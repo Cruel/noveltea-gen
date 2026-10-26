@@ -185,6 +185,10 @@ NT_LIVE_TEST=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
 
 Set `NT_PROVIDER` and `NT_MODEL` if needed. The real-model test may incur usage; it uses a disposable Story root and isolated local state/cache paths. It expects `pnpm catalog` to be usable in the development skills checkout. The normal `run` command remains a graph-routing proof of concept with **no Story write permissions**.
 
+## Certification of the integration proof (#11)
+
+See **[docs/certification.md](docs/certification.md)** for the acceptance matrix, reproducible CLI examples, cross-process/snapshot checks, evidence boundaries and the optional real-Pi/Studio/LangSmith live-smoke checklist. Run `pnpm certify` for the dedicated offline end-to-end matrix; `pnpm check` runs every deterministic test, typecheck and build. Fixture success **does not** demonstrate real Pi skill use or hosted traces; the checklist separates those checks explicitly.
+
 ## Tests
 
 Run deterministic tests and compile the CLI:
