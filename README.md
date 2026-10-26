@@ -1,6 +1,6 @@
 # NovelTea-gen
 
-A local-first TypeScript/pnpm proof of concept integrating a Pi coordinator with a compiled LangGraph.js workflow. This version targets an explicit Story project root and demonstrates a Pi-initiated LangGraph handoff to one of two isolated worker types (#4–#5), with SQLite checkpoint/restart recovery (#6) and controlled NovelTea skill loading (#7). Nested LangSmith Pi tracing remains follow-up work.
+A local-first TypeScript/pnpm proof of concept integrating a Pi coordinator with a compiled LangGraph.js workflow. This version targets an explicit Story project root and demonstrates a Pi-initiated LangGraph handoff to one of two isolated worker types (#4–#5), with SQLite checkpoint/restart recovery (#6), controlled NovelTea skill loading (#7–#9), and local/opt-in hosted nested tracing (#10).
 
 ## Setup
 
@@ -11,7 +11,22 @@ pnpm install
 pnpm check
 ```
 
-Authenticate using Pi's supported mechanism, for example `pi /login` for your OpenAI sign-in, or configure a provider API key through Pi/environment variables. NovelTea-gen has **no additional credential store**; Pi manages saved credentials and OAuth refresh.
+Authenticate using Pi's supported mechanism, for example `pi /login` for your OpenAI sign-in, or configure a provider API key through Pi/environment variables. NovelTea-gen has **no additional model credential store**; Pi manages saved credentials and OAuth refresh.
+
+## Developer quick start: run, inspect, locate
+
+For future maintainers and coding agents, the operational entry point is **`AGENTS.md`**, including a map of stored artifacts and their environment overrides. Detailed behavior is documented in the relevant sections below.
+
+```sh
+pnpm check
+pnpm dev run --project ./.projects/agent-debug --create-project \
+  --task "Develop a mystery plot twist" --trace-local
+pnpm trace:show              # Read the latest local trace tree
+pnpm trace:show --json       # All spans, inputs, outputs, timings and errors
+pnpm studio                  # Local graph visualization; no LangSmith API key
+```
+
+Look in **`.local/traces/*.jsonl`** for saved local traces. Each `--trace-local` run reports its exact `localTrace` path; `pnpm trace:show --file <path>` opens a specific saved run. Other important state lives outside the Story project: checkpoints under `~/.local/state/noveltea-gen/<project-id>/`, real Pi sessions under the Pi agent session directory, and pinned skills under `~/.cache/noveltea-gen/skill-snapshots/`. Local configuration and optional LangSmith credentials live in the repo's ignored `.local/` directory. Consult **`AGENTS.md`** for the full storage map and overrides. Cloud tracing is off unless explicitly enabled via `--trace`; `--trace-local` does not upload traces. Real Pi runs may consume model usage, so use `--fixture` for deterministic graph checks.
 
 ## Local NovelTea skills configuration (#7)
 
