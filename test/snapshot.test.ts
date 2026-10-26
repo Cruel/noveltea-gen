@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -37,7 +37,10 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
   const configFile = join(base, "config.json");
   await writeFile(configFile, JSON.stringify({ novelteaSkills: "./skills-repo", skillDiscovery: "explicit-only" }));
   const config = await loadSkillConfig(configFile);
-  const a = (await createSkillSnapshot(config))!;
+  const concurrent = await Promise.all(Array.from({ length: 6 }, () => createSkillSnapshot(config)));
+  const a = concurrent[0]!;
+  assert.ok(concurrent.every(entry => entry?.id === a.id && entry.path === a.path),
+    "concurrent workflows must publish and reuse one verified digest directory");
   assert.equal(a.id, a.digest);
   assert.match(a.id, /^[a-f0-9]{64}$/);
   assert.equal(a.commit, git(checkout, "rev-parse", "HEAD"));
@@ -82,6 +85,12 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
   }), /corrupt|modified/);
   await rm(join(a.path), { recursive: true });
   await assert.rejects(openSkillSnapshot(a.id), /Cannot restore pinned/);
+  const linked = join(base, "linked-root");
+  await mkdir(linked);
+  git(linked, "init", "-q");
+  git(linked, "commit", "--allow-empty", "-qm", "linked checkout");
+  await symlink(join(checkout, "skills"), join(linked, "skills"));
+  await assert.rejects(createSkillSnapshot({ ...config, novelteaSkills: linked }), /real directory/);
 });
 
 test("fixture checkpoint preserves snapshot identity after checkout is removed", async t => {

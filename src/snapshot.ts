@@ -15,9 +15,24 @@ export interface SkillSnapshot {
   dirty: boolean;
 }
 interface FileEntry { path: string; digest: string; data: Buffer }
+type GitProvenance = Pick<SkillSnapshot, "commit" | "branch" | "detached" | "dirty">;
 
 function git(root: string, ...args: string[]): string {
   return execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+}
+function gitProvenance(root: string): GitProvenance {
+  const branchResult = spawnSync("git", ["-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  if (branchResult.status !== 0 && branchResult.status !== 1) {
+    throw new Error(`Cannot read NovelTea skill checkout branch: ${root}`);
+  }
+  const branch = branchResult.status === 0 ? branchResult.stdout.trim() : null;
+  return {
+    commit: git(root, "rev-parse", "HEAD"),
+    branch,
+    detached: branch === null,
+    dirty: Boolean(git(root, "status", "--porcelain", "--untracked-files=all")),
+  };
 }
 function cacheRoot(): string {
   return resolve(process.env.NT_SKILL_CACHE_DIR ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "noveltea-gen", "skill-snapshots"));
@@ -41,7 +56,12 @@ async function capture(root: string): Promise<{ digest: string; files: FileEntry
       } else throw new Error(`Unsupported snapshot source entry: ${full}`);
     }
   }
-  await walk(join(root, "skills"));
+  const skillsRoot = join(root, "skills");
+  const skillsInfo = await lstat(skillsRoot);
+  if (!skillsInfo.isDirectory() || skillsInfo.isSymbolicLink()) {
+    throw new Error(`Snapshot skills root must be a real directory: ${skillsRoot}`);
+  }
+  await walk(skillsRoot);
   if (!files.some(f => /^skills\/[^/]+\/SKILL\.md$/.test(f.path))) {
     throw new Error("NovelTea checkout has no skill packages.");
   }
@@ -69,6 +89,7 @@ export async function openSkillSnapshot(id: string): Promise<string> {
 export async function createSkillSnapshot(config: SkillConfig): Promise<SkillSnapshot | undefined> {
   if (!config.novelteaSkills) return undefined;
   const root = await realpath(config.novelteaSkills);
+  const before = gitProvenance(root);
   const { digest, files } = await capture(root);
   const base = cacheRoot();
   await mkdir(base, { recursive: true });
@@ -93,25 +114,35 @@ export async function createSkillSnapshot(config: SkillConfig): Promise<SkillSna
         if ((await capture(root)).digest !== digest) {
           throw new Error("NovelTea skills changed during snapshot publication; retry this new workflow.");
         }
-        // Stage fully, then atomically publish the immutable digest directory.
-        // Never intentionally replace an existing digest directory, even if it is empty.
-        try { await lstat(destination); throw new Error(`Existing skill snapshot ${digest} cannot be replaced.`); }
+        // Another workflow may have published the same digest while we staged.
+        // Reuse a verified winner; never overwrite a present (possibly corrupt) cache.
+        let alreadyPresent = false;
+        try { await lstat(destination); alreadyPresent = true; }
         catch (existing) {
           if (!(existing instanceof Error && "code" in existing && existing.code === "ENOENT")) throw existing;
         }
-        try { await rename(temp, destination); }
-        catch (publishError) {
-          try { await openSkillSnapshot(digest); }
-          catch { throw publishError; }
+        if (alreadyPresent) {
+          await openSkillSnapshot(digest);
+        } else {
+          try { await rename(temp, destination); }
+          catch (publishError) {
+            // An atomic concurrent publish can win after our existence check.
+            try { await openSkillSnapshot(digest); }
+            catch { throw publishError; }
+          }
         }
       } finally { await rm(temp, { recursive: true, force: true }); }
     }
     if (await stat(destination).then(() => true, () => false)) await openSkillSnapshot(digest);
     else throw error;
   }
-  const branchResult = spawnSync("git", ["-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"], { encoding: "utf8" });
-  const branch = branchResult.status === 0 ? branchResult.stdout.trim() : null;
-  const commit = git(root, "rev-parse", "HEAD");
-  const dirty = Boolean(git(root, "status", "--porcelain", "--untracked-files=all"));
-  return { id: digest, digest, path: destination, commit, branch, detached: branch === null, dirty };
+  // A snapshot may be reused from the cache, but its recorded Git provenance
+  // must still describe the source that was hashed. Detect concurrent checkout
+  // edits/pulls even when the cached digest already existed.
+  const after = gitProvenance(root);
+  if (JSON.stringify(before) !== JSON.stringify(after) ||
+      (await capture(root)).digest !== digest) {
+    throw new Error("NovelTea skills checkout changed while capturing Git provenance; retry this new workflow.");
+  }
+  return { id: digest, digest, path: destination, ...before };
 }
