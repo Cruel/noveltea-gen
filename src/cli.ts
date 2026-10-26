@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 
 interface CliOptions {
+  command: "run" | "demo-story";
   task: string;
   provider: string;
   model: string;
@@ -23,6 +24,7 @@ const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
 Usage:
   pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
   pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
+  pnpm dev demo-story --project ./fresh-story --create-project --task "A mystery; choose the rest"
 
 Options:
   --project <path>    Required Story root (existing directory, independent of app checkout)
@@ -32,21 +34,26 @@ Options:
   --model <name>      Pi model (default: gpt-6-luna, if supported)
   --thread <id>       User thread name (namespaced to the project; default: UUID)
   --fixture           Deterministic test adapter; no Pi/model/auth/network calls
+                       (demo-story fixture is NOT a live Pi skills-use proof)
   --fixture-direct    With --fixture, select direct_tagline_worker instead of Pi worker
   --pause-after <at>  Commit and stop after handoff or worker (safe boundaries)
   --resume            Continue --thread from saved SQLite and Pi sessions (no --task)
   --trace             Opt in to LangSmith cloud graph tracing (needs LANGSMITH_API_KEY)
   --help              Show this help
 
-Output: JSON with project/thread identity, selected worker, validated storyNote or tagline, and the coordinator response.
+demo-story: opt-in, only writes one draft Creative Direction into an empty Story root using pinned nt-story-discovery and nt-catalog. No engine or real Story orchestration; catalog readiness unverified unless separately validated.
+
+run output: JSON with project/thread identity, selected worker, validated storyNote or tagline, and the coordinator response.
 `;
 
 function parseArgs(argv: string[]): CliOptions | null {
   if (argv.includes("--help") || argv.includes("-h")) return null;
-  if (argv.shift() !== "run") {
-    throw new Error("Expected the 'run' command. Use --help for usage.");
+  const command = argv.shift();
+  if (command !== "run" && command !== "demo-story") {
+    throw new Error("Expected 'run' or 'demo-story'. Use --help for usage.");
   }
   const options: CliOptions = {
+    command,
     task: "",
     provider: "openai",
     model: "gpt-6-luna",
@@ -109,6 +116,10 @@ function parseArgs(argv: string[]): CliOptions | null {
   }
   if (!options.project.trim()) throw new Error("Missing required --project <path>.");
   if (options.fixtureDirect && !options.fixture) throw new Error("--fixture-direct requires --fixture.");
+  if (command === "demo-story" && (options.resume || options.pauseAfter || options.fixtureDirect ||
+      options.trace || options.threadProvided)) {
+    throw new Error("demo-story does not support graph --resume, --pause-after, --fixture-direct, --trace or --thread.");
+  }
   return options;
 }
 
@@ -134,6 +145,15 @@ async function main(): Promise<void> {
   const { runCoordinator } = await import("./graph.js");
   const { createSkillSnapshot } = await import("./snapshot.js");
   const skillSnapshot = options.resume ? undefined : await createSkillSnapshot(skillConfig);
+  if (options.command === "demo-story") {
+    const { runFoundationDemo } = await import("./demo.js");
+    const result = await runFoundationDemo({
+      project, config: skillConfig, snapshot: skillSnapshot,
+      provider: options.provider, model: options.model, task: options.task, fixture: options.fixture,
+    });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   const fixturePiSdk = options.fixture
     ? await import("@earendil-works/pi-coding-agent") : null;
   const fixtureStorage = options.fixture

@@ -59,7 +59,7 @@ Alternatively, create an **empty** Story directory:
 pnpm dev run --project ./story-test --create-project --task "Suggest a one-sentence premise."
 ```
 
-`--create-project` performs directory creation only. It does **not** initialize an engine game, install skills, modify an existing project, or generate content unless the model is subsequently given approved tools (none are enabled yet).
+For `run`, `--create-project` performs directory creation only. It does **not** initialize an engine game, install skills, modify an existing project or generate Story content. The separate opt-in `demo-story` command below has one narrowly scoped Story-writing tool.
 
 The default model is `openai/gpt-6-luna`, if the selected Pi credentials support it. Use `pi --list-models` to see available provider/model combinations, and override with `--provider` and `--model`. Unsupported pairs fail explicitly.
 
@@ -139,6 +139,37 @@ this proof of concept. Restore missing session files or SQLite backups when
 recovery reports a damaged or mismatched record—do not replace them with fresh
 Pi conversations.
 
+## Opt-in skill-driven Story foundation demo (#9)
+
+`demo-story` is **separate from** the existing `run` LangGraph handoff. It exercises a real Pi agent using the immutable NovelTea skill snapshot against a **fresh, empty, explicitly selected** Story root. Configure `.local/config.json` with `novelteaSkills` pointing at the `noveltea-skills` Git checkout first (see configuration above). The command forces explicit-only discovery from the **pinned snapshot**, requires `nt-story-discovery` and `nt-catalog`, and does not install skills, update their source checkout or change global Pi configuration. It retains its own Pi transcript under the application state directory, not inside the Story.
+
+With valid Pi credentials, run:
+
+```sh
+pnpm dev demo-story --project ./scratch-story-foundation --create-project \
+  --task "Create a murder mystery set aboard a stopped midnight train. Keep it dialogue-led with reusable visual locations. You are delegated all other creative foundation choices."
+```
+
+The agent is directed to actually load `nt-story-discovery/SKILL.md`, `nt-catalog/SKILL.md`, `nt-catalog/references/records.md`, `authority-and-validation.md` and `glossary.md` through its restricted `read` tool. The one allowlisted `write_creative_direction` tool **refuses to write until those reads succeed**. It accepts constrained structured inputs and creates only `creative-direction/foundation.md`, with `schema: '0.1'`, `status: draft`, required foundation fields, Markdown prose and individually attributed Creative Decisions. User-supplied choices are `origin: user` / `authority: user-protected`; choices filled within the explicitly delegated scope remain `origin: agent` / `authority: delegated`. There is no approval implied by the draft status.
+
+The directory must be **empty**, even if it already exists. The tool cannot overwrite canon or create additional records, an engine project, or an entire Story. The response reports the skill digest and Git provenance, exact read paths, Pi transcript file, created artifact, and `catalogValidation: "unverified"`. The demo performs constrained input checks and reads the written file back, but does **not** claim native catalog validation, foundation readiness, creative quality, author approval or NovelTea engine playability. This installed NovelTea CLI currently does not expose `noveltea narrative validate`; if it becomes available, use its documented interface separately. In a `noveltea-skills` development checkout only, you can explicitly run `pnpm catalog /absolute/path/to/scratch-story-foundation` to see diagnostics and the **design** versus **approved** foundation minimums. That temporary validator is not a production dependency.
+
+To exercise the same file boundary deterministically without credentials or a model:
+
+```sh
+pnpm dev demo-story --project ./scratch-story-fixture --create-project \
+  --fixture --task "A murder mystery"
+```
+
+The fixture is **not** proof of a Pi agent actually reading or using the skills. For an opt-in real-model integration smoke that checks the persisted Pi tool calls, validates the authored record with the development catalog, and verifies the source checkout remains unchanged:
+
+```sh
+NT_LIVE_TEST=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
+  pnpm exec tsx --test --test-name-pattern='opt-in real Pi authors' test/live.test.ts
+```
+
+Set `NT_PROVIDER` and `NT_MODEL` if needed. The real-model test may incur usage; it uses a disposable Story root and isolated local state/cache paths. It expects `pnpm catalog` to be usable in the development skills checkout. The normal `run` command remains a graph-routing proof of concept with **no Story write permissions**.
+
 ## Tests
 
 Run deterministic tests and compile the CLI:
@@ -175,4 +206,4 @@ Nested Pi model/turn/tool traces and Studio setup are covered under #10. Do not 
 
 ## Scope
 
-The coordinator, project isolation, Pi worker, direct pi-ai worker, SQLite/Pi recovery, controlled NovelTea skill loading and immutable provenance snapshots implement #2–#8. Full LangSmith observability remains future work in #9–#11.
+The coordinator, project isolation, Pi worker, direct pi-ai worker, SQLite/Pi recovery, controlled NovelTea skill loading, immutable provenance snapshots and isolated Story foundation demo implement #2–#9. Full LangSmith observability remains future work in #10–#11.
