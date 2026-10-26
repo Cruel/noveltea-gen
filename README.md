@@ -15,10 +15,10 @@ To use a real agent, authenticate with Pi's supported mechanism (for example, us
 
 ```sh
 pnpm dev run --task "In one sentence, what makes an opening scene compelling?" \
-  --provider openai-codex --model gpt-6-luna
+  --provider openai --model gpt-6-luna
 ```
 
-The requested default is `openai-codex/gpt-6-luna` **where available**; providers may not expose that model. If it is absent, the CLI fails with an actionable error instead of silently using another model. Use `pi --list-models` to find a supported pair and override `--provider` and `--model`.
+The requested default is `openai/gpt-6-luna` **where available**; providers may not expose that model. If it is absent, the CLI fails with an actionable error instead of silently using another model. Use `pi --list-models` to find a supported pair and override `--provider` and `--model`.
 
 The program prints the actual Pi response as JSON along with independently generated `threadId` and `runId`. The identifiers are **correlation IDs only** at this stage: SQLite checkpointing, Pi session persistence and resumption are separate work under #6. The Pi agent has no tools in this initial read-only demonstration; later tickets will define project-scoped tools and skills.
 
@@ -36,7 +36,7 @@ The explicit `--fixture` mode still compiles and executes LangGraph; it substitu
 To exercise the real Pi SDK through the public CLI with your existing sign-in (may incur usage):
 
 ```sh
-NT_PROVIDER=openai-codex NT_MODEL=gpt-6-luna pnpm test:live
+NT_PROVIDER=openai NT_MODEL=gpt-6-luna pnpm test:live
 ```
 
 The live test is opt-in and is skipped during routine tests. Choose a provider/model pair actually supported by your Pi account.

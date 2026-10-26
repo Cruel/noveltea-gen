@@ -18,7 +18,7 @@ Usage:
 
 Options:
   --task <text>       Coordinator's task (required)
-  --provider <name>   Pi provider (default: openai-codex)
+  --provider <name>   Pi provider (default: openai)
   --model <name>      Pi model (default: gpt-6-luna, if supported)
   --thread <id>       Graph thread identifier (default: generated UUID)
   --fixture           Deterministic test adapter; no Pi/model/auth/network calls
@@ -35,7 +35,7 @@ function parseArgs(argv: string[]): CliOptions | null {
   }
   const options: CliOptions = {
     task: "",
-    provider: "openai-codex",
+    provider: "openai",
     model: "gpt-6-luna",
     threadId: randomUUID(),
     fixture: false,

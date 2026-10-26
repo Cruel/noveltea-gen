@@ -7,7 +7,7 @@ test("a graph node returns the coordinator's exact response", async () => {
   const result = await runCoordinator({
     task: "Please answer",
     threadId: "t1",
-    provider: "openai-codex",
+    provider: "openai",
     model: "gpt-6-luna",
     invokePi: async (request) => {
       calls.push(request);
@@ -17,7 +17,7 @@ test("a graph node returns the coordinator's exact response", async () => {
   assert.equal(result.response, "The real agent's text");
   assert.deepEqual(calls, [{
     task: "Please answer",
-    provider: "openai-codex",
+    provider: "openai",
     model: "gpt-6-luna",
   }]);
   assert.equal(result.threadId, "t1");

@@ -24,6 +24,8 @@ test("fixture runs the compiled LangGraph end-to-end without auth or tracing", (
   assert.match(output.runId, /^[0-9a-f-]{36}$/i);
   assert.equal(output.response, "Fixture coordinator received: Hello, graph");
   assert.equal(output.mode, "fixture");
+  assert.equal(output.provider, "openai");
+  assert.equal(output.model, "gpt-6-luna");
   assert.equal(output.tracing, false);
 });
 
