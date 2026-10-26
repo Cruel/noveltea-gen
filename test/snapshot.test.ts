@@ -1,11 +1,13 @@
+import { makeTestTreeWritable, removeTestTree } from "./helpers.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { createSkillSnapshot, openSkillSnapshot } from "../src/snapshot.js";
-import { loadSkillConfig } from "../src/skills.js";
+import { createSkillSnapshot, openSkillSnapshot, verifiedSkillFiles } from "../src/snapshot.js";
+import { createSkillReadTool, loadSkillConfig } from "../src/skills.js";
+import { createProjectResourceLoader } from "../src/pi.js";
 
 function git(root: string, ...args: string[]) {
   return execFileSync("git", ["-C", root, ...args], {
@@ -17,7 +19,7 @@ function git(root: string, ...args: string[]) {
 
 test("content-addressed immutable snapshots capture git provenance, reuse, changes and corruption", async t => {
   const base = await mkdtemp(join(tmpdir(), "nt-gen-snapshot-"));
-  t.after(() => rm(base, { recursive: true, force: true }));
+  t.after(() => removeTestTree(base));
   const previous = process.env.NT_SKILL_CACHE_DIR;
   process.env.NT_SKILL_CACHE_DIR = join(base, "cache");
   t.after(() => {
@@ -75,7 +77,49 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
   assert.equal(detached.detached, true);
   assert.equal(detached.branch, null);
   assert.equal(detached.dirty, true);
-  await writeFile(join(a.path, "skills", "nt-catalog", "SKILL.md"), "corrupted");
+  // Even names excluded during source capture must not be admitted into a
+  // published cache after the digest is computed.
+  // The read tool must preserve the verified file allowlist even if a cache
+  // owner changes permissions and tampers with a snapshot after session start.
+  const verified = await verifiedSkillFiles(f.id);
+  const { loader } = createProjectResourceLoader({ root: base, id: "x".repeat(64) },
+    join(base, "agent"), true, {
+      discovery: "explicit-only", novelteaSkills: f.path, skillDirs: [], requiredSkills: ["nt-catalog"],
+    });
+  await loader.reload();
+  const reader = createSkillReadTool(loader.getSkills().skills, verified);
+  const read = (path: string) => reader.execute("test", { path }, undefined, undefined, {} as never);
+  const verifiedFile = join(f.path, "skills", "nt-catalog", "references", "new.md");
+  assert.match(JSON.stringify(await read(verifiedFile)), /new/);
+  const sealedCatalog = join(f.path, "skills", "nt-catalog");
+  const oldWritableFile = join(sealedCatalog, "SKILL.md");
+  await chmod(oldWritableFile, 0o644);
+  await openSkillSnapshot(f.id);
+  assert.equal((await stat(oldWritableFile)).mode & 0o222, 0,
+    "existing valid cache entries must be sealed on reuse");
+  await chmod(sealedCatalog, 0o755);
+  await mkdir(join(sealedCatalog, "dist"));
+  const injected = join(sealedCatalog, "dist", "reference.md");
+  await writeFile(injected, "UNRECORDED");
+  await assert.rejects(read(injected), /not in the verified pinned snapshot/);
+  await chmod(verifiedFile, 0o644);
+  await writeFile(verifiedFile, "MUTATED");
+  await assert.rejects(read(verifiedFile), /not in the verified pinned snapshot/);
+  await writeFile(verifiedFile, "new");
+  await assert.rejects(openSkillSnapshot(f.id), /corrupt|modified/);
+  await rm(join(sealedCatalog, "dist"), { recursive: true });
+  await mkdir(join(sealedCatalog, "node_modules"));
+  await assert.rejects(openSkillSnapshot(f.id), /corrupt|modified/,
+    "unexpected empty subdirectories must also invalidate the cache");
+  await rm(join(sealedCatalog, "node_modules"), { recursive: true });
+  assert.equal(await openSkillSnapshot(f.id), f.path);
+  assert.equal((await stat(sealedCatalog)).mode & 0o222, 0);
+  const skillFile = join(a.path, "skills", "nt-catalog", "SKILL.md");
+  assert.equal((await stat(skillFile)).mode & 0o222, 0, "snapshot files must be read-only");
+  assert.equal((await stat(join(a.path, "skills", "nt-catalog"))).mode & 0o222, 0,
+    "snapshot directories must be read-only");
+  await chmod(skillFile, 0o644); // deliberate owner tampering
+  await writeFile(skillFile, "corrupted");
   await assert.rejects(openSkillSnapshot(a.id), /corrupt|modified/);
   await assert.rejects(createSkillSnapshot(config).then(async () => {
     await writeFile(join(checkout, "skills", "nt-catalog", "SKILL.md"), "---\nname: nt-catalog\ndescription: Catalog\n---\ntext\n");
@@ -83,6 +127,7 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
     await writeFile(ref, "reference v1");
     await createSkillSnapshot(config);
   }), /corrupt|modified/);
+  makeTestTreeWritable(a.path);
   await rm(join(a.path), { recursive: true });
   await assert.rejects(openSkillSnapshot(a.id), /Cannot restore pinned/);
   const linked = join(base, "linked-root");
@@ -95,7 +140,7 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
 
 test("fixture checkpoint preserves snapshot identity after checkout is removed", async t => {
   const base = await mkdtemp(join(tmpdir(), "nt-gen-snapshot-cli-"));
-  t.after(() => rm(base, { recursive: true, force: true }));
+  t.after(() => removeTestTree(base));
   const checkout = join(base, "source");
   const catalog = join(checkout, "skills", "nt-catalog");
   await mkdir(catalog, { recursive: true });
@@ -124,7 +169,9 @@ test("fixture checkpoint preserves snapshot identity after checkout is removed",
   const second = run(["--resume"]);
   assert.equal(second.status, "completed");
   assert.equal(second.skillSnapshot.id, first.skillSnapshot.id);
-  await writeFile(join(second.skillSnapshot.path, "skills", "nt-catalog", "SKILL.md"), "damaged");
+  const oldSkill = join(second.skillSnapshot.path, "skills", "nt-catalog", "SKILL.md");
+  await chmod(oldSkill, 0o644);
+  await writeFile(oldSkill, "damaged");
   const failure = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "run",
     "--project", project, "--thread", "snapshot-resume", "--fixture", "--resume"], {
     cwd: resolve("."), env, encoding: "utf8", timeout: 30_000,

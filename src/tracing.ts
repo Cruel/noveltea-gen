@@ -96,6 +96,16 @@ export function directTraceOutput(value: DirectTraceResult): Record<string, unkn
   };
 }
 
+export class DirectModelStopError extends Error {
+  constructor(readonly stopReason: string) {
+    super(`Direct model returned stopReason: ${stopReason}.`);
+  }
+}
+
+function safeStopReason(value: string): string {
+  return ["error", "aborted", "length", "toolUse"].includes(value) ? value : "unexpected";
+}
+
 /** Bare pi-ai calls have no Pi events, so trace exactly one model span. */
 export async function traceDirectModel(
   enabled: boolean,
@@ -106,10 +116,21 @@ export async function traceDirectModel(
   // No arbitrary SDK/provider objects enter the trace: just the model request
   // brief, completion text, token usage and sanitized errors from the caller.
   return traceable(async (_input: DirectTraceRequest) => {
-    try { return await invoke(); }
-    catch {
-      // The tracing wrapper sees this failure before the graph's caller does.
-      // Never record raw provider exception text (which may contain secrets).
+    try {
+      const result = await invoke();
+      if (result.stopReason !== "stop") {
+        // A provider can report failure, abort or truncation without throwing.
+        // The adapter rejects every non-stop completion; the LLM span must
+        // record the same outcome without retaining an untrusted reason string.
+        const reason = safeStopReason(result.stopReason);
+        const span = getCurrentRunTree(true);
+        if (span) span.outputs = directTraceOutput({ ...result, stopReason: reason });
+        throw new DirectModelStopError(reason);
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof DirectModelStopError) throw error;
+      // SDK errors may contain credentials, headers or raw provider payloads.
       throw new Error("Direct model provider request failed (provider details redacted).");
     }
   }, {

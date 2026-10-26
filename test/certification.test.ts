@@ -1,6 +1,7 @@
+import { removeTestTree } from "./helpers.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,6 +9,7 @@ import { runCoordinator, DIRECT_WORKER_DESTINATION, WORKER_DESTINATION, type Coo
 import { readLocalTrace } from "../src/local-trace.js";
 import { createProjectResourceLoader } from "../src/pi.js";
 import { createSkillReadTool } from "../src/skills.js";
+import { verifiedSkillFiles } from "../src/snapshot.js";
 
 const cli = resolve("src/cli.ts");
 const note = "A secret in the opening scene changes everything.";
@@ -19,7 +21,7 @@ function git(root: string, ...args: string[]): string {
 
 function certificationFixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "nt-gen-certification-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeTestTree(root));
   const checkout = join(root, "noveltea-skills");
   const catalog = join(checkout, "skills", "nt-catalog");
   mkdirSync(join(catalog, "references"), { recursive: true });
@@ -156,7 +158,15 @@ test("certification: cross-process safe handoff resumes the original pinned skil
       skillDirs: [], requiredSkills: ["nt-catalog"],
     });
   await loader.reload();
-  const read = createSkillReadTool(loader.getSkills().skills);
+  const originalCache = process.env.NT_SKILL_CACHE_DIR;
+  process.env.NT_SKILL_CACHE_DIR = f.env.NT_SKILL_CACHE_DIR;
+  let approved;
+  try { approved = await verifiedSkillFiles(paused.skillSnapshot.id); }
+  finally {
+    if (originalCache === undefined) delete process.env.NT_SKILL_CACHE_DIR;
+    else process.env.NT_SKILL_CACHE_DIR = originalCache;
+  }
+  const read = createSkillReadTool(loader.getSkills().skills, approved);
   const result = await read.execute("certification",
     { path: join(originalPath, reference) }, undefined, undefined, {} as never);
   assert.equal(result.content[0]?.type, "text");

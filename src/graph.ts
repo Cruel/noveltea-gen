@@ -28,6 +28,8 @@ export interface CoordinatorStartReply {
   piSessionFile?: string;
   /** Untrusted Pi tool payload. A graph transition requires strict validation. */
   handoff: unknown;
+  /** Studio picks a snapshot at actual graph start; persist exactly that one. */
+  skillSnapshot?: SkillSnapshot | null;
 }
 
 export interface WorkerRequest {
@@ -136,7 +138,7 @@ const CoordinatorState = Annotation.Root({
   response: Annotation<string>(),
   piSessionId: Annotation<string>(),
   workerPiSessionId: Annotation<string>(),
-  skillSnapshot: Annotation<SkillSnapshot | undefined>(),
+  skillSnapshot: Annotation<SkillSnapshot | null | undefined>(),
 });
 
 export function createCoordinatorGraph(
@@ -158,7 +160,8 @@ export function createCoordinatorGraph(
         throw new Error("Cannot checkpoint handoff: coordinator Pi session was not persisted.");
       }
       return { piSessionId: result.piSessionId, piSessionFile: result.piSessionFile ?? "",
-        handoff: validateHandoff(result.handoff) };
+        handoff: validateHandoff(result.handoff),
+        ...(Object.hasOwn(result, "skillSnapshot") ? { skillSnapshot: result.skillSnapshot } : {}) };
     })
     .addNode(WORKER_DESTINATION, async (state) => {
       const handoff = validateHandoff(state.handoff);

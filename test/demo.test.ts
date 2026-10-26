@@ -1,6 +1,7 @@
+import { removeTestTree } from "./helpers.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -11,7 +12,7 @@ import { createProjectResourceLoader } from "../src/pi.js";
 
 function setup(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "nt-gen-foundation-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeTestTree(root));
   const checkout = join(root, "noveltea-skills");
   const skills = join(checkout, "skills");
   const story = join(root, "story");

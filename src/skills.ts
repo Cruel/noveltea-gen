@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import type { VerifiedSkillFiles } from "./snapshot.js";
 import { execFileSync } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -175,7 +177,7 @@ export function resolveConfiguredSkills(
  * Custom Pi "read" tool. It can only read resources beneath a loaded skill's
  * directory and cannot follow symlinks outside those roots. No shell or writes.
  */
-export function createSkillReadTool(skills: Skill[]): ToolDefinition {
+export function createSkillReadTool(skills: Skill[], snapshot?: VerifiedSkillFiles): ToolDefinition {
   const roots = [...new Set(skills.map(skill => realpathSync(skill.baseDir)))];
   return {
     name: "read",
@@ -201,7 +203,17 @@ export function createSkillReadTool(skills: Skill[]): ToolDefinition {
       if (!info.isFile() || info.size > 128 * 1024) {
         throw new Error("Skill read denied: expected a regular text file at most 128 KiB.");
       }
-      const content = await readFile(canonical, "utf8");
+      const bytes = await readFile(canonical);
+      const content = bytes.toString("utf8");
+      // The snapshot's file allowlist is fixed when the Pi session starts.
+      // Even a cache owner injecting a new file or changing permissions and
+      // editing an existing file cannot make it a valid pinned resource.
+      if (snapshot && contained(snapshot.root, canonical)) {
+        const expected = snapshot.hashes.get(canonical);
+        if (!expected || createHash("sha256").update(bytes).digest("hex") !== expected) {
+          throw new Error("Skill read denied: resource is not in the verified pinned snapshot.");
+        }
+      }
       if (content.includes("\0")) throw new Error("Skill read denied: binary resources are not supported.");
       return { content: [{ type: "text", text: content }], details: undefined };
     },

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import type { SkillConfig } from "./skills.js";
@@ -15,6 +15,9 @@ export interface SkillSnapshot {
   dirty: boolean;
 }
 interface FileEntry { path: string; digest: string; data: Buffer }
+interface Capture { digest: string; files: FileEntry[]; directories: string[] }
+/** Allowlist for the restricted reader, bound to an already verified digest. */
+export interface VerifiedSkillFiles { root: string; hashes: ReadonlyMap<string, string> }
 type GitProvenance = Pick<SkillSnapshot, "commit" | "branch" | "detached" | "dirty">;
 
 function git(root: string, ...args: string[]): string {
@@ -40,15 +43,21 @@ function cacheRoot(): string {
 function permitted(name: string): boolean {
   return ![".git", "node_modules", ".cache", "dist", ".pnpm", "__pycache__", ".venv", "vendor"].includes(name);
 }
-async function capture(root: string): Promise<{ digest: string; files: FileEntry[] }> {
+async function capture(root: string, includeExcluded = false): Promise<Capture> {
   const files: FileEntry[] = [];
+  const directories: string[] = [];
   async function walk(dir: string) {
     for (const item of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!permitted(item.name)) continue;
+      // Source checkout filters are NOT cache verification rules. Every
+      // published file (even under dist/ or node_modules/) must be hashed.
+      if (!includeExcluded && !permitted(item.name)) continue;
       const full = join(dir, item.name);
       const info = await lstat(full);
       if (info.isSymbolicLink()) throw new Error(`Snapshot source contains symlink: ${full}`);
-      if (info.isDirectory()) await walk(full);
+      if (info.isDirectory()) {
+        directories.push(relative(root, full).split(sep).join("/"));
+        await walk(full);
+      }
       else if (info.isFile()) {
         const path = relative(root, full).split(sep).join("/");
         const data = await readFile(full);
@@ -67,13 +76,54 @@ async function capture(root: string): Promise<{ digest: string; files: FileEntry
   }
   files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   const digest = createHash("sha256").update(JSON.stringify(files.map(({ path, digest }) => [path, digest]))).digest("hex");
-  return { digest, files };
+  return { digest, files, directories };
 }
-async function verify(root: string, expected: string): Promise<void> {
-  const result = await capture(root);
-  if (result.digest !== expected || (await readdir(root)).some(x => x !== "skills")) {
+async function verify(root: string, expected: string): Promise<Capture> {
+  const result = await capture(root, true);
+  // Empty/new directories are also unexpected published resources; the
+  // manifest is precisely the set of file paths and their parent directories.
+  const expectedDirs = new Set<string>();
+  for (const file of result.files) {
+    const components = file.path.split("/");
+    for (let i = 1; i < components.length; i++) {
+      expectedDirs.add(components.slice(0, i).join("/"));
+    }
+  }
+  if (result.digest !== expected || (await readdir(root)).some(x => x !== "skills") ||
+      result.directories.some(dir => !expectedDirs.has(dir))) {
     throw new Error(`Skill snapshot ${expected} is missing, corrupt or modified; restore the original cache. Never use the live checkout as a fallback.`);
   }
+  return result;
+}
+/** POSIX read-only permissions also upgrade valid snapshots from older builds. */
+async function seal(root: string, captured: Capture) {
+  for (const entry of captured.files) {
+    const path = join(root, entry.path);
+    if ((await lstat(path)).mode & 0o222) await chmod(path, 0o444);
+  }
+  // Change children before parents so staging is never blocked by its own mode.
+  for (const dir of [...captured.directories].sort((a, b) => b.length - a.length)) {
+    const path = join(root, dir);
+    if ((await lstat(path)).mode & 0o222) await chmod(path, 0o555);
+  }
+  if ((await lstat(root)).mode & 0o222) await chmod(root, 0o555);
+}
+/** Only for discarded, unpublished staging trees, never a pinned cache. */
+async function discardStage(root: string) {
+  async function unlock(dir: string) {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); }
+    catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const item of entries) {
+      if (item.isDirectory()) await unlock(join(dir, item.name));
+    }
+    await chmod(dir, 0o755);
+  }
+  await unlock(root);
+  await rm(root, { recursive: true, force: true });
 }
 export async function openSkillSnapshot(id: string): Promise<string> {
   if (!/^[a-f0-9]{64}$/.test(id)) throw new Error("Invalid skill snapshot ID.");
@@ -81,11 +131,17 @@ export async function openSkillSnapshot(id: string): Promise<string> {
   try {
     const info = await lstat(path);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("not a real snapshot directory");
-    await verify(path, id);
+    await seal(path, await verify(path, id));
   }
   catch (error) { throw new Error(`Cannot restore pinned skill snapshot ${id}: ${error instanceof Error ? error.message : error}`); }
   return path;
 }
+export async function verifiedSkillFiles(id: string): Promise<VerifiedSkillFiles> {
+  const root = await openSkillSnapshot(id);
+  const verified = await verify(root, id);
+  return { root, hashes: new Map(verified.files.map(f => [join(root, f.path), f.digest])) };
+}
+
 export async function createSkillSnapshot(config: SkillConfig): Promise<SkillSnapshot | undefined> {
   if (!config.novelteaSkills) return undefined;
   const root = await realpath(config.novelteaSkills);
@@ -109,7 +165,7 @@ export async function createSkillSnapshot(config: SkillConfig): Promise<SkillSna
           await mkdir(join(target, ".."), { recursive: true });
           await writeFile(target, entry.data, { flag: "wx" });
         }
-        await verify(temp, digest);
+        await seal(temp, await verify(temp, digest));
         // Refuse mixed-generation content if the source changed during copying.
         if ((await capture(root)).digest !== digest) {
           throw new Error("NovelTea skills changed during snapshot publication; retry this new workflow.");
@@ -131,7 +187,7 @@ export async function createSkillSnapshot(config: SkillConfig): Promise<SkillSna
             catch { throw publishError; }
           }
         }
-      } finally { await rm(temp, { recursive: true, force: true }); }
+      } finally { await discardStage(temp); }
     }
     if (await stat(destination).then(() => true, () => false)) await openSkillSnapshot(digest);
     else throw error;

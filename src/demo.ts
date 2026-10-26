@@ -9,7 +9,7 @@ import { stateDirectory } from "./checkpoint.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { type StoryProject } from "./project.js";
 import { createSkillReadTool, type SkillConfig } from "./skills.js";
-import { type SkillSnapshot } from "./snapshot.js";
+import { verifiedSkillFiles, type SkillSnapshot, type VerifiedSkillFiles } from "./snapshot.js";
 
 const FOUNDATION_PATH = "creative-direction/foundation.md";
 const REQUIRED_READS = [
@@ -138,7 +138,7 @@ export async function assertFreshStory(project: StoryProject): Promise<void> {
   }
 }
 
-export function createFoundationTools(project: StoryProject, skills: Skill[]): {
+export function createFoundationTools(project: StoryProject, skills: Skill[], snapshot?: VerifiedSkillFiles): {
   tools: ToolDefinition[];
   artifact: string;
   required: string[];
@@ -151,7 +151,7 @@ export function createFoundationTools(project: StoryProject, skills: Skill[]): {
     if (!skill) throw new Error(`Story demo requires pinned skill "${name}".`);
     return join(skill.baseDir, path);
   });
-  const read = createSkillReadTool(skills);
+  const read = createSkillReadTool(skills, snapshot);
   const reads = new Set<string>();
   let written = false;
   const artifact = join(project.root, FOUNDATION_PATH);
@@ -286,7 +286,7 @@ export async function runFoundationDemo(input: DemoOptions) {
     if (diagnostic.type === "error") throw new Error(`Demo skill discovery error: ${diagnostic.message}`);
   }
   const { tools, artifact, required, readPaths, didWrite } = createFoundationTools(
-    project, loader.getSkills().skills,
+    project, loader.getSkills().skills, await verifiedSkillFiles(snapshot.id),
   );
   const canonicalRequired = await Promise.all(required.map(async path => {
     try { return await realpath(path); }

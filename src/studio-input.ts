@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 import { openStoryProject } from "./project.js";
-import { loadSkillConfig } from "./skills.js";
-import { createSkillSnapshot } from "./snapshot.js";
 
 /** Generate fully scoped, deterministic Studio input state for one Story. */
 async function main(args: string[]) {
@@ -24,14 +22,14 @@ async function main(args: string[]) {
     throw new Error("Studio input requires --project and --task.");
   }
   const selected = await openStoryProject(project);
-  const snapshot = await createSkillSnapshot(await loadSkillConfig());
   process.stdout.write(JSON.stringify({
     task, provider, model,
     projectRoot: selected.root, projectId: selected.id,
     executionMode: "pi", storyNote: "", tagline: "", handoff: null,
     response: "", piSessionId: "", piSessionFile: "",
     workerPiSessionId: "", workerPiSessionFile: "",
-    skillSnapshot: snapshot ?? null,
+    // Studio captures and persists the active skill snapshot when the graph starts.
+    skillSnapshot: null,
   }, null, 2) + "\n");
 }
 main(process.argv.slice(2)).catch(error => {

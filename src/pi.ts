@@ -21,8 +21,8 @@ import {
 import { openPersistedSession } from "./checkpoint.js";
 import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
 import { createSkillReadTool, resolveConfiguredSkills, type SkillConfig } from "./skills.js";
-import type { SkillSnapshot } from "./snapshot.js";
-import { piTraceExtensions, traceDirectModel } from "./tracing.js";
+import { verifiedSkillFiles, type SkillSnapshot } from "./snapshot.js";
+import { DirectModelStopError, piTraceExtensions, traceDirectModel } from "./tracing.js";
 import type { Client } from "langsmith";
 
 /**
@@ -163,6 +163,7 @@ export function createPiDelegationAdapters(
   configureTrace: (metadata: Record<string, string | boolean>) => void;
 } {
   let activeConfig = config;
+  let pinned: SkillSnapshot | undefined;
   let coordinator: AgentSession | undefined;
   let worker: AgentSession | undefined;
   let runtime: ModelRuntime | undefined;
@@ -215,7 +216,7 @@ export function createPiDelegationAdapters(
       if (diagnostic.type === "collision") process.stderr.write(`noveltea-gen: ${diagnostic.message}\n`);
     }
     const skillTools = includeProjectInstructions && skillResult.skills.length
-      ? [createSkillReadTool(skillResult.skills)] : [];
+      ? [createSkillReadTool(skillResult.skills, pinned ? await verifiedSkillFiles(pinned.id) : undefined)] : [];
     if (includeProjectInstructions) coordinatorReadEnabled = skillTools.length > 0;
     const activeTools = [...tools, ...skillTools];
     const { session } = await createAgentSession({
@@ -235,6 +236,7 @@ export function createPiDelegationAdapters(
   return {
     configureTrace(metadata) { traceMetadata = metadata; },
     pinSkillSnapshot(snapshot) {
+      pinned = snapshot;
       activeConfig = snapshot ? { ...config, novelteaSkills: snapshot.path } : { ...config, novelteaSkills: undefined, requiredSkills: [] };
     },
     async restorePi(input) {
@@ -335,7 +337,10 @@ export function createPiDelegationAdapters(
             usage: result.usage,
           };
         });
-      } catch {
+      } catch (error) {
+        if (error instanceof DirectModelStopError) {
+          throw new Error(`Direct model did not finish (stopReason: ${error.stopReason}). Check model access, quota and output limits.`);
+        }
         // Provider SDK messages are not necessarily secret-safe. Do not leak
         // tokens, request headers, or raw provider payloads into graph/CLI logs.
         throw new Error(

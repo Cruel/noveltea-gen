@@ -150,6 +150,31 @@ test("direct pi-ai model span is scoped to its LangGraph node and sanitizes prov
   error => error instanceof Error && !error.message.includes("SECRET_PROVIDER_KEY"));
 });
 
+test("direct-model error and aborted completions fail their own LLM spans with sanitized usage", async () => {
+  const client = new Client({ apiKey: "offline-only", apiUrl: "http://127.0.0.1:1",
+    autoBatchTracing: false });
+  Object.assign(client, { createRun: async () => undefined, updateRun: async () => undefined });
+  const parent = new RunTree({ name: "offline-root", run_type: "chain", client, tracingEnabled: true });
+  for (const reason of ["error", "aborted", "length", "toolUse", "SECRET_IN_STOP_REASON"] as const) {
+    const safeReason = reason === "SECRET_IN_STOP_REASON" ? "unexpected" : reason;
+    await assert.rejects(withRunTree(parent, () => traceDirectModel(true,
+      { provider: "test", model: "mock", brief: "a tagline" }, async () => ({
+        text: "provider returned unusable output", stopReason: reason,
+        usage: { input: 11, output: 3, totalTokens: 14 },
+        secret: "MUST_NOT_TRACE_PROVIDER_OBJECT",
+      }))), new RegExp(safeReason));
+    const span = [...parent.child_runs].reverse().find(run => run.name === "pi-ai direct model request");
+    assert.ok(span, "a failed provider completion must still yield an LLM span");
+    assert.match(span.error ?? "", new RegExp(safeReason));
+    assert.equal(span.outputs?.stop_reason, safeReason);
+    assert.deepEqual(span.outputs?.usage_metadata, {
+      input_tokens: 11, output_tokens: 3, total_tokens: 14,
+      input_token_details: { cache_read: 0, cache_creation: 0 },
+    });
+    assert.doesNotMatch(JSON.stringify(span), /MUST_NOT_TRACE_PROVIDER_OBJECT|SECRET_IN_STOP_REASON/);
+  }
+});
+
 test("the Pi extension nests agent, turn, provider, tool, and compaction spans under a node", async () => {
   const handlers = new Map<string, Array<(event: any, ctx: any) => Promise<void>>>();
   const fakePi = {

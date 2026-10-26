@@ -1,6 +1,7 @@
+import { removeTestTree } from "./helpers.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { projectSessionDir } from "../src/project.js";
 import { tmpdir } from "node:os";
@@ -63,7 +64,7 @@ test("opt-in real Pi reads nt-catalog SKILL.md and bundled reference from local 
       JSON.stringify(reads));
   } finally {
     assert.equal(gitStatus(), before, "noveltea-skills checkout must remain unmodified");
-    rmSync(base, { recursive: true, force: true });
+    removeTestTree(base);
   }
 });
 
@@ -134,7 +135,7 @@ test("opt-in real Pi authors a minimal Creative Direction from pinned Story skil
     const after = spawnSync("git", ["-C", checkout, "status", "--porcelain"], { encoding: "utf8" });
     assert.equal(after.status, 0, after.stderr);
     assert.equal(after.stdout, before.stdout, "noveltea-skills source checkout must not change");
-    rmSync(base, { recursive: true, force: true });
+    removeTestTree(base);
   }
 });
 
@@ -174,7 +175,7 @@ test("opt-in live smoke test runs distinct Pi conversations with project-local A
     assert.notEqual(first.graphThreadId, second.graphThreadId);
     assert.notEqual(first.piSessionId, second.piSessionId);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTestTree(base);
   }
 });
 
@@ -203,7 +204,7 @@ test("opt-in live smoke test uses direct pi-ai credentials and returns to the or
     assert.equal(output.storyNote, undefined);
     assert.equal(output.workerPiSessionId, undefined, "direct model call must not claim a Pi worker session");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTestTree(root);
   }
 });
 
@@ -243,6 +244,6 @@ test("opt-in live SQLite restart resumes persisted coordinator and worker Pi his
     assert.equal(resumed.storyNote, first.storyNote);
     assert.ok(resumed.response.trim());
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    removeTestTree(base);
   }
 });
