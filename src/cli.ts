@@ -5,6 +5,8 @@ interface CliOptions {
   task: string;
   provider: string;
   model: string;
+  project: string;
+  createProject: boolean;
   threadId: string;
   fixture: boolean;
   trace: boolean;
@@ -13,19 +15,21 @@ interface CliOptions {
 const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
 
 Usage:
-  pnpm dev run --task "Summarize why a story needs a premise."
-  pnpm dev run --fixture --task "Verify the graph without network calls."
+  pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
+  pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
 
 Options:
+  --project <path>    Required Story root (existing directory, independent of app checkout)
+  --create-project    Create the directory if missing; no engine game or skills installed
   --task <text>       Coordinator's task (required)
   --provider <name>   Pi provider (default: openai)
   --model <name>      Pi model (default: gpt-6-luna, if supported)
-  --thread <id>       Graph thread identifier (default: generated UUID)
+  --thread <id>       User thread name (namespaced to the project; default: UUID)
   --fixture           Deterministic test adapter; no Pi/model/auth/network calls
   --trace             Opt in to LangSmith cloud graph tracing (needs LANGSMITH_API_KEY)
   --help              Show this help
 
-Output: a JSON object containing status, threadId, runId, and the actual response.
+Output: JSON with the canonical Story root, scoped thread, Pi session ID and response.
 `;
 
 function parseArgs(argv: string[]): CliOptions | null {
@@ -37,6 +41,8 @@ function parseArgs(argv: string[]): CliOptions | null {
     task: "",
     provider: "openai",
     model: "gpt-6-luna",
+    project: "",
+    createProject: false,
     threadId: randomUUID(),
     fixture: false,
     trace: false,
@@ -47,8 +53,10 @@ function parseArgs(argv: string[]): CliOptions | null {
       options.fixture = true;
     } else if (option === "--trace") {
       options.trace = true;
+    } else if (option === "--create-project") {
+      options.createProject = true;
     } else if (option === "--task" || option === "--model" ||
-               option === "--provider" || option === "--thread") {
+               option === "--provider" || option === "--thread" || option === "--project") {
       const value = argv.shift();
       if (!value?.trim() || value.startsWith("--")) {
         throw new Error(`Missing value for ${option}.`);
@@ -57,11 +65,13 @@ function parseArgs(argv: string[]): CliOptions | null {
       if (option === "--model") options.model = value;
       if (option === "--provider") options.provider = value;
       if (option === "--thread") options.threadId = value;
+      if (option === "--project") options.project = value;
     } else {
       throw new Error(`Unknown option: ${option}. Use --help for usage.`);
     }
   }
   if (!options.task.trim()) throw new Error("Missing required --task <text>.");
+  if (!options.project.trim()) throw new Error("Missing required --project <path>.");
   return options;
 }
 
@@ -80,15 +90,21 @@ async function main(): Promise<void> {
     throw new Error("--trace requires LANGSMITH_API_KEY. Without --trace, no cloud traces are uploaded.");
   }
 
+  const { openStoryProject } = await import("./project.js");
+  const project = await openStoryProject(options.project, options.createProject);
   const { runCoordinator } = await import("./graph.js");
   const invokePi = options.fixture
-    ? async ({ task }: { task: string }) => `Fixture coordinator received: ${task}`
+    ? async ({ task }: { task: string }) => ({
+        response: `Fixture coordinator received: ${task}`,
+        piSessionId: randomUUID(),
+      })
     : (await import("./pi.js")).invokePiCoordinator;
 
   const result = await runCoordinator({
     task: options.task,
     provider: options.provider,
     model: options.model,
+    project,
     threadId: options.threadId,
     invokePi,
   });

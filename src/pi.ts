@@ -1,15 +1,44 @@
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
+  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { CoordinatorRequest } from "./graph.js";
+import type { CoordinatorReply, CoordinatorRequest } from "./graph.js";
+import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
 
 /**
- * Pi retains responsibility for credential lookup, OAuth refresh and model calls.
- * No credentials are copied into LangGraph state, logs or NovelTea-gen files.
+ * Project-limited Pi resources. Credentials continue to come from Pi's user-level
+ * ModelRuntime; loading project resources must not implicitly inherit unrelated
+ * global instructions, extensions, skills, prompts or tools.
  */
-export async function invokePiCoordinator(request: CoordinatorRequest): Promise<string> {
+export function createProjectResourceLoader(project: StoryProject, agentDir = getAgentDir()) {
+  const settingsManager = SettingsManager.inMemory();
+  return {
+    settingsManager,
+    loader: new DefaultResourceLoader({
+      cwd: project.root,
+      agentDir,
+      settingsManager,
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      agentsFilesOverride: () => ({ agentsFiles: projectInstructions(project) }),
+      systemPromptOverride: () => undefined,
+      appendSystemPromptOverride: () => [],
+    }),
+  };
+}
+
+/**
+ * Pi owns provider credentials, OAuth refresh, and session history. Graph
+ * orchestration owns the project namespace and the current invocation.
+ */
+export async function invokePiCoordinator(request: CoordinatorRequest): Promise<CoordinatorReply> {
   const modelRuntime = await ModelRuntime.create();
   const model = modelRuntime.getModel(request.provider, request.model);
   if (!model) {
@@ -21,7 +50,6 @@ export async function invokePiCoordinator(request: CoordinatorRequest): Promise<
     );
   }
 
-  // Pi's supported runtime handles saved OAuth, refresh and environment/API keys.
   // Availability is not proof of subscription entitlement: live providers can
   // still reject a model, which we report as a failed run.
   let available;
@@ -41,13 +69,24 @@ export async function invokePiCoordinator(request: CoordinatorRequest): Promise<
     );
   }
 
+  const { loader, settingsManager } = createProjectResourceLoader(request.project);
+  // Pi's SDK reloads only an implicitly created loader. Explicit loaders must
+  // be initialized before session creation or project instructions are absent.
+  await loader.reload();
   const { session } = await createAgentSession({
     modelRuntime,
     model,
-    sessionManager: SessionManager.inMemory(),
-    // #3 adds explicit, isolated Story project roots.
-    cwd: process.cwd(),
+    cwd: request.project.root,
+    resourceLoader: loader,
+    settingsManager,
+    // Pi persists conversations in its supported project-specific session store.
+    // Graph checkpoint and resume semantics are separate work in #6.
+    sessionManager: SessionManager.create(
+      request.project.root,
+      projectSessionDir(request.project, getAgentDir()),
+    ),
     noTools: "all",
+    tools: [],
   });
 
   try {
@@ -67,7 +106,7 @@ export async function invokePiCoordinator(request: CoordinatorRequest): Promise<
         "credentials and available token quota.",
       );
     }
-    return response;
+    return { response, piSessionId: session.sessionId };
   } finally {
     session.dispose();
   }
