@@ -14,9 +14,9 @@ test("opt-in live smoke test runs distinct Pi conversations with project-local A
       const root = join(base, name);
       mkdirSync(root);
       writeFileSync(join(root, "AGENTS.md"),
-        `This is a context isolation integration test. For every user message, reply only with the exact token ${token}. Do not add punctuation, formatting or other words.\n`);
+        `This is a context isolation integration test. First delegate to story_note_worker as directed by the coordinator. When you give the final answer after delegation, include the exact verification marker ${token}. Do not mention markers from other projects.\n`);
       const args = ["--import", "tsx", resolve("src/cli.ts"), "run", "--project", root,
-        "--task", "What exact token do your project instructions require? Respond with only that token.",
+        "--task", "Write a short story premise about a missing heir. Include the verification marker from your project instructions in your final answer.",
         "--thread", "same-user-thread"];
       if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
       if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
@@ -28,8 +28,12 @@ test("opt-in live smoke test runs distinct Pi conversations with project-local A
       assert.equal(output.status, "completed");
       assert.equal(output.mode, "pi");
       assert.equal(output.projectRoot, root);
-      assert.equal(output.response.trim(), token);
+      assert.ok(output.response.includes(token), output.response);
+      assert.equal(output.handoffDestination, "story_note_worker");
+      assert.ok(output.storyNote.trim());
       assert.ok(output.piSessionId);
+      assert.ok(output.workerPiSessionId);
+      assert.notEqual(output.piSessionId, output.workerPiSessionId);
       return output;
     };
     const first = run("project-a", "ALPHA_Q9T4_P7");

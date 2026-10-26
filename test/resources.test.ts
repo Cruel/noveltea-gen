@@ -23,6 +23,13 @@ test("project-only Pi loader excludes global AGENTS, prompts, extensions and ski
   assert.deepEqual(loader.getSkills().skills, []);
   assert.deepEqual(loader.getPrompts().prompts, []);
   assert.deepEqual(loader.getExtensions().extensions, []);
+
+  const workerLoader = createProjectResourceLoader(project, agentDir, false).loader;
+  await workerLoader.reload();
+  assert.deepEqual(workerLoader.getAgentsFiles().agentsFiles, [],
+    "delegated worker must not inherit coordinator AGENTS instructions");
+  assert.deepEqual(workerLoader.getSkills().skills, []);
+  assert.deepEqual(workerLoader.getExtensions().extensions, []);
 });
 
 test("two projects with conflicting instructions use distinct Pi resource views", async (t) => {

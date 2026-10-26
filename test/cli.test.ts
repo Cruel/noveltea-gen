@@ -32,7 +32,11 @@ test("fixture runs compiled LangGraph with an explicit project, no auth or traci
   assert.equal(output.graphThreadId, `${output.projectId}:fixed-thread`);
   assert.match(output.piSessionId, /^[0-9a-f-]{36}$/i);
   assert.match(output.runId, /^[0-9a-f-]{36}$/i);
-  assert.equal(output.response, "Fixture coordinator received: Hello, graph");
+  assert.equal(output.response, "Fixture coordinator received: Hello, graph; worker note: A secret in the opening scene changes everything.");
+  assert.equal(output.handoffDestination, "story_note_worker");
+  assert.equal(output.storyNote, "A secret in the opening scene changes everything.");
+  assert.notEqual(output.workerPiSessionId, output.piSessionId);
+  assert.match(output.workerPiSessionId, /^[0-9a-f-]{36}$/i);
   assert.equal(output.mode, "fixture");
   assert.equal(output.provider, "openai");
   assert.equal(output.model, "gpt-6-luna");

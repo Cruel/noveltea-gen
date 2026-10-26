@@ -29,7 +29,7 @@ Options:
   --trace             Opt in to LangSmith cloud graph tracing (needs LANGSMITH_API_KEY)
   --help              Show this help
 
-Output: JSON with the canonical Story root, scoped thread, Pi session ID and response.
+Output: JSON with the Story root, scoped thread, coordinator/worker sessions, handoff, storyNote and response.
 `;
 
 function parseArgs(argv: string[]): CliOptions | null {
@@ -93,12 +93,26 @@ async function main(): Promise<void> {
   const { openStoryProject } = await import("./project.js");
   const project = await openStoryProject(options.project, options.createProject);
   const { runCoordinator } = await import("./graph.js");
-  const invokePi = options.fixture
-    ? async ({ task }: { task: string }) => ({
-        response: `Fixture coordinator received: ${task}`,
-        piSessionId: randomUUID(),
-      })
-    : (await import("./pi.js")).invokePiCoordinator;
+  const adapters = options.fixture
+    ? (() => {
+        const piSessionId = randomUUID();
+        const workerPiSessionId = randomUUID();
+        return {
+          startPi: async () => ({
+            piSessionId,
+            handoff: { destination: "story_note_worker", brief: "Propose a Story twist" },
+          }),
+          invokeWorker: async () => ({
+            piSessionId: workerPiSessionId,
+            update: { storyNote: "A secret in the opening scene changes everything." },
+          }),
+          resumePi: async ({ storyNote }: { storyNote: string }) => ({
+            piSessionId,
+            response: `Fixture coordinator received: ${options.task}; worker note: ${storyNote}`,
+          }),
+        };
+      })()
+    : (await import("./pi.js")).createPiDelegationAdapters();
 
   const result = await runCoordinator({
     task: options.task,
@@ -106,7 +120,7 @@ async function main(): Promise<void> {
     model: options.model,
     project,
     threadId: options.threadId,
-    invokePi,
+    ...adapters,
   });
   process.stdout.write(JSON.stringify({
     status: "completed",
