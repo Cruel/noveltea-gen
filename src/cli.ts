@@ -129,6 +129,8 @@ async function main(): Promise<void> {
 
   const { openStoryProject } = await import("./project.js");
   const project = await openStoryProject(options.project, options.createProject);
+  const { loadSkillConfig } = await import("./skills.js");
+  const skillConfig = await loadSkillConfig();
   const { runCoordinator } = await import("./graph.js");
   const fixturePiSdk = options.fixture
     ? await import("@earendil-works/pi-coding-agent") : null;
@@ -180,7 +182,7 @@ async function main(): Promise<void> {
           }),
         };
       })()
-    : (await import("./pi.js")).createPiDelegationAdapters();
+    : (await import("./pi.js")).createPiDelegationAdapters(skillConfig);
 
   const result = await runCoordinator({
     task: options.task,

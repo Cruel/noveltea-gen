@@ -19,6 +19,7 @@ import {
 } from "./graph.js";
 import { openPersistedSession } from "./checkpoint.js";
 import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
+import { createSkillReadTool, resolveConfiguredSkills, type SkillConfig } from "./skills.js";
 
 /**
  * Project-limited resources. The Pi worker deliberately receives no AGENTS
@@ -29,6 +30,7 @@ export function createProjectResourceLoader(
   project: StoryProject,
   agentDir = getAgentDir(),
   includeProjectInstructions = true,
+  config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] },
 ) {
   const settingsManager = SettingsManager.inMemory();
   return {
@@ -38,7 +40,10 @@ export function createProjectResourceLoader(
       agentDir,
       settingsManager,
       noExtensions: true,
-      noSkills: true,
+      noSkills: !includeProjectInstructions || config.discovery === "explicit-only",
+      skillsOverride: (base) => includeProjectInstructions
+        ? resolveConfiguredSkills(base, config, project.root, agentDir)
+        : { skills: [], diagnostics: [] },
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
@@ -143,12 +148,13 @@ export function parseDirectWorkerOutput(text: string): DirectWorkerReply["update
  * Direct calls use Pi's ModelRuntime.completeSimple() with the same credential
  * runtime used by the coordinator (OAuth refresh and API keys supported).
  */
-export function createPiDelegationAdapters(): DelegationAdapters {
+export function createPiDelegationAdapters(config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] }): DelegationAdapters {
   let coordinator: AgentSession | undefined;
   let worker: AgentSession | undefined;
   let runtime: ModelRuntime | undefined;
   let selected: WorkerDestination | undefined;
   let directCompleted = false;
+  let coordinatorReadEnabled = false;
 
   async function getUsableModel(currentProvider: string, currentModel: string) {
     runtime ??= await ModelRuntime.create();
@@ -183,8 +189,17 @@ export function createPiDelegationAdapters(): DelegationAdapters {
     existingSession?: SessionManager,
   ): Promise<AgentSession> {
     const model = await getUsableModel(currentProvider, currentModel);
-    const { loader, settingsManager } = createProjectResourceLoader(root, getAgentDir(), includeProjectInstructions);
+    const { loader, settingsManager } = createProjectResourceLoader(root, getAgentDir(), includeProjectInstructions, config);
     await loader.reload();
+    const skillResult = loader.getSkills();
+    for (const diagnostic of skillResult.diagnostics) {
+      if (diagnostic.type === "error") throw new Error(`Skill discovery error at ${diagnostic.path}: ${diagnostic.message}`);
+      if (diagnostic.type === "collision") process.stderr.write(`noveltea-gen: ${diagnostic.message}\n`);
+    }
+    const skillTools = includeProjectInstructions && skillResult.skills.length
+      ? [createSkillReadTool(skillResult.skills)] : [];
+    if (includeProjectInstructions) coordinatorReadEnabled = skillTools.length > 0;
+    const activeTools = [...tools, ...skillTools];
     const { session } = await createAgentSession({
       modelRuntime: runtime!,
       model,
@@ -193,8 +208,8 @@ export function createPiDelegationAdapters(): DelegationAdapters {
       settingsManager,
       sessionManager: existingSession ?? SessionManager.create(root.root, projectSessionDir(root, getAgentDir())),
       noTools: "all",
-      tools: tools.map(t => t.name),
-      customTools: tools,
+      tools: activeTools.map(t => t.name),
+      customTools: activeTools,
     });
     return session;
   }
@@ -216,7 +231,7 @@ export function createPiDelegationAdapters(): DelegationAdapters {
       if (coordinator.sessionId !== input.coordinator.id) {
         throw new Error("Cannot recover Pi coordinator: session identity changed.");
       }
-      coordinator.setActiveToolsByName([]);
+      coordinator.setActiveToolsByName(coordinatorReadEnabled ? ["read"] : []);
       if (input.worker) {
         const workerManager = await openPersistedSession(
           request.project, "pi", input.worker,
@@ -237,7 +252,10 @@ export function createPiDelegationAdapters(): DelegationAdapters {
       const recorder = createHandoffRecorder();
       coordinator = await startSession(request.project, request.provider, request.model, [recorder.tool], true);
       await coordinator.prompt(
-        "You are the Story coordinator. Choose exactly ONE LangGraph worker and call " +
+        "You are the Story coordinator. If the user requests an available skill, " +
+        "use the read tool to load its SKILL.md and any relevant bundled references first. " +
+        "The read tool only accesses advertised skill resources; do not try to read Story files. " +
+        "Then choose exactly ONE LangGraph worker and call " +
         "delegate_to_worker exactly once. For concise promotional taglines, slogans, or hooks, " +
         "choose direct_tagline_worker and brief it to write a punchy one-line tagline. " +
         "For story concepts, premises, plot development, or twists, choose story_note_worker " +
@@ -250,7 +268,7 @@ export function createPiDelegationAdapters(): DelegationAdapters {
       const handoff = validateHandoff(recorder.getIntent());
       selected = handoff.destination;
       // The resumed coordinator must answer, not initiate a second untracked handoff.
-      coordinator.setActiveToolsByName([]);
+      coordinator.setActiveToolsByName(coordinatorReadEnabled ? ["read"] : []);
       const piSessionFile = coordinator.sessionManager.getSessionFile();
       return { piSessionId: coordinator.sessionId, piSessionFile, handoff };
     },

@@ -1,9 +1,68 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { projectSessionDir } from "../src/project.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+
+test("opt-in real Pi reads nt-catalog SKILL.md and bundled reference from local checkout", {
+  skip: process.env.NT_LIVE_TEST !== "1" || !process.env.NT_SKILLS_CHECKOUT
+    ? "set NT_LIVE_TEST=1 and NT_SKILLS_CHECKOUT to an actual noveltea-skills checkout"
+    : undefined,
+}, () => {
+  const checkout = realpathSync(process.env.NT_SKILLS_CHECKOUT!);
+  const base = mkdtempSync(join(tmpdir(), "nt-gen-catalog-live-"));
+  const gitStatus = () => {
+    const result = spawnSync("git", ["-C", checkout, "status", "--porcelain"], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const before = gitStatus();
+  try {
+    const root = join(base, "story");
+    mkdirSync(root);
+    const contract = "Our Story has protagonist Mira and the abandoned ferry location. Give them durable IDs, " +
+      "identify canonical record kinds, and explain whether a Relationship record links a Character to a World Entity.";
+    writeFileSync(join(root, "AGENTS.md"),
+      "Treat the supplied Story contract as authoritative. Read nt-catalog and a relevant bundled reference " +
+      "before delegating to story_note_worker. Keep the final answer grounded in that reference.\n");
+    const configPath = join(base, "config.json");
+    writeFileSync(configPath, JSON.stringify({ novelteaSkills: checkout, skillDiscovery: "explicit-only" }));
+    const args = ["--import", "tsx", resolve("src/cli.ts"), "run", "--project", root,
+      "--task", "Use nt-catalog: read SKILL.md and references/records.md with read before delegating. " +
+        contract + " After your worker returns, answer the catalog question with the exact record kinds and reference.",
+    ];
+    if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
+    if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
+    const result = spawnSync(process.execPath, args, {
+      cwd: resolve("."), env: { ...process.env, NT_CONFIG_FILE: configPath },
+      encoding: "utf8", timeout: 180_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.status, "completed");
+    assert.equal(output.handoffDestination, "story_note_worker");
+    assert.match(output.response, /character/i);
+    assert.match(output.response, /world.entity/i);
+    assert.match(output.response, /records\.md/i);
+    const sessions = projectSessionDir({ root, id: output.projectId }, getAgentDir());
+    const sessionName = readdirSync(sessions).find(name => name.endsWith(`${output.piSessionId}.jsonl`));
+    assert.ok(sessionName, "coordinator Pi session must be persisted");
+    const entries = readFileSync(join(sessions, sessionName), "utf8")
+      .trim().split("\n").map(line => JSON.parse(line));
+    const reads = entries.flatMap(entry => entry.message?.content ?? [])
+      .filter(item => item.type === "toolCall" && item.name === "read")
+      .map(item => item.arguments?.path);
+    assert.ok(reads.includes(join(checkout, "skills", "nt-catalog", "SKILL.md")), JSON.stringify(reads));
+    assert.ok(reads.includes(join(checkout, "skills", "nt-catalog", "references", "records.md")),
+      JSON.stringify(reads));
+  } finally {
+    assert.equal(gitStatus(), before, "noveltea-skills checkout must remain unmodified");
+    rmSync(base, { recursive: true, force: true });
+  }
+});
 
 test("opt-in live smoke test runs distinct Pi conversations with project-local AGENTS instructions", {
   skip: process.env.NT_LIVE_TEST !== "1" ? "set NT_LIVE_TEST=1 to use live credentials" : undefined,
