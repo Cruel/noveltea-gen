@@ -3,6 +3,7 @@ import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { openCheckpointer, openPersistedSession, type ExecutionMode, type PiSessionReference } from "./checkpoint.js";
 import { scopeThread, type StoryProject } from "./project.js";
+import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 
 /** Fixed, closed routing table. Pi chooses; LangGraph validates and routes. */
 export const WORKER_DESTINATION = "story_note_worker" as const;
@@ -134,6 +135,7 @@ const CoordinatorState = Annotation.Root({
   response: Annotation<string>(),
   piSessionId: Annotation<string>(),
   workerPiSessionId: Annotation<string>(),
+  skillSnapshot: Annotation<SkillSnapshot | undefined>(),
 });
 
 export function createCoordinatorGraph(
@@ -218,6 +220,8 @@ export interface CoordinatorOptions extends CoordinatorRequest, DelegationAdapte
   /** User-facing name, scoped to the project before graph use. */
   threadId: string;
   persistence?: { resume?: boolean; pauseAfter?: "handoff" | "worker"; mode: ExecutionMode };
+  skillSnapshot?: SkillSnapshot;
+  pinSkillSnapshot?: (snapshot: SkillSnapshot | undefined) => void;
 }
 
 export async function runCoordinator(options: CoordinatorOptions) {
@@ -234,6 +238,7 @@ export async function runCoordinator(options: CoordinatorOptions) {
     metadata: {
       "noveltea.thread_id": graphThreadId,
       "noveltea.project_id": options.project.id,
+      ...(options.skillSnapshot ? { "noveltea.skill_snapshot_id": options.skillSnapshot.id, "noveltea.skill_digest": options.skillSnapshot.digest, "noveltea.skill_commit": options.skillSnapshot.commit, "noveltea.skill_branch": options.skillSnapshot.branch ?? "DETACHED", "noveltea.skill_dirty": options.skillSnapshot.dirty } : {}),
     },
   };
   try {
@@ -252,6 +257,7 @@ export async function runCoordinator(options: CoordinatorOptions) {
       response: "",
       piSessionId: "",
       workerPiSessionId: "",
+      skillSnapshot: options.skillSnapshot,
       handoff: undefined,
     };
 
@@ -278,6 +284,18 @@ export async function runCoordinator(options: CoordinatorOptions) {
             "Cannot resume: checkpoint belongs to a different Story project or execution mode.",
           );
         }
+        if (state.skillSnapshot) {
+          const pinned = state.skillSnapshot;
+          Object.assign(config.metadata, {
+            "noveltea.skill_snapshot_id": pinned.id,
+            "noveltea.skill_digest": pinned.digest,
+            "noveltea.skill_commit": pinned.commit,
+            "noveltea.skill_branch": pinned.branch ?? "DETACHED",
+            "noveltea.skill_dirty": pinned.dirty,
+          });
+          if (pinned.digest !== pinned.id) throw new Error("Checkpoint skill snapshot identity mismatch.");
+          options.pinSkillSnapshot?.({ ...pinned, path: await openSkillSnapshot(pinned.id) });
+        } else options.pinSkillSnapshot?.(undefined);
         const handoff = validateHandoff(state.handoff);
         if (!state.piSessionId?.trim() || !state.piSessionFile?.trim()) {
           throw new Error("Cannot resume: checkpoint lacks a persisted coordinator Pi session.");
@@ -346,6 +364,7 @@ export async function runCoordinator(options: CoordinatorOptions) {
       handoffDestination: handoff.destination,
       provider: output.provider,
       model: output.model,
+      ...(output.skillSnapshot ? { skillSnapshot: output.skillSnapshot } : {}),
       response: paused ? undefined : output.response,
       ...(handoff.destination === WORKER_DESTINATION
         ? {

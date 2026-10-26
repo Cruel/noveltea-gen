@@ -44,6 +44,9 @@ test("opt-in real Pi reads nt-catalog SKILL.md and bundled reference from local 
     const output = JSON.parse(result.stdout);
     assert.equal(output.status, "completed");
     assert.equal(output.handoffDestination, "story_note_worker");
+    assert.match(output.skillSnapshot.id, /^[a-f0-9]{64}$/);
+    assert.equal(output.skillSnapshot.id, output.skillSnapshot.digest);
+    assert.equal(output.skillSnapshot.commit, spawnSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim());
     assert.match(output.response, /character/i);
     assert.match(output.response, /world.entity/i);
     assert.match(output.response, /records\.md/i);
@@ -55,8 +58,8 @@ test("opt-in real Pi reads nt-catalog SKILL.md and bundled reference from local 
     const reads = entries.flatMap(entry => entry.message?.content ?? [])
       .filter(item => item.type === "toolCall" && item.name === "read")
       .map(item => item.arguments?.path);
-    assert.ok(reads.includes(join(checkout, "skills", "nt-catalog", "SKILL.md")), JSON.stringify(reads));
-    assert.ok(reads.includes(join(checkout, "skills", "nt-catalog", "references", "records.md")),
+    assert.ok(reads.includes(join(output.skillSnapshot.path, "skills", "nt-catalog", "SKILL.md")), JSON.stringify(reads));
+    assert.ok(reads.includes(join(output.skillSnapshot.path, "skills", "nt-catalog", "references", "records.md")),
       JSON.stringify(reads));
   } finally {
     assert.equal(gitStatus(), before, "noveltea-skills checkout must remain unmodified");

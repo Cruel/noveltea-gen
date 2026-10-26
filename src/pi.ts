@@ -20,6 +20,7 @@ import {
 import { openPersistedSession } from "./checkpoint.js";
 import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
 import { createSkillReadTool, resolveConfiguredSkills, type SkillConfig } from "./skills.js";
+import type { SkillSnapshot } from "./snapshot.js";
 
 /**
  * Project-limited resources. The Pi worker deliberately receives no AGENTS
@@ -148,7 +149,8 @@ export function parseDirectWorkerOutput(text: string): DirectWorkerReply["update
  * Direct calls use Pi's ModelRuntime.completeSimple() with the same credential
  * runtime used by the coordinator (OAuth refresh and API keys supported).
  */
-export function createPiDelegationAdapters(config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] }): DelegationAdapters {
+export function createPiDelegationAdapters(config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] }): DelegationAdapters & { pinSkillSnapshot: (snapshot: SkillSnapshot | undefined) => void } {
+  let activeConfig = config;
   let coordinator: AgentSession | undefined;
   let worker: AgentSession | undefined;
   let runtime: ModelRuntime | undefined;
@@ -189,7 +191,7 @@ export function createPiDelegationAdapters(config: SkillConfig = { discovery: "e
     existingSession?: SessionManager,
   ): Promise<AgentSession> {
     const model = await getUsableModel(currentProvider, currentModel);
-    const { loader, settingsManager } = createProjectResourceLoader(root, getAgentDir(), includeProjectInstructions, config);
+    const { loader, settingsManager } = createProjectResourceLoader(root, getAgentDir(), includeProjectInstructions, activeConfig);
     await loader.reload();
     const skillResult = loader.getSkills();
     for (const diagnostic of skillResult.diagnostics) {
@@ -215,6 +217,9 @@ export function createPiDelegationAdapters(config: SkillConfig = { discovery: "e
   }
 
   return {
+    pinSkillSnapshot(snapshot) {
+      activeConfig = snapshot ? { ...config, novelteaSkills: snapshot.path } : { ...config, novelteaSkills: undefined, requiredSkills: [] };
+    },
     async restorePi(input) {
       if (coordinator || worker) {
         throw new Error("Cannot restore Pi: adapter already holds a live session.");

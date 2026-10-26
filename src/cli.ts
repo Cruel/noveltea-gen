@@ -130,8 +130,10 @@ async function main(): Promise<void> {
   const { openStoryProject } = await import("./project.js");
   const project = await openStoryProject(options.project, options.createProject);
   const { loadSkillConfig } = await import("./skills.js");
-  const skillConfig = await loadSkillConfig();
+  const skillConfig = await loadSkillConfig(undefined, !options.resume);
   const { runCoordinator } = await import("./graph.js");
+  const { createSkillSnapshot } = await import("./snapshot.js");
+  const skillSnapshot = options.resume ? undefined : await createSkillSnapshot(skillConfig);
   const fixturePiSdk = options.fixture
     ? await import("@earendil-works/pi-coding-agent") : null;
   const fixtureStorage = options.fixture
@@ -150,6 +152,7 @@ async function main(): Promise<void> {
           return { piSessionId: manager.getSessionId(), piSessionFile: file };
         };
         return {
+          pinSkillSnapshot: (_snapshot: unknown) => {},
           startPi: async () => {
             const saved = saveFixtureSession(`Fixture coordinator: ${options.task}`);
             piSessionId = saved.piSessionId;
@@ -183,6 +186,7 @@ async function main(): Promise<void> {
         };
       })()
     : (await import("./pi.js")).createPiDelegationAdapters(skillConfig);
+  if (!options.fixture && !options.resume) adapters.pinSkillSnapshot(skillSnapshot);
 
   const result = await runCoordinator({
     task: options.task,
@@ -190,6 +194,8 @@ async function main(): Promise<void> {
     model: options.model,
     project,
     threadId: options.threadId,
+    skillSnapshot,
+    ...(!options.fixture ? { pinSkillSnapshot: adapters.pinSkillSnapshot } : {}),
     persistence: { resume: options.resume, pauseAfter: options.pauseAfter,
       mode: options.fixture ? "fixture" : "pi" },
     ...adapters,

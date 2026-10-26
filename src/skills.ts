@@ -35,7 +35,7 @@ async function directory(path: string, description: string): Promise<string> {
 }
 
 /** Local app configuration is never taken from a Story root. */
-export async function loadSkillConfig(path = process.env.NT_CONFIG_FILE ?? DEFAULT_CONFIG): Promise<SkillConfig> {
+export async function loadSkillConfig(path = process.env.NT_CONFIG_FILE ?? DEFAULT_CONFIG, verifyCheckout = true): Promise<SkillConfig> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
@@ -70,9 +70,10 @@ export async function loadSkillConfig(path = process.env.NT_CONFIG_FILE ?? DEFAU
   const base = dirname(resolve(path));
   const checkout = data.novelteaSkills as string | undefined;
   const novelteaSkills = checkout
-    ? await directory(configPath(checkout, base), "novelteaSkills Git checkout")
+    ? verifyCheckout ? await directory(configPath(checkout, base), "novelteaSkills Git checkout")
+      : configPath(checkout, base)
     : undefined;
-  if (novelteaSkills) {
+  if (novelteaSkills && verifyCheckout) {
     try {
       await stat(join(novelteaSkills, ".git"));
     } catch {
@@ -89,7 +90,7 @@ export async function loadSkillConfig(path = process.env.NT_CONFIG_FILE ?? DEFAU
   }
   const skillDirs: string[] = [];
   for (const entry of data.skillDirs as string[] | undefined ?? []) {
-    skillDirs.push(await directory(configPath(entry, base), "skillDirs entry"));
+    skillDirs.push(verifyCheckout ? await directory(configPath(entry, base), "skillDirs entry") : configPath(entry, base));
   }
   if (new Set(skillDirs).size !== skillDirs.length) {
     throw new Error("Duplicate configured skillDirs entries.");
