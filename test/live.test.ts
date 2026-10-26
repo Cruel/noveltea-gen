@@ -44,3 +44,32 @@ test("opt-in live smoke test runs distinct Pi conversations with project-local A
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("opt-in live smoke test uses direct pi-ai credentials and returns to the original Pi coordinator", {
+  skip: process.env.NT_LIVE_TEST !== "1" ? "set NT_LIVE_TEST=1 to use live credentials" : undefined,
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), "nt-gen-direct-live-"));
+  try {
+    writeFileSync(join(root, "AGENTS.md"),
+      "For tagline requests, select direct_tagline_worker. Answer with the resulting tagline, not a plot outline.\n");
+    const args = ["--import", "tsx", resolve("src/cli.ts"), "run", "--project", root,
+      "--task", "Write a punchy promotional tagline for a haunted lighthouse mystery. This is a tagline, not a plot premise."];
+    if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
+    if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
+    const result = spawnSync(process.execPath, args, {
+      cwd: resolve("."), env: process.env, encoding: "utf8", timeout: 120_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.status, "completed");
+    assert.equal(output.mode, "pi");
+    assert.equal(output.handoffDestination, "direct_tagline_worker");
+    assert.ok(output.tagline.trim());
+    assert.ok(output.response.trim());
+    assert.ok(output.piSessionId);
+    assert.equal(output.storyNote, undefined);
+    assert.equal(output.workerPiSessionId, undefined, "direct model call must not claim a Pi worker session");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

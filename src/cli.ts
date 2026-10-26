@@ -9,6 +9,7 @@ interface CliOptions {
   createProject: boolean;
   threadId: string;
   fixture: boolean;
+  fixtureDirect: boolean;
   trace: boolean;
 }
 
@@ -26,10 +27,11 @@ Options:
   --model <name>      Pi model (default: gpt-6-luna, if supported)
   --thread <id>       User thread name (namespaced to the project; default: UUID)
   --fixture           Deterministic test adapter; no Pi/model/auth/network calls
+  --fixture-direct    With --fixture, select direct_tagline_worker instead of Pi worker
   --trace             Opt in to LangSmith cloud graph tracing (needs LANGSMITH_API_KEY)
   --help              Show this help
 
-Output: JSON with the Story root, scoped thread, coordinator/worker sessions, handoff, storyNote and response.
+Output: JSON with project/thread identity, selected worker, validated storyNote or tagline, and the coordinator response.
 `;
 
 function parseArgs(argv: string[]): CliOptions | null {
@@ -45,12 +47,15 @@ function parseArgs(argv: string[]): CliOptions | null {
     createProject: false,
     threadId: randomUUID(),
     fixture: false,
+    fixtureDirect: false,
     trace: false,
   };
   while (argv.length > 0) {
     const option = argv.shift()!;
     if (option === "--fixture") {
       options.fixture = true;
+    } else if (option === "--fixture-direct") {
+      options.fixtureDirect = true;
     } else if (option === "--trace") {
       options.trace = true;
     } else if (option === "--create-project") {
@@ -72,6 +77,7 @@ function parseArgs(argv: string[]): CliOptions | null {
   }
   if (!options.task.trim()) throw new Error("Missing required --task <text>.");
   if (!options.project.trim()) throw new Error("Missing required --project <path>.");
+  if (options.fixtureDirect && !options.fixture) throw new Error("--fixture-direct requires --fixture.");
   return options;
 }
 
@@ -100,15 +106,22 @@ async function main(): Promise<void> {
         return {
           startPi: async () => ({
             piSessionId,
-            handoff: { destination: "story_note_worker", brief: "Propose a Story twist" },
+            handoff: options.fixtureDirect
+              ? { destination: "direct_tagline_worker", brief: "Write a one-line story tagline" }
+              : { destination: "story_note_worker", brief: "Propose a Story twist" },
           }),
           invokeWorker: async () => ({
             piSessionId: workerPiSessionId,
             update: { storyNote: "A secret in the opening scene changes everything." },
           }),
-          resumePi: async ({ storyNote }: { storyNote: string }) => ({
+          invokeDirectWorker: async () => ({
+            update: { tagline: "Every secret has a final chapter." },
+          }),
+          resumePi: async (update: { storyNote?: string; tagline?: string }) => ({
             piSessionId,
-            response: `Fixture coordinator received: ${options.task}; worker note: ${storyNote}`,
+            response: update.tagline !== undefined
+              ? `Fixture coordinator received: ${options.task}; direct tagline: ${update.tagline}`
+              : `Fixture coordinator received: ${options.task}; worker note: ${update.storyNote}`,
           }),
         };
       })()

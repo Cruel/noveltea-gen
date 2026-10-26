@@ -1,6 +1,6 @@
 # NovelTea-gen
 
-A local-first TypeScript/pnpm proof of concept integrating a Pi coordinator with a compiled LangGraph.js workflow. This version targets an explicit Story project root and demonstrates a Pi-initiated LangGraph worker handoff (#4). Checkpoint/recovery, skills, snapshots and nested LangSmith Pi tracing remain follow-up tickets.
+A local-first TypeScript/pnpm proof of concept integrating a Pi coordinator with a compiled LangGraph.js workflow. This version targets an explicit Story project root and demonstrates a Pi-initiated LangGraph handoff to one of two isolated worker types (#4–#5). Checkpoint/recovery, skills, snapshots and nested LangSmith Pi tracing remain follow-up tickets.
 
 ## Setup
 
@@ -37,15 +37,18 @@ Relative project paths are resolved against the shell's working directory. Pi us
 
 Only the selected Story root's AGENTS-style instructions are loaded. We deliberately disable global/ancestor instructions, user extensions, nonapproved tools, automatic skill discovery, additional prompts and themes in this early read-only coordinator. Provider authentication **is shared**, through Pi's own credential store. Later tickets define explicit skill discovery, controlled Story authoring tools and custom extensions.
 
-Pi sessions use a SHA-256-based project-specific directory under Pi’s session store (via its supported `SessionManager.create()` API), avoiding collisions in Pi’s ordinary path-to-folder encoding. Each invocation creates a fresh Pi coordinator conversation with its own `piSessionId`. A successful delegation creates an independent worker conversation with `workerPiSessionId`. The CLI emits `projectRoot`, `projectId`, `threadId`, `graphThreadId`, `piSessionId`, `runId` and the model's actual `response`. Even if two projects reuse the same user-facing `--thread` value, the actual LangGraph thread ID is prefixed by the project identity, preventing accidental cross-project state reuse. **Cross-process checkpointed graph restoration and explicit Pi session restoration are not implemented**; those guarantees belong to #6. The #4 continuation preserves one Pi session within the same running graph invocation.
+Pi sessions use a SHA-256-based project-specific directory under Pi’s session store (via its supported `SessionManager.create()` API), avoiding collisions in Pi’s ordinary path-to-folder encoding. Each invocation creates a fresh Pi coordinator conversation with its own `piSessionId`. A `story_note_worker` delegation creates an independent Pi worker conversation with `workerPiSessionId`; `direct_tagline_worker` instead makes one model call without a worker Pi session. The CLI emits `projectRoot`, `projectId`, `threadId`, `graphThreadId`, `piSessionId`, `runId` and the model's actual `response`. Even if two projects reuse the same user-facing `--thread` value, the actual LangGraph thread ID is prefixed by the project identity, preventing accidental cross-project state reuse. **Cross-process checkpointed graph restoration and explicit Pi session restoration are not implemented**; those guarantees belong to #6. The #4 continuation preserves one Pi session within the same running graph invocation.
 
-## Pi-directed LangGraph handoff (#4)
+## Pi-directed LangGraph handoff (#4–#5)
 
-The real coordinator has one allowlisted custom Pi tool, `delegate_to_worker`. Pi chooses the `story_note_worker` destination and supplies a concise `brief`. The custom tool **only records the handoff intent**. It does not run subagents, call a worker, modify graph state or finish the user's task. The stable yield boundary is **the settled coordinator Pi turn containing exactly one handoff tool call**. After that turn settles, the `pi_coordinator` LangGraph node validates the intent, and a conditional LangGraph edge routes to `story_note_worker`. A malformed, missing, repeated or unknown handoff causes the entire run to fail.
+The coordinator has one allowlisted custom Pi tool, `delegate_to_worker`. **Pi chooses** between two mutually exclusive destinations and supplies a concise `brief`. The tool **only records the intent**; it never runs a worker or changes shared graph state. The stable yield boundary is **the settled coordinator Pi turn containing exactly one handoff tool call**. LangGraph strictly validates the selected destination before executing only the chosen worker, then resumes the original Pi coordinator session. Missing, repeated or unknown handoffs fail the run.
 
-The worker is a separate real Pi session with no built-in tools, global extensions or project AGENTS instructions. LangGraph gives it only the projected work fields (`brief` and the shared `storyNote`); it cannot see the coordinator's transcript or original task through graph state. The worker must return JSON containing exactly one nonempty `storyNote` string. The graph validates this output and the distinct worker session ID before merging that one shared field. Invalid output fails the graph rather than silently succeeding.
+- **`story_note_worker` (#4):** A separate Pi agent session without coding tools, extensions or project instructions receives only `{brief, storyNote}`. Its exact JSON `{storyNote: string}` updates the shared `storyNote` field. This route reports `workerPiSessionId`.
+- **`direct_tagline_worker` (#5):** A single tool-free **pi-ai direct model call**, implemented through the coding-agent's `ModelRuntime.completeSimple()`. It receives only `{brief}` (no original user task, coordinator transcript, AGENTS instructions, project root, tools or skills) and returns exact JSON `{tagline: string}`. It updates **only** `tagline`; it creates no Pi agent session and reports no worker session ID.
 
-Afterward, the `pi_continuation` node prompts **the original, still-live coordinator Pi session**, passing the validated worker update. The coordinator's earlier conversation remains intact and supplies context for the final answer. Once the graph ends (success or error), sessions are disposed. This is an **in-process handoff**, not a durable pause or LangGraph checkpoint; process death between nodes cannot be resumed until #6. JSON output includes `handoffDestination`, `storyNote`, and both Pi session IDs.
+The selected implementation for #5 is **direct pi-ai**, not a minimal Pi SDK agent. There is no runtime fallback. Both branches use Pi's existing `ModelRuntime` and supported credentials, including saved OAuth tokens with refresh and configured API keys. Provider/model selection is inherited from the CLI. Unsupported models, unavailable credentials and failed model calls produce actionable errors without adding credentials or raw provider payloads to graph state or CLI error text. Worker outputs are strictly validated before merging and failures prevent continuation.
+
+The `pi_continuation` node prompts **the same live coordinator Pi session** with only the validated result from the selected worker. The final response retains the coordinator's pre-delegation conversation. After the graph ends or fails, Pi sessions are disposed. This is an **in-process handoff**, not a durable graph checkpoint; cross-process recovery belongs to #6.
 
 ## Tests
 
@@ -61,15 +64,15 @@ Test the public graph/CLI boundary without credentials or model requests, agains
 pnpm dev run --project ./scratch-story --create-project --fixture --task "Hello from the graph" --thread smoke-1
 ```
 
-`--fixture` still executes the real compiled LangGraph and all three graph nodes, substituting deterministic Pi coordinator/worker adapters. It does **not** exercise real Pi tool calls or provider authentication.
+`--fixture` executes the compiled LangGraph using deterministic adapters and defaults to `story_note_worker`. Add `--fixture-direct` to exercise `direct_tagline_worker` instead (this flag requires `--fixture`). Neither fixture executes real Pi model calls or provider authentication. Both fixtures verify routing and state merges through the public CLI.
 
-With a valid Pi login, run the opt-in live test (two Story projects, each using coordinator handoff, worker and continuation model calls; may incur usage):
+With a valid Pi login, run the opt-in live tests (two Story-project isolation runs and a separate direct-model branch run; may incur usage):
 
 ```sh
 NT_PROVIDER=openai NT_MODEL=gpt-6-luna pnpm test:live
 ```
 
-The live test runs two separate disposable Story projects whose AGENTS.md files require mutually exclusive markers in the final answer. It verifies that the real model initiates delegation, separate worker sessions return valid notes, the coordinator continues with project-local instructions, and graph threads remain distinct. It does not use a preconfigured external directory or modify either the NovelTea-gen checkout or global Pi instructions.
+The live test runs two separate disposable Story projects whose AGENTS.md files require mutually exclusive markers in the final answer. It verifies that the model initiates the appropriate delegation, the Pi worker and direct-model branches return validated results, the same coordinator resumes with project-local instructions, and graph threads remain distinct. It does not use a preconfigured external directory or modify either the NovelTea-gen checkout or global Pi instructions.
 
 ## LangSmith tracing
 
@@ -83,4 +86,4 @@ Nested Pi model/turn/tool traces and Studio setup are covered under #10. Do not 
 
 ## Scope
 
-The coordinator, project isolation and single graph-delegated worker implement #2–#4. Additional worker destinations, model-only worker variants, checkpoint/restart recovery, NovelTea skills, provenance snapshots and full LangSmith observability remain future work in #5–#11.
+The coordinator, project isolation, Pi worker and direct pi-ai worker implement #2–#5. Checkpoint/restart recovery, NovelTea skills, provenance snapshots and full LangSmith observability remain future work in #6–#11.

@@ -43,6 +43,25 @@ test("fixture runs compiled LangGraph with an explicit project, no auth or traci
   assert.equal(output.tracing, false);
 });
 
+test("direct fixture routes to only the tagline worker through the public CLI", () => {
+  const result = run(["run", "--project", root, "--fixture", "--fixture-direct",
+    "--task", "Write a slogan"]);
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.handoffDestination, "direct_tagline_worker");
+  assert.equal(output.tagline, "Every secret has a final chapter.");
+  assert.equal(output.response, "Fixture coordinator received: Write a slogan; direct tagline: Every secret has a final chapter.");
+  assert.equal(output.workerPiSessionId, undefined);
+  assert.equal(output.storyNote, undefined);
+  assert.ok(output.piSessionId);
+});
+
+test("direct fixture selection is forbidden in live mode", () => {
+  const result = run(["run", "--project", root, "--fixture-direct", "--task", "a tagline"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--fixture-direct requires --fixture/);
+});
+
 test("fixture accepts explicitly selected model and provider", () => {
   const result = run(["run", "--project", root, "--fixture", "--task", "Test",
     "--provider", "anthropic", "--model", "claude-sonnet-4-5"]);

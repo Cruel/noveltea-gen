@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  runCoordinator, WORKER_DESTINATION, validateHandoff, validateWorkerReply,
+  runCoordinator, WORKER_DESTINATION, DIRECT_WORKER_DESTINATION,
+  validateHandoff, validateWorkerReply, validateDirectWorkerReply,
   type CoordinatorOptions,
 } from "../src/graph.js";
 import type { StoryProject } from "../src/project.js";
@@ -28,6 +29,10 @@ function harness(overrides: Partial<CoordinatorOptions> = {}) {
         calls.push({ stage: "worker", input });
         return { piSessionId: "worker-session", update: { storyNote: "The detective is the culprit." } };
       },
+      invokeDirectWorker: async (input) => {
+        calls.push({ stage: "direct-worker", input });
+        return { update: { tagline: "A deadly secret keeps time." } };
+      },
       resumePi: async (input) => {
         calls.push({ stage: "coordinator-resume", input });
         assert.equal(sessionAlive, true, "original coordinator session must still exist");
@@ -53,6 +58,7 @@ test("handoff is selected by Pi, graph projects state and resumes the original c
     work: { brief: "Propose a twist", storyNote: "" },
   });
   assert.deepEqual(calls[2]?.input, {
+    destination: WORKER_DESTINATION,
     storyNote: "The detective is the culprit.",
     workerPiSessionId: "worker-session",
   });
@@ -111,4 +117,54 @@ test("missing start-session identity and no handoff fail rather than return a re
     piSessionId: "", handoff: { destination: WORKER_DESTINATION, brief: "ok" },
   }) });
   await assert.rejects(() => runCoordinator(options), /session identity/i);
+});
+
+test("direct-model branch is Pi-selected, projects only the brief, skips the Pi worker and resumes", async () => {
+  const { options, calls } = harness();
+  const originalStartPi = options.startPi;
+  options.startPi = async (input) => ({
+    ...await originalStartPi(input),
+    handoff: { destination: DIRECT_WORKER_DESTINATION, brief: "Write a punchy tagline" },
+  });
+  const output = await runCoordinator(options);
+  assert.deepEqual(calls.map(x => x.stage), ["coordinator-start", "direct-worker", "coordinator-resume"]);
+  assert.deepEqual(calls[1]?.input, { provider: "test", model: "fixture", work: { brief: "Write a punchy tagline" } });
+  assert.deepEqual(calls[2]?.input, { destination: DIRECT_WORKER_DESTINATION, tagline: "A deadly secret keeps time." });
+  assert.equal(output.handoffDestination, DIRECT_WORKER_DESTINATION);
+  assert.equal(output.tagline, "A deadly secret keeps time.");
+  assert.equal(output.piSessionId, "coordinator-session");
+  assert.equal(output.workerPiSessionId, undefined, "direct calls have no Pi session");
+  assert.equal(output.storyNote, undefined, "unselected worker must not update its field");
+});
+
+test("direct worker rejects malformed updates and does not resume or silently fall back", async () => {
+  const bad = [
+    null, {}, { update: { tagline: "" } }, { update: { tagline: 5 } },
+    { update: { tagline: "ok", storyNote: "inject" } },
+    { update: { tagline: "ok" }, piSessionId: "invented" },
+  ];
+  for (const reply of bad) {
+    const { options, calls } = harness({
+      startPi: async () => ({ piSessionId: "coordinator-session", handoff: { destination: DIRECT_WORKER_DESTINATION, brief: "A tagline" } }),
+      invokeDirectWorker: async (input) => { calls.push({ stage: "direct-worker", input }); return reply; },
+    });
+    await assert.rejects(() => runCoordinator(options), /direct worker|tagline|update/i);
+    assert.deepEqual(calls.map(x => x.stage), ["direct-worker"]);
+  }
+  const { options, calls } = harness({
+    startPi: async () => ({ piSessionId: "coordinator-session", handoff: { destination: DIRECT_WORKER_DESTINATION, brief: "A tagline" } }),
+    invokeDirectWorker: async () => { throw new Error("direct provider unavailable"); },
+  });
+  await assert.rejects(() => runCoordinator(options), /direct provider unavailable/);
+  assert.deepEqual(calls, [], "no fallback worker or continuation");
+  assert.deepEqual(validateDirectWorkerReply({ update: { tagline: "A dark secret." } }),
+    { update: { tagline: "A dark secret." } });
+});
+
+test("handoff accepts exactly two known destinations, not arbitrary graph node names", () => {
+  assert.deepEqual(validateHandoff({ destination: DIRECT_WORKER_DESTINATION, brief: "tagline" }),
+    { destination: DIRECT_WORKER_DESTINATION, brief: "tagline" });
+  for (const destination of ["pi_continuation", "__end__", "invalid", null]) {
+    assert.throws(() => validateHandoff({ destination, brief: "tagline" }), /Invalid Pi handoff/);
+  }
 });

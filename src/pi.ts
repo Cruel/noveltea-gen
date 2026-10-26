@@ -6,18 +6,23 @@ import {
   SessionManager,
   SettingsManager,
   type ToolDefinition,
+  type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import {
+  DIRECT_WORKER_DESTINATION,
+  WORKER_DESTINATION,
   validateHandoff,
   type DelegationAdapters,
+  type WorkerDestination,
   type WorkerReply,
+  type DirectWorkerReply,
 } from "./graph.js";
 import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
 
 /**
- * Project-limited resources. The worker deliberately receives no AGENTS context:
- * its only task data is the graph's explicitly projected work object.
+ * Project-limited resources. The Pi worker deliberately receives no AGENTS
+ * context: its only task data is the graph's explicitly projected work object.
+ * The direct-model worker never constructs this loader or a Pi agent session.
  */
 export function createProjectResourceLoader(
   project: StoryProject,
@@ -45,21 +50,26 @@ export function createProjectResourceLoader(
   };
 }
 
-/** This tool only records Pi's intent; it NEVER runs a worker or edits graph state. */
+/** Tool records Pi's selected destination; it never executes either worker. */
 export function createHandoffRecorder(): { tool: ToolDefinition; getIntent: () => unknown } {
   const attempts: unknown[] = [];
   const tool: ToolDefinition = {
     name: "delegate_to_worker",
     label: "Delegate to graph worker",
     description:
-      "Yield work to a LangGraph node. Invoke exactly once with destination " +
-      "'story_note_worker' and a concise brief for the worker. " +
-      "Do not try to perform the work yourself. The worker will run after your turn settles.",
+      "Yield work to a LangGraph node. Choose story_note_worker for plot development, twists, or " +
+      "story concepts, or direct_tagline_worker for concise promotional taglines, slogans and hooks. " +
+      "Supply exactly one destination and an actionable brief. The tool only records intent; " +
+      "the chosen graph worker executes after your turn settles.",
     parameters: {
       type: "object",
       properties: {
-        destination: { type: "string", description: "The LangGraph worker node: story_note_worker" },
-        brief: { type: "string", description: "Instruction sent to the worker" },
+        destination: {
+          type: "string",
+          enum: [WORKER_DESTINATION, DIRECT_WORKER_DESTINATION],
+          description: "Which mutually exclusive LangGraph worker should execute",
+        },
+        brief: { type: "string", description: "Specific task for the selected worker" },
       },
       required: ["destination", "brief"],
       additionalProperties: false,
@@ -101,35 +111,67 @@ function assertText(session: AgentSession, role: string): string {
   return response;
 }
 
-/** Worker replies are model output, never trusted as graph updates without validation. */
-export function parseWorkerOutput(text: string): WorkerReply["update"] {
+/** Parse a single worker-owned field; never merge arbitrary JSON into graph state. */
+function parseStringUpdate(text: string, field: "storyNote" | "tagline", label: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error("Invalid worker output: expected an exact JSON object with storyNote.");
+    throw new Error(`Invalid ${label} output: expected an exact JSON object with ${field}.`);
   }
   if (typeof parsed !== "object" || !parsed || Array.isArray(parsed) ||
-      Object.keys(parsed).length !== 1 || !Object.hasOwn(parsed, "storyNote") ||
-      typeof (parsed as { storyNote?: unknown }).storyNote !== "string" ||
-      !(parsed as { storyNote: string }).storyNote.trim()) {
-    throw new Error("Invalid worker output: expected one nonempty storyNote string.");
+      Object.keys(parsed).length !== 1 || !Object.hasOwn(parsed, field) ||
+      typeof (parsed as Record<string, unknown>)[field] !== "string" ||
+      !(parsed as Record<string, string>)[field]?.trim()) {
+    throw new Error(`Invalid ${label} output: expected one nonempty ${field} string.`);
   }
-  return { storyNote: (parsed as { storyNote: string }).storyNote };
+  return (parsed as Record<string, string>)[field]!;
+}
+
+export function parseWorkerOutput(text: string): WorkerReply["update"] {
+  return { storyNote: parseStringUpdate(text, "storyNote", "worker") };
+}
+
+export function parseDirectWorkerOutput(text: string): DirectWorkerReply["update"] {
+  return { tagline: parseStringUpdate(text, "tagline", "direct worker") };
 }
 
 /**
- * One graph invocation owns a live coordinator session across start -> worker ->
- * continuation. #6 will introduce checkpointed cross-process recovery; this
- * closure must not be mistaken for durable checkpoint/session restoration.
+ * A graph invocation owns its original Pi session until the chosen worker
+ * returns. Only story_note_worker creates a second Pi agent session.
+ * Direct calls use Pi's ModelRuntime.completeSimple() with the same credential
+ * runtime used by the coordinator (OAuth refresh and API keys supported).
  */
 export function createPiDelegationAdapters(): DelegationAdapters {
   let coordinator: AgentSession | undefined;
   let worker: AgentSession | undefined;
   let runtime: ModelRuntime | undefined;
-  let project: StoryProject | undefined;
-  let provider: string | undefined;
-  let modelName: string | undefined;
+  let selected: WorkerDestination | undefined;
+  let directCompleted = false;
+
+  async function getUsableModel(currentProvider: string, currentModel: string) {
+    runtime ??= await ModelRuntime.create();
+    const model = runtime.getModel(currentProvider, currentModel);
+    if (!model) {
+      throw new Error(
+        `Pi does not recognize model "${currentProvider}/${currentModel}". ` +
+        "Run pi --list-models to select a supported pair.",
+      );
+    }
+    let available;
+    try {
+      available = await runtime.getAvailable(currentProvider);
+    } catch {
+      throw new Error(`Pi could not verify credentials for provider "${currentProvider}". Use pi /login or a supported API key.`);
+    }
+    if (!available.some((candidate) => candidate.id === currentModel)) {
+      throw new Error(
+        `No usable Pi credential for provider "${currentProvider}" and model "${currentModel}". ` +
+        "Use pi /login or configure a supported API key.",
+      );
+    }
+    return model;
+  }
 
   async function startSession(
     root: StoryProject,
@@ -138,28 +180,11 @@ export function createPiDelegationAdapters(): DelegationAdapters {
     tools: ToolDefinition[],
     includeProjectInstructions: boolean,
   ): Promise<AgentSession> {
-    runtime ??= await ModelRuntime.create();
-    const model = runtime.getModel(currentProvider, currentModel);
-    if (!model) {
-      throw new Error(
-        `Pi does not recognize model "${currentProvider}/${currentModel}". ` +
-        "Run `pi --list-models` to select a supported pair.",
-      );
-    }
-    let available;
-    try {
-      available = await runtime.getAvailable(currentProvider);
-    } catch {
-      throw new Error(`Pi could not verify credentials for provider "${currentProvider}". Use pi /login.`);
-    }
-    if (!available.some((candidate) => candidate.id === currentModel)) {
-      throw new Error(`No usable Pi credential for provider "${currentProvider}" and model "${currentModel}". Use pi /login.`);
-    }
-
+    const model = await getUsableModel(currentProvider, currentModel);
     const { loader, settingsManager } = createProjectResourceLoader(root, getAgentDir(), includeProjectInstructions);
     await loader.reload();
     const { session } = await createAgentSession({
-      modelRuntime: runtime,
+      modelRuntime: runtime!,
       model,
       cwd: root.root,
       resourceLoader: loader,
@@ -175,30 +200,30 @@ export function createPiDelegationAdapters(): DelegationAdapters {
   return {
     async startPi(request) {
       if (coordinator) throw new Error("Coordinator has already been started.");
-      project = request.project;
-      provider = request.provider;
-      modelName = request.model;
       const recorder = createHandoffRecorder();
-      coordinator = await startSession(project, provider, modelName, [recorder.tool], true);
+      coordinator = await startSession(request.project, request.provider, request.model, [recorder.tool], true);
       await coordinator.prompt(
-        "You are the Story coordinator. Analyze the user's task and choose a delegated graph " +
-        "worker by calling delegate_to_worker exactly once with destination story_note_worker " +
-        "and a brief asking for a useful Story concept or twist. Do not write the worker result " +
-        "yourself and do not call any other tool. The graph will return a worker note to your " +
-        "same conversation in a subsequent turn.\n\nUser task:\n" + request.task,
+        "You are the Story coordinator. Choose exactly ONE LangGraph worker and call " +
+        "delegate_to_worker exactly once. For concise promotional taglines, slogans, or hooks, " +
+        "choose direct_tagline_worker and brief it to write a punchy one-line tagline. " +
+        "For story concepts, premises, plot development, or twists, choose story_note_worker " +
+        "and brief it to propose a useful narrative note. Choose based on the user's requested " +
+        "work, not an external router. Do not complete the worker task yourself. The graph will " +
+        "return the selected worker's result to this same conversation after your turn settles.\n\n" +
+        "User task:\n" + request.task,
       );
       assertCompleted(coordinator, "coordinator handoff");
-      const handoff = recorder.getIntent();
-      // Once yielded, the continuation is answer-only: a second delegated tool
-      // call would otherwise be recorded but not routed by the finished graph.
+      const handoff = validateHandoff(recorder.getIntent());
+      selected = handoff.destination;
+      // The resumed coordinator must answer, not initiate a second untracked handoff.
       coordinator.setActiveToolsByName([]);
       return { piSessionId: coordinator.sessionId, handoff };
     },
     async invokeWorker(request) {
-      if (!coordinator || !project || !provider || !modelName) {
-        throw new Error("Cannot invoke worker before Pi handoff.");
+      if (!coordinator || selected !== WORKER_DESTINATION) {
+        throw new Error("Pi worker invoked without its selected handoff.");
       }
-      if (worker) throw new Error("Worker was already invoked.");
+      if (worker || directCompleted) throw new Error("A worker has already been invoked.");
       worker = await startSession(request.project, request.provider, request.model, [], false);
       await worker.prompt(
         "You are an isolated Story-note worker. Respond ONLY with valid JSON, exactly " +
@@ -208,15 +233,62 @@ export function createPiDelegationAdapters(): DelegationAdapters {
       const update = parseWorkerOutput(assertText(worker, "worker"));
       return { piSessionId: worker.sessionId, update };
     },
+    async invokeDirectWorker(request) {
+      if (!coordinator || selected !== DIRECT_WORKER_DESTINATION) {
+        throw new Error("Direct worker invoked without its selected handoff.");
+      }
+      if (worker || directCompleted) throw new Error("A worker has already been invoked.");
+      const model = await getUsableModel(request.provider, request.model);
+      // This is a direct pi-ai model call, with no agent loop, Pi session,
+      // project context, skills, tools, or transcript from the coordinator.
+      let result;
+      try {
+        result = await runtime!.completeSimple(model, {
+          systemPrompt: "You are a concise Story-marketing copywriter. Return ONLY a JSON object " +
+            'with exactly one string property: {"tagline":"a compelling one-line story hook"}. ' +
+            "No Markdown or explanations. Use only the supplied brief.",
+          messages: [{ role: "user", content: JSON.stringify(request.work), timestamp: Date.now() }],
+        }, { maxTokens: 512 });
+      } catch {
+        // Provider SDK messages are not necessarily secret-safe. Do not leak
+        // tokens, request headers, or raw provider payloads into graph/CLI logs.
+        throw new Error(
+          `Direct model request failed for "${request.provider}/${request.model}". ` +
+          "Check Pi login/API key, provider availability, model access and token quota.",
+        );
+      }
+      if (result.stopReason !== "stop") {
+        throw new Error(
+          `Direct model did not finish (stopReason: ${result.stopReason}). ` +
+          "Check model access, quota and output limits.",
+        );
+      }
+      const update = parseDirectWorkerOutput(
+        result.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
+      );
+      directCompleted = true;
+      return { update };
+    },
     async resumePi(request) {
-      if (!coordinator || !worker) throw new Error("Cannot resume Pi before the worker has completed.");
+      if (!coordinator || selected !== request.destination) {
+        throw new Error("Cannot resume Pi without the chosen worker's result.");
+      }
+      let updateSummary: string;
+      if (request.destination === WORKER_DESTINATION) {
+        if (!worker || worker.sessionId !== request.workerPiSessionId) {
+          throw new Error("Cannot resume Pi without the validated worker session.");
+        }
+        updateSummary = "The separate Pi worker session " + JSON.stringify(request.workerPiSessionId) +
+          " updated the shared storyNote field to " + JSON.stringify(request.storyNote) + ".";
+      } else {
+        if (!directCompleted || worker) throw new Error("Cannot resume Pi before direct model completion.");
+        updateSummary = "The direct-model worker updated the shared tagline field to " +
+          JSON.stringify(request.tagline) + ". It did not create a Pi session.";
+      }
       const sessionId = coordinator.sessionId;
       await coordinator.prompt(
-        "LangGraph completed the handoff. The separate worker Pi session " +
-        JSON.stringify(request.workerPiSessionId) +
-        " updated the shared storyNote field to " + JSON.stringify(request.storyNote) +
-        ". Use this note to answer the original user's task in a concise reply. " +
-        "Do not call delegate_to_worker again.",
+        "LangGraph completed the handoff. " + updateSummary +
+        " Use this validated result to answer the original user's request in a concise reply.",
       );
       return { piSessionId: sessionId, response: assertText(coordinator, "continuation") };
     },
