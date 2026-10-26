@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import type { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { openCheckpointer, openPersistedSession, type ExecutionMode, type PiSessionReference } from "./checkpoint.js";
 import { scopeThread, type StoryProject } from "./project.js";
 
 /** Fixed, closed routing table. Pi chooses; LangGraph validates and routes. */
@@ -21,6 +23,7 @@ export interface HandoffIntent {
 
 export interface CoordinatorStartReply {
   piSessionId: string;
+  piSessionFile?: string;
   /** Untrusted Pi tool payload. A graph transition requires strict validation. */
   handoff: unknown;
 }
@@ -34,6 +37,7 @@ export interface WorkerRequest {
 }
 export interface WorkerReply {
   piSessionId: string;
+  piSessionFile?: string;
   update: { storyNote: string };
 }
 
@@ -61,6 +65,14 @@ export interface DelegationAdapters {
   invokeWorker: (request: WorkerRequest) => Promise<unknown>;
   invokeDirectWorker: (request: DirectWorkerRequest) => Promise<unknown>;
   resumePi: (request: CoordinatorResumeRequest) => Promise<CoordinatorReply>;
+  /** Rehydrate the original persisted Pi histories without new conversations. */
+  restorePi?: (input: {
+    request: CoordinatorRequest;
+    coordinator: PiSessionReference;
+    worker?: PiSessionReference;
+    destination: WorkerDestination;
+    workerCompleted: boolean;
+  }) => Promise<void>;
   dispose?: () => void | Promise<void>;
 }
 
@@ -83,14 +95,19 @@ export function validateHandoff(input: unknown): HandoffIntent {
 }
 
 export function validateWorkerReply(input: unknown, coordinatorPiSessionId: string): WorkerReply {
-  if (!record(input) || !exactKeys(input, ["piSessionId", "update"]) ||
+  if (!record(input) ||
+      !(exactKeys(input, ["piSessionId", "update"]) || exactKeys(input, ["piSessionId", "piSessionFile", "update"])) ||
+      (Object.hasOwn(input, "piSessionFile") &&
+       (typeof input.piSessionFile !== "string" || !input.piSessionFile.trim())) ||
       typeof input.piSessionId !== "string" || !input.piSessionId.trim() ||
       input.piSessionId === coordinatorPiSessionId ||
       !record(input.update) || !exactKeys(input.update, ["storyNote"]) ||
       typeof input.update.storyNote !== "string" || !input.update.storyNote.trim()) {
     throw new Error("Invalid worker result: expected a separate Pi session and one nonempty storyNote update.");
   }
-  return { piSessionId: input.piSessionId, update: { storyNote: input.update.storyNote } };
+  return { piSessionId: input.piSessionId,
+    ...(typeof input.piSessionFile === "string" ? { piSessionFile: input.piSessionFile } : {}),
+    update: { storyNote: input.update.storyNote } };
 }
 
 export function validateDirectWorkerReply(input: unknown): DirectWorkerReply {
@@ -108,6 +125,9 @@ const CoordinatorState = Annotation.Root({
   model: Annotation<string>(),
   projectRoot: Annotation<string>(),
   projectId: Annotation<string>(),
+  executionMode: Annotation<ExecutionMode>(),
+  piSessionFile: Annotation<string>(),
+  workerPiSessionFile: Annotation<string>(),
   storyNote: Annotation<string>(),
   tagline: Annotation<string>(),
   handoff: Annotation<HandoffIntent | undefined>(),
@@ -116,7 +136,10 @@ const CoordinatorState = Annotation.Root({
   workerPiSessionId: Annotation<string>(),
 });
 
-export function createCoordinatorGraph(adapters: DelegationAdapters) {
+export function createCoordinatorGraph(
+  adapters: DelegationAdapters,
+  persistence?: { saver: SqliteSaver; pauseAfter?: "handoff" | "worker" },
+) {
   return new StateGraph(CoordinatorState)
     .addNode("pi_coordinator", async (state) => {
       const result = await adapters.startPi({
@@ -128,7 +151,11 @@ export function createCoordinatorGraph(adapters: DelegationAdapters) {
       if (typeof result.piSessionId !== "string" || !result.piSessionId.trim()) {
         throw new Error("Pi coordinator did not return a session identity.");
       }
-      return { piSessionId: result.piSessionId, handoff: validateHandoff(result.handoff) };
+      if (persistence && !result.piSessionFile) {
+        throw new Error("Cannot checkpoint handoff: coordinator Pi session was not persisted.");
+      }
+      return { piSessionId: result.piSessionId, piSessionFile: result.piSessionFile ?? "",
+        handoff: validateHandoff(result.handoff) };
     })
     .addNode(WORKER_DESTINATION, async (state) => {
       const handoff = validateHandoff(state.handoff);
@@ -140,7 +167,11 @@ export function createCoordinatorGraph(adapters: DelegationAdapters) {
         work: { brief: handoff.brief, storyNote: state.storyNote },
       });
       const result = validateWorkerReply(raw, state.piSessionId);
-      return { storyNote: result.update.storyNote, workerPiSessionId: result.piSessionId };
+      if (persistence && !result.piSessionFile) {
+        throw new Error("Cannot checkpoint worker: worker Pi session was not persisted.");
+      }
+      return { storyNote: result.update.storyNote, workerPiSessionId: result.piSessionId,
+        workerPiSessionFile: result.piSessionFile ?? "" };
     })
     .addNode(DIRECT_WORKER_DESTINATION, async (state) => {
       const handoff = validateHandoff(state.handoff);
@@ -174,43 +205,138 @@ export function createCoordinatorGraph(adapters: DelegationAdapters) {
     .addEdge(WORKER_DESTINATION, "pi_continuation")
     .addEdge(DIRECT_WORKER_DESTINATION, "pi_continuation")
     .addEdge("pi_continuation", END)
-    .compile();
+    .compile({
+      checkpointer: persistence?.saver,
+      interruptAfter: persistence?.pauseAfter === "handoff"
+        ? ["pi_coordinator"]
+        : persistence?.pauseAfter === "worker"
+          ? [WORKER_DESTINATION, DIRECT_WORKER_DESTINATION] : [],
+    });
 }
 
 export interface CoordinatorOptions extends CoordinatorRequest, DelegationAdapters {
   /** User-facing name, scoped to the project before graph use. */
   threadId: string;
+  persistence?: { resume?: boolean; pauseAfter?: "handoff" | "worker"; mode: ExecutionMode };
 }
 
 export async function runCoordinator(options: CoordinatorOptions) {
   const runId = randomUUID();
   const graphThreadId = scopeThread(options.project, options.threadId);
-  const graph = createCoordinatorGraph(options);
+  const saver = options.persistence
+    ? await openCheckpointer(options.project, Boolean(options.persistence.resume))
+    : undefined;
+  const graph = createCoordinatorGraph(options, saver
+    ? { saver, pauseAfter: options.persistence?.pauseAfter } : undefined);
+  const config = {
+    runId,
+    configurable: { thread_id: graphThreadId },
+    metadata: {
+      "noveltea.thread_id": graphThreadId,
+      "noveltea.project_id": options.project.id,
+    },
+  };
   try {
-    const output = await graph.invoke(
-      {
-        task: options.task,
-        provider: options.provider,
-        model: options.model,
-        projectRoot: options.project.root,
-        projectId: options.project.id,
-        storyNote: "",
-        tagline: "",
-        response: "",
-        piSessionId: "",
-        workerPiSessionId: "",
-      },
-      {
-        runId,
-        configurable: { thread_id: graphThreadId },
-        metadata: {
-          "noveltea.thread_id": graphThreadId,
-          "noveltea.project_id": options.project.id,
-        },
-      },
-    );
+    let completedState: typeof CoordinatorState.State | undefined;
+    let input: typeof CoordinatorState.State | null = {
+      task: options.task,
+      provider: options.provider,
+      model: options.model,
+      projectRoot: options.project.root,
+      projectId: options.project.id,
+      executionMode: options.persistence?.mode ?? "pi",
+      piSessionFile: "",
+      workerPiSessionFile: "",
+      storyNote: "",
+      tagline: "",
+      response: "",
+      piSessionId: "",
+      workerPiSessionId: "",
+      handoff: undefined,
+    };
+
+    if (saver) {
+      let existing;
+      try {
+        existing = await saver.getTuple(config);
+      } catch {
+        throw new Error("Cannot read SQLite checkpoint: database or checkpoint data is corrupt.");
+      }
+      if (options.persistence?.resume) {
+        if (!existing) {
+          throw new Error(
+            "Cannot resume: no checkpoint for this thread and Story root. " +
+            "Check --thread and --project; no new conversation was started.",
+          );
+        }
+        const snapshot = await graph.getState(config);
+        const state = snapshot.values as typeof CoordinatorState.State;
+        if (state.projectRoot !== options.project.root ||
+            state.projectId !== options.project.id ||
+            state.executionMode !== options.persistence.mode) {
+          throw new Error(
+            "Cannot resume: checkpoint belongs to a different Story project or execution mode.",
+          );
+        }
+        const handoff = validateHandoff(state.handoff);
+        if (!state.piSessionId?.trim() || !state.piSessionFile?.trim()) {
+          throw new Error("Cannot resume: checkpoint lacks a persisted coordinator Pi session.");
+        }
+        const coordinator: PiSessionReference = {
+          id: state.piSessionId, file: state.piSessionFile,
+        };
+        await openPersistedSession(options.project, options.persistence.mode, coordinator);
+        const next = snapshot.next.map(String);
+        if (next.some((node) => node !== WORKER_DESTINATION &&
+          node !== DIRECT_WORKER_DESTINATION && node !== "pi_continuation")) {
+          throw new Error("Cannot resume: checkpoint contains an unsupported pending graph node.");
+        }
+        const workerCompleted = next.includes("pi_continuation") || next.length === 0;
+        const worker: PiSessionReference | undefined =
+          handoff.destination === WORKER_DESTINATION && workerCompleted
+            ? { id: state.workerPiSessionId, file: state.workerPiSessionFile }
+            : undefined;
+        if (worker) {
+          await openPersistedSession(options.project, options.persistence.mode, worker);
+        }
+        if (next.length === 0) completedState = state;
+        if (next.length > 0) {
+          if (!options.restorePi) {
+            throw new Error("Cannot resume: the selected Pi adapter does not support session restoration.");
+          }
+          await options.restorePi({
+            request: {
+              task: state.task,
+              provider: state.provider,
+              model: state.model,
+              project: options.project,
+            },
+            coordinator,
+            worker,
+            destination: handoff.destination,
+            workerCompleted,
+          });
+        }
+        // Null input advances from the committed superstep; it does not rerun
+        // the original coordinator or replay a previously checkpointed worker.
+        input = null;
+      } else if (existing) {
+        throw new Error(
+          "This Story thread already has a checkpoint. Use --resume to continue it " +
+          "or choose a new --thread; existing state was not overwritten.",
+        );
+      }
+    } else if (options.persistence?.resume) {
+      throw new Error("Cannot resume without SQLite checkpoint storage.");
+    }
+
+    const output = completedState ?? await graph.invoke(input, config);
     const handoff = validateHandoff(output.handoff);
+    const snapshot = saver ? await graph.getState(config) : undefined;
+    const next = snapshot?.next.map(String) ?? [];
+    const paused = next.length > 0;
     return {
+      ...(saver ? { status: paused ? "paused" : "completed", next } : {}),
       runId,
       threadId: options.threadId,
       graphThreadId,
@@ -218,14 +344,26 @@ export async function runCoordinator(options: CoordinatorOptions) {
       projectId: options.project.id,
       piSessionId: output.piSessionId,
       handoffDestination: handoff.destination,
-      provider: options.provider,
-      model: options.model,
-      response: output.response,
+      provider: output.provider,
+      model: output.model,
+      response: paused ? undefined : output.response,
       ...(handoff.destination === WORKER_DESTINATION
-        ? { storyNote: output.storyNote, workerPiSessionId: output.workerPiSessionId }
-        : { tagline: output.tagline }),
+        ? {
+            ...(!paused || Boolean(output.storyNote)
+              ? { storyNote: output.storyNote } : {}),
+            ...(output.workerPiSessionId
+              ? { workerPiSessionId: output.workerPiSessionId } : {}),
+          }
+        : {
+            ...(!paused || Boolean(output.tagline)
+              ? { tagline: output.tagline } : {}),
+          }),
     };
   } finally {
-    await options.dispose?.();
+    try {
+      await options.dispose?.();
+    } finally {
+      saver?.db.close();
+    }
   }
 }

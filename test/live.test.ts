@@ -73,3 +73,43 @@ test("opt-in live smoke test uses direct pi-ai credentials and returns to the or
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("opt-in live SQLite restart resumes persisted coordinator and worker Pi histories", {
+  skip: process.env.NT_LIVE_TEST !== "1" ? "set NT_LIVE_TEST=1 to use live credentials" : undefined,
+}, () => {
+  const base = mkdtempSync(join(tmpdir(), "nt-gen-checkpoint-live-"));
+  const root = join(base, "story");
+  mkdirSync(root);
+  const env = { ...process.env, NT_STATE_DIR: join(base, "state") };
+  const run = (args: string[]) => {
+    const full = ["--import", "tsx", resolve("src/cli.ts"), "run", "--project", root, ...args];
+    if (!args.includes("--resume")) {
+      if (process.env.NT_PROVIDER) full.push("--provider", process.env.NT_PROVIDER);
+      if (process.env.NT_MODEL) full.push("--model", process.env.NT_MODEL);
+    }
+    const result = spawnSync(process.execPath, full, {
+      cwd: resolve("."), env, encoding: "utf8", timeout: 120_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  try {
+    writeFileSync(join(root, "AGENTS.md"),
+      "Use story_note_worker when asked for a plot premise. Complete the original user request after the worker returns.\n");
+    const first = run(["--thread", "persisted", "--task",
+      "Write a concise locked-room mystery premise with a fair clue and surprising twist.",
+      "--pause-after", "worker"]);
+    assert.equal(first.status, "paused");
+    assert.deepEqual(first.next, ["pi_continuation"]);
+    assert.equal(first.handoffDestination, "story_note_worker");
+    assert.ok(first.piSessionId && first.workerPiSessionId);
+    const resumed = run(["--thread", "persisted", "--resume"]);
+    assert.equal(resumed.status, "completed");
+    assert.equal(resumed.piSessionId, first.piSessionId);
+    assert.equal(resumed.workerPiSessionId, first.workerPiSessionId);
+    assert.equal(resumed.storyNote, first.storyNote);
+    assert.ok(resumed.response.trim());
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

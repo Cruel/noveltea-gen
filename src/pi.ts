@@ -17,6 +17,7 @@ import {
   type WorkerReply,
   type DirectWorkerReply,
 } from "./graph.js";
+import { openPersistedSession } from "./checkpoint.js";
 import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
 
 /**
@@ -179,6 +180,7 @@ export function createPiDelegationAdapters(): DelegationAdapters {
     currentModel: string,
     tools: ToolDefinition[],
     includeProjectInstructions: boolean,
+    existingSession?: SessionManager,
   ): Promise<AgentSession> {
     const model = await getUsableModel(currentProvider, currentModel);
     const { loader, settingsManager } = createProjectResourceLoader(root, getAgentDir(), includeProjectInstructions);
@@ -189,7 +191,7 @@ export function createPiDelegationAdapters(): DelegationAdapters {
       cwd: root.root,
       resourceLoader: loader,
       settingsManager,
-      sessionManager: SessionManager.create(root.root, projectSessionDir(root, getAgentDir())),
+      sessionManager: existingSession ?? SessionManager.create(root.root, projectSessionDir(root, getAgentDir())),
       noTools: "all",
       tools: tools.map(t => t.name),
       customTools: tools,
@@ -198,6 +200,38 @@ export function createPiDelegationAdapters(): DelegationAdapters {
   }
 
   return {
+    async restorePi(input) {
+      if (coordinator || worker) {
+        throw new Error("Cannot restore Pi: adapter already holds a live session.");
+      }
+      selected = input.destination;
+      const request = input.request;
+      const coordinatorManager = await openPersistedSession(
+        request.project, "pi", input.coordinator,
+      );
+      coordinator = await startSession(
+        request.project, request.provider, request.model,
+        [], true, coordinatorManager,
+      );
+      if (coordinator.sessionId !== input.coordinator.id) {
+        throw new Error("Cannot recover Pi coordinator: session identity changed.");
+      }
+      coordinator.setActiveToolsByName([]);
+      if (input.worker) {
+        const workerManager = await openPersistedSession(
+          request.project, "pi", input.worker,
+        );
+        worker = await startSession(
+          request.project, request.provider, request.model,
+          [], false, workerManager,
+        );
+        if (worker.sessionId !== input.worker.id) {
+          throw new Error("Cannot recover Pi worker: session identity changed.");
+        }
+      }
+      directCompleted = input.destination === DIRECT_WORKER_DESTINATION &&
+        input.workerCompleted;
+    },
     async startPi(request) {
       if (coordinator) throw new Error("Coordinator has already been started.");
       const recorder = createHandoffRecorder();
@@ -217,7 +251,8 @@ export function createPiDelegationAdapters(): DelegationAdapters {
       selected = handoff.destination;
       // The resumed coordinator must answer, not initiate a second untracked handoff.
       coordinator.setActiveToolsByName([]);
-      return { piSessionId: coordinator.sessionId, handoff };
+      const piSessionFile = coordinator.sessionManager.getSessionFile();
+      return { piSessionId: coordinator.sessionId, piSessionFile, handoff };
     },
     async invokeWorker(request) {
       if (!coordinator || selected !== WORKER_DESTINATION) {
@@ -231,7 +266,8 @@ export function createPiDelegationAdapters(): DelegationAdapters {
         "You must use only the supplied work data.\nWork:\n" + JSON.stringify(request.work),
       );
       const update = parseWorkerOutput(assertText(worker, "worker"));
-      return { piSessionId: worker.sessionId, update };
+      return { piSessionId: worker.sessionId,
+        piSessionFile: worker.sessionManager.getSessionFile(), update };
     },
     async invokeDirectWorker(request) {
       if (!coordinator || selected !== DIRECT_WORKER_DESTINATION) {

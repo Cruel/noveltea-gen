@@ -10,6 +10,11 @@ interface CliOptions {
   threadId: string;
   fixture: boolean;
   fixtureDirect: boolean;
+  resume: boolean;
+  pauseAfter?: "handoff" | "worker";
+  threadProvided: boolean;
+  providerProvided: boolean;
+  modelProvided: boolean;
   trace: boolean;
 }
 
@@ -28,6 +33,8 @@ Options:
   --thread <id>       User thread name (namespaced to the project; default: UUID)
   --fixture           Deterministic test adapter; no Pi/model/auth/network calls
   --fixture-direct    With --fixture, select direct_tagline_worker instead of Pi worker
+  --pause-after <at>  Commit and stop after handoff or worker (safe boundaries)
+  --resume            Continue --thread from saved SQLite and Pi sessions (no --task)
   --trace             Opt in to LangSmith cloud graph tracing (needs LANGSMITH_API_KEY)
   --help              Show this help
 
@@ -48,6 +55,10 @@ function parseArgs(argv: string[]): CliOptions | null {
     threadId: randomUUID(),
     fixture: false,
     fixtureDirect: false,
+    resume: false,
+    threadProvided: false,
+    providerProvided: false,
+    modelProvided: false,
     trace: false,
   };
   while (argv.length > 0) {
@@ -56,10 +67,18 @@ function parseArgs(argv: string[]): CliOptions | null {
       options.fixture = true;
     } else if (option === "--fixture-direct") {
       options.fixtureDirect = true;
+    } else if (option === "--resume") {
+      options.resume = true;
     } else if (option === "--trace") {
       options.trace = true;
     } else if (option === "--create-project") {
       options.createProject = true;
+    } else if (option === "--pause-after") {
+      const stage = argv.shift();
+      if (stage !== "handoff" && stage !== "worker") {
+        throw new Error("--pause-after must be handoff or worker.");
+      }
+      options.pauseAfter = stage;
     } else if (option === "--task" || option === "--model" ||
                option === "--provider" || option === "--thread" || option === "--project") {
       const value = argv.shift();
@@ -67,15 +86,27 @@ function parseArgs(argv: string[]): CliOptions | null {
         throw new Error(`Missing value for ${option}.`);
       }
       if (option === "--task") options.task = value;
-      if (option === "--model") options.model = value;
-      if (option === "--provider") options.provider = value;
-      if (option === "--thread") options.threadId = value;
+      if (option === "--model") { options.model = value; options.modelProvided = true; }
+      if (option === "--provider") { options.provider = value; options.providerProvided = true; }
+      if (option === "--thread") {
+        options.threadId = value;
+        options.threadProvided = true;
+      }
       if (option === "--project") options.project = value;
     } else {
       throw new Error(`Unknown option: ${option}. Use --help for usage.`);
     }
   }
-  if (!options.task.trim()) throw new Error("Missing required --task <text>.");
+  if (options.resume) {
+    if (!options.threadProvided) throw new Error("--resume requires an explicit --thread <id>.");
+    if (options.task.trim()) throw new Error("--resume does not accept --task; task comes from the checkpoint.");
+    if (options.providerProvided || options.modelProvided) {
+      throw new Error("--resume does not accept --provider or --model; selection comes from the checkpoint.");
+    }
+    if (options.createProject) throw new Error("--resume does not accept --create-project.");
+  } else if (!options.task.trim()) {
+    throw new Error("Missing required --task <text>.");
+  }
   if (!options.project.trim()) throw new Error("Missing required --project <path>.");
   if (options.fixtureDirect && !options.fixture) throw new Error("--fixture-direct requires --fixture.");
   return options;
@@ -99,29 +130,53 @@ async function main(): Promise<void> {
   const { openStoryProject } = await import("./project.js");
   const project = await openStoryProject(options.project, options.createProject);
   const { runCoordinator } = await import("./graph.js");
+  const fixturePiSdk = options.fixture
+    ? await import("@earendil-works/pi-coding-agent") : null;
+  const fixtureStorage = options.fixture
+    ? await import("./checkpoint.js") : null;
   const adapters = options.fixture
     ? (() => {
-        const piSessionId = randomUUID();
-        const workerPiSessionId = randomUUID();
+        let piSessionId: string = randomUUID();
+        let fixtureTask = options.task;
+        const { SessionManager } = fixturePiSdk!;
+        const { sessionDirectory } = fixtureStorage!;
+        const saveFixtureSession = (text: string) => {
+          const manager = SessionManager.create(project.root, sessionDirectory(project, "fixture"));
+          manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+          const file = manager.getSessionFile();
+          if (!file) throw new Error("Fixture Pi session did not persist.");
+          return { piSessionId: manager.getSessionId(), piSessionFile: file };
+        };
         return {
-          startPi: async () => ({
-            piSessionId,
-            handoff: options.fixtureDirect
-              ? { destination: "direct_tagline_worker", brief: "Write a one-line story tagline" }
-              : { destination: "story_note_worker", brief: "Propose a Story twist" },
-          }),
-          invokeWorker: async () => ({
-            piSessionId: workerPiSessionId,
-            update: { storyNote: "A secret in the opening scene changes everything." },
-          }),
+          startPi: async () => {
+            const saved = saveFixtureSession(`Fixture coordinator: ${options.task}`);
+            piSessionId = saved.piSessionId;
+            return {
+              ...saved,
+              handoff: options.fixtureDirect
+                ? { destination: "direct_tagline_worker", brief: "Write a one-line story tagline" }
+                : { destination: "story_note_worker", brief: "Propose a Story twist" },
+            };
+          },
+          invokeWorker: async () => {
+            const saved = saveFixtureSession("Fixture worker: story note");
+            return { ...saved, update: { storyNote: "A secret in the opening scene changes everything." } };
+          },
           invokeDirectWorker: async () => ({
             update: { tagline: "Every secret has a final chapter." },
           }),
+          restorePi: async ({ request, coordinator }: {
+            request: { task: string };
+            coordinator: { id: string };
+          }) => {
+            fixtureTask = request.task;
+            piSessionId = coordinator.id;
+          },
           resumePi: async (update: { storyNote?: string; tagline?: string }) => ({
             piSessionId,
             response: update.tagline !== undefined
-              ? `Fixture coordinator received: ${options.task}; direct tagline: ${update.tagline}`
-              : `Fixture coordinator received: ${options.task}; worker note: ${update.storyNote}`,
+              ? `Fixture coordinator received: ${fixtureTask}; direct tagline: ${update.tagline}`
+              : `Fixture coordinator received: ${fixtureTask}; worker note: ${update.storyNote}`,
           }),
         };
       })()
@@ -133,10 +188,12 @@ async function main(): Promise<void> {
     model: options.model,
     project,
     threadId: options.threadId,
+    persistence: { resume: options.resume, pauseAfter: options.pauseAfter,
+      mode: options.fixture ? "fixture" : "pi" },
     ...adapters,
   });
   process.stdout.write(JSON.stringify({
-    status: "completed",
+    status: result.status,
     mode: options.fixture ? "fixture" : "pi",
     tracing: options.trace,
     ...result,

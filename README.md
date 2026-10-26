@@ -1,6 +1,6 @@
 # NovelTea-gen
 
-A local-first TypeScript/pnpm proof of concept integrating a Pi coordinator with a compiled LangGraph.js workflow. This version targets an explicit Story project root and demonstrates a Pi-initiated LangGraph handoff to one of two isolated worker types (#4–#5). Checkpoint/recovery, skills, snapshots and nested LangSmith Pi tracing remain follow-up tickets.
+A local-first TypeScript/pnpm proof of concept integrating a Pi coordinator with a compiled LangGraph.js workflow. This version targets an explicit Story project root and demonstrates a Pi-initiated LangGraph handoff to one of two isolated worker types (#4–#5), with SQLite checkpoint/restart recovery (#6). Skills, snapshots and nested LangSmith Pi tracing remain follow-up tickets.
 
 ## Setup
 
@@ -37,7 +37,7 @@ Relative project paths are resolved against the shell's working directory. Pi us
 
 Only the selected Story root's AGENTS-style instructions are loaded. We deliberately disable global/ancestor instructions, user extensions, nonapproved tools, automatic skill discovery, additional prompts and themes in this early read-only coordinator. Provider authentication **is shared**, through Pi's own credential store. Later tickets define explicit skill discovery, controlled Story authoring tools and custom extensions.
 
-Pi sessions use a SHA-256-based project-specific directory under Pi’s session store (via its supported `SessionManager.create()` API), avoiding collisions in Pi’s ordinary path-to-folder encoding. Each invocation creates a fresh Pi coordinator conversation with its own `piSessionId`. A `story_note_worker` delegation creates an independent Pi worker conversation with `workerPiSessionId`; `direct_tagline_worker` instead makes one model call without a worker Pi session. The CLI emits `projectRoot`, `projectId`, `threadId`, `graphThreadId`, `piSessionId`, `runId` and the model's actual `response`. Even if two projects reuse the same user-facing `--thread` value, the actual LangGraph thread ID is prefixed by the project identity, preventing accidental cross-project state reuse. **Cross-process checkpointed graph restoration and explicit Pi session restoration are not implemented**; those guarantees belong to #6. The #4 continuation preserves one Pi session within the same running graph invocation.
+Pi sessions use a SHA-256-based project-specific directory under Pi’s session store (via its supported `SessionManager.create()` and `SessionManager.open()` APIs), avoiding collisions in Pi’s ordinary path-to-folder encoding. Each invocation creates a fresh Pi coordinator conversation with its own `piSessionId`. A `story_note_worker` delegation creates an independent Pi worker conversation with `workerPiSessionId`; `direct_tagline_worker` instead makes one model call without a worker Pi session. The CLI emits `projectRoot`, `projectId`, `threadId`, `graphThreadId`, `piSessionId`, `runId` and the model's actual `response`. Even if two projects reuse the same user-facing `--thread` value, the actual LangGraph thread ID is prefixed by the project identity, preventing accidental cross-project state reuse. Since #6, local SQLite checkpoints preserve graph progress across processes. Pi coordinator and worker histories remain independently persisted in their project-scoped Pi JSONL session store. The graph stores session identifiers and paths, not live SDK objects. See **Checkpoint/restart recovery** below.
 
 ## Pi-directed LangGraph handoff (#4–#5)
 
@@ -48,7 +48,64 @@ The coordinator has one allowlisted custom Pi tool, `delegate_to_worker`. **Pi c
 
 The selected implementation for #5 is **direct pi-ai**, not a minimal Pi SDK agent. There is no runtime fallback. Both branches use Pi's existing `ModelRuntime` and supported credentials, including saved OAuth tokens with refresh and configured API keys. Provider/model selection is inherited from the CLI. Unsupported models, unavailable credentials and failed model calls produce actionable errors without adding credentials or raw provider payloads to graph state or CLI error text. Worker outputs are strictly validated before merging and failures prevent continuation.
 
-The `pi_continuation` node prompts **the same live coordinator Pi session** with only the validated result from the selected worker. The final response retains the coordinator's pre-delegation conversation. After the graph ends or fails, Pi sessions are disposed. This is an **in-process handoff**, not a durable graph checkpoint; cross-process recovery belongs to #6.
+The `pi_continuation` node prompts **the same live coordinator Pi session** with only the validated result from the selected worker. The final response retains the coordinator's pre-delegation conversation. After each process completes or pauses, live SDK objects are disposed. The stable committed handoff and worker boundaries can now resume in another process from SQLite and Pi session histories (#6).
+
+## Checkpoint/restart recovery (#6)
+
+Every CLI execution writes **local SQLite LangGraph checkpoints** under
+`~/.local/state/noveltea-gen/<project-hash>/checkpoints.sqlite` by default.
+If `XDG_STATE_HOME` is set, the base is `$XDG_STATE_HOME/noveltea-gen`;
+`NT_STATE_DIR` overrides that base entirely. The project hash is SHA-256
+of the canonical Story root. This storage is outside the Story directory;
+an empty Story project remains empty. The
+project's canonical path scopes graph thread IDs and the checkpoint store. Pass a
+stable `--thread` when you expect to resume; otherwise a new UUID is assigned.
+Resuming through a different project root, including a copy at another path,
+does not reuse the original checkpoint.
+
+To stop at the **safe committed handoff boundary** and resume in a fresh process:
+
+```sh
+pnpm dev run --project /path/to/story --thread draft-1 --task "Develop a mystery premise" --pause-after handoff
+# Close the process or terminal. Later:
+pnpm dev run --project /path/to/story --thread draft-1 --resume
+```
+
+To checkpoint the selected worker's validated result before the original Pi
+coordinator continues, use `--pause-after worker` on the first invocation
+(instead of `handoff`). This also works with `direct_tagline_worker`, which
+does not have a Pi worker session. Both pause types return `status: "paused"`
+and a list of pending `next` nodes. A successful continuation returns
+`status: "completed"`; repeating `--resume` on a completed thread reads the
+committed result without rerunning nodes. An existing thread cannot be
+accidentally restarted or overwritten, and `--resume` takes no new task,
+provider, model, or project-creation options.
+
+The graph checkpoint contains the original task, selected destination and
+structured updates, plus *serializable references* to independent Pi JSONL
+session histories. On resume, NovelTea-gen verifies the stored canonical
+project identity, mode, session file location, session headers, JSONL syntax
+and the presence of conversation history **before** invoking downstream work; then it reopens the exact
+sessions through Pi's supported `SessionManager.open()`, never
+`continueRecent()` (which can silently create a replacement). For a
+noninteractive test with no provider usage, add `--fixture` to both invocations.
+
+Pi's existing credential storage and OAuth refresh are unchanged.
+`NT_STATE_DIR` optionally overrides the default application state location;
+keep the same setting across invocations. The pnpm workspace explicitly allows
+the `better-sqlite3` native dependency's installation build.
+
+**Recovery limits:** LangGraph records a checkpoint between graph supersteps,
+not a distributed transaction with Pi's JSONL persistence or external systems.
+If a process crashes *during* a coordinator turn, model request, worker
+execution, or a side-effecting tool, the in-flight operation may need manual
+reconciliation and could be repeated on retry. No exactly-once guarantee is
+claimed for uncommitted model/tool side effects. Only committed nodes are
+skipped on resume. Don't run simultaneous continuations of the same thread;
+cross-process thread leasing and external side-effect idempotency are outside
+this proof of concept. Restore missing session files or SQLite backups when
+recovery reports a damaged or mismatched record—do not replace them with fresh
+Pi conversations.
 
 ## Tests
 
@@ -66,7 +123,7 @@ pnpm dev run --project ./scratch-story --create-project --fixture --task "Hello 
 
 `--fixture` executes the compiled LangGraph using deterministic adapters and defaults to `story_note_worker`. Add `--fixture-direct` to exercise `direct_tagline_worker` instead (this flag requires `--fixture`). Neither fixture executes real Pi model calls or provider authentication. Both fixtures verify routing and state merges through the public CLI.
 
-With a valid Pi login, run the opt-in live tests (two Story-project isolation runs and a separate direct-model branch run; may incur usage):
+With a valid Pi login, run the opt-in live tests (project isolation, direct-model routing and cross-process SQLite/Pi recovery; may incur usage):
 
 ```sh
 NT_PROVIDER=openai NT_MODEL=gpt-6-luna pnpm test:live
@@ -86,4 +143,4 @@ Nested Pi model/turn/tool traces and Studio setup are covered under #10. Do not 
 
 ## Scope
 
-The coordinator, project isolation, Pi worker and direct pi-ai worker implement #2–#5. Checkpoint/restart recovery, NovelTea skills, provenance snapshots and full LangSmith observability remain future work in #6–#11.
+The coordinator, project isolation, Pi worker, direct pi-ai worker and SQLite/Pi recovery implement #2–#6. NovelTea skills, provenance snapshots and full LangSmith observability remain future work in #7–#11.
