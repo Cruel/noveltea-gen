@@ -70,6 +70,9 @@ async function capture(root: string, includeExcluded = false): Promise<Capture> 
   if (!skillsInfo.isDirectory() || skillsInfo.isSymbolicLink()) {
     throw new Error(`Snapshot skills root must be a real directory: ${skillsRoot}`);
   }
+  // walk() records child directories, not its starting directory. Include
+  // skills/ itself so publication and reuse seal the entire snapshot tree.
+  directories.push("skills");
   await walk(skillsRoot);
   if (!files.some(f => /^skills\/[^/]+\/SKILL\.md$/.test(f.path))) {
     throw new Error("NovelTea checkout has no skill packages.");

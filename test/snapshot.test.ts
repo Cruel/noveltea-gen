@@ -94,9 +94,13 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
   const sealedCatalog = join(f.path, "skills", "nt-catalog");
   const oldWritableFile = join(sealedCatalog, "SKILL.md");
   await chmod(oldWritableFile, 0o644);
+  const reusableSkillsDir = join(f.path, "skills");
+  await chmod(reusableSkillsDir, 0o755); // simulate a cache published before the sealing fix
   await openSkillSnapshot(f.id);
   assert.equal((await stat(oldWritableFile)).mode & 0o222, 0,
     "existing valid cache entries must be sealed on reuse");
+  assert.equal((await stat(reusableSkillsDir)).mode & 0o777, 0o555,
+    "reusing a valid older snapshot must seal its intermediate skills/ directory");
   await chmod(sealedCatalog, 0o755);
   await mkdir(join(sealedCatalog, "dist"));
   const injected = join(sealedCatalog, "dist", "reference.md");
@@ -114,6 +118,9 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
   await rm(join(sealedCatalog, "node_modules"), { recursive: true });
   assert.equal(await openSkillSnapshot(f.id), f.path);
   assert.equal((await stat(sealedCatalog)).mode & 0o222, 0);
+  const publishedSkillsDir = join(a.path, "skills");
+  assert.equal((await stat(publishedSkillsDir)).mode & 0o777, 0o555,
+    "the intermediate skills/ directory must be sealed on publication");
   const skillFile = join(a.path, "skills", "nt-catalog", "SKILL.md");
   assert.equal((await stat(skillFile)).mode & 0o222, 0, "snapshot files must be read-only");
   assert.equal((await stat(join(a.path, "skills", "nt-catalog"))).mode & 0o222, 0,
