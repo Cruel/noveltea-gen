@@ -7,6 +7,7 @@ import {
   SettingsManager,
   type ToolDefinition,
   type AgentSession,
+  type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import {
   DIRECT_WORKER_DESTINATION,
@@ -21,6 +22,8 @@ import { openPersistedSession } from "./checkpoint.js";
 import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
 import { createSkillReadTool, resolveConfiguredSkills, type SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
+import { piTraceExtensions, traceDirectModel } from "./tracing.js";
+import type { Client } from "langsmith";
 
 /**
  * Project-limited resources. The Pi worker deliberately receives no AGENTS
@@ -32,6 +35,7 @@ export function createProjectResourceLoader(
   agentDir = getAgentDir(),
   includeProjectInstructions = true,
   config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] },
+  traceExtensions: InlineExtension[] = [],
 ) {
   const settingsManager = SettingsManager.inMemory();
   return {
@@ -41,6 +45,7 @@ export function createProjectResourceLoader(
       agentDir,
       settingsManager,
       noExtensions: true,
+      extensionFactories: traceExtensions,
       noSkills: !includeProjectInstructions || config.discovery === "explicit-only",
       skillsOverride: (base) => includeProjectInstructions
         ? resolveConfiguredSkills(base, config, project.root, agentDir)
@@ -149,7 +154,14 @@ export function parseDirectWorkerOutput(text: string): DirectWorkerReply["update
  * Direct calls use Pi's ModelRuntime.completeSimple() with the same credential
  * runtime used by the coordinator (OAuth refresh and API keys supported).
  */
-export function createPiDelegationAdapters(config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] }): DelegationAdapters & { pinSkillSnapshot: (snapshot: SkillSnapshot | undefined) => void } {
+export function createPiDelegationAdapters(
+  config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] },
+  trace = false,
+  traceClient?: Client,
+): DelegationAdapters & {
+  pinSkillSnapshot: (snapshot: SkillSnapshot | undefined) => void;
+  configureTrace: (metadata: Record<string, string | boolean>) => void;
+} {
   let activeConfig = config;
   let coordinator: AgentSession | undefined;
   let worker: AgentSession | undefined;
@@ -157,6 +169,7 @@ export function createPiDelegationAdapters(config: SkillConfig = { discovery: "e
   let selected: WorkerDestination | undefined;
   let directCompleted = false;
   let coordinatorReadEnabled = false;
+  let traceMetadata: Record<string, string | boolean> = {};
 
   async function getUsableModel(currentProvider: string, currentModel: string) {
     runtime ??= await ModelRuntime.create();
@@ -191,7 +204,10 @@ export function createPiDelegationAdapters(config: SkillConfig = { discovery: "e
     existingSession?: SessionManager,
   ): Promise<AgentSession> {
     const model = await getUsableModel(currentProvider, currentModel);
-    const { loader, settingsManager } = createProjectResourceLoader(root, getAgentDir(), includeProjectInstructions, activeConfig);
+    const { loader, settingsManager } = createProjectResourceLoader(
+      root, getAgentDir(), includeProjectInstructions, activeConfig,
+      piTraceExtensions(trace || Boolean(traceClient), traceMetadata, traceClient),
+    );
     await loader.reload();
     const skillResult = loader.getSkills();
     for (const diagnostic of skillResult.diagnostics) {
@@ -217,6 +233,7 @@ export function createPiDelegationAdapters(config: SkillConfig = { discovery: "e
   }
 
   return {
+    configureTrace(metadata) { traceMetadata = metadata; },
     pinSkillSnapshot(snapshot) {
       activeConfig = snapshot ? { ...config, novelteaSkills: snapshot.path } : { ...config, novelteaSkills: undefined, requiredSkills: [] };
     },
@@ -300,14 +317,24 @@ export function createPiDelegationAdapters(config: SkillConfig = { discovery: "e
       const model = await getUsableModel(request.provider, request.model);
       // This is a direct pi-ai model call, with no agent loop, Pi session,
       // project context, skills, tools, or transcript from the coordinator.
-      let result;
+      let completion;
       try {
-        result = await runtime!.completeSimple(model, {
+        const invoke = async () => runtime!.completeSimple(model, {
           systemPrompt: "You are a concise Story-marketing copywriter. Return ONLY a JSON object " +
             'with exactly one string property: {"tagline":"a compelling one-line story hook"}. ' +
             "No Markdown or explanations. Use only the supplied brief.",
           messages: [{ role: "user", content: JSON.stringify(request.work), timestamp: Date.now() }],
         }, { maxTokens: 512 });
+        completion = await traceDirectModel(trace || Boolean(traceClient), {
+          provider: request.provider, model: request.model, brief: request.work.brief,
+        }, async () => {
+          const result = await invoke();
+          return {
+            text: result.content.filter(item => item.type === "text").map(item => item.text).join(""),
+            stopReason: result.stopReason,
+            usage: result.usage,
+          };
+        });
       } catch {
         // Provider SDK messages are not necessarily secret-safe. Do not leak
         // tokens, request headers, or raw provider payloads into graph/CLI logs.
@@ -316,15 +343,13 @@ export function createPiDelegationAdapters(config: SkillConfig = { discovery: "e
           "Check Pi login/API key, provider availability, model access and token quota.",
         );
       }
-      if (result.stopReason !== "stop") {
+      if (completion.stopReason !== "stop") {
         throw new Error(
-          `Direct model did not finish (stopReason: ${result.stopReason}). ` +
+          `Direct model did not finish (stopReason: ${completion.stopReason}). ` +
           "Check model access, quota and output limits.",
         );
       }
-      const update = parseDirectWorkerOutput(
-        result.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
-      );
+      const update = parseDirectWorkerOutput(completion.text);
       directCompleted = true;
       return { update };
     },

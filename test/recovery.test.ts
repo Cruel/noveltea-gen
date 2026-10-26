@@ -183,9 +183,15 @@ test("failed or canceled worker leaves committed handoff retryable without repea
   }
   assert.equal(workerCalls, 2);
   let restoredId = "";
+  let configuredTrace: Record<string, string | boolean> | undefined;
   const done = await runCoordinator({
     ...options, persistence: { mode: "fixture", resume: true },
-    restorePi: async ({ coordinator }) => { restoredId = coordinator.id; },
+    configureTrace: (metadata) => { configuredTrace = metadata; },
+    restorePi: async ({ coordinator }) => {
+      assert.equal(configuredTrace?.["noveltea.project_id"], root.id,
+        "restored Pi must receive trace provenance before session construction");
+      restoredId = coordinator.id;
+    },
     invokeWorker: async () => {
       workerCalls++;
       const manager = SessionManager.create(root.root, sessionDirectory(root, "fixture"));

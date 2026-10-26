@@ -194,16 +194,80 @@ NT_PROVIDER=openai NT_MODEL=gpt-6-luna pnpm test:live
 
 The live test runs two separate disposable Story projects whose AGENTS.md files require mutually exclusive markers in the final answer. It verifies that the model initiates the appropriate delegation, the Pi worker and direct-model branches return validated results, the same coordinator resumes with project-local instructions, and graph threads remain distinct. The existing project-isolation tests do not require an external checkout or modify global Pi instructions. To also test **real** skill consumption, set `NT_SKILLS_CHECKOUT=/path/to/noveltea-skills` with `NT_LIVE_TEST=1`. The skill integration test loads the actual Git checkout without modifying it, exercises Pi against a supplied Story contract and inspects the persisted Pi transcript to verify that `nt-catalog/SKILL.md` and `references/records.md` were read through the restricted tool.
 
-## LangSmith tracing
+## Local LangGraph Studio and opt-in LangSmith tracing (#10)
 
-Cloud tracing is **off by default**, even when a parent shell has `LANGSMITH_TRACING` or `LANGCHAIN_TRACING_V2` set. Explicitly enable graph tracing (which uploads trace data) by passing `--trace` and providing `LANGSMITH_API_KEY`:
+**Local Studio:** The JS LangGraph CLI is installed as a development dependency. Start the local API server from this checkout:
 
 ```sh
-LANGSMITH_API_KEY=... pnpm dev run --project ./story-test --trace --task "Example"
+pnpm studio
 ```
 
-Nested Pi model/turn/tool traces and Studio setup are covered under #10. Do not enable cloud tracing with confidential Story content without reviewing the destination.
+Open the Studio URL printed by the server (typically `https://smith.langchain.com/studio?baseUrl=http://localhost:2024`). The local server exposes the graph named `noveltea`; its actual nodes are `pi_coordinator`, `story_note_worker`, `direct_tagline_worker` and `pi_continuation`. You can inspect node transitions, checkpoints and state locally **without a LangSmith API key**. Studio's browser UI is hosted on LangSmith, but the graph execution and checkpoint data are local; do not confuse opening that UI with opting in to hosted trace uploads.
+
+Select an existing Story root. Generate the *full* State JSON to paste into Studio's input panel:
+
+```sh
+pnpm studio:input --project ./scratch-story --task "Invent a mystery premise"
+```
+
+The helper emits canonical `projectRoot`/`projectId`, model choice, empty initial graph fields and the pinned skill snapshot (if configured). It is read-only except for reuse/creation of the immutable skill cache; it does not invoke a model or create a Story. Optional `--provider` and `--model` override the defaults. The Story directory itself must exist. Pi's login still supplies model credentials; **LangSmith credentials are not required for local Studio**. For CLI-generated checkpoints and project-scoped Pi JSONL histories, use `pnpm dev run --project ... --thread ... --pause-after ...` and `--resume` as documented above. The Studio server uses its own local development graph state, not the CLI's SQLite thread database, while Pi histories remain project-scoped.
+
+**Studio limits:** This is an inspection proof of concept, not a multi-user execution server. Run only one Studio conversation at a time; it rejects overlapping executions. Start a fresh run after failures, and use the CLI for tested cross-process checkpoint/restart recovery. Studio doesn't provide cross-process recovery of an in-progress Pi SDK session. The standalone authoring demo (`demo-story`) is not the Studio graph and has its own stricter Story-write permissions.
+
+**Hosted trace opt-in:** Cloud tracing is **off by default**, even when the shell already has `LANGSMITH_TRACING`, `LANGCHAIN_TRACING_V2` or `TRACE_TO_LANGSMITH` set. No LangSmith API key is needed for normal CLI, fixtures, or local Studio use. Optionally store tracing-only credentials in the gitignored `.local/langsmith.env` (restrict permissions to `0600`):
+
+```dotenv
+LANGSMITH_API_KEY=<your-tracing-only-key>
+LANGSMITH_PROJECT=noveltea-gen
+```
+
+This file is read **only** after `--trace` (CLI) or `NT_STUDIO_TRACE=1` (`pnpm studio:trace`). Its presence **never** enables tracing by itself. Explicit shell/CI environment values take precedence. Never commit or paste the real key into source, tests, or trace metadata. For hosted LangSmith traces, use a valid key **and an explicit flag**:
+
+```sh
+pnpm dev run --project ./scratch-story --thread trace-pi --trace \
+  --task "Propose a murder mystery twist"
+```
+
+The CLI loads `@langchain/langsmith-pi-extension` programmatically for coordinator and independent Pi worker sessions, without enabling global, Story, or arbitrary Pi extensions. LangGraph and Pi traces share a parent context. Pi agent runs contain turns, model/provider calls, tool executions, usage, errors and compaction spans if Pi emits them. The model-only `direct_tagline_worker` is traced separately as a `pi-ai direct model request` LLM span, including the brief, response, available token/cache counts and stop/error status; it creates no Pi agent. The extension uses the same pinned `langsmith` SDK version as LangGraph to preserve trace context.
+
+The graph and Pi metadata include stable run/thread/project identifiers and the skill snapshot digest, Git commit, branch and dirty status. **Skill contents, source paths and credentials are not placed in provenance metadata.** Explicit hosted tracing can still send **prompt text, model responses and tool read results**, including loaded skill references, because those are part of Pi model execution; do not enable it with confidential Story data, secrets or skill content you do not intend to upload. The direct-model span never receives Pi credentials or raw provider objects, and provider SDK error text is redacted before entering that span. No tracing extension is loaded when tracing is off.
+
+For a Studio-server hosted trace (as distinct from the CLI), use this explicit launch and paste a generated input:
+
+```sh
+pnpm studio:trace
+```
+
+### Manual LangSmith end-to-end inspection (requires key and Pi login)
+
+1. Create or select a disposable Story root and set `LANGSMITH_API_KEY` and, optionally, `LANGSMITH_PROJECT`. Use a new `--thread` for each case. Leave tracing off for an initial fixture run; confirm no LangSmith runs appear for it and the local SQLite checkpoint and Pi JSONL files remain available.
+2. Run `pnpm dev run --project <root> --trace --task "Invent a compact locked-room mystery premise"`. Confirm a single graph trace with `pi_coordinator → story_note_worker → pi_continuation`; under the correct graph nodes, expand the Pi agent/turn/provider/tool runs. Verify model usage and a `delegate_to_worker` tool span. If Pi emits a compaction or error, check its status/span rather than expecting one every run.
+3. Run `pnpm dev run --project <root> --trace --task "Write a promotional tagline for a gothic mystery"`. Confirm `pi_coordinator → direct_tagline_worker → pi_continuation` and a model span labeled `pi-ai direct model request` under the direct worker node, with request brief, returned JSON text, stop status and token usage. There must be **no** independent Pi worker session in this branch.
+4. Confirm the graph and child trace correlation identifiers and snapshot Git revision/digest match CLI output. Check that no API key, authorization header, raw provider SDK object or **skill contents in metadata** appear in the runs. Trace payloads may contain user/task/skill **content**, as noted above; review before transmitting. Repeat a run without `--trace` to verify opt-out even with inherited LangSmith environment variables.
+5. Optionally use `pnpm studio`, then `pnpm studio:input` for the same root and inspect the live graph node transitions locally. Hosted tracing for Studio requires `pnpm studio:trace` and a valid LangSmith API key; it is never silently enabled by local Studio.
+
+Automated instrumentation tests: `pnpm exec tsx --test test/tracing.test.ts`. They require no LangSmith key and verify the opt-in gate, disabled Pi extensions, metadata allowlist, direct-model output sanitization and both graph branch configurations. A live hosted trace tree must be inspected with real credentials; fixture tests are not evidence of a successful upload.
+
+### Local nested traces for development (no cloud required)
+
+To capture and inspect the **actual** LangGraph and Pi trace tree on disk, independently of hosted LangSmith:
+
+```sh
+pnpm dev run --project ./scratch-story --thread debug-1 --trace-local \
+  --task "Propose a locked-room mystery twist"
+pnpm trace:show
+pnpm trace:show --json
+pnpm trace:show --file .local/traces/<specific-run>.jsonl
+```
+
+The CLI reports `localTrace` in its result JSON. `trace:show` opens the latest trace and displays graph node transitions, nested Pi agent turns, provider/model spans, tool executions, compactions, status, duration and token usage. `--json` provides the complete merged span records, including inputs and outputs, for deeper debugging and automated inspection. Raw append-only LangSmith-style create/update events are saved under gitignored **`.local/traces/*.jsonl`** (mode `0600`); `NT_LOCAL_TRACE_DIR` overrides the directory for isolated test runs. Failed runs also print the trace path to stderr so partial/error traces can be investigated.
+
+`--trace-local` **never requires a LangSmith key and makes no hosted trace uploads**. Cloud tracing is still **off** unless separately enabled by `--trace`. The two flags can be combined to keep a local copy while explicitly submitting the same run to LangSmith. Local recordings are not pruned automatically; remove files under `.local/traces` when no longer needed.
+
+**Data sensitivity:** Local traces include Story prompts, model messages, skills returned by read tools, and model/tool outputs. Protect or delete them as confidential development data. Known credential fields and configured environment secret values are redacted; this is not a guarantee that arbitrary user-included secrets cannot occur in content. Both local and cloud capture remain opt-in. Pi session JSONL and SQLite checkpoints are still separate from these full execution traces.
+
+Instrumented fixture tests: `pnpm exec tsx --test test/local-trace.test.ts`. The tests exercise both branches locally, require no model credentials and verify trace completion, file permissions, cloud opt-out and credential redaction. A real-Pi smoke test also confirmed an actual local tree containing Pi agent, model, tool and direct-model spans.
 
 ## Scope
 
-The coordinator, project isolation, Pi worker, direct pi-ai worker, SQLite/Pi recovery, controlled NovelTea skill loading, immutable provenance snapshots and isolated Story foundation demo implement #2–#9. Full LangSmith observability remains future work in #10–#11.
+#2–#10 include the coordinator, worker isolation, SQLite/Pi recovery, controlled and pinned NovelTea skill discovery, the bounded Story authoring demo, local LangGraph Studio and opt-in nested LangSmith observability. This does not claim a production Story orchestration graph or a fully implemented Story engine.

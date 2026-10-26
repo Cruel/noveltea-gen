@@ -1,0 +1,6 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "noveltea": "./src/studio.ts:graph"
+  }
+}

@@ -8,3 +8,6 @@ dist/
 .local/
 .cache/
 .projects/
+
+# LangGraph API
+.langgraph_api

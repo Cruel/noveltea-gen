@@ -4,6 +4,7 @@ import type { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { openCheckpointer, openPersistedSession, type ExecutionMode, type PiSessionReference } from "./checkpoint.js";
 import { scopeThread, type StoryProject } from "./project.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
+import { provenanceMetadata } from "./tracing.js";
 
 /** Fixed, closed routing table. Pi chooses; LangGraph validates and routes. */
 export const WORKER_DESTINATION = "story_note_worker" as const;
@@ -222,6 +223,7 @@ export interface CoordinatorOptions extends CoordinatorRequest, DelegationAdapte
   persistence?: { resume?: boolean; pauseAfter?: "handoff" | "worker"; mode: ExecutionMode };
   skillSnapshot?: SkillSnapshot;
   pinSkillSnapshot?: (snapshot: SkillSnapshot | undefined) => void;
+  configureTrace?: (metadata: Record<string, string | boolean>) => void;
 }
 
 export async function runCoordinator(options: CoordinatorOptions) {
@@ -235,11 +237,10 @@ export async function runCoordinator(options: CoordinatorOptions) {
   const config = {
     runId,
     configurable: { thread_id: graphThreadId },
-    metadata: {
-      "noveltea.thread_id": graphThreadId,
-      "noveltea.project_id": options.project.id,
-      ...(options.skillSnapshot ? { "noveltea.skill_snapshot_id": options.skillSnapshot.id, "noveltea.skill_digest": options.skillSnapshot.digest, "noveltea.skill_commit": options.skillSnapshot.commit, "noveltea.skill_branch": options.skillSnapshot.branch ?? "DETACHED", "noveltea.skill_dirty": options.skillSnapshot.dirty } : {}),
-    },
+    metadata: provenanceMetadata({
+      runId, threadId: graphThreadId, projectId: options.project.id,
+      snapshot: options.skillSnapshot,
+    }),
   };
   try {
     let completedState: typeof CoordinatorState.State | undefined;
@@ -286,16 +287,15 @@ export async function runCoordinator(options: CoordinatorOptions) {
         }
         if (state.skillSnapshot) {
           const pinned = state.skillSnapshot;
-          Object.assign(config.metadata, {
-            "noveltea.skill_snapshot_id": pinned.id,
-            "noveltea.skill_digest": pinned.digest,
-            "noveltea.skill_commit": pinned.commit,
-            "noveltea.skill_branch": pinned.branch ?? "DETACHED",
-            "noveltea.skill_dirty": pinned.dirty,
-          });
+          Object.assign(config.metadata, provenanceMetadata({
+            runId, threadId: graphThreadId, projectId: options.project.id, snapshot: pinned,
+          }));
           if (pinned.digest !== pinned.id) throw new Error("Checkpoint skill snapshot identity mismatch.");
           options.pinSkillSnapshot?.({ ...pinned, path: await openSkillSnapshot(pinned.id) });
         } else options.pinSkillSnapshot?.(undefined);
+        // Pi sessions are reconstructed below. Configure the extension BEFORE
+        // restoration so resumed agent turns retain pinned provenance too.
+        options.configureTrace?.(config.metadata);
         const handoff = validateHandoff(state.handoff);
         if (!state.piSessionId?.trim() || !state.piSessionFile?.trim()) {
           throw new Error("Cannot resume: checkpoint lacks a persisted coordinator Pi session.");
@@ -348,6 +348,7 @@ export async function runCoordinator(options: CoordinatorOptions) {
       throw new Error("Cannot resume without SQLite checkpoint storage.");
     }
 
+    options.configureTrace?.(config.metadata);
     const output = completedState ?? await graph.invoke(input, config);
     const handoff = validateHandoff(output.handoff);
     const snapshot = saver ? await graph.getState(config) : undefined;

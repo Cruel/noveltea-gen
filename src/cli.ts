@@ -17,6 +17,7 @@ interface CliOptions {
   providerProvided: boolean;
   modelProvided: boolean;
   trace: boolean;
+  traceLocal: boolean;
 }
 
 const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
@@ -39,6 +40,7 @@ Options:
   --pause-after <at>  Commit and stop after handoff or worker (safe boundaries)
   --resume            Continue --thread from saved SQLite and Pi sessions (no --task)
   --trace             Opt in to LangSmith cloud graph tracing (needs LANGSMITH_API_KEY)
+  --trace-local       Save local, private JSONL spans (no cloud API key required)
   --help              Show this help
 
 demo-story: opt-in, only writes one draft Creative Direction into an empty Story root using pinned nt-story-discovery and nt-catalog. No engine or real Story orchestration; catalog readiness unverified unless separately validated.
@@ -67,6 +69,7 @@ function parseArgs(argv: string[]): CliOptions | null {
     providerProvided: false,
     modelProvided: false,
     trace: false,
+    traceLocal: false,
   };
   while (argv.length > 0) {
     const option = argv.shift()!;
@@ -78,6 +81,8 @@ function parseArgs(argv: string[]): CliOptions | null {
       options.resume = true;
     } else if (option === "--trace") {
       options.trace = true;
+    } else if (option === "--trace-local") {
+      options.traceLocal = true;
     } else if (option === "--create-project") {
       options.createProject = true;
     } else if (option === "--pause-after") {
@@ -117,8 +122,8 @@ function parseArgs(argv: string[]): CliOptions | null {
   if (!options.project.trim()) throw new Error("Missing required --project <path>.");
   if (options.fixtureDirect && !options.fixture) throw new Error("--fixture-direct requires --fixture.");
   if (command === "demo-story" && (options.resume || options.pauseAfter || options.fixtureDirect ||
-      options.trace || options.threadProvided)) {
-    throw new Error("demo-story does not support graph --resume, --pause-after, --fixture-direct, --trace or --thread.");
+      options.trace || options.traceLocal || options.threadProvided)) {
+    throw new Error("demo-story does not support graph --resume, --pause-after, --fixture-direct, --trace, --trace-local or --thread.");
   }
   return options;
 }
@@ -130,10 +135,18 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Credentials in .local/langsmith.env are read only for an explicitly
+  // tracing-enabled invocation. Merely storing a key never enables tracing.
+  if (options.trace) {
+    const { loadLocalLangSmithCredentials } = await import("./langsmith-config.js");
+    loadLocalLangSmithCredentials();
+  }
+
   // LangGraph/LangSmith can see preexisting environment flags on import.
   // Override them until this invocation *explicitly* opts into cloud tracing.
   process.env.LANGSMITH_TRACING = options.trace ? "true" : "false";
   process.env.LANGCHAIN_TRACING_V2 = options.trace ? "true" : "false";
+  process.env.TRACE_TO_LANGSMITH = options.trace ? "true" : "false";
   if (options.trace && !process.env.LANGSMITH_API_KEY) {
     throw new Error("--trace requires LANGSMITH_API_KEY. Without --trace, no cloud traces are uploaded.");
   }
@@ -158,6 +171,9 @@ async function main(): Promise<void> {
     ? await import("@earendil-works/pi-coding-agent") : null;
   const fixtureStorage = options.fixture
     ? await import("./checkpoint.js") : null;
+  const localCapture = options.traceLocal
+    ? await (await import("./local-trace.js")).startLocalTrace(options.trace)
+    : undefined;
   const adapters = options.fixture
     ? (() => {
         let piSessionId: string = randomUUID();
@@ -205,10 +221,10 @@ async function main(): Promise<void> {
           }),
         };
       })()
-    : (await import("./pi.js")).createPiDelegationAdapters(skillConfig);
+    : (await import("./pi.js")).createPiDelegationAdapters(skillConfig, options.trace, localCapture?.client);
   if (!options.fixture && !options.resume) adapters.pinSkillSnapshot(skillSnapshot);
 
-  const result = await runCoordinator({
+  const executeGraph = () => runCoordinator({
     task: options.task,
     provider: options.provider,
     model: options.model,
@@ -220,7 +236,21 @@ async function main(): Promise<void> {
       mode: options.fixture ? "fixture" : "pi" },
     ...adapters,
   });
+  let result;
+  try {
+    result = localCapture
+      ? await (await import("./local-trace.js")).recordLocalGraph(localCapture, executeGraph, {
+          projectId: project.id, threadId: options.threadId,
+        })
+      : await executeGraph();
+  } catch (error) {
+    if (localCapture) process.stderr.write(`noveltea-gen: local trace: ${localCapture.file}\n`);
+    throw error;
+  } finally {
+    await localCapture?.close();
+  }
   process.stdout.write(JSON.stringify({
+    ...(localCapture ? { localTrace: localCapture.file } : {}),
     status: result.status,
     mode: options.fixture ? "fixture" : "pi",
     tracing: options.trace,

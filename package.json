@@ -4,23 +4,36 @@
   "private": true,
   "type": "module",
   "description": "Local-first NovelTea generation orchestration proof of concept",
-  "bin": { "noveltea-gen": "./dist/cli.js" },
+  "bin": {
+    "noveltea-gen": "./dist/cli.js"
+  },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts",
     "test:live": "NT_LIVE_TEST=1 tsx --test test/live.test.ts",
+    "studio": "LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false TRACE_TO_LANGSMITH=false langgraphjs dev --no-browser --n-jobs-per-worker 1",
+    "studio:trace": "NT_STUDIO_TRACE=1 LANGSMITH_TRACING=true LANGCHAIN_TRACING_V2=true TRACE_TO_LANGSMITH=true langgraphjs dev --no-browser --n-jobs-per-worker 1",
+    "studio:input": "tsx src/studio-input.ts",
+    "trace:show": "tsx src/trace-show.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "packageManager": "pnpm@11.15.0",
   "dependencies": {
-    "@langchain/langgraph": "1.5.2",
     "@earendil-works/pi-coding-agent": "1.4.0",
-    "@langchain/langgraph-checkpoint-sqlite": "1.1.0"
+    "@langchain/core": "1.3.0",
+    "@langchain/langgraph": "1.5.2",
+    "@langchain/langgraph-checkpoint": "1.2.1",
+    "@langchain/langgraph-checkpoint-sqlite": "1.1.0",
+    "@langchain/langsmith-pi-extension": "0.2.1",
+    "langsmith": "0.11.1"
   },
   "devDependencies": {
+    "@langchain/langgraph-cli": "1.5.5",
     "@types/node": "^24.0.0",
     "tsx": "4.23.15",
     "typescript": "~5.9.3"
