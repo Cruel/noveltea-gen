@@ -25,8 +25,8 @@ export async function authorArchitecture(
   plan: Plan,
   provider: string,
   modelId: string,
-  onSession: (path: string) => Promise<void>,
-): Promise<{ piSessionFile?: string; skillReads: string[] }> {
+  onSession: (sessionId: string, path: string) => Promise<void>,
+): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[] }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = {
     discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -58,7 +58,8 @@ export async function authorArchitecture(
   });
   try {
     const sessionFile = session.sessionManager.getSessionFile();
-    if (sessionFile) await onSession(sessionFile);
+    if (!sessionFile) throw new Error("Architecture Pi session transcript cannot be persisted; writer will not begin.");
+    await onSession(session.sessionId, sessionFile);
     await session.prompt(
       "You are the NovelTea Story architecture specialist, working on an isolated Git-backed Story. " +
       "Read the following pinned skill instructions using the read tool before writing:\n" +
@@ -104,7 +105,7 @@ export async function authorArchitecture(
         resolve(project.root, c.arguments.path as string).slice(project.root.length + 1).split(sep).join("/"),
       ));
     if (!authored) throw new Error("Architecture specialist did not author canonical Arc/Milestone Markdown.");
-    return { piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
+    return { piSessionId: session.sessionId, piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
       skillReads: reads.filter(p => required.includes(p)) };
   } finally {
     session.dispose();

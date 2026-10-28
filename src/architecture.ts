@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
+import { withStoryJobLock } from "./job-lock.js";
+import { verifyJobPiSession } from "./job-session.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -40,6 +42,10 @@ interface Receipt {
   jobId: string;
   baseSha: string;
   expectedHead: string;
+  /** Saved worktree and thread identities cannot be silently repointed. */
+  branch?: string;
+  worktreeRoot?: string;
+  threadId?: string;
   mode: "autonomous" | "collaborative";
   worker: "fixture" | "pi";
   provider: string;
@@ -49,10 +55,12 @@ interface Receipt {
   history: Array<{ plan: Plan; proposal: string; approvedContract: CompletionContract;
     verifiedHead: string; reason: string; source: "author-ed25519"; signed: SignedAuthorEvidence }>;
   proposal?: { digest: string; contract: CompletionContract; version: number };
+  manuallyReconciled?: { paths: string[]; digest: string };
   phase: "awaiting-author" | "ready" | "writing" | "authored" | "committed";
   paths?: string[];
   contentDigest?: string;
   piSessionFile?: string;
+  piSessionId?: string;
   skillReads?: string[];
   outstanding?: Obligation[];
 }
@@ -66,10 +74,10 @@ interface CatalogReport {
   protection: { status: string; changes: unknown[]; warnings: unknown[] };
 }
 export interface ArchitectureOptions {
-  story: string; job: string; action: "run" | "inspect" | "propose" | "approve";
+  story: string; job: string; action: "run" | "inspect" | "propose" | "approve" | "reconcile";
   contract?: unknown; mode?: "autonomous" | "collaborative";
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
-  proposal?: string; signedEvidence?: string;
+  proposal?: string; signedEvidence?: string; recoveryDigest?: string;
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -193,6 +201,93 @@ async function changedPaths(job: JobStartResult) {
 async function contentDigest(job: JobStartResult, paths: string[]) {
   return hash(JSON.stringify(await Promise.all(paths.map(async path => [path, hash(await readFile(join(job.worktreeStoryRoot, path), "utf8"))]))));
 }
+type Reconciliation = {
+  status: "ready" | "recoverable-commit" | "blocked";
+  actualHead: string;
+  changes: string[];
+  reason?: string;
+  candidate?: { paths: string[]; digest: string };
+};
+
+/** Reconcile the receipt with Git, not merely with the last graph node. */
+async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconciliation> {
+  const actualHead = git(job, "rev-parse", "HEAD").trim();
+  const changes = dirty(job);
+  const blocked = (reason: string): Reconciliation =>
+    ({ status: "blocked", actualHead, changes, reason });
+  try {
+    assertHead(job, actualHead);
+    if (state.worker === "pi" && ["writing", "authored"].includes(state.phase)) {
+      await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
+    }
+    if (state.phase === "writing") {
+      const result = blocked("Interrupted architecture writer: review the preserved files; use job architecture reconcile with the exact candidate digest to accept them without replaying the writer.");
+      if (actualHead === state.expectedHead) {
+        try {
+          const paths = await changedPaths(job);
+          result.candidate = { paths, digest: await contentDigest(job, paths) };
+        } catch { /* No safe candidate: preserve the changes and report their Git status. */ }
+      }
+      return result;
+    }
+    if (state.phase === "authored") {
+      const paths = state.paths;
+      if (!paths?.length || paths.some(p => !/^(arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(p)) ||
+          !state.contentDigest || !/^[a-f0-9]{64}$/.test(state.contentDigest)) {
+        return blocked("Authored work-item inventory is missing or corrupt; inspect the Story before recovery.");
+      }
+      if (state.manuallyReconciled &&
+          (state.manuallyReconciled.digest !== state.contentDigest ||
+           JSON.stringify(state.manuallyReconciled.paths) !== JSON.stringify(paths))) {
+        return blocked("Manually reviewed recovery differs from the persisted authored inventory.");
+      }
+      if (actualHead === state.expectedHead) {
+        if (JSON.stringify(await changedPaths(job)) !== JSON.stringify(paths) ||
+            await contentDigest(job, paths) !== state.contentDigest) {
+          return blocked("Uncommitted architecture changes differ from the recorded authored work item. Preserve edits and reconcile manually.");
+        }
+        return { status: "ready", actualHead, changes };
+      }
+      if (changes.length) return blocked("Uncommitted or staged changes accompany an interrupted commit. Inspect before continuing.");
+      const parents = git(job, "rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ");
+      if (parents.length !== 2 || parents[1] !== state.expectedHead) {
+        return blocked("Unexpected Git history after work-item crash; expected exactly one child of the verified head.");
+      }
+      const message = git(job, "log", "-1", "--format=%B");
+      const trailers = [
+        `NovelTea-Job: ${job.jobId}`,
+        "NovelTea-Work-Item: global-architecture",
+        `NovelTea-Plan-Version: ${state.plan?.version}`,
+        `NovelTea-Architecture: ${state.contentDigest}`,
+        ...(state.manuallyReconciled ? [`NovelTea-Reviewed-Recovery: ${state.manuallyReconciled.digest}`] : []),
+      ];
+      if (trailers.some(t => !message.split("\n").includes(t))) {
+        return blocked("Interrupted Git commit lacks exact work-item provenance.");
+      }
+      const committed = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+        .trim().split("\n").filter(Boolean).sort();
+      if (JSON.stringify(committed) !== JSON.stringify(paths.map(p => repoPath(job, p)).sort()) ||
+          await contentDigest(job, paths) !== state.contentDigest) {
+        return blocked("Interrupted commit paths or committed bytes differ from the authorized work item.");
+      }
+      return { status: "recoverable-commit", actualHead, changes };
+    }
+    if (state.phase === "committed" && actualHead !== state.expectedHead && !changes.length) {
+      // A later, separately verified work unit may have advanced the same job.
+      // The architecture receipt remains pinned to its own completed commit.
+      if (await trustedHead(job) === actualHead) {
+        git(job, "merge-base", "--is-ancestor", state.expectedHead, actualHead);
+        return { status: "ready", actualHead, changes };
+      }
+    }
+    if (actualHead !== state.expectedHead || changes.length) {
+      return blocked("Story job HEAD, staged content or worktree differs from the saved safe boundary; review manual changes.");
+    }
+    return { status: "ready", actualHead, changes };
+  } catch (cause) {
+    return blocked("Unable to reconcile actual Git/Pi state: " + (cause instanceof Error ? cause.message : String(cause)));
+  }
+}
 async function fixtureAuthor(job: JobStartResult, state: Receipt) {
   const targets = state.plan!.contract.scope.targets;
   const arc = targets.find(id => id.startsWith("arc.")) ?? "arc.truth";
@@ -271,11 +366,12 @@ function finishPlan(state: Receipt, report: CatalogReport, commit: string) {
   state.phase = "committed";
   state.expectedHead = commit;
 }
-function output(job: JobStartResult, state: Receipt) {
+function output(job: JobStartResult, state: Receipt, recovery?: Reconciliation) {
   const complete = state.phase === "committed" && state.plan?.contract.scope.kind === "partial" &&
     state.plan.contract.scope.depth === "architecture" && state.plan.contract.scope.branches.length === 0;
-  return { status: state.phase === "awaiting-author" ? "awaiting-author" : complete ? "complete-in-scope" : state.phase === "committed" ? "architecture-committed" : state.phase,
+  return { status: recovery?.status === "blocked" ? "blocked" : state.phase === "awaiting-author" ? "awaiting-author" : complete ? "complete-in-scope" : state.phase === "committed" ? "architecture-committed" : state.phase,
     jobId: job.jobId, branch: job.branch, worktreeStoryRoot: job.worktreeStoryRoot, headSha: state.expectedHead,
+    recovery,
     plan: state.plan, proposal: state.proposal, history: state.history, outstanding: state.outstanding ?? [],
     authorSigningRequest: state.proposal ? {
       version: 1, kind: "plan", jobId: job.jobId, threadId: job.threadId,
@@ -287,32 +383,58 @@ function output(job: JobStartResult, state: Receipt) {
       constraintsAndEnvelope: "unverified", branchExecution: state.plan?.contract.scope.branches.length ? "unverified" : "not-requested",
       fullStory: false },
     questions: state.phase === "awaiting-author" ? "Supply --contract with kind, depth, target IDs, branch constraints and production envelope; no Story writes have occurred." : undefined,
-    piSessionFile: state.piSessionFile, skillReads: state.skillReads, skillSnapshot: state.snapshot?.id };
+    piSessionId: state.piSessionId, piSessionFile: state.piSessionFile,
+    skillReads: state.skillReads, skillSnapshot: state.snapshot?.id };
 }
 export async function runArchitectureJob(input: ArchitectureOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const file = join(dirname(job.worktreeRoot), "architecture.json");
-  const lock = join(dirname(job.worktreeRoot), ".story-writing");
   // Initial validator pinning updates job.json; reopen the durable manifest before each validation.
   const validate = async (source?: string, view?: { worktreeRoot: string; worktreeStoryRoot: string; baseSha: string }) =>
     validateStoryJob(await startStoryJob({ story: input.story, job: input.job }, false), source, view);
-  try { await mkdir(lock); } catch { throw new Error("Story writer is running or interrupted; inspect its lock and worktree."); }
-  try {
+  return withStoryJobLock(job, "global-architecture", async () => {
     let state: Receipt | undefined = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) : undefined;
-    if (state && (state.format !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha)) throw new Error("Invalid architecture receipt identity.");
+    if (state && (state.format !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha ||
+      (state.branch !== undefined && state.branch !== job.branch) ||
+      (state.worktreeRoot !== undefined && state.worktreeRoot !== job.worktreeRoot) ||
+      (state.threadId !== undefined && state.threadId !== job.threadId))) {
+      throw new Error("Invalid architecture receipt worktree, branch, thread or base identity.");
+    }
     if (state) verifyPlanHistory(job, state);
     if (!state) {
       if (input.action !== "run") throw new Error("Start architecture run before inspecting or revising its plan.");
       if (!input.contract && input.mode !== "collaborative") throw new Error("Autonomous architecture requires explicit --contract scope.");
       const head = await trustedHead(job);
       if (dirty(job).length) throw new Error("Architecture requires a clean job worktree.");
-      state = { format: 1, jobId: job.jobId, baseSha: job.baseSha, expectedHead: head, mode: input.mode ?? "autonomous",
+      state = { format: 1, jobId: job.jobId, baseSha: job.baseSha, expectedHead: head,
+        branch: job.branch, worktreeRoot: job.worktreeRoot, threadId: job.threadId,
+        mode: input.mode ?? "autonomous",
         worker: input.fixture ? "fixture" : "pi", provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         history: [], phase: input.contract ? "ready" : "awaiting-author",
         plan: input.contract ? newPlan(parseContract(input.contract)) : undefined };
       await persist(file, state);
     }
-    if (input.action === "inspect") return output(job, state);
+    if (input.action === "inspect") return output(job, state, await reconcile(job, state));
+    if (input.action === "reconcile") {
+      if (!["writing", "authored"].includes(state.phase) ||
+          !input.recoveryDigest || !/^[a-f0-9]{64}$/.test(input.recoveryDigest)) {
+        throw new Error("Manual reconciliation requires a writing/authored work item and the exact --digest <sha256> of the reviewed files.");
+      }
+      // This author-initiated transition deliberately does not authorize
+      // protected changes. The canonical validator and independent Git gate
+      // must still accept the exact reviewed content on the next run.
+      assertHead(job, state.expectedHead);
+      if (state.worker === "pi") await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
+      const paths = await changedPaths(job);
+      const digest = await contentDigest(job, paths);
+      if (digest !== input.recoveryDigest) throw new Error("Review digest differs from current Story bytes. Inspect again; nothing was adopted.");
+      state.paths = paths;
+      state.contentDigest = digest;
+      state.manuallyReconciled = { paths, digest };
+      state.phase = "authored";
+      await persist(file, state);
+      return output(job, state, await reconcile(job, state));
+    }
     if (state.phase === "awaiting-author") {
       if (!input.contract) return output(job, state);
       state.plan = newPlan(parseContract(input.contract)); state.phase = "ready";
@@ -352,6 +474,7 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
           // uncommitted file inventory or content digest.
           delete state.paths;
           delete state.contentDigest;
+          delete state.manuallyReconciled;
         }
         delete state.proposal;
       }
@@ -359,6 +482,8 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
       return output(job, state);
     }
     if (input.action !== "run") throw new Error("Unknown architecture action.");
+    const recovery = await reconcile(job, state);
+    if (recovery.status === "blocked") throw new Error("Architecture recovery blocked: " + recovery.reason);
     if ((input.fixture === true) !== (state.worker === "fixture") || input.mode && input.mode !== state.mode ||
         input.provider && input.provider !== state.provider || input.model && input.model !== state.model) throw new Error("Architecture worker configuration differs from the persisted assignment.");
     const config = input.skillsSource
@@ -375,6 +500,7 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
     }
     if (await openSkillSnapshot(state.snapshot.id) !== state.snapshot.path) throw new Error("Architecture skill snapshot identity mismatch.");
     if (state.phase === "committed") {
+      if (recovery.actualHead !== state.expectedHead) return output(job, state, recovery);
       assertHead(job, state.expectedHead);
       if (dirty(job).length) throw new Error("Unexpected edits after architecture commit.");
       // The architecture receipt is durable before the shared verified-head
@@ -414,7 +540,11 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
         else {
           const { authorArchitecture } = await import("./architecture-specialist.js");
           Object.assign(receipt, await authorArchitecture(job, receipt.snapshot!, receipt.plan!, receipt.provider, receipt.model,
-            async piSessionFile => { receipt.piSessionFile = piSessionFile; await persist(file, receipt); }));
+            async (piSessionId, piSessionFile) => {
+              receipt.piSessionId = piSessionId;
+              receipt.piSessionFile = piSessionFile;
+              await persist(file, receipt);
+            }));
         }
         assertHead(job, receipt.expectedHead);
         receipt.paths = await changedPaths(job);
@@ -425,9 +555,9 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
       .addNode("validate_and_commit_architecture", async ({ receipt }) => {
         const head = git(job, "rev-parse", "HEAD").trim();
         const recovering = head !== receipt.expectedHead;
-        if (recovering && (git(job, "rev-parse", "HEAD^").trim() !== receipt.expectedHead ||
-            !git(job, "log", "-1", "--format=%B").includes(`NovelTea-Architecture: ${receipt.contentDigest}`) || dirty(job).length)) {
-          throw new Error("Unexpected architecture commit; preserve it for reconciliation.");
+        const verified = await reconcile(job, receipt);
+        if (verified.status === "blocked" || (recovering && verified.status !== "recoverable-commit")) {
+          throw new Error("Unexpected architecture commit; preserve it for reconciliation: " + verified.reason);
         }
         const latest = await validate(source, { ...job, baseSha: receipt.expectedHead });
         const report = reportOf(latest);
@@ -445,7 +575,8 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
             if (JSON.stringify(await changedPaths(job)) !== JSON.stringify(receipt.paths)) throw new Error("Architecture paths changed before commit.");
             git(job, "add", "--", ...receipt.paths.map(p => repoPath(job, p)));
             git(job, "-c", "user.name=NovelTea Generator", "-c", "user.email=noveltea-gen@users.noreply.github.com", "commit", "-m",
-              `Generate Story architecture [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: global-architecture\nNovelTea-Plan-Version: ${receipt.plan!.version}\nNovelTea-Architecture: ${receipt.contentDigest}`);
+              `Generate Story architecture [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: global-architecture\nNovelTea-Plan-Version: ${receipt.plan!.version}\nNovelTea-Architecture: ${receipt.contentDigest}` +
+              (receipt.manuallyReconciled ? `\nNovelTea-Reviewed-Recovery: ${receipt.manuallyReconciled.digest}` : ""));
           }
         }
         if (!receipt.paths && !recovering && receipt.plan!.items[0]?.status !== "verified") {
@@ -463,5 +594,5 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
       .addEdge("validate_and_commit_architecture", END).compile();
     const result = await graph.invoke({ receipt: state });
     return output(job, result.receipt);
-  } finally { await rmdir(lock).catch(() => undefined); }
+  });
 }

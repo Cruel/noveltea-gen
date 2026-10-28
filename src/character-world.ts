@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
+import { withStoryJobLock } from "./job-lock.js";
+import { verifyJobPiSession } from "./job-session.js";
 import { trustedHead } from "./revision.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -22,6 +24,8 @@ interface Unit {
   digest?: string;
   claimedPaths?: string[];
   piSessionFile?: string;
+  piSessionId?: string;
+  reviewedRecoveryDigest?: string;
   skillReads?: string[];
   commitSha?: string;
   outstanding?: Obligation[];
@@ -33,6 +37,9 @@ interface Receipt {
   version: 1;
   jobId: string;
   baseSha: string;
+  branch?: string;
+  worktreeRoot?: string;
+  threadId?: string;
   architectureHead: string;
   planVersion: number;
   contractDigest: string;
@@ -60,7 +67,8 @@ interface CatalogReport {
 export interface CharacterWorldOptions {
   story: string;
   job: string;
-  action: "run" | "inspect";
+  action: "run" | "inspect" | "reconcile";
+  recoveryDigest?: string;
   skillsSource?: string;
   validatorSource?: string;
   fixture?: boolean;
@@ -218,8 +226,10 @@ function verifyCommit(job: JobStartResult, unit: Unit, before: string, commit: s
     throw new Error("Foundation commit has an unexpected parent or missing audit inventory.");
   }
   const message = git(job, "log", "-1", "--format=%B", commit);
-  if (!message.includes("NovelTea-Work-Item: " + unit.id + "\n") ||
-      !message.includes("NovelTea-Foundations: " + unit.digest)) {
+  if (!message.split("\n").includes("NovelTea-Job: " + job.jobId) ||
+      !message.split("\n").includes("NovelTea-Work-Item: " + unit.id) ||
+      !message.split("\n").includes("NovelTea-Foundations: " + unit.digest) ||
+      (unit.reviewedRecoveryDigest && !message.split("\n").includes("NovelTea-Reviewed-Recovery: " + unit.reviewedRecoveryDigest))) {
     throw new Error("Foundation commit provenance does not match the assigned unit.");
   }
   const changed = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
@@ -349,14 +359,84 @@ function output(job: JobStartResult, receipt: Receipt) {
     skillSnapshot: receipt.snapshot?.id };
 }
 
+type Recovery = {
+  status: "ready" | "recoverable-commit" | "blocked";
+  actualHead: string;
+  changes: string[];
+  reason?: string;
+  candidate?: { unit: string; paths: string[]; digest: string };
+};
+
+/** Inspect actual Git and the original Pi transcript before any resumed writer. */
+async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<Recovery> {
+  const actualHead = git(job, "rev-parse", "HEAD");
+  const changes = dirty(job);
+  const blocked = (reason: string): Recovery => ({ status: "blocked", actualHead, changes, reason });
+  try {
+    if (git(job, "symbolic-ref", "--short", "HEAD") !== job.branch) {
+      return blocked("Character/World branch drift; inspect Git before resuming.");
+    }
+    const index = receipt.units.findIndex(unit => unit.phase !== "committed");
+    if (index < 0) {
+      const last = receipt.units[1]!.commitSha;
+      if (!last || changes.length) return blocked("Committed foundations have unexpected worktree or staged changes.");
+      if (actualHead !== last) {
+        if (actualHead !== await trustedHead(job)) return blocked("Foundations HEAD is not a verified successor.");
+        git(job, "merge-base", "--is-ancestor", last, actualHead);
+      }
+      return { status: "ready", actualHead, changes };
+    }
+    const unit = receipt.units[index]!;
+    const before = index ? receipt.units[index - 1]!.commitSha : receipt.architectureHead;
+    if (!before || unit.beforeHead && unit.beforeHead !== before) return blocked("Saved work-item parent differs from the verified chain.");
+    if (index && receipt.units[0]!.commitSha) verifyCommit(job, receipt.units[0]!, receipt.architectureHead, before);
+    if (unit.phase === "writing") {
+      if (receipt.worker === "pi") await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
+      const result = blocked("Interrupted specialist writing (" + unit.id + "): review preserved files and use foundations reconcile with the exact candidate digest; no replay.");
+      if (actualHead === before && changes.every(entry => ["??", " M"].includes(entry.slice(0, 2)))) {
+        const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+        const paths = changes.map(entry => entry.slice(3));
+        if (paths.length && paths.every(p => p.startsWith(prefix))) {
+          const local = paths.map(p => p.slice(prefix.length)).sort();
+          try { result.candidate = { unit: unit.id, paths: local, digest: await fileDigest(job, local) }; }
+          catch { /* Unsafe or missing files have no candidate. */ }
+        }
+      }
+      return result;
+    }
+    if (unit.phase === "pending") {
+      return actualHead === before && !changes.length
+        ? { status: "ready", actualHead, changes }
+        : blocked("Unexpected Git history, staged data or worktree changes before specialist handoff.");
+    }
+    if (!unit.paths?.length || !unit.digest) return blocked("Authored foundation inventory is missing or corrupt.");
+    if (receipt.worker === "pi") await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
+    if (actualHead === before) {
+      const observed = changes.map(entry => entry.slice(3));
+      const expected = unit.paths.map(p => repoPath(job, p)).sort();
+      if (changes.some(entry => !["??", " M"].includes(entry.slice(0, 2))) ||
+          JSON.stringify(observed.sort()) !== JSON.stringify(expected) ||
+          await fileDigest(job, unit.paths) !== unit.digest) {
+        return blocked("Authored foundation files differ from recorded paths or bytes; preserve for review.");
+      }
+      return { status: "ready", actualHead, changes };
+    }
+    if (changes.length) return blocked("Staged or uncommitted changes accompany a completed specialist commit.");
+    if (git(job, "rev-parse", "HEAD^") !== before) return blocked("Unexpected commit parent after specialist crash.");
+    verifyCommit(job, unit, before, actualHead);
+    if (await fileDigest(job, unit.paths) !== unit.digest) return blocked("Committed specialist bytes differ from recorded digest.");
+    return { status: "recoverable-commit", actualHead, changes };
+  } catch (error) {
+    return blocked("Character/World recovery cannot be trusted: " + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
 export async function runCharacterWorldJob(input: CharacterWorldOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const parent = dirname(job.worktreeRoot);
   const file = join(parent, "character-world.json");
-  const lock = join(parent, ".story-writing");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("Start character-world run before inspect.");
-  try { await mkdir(lock); } catch { throw new Error("Story writer is running or interrupted; inspect the shared lock and worktree."); }
-  try {
+  return withStoryJobLock(job, "character-world", async () => {
     if (!existsSync(join(parent, "architecture.json"))) {
       throw new Error("Character/World foundations require a verified committed architecture cluster.");
     }
@@ -370,6 +450,9 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     if (existsSync(file)) {
       receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
       if (receipt.version !== 1 || receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
+          (receipt.branch !== undefined && receipt.branch !== job.branch) ||
+          (receipt.worktreeRoot !== undefined && receipt.worktreeRoot !== job.worktreeRoot) ||
+          (receipt.threadId !== undefined && receipt.threadId !== job.threadId) ||
           receipt.architectureHead !== arch.expectedHead || receipt.planVersion !== plan.version ||
           receipt.contractDigest !== contractDigest || receipt.units?.length !== 2 ||
           receipt.units[0]?.domain !== "world" || receipt.units[1]?.domain !== "character") {
@@ -381,6 +464,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         throw new Error("Foundations require an unchanged clean verified architecture HEAD.");
       }
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
+        branch: job.branch, worktreeRoot: job.worktreeRoot, threadId: job.threadId,
         architectureHead: arch.expectedHead, planVersion: plan.version, contractDigest,
         worker: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
@@ -388,7 +472,14 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           { id: "character-foundations", domain: "character", phase: "pending" }] };
       await persist(file, receipt);
     }
-    if (input.action === "inspect") return output(job, receipt);
+    const recovery = await inspectRecovery(job, receipt);
+    if (input.action === "inspect") {
+      const result = output(job, receipt);
+      return { ...result, status: recovery.status === "blocked" ? "blocked" : result.status, recovery };
+    }
+    if (input.action === "run" && recovery.status === "blocked") {
+      throw new Error(recovery.reason ?? "Foundations recovery blocked.");
+    }
     if (Boolean(input.fixture) !== (receipt.worker === "fixture") ||
         (input.provider && input.provider !== receipt.provider) ||
         (input.model && input.model !== receipt.model)) {
@@ -412,6 +503,32 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     const validate = async (head: string) => validateStoryJob(
       await startStoryJob({ story: input.story, job: input.job }, false),
       validatorSource, { ...job, baseSha: head });
+    if (input.action === "reconcile") {
+      const index = receipt.units.findIndex(unit => unit.phase !== "committed");
+      const unit = receipt.units[index];
+      if (!unit || unit.phase !== "writing" || !input.recoveryDigest ||
+          !/^[a-f0-9]{64}$/.test(input.recoveryDigest) ||
+          !recovery.candidate || recovery.candidate.unit !== unit.id ||
+          recovery.candidate.digest !== input.recoveryDigest) {
+        throw new Error("Foundations reconciliation requires an interrupted writer and exact inspected --digest; Git, Pi or file inventory is unsafe.");
+      }
+      const before = index ? receipt.units[index - 1]!.commitSha : receipt.architectureHead;
+      if (!before) throw new Error("Missing parent work-item commit.");
+      assertHead(job, before);
+      const preReport = reportOf(await validate(before), before);
+      const assign = assignment(unit.domain, plan, preReport,
+        receipt.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
+      const paths = await auditPaths(job, unit, assign, recovery.candidate.paths);
+      const reviewed = await fileDigest(job, paths);
+      if (reviewed !== input.recoveryDigest) throw new Error("Foundation review digest no longer matches actual file bytes.");
+      unit.claimedPaths = paths;
+      unit.paths = paths;
+      unit.digest = reviewed;
+      unit.reviewedRecoveryDigest = reviewed;
+      unit.phase = "authored";
+      await persist(file, receipt);
+      return { ...output(job, receipt), status: "authored", recovery: await inspectRecovery(job, receipt) };
+    }
     const Channels = Annotation.Root({ receipt: Annotation<Receipt>() });
     const graph = new StateGraph(Channels)
       .addNode("world_foundations", async ({ receipt }) => { await executeUnit(receipt.units[0]!, receipt); return { receipt }; })
@@ -433,21 +550,29 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         if (index === state.units.length - 1 || state.units[index + 1]!.phase === "pending") {
           assertHead(job, unit.commitSha);
           if (dirty(job).length) throw new Error("Unexpected edits after specialist commit.");
-        } else if (current !== unit.commitSha && current !== state.units[index + 1]!.commitSha) {
-          throw new Error("Foundation Git chain changed unexpectedly.");
+        } else if (current !== unit.commitSha) {
+          const next = state.units[index + 1]!;
+          if (next.phase === "authored") {
+            verifyCommit(job, next, unit.commitSha, current);
+            if (dirty(job).length || await fileDigest(job, next.paths!) !== next.digest) {
+              throw new Error("Unverified next specialist commit or uncommitted changes.");
+            }
+          } else if (current !== next.commitSha) {
+            throw new Error("Foundation Git chain changed unexpectedly.");
+          }
         }
         if (current === unit.commitSha) await publishHead(job, before, unit.commitSha, unit.id);
         return;
       }
       if (unit.phase === "writing") {
-        throw new Error("Interrupted specialist writing; inspect preserved files and session. Never blindly rerun the writer.");
+        throw new Error("Interrupted specialist writing; inspect preserved files and Pi session, then reconcile exact bytes. Never replay the writer.");
       }
       const currentHead = git(job, "rev-parse", "HEAD");
       const recovering = unit.phase === "authored" && currentHead !== before;
-      if (recovering && (!unit.digest || !unit.paths ||
-          git(job, "rev-parse", "HEAD^") !== before ||
-          !git(job, "log", "-1", "--format=%B").includes("NovelTea-Foundations: " + unit.digest) ||
-          dirty(job).length)) throw new Error("Unrecognized interrupted foundation commit; reconcile manually.");
+      if (recovering) {
+        if (recovery.status !== "recoverable-commit") throw new Error("Unrecognized interrupted foundation commit; reconcile manually.");
+        verifyCommit(job, unit, before, currentHead);
+      }
       if (!recovering) {
         assertHead(job, before);
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Specialist requires a clean work-item boundary.");
@@ -462,7 +587,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         let evidence: SpecialistEvidence;
         if (state.worker === "fixture") evidence = await fixtureAuthor(job, unit, assign);
         else evidence = await authorCharacterWorld(job, state.snapshot!, assign, state.provider, state.model,
-          async session => { unit.piSessionFile = session; await persist(file, state); },
+          async (id, session) => { unit.piSessionId = id; unit.piSessionFile = session; await persist(file, state); },
           async proposed => {
             // Inspect the actual working tree BEFORE showing validator diagnostics
             // to Pi. Unexpected paths, staging or forged manifests fail closed.
@@ -492,6 +617,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         unit.laterObligations = evidence.laterObligations;
         unit.skillReads = evidence.skillReads;
         unit.piSessionFile = evidence.piSessionFile ?? unit.piSessionFile;
+        unit.piSessionId = evidence.piSessionId ?? unit.piSessionId;
         unit.paths = await auditPaths(job, unit, assign, evidence.claimedPaths);
         unit.digest = await fileDigest(job, unit.paths);
         unit.phase = "authored";
@@ -515,7 +641,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         git(job, "add", "--", ...paths.map(p => repoPath(job, p)));
         git(job, "-c", "user.name=NovelTea Generator",
           "-c", "user.email=noveltea-gen@users.noreply.github.com", "commit", "-m",
-          `Develop ${unit.domain} foundations [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${unit.id}\nNovelTea-Plan-Version: ${state.planVersion}\nNovelTea-Foundations: ${unit.digest}`);
+          `Develop ${unit.domain} foundations [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${unit.id}\nNovelTea-Plan-Version: ${state.planVersion}\nNovelTea-Foundations: ${unit.digest}` +
+          (unit.reviewedRecoveryDigest ? `\nNovelTea-Reviewed-Recovery: ${unit.reviewedRecoveryDigest}` : ""));
       }
       if (dirty(job).length) throw new Error("Specialist commit left uncommitted work.");
       const sha = git(job, "rev-parse", "HEAD");
@@ -531,5 +658,5 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     }
     const result = await graph.invoke({ receipt });
     return output(job, result.receipt);
-  } finally { await rmdir(lock).catch(() => undefined); }
+  });
 }
