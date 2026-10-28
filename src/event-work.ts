@@ -12,6 +12,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
+import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 
@@ -454,6 +455,8 @@ export async function runEventWorkItem(input: EventOptions) {
         if (dirty(job).length) throw new Error("Event specialist requires a clean work-item boundary.");
         const prior = reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
         const assign = selectedAssignment(job, arch.plan!, prior, receipt.milestoneId, receipt.workItemId);
+        await preflightPiAssignment(job, "event:" + receipt.workItemId, receipt.worker === "pi"
+          ? { provider: receipt.provider, model: receipt.model } : undefined);
         receipt.phase = "writing";
         await persist(receiptFile, receipt);
         try {

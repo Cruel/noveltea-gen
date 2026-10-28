@@ -5,7 +5,7 @@ import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -82,7 +82,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
   const runtime = await ModelRuntime.create();
   const dir = join(dirname(job.worktreeRoot), "interactive-sessions", assignment.workItemId, domain);
   const context = await preparePiContext(job, project, {
-    group: "interactive:" + assignment.milestoneId + ":" + domain,
+    group: piNarrativeGroup("interactive:" + domain, assignment.sourcePaths, assignment.milestoneId),
     step: "interactive:" + assignment.workItemId + ":" + domain,
     paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId,
     thinking, directory: dir,

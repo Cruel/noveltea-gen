@@ -13,6 +13,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
+import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
@@ -535,6 +536,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       const baseline = verified(await validate(base), base);
       const assign = selectAssignment(architecture.plan!, baseline, source, input.milestone);
       if (s.phase === "pending") {
+        await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"
+          ? { provider: s.provider, model: s.model, thinking: s.thinking } : undefined);
         s.phase = "writing"; s.beforeHead = base; await save(file, s);
         try {
           const verifyDraft = async (evidence: CompositionEvidence) => {
@@ -558,7 +561,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             if (s.worker === "pi") {
               const review = await reviewComposition(job, s.snapshot!, assign, paths,
                 s.provider, s.model, s.thinking,
-                async session => { s.reviewSessionFile = session; await save(file, s); });
+                async session => { s.reviewSessionFile = session; await save(file, s); }, true);
               const missing = [...structural.outcomes, ...structural.solutions].filter(route =>
                 !review.sourceEvidence.some(line => line.toLowerCase().includes(route.toLowerCase())));
               if (review.verdict !== "pass" || review.concerns.length || missing.length)

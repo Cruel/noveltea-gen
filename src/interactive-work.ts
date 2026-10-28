@@ -12,6 +12,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
+import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
@@ -788,6 +789,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       const baseline = reportOf(await validate(before), before);
       const assign = selectAssignment(architecture.plan!, baseline, state.milestoneId);
       if (unit.phase === "pending") {
+        await preflightPiAssignment(job, "interactive:" + assign.workItemId + ":" + unit.domain,
+          state.worker === "pi" ? { provider: state.provider, model: state.model, thinking: state.thinking } : undefined);
         unit.phase = "writing";
         unit.beforeHead = before;
         await persist(file, state);

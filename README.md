@@ -34,7 +34,8 @@ Git-backed Story jobs keep canonical Markdown and the validated work-item plan a
 conversations are a reusable optimization, not another Story source of truth. Completed related
 specialist conversations are restored or forked with Pi's supported `SessionManager` APIs into
 the next work item's own session directory. Writer and independent reviewer contexts remain
-separate; unrelated narrative domains and author-only deferred ideas never share conversations.
+separate; related milestones within the same Arc can reuse a prefix, while unrelated
+Arc contexts and author-only deferred ideas never share conversations.
 The first prompt retains a consistent skill/instruction prefix and explicitly states that saved
 Story files supersede old conversation content. A private receipt records the pinned skill
 snapshot, selected model, successful Story reads, source SHA-256 versions, and conversation
@@ -65,7 +66,11 @@ sessions is counted once. When a cost budget is configured but Pi omits a model
 call's price, the next safe boundary pauses with `cost-unavailable` rather than
 incorrectly treating unknown spend as free. No independent telemetry service is created. A limit reached at
 a safe assignment boundary returns `{"status":"paused-budget","resumable":true}`
-without starting a new specialist turn. Increase the limit via `job pi configure` and
+without starting a new specialist turn. The job runner checks budget and required
+model availability **before** persisting the writer-start marker; a pause leaves the
+work item retryable without an interrupted-write reconciliation. Independent review
+nested inside an active writer defers its budget gate to the next safe boundary.
+Increase the limit via `job pi configure` and
 rerun the same command; counters are not reset. Once a writer has begun an assignment,
 its bounded repair prompts can finish without an artificial mid-edit budget interruption.
 An actual process crash or partial tool edit still requires the established Git/worktree

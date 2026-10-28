@@ -8,6 +8,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { trustedHead } from "./revision.js";
 import { loadSkillConfig } from "./skills.js";
+import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
@@ -453,6 +454,10 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
     const graph = new StateGraph(Channels)
       .addNode("scope_validation_and_editorial_review", async ({ receipt }) => {
         const reviewer = async (audit: ScopeAudit) => {
+          await preflightPiAssignment(job,
+            "narrative-review:" + audit.assignment.planVersion + ":" + job.headSha,
+            receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model,
+              thinking: receipt.thinking } : undefined);
           receipt.phase = "reviewing"; await save(file, receipt);
           if (receipt.worker === "fixture") {
             const issues = audit.diagnostics.filter(d => d.severity === "blocking").map(d => ({
@@ -486,6 +491,8 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
           }
           const allowed = origin.paths;
           const priorHead = receipt.headSha;
+          await preflightPiAssignment(job, "narrative-repair:" + job.headSha,
+            { provider: origin.provider, model: origin.model, thinking: origin.thinking });
           receipt.phase = "repairing"; receipt.attempts++; await save(file, receipt);
           const before = digest(allowed.map(p => git(job, "hash-object", "--", join(job.worktreeStoryRoot, p))).join("|"));
           try {

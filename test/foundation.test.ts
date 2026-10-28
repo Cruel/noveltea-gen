@@ -168,6 +168,49 @@ test("public CLI authors a new empty Story in its job branch, without writing so
   assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "1");
 });
 
+test("public foundation CLI pauses before writer start and resumes after raising the budget", () => {
+  const { repo, story, baseline } = repository("budget-pause");
+  const job = start(story, "budget-pause");
+  const configure = (max: number) => launch(["pi", "configure", "--story", story, "--job", "first",
+    "--max-steps", String(max)], "budget-pause");
+  assert.equal(configure(0).status, 0);
+  const before = foundation(story, "budget-pause", "--mode", "autonomous",
+    "--task", "A mystery with a locked study");
+  assert.equal(before.result.status, 0, before.result.stderr);
+  assert.equal(before.data.status, "paused-budget");
+  assert.equal(before.data.reason, "steps");
+  assert.equal(before.data.resumable, true);
+  const inspect = foundation(story, "budget-pause", "--inspect");
+  assert.equal(inspect.result.status, 0, inspect.result.stderr);
+  assert.notEqual(inspect.data.status, "blocked");
+  assert.equal(JSON.parse(readFileSync(join(job.worktreeRoot, "../foundation.json"), "utf8")).writerStarted, false);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), baseline);
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(configure(1).status, 0);
+  const resumed = foundation(story, "budget-pause");
+  assert.equal(resumed.result.status, 0, resumed.result.stderr);
+  assert.equal(resumed.data.status, "committed");
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "1");
+  const repeat = foundation(story, "budget-pause");
+  assert.equal(repeat.result.status, 0, repeat.result.stderr);
+  assert.equal(repeat.data.commitSha, resumed.data.commitSha);
+  assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
+});
+
+test("missing required model fails before starting any foundation writer", () => {
+  const { story, baseline } = repository("model-unavailable");
+  const job = start(story, "model-unavailable");
+  const attempt = launch(["foundation", "--story", story, "--job", "first",
+    "--task", "An uncertain mystery", "--provider", "not-a-provider",
+    "--model", "unavailable-model"], "model-unavailable");
+  assert.notEqual(attempt.status, 0);
+  assert.match(attempt.stderr, /Required Pi model\/capabilities unavailable/);
+  const state = JSON.parse(readFileSync(join(job.worktreeRoot, "../foundation.json"), "utf8"));
+  assert.equal(state.writerStarted, false);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), baseline);
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+});
+
 test("onboarding idea commits remain independent and foundation continues from their verified HEAD", () => {
   const { repo, story, baseline } = repository("inbox-before-foundation");
   const job = start(story, "inbox-before-foundation");

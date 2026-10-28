@@ -226,7 +226,7 @@ function specialistSkill(kind: string) {
 }
 async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: string,
   instruction: string, provider: string, modelId: string,
-  thinking: "low" | "high" | undefined, writable: boolean) {
+  thinking: "low" | "high" | undefined, writable: boolean, insideWriter = false) {
   if (await openSkillSnapshot(snapshot.id) !== snapshot.path) throw new Error("Pinned placement skills changed.");
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
@@ -252,7 +252,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
   const context = await preparePiContext(job, project, {
     group: "idea:" + identity + ":" + (writable ? "write" : "review"),
     step: "idea:" + identity + ":" + (writable ? "write" : "review"),
-    paths: required, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
+    paths: required, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking,
@@ -562,7 +562,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
         "requirement against literal canonical prose, NOT merely an ID or reference. " +
         "Consider the alternatives and placement suitability. Report BLOCK if the idea is " +
         "only superficially linked.\n" + assignment, input.provider ?? "openai",
-        input.model ?? "gpt-6-luna", input.thinking, false);
+        input.model ?? "gpt-6-luna", input.thinking, false, true);
       editorialEvidence = independent.evidence;
       reviewSession = independent.sessionFile;
     }

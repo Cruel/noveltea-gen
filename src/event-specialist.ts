@@ -6,7 +6,7 @@ import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -72,7 +72,8 @@ export async function authorEventCluster(
   const runtime = await ModelRuntime.create();
   const sessionDir = join(dirname(job.worktreeRoot), "event-sessions", assignment.workItemId);
   const context = await preparePiContext(job, project, {
-    group: "event:" + assignment.milestoneId, step: "event:" + assignment.workItemId,
+    group: piNarrativeGroup("event", assignment.sourcePaths, assignment.milestoneId),
+    step: "event:" + assignment.workItemId,
     paths: assignment.sourcePaths, snapshot: snapshot.id,
     provider, model: modelId, directory: sessionDir,
   }, runtime);

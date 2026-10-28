@@ -8,7 +8,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { startStoryJob } from "../src/job.js";
 import { openStoryProject } from "../src/project.js";
 import { configurePiPolicy, guardPiBudget, inspectPiPolicy, PiBudgetPause,
-  preparePiContext, resolvePiModel, type PiPolicy } from "../src/job-pi-policy.js";
+  preparePiContext, piNarrativeGroup, resolvePiModel, type PiPolicy } from "../src/job-pi-policy.js";
 
 const fixtures = mkdtempSync(join(tmpdir(), "nt-gen-pi-policy-"));
 after(() => rmSync(fixtures, { recursive: true, force: true }));
@@ -183,6 +183,37 @@ test("forked Pi transcripts do not double-charge already counted model calls", a
   const result = (await inspectPiPolicy(job)).budget;
   assert.equal(result.modelCalls, 1);
   assert.ok(Math.abs(result.costUsd - 0.2) < 0.001);
+});
+
+test("related Arc work reuses the cache-compatible prefix without sharing an unrelated Arc", async () => {
+  const { job, project } = await fixture();
+  const role = "event";
+  const groupA = piNarrativeGroup(role, ["arcs/test.md", "events/test.md"], "milestone.first");
+  const groupAgain = piNarrativeGroup(role, ["arcs/test.md", "events/another.md"], "milestone.second");
+  const groupOther = piNarrativeGroup(role, ["arcs/other.md"], "milestone.third");
+  assert.equal(groupA, groupAgain);
+  assert.notEqual(groupA, groupOther);
+  const first = await preparePiContext(job, project, options(job, "first", ["arcs/test.md"], groupA), runtime());
+  first.manager.appendMessage({ role: "user", content: "Arc-specific historical plan", timestamp: Date.now() });
+  await first.completed(first.manager.getSessionFile()!, first.manager.getSessionId());
+  const second = await preparePiContext(job, project, options(job, "second", ["arcs/test.md"], groupAgain), runtime());
+  assert.match(second.contextNote, /Continuing a related specialist conversation/);
+  assert.match(readFileSync(second.manager.getSessionFile()!, "utf8"), /Arc-specific historical plan/);
+  const unrelated = await preparePiContext(job, project, options(job, "third", ["arcs/other.md"], groupOther), runtime());
+  assert.match(unrelated.contextNote, /Starting a fresh scoped specialist conversation/);
+});
+
+test("nested review does not budget-pause inside the uncommitted authoring step", async () => {
+  const { job, project } = await fixture();
+  await configurePiPolicy(job, policy({ limits: { steps: 1 } }));
+  const writer = await preparePiContext(job, project, options(job, "write"), runtime());
+  writer.manager.appendMessage({ role: "user", content: "uncommitted active writer", timestamp: Date.now() });
+  await assert.rejects(preparePiContext(job, project, options(job, "review"), runtime()), PiBudgetPause);
+  const review = await preparePiContext(job, project, {
+    ...options(job, "review", [], "composition:review"), insideWriter: true,
+  }, runtime());
+  await review.beforeTurn();
+  assert.equal((await inspectPiPolicy(job)).budget.steps, 1);
 });
 
 test("cost budgets pause if Pi returns usage but omits the call price", async () => {

@@ -12,7 +12,7 @@ import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from ".
 import { verifyJobPiSession } from "./job-session.js";
 import { trustedHead } from "./revision.js";
 import { createProjectResourceLoader } from "./pi.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, preflightPiAssignment } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -625,6 +625,9 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       if (changedPaths(job).length) {
         throw new Error("Unfinished foundation edits exist. Inspect and reconcile them; the specialist will not blindly rerun.");
       }
+      // Budget pauses must happen before the irreversible writerStarted marker.
+      await preflightPiAssignment(job, "foundation:write", foundation.workerMode === "pi"
+        ? { provider: foundation.provider, model: foundation.model } : undefined);
       foundation.writerStarted = true;
       await saveState(stateFile(job), foundation);
       const authored = foundation.workerMode === "fixture"

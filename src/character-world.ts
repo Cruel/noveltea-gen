@@ -9,6 +9,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
+import { preflightPiAssignment } from "./job-pi-policy.js";
 import { trustedHead } from "./revision.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -598,6 +599,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       const assign = assignment(unit.domain, plan, preReport,
         state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
       if (unit.phase === "pending") {
+        await preflightPiAssignment(job, "foundations:" + unit.domain, state.worker === "pi"
+          ? { provider: state.provider, model: state.model } : undefined);
         unit.beforeHead = before;
         unit.phase = "writing";
         await persist(file, state);

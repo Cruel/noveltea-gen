@@ -281,6 +281,18 @@ export async function guardPiBudget(job: JobStartResult, step: string, sessionFi
   await persist(budgetPath(job), state);
 }
 
+/** Safe-boundary admission happens before a job receipt records a writer as
+ * started. Failures to resolve credentials, requirements, or budgets cannot
+ * masquerade as interrupted filesystem edits. Fixtures also count steps. */
+export async function preflightPiAssignment(job: JobStartResult, step: string,
+  profile?: { provider: string; model: string; thinking?: "low" | "high" }): Promise<void> {
+  await guardPiBudget(job, step);
+  if (profile) {
+    const runtime = await ModelRuntime.create();
+    await resolvePiModel(job, runtime, profile.provider, profile.model, profile.thinking);
+  }
+}
+
 /** Record the just-completed session without imposing a new budget gate after
  * edits. The next safe boundary will inspect its actual usage and pause. */
 async function recordPiSession(job: JobStartResult, sessionFile: string): Promise<void> {
@@ -296,11 +308,20 @@ async function recordPiSession(job: JobStartResult, sessionFile: string): Promis
   }
 }
 
+/** Share a prefix only when assignments reference the same actual Arc scope.
+ * Different domains/roles remain isolated even within that Arc. */
+export function piNarrativeGroup(role: string, paths: string[], fallback: string): string {
+  const arcs = [...new Set(paths.filter(path => path.startsWith("arcs/") && path.endsWith(".md")))].sort();
+  return role + ":" + (arcs.length ? arcs.join("|") : fallback);
+}
+
 /** Each completed, clean specialist turn may be reused within its scoped narrative group. */
 export async function preparePiContext(job: JobStartResult, project: StoryProject, options: {
   group: string; step: string; paths: string[]; snapshot: string;
   provider: string; model: string; thinking?: "low" | "high";
   directory: string;
+  /** An independent review nested inside an active writer must not pause mid-edit. */
+  insideWriter?: boolean;
 }, runtime: ModelRuntime): Promise<{
   model: NonNullable<ReturnType<ModelRuntime["getModel"]>>;
   thinking?: "low" | "high";
@@ -309,7 +330,7 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   beforeTurn: (file?: string) => Promise<void>;
   completed: (file: string, id: string) => Promise<void>;
 }> {
-  await guardPiBudget(job, options.step);
+  if (!options.insideWriter) await guardPiBudget(job, options.step);
   const { model, resolution } = await resolvePiModel(job, runtime, options.provider, options.model, options.thinking);
   const file = contextPath(job, options.group);
   const previous = await json<ContextReceipt>(file);
@@ -363,7 +384,9 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
     "; model provenance: " + resolution.source + " (" + expectedModel + ").\n\n";
   return {
     model, thinking: resolution.thinking, manager, contextNote,
-    async beforeTurn(sessionFile) { await guardPiBudget(job, options.step, sessionFile); },
+    async beforeTurn(sessionFile) {
+      if (!options.insideWriter) await guardPiBudget(job, options.step, sessionFile);
+    },
     async completed(sessionFile, id) {
       await recordPiSession(job, sessionFile);
       await persist(file, { version: 1, group: options.group, file: sessionFile, sessionId: id,

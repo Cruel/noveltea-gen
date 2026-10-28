@@ -9,6 +9,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { parseCarryForward, verifyCarryForwardCandidates } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
+import { preflightPiAssignment } from "./job-pi-policy.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -553,6 +554,8 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
               receipt.plan!.contract.scope.targets, [], receipt.plan!.version);
           }
         }
+        await preflightPiAssignment(job, "architecture:" + receipt.plan!.version, receipt.worker === "pi"
+          ? { provider: receipt.provider, model: receipt.model } : undefined);
         receipt.phase = "writing"; receipt.plan!.items[0]!.status = "writing";
         await persist(file, receipt);
         if (receipt.worker === "fixture") await fixtureAuthor(job, receipt);

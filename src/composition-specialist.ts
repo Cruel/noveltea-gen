@@ -5,7 +5,7 @@ import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -76,7 +76,7 @@ function strings(value: unknown): value is string[] {
 }
 async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assignment: CompositionAssignment,
   provider: string, modelId: string, thinking: "low" | "high" | undefined,
-  phase: "write" | "review", extraPaths: string[] = []) {
+  phase: "write" | "review", extraPaths: string[] = [], insideWriter = false) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: ["nt-narrative-composition", "nt-catalog"] };
@@ -92,10 +92,10 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
   const runtime = await ModelRuntime.create();
   const dir = join(dirname(job.worktreeRoot), "composition-sessions", assignment.workItemId, phase);
   const context = await preparePiContext(job, project, {
-    group: "composition:" + assignment.milestoneId + ":" + phase,
+    group: piNarrativeGroup("composition:" + phase, assignment.sourcePaths, assignment.milestoneId),
     step: "composition:" + assignment.workItemId + ":" + phase,
     paths: [...assignment.sourcePaths, ...extraPaths], snapshot: snapshot.id,
-    provider, model: modelId, thinking, directory: dir,
+    provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
@@ -218,9 +218,10 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
 }
 export async function reviewComposition(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: CompositionAssignment, paths: string[], provider: string, modelId: string,
-  thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>): Promise<SemanticReview> {
+  thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
+  insideWriter = false): Promise<SemanticReview> {
   const { session, project, pinned, context } = await createSession(job, snapshot, assignment,
-    provider, modelId, thinking, "review", paths);
+    provider, modelId, thinking, "review", paths, insideWriter);
   try {
     const sessionFile = session.sessionManager.getSessionFile();
     if (sessionFile) await onSession(sessionFile);
