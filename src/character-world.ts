@@ -41,6 +41,8 @@ interface Receipt {
   worktreeRoot?: string;
   threadId?: string;
   architectureHead: string;
+  /** Last verified HEAD before World specialist; may include noncanonical captures. */
+  startHead?: string;
   planVersion: number;
   contractDigest: string;
   worker: "fixture" | "pi";
@@ -350,7 +352,7 @@ async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: Foundation
 function output(job: JobStartResult, receipt: Receipt) {
   return { status: receipt.units.every(unit => unit.phase === "committed") ? "foundations-committed" : "in-progress",
     jobId: job.jobId, branch: job.branch, worktreeStoryRoot: job.worktreeStoryRoot,
-    headSha: receipt.units[1].commitSha ?? receipt.units[0].commitSha ?? receipt.architectureHead,
+    headSha: receipt.units[1].commitSha ?? receipt.units[0].commitSha ?? receipt.startHead ?? receipt.architectureHead,
     architectureHead: receipt.architectureHead, planVersion: receipt.planVersion,
     items: receipt.units.map(unit => ({ ...unit, dependencies: unit.domain === "world" ? ["global-architecture"] : ["world-foundations"],
       specialist: unit.domain === "world" ? "nt-worldbuilding" : "nt-character-development" })),
@@ -387,9 +389,9 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
       return { status: "ready", actualHead, changes };
     }
     const unit = receipt.units[index]!;
-    const before = index ? receipt.units[index - 1]!.commitSha : receipt.architectureHead;
+    const before = index ? receipt.units[index - 1]!.commitSha : (receipt.startHead ?? receipt.architectureHead);
     if (!before || unit.beforeHead && unit.beforeHead !== before) return blocked("Saved work-item parent differs from the verified chain.");
-    if (index && receipt.units[0]!.commitSha) verifyCommit(job, receipt.units[0]!, receipt.architectureHead, before);
+    if (index && receipt.units[0]!.commitSha) verifyCommit(job, receipt.units[0]!, receipt.startHead ?? receipt.architectureHead, before);
     if (unit.phase === "writing") {
       if (receipt.worker === "pi") await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
       const result = blocked("Interrupted specialist writing (" + unit.id + "): review preserved files and use foundations reconcile with the exact candidate digest; no replay.");
@@ -460,10 +462,10 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       }
     } else {
       if (input.action !== "run") throw new Error("No foundations receipt to inspect.");
-      if (dirty(job).length || await trustedHead(job) !== arch.expectedHead) {
-        throw new Error("Foundations require an unchanged clean verified architecture HEAD.");
-      }
-      receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
+      const startHead = await trustedHead(job);
+      if (dirty(job).length) throw new Error("Foundations require a clean verified Story HEAD.");
+      git(job, "merge-base", "--is-ancestor", arch.expectedHead, startHead);
+      receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha, startHead,
         branch: job.branch, worktreeRoot: job.worktreeRoot, threadId: job.threadId,
         architectureHead: arch.expectedHead, planVersion: plan.version, contractDigest,
         worker: input.fixture ? "fixture" : "pi",
@@ -484,6 +486,18 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         (input.provider && input.provider !== receipt.provider) ||
         (input.model && input.model !== receipt.model)) {
       throw new Error("Foundations specialist worker configuration differs from the saved assignment.");
+    }
+    if (input.action === "run" && receipt.units.every(unit => unit.phase === "committed")) {
+      const [world, character] = receipt.units;
+      verifyCommit(job, world, receipt.startHead ?? receipt.architectureHead, world.commitSha!);
+      verifyCommit(job, character, world.commitSha!, character.commitSha!);
+      // A later independently verified inbox capture is not a reason to replay
+      // specialists. Restore a missing final verified-head publication only if
+      // the Character commit itself remains the current worktree HEAD.
+      if (recovery.actualHead === character.commitSha) {
+        await publishHead(job, world.commitSha!, character.commitSha!, character.id);
+      }
+      return output(job, receipt);
     }
     const config = input.skillsSource
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
@@ -512,7 +526,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           recovery.candidate.digest !== input.recoveryDigest) {
         throw new Error("Foundations reconciliation requires an interrupted writer and exact inspected --digest; Git, Pi or file inventory is unsafe.");
       }
-      const before = index ? receipt.units[index - 1]!.commitSha : receipt.architectureHead;
+      const before = index ? receipt.units[index - 1]!.commitSha : (receipt.startHead ?? receipt.architectureHead);
       if (!before) throw new Error("Missing parent work-item commit.");
       assertHead(job, before);
       const preReport = reportOf(await validate(before), before);
@@ -537,7 +551,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       .addEdge("character_foundations", END).compile();
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
-      const prior = index ? state.units[index - 1]!.commitSha : state.architectureHead;
+      const prior = index ? state.units[index - 1]!.commitSha : (state.startHead ?? state.architectureHead);
       if (!prior) throw new Error("Character specialist cannot run before the Worldbuilding work-item commit.");
       if (unit.beforeHead && unit.beforeHead !== prior) throw new Error("Work-unit head changed since assignment.");
       const before = prior;

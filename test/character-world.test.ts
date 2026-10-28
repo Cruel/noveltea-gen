@@ -109,6 +109,46 @@ test("real public CLI creates two separately validated canonical specialist comm
   assert.equal(JSON.parse(replay.stdout).headSha, head, "replay must not commit twice");
 });
 
+test("deferred capture between architecture and Character/World handoff remains a separate verified commit", { skip: !available }, () => {
+  const { cli, job, architecture, baseline } = setup("ideas-handoff");
+  const arch = architecture();
+  const payload = join(root, "ideas-handoff.json");
+  writeFileSync(payload, JSON.stringify({
+    kind: "event-concept",
+    source: { kind: "author-continuation", reference: "late planning note" },
+    original: "The witness changes their mind after the discovery.",
+    requirements: { meaning: [{ text: "Consequential reversal", binding: true }],
+      wording: [], participants: [] },
+    identities: { known: [], unresolved: ["the witness"] },
+    prerequisites: ["milestone.disclosure"],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  const capture = cli(["ideas", "capture", "--file", payload]);
+  assert.equal(capture.status, 0, capture.stderr);
+  const idea = JSON.parse(capture.stdout);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD^"), arch.headSha);
+  const world = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(world.status, 0, world.stderr);
+  const result = JSON.parse(world.stdout);
+  assert.equal(result.status, "foundations-committed");
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD~2"), idea.commitSha);
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "4");
+  const replay = cli(["foundations", "run", "--fixture"]);
+  assert.equal(replay.status, 0, replay.stderr);
+  assert.equal(JSON.parse(replay.stdout).headSha, result.headSha);
+  writeFileSync(payload, JSON.stringify({ ...JSON.parse(readFileSync(payload, "utf8")),
+    source: { kind: "author-continuation", reference: "after character foundations" } }));
+  const following = cli(["ideas", "capture", "--file", payload]);
+  assert.equal(following.status, 0, following.stderr);
+  const postCapture = git(job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "5");
+  const after = cli(["foundations", "run", "--fixture"]);
+  assert.equal(after.status, 0, after.stderr);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), postCapture,
+    "completed specialists are not replayed after another verified inbox capture");
+});
+
 test("cannot start foundations before architecture and cannot convert a mismatched specialist manifest into a commit", { skip: !available }, () => {
   const { cli, job, architecture } = setup("mismatch");
   const before = cli(["foundations", "run", "--fixture", "--skills-source", source]);

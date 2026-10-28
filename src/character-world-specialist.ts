@@ -91,6 +91,8 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       "Read ALL the pinned guidance below using the read tool before writing:\n" +
       required.map(path => join(snapshot.path, "skills", path)).join("\n") +
       "\nRead only the relevant existing Story sources named in the assignment (follow necessary typed references). " +
+      "Never read/search .story-inbox/ideas, even with git grep/show, rg --hidden, find or broad scans; " +
+      "it holds noncanonical, dormant author material reserved for a later placement specialist. " +
       "Do not modify files outside your ownership; never write Creative Direction, Milestones, Events, or engine files. " +
       "Preserve author-protected decisions and existing authorized choices; do not treat draft status as permission to retcon. " +
       "Write canonical schema '0.1' Markdown, with quoted YAML prose scalars, draft status and honest completeness. " +
