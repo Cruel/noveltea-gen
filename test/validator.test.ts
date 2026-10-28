@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { agentValidatorBashTool } from "../src/validator.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-validators-"));
 after(() => removeTestTree(root));
@@ -319,4 +320,47 @@ test("native #526/#535 cutover parity for canonical valid, structural and protec
   writeFileSync(worktreeRecord, protectedSource.replace("central_conflict:",
     "unsupported_field: true\ncentral_conflict:"));
   parity();
+});
+
+test("agent-side temporary noveltea CLI validates against the pinned Git baseline", async () => {
+  const repo = repository("agent-cli-shim");
+  writeFileSync(join(repo, "story.md"), "VALID");
+  git(repo, "add", "story.md");
+  git(repo, "commit", "-qm", "Protected Story baseline");
+  const state = join(root, "state-agent-shim");
+  const job = start(repo, state);
+  const source = fakeSource("agent-cli-source");
+  const tool = await agentValidatorBashTool(job, source);
+  const prefix = `NT_STATE_DIR=${JSON.stringify(join(state, "state"))} ` +
+    `NT_VALIDATOR_CACHE_DIR=${JSON.stringify(join(state, "validators"))} `;
+  const ctx = { cwd: job.worktreeStoryRoot, sessionManager: {
+    getSessionId: () => "test-session", getSessionFile: () => null,
+  }, thinkingLevel: "medium" } as any;
+  const call = async (command: string) => {
+    const output = await tool.execute("agent-test", { command: prefix + command }, undefined, undefined, ctx);
+    return output.content.filter((c): c is { type: "text"; text: string } =>
+      c.type === "text").map(c => c.text).join("\n");
+  };
+  const good = await call("noveltea narrative validate . --json");
+  assert.equal(JSON.parse(good).validationStatus, "passed");
+  assert.equal(JSON.parse(good).protection.status, "checked");
+  assert.equal(JSON.parse(good).protection.base, job.baseSha);
+  assert.equal(existsSync(join(job.worktreeRoot, "..", "validator.json")), true);
+  assert.equal(existsSync(join(job.worktreeRoot, "..", "agent-validator-bin", "noveltea")), true);
+
+  writeFileSync(join(job.worktreeStoryRoot, "story.md"), "INVALID CHANGED");
+  const bad = await call("noveltea narrative validate . --json");
+  const report = JSON.parse(bad.split("\n\nCommand exited with code")[0]!);
+  assert.equal(report.validationStatus, "rejected");
+  assert.equal(report.diagnostics[0].code, "schema");
+  assert.equal(report.protection.warnings.length, 1);
+  assert.match(bad, /Command exited with code 1/);
+  const unverified = await call("TEST_NO_BASELINE=yes noveltea narrative validate . --json");
+  assert.equal(JSON.parse(unverified.split("\n\nCommand exited with code")[0]!).validationStatus, "unverified");
+  assert.match(unverified, /Command exited with code 2/);
+  const otherBase = "a".repeat(40);
+  assert.match(await call(`noveltea narrative validate . --base ${otherBase} --json`), /untrusted --base/);
+  assert.match(await call("noveltea narrative validate /tmp --json"), /Story root is not the active job Story/);
+  assert.match(await call("noveltea narrative --help"), /Usage: noveltea narrative validate/);
+  assert.equal(git(repo, "status", "--porcelain"), "");
 });

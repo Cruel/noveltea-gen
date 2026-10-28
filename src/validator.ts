@@ -1,9 +1,11 @@
 import { spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createBashToolDefinition, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { build } from "esbuild";
 import { canonicalDestination, type JobStartResult } from "./job.js";
 
@@ -302,6 +304,40 @@ export interface ValidationView {
   worktreeRoot: string;
   worktreeStoryRoot: string;
   baseSha: string;
+}
+
+/** Temporary compatibility bridge for agent-side validation. The Bash hook isolates
+ * PATH and job identity to this Pi session, without mutating global process.env.
+ * It delegates back to the pinned validator adapter through the public job CLI.
+ * Remove with src/noveltea-cli-shim.mjs when native CLI validation is certified. */
+export async function agentValidatorBashTool(job: JobStartResult, sourceCheckout?: string): Promise<ToolDefinition> {
+  const bin = join(dirname(job.worktreeRoot), "agent-validator-bin");
+  const target = fileURLToPath(new URL("./noveltea-cli-shim.mjs", import.meta.url));
+  const command = join(bin, "noveltea");
+  await mkdir(bin, { recursive: true });
+  try {
+    await symlink(target, command);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST") ||
+        await readlink(command).catch(() => null) !== target) {
+      throw new Error("Agent validator command conflicts with the job's pinned shim.");
+    }
+  }
+  return createBashToolDefinition(job.worktreeStoryRoot, {
+    spawnHook: ({ command, cwd, env }) => ({
+      command, cwd, env: {
+        ...env,
+        PATH: bin + (env.PATH ? ":" + env.PATH : ""),
+        NT_AGENT_STORY_ROOT: job.worktreeStoryRoot,
+        NT_AGENT_ORIGINAL_STORY_ROOT: job.storyRoot,
+        NT_AGENT_JOB_ID: job.jobId,
+        NT_AGENT_TRUSTED_BASE: job.baseSha,
+        NT_AGENT_VALIDATOR_SOURCE: sourceCheckout ?? "",
+      },
+    }),
+  // Pi declares customTools with an invariant broad schema; the Bash tool has
+  // the same runtime shape but a narrower typed command parameter schema.
+  }) as unknown as ToolDefinition;
 }
 
 export async function validateStoryJob(job: JobStartResult, sourceCheckout?: string,

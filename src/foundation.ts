@@ -11,7 +11,7 @@ import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
-import { validateStoryJob, type ValidationResult } from "./validator.js";
+import { agentValidatorBashTool, validateStoryJob, type ValidationResult } from "./validator.js";
 
 type Mode = "autonomous" | "collaborative";
 type Stage = "awaiting-author" | "writing" | "committed";
@@ -162,7 +162,7 @@ async function fixtureAuthor(job: JobStartResult, state: FoundationState, target
     piSessionId: undefined, piSessionFile: undefined };
 }
 
-async function piAuthor(job: JobStartResult, state: FoundationState, target: string, provider: string, modelId: string) {
+async function piAuthor(job: JobStartResult, state: FoundationState, target: string, provider: string, modelId: string, validatorSource?: string) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: state.snapshot.path,
     skillDirs: [], requiredSkills: ["nt-story-discovery", "nt-catalog"] };
@@ -185,6 +185,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model, resourceLoader: loader, settingsManager,
     sessionManager: SessionManager.create(project.root, sessionDir),
+    customTools: [await agentValidatorBashTool(job, validatorSource)],
     // Standard tools remain available, including grep/rg and Git inspection
     // through bash. No structured-record writer or Git commit tool exists.
     noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
@@ -207,6 +208,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       "For YAML frontmatter, DOUBLE-QUOTE every free-text scalar (title, premise, central_conflict, genre, tone, " +
       "player_experience, scope and decision statements); escape embedded quote characters as needed. " +
       "Plain unquoted prose with colons is INVALID YAML. Verify your frontmatter is parseable before finishing. " +
+      "Run noveltea narrative validate . --json after authoring, inspect diagnostics and readiness, repair and revalidate before finishing. " +
       "Honor the requested narrative/presentation envelope as constraints rather than universal plot counts. " +
       "Do not claim validation, approval or a commit; the graph performs those independently. " +
       `Collaboration mode: ${state.mode}.\nAuthor brief: ${state.task}\n` +
@@ -478,7 +480,8 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       }
       const authored = foundation.workerMode === "fixture"
         ? await fixtureAuthor(job, foundation, target)
-        : await piAuthor(job, foundation, target, foundation.provider, foundation.model);
+        : await piAuthor(job, foundation, target, foundation.provider, foundation.model,
+          input.validatorSource ?? input.skillsSource);
       const next = { ...foundation, ...authored };
       await saveState(stateFile(job), next);
       assertHead(job, job.baseSha);

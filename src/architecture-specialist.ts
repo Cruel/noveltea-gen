@@ -4,6 +4,7 @@ import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-work
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
+import { agentValidatorBashTool } from "./validator.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
@@ -52,6 +53,7 @@ export async function authorArchitecture(
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model, resourceLoader: loader, settingsManager,
     sessionManager: SessionManager.create(project.root, sessionDir),
+    customTools: [await agentValidatorBashTool(job)],
     noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
   });
   try {
@@ -75,7 +77,7 @@ export async function authorArchitecture(
       "The graph independently validates, inspects and commits your changes. " +
       "Production economy is an explicit constraint, not a universal fixed budget. " +
       "Frontmatter free-text YAML scalars must be quoted; avoid invalid colon-containing unquoted values. " +
-      "Before finishing, inspect your new records for correctness and explain downstream obligations.\n" +
+      "Before finishing, run noveltea narrative validate . --json, inspect diagnostics and coverage, repair problems and rerun validation; the graph independently decides acceptance. Explain downstream obligations.\n" +
       "AUTHORIZED PLAN AND SCOPE:\n" + JSON.stringify(plan, null, 2) +
       "\nOnly implement the global architecture work item now, not the downstream realization or composition items.",
     );
