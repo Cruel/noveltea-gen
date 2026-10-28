@@ -20,7 +20,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const KINDS = ["event-concept", "conversation", "exact-dialogue", "narrative-anchor"] as const;
 type Kind = typeof KINDS[number];
 type Depth = "architecture" | "milestone" | "event";
-interface Requirement { text: string; binding: boolean }
+export interface Requirement { text: string; binding: boolean }
 interface UpstreamConstraint { text: string; targets: string[]; authorized: true }
 export interface IdeaInput {
   id?: string;
@@ -36,18 +36,31 @@ export interface IdeaInput {
     minRelevantEvents?: number; minRelevantMilestones?: number };
   upstreamConstraints: UpstreamConstraint[];
 }
-type PersistedIdea = Omit<IdeaInput, "id"> & {
+export interface IdeaPlacementHistory {
+  revision: number;
+  action: "integrated" | "reassessed" | "relocation-proposed" | "relocated";
+  priorHead: string;
+  recordIds: string[];
+  rationale: string;
+  alternatives: Array<{ recordId: string; rationale: string }>;
+  verified: "fixture-unverified" | "pi" | "pending-approval";
+  evidence: string[];
+  realizationDigest: string;
+  sessionFiles?: string[];
+}
+export type PersistedIdea = Omit<IdeaInput, "id"> & {
   schema: "0.1"; id: string;
-  lifecycle: { status: "dormant"; capturedAt: string; activatedAt: null;
-    placedAt: null; placements: [] };
+  lifecycle: { status: "dormant" | "integrated"; capturedAt: string;
+    activatedAt: string | null; placedAt: string | null;
+    placements: IdeaPlacementHistory[] };
 };
 interface Receipt {
   version: 1; jobId: string; threadId: string; branch: string; worktreeRoot: string;
   id: string; inputDigest: string; priorHead: string; path: string;
   blobDigest: string; content?: string; phase: "prepared" | "committed"; commitSha?: string;
 }
-interface RecordInfo { id: string; type: string; arcs: string[]; completeness?: string; status?: string }
-interface Assessment { id: string; eligible: boolean; status: "dormant"; reasons: string[];
+export interface RecordInfo { id: string; type: string; arcs: string[]; events: string[]; path: string; completeness?: string; status?: string }
+interface Assessment { id: string; eligible: boolean; status: "dormant" | "integrated"; reasons: string[];
   breadth: { events: number; milestones: number }; depth: Depth }
 export interface IdeaAction {
   story: string; job: string; action: "capture" | "inspect" | "eligibility" | "context" | "placement-context";
@@ -62,24 +75,24 @@ function stable(value: unknown): string {
   }
   return JSON.stringify(value);
 }
-function gitRaw(job: JobStartResult, ...args: string[]) {
+export function gitRaw(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[key];
   return execFileSync("git", args, { cwd: job.worktreeRoot, env, encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
 }
-function git(job: JobStartResult, ...args: string[]) { return gitRaw(job, ...args).trim(); }
-function repoPath(job: JobStartResult, path: string) {
+export function git(job: JobStartResult, ...args: string[]) { return gitRaw(job, ...args).trim(); }
+export function repoPath(job: JobStartResult, path: string) {
   return job.storyRelativePath ? job.storyRelativePath + "/" + path : path;
 }
-function pathFor(id: string) { return INBOX + "/" + id + ".yaml"; }
+export function pathFor(id: string) { return INBOX + "/" + id + ".yaml"; }
 function receiptFile(job: JobStartResult, id: string) {
   return join(dirname(job.worktreeRoot), "ideas", id + ".json");
 }
 function headFile(job: JobStartResult) {
   return join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
 }
-async function persist(path: string, value: unknown) {
+export async function persist(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true });
   const temp = path + "." + randomUUID() + ".tmp";
   try {
@@ -89,7 +102,7 @@ async function persist(path: string, value: unknown) {
     throw err;
   }
 }
-function assertClean(job: JobStartResult) {
+export function assertClean(job: JobStartResult) {
   if (git(job, "symbolic-ref", "--short", "HEAD") !== job.branch) throw new Error("Idea capture branch drift; inspect Git.");
   if (gitRaw(job, "status", "--porcelain=v1", "-z", "--untracked-files=all").length) {
     throw new Error("Idea capture requires a clean job worktree; unexpected staged/uncommitted content must be reviewed.");
@@ -182,13 +195,14 @@ function checkReceipt(job: JobStartResult, receipt: Receipt, id: string, digest:
   }
   if (receipt.inputDigest !== digest) throw new Error("Idea ID conflict: original material or requirements differ from existing capture.");
 }
-async function publishHead(job: JobStartResult, prior: string, commit: string, id: string) {
+export async function publishHead(job: JobStartResult, prior: string, commit: string, id: string,
+  workItem = "idea-capture:" + id) {
   const file = headFile(job);
   if (existsSync(file)) {
     const saved = JSON.parse(await readFile(file, "utf8")) as { version: number; jobId: string; headSha: string };
     if (saved.version !== 1 || saved.jobId !== job.jobId ||
         (saved.headSha !== prior && saved.headSha !== commit)) {
-      throw new Error("Verified-head marker changed during idea capture; preserve the commit.");
+      throw new Error("Verified-head marker changed during deferred idea work; preserve the commit.");
     }
     if (saved.headSha === commit) return;
   } else if (prior !== job.baseSha) {
@@ -199,7 +213,7 @@ async function publishHead(job: JobStartResult, prior: string, commit: string, i
       throw new Error("Cannot establish a trusted predecessor for idea capture.");
     }
   }
-  await persist(file, { version: 1, jobId: job.jobId, headSha: commit, workItemId: "idea-capture:" + id });
+  await persist(file, { version: 1, jobId: job.jobId, headSha: commit, workItemId: workItem });
 }
 function verifyHistoricalCapture(job: JobStartResult, receipt: Receipt) {
   const commit = receipt.commitSha;
@@ -334,9 +348,9 @@ function frontmatter(value: string): RecordInfo | undefined {
   };
   const id = scalar("id"), type = scalar("type");
   if (!id || !type) return;
-  return { id, type, arcs: list("arcs"), completeness: scalar("completeness"), status: scalar("status") };
+  return { id, type, arcs: list("arcs"), events: list("events"), path: "", completeness: scalar("completeness"), status: scalar("status") };
 }
-function records(job: JobStartResult) {
+export function records(job: JobStartResult) {
   const root = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   const paths = git(job, "ls-tree", "-r", "--name-only", "HEAD", "--",
     ...["creative-direction", "arcs", "milestones", "events", "characters",
@@ -348,7 +362,8 @@ function records(job: JobStartResult) {
     if (!p.endsWith(".md")) continue;
     const record = frontmatter(gitRaw(job, "show", "HEAD:" + p));
     if (record && /^(creative-direction|arc|milestone|event|character|world-entity|fact|relationship|revelation|choice-point|puzzle|authored-content|narrative-position)$/.test(record.type) &&
-        record.id.startsWith(record.type + ".") && record.status !== "superseded") items.set(record.id, record);
+        record.id.startsWith(record.type + ".") && record.status !== "superseded")
+      items.set(record.id, { ...record, path: p.slice(root.length) });
   }
   return items;
 }
@@ -365,7 +380,7 @@ function scopeArcs(idea: PersistedIdea, catalog: Map<string, RecordInfo>) {
 function matching(record: RecordInfo, idea: PersistedIdea, arcs: Set<string>) {
   return idea.placement.scopeIds.includes(record.id) || record.arcs.some(a => arcs.has(a));
 }
-function assess(idea: PersistedIdea, catalog: Map<string, RecordInfo>): Assessment {
+export function assess(idea: PersistedIdea, catalog: Map<string, RecordInfo>): Assessment {
   const arcs = scopeArcs(idea, catalog);
   const milestones = [...catalog.values()].filter(x => x.type === "milestone" &&
     x.completeness !== "partial" && matching(x, idea, arcs));
@@ -387,7 +402,7 @@ function assess(idea: PersistedIdea, catalog: Map<string, RecordInfo>): Assessme
   if (events.length < minEvents) reasons.push("insufficient-relevant-events");
   if (idea.placement.earliest === "event" && !events.length) reasons.push("event-depth-not-reached");
   if (idea.placement.earliest === "milestone" && !milestones.length) reasons.push("milestone-depth-not-reached");
-  return { id: idea.id, eligible: reasons.length === 0, status: "dormant", reasons,
+  return { id: idea.id, eligible: reasons.length === 0, status: idea.lifecycle.status, reasons,
     breadth: { events: events.length, milestones: milestones.length }, depth: idea.placement.earliest };
 }
 function contextMatch(idea: PersistedIdea, target: RecordInfo, catalog: Map<string, RecordInfo>) {
@@ -396,7 +411,7 @@ function contextMatch(idea: PersistedIdea, target: RecordInfo, catalog: Map<stri
     target.type === "milestone" && matching(target, idea, arcs) ||
     target.type === "arc" && idea.placement.scopeIds.includes(target.id);
 }
-async function load(job: JobStartResult) {
+export async function load(job: JobStartResult) {
   // Inspect only committed, trusted Git data. Never read dirty working-tree
   // inbox bytes, and never expose them to ordinary worker context.
   await trustedHead(job);
@@ -411,17 +426,21 @@ async function load(job: JobStartResult) {
     }
     const idea = JSON.parse(gitRaw(job, "show", "HEAD:" + path)) as PersistedIdea;
     if (idea.id !== path.slice(prefix.length, -5) ||
-        idea.schema !== "0.1" || idea.lifecycle?.status !== "dormant" ||
+        idea.schema !== "0.1" || !["dormant", "integrated"].includes(idea.lifecycle?.status) ||
+        !Array.isArray(idea.lifecycle?.placements) ||
         !existsSync(receiptFile(job, idea.id))) throw new Error("Inbox record lacks verified capture provenance.");
     const receipt = JSON.parse(await readFile(receiptFile(job, idea.id), "utf8")) as Receipt;
     const { id, schema, lifecycle, ...original } = idea;
     void schema; void lifecycle;
     checkReceipt(job, receipt, idea.id, captureIdentity({ id, ...original }).digest);
     if (receipt.phase !== "committed" || !receipt.commitSha ||
-        sha(gitRaw(job, "show", receipt.commitSha + ":" + repoPath(job, receipt.path))) !== receipt.blobDigest ||
-        sha(gitRaw(job, "show", "HEAD:" + repoPath(job, receipt.path))) !== receipt.blobDigest) {
-      throw new Error("Inbox record no longer matches committed capture evidence.");
+        sha(gitRaw(job, "show", receipt.commitSha + ":" + repoPath(job, receipt.path))) !== receipt.blobDigest) {
+      throw new Error("Inbox original capture differs from verified author input.");
     }
+    // Mutations are limited to the lifecycle and each transition is checked
+    // against its own committed placement receipt; original author inputs are immutable.
+    const { verifyPlacementHistory } = await import("./idea-placement.js");
+    await verifyPlacementHistory(job, idea, receipt.commitSha);
     ideas.push(idea);
   }
   return ideas.sort((a, b) => a.id.localeCompare(b.id));
@@ -431,11 +450,25 @@ async function load(job: JobStartResult) {
  * hold the shared job lock and use the verified immutable inbox. */
 export async function deferredCompletionObligations(job: JobStartResult) {
   const ideas = await load(job);
-  return ideas.filter(idea =>
-    [...idea.requirements.meaning, ...idea.requirements.wording, ...idea.requirements.participants]
-      .some(requirement => requirement.binding)).map(idea => ({
+  const catalog = records(job);
+  const { candidatesFor } = await import("./idea-placement.js");
+  return ideas.filter(idea => {
+    if (![...idea.requirements.meaning, ...idea.requirements.wording,
+      ...idea.requirements.participants].some(requirement => requirement.binding)) return false;
+    const last = idea.lifecycle.placements.filter(p =>
+      p.action === "integrated" || p.action === "relocated" || p.action === "reassessed").at(-1);
+    if (idea.lifecycle.status !== "integrated" || last?.verified !== "pi") return true;
+    const paths = last.recordIds.map(id => catalog.get(id)?.path);
+    if (paths.some(p => !p)) return true;
+    const exact = sha(paths.map(p => sha(gitRaw(job, "show", "HEAD:" + repoPath(job, p!)))).join("|"));
+    if (exact !== last.realizationDigest) return true;
+    // New plausible locations require renewed placement/semantic assessment:
+    // a prior editorial approval does not attest later structural alternatives.
+    return candidatesFor(idea, catalog).some(c =>
+      !last.alternatives.some(a => a.recordId === c.id));
+  }).map(idea => ({
     id: idea.id, scopeIds: idea.placement.scopeIds,
-    message: "Binding deferred author idea has not been integrated: " + idea.id,
+    message: "Binding author idea is deferred or requires fresh semantic/placement reassessment: " + idea.id,
   }));
 }
 /**

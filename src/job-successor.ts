@@ -77,6 +77,11 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       verifyReviewRepair(job, commit, parents[1]!, paths, trailers);
       continue;
     }
+    if (trailers.includes("NovelTea-Work-Item: idea-placement")) {
+      const { verifyPlacementSuccessor } = await import("./idea-placement.js");
+      await verifyPlacementSuccessor(job, commit, parents[1]!, paths, trailers);
+      continue;
+    }
     if (paths.length !== 1 || !paths[0]!.startsWith(prefix) ||
         !/^[a-z][a-z0-9-]*\.yaml$/.test(paths[0]!.slice(prefix.length))) {
       throw new Error("Verified successor changes narrative premises; explicit impact review is required.");

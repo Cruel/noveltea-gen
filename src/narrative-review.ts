@@ -13,6 +13,7 @@ import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import type { PlanHistoryStep } from "./plan-continuity.js";
 import { deferredCompletionObligations } from "./ideas.js";
+import type { auditIdeasUnderJobLock } from "./idea-placement.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { reviewNarrative, repairNarrativeProse, type ReviewAssignment, type EditorialVerdict,
   type EditorialFinding } from "./narrative-review-specialist.js";
@@ -65,6 +66,7 @@ interface Receipt {
   worker: "pi" | "fixture"; provider: string; model: string; thinking?: "low" | "high";
   phase: "pending" | "reviewing" | "repairing" | "completed" | "blocked";
   attempts: number; seen: string[]; sessionFiles: string[]; audit?: ScopeAudit;
+  ideaAudit?: Awaited<ReturnType<typeof auditIdeasUnderJobLock>>;
   repairPriorHead?: string; repairPaths?: string[]; repairDigest?: string;
   repairCommitSha?: string; editorial?: EditorialVerdict; failure?: string;
 }
@@ -297,7 +299,7 @@ function output(job: JobStartResult, state: Receipt | undefined) {
       ? "editorial-unverified" : state.phase === "pending" ? "pending" : "blocked";
   return { status, jobId: job.jobId, branch: job.branch, planVersion: state.planVersion,
     headSha: state.headSha, attempts: state.attempts, audit: state.audit,
-    editorial: state.editorial ?? { verdict: "unverified" }, sessionFiles: state.sessionFiles,
+    ideaAudit: state.ideaAudit, editorial: state.editorial ?? { verdict: "unverified" }, sessionFiles: state.sessionFiles,
     failure: state.failure, worker: state.worker };
 }
 function repairable(audit: ScopeAudit, findings: EditorialFinding[]) {
@@ -380,6 +382,8 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
   }
   return withStoryJobLock(job, "review-scope", async () => {
     await processAuthorUpdatesAtBoundary(job);
+    const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
+    await scheduleIdeasAtBoundary(job, "final-review");
     const file = fileFor(job);
     const archFile = join(dirname(job.worktreeRoot), "architecture.json");
     if (!existsSync(archFile)) throw new Error("Narrative review requires an approved architecture plan.");
@@ -423,6 +427,9 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
       await save(file, state);
     }
     const s = state;
+    const { auditIdeasUnderJobLock } = await import("./idea-placement.js");
+    s.ideaAudit = await auditIdeasUnderJobLock(job);
+    await save(file, s);
     const config = input.skillsSource
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
       : s.snapshot

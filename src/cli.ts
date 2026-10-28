@@ -47,6 +47,13 @@ Usage:
   pnpm dev job ideas eligibility --story /path/to/story --job draft-1
   pnpm dev job ideas context --story /path/to/story --job draft-1 --target arc.truth
   pnpm dev job ideas placement-context --story /path/to/story --job draft-1 --target event.reveal
+  pnpm dev job ideas plan --story /path/to/story --job draft-1
+  pnpm dev job ideas place --story /path/to/story --job draft-1 --id idea-abc --target authored-content.reveal --skills-source /path/to/noveltea-skills
+  pnpm dev job ideas audit --story /path/to/story --job draft-1
+  pnpm dev job ideas reverse --story /path/to/story --job draft-1
+  pnpm dev job ideas reassess --story /path/to/story --job draft-1 --id idea-abc
+  pnpm dev job ideas reassess --story /path/to/story --job draft-1 --id idea-abc --record --skills-source /path/to/noveltea-skills
+  pnpm dev job ideas relocate --story /path/to/story --job draft-1 --id idea-abc --target authored-content.alternative
   pnpm dev job author send --story /path/to/story --job draft-1 --file author-message.json
   pnpm dev job author inspect --story /path/to/story --job draft-1
   pnpm dev job author process --story /path/to/story --job draft-1
@@ -333,17 +340,36 @@ async function main(): Promise<void> {
     const args = process.argv.slice(4);
     const action = args.shift();
     if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
-    if (!["capture", "inspect", "eligibility", "context", "placement-context"].includes(action ?? "")) {
-      throw new Error("Expected job ideas capture|inspect|eligibility|context|placement-context.");
+    if (!["capture", "inspect", "eligibility", "context", "placement-context",
+      "plan", "place", "audit", "reassess", "relocate", "reverse"].includes(action ?? "")) {
+      throw new Error("Expected job ideas capture|inspect|eligibility|context|placement-context|plan|place|audit|reassess|relocate|reverse.");
     }
-    const values = parseJobOptions(args, "ideas", ["--story", "--job", "--file", "--target"]);
+    const values = parseJobOptions(args, "ideas", ["--story", "--job", "--file", "--target",
+      "--id", "--fixture", "--skills-source", "--validator-source", "--provider", "--model",
+      "--thinking", "--signed-evidence", "--record"], ["--fixture", "--record"]);
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job ideas requires --story and --job.");
     disableJobCloudTracing();
-    const { runIdeas } = await import("./ideas.js");
-    const result = await runIdeas({ story, job,
-      action: action as "capture" | "inspect" | "eligibility" | "context" | "placement-context",
-      file: values.get("--file"), target: values.get("--target") });
+    if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!))
+      throw new Error("Idea --thinking supports low or high.");
+    let result: unknown;
+    if (["plan", "place", "audit", "reassess", "relocate", "reverse"].includes(action!)) {
+      if (values.has("--file")) throw new Error("Only idea capture uses --file.");
+      const { runIdeaPlacement } = await import("./idea-placement.js");
+      result = await runIdeaPlacement({ story, job, action: action as
+        "plan" | "place" | "audit" | "reassess" | "relocate" | "reverse",
+        id: values.get("--id"), target: values.get("--target"), fixture: values.has("--fixture"),
+        record: values.has("--record"),
+        skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
+        provider: values.get("--provider"), model: values.get("--model"),
+        thinking: values.get("--thinking") as "low" | "high" | undefined,
+        signedEvidence: values.get("--signed-evidence") });
+    } else {
+      const { runIdeas } = await import("./ideas.js");
+      result = await runIdeas({ story, job,
+        action: action as "capture" | "inspect" | "eligibility" | "context" | "placement-context",
+        file: values.get("--file"), target: values.get("--target") });
+    }
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     return;
   }

@@ -897,6 +897,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     }
     const result = await graph.invoke({ receipt });
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
+    await scheduleIdeasAtBoundary(job, "interactive-work");
     return { ...output(job, result.receipt), authorUpdates };
   });
 }

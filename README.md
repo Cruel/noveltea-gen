@@ -429,7 +429,8 @@ paraphrase. The source and `original` preserve author wording. Optional
 `unresolvedPrerequisites` preserves free-text prerequisites that have no
 canonical ID yet; they block eligibility rather than being silently assumed
 fulfilled. The `lifecycle` starts `dormant`, with null activation/placement references
-and an empty placement history; #27 owns actual placement and reassessment.
+and an empty placement history. Placement and reassessment are handled by the
+separate, author-intent-aware #27 workflow below.
 
 A capture obtains the shared job writer lock, checks the trusted HEAD and
 clean worktree, then records a durable receipt **before** writing the idea.
@@ -460,12 +461,91 @@ The interfaces have deliberately different audiences:
 Existing Pi writing specialists are instructed not to read or search the
 reserved directory. Ordinary inspections (including grep/rg/git diff)
 remain available; the source-selection boundary and scoped context API
-are not a filesystem-level security sandbox. No automatic placement,
-canonical Event/Content creation, or deletion happens in #24. Incoming
-unsolicited author messages will be routed here by #25.
+are not a filesystem-level security sandbox. Capturing an idea never
+implicitly places it. Incoming unsolicited author messages are routed to
+this inbox by #25.
 
 Test with `pnpm exec tsx --test test/ideas.test.ts test/foundation.test.ts
 test/character-world.test.ts`.
+
+## Independent deferred-idea placement and reassessment (#27)
+
+The generator creates noncanonical, scheduler-only idea-placement task
+snapshots at completed architecture, Character/World, Event, Interactive,
+Composition and final-review boundaries (in `idea-placement-tasks.json` under
+the job state directory). Scheduling tracks eligibility and compares **all**
+relevant developed Event, Milestone or Authored Content targets rather than
+forcing the first match. Nothing in a normal craft writer's context receives
+the complete dormant inbox. An eligible idea with no suitable canonical
+placement remains deferred.
+
+```sh
+pnpm dev job ideas plan --story /path/to/story --job draft-1
+pnpm dev job ideas place --story /path/to/story --job draft-1 \\
+  --id the-bell-conversation --target authored-content.disclosure \\
+  --skills-source /path/to/noveltea-skills
+pnpm dev job ideas audit --story /path/to/story --job draft-1
+pnpm dev job ideas reverse --story /path/to/story --job draft-1
+pnpm dev job ideas reassess --story /path/to/story --job draft-1 \\
+  --id the-bell-conversation
+pnpm dev job ideas reassess --story /path/to/story --job draft-1 \\
+  --id the-bell-conversation --record --skills-source /path/to/noveltea-skills
+pnpm dev job ideas relocate --story /path/to/story --job draft-1 \\
+  --id the-bell-conversation --target authored-content.later
+```
+
+`plan` returns only IDs, eligibility, relevant breadth and competing canonical
+candidates. Dedicated `place` starts a pinned **existing** craft specialist
+(architecture, Event design or composition) on a single explicitly selected
+canonical target, then validates scoped structure/protected decisions and
+launches a separate, read-only `nt-narrative-review` Pi session to check the
+literal source against original author intent, protected wording, participants
+and semantic obligations. An integration is committed only after both gates
+pass. Exact protected dialogue is additionally checked byte-for-byte. `--fixture`
+provides a deterministic structural test of the same public workflow, but its
+output remains `integrated-editorial-unverified` and cannot satisfy a binding
+completion obligation. Blocked edits are left for manual reconciliation; no
+blind restart or author-branch merge occurs.
+
+Each integration and reassessment is stored as a new commit. The immutable
+original/source/requirements are preserved in `.story-inbox/ideas/*.yaml`
+(JSON-subset YAML), while `lifecycle.placements` records the current canonical
+IDs, candidate comparisons, rationale, Git predecessor, actual realization
+fingerprint, model evidence and historical review sessions. Immutable capture
+receipts and later placement receipts are checked against every Git ancestor,
+blob/path inventory and provenance trailer. `reverse` derives canonical
+record ID → inbox ID relationships from those histories, without introducing
+provenance keys into canonical frontmatter.
+
+`audit` rechecks current realization bytes and newly developed plausible
+locations. `reassess` proposes changes and impact; `--record` performs a new
+semantic review and commits a historical retained-placement entry. A real
+reviewer is required to mark that entry `pi` verified; a fixture cannot do so.
+The final scoped narrative review checks outstanding binding ideas, but
+unrelated partial-scope ideas remain deferred without failing the requested
+scope. Changed canonical text or newly developed alternatives invalidate stale
+fulfillment until reviewed again.
+
+`relocate` first returns `approval-required` with its precise
+`proposal` (SHA-256 of the current head, old/new ID and competing locations),
+plus affected paths. The caller must produce an offline **Ed25519-signed**
+`kind: decision`, `action: approved` payload bound to `workItemId:
+idea-relocate:<id>`, `verifiedHead`, and `changeId`/`proposalSha256` equal to
+that exact proposal; see `docs/author-signing.md`. Supply it using
+`--signed-evidence /path/to/signed-approval.json`. Only then may a bounded
+craft specialist edit both old and new realization records. The old occurrence
+is removed, the new one is validated and independently reviewed, and one
+commit records both canonical paths and the inbox's updated current IDs. The
+signed approval itself is retained and verified in historical placement receipts.
+
+Run `pnpm exec tsx --test test/idea-placement.test.ts` for deterministic
+full-CLI integration, relocation and tamper tests. To exercise real pinned Pi
+craft authorship and separate semantic review (model usage required):
+
+```sh
+NT_LIVE_IDEA_PLACEMENT=1 NT_PROVIDER=openai NT_MODEL=gpt-6-luna \\
+  NT_THINKING=low pnpm exec tsx --test test/idea-placement.test.ts
+```
 
 ## Live author messages and LangGraph approval interrupts (#25)
 

@@ -561,6 +561,8 @@ export async function runEventWorkItem(input: EventOptions) {
       .addEdge("validate_and_commit_event", END).compile();
     const result = await graph.invoke({ receipt });
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
+    await scheduleIdeasAtBoundary(job, "event-work");
     return { ...output(job, result.receipt), authorUpdates };
   });
 }

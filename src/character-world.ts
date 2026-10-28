@@ -675,6 +675,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     }
     const result = await graph.invoke({ receipt });
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
+    await scheduleIdeasAtBoundary(job, "character-world");
     return { ...output(job, result.receipt), authorUpdates };
   });
 }

@@ -635,6 +635,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       }).addEdge(START, "compose_and_review").addEdge("compose_and_review", END).compile();
     const result = await graph.invoke({ receipt: state });
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
+    await scheduleIdeasAtBoundary(job, "composition-work");
     return { ...output(job, result.receipt), authorUpdates };
   });
 }

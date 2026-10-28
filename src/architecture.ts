@@ -618,6 +618,8 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       .addEdge("validate_and_commit_architecture", END).compile();
     const result = await graph.invoke({ receipt: state });
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
+    await scheduleIdeasAtBoundary(job, "architecture");
     return { ...output(job, result.receipt), authorUpdates };
   };
   return alreadyLocked ? execute() : withStoryJobLock(job, "global-architecture", execute);
