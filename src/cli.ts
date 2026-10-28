@@ -23,6 +23,9 @@ interface CliOptions {
 const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
 
 Usage:
+  pnpm dev job generate start --story /path/to/story --job draft-1 --task "A bounded mystery" --contract scope.json
+  pnpm dev job generate resume --story /path/to/story --job draft-1
+  pnpm dev job generate inspect --story /path/to/story --job draft-1
   pnpm dev job start --story /path/to/story --job draft-1
   pnpm dev job validate --story /path/to/story --job draft-1
   pnpm dev job pi inspect --story /path/to/story --job draft-1
@@ -333,6 +336,30 @@ function parseJobOptions(
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "generate") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (action !== "start" && action !== "resume" && action !== "inspect")
+      throw new Error("Expected job generate start|resume|inspect.");
+    const values = parseJobOptions(args, "generate", ["--story", "--job", "--task", "--contract",
+      "--skills-source", "--validator-source", "--provider", "--model", "--fixture", "--pause-after"], ["--fixture"]);
+    const story = values.get("--story"), job = values.get("--job");
+    if (!story || !job) throw new Error("job generate requires --story and --job.");
+    disableJobCloudTracing();
+    const { runStoryGeneration, generationStages } = await import("./generation.js");
+    const pauseAfter = values.get("--pause-after") as typeof generationStages[number] | undefined;
+    if (pauseAfter && (!generationStages.includes(pauseAfter) || action === "inspect"))
+      throw new Error("--pause-after must name a generation stage and cannot be used with inspect.");
+    const { readFile } = await import("node:fs/promises");
+    const contract = values.has("--contract") ? JSON.parse(await readFile(values.get("--contract")!, "utf8")) : undefined;
+    const result = await runStoryGeneration({ story, job, action, contract, pauseAfter,
+      task: values.get("--task"), fixture: values.has("--fixture") ? true : undefined,
+      skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
+      provider: values.get("--provider"), model: values.get("--model") });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "pi") {
     const args = process.argv.slice(4);
     const action = args.shift();

@@ -97,7 +97,7 @@ async function persist(path: string, value: unknown) {
   await writeFile(tmp, JSON.stringify(value, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   await rename(tmp, path);
 }
-function parseContract(value: unknown): CompletionContract {
+export function parseContract(value: unknown): CompletionContract {
   const c = value as CompletionContract;
   const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === "string" && x.trim());
   if (!c || !["full-story", "partial"].includes(c.scope?.kind) ||

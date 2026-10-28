@@ -5,6 +5,7 @@ import { lstat, mkdir, readdir, readFile, rename, writeFile } from "node:fs/prom
 import { dirname, join } from "node:path";
 import { Annotation, Command, END, START, StateGraph, interrupt } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { captureIdeaUnderJobLock, reconcileCapturedIdeaUnderJobLock } from "./ideas.js";
@@ -403,6 +404,14 @@ function config(job: JobStartResult, id: string) {
   return { configurable: { thread_id: "author-update:" + job.threadId + ":" + id } };
 }
 async function processOne(job: JobStartResult, message: Message, response?: Resume) {
+  // This is an independently resumable graph, not a parent-checkpoint subgraph.
+  // Inherited Pregel internals otherwise redirect its SQLite checkpoint namespace
+  // and bubble its interrupt into the caller, breaking `job author resume`.
+  const parent = AsyncLocalStorageProviderSingleton.getRunnableConfig();
+  return AsyncLocalStorageProviderSingleton.runWithConfig({ callbacks: parent?.callbacks, tags: parent?.tags },
+    () => processOneIsolated(job, message, response));
+}
+async function processOneIsolated(job: JobStartResult, message: Message, response?: Resume) {
   const before = await loadReceipt(job, message);
   if (before.phase === "applied" || before.phase === "review-required") return before;
   // The approval side effect may have committed before the graph's interrupt

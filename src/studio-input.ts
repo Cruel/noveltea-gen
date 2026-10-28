@@ -1,36 +1,29 @@
 #!/usr/bin/env node
-import { openStoryProject } from "./project.js";
+import { readFile } from "node:fs/promises";
+import { startStoryJob } from "./job.js";
+import { parseGenerationContract } from "./generation.js";
 
-/** Generate fully scoped, deterministic Studio input state for one Story. */
+/** Prepare production Studio input without invoking a writer or creating a job. */
 async function main(args: string[]) {
-  let project: string | undefined;
-  let task: string | undefined;
-  let provider = "openai";
-  let model = "gpt-6-luna";
-  for (let i = 0; i < args.length; i += 2) {
-    const name = args[i];
-    const value = args[i + 1];
-    if (!value || !["--project", "--task", "--provider", "--model"].includes(name ?? "")) {
-      throw new Error("Usage: pnpm studio:input --project <existing-story-root> --task <task> [--provider <name>] [--model <name>]");
+  const values = new Map<string, string>();
+  for (let i = 0; i < args.length; i++) {
+    const name = args[i]!;
+    if (values.has(name)) throw new Error("Duplicate option: " + name);
+    if (name === "--fixture") { values.set(name, "true"); continue; }
+    const value = args[++i];
+    if (!value || value.startsWith("--") || !["--story", "--job", "--task", "--contract",
+      "--provider", "--model", "--skills-source", "--validator-source"].includes(name)) {
+      throw new Error("Usage: pnpm studio:input --story <existing-story> --job <id> --task <objective> --contract <json-file> [--fixture] [--skills-source <path>]");
     }
-    if (name === "--project") project = value;
-    if (name === "--task") task = value;
-    if (name === "--provider") provider = value;
-    if (name === "--model") model = value;
+    values.set(name, value);
   }
-  if (!project?.trim() || !task?.trim()) {
-    throw new Error("Studio input requires --project and --task.");
-  }
-  const selected = await openStoryProject(project);
-  process.stdout.write(JSON.stringify({
-    task, provider, model,
-    projectRoot: selected.root, projectId: selected.id,
-    executionMode: "pi", storyNote: "", tagline: "", handoff: null,
-    response: "", piSessionId: "", piSessionFile: "",
-    workerPiSessionId: "", workerPiSessionFile: "",
-    // Studio captures and persists the active skill snapshot when the graph starts.
-    skillSnapshot: null,
-  }, null, 2) + "\n");
+  const story = values.get("--story"), job = values.get("--job"), task = values.get("--task"), file = values.get("--contract");
+  if (!story || !job || !task?.trim() || !file) throw new Error("Studio input requires --story, --job, --task and --contract.");
+  const selected = await startStoryJob({ story, job }, false);
+  const contract = parseGenerationContract(JSON.parse(await readFile(file, "utf8")));
+  process.stdout.write(JSON.stringify({ request: { story: selected.storyRoot, job, task, contract,
+    fixture: values.has("--fixture"), provider: values.get("--provider"), model: values.get("--model"),
+    skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source") } }, null, 2) + "\n");
 }
 main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`noveltea-gen studio input: ${error instanceof Error ? error.message : "error"}\n`);

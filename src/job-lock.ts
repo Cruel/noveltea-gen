@@ -46,9 +46,18 @@ function isAlive(pid: number): boolean {
 export async function withStoryJobLock<T>(
   job: JobStartResult, workItem: string, run: () => Promise<T>,
 ): Promise<T> {
+  return withJobLease(job, workItem, ".story-job", run);
+}
+
+/** Serialize parent checkpoint invocations without nesting the specialist writer lock. */
+export async function withStoryGenerationLock<T>(job: JobStartResult, run: () => Promise<T>): Promise<T> {
+  return withJobLease(job, "generation", ".story-generation", run);
+}
+
+async function withJobLease<T>(job: JobStartResult, workItem: string, prefix: string, run: () => Promise<T>): Promise<T> {
   const jobRoot = dirname(job.worktreeRoot);
-  const lock = join(jobRoot, ".story-job-running");
-  const reclaim = join(jobRoot, ".story-job-reclaim");
+  const lock = join(jobRoot, prefix + "-running");
+  const reclaim = join(jobRoot, prefix + "-reclaim");
   const owner: Owner = {
     version: 1, jobId: job.jobId, pid: process.pid,
     host: hostname(), nonce: randomUUID(), workItem,
@@ -71,7 +80,7 @@ export async function withStoryJobLock<T>(
       }
       // The stale owner is saved as an audit artifact; two would-be reclaimers
       // cannot both acquire the new lock because the guard is a mkdir.
-      await rename(lock, join(jobRoot, `.story-job-stale-${previous.nonce}`));
+      await rename(lock, join(jobRoot, `${prefix}-stale-${previous.nonce}`));
       await mkdir(lock);
     } finally {
       if (claimed) await rmdir(reclaim);

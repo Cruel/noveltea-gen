@@ -1,6 +1,6 @@
 # NovelTea-gen
 
-A local-first TypeScript/pnpm proof of concept integrating a Pi coordinator with a compiled LangGraph.js workflow. This version targets an explicit Story project root and demonstrates a Pi-initiated LangGraph handoff to one of two isolated worker types (#4–#5), with SQLite checkpoint/restart recovery (#6), controlled NovelTea skill loading (#7–#9), and local/opt-in hosted nested tracing (#10).
+A local-first TypeScript/pnpm Story generator using LangGraph.js to coordinate Git-backed Story jobs and pinned Pi specialists. The production `job generate` entrypoint executes one explicitly scoped Milestone through independent review. The original `run` note/tagline routing proof of concept remains separate, with its own SQLite checkpoints and tracing.
 
 ## Setup
 
@@ -27,6 +27,113 @@ pnpm studio                  # Local graph visualization; no LangSmith API key
 ```
 
 Look in **`.local/traces/*.jsonl`** for saved local traces. Each `--trace-local` run reports its exact `localTrace` path; `pnpm trace:show --file <path>` opens a specific saved run. Other important state lives outside the Story project: checkpoints under `~/.local/state/noveltea-gen/<project-id>/`, real Pi sessions under the Pi agent session directory, and pinned skills under `~/.cache/noveltea-gen/skill-snapshots/`. Local configuration and optional LangSmith credentials live in the repo's ignored `.local/` directory. Consult **`AGENTS.md`** for the full storage map and overrides. Cloud tracing is off unless explicitly enabled via `--trace`; `--trace-local` does not upload traces. Real Pi runs may consume model usage, so use `--fixture` for deterministic graph checks.
+
+## Checkpointed single-Milestone Story generation (#32)
+
+Start a Git-backed job once, then give the production parent graph an explicit
+objective and completion contract. You do **not** need to invoke each specialist:
+
+```sh
+pnpm dev job start --story /path/to/existing/repo/story --job draft-1
+pnpm dev job generate start --story /path/to/existing/repo/story --job draft-1 \
+  --task "Develop the missing witness mystery; invent unspecified details" \
+  --contract ./scope.json --skills-source /path/to/noveltea-skills
+pnpm dev job generate inspect --story /path/to/existing/repo/story --job draft-1
+pnpm dev job generate resume --story /path/to/existing/repo/story --job draft-1
+```
+
+`scope.json` uses the existing architecture completion contract, for example:
+
+```json
+{
+  "scope": {
+    "kind": "partial", "depth": "composition",
+    "targets": ["arc.truth", "milestone.disclosure"],
+    "branches": ["protect", "challenge"]
+  },
+  "constraints": ["The player can protect or challenge the witness"],
+  "envelope": {
+    "presentation": "Dialogue-led visual novel",
+    "hardLimits": [], "preferences": []
+  }
+}
+```
+
+This first production scheduler requires **exactly one Milestone and at most one
+Arc**, not full-Story or multi-Milestone scheduling. It runs Creative Direction,
+architecture, World/Character foundations, Event design, Choice/Puzzle design,
+composition, then independent requested-scope review. `architecture` and
+`interactive` depths omit later authoring stages, but still request independent
+scope assessment; a shallower request is not a promise that all review obligations
+can be satisfied. No iterative whole-Story improvement or automatic integration is
+performed. Canonical Story files remain the direct context source until #22; no
+Context Manifest or dormant author-inbox content is added to ordinary writers.
+
+`start` pins the objective, contract, fixture/Pi selection and explicit model/source
+options. `resume` accepts no replacement inputs; it uses that same request. Existing
+work-item receipts retain their own stronger brief/model/authorization checks.
+A changed or missing pinned architecture plan blocks the old run rather than
+silently adopting new authorization. Scope changes use the separate signed
+architecture/revision procedures; this bounded parent does not automatically
+reschedule changed scope. It also does not automatically answer required author
+questions or approve protected decisions.
+
+The actual parent StateGraph has `schedule`, `author_update_intake`,
+`specialist_dispatch`, `verify_committed_work`, and `completion_decision` nodes.
+Per-job `generation.sqlite` lives beside `job.json`, under the effective
+`NT_STATE_DIR`/XDG job state directory, with thread `<job-thread>:generation`.
+Inspection returns the pinned request, completed stage/head evidence, next stage,
+checkpoint location and the existing source-linked job report. The checkpoint is
+private operational state, not Story canon. A separate crash-reclaimable parent
+lease serializes CLI continuations; every writer still uses the existing shared
+Story writer lock. No checkpoint is assumed to atomically commit Git or Pi effects.
+
+To exercise cross-process resume, use `--pause-after foundation` (or
+`architecture`, `foundations`, `event`, `interactive`, `composition`, `review`) on
+start or resume. Every continuation re-enters the safe-boundary intake and uses
+saved results or the current specialist's receipt/recovery API before advancing.
+A commit made before receipt/checkpoint publication is reconciled by the original
+specialist, not authored again. Interrupted writers, dirty worktrees and unexpected
+HEADs preserve edits/transcripts and block for the existing manual reconciliation
+procedures. Author `paused`/`cancelled` controls, pending questions/approvals, and
+cumulative Pi budgets stop downstream dispatch. Use `job author resume` with the
+exact typed response (and signed evidence where required), or explicitly raise the
+job's budget before `generate resume`. Cancellation is not released by resume.
+
+A run reports `completed` only when the existing current-scope report confirms
+independent **real Pi** editorial completion. `--fixture` runs all deterministic
+specialists and real Git/validator gates, but ends `blocked` with
+`editorial-unverified`, never literary success. Other blocks include a reason and
+retain the next stage for inspection. The author's original checkout is untouched.
+
+**Studio:** `pnpm studio` registers only **`story_generation`**, exported from
+`src/studio.ts`. The old note/tagline prototype is no longer registered. For a fresh
+disposable job, Studio input is `{"request":{"story":"/absolute/story",
+"job":"draft-1","task":"Your objective","contract":{...},"fixture":true,
+"skillsSource":"/absolute/noveltea-skills"}}`, using the full contract above.
+Studio owns its server checkpoints; CLI `generate resume` uses the per-job SQLite
+store, not Studio's thread. Use one execution surface per job, no concurrent
+Studio/CLI runs, and the CLI for tested process-restart recovery. Studio resume
+must retain the saved request/cursor/completed stages; never reset an interrupted
+writer with a fresh Studio thread. Both surfaces invoke the same production graph
+and existing specialist APIs, not the note/tagline graph. Hosted tracing remains
+an independent opt-in (`NT_STUDIO_TRACE=1`); ordinary CLI generation disables it.
+
+Verification (canonical sibling skills checkout required for fixtures):
+
+```sh
+pnpm exec tsx --test test/generation.test.ts
+# Explicit opt-in: consumes model usage and can truthfully finish blocked.
+NT_LIVE_GENERATION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
+  NT_PROVIDER=openai NT_MODEL=gpt-6-luna NT_KEEP_FAILED_LIVE=1 \
+  pnpm exec tsx --test --test-name-pattern='opt-in real Pi single-Milestone' test/generation.test.ts
+```
+
+The live test verifies actual pinned discovery-skill reads and Markdown editing,
+then resumes the parent in a new process and checks its truthful outcome and author
+checkout isolation. With `NT_KEEP_FAILED_LIVE=1`, disposable evidence is preserved
+at the printed path (including on success). Fixture results alone certify neither
+real skill invocation nor creative quality.
 
 ## Pi context reuse, pinned model policy and resumable budgets (#28)
 
@@ -162,7 +269,7 @@ are never opened.
 This ticket establishes the Git job boundary only. The older `run`
 LangGraph/Pi proof of concept below still operates directly on its explicit
 `--project` directory, and does **not** automatically start or attach a
-Git-backed job. Later Story-orchestration tickets will consume this durable
+Git-backed job. The production `job generate` parent consumes this durable
 job worktree and thread identity. Do not treat `job start` as a completed
 narrative-generation run.
 
@@ -1427,17 +1534,20 @@ The live test runs two separate disposable Story projects whose AGENTS.md files 
 pnpm studio
 ```
 
-Open the Studio URL printed by the server (typically `https://smith.langchain.com/studio?baseUrl=http://localhost:2024`). The local server exposes the graph named `noveltea`; its actual nodes are `pi_coordinator`, `story_note_worker`, `direct_tagline_worker` and `pi_continuation`. You can inspect node transitions, checkpoints and state locally **without a LangSmith API key**. Studio's browser UI is hosted on LangSmith, but the graph execution and checkpoint data are local; do not confuse opening that UI with opting in to hosted trace uploads.
+Open the Studio URL printed by the server (typically `https://smith.langchain.com/studio?baseUrl=http://localhost:2024`). The server exposes the production **`story_generation`** graph from `src/studio.ts`, not the old note/tagline prototype. You can inspect scheduling, author intake, specialist dispatch, verification and completion nodes locally **without a LangSmith API key**. Studio's browser UI is hosted on LangSmith, but graph execution and checkpoint data are local; opening the UI does not opt in to hosted trace uploads.
 
-Select an existing Story root. Generate the *full* State JSON to paste into Studio's input panel:
+Prepare an existing Git-backed job and generate input for a fresh Studio thread:
 
 ```sh
-pnpm studio:input --project ./scratch-story --task "Invent a mystery premise"
+pnpm dev job start --story /path/to/story --job studio-draft
+pnpm studio:input --story /path/to/story --job studio-draft \
+  --task "Develop one mystery Milestone" --contract ./scope.json \
+  --skills-source /path/to/noveltea-skills --fixture
 ```
 
-The helper emits canonical `projectRoot`/`projectId`, model choice and empty initial graph fields. It emits a null skill snapshot: at each **actual Studio graph invocation**, the server captures the current skill checkout, pins it for Pi, and writes that same snapshot into graph state and trace provenance. A server restart is not necessary after skill source changes. The helper does not invoke a model, create a Story or capture a skill snapshot. Optional `--provider` and `--model` override the defaults. The Story directory itself must exist. Pi's login still supplies model credentials; **LangSmith credentials are not required for local Studio**. For CLI-generated checkpoints and project-scoped Pi JSONL histories, use `pnpm dev run --project ... --thread ... --pause-after ...` and `--resume` as documented above. The Studio server uses its own local development graph state, not the CLI's SQLite thread database, while Pi histories remain project-scoped.
+The helper validates the one-Milestone contract and existing job identity, and emits the production `request` object. It does not create a job, invoke a model or edit Story files. Omit `--fixture` to opt into real Pi; optional `--provider` and `--model` override defaults. Specialists pin their own skills and transcripts through the same work-item APIs used by CLI generation.
 
-**Studio limits:** This is an inspection proof of concept, not a multi-user execution server. Run only one Studio conversation at a time; it rejects overlapping executions. Start a fresh run after failures, and use the CLI for tested cross-process checkpoint/restart recovery. Studio doesn't provide cross-process recovery of an in-progress Pi SDK session. The standalone authoring demo (`demo-story`) is not the Studio graph and has its own stricter Story-write permissions.
+**Studio limits:** Use only one execution surface/thread per job. Studio owns its development-server checkpoints, separate from CLI `generation.sqlite`; use `job generate` for tested durable CLI restart/reconciliation. Never start a fresh thread to overwrite interrupted specialist work. See the production generation section for safe-boundary controls, resume and preserved crash evidence. Legacy `run`/`demo-story` CLI commands remain available, but are not Studio's registered graph.
 
 **Hosted trace opt-in:** Cloud tracing is **off by default**, even when the shell already has `LANGSMITH_TRACING`, `LANGCHAIN_TRACING_V2` or `TRACE_TO_LANGSMITH` set. No LangSmith API key is needed for normal CLI, fixtures, or local Studio use. Optionally store tracing-only credentials in the gitignored `.local/langsmith.env` (restrict permissions to `0600`):
 

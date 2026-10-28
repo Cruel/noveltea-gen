@@ -12,7 +12,7 @@ import { previewStoryMerge } from "./merge-preview.js";
 type Outcome = "completed" | "paused" | "blocked" | "failed";
 type IntegrationStatus = "mergeable" | "conflicts" | "not assessed";
 type Json = Record<string, unknown>;
-interface WorkItemStatus {
+export interface WorkItemStatus {
   id: string; kind: string; status: string; targets: string[];
   commitSha?: string; reason?: string; receipt: string;
 }
