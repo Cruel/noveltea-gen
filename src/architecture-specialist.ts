@@ -63,6 +63,8 @@ export async function authorArchitecture(
       "Read the following pinned skill instructions using the read tool before writing:\n" +
       REQUIRED.map(path => join(snapshot.path, "skills", path)).join("\n") +
       "\nRead the actual canonical Creative Direction and any relevant existing Story records. " +
+      "Do not read or search the noncanonical .story-inbox/ideas directory (including via git grep/show or rg --hidden); " +
+      "dormant author concepts and dialogue must not influence early architecture. Only use explicitly supplied scoped constraints. " +
       "Follow nt-story-architecture and nt-catalog. Do not invent an alternative narrative schema. " +
       "AUTHOR actual Arc and Milestone Markdown inside the Story root using ordinary write/edit tools. " +
       "Only write arcs/*.md and milestones/*.md; do not edit Creative Direction, Events, other records, or project files. " +

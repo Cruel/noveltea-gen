@@ -34,6 +34,11 @@ Usage:
   pnpm dev job foundations run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job foundations inspect --story /path/to/story --job draft-1
   pnpm dev job foundations reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
+  pnpm dev job ideas capture --story /path/to/story --job draft-1 --file idea.json
+  pnpm dev job ideas inspect --story /path/to/story --job draft-1
+  pnpm dev job ideas eligibility --story /path/to/story --job draft-1
+  pnpm dev job ideas context --story /path/to/story --job draft-1 --target arc.truth
+  pnpm dev job ideas placement-context --story /path/to/story --job draft-1 --target event.reveal
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --signed-evidence /path/to/offline-signed-plan.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
@@ -83,6 +88,15 @@ Job foundations (Character and World foundations after architecture):
   --validator-source <path>  Canonical Story validator checkout (first run)
   --provider, --model      Real Pi specialist model (default openai/gpt-6-luna)
   --fixture                Deterministic test adapter, not live Pi evidence
+
+Job ideas (deferred, noncanonical author material):
+  capture             Persist exact author intent to .story-inbox/ideas/<id>.yaml in a verified Git commit
+  inspect             Author-only full inbox inspection (never a worker context)
+  eligibility         Scheduler-only IDs, counts, prerequisites and reasons (no source/wording)
+  context             Ordinary worker: only explicitly authorized constraints for one canonical target
+  placement-context   Dedicated future placement worker: eligible in-scope material at required depth
+  --file <json>       Capture input preserving source, wording, binding requirements, scope and prerequisites
+  --target <id>       Narrow canonical Arc/Milestone/Event ID; required for context operations
 
 Job foundation:
   --inspect                Inspect saved writer/crash state without running the specialist
@@ -198,6 +212,34 @@ function parseArgs(argv: string[]): CliOptions | null {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "ideas") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (!["capture", "inspect", "eligibility", "context", "placement-context"].includes(action ?? "")) {
+      throw new Error("Expected job ideas capture|inspect|eligibility|context|placement-context.");
+    }
+    const allowed = new Set(["--story", "--job", "--file", "--target"]);
+    const values = new Map<string, string>();
+    while (args.length) {
+      const flag = args.shift()!;
+      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate ideas option: " + flag);
+      const value = args.shift();
+      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing ideas option value: " + flag);
+      values.set(flag, value);
+    }
+    const story = values.get("--story"), job = values.get("--job");
+    if (!story || !job) throw new Error("job ideas requires --story and --job.");
+    process.env.LANGSMITH_TRACING = "false";
+    process.env.LANGCHAIN_TRACING_V2 = "false";
+    process.env.TRACE_TO_LANGSMITH = "false";
+    const { runIdeas } = await import("./ideas.js");
+    const result = await runIdeas({ story, job,
+      action: action as "capture" | "inspect" | "eligibility" | "context" | "placement-context",
+      file: values.get("--file"), target: values.get("--target") });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "foundations") {
     const args = process.argv.slice(4);
     const action = args.shift();

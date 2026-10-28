@@ -361,6 +361,100 @@ Unsigned CLI assertions and model claims are not authorization.
 Test the public interface with
 `pnpm exec tsx --test test/architecture.test.ts`.
 
+## Deferred author idea inbox (#24)
+
+Deferred Event concepts, conversations, exact dialogue and narrative anchors are **not**
+canonical Story records. They live as one Git-tracked YAML 1.2 file per idea
+under the reserved `.story-inbox/ideas/<stable-id>.yaml` path within the
+**job worktree's Story root**, not in the disposable `.noveltea` cache.
+The files use JSON formatting (a strict, valid subset of YAML 1.2) so literal
+dialogue and individual requirements survive serialization without loss.
+An author's normal checkout is not altered.
+
+Capture author material explicitly during initial onboarding (after `job
+start`, before `job foundation`) or at a clean, verified continuation boundary:
+
+```sh
+pnpm dev job ideas capture --story /path/to/story --job draft-1 --file ./idea.json
+pnpm dev job ideas inspect --story /path/to/story --job draft-1
+pnpm dev job ideas eligibility --story /path/to/story --job draft-1
+pnpm dev job ideas context --story /path/to/story --job draft-1 --target arc.truth
+pnpm dev job ideas placement-context --story /path/to/story --job draft-1 --target event.reveal
+```
+
+The `--file` contains a JSON object; for example:
+
+```json
+{
+  "id": "the-bell-conversation",
+  "kind": "exact-dialogue",
+  "source": { "kind": "author-onboarding", "reference": "notebook p. 7" },
+  "original": "Mara: \"No one remembers the bell.\"",
+  "requirements": {
+    "meaning": [{ "text": "Mara's confession changes trust", "binding": true }],
+    "wording": [{ "text": "No one remembers the bell.", "binding": true }],
+    "participants": [{ "text": "character.mara", "binding": true }]
+  },
+  "identities": { "known": ["character.mara"], "unresolved": ["silent witness"] },
+  "prerequisites": ["milestone.disclosure"],
+  "placement": {
+    "scopeIds": ["arc.truth"],
+    "flexible": true,
+    "earliest": "event",
+    "minRelevantEvents": 3,
+    "minRelevantMilestones": 2
+  },
+  "upstreamConstraints": [
+    { "text": "Keep Mara present in the truth arc", "targets": ["arc.truth"], "authorized": true }
+  ]
+}
+```
+
+The optional ID is a safe slug; when omitted, a content-addressed ID is
+derived from the capture request. Distinct meaning/wording/participant
+requirements remain **individually binding**, not collapsed into a broad
+paraphrase. The source and `original` preserve author wording. Optional
+`unresolvedPrerequisites` preserves free-text prerequisites that have no
+canonical ID yet; they block eligibility rather than being silently assumed
+fulfilled. The `lifecycle` starts `dormant`, with null activation/placement references
+and an empty placement history; #27 owns actual placement and reassessment.
+
+A capture obtains the shared job writer lock, checks the trusted HEAD and
+clean worktree, then records a durable receipt **before** writing the idea.
+The only new Git path in its commit is that idea's YAML, with exact blob
+hash and provenance trailers; commit recovery checks parent, path, hash
+and trailers. Replaying the same capture returns its original commit,
+even across process restart; a conflicting stable ID, unexpected Git
+changes or an interrupted other writer blocks without overwriting author
+work. A capture between architecture and Character/World foundations
+advances the verified starting HEAD without changing the authorized plan.
+
+The interfaces have deliberately different audiences:
+
+- `ideas inspect` returns the complete committed author inbox **only** for
+  direct author inspection; do not forward it to Story writing agents.
+- `ideas eligibility` returns *IDs, depth, relevant breadth and unmet
+  prerequisites*, never original prose. Only declared scope/actual record
+  references count. Dialogue requires at least three relevant Events and
+  two relevant Milestones, not just an opening Event. Partial Story scopes
+  may leave ideas dormant indefinitely.
+- `ideas context --target` returns **only** explicitly authorized,
+  target-scoped upstream constraints, never unplaced original wording.
+- `ideas placement-context --target` is reserved for a **dedicated**
+  placement specialist (#27), and returns original content only when the
+  idea is eligible and the selected canonical target has the correct depth
+  and Arc/Milestone relevance.
+
+Existing Pi writing specialists are instructed not to read or search the
+reserved directory. Ordinary inspections (including grep/rg/git diff)
+remain available; the source-selection boundary and scoped context API
+are not a filesystem-level security sandbox. No automatic placement,
+canonical Event/Content creation, or deletion happens in #24. Incoming
+unsolicited author messages will be routed here by #25.
+
+Test with `pnpm exec tsx --test test/ideas.test.ts test/foundation.test.ts
+test/character-world.test.ts`.
+
 ## Canonical Character and World foundations (#18)
 
 After `job architecture run` has committed a verified Arc/Milestone cluster,

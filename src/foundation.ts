@@ -33,6 +33,8 @@ interface FoundationState {
   version: 1;
   jobId: string;
   baseSha: string;
+  /** Trusted HEAD when this work item began (may include inbox capture commits). */
+  workHead?: string;
   mode: Mode;
   workerMode: "pi" | "fixture";
   provider: string;
@@ -213,6 +215,9 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
       "\nFollow the pinned nt-story-discovery and nt-catalog instructions. " +
       `Only edit the canonical Story file ${target}, within cwd ${project.root}. ` +
+      "Never read or search .story-inbox/ideas or include dormant author ideas in any Story draft. " +
+      "That reserved Git-tracked directory is noncanonical and author-only; avoid it even with rg --hidden, git grep, git show or broad filesystem scans. " +
+      "Use only narrowly scoped author constraints supplied explicitly for this assignment. " +
       "Never run git add, commit, reset, checkout, or alter Git history. Do not touch other files or any NovelTea engine records. " +
       "You may inspect with grep, rg, Git diff, status and history. " +
       "Preserve every existing user-protected decision verbatim; do not invent author approvals. " +
@@ -294,6 +299,7 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
       "Actually read the pinned nt-story-discovery and nt-catalog guidance and references using read:\n" +
       REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
       "\nInspect the existing Creative Direction if relevant. Following the discovery guidance, " +
+      "Do not read/search .story-inbox/ideas: deferred narrative ideas are author-only until a separate placement stage. " +
       "ask the author all currently answerable consequential creative, branching and production questions " +
       "in one concise round. State that partial answers and delegation of remaining choices are allowed. " +
       "Do not falsely treat a question or proposed decision as approved. " +
@@ -348,10 +354,27 @@ async function existingState(job: JobStartResult): Promise<FoundationState | und
   }
   return state;
 }
+function workHead(state: FoundationState) { return state.workHead ?? state.baseSha; }
+async function advanceInboxVerifiedHead(job: JobStartResult, state: FoundationState, commit: string) {
+  const file = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  if (!existsSync(file)) return; // Older foundation-first jobs have no shared marker.
+  const saved = JSON.parse(await readFile(file, "utf8")) as { version?: number; jobId?: string; headSha?: string };
+  if (saved.version !== 1 || saved.jobId !== job.jobId ||
+      (saved.headSha !== workHead(state) && saved.headSha !== commit)) {
+    throw new Error("Verified HEAD marker differs from the foundation's original trusted predecessor.");
+  }
+  if (saved.headSha !== commit) {
+    await mkdir(dirname(file), { recursive: true });
+    const tmp = file + "." + randomUUID() + ".tmp";
+    await writeFile(tmp, JSON.stringify({ version: 1, jobId: job.jobId, headSha: commit,
+      workItemId: WORK_ITEM }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    await rename(tmp, file);
+  }
+}
 function recoveryCommit(job: JobStartResult, state: FoundationState): string | undefined {
   const head = git(job, "rev-parse", "HEAD");
-  if (head === job.baseSha) return undefined;
-  if (git(job, "rev-parse", "HEAD^") !== job.baseSha ||
+  if (head === workHead(state)) return undefined;
+  if (git(job, "rev-parse", "HEAD^") !== workHead(state) ||
       !git(job, "log", "-1", "--format=%B").includes(`NovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${WORK_ITEM}`) ||
       (state.stage !== "committed" &&
         (!git(job, "log", "-1", "--format=%B").split("\n").includes(`NovelTea-Foundation: ${state.authoredSha256}`) ||
@@ -393,7 +416,7 @@ function output(job: JobStartResult, state: FoundationState) {
     jobId: job.jobId, workItemId: WORK_ITEM, mode: state.mode,
     workerMode: state.workerMode, provider: state.provider, model: state.model,
     branch: job.branch,
-    baseSha: job.baseSha, headSha: state.commitSha ?? job.baseSha,
+    baseSha: job.baseSha, headSha: state.commitSha ?? workHead(state),
     worktreeStoryRoot: job.worktreeStoryRoot, target: state.target,
     commitSha: state.commitSha, validation: state.validation,
     skillSnapshot: { id: state.snapshot.id, commit: state.snapshot.commit },
@@ -416,14 +439,15 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       if (input.inspect || input.recoveryDigest) throw new Error("Foundation has no saved work item to inspect or reconcile.");
       if (!input.task?.trim()) throw new Error("New foundation work item requires --task.");
       if (input.authorInput) throw new Error("Start collaborative discovery before supplying --author-input.");
-      assertHead(job, job.baseSha);
+      const verified = await trustedHead(job);
+      assertHead(job, verified);
       if (changedPaths(job).length) throw new Error("Job worktree contains unexpected preexisting changes.");
       const config = await loadSkillConfig();
       const snapshot = await createSkillSnapshot({ ...config, novelteaSkills: input.skillsSource ?? config.novelteaSkills,
         discovery: "explicit-only", requiredSkills: ["nt-story-discovery", "nt-catalog"] });
       if (!snapshot) throw new Error("Foundation generation requires configured pinned NovelTea skills (--skills-source or .local/config.json).");
       state = {
-        version: 1, jobId: job.jobId, baseSha: job.baseSha,
+        version: 1, jobId: job.jobId, baseSha: job.baseSha, workHead: verified,
         task: input.task, envelope: input.envelope ?? "",
         mode: input.mode ?? "autonomous", snapshot,
         workerMode: input.fixture ? "fixture" : "pi",
@@ -447,7 +471,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       const changes = gitRaw(job, "status", "--porcelain=v1", "-z", "--untracked-files=all")
         .split("\0").filter(Boolean);
       let candidate: { target: string; digest: string } | undefined;
-      if (state.stage === "writing" && state.writerStarted && actualHead === job.baseSha && state.target) {
+      if (state.stage === "writing" && state.writerStarted && actualHead === workHead(state) && state.target) {
         try {
           assertOnlyTarget(job, state.target);
           await assertSafeTarget(job, state.target);
@@ -469,7 +493,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         }
       } else if (state.stage === "writing" && state.writerStarted) {
         blockedReason = "Interrupted writer: inspect preserved Creative Direction and acknowledge its exact digest; no automatic replay.";
-      } else if (actualHead !== job.baseSha || changes.length) {
+      } else if (actualHead !== workHead(state) || changes.length) {
         blockedReason = "Foundation baseline has unexpected Git history or worktree edits.";
       }
       return {
@@ -483,7 +507,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       if (!state.questions) {
         const discovery = await discoverQuestions(job, state,
           state.provider, state.model, state.workerMode === "fixture");
-        assertHead(job, job.baseSha);
+        assertHead(job, workHead(state));
         if (changedPaths(job).length) throw new Error("Discovery unexpectedly modified the job worktree.");
         Object.assign(state, discovery);
         await saveState(stateFile(job), state);
@@ -506,7 +530,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
           !/^[a-f0-9]{64}$/.test(input.recoveryDigest)) {
         throw new Error("Foundation reconciliation requires an interrupted writing work item and the exact reviewed --reconcile-digest.");
       }
-      assertHead(job, job.baseSha);
+      assertHead(job, workHead(state));
       assertOnlyTarget(job, target);
       await assertSafeTarget(job, target);
       if (state.workerMode === "pi") {
@@ -544,6 +568,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
     }
     if (state.stage === "committed") {
       if (recovered !== state.commitSha) throw new Error("Saved foundation commit differs from job HEAD.");
+      await advanceInboxVerifiedHead(job, state, state.commitSha!);
       return output(job, state);
     }
     state = await executeFoundationGraph(job, state, input, recovered);
@@ -565,7 +590,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
     .addNode("write_foundation", async ({ foundation, recovered }) => {
       if (recovered) return {};
       const target = foundation.target!;
-      assertHead(job, job.baseSha);
+      assertHead(job, workHead(foundation));
       if (foundation.writerStarted) {
         if (!foundation.authoredSha256) {
           throw new Error("Interrupted foundation writer; preserve unfinished files and original Pi session. Never replay writer tools.");
@@ -595,7 +620,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
           });
       const next = { ...foundation, ...authored, authoredSha256: await foundationDigest(job, target) };
       await saveState(stateFile(job), next);
-      assertHead(job, job.baseSha);
+      assertHead(job, workHead(foundation));
       assertOnlyTarget(job, target);
       await assertSafeTarget(job, target);
       return { foundation: next };
@@ -610,7 +635,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
         throw new Error("Foundation bytes differ from the exact authored work item; commit refused.");
       }
       if (!recovered) {
-        assertHead(job, job.baseSha);
+        assertHead(job, workHead(foundation));
         git(job, "add", "--", storyPath(job, target));
         if (git(job, "diff", "--cached", "--name-only") !== storyPath(job, target)) {
           throw new Error("Git staging contains unexpected files; commit refused.");
@@ -629,6 +654,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
         commitSha: git(job, "rev-parse", "HEAD"),
       };
       await saveState(stateFile(job), next);
+      await advanceInboxVerifiedHead(job, next, next.commitSha!);
       return { foundation: next };
     })
     .addEdge(START, "write_foundation")

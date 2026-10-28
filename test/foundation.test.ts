@@ -168,6 +168,41 @@ test("public CLI authors a new empty Story in its job branch, without writing so
   assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "1");
 });
 
+test("onboarding idea commits remain independent and foundation continues from their verified HEAD", () => {
+  const { repo, story, baseline } = repository("inbox-before-foundation");
+  const job = start(story, "inbox-before-foundation");
+  const input = join(root, "onboarding-idea.json");
+  writeFileSync(input, JSON.stringify({
+    kind: "conversation",
+    source: { kind: "author-onboarding", reference: "first conversation" },
+    original: "The archivist and witness must have a confrontation.",
+    requirements: { meaning: [{ text: "Trust is broken", binding: true }], wording: [], participants: [] },
+    identities: { known: [], unresolved: ["witness"] },
+    prerequisites: [], placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  const captured = launch(["ideas", "capture", "--story", story, "--job", "first", "--file", input], "inbox-before-foundation");
+  assert.equal(captured.status, 0, captured.stderr);
+  const idea = JSON.parse(captured.stdout);
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "1");
+  const first = foundation(story, "inbox-before-foundation", "--task", "A story of contested memories");
+  assert.equal(first.result.status, 0, first.result.stderr);
+  assert.equal(first.data.status, "committed");
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "2");
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD^"), idea.commitSha);
+  assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
+  const repeated = foundation(story, "inbox-before-foundation");
+  assert.equal(repeated.result.status, 0, repeated.result.stderr);
+  assert.equal(repeated.data.commitSha, first.data.commitSha);
+  const secondIdea = { ...JSON.parse(readFileSync(input, "utf8")),
+    source: { kind: "author-continuation", reference: "new author note" } };
+  writeFileSync(input, JSON.stringify(secondIdea));
+  const continuation = launch(["ideas", "capture", "--story", story, "--job", "first", "--file", input], "inbox-before-foundation");
+  assert.equal(continuation.status, 0, continuation.stderr);
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "3");
+  assert.equal(foundation(story, "inbox-before-foundation").result.status, 0);
+});
+
 test("existing protected foundation is preserved and validated against the trusted base", () => {
   const { repo, story, baseline } = repository("existing", true);
   const job = start(story, "existing");
