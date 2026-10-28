@@ -60,6 +60,58 @@ Snapshots are stored at `~/.cache/noveltea-gen/skill-snapshots/<full-sha256>/`, 
 
 LangGraph checkpoints persist the snapshot identifier, full digest and source Git commit, branch (or detached HEAD) and dirty status. The selected snapshot is also included in CLI run output. On every resumed run, the pinned cache directory is validated **before** a Pi agent is restored. NovelTea-skills discovery and the restricted skill reader use that directory; changed, pulled or even deleted source checkouts have no effect on resumed skill contents. A new workflow captures the current live checkout instead. Snapshot metadata can appear in graph trace metadata when tracing is explicitly enabled; **skill contents are not uploaded** as snapshot metadata. Skills that the model actually reads can still appear in Pi transcript/model conversations, as expected.
 
+## Git-backed Story job setup (#13)
+
+Use the separate public job entry point to establish a durable, isolated Git
+baseline before future Story-generation work:
+
+```sh
+pnpm dev job start --story /path/to/existing-git-repo/story --job draft-1
+# Repeat the identical command to re-open the same job and worktree.
+```
+
+`--story` must name an **existing directory** within an **existing Git
+worktree** with a committed HEAD. The directory can be empty, or contain
+previously committed canonical Story records. Paths are canonicalized, so
+symlink aliases refer to the same Story. No Git initialization, staging,
+committing, stashing or author-branch checkout takes place.
+
+New jobs reject tracked edits, staged edits and untracked files **within
+the selected Story root**; unrelated dirty files in a containing monorepo are
+permitted. Each `--job` ID is a stable logical identity for that Story,
+and distinct IDs (or different sibling Story roots) receive distinct branches,
+worktrees and thread IDs. A resumed job may have unfinished files or later
+commits in **its own** worktree. The original author branch is never modified
+or automatically merged.
+
+The command prints machine-readable JSON with `jobId`, `storyRoot`,
+`storyRelativePath`, `gitRoot`, `baseSha`, `branch`, `worktreeRoot`,
+`worktreeStoryRoot`, `headSha`, and the durable `threadId`. The job
+branch is `noveltea-gen/<sha256>`; it is checked out only in its own Git
+worktree. By default persistent job metadata and the worktree live outside
+the author's Git checkout:
+
+```text
+~/.local/state/noveltea-gen/jobs/<sha256>/job.json
+~/.local/state/noveltea-gen/jobs/<sha256>/worktree/
+```
+
+`XDG_STATE_HOME` changes the state base and `NT_STATE_DIR` replaces the
+application state root; storage resolving inside the author Git checkout
+is rejected. Lost, altered or unexpected job worktree/branch identity
+fails closed instead of silently creating another. A second invocation with
+the same Story and job reopens the existing worktree, even if the author's
+checkout has since changed. Optional `--noveltea-project /path/to/engine`
+stores a separate future engine-project path as metadata only; engine records
+are never opened.
+
+This ticket establishes the Git job boundary only. The older `run`
+LangGraph/Pi proof of concept below still operates directly on its explicit
+`--project` directory, and does **not** automatically start or attach a
+Git-backed job. Later Story-orchestration tickets will consume this durable
+job worktree and thread identity. Do not treat `job start` as a completed
+narrative-generation run.
+
 ## Run against a Story project
 
 Select an **existing** Story directory using `--project`:

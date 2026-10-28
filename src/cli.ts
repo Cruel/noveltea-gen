@@ -23,9 +23,15 @@ interface CliOptions {
 const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
 
 Usage:
+  pnpm dev job start --story /path/to/story --job draft-1
   pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
   pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
   pnpm dev demo-story --project ./fresh-story --create-project --task "A mystery; choose the rest"
+
+Job start:
+  --story <path>     Required existing canonical Story directory within a Git worktree
+  --job <id>         Required stable logical job ID (reopen by repeating the same ID)
+  --noveltea-project <path>  Optional future engine project root (metadata only)
 
 Options:
   --project <path>    Required Story root (existing directory, independent of app checkout)
@@ -129,6 +135,37 @@ function parseArgs(argv: string[]): CliOptions | null {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job") {
+    const args = process.argv.slice(3);
+    if (args.shift() !== "start") throw new Error("Expected 'job start'.");
+    if (args.includes("--help") || args.includes("-h")) {
+      process.stdout.write(USAGE);
+      return;
+    }
+    let story = "";
+    let job = "";
+    let novelteaProject: string | undefined;
+    const provided = new Set<string>();
+    while (args.length) {
+      const flag = args.shift()!;
+      if (flag !== "--story" && flag !== "--job" && flag !== "--noveltea-project") {
+        throw new Error(`Unknown job option: ${flag}. Use --help for usage.`);
+      }
+      if (provided.has(flag)) throw new Error(`Duplicate job option: ${flag}.`);
+      provided.add(flag);
+      const value = args.shift();
+      if (!value?.trim() || value.startsWith("--")) throw new Error(`Missing value for ${flag}.`);
+      if (flag === "--story") story = value;
+      if (flag === "--job") job = value;
+      if (flag === "--noveltea-project") novelteaProject = value;
+    }
+    if (!story) throw new Error("Missing required --story <path>.");
+    if (!job) throw new Error("Missing required --job <id>.");
+    const { startStoryJob } = await import("./job.js");
+    const result = await startStoryJob({ story, job, novelteaProject });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   if (!options) {
     process.stdout.write(USAGE);
