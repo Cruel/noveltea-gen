@@ -1114,6 +1114,61 @@ is advisory; any subsequent generation-branch edit requires a separate,
 `NT_LIVE_MERGE_PREVIEW=1` with a configured Pi provider/model and the NovelTea
 skills checkout to exercise the opt-in qualitative contradiction test.
 
+## Read-only Story job completion and integration report (#30)
+
+Generate an **author-facing** report from the persisted Git-backed job state after
+any process restart. No graph worker or model is needed for ordinary inspection:
+
+```sh
+pnpm dev job report --story /path/to/story --job draft-1
+pnpm dev job report --story /path/to/story --job draft-1 --format markdown
+pnpm dev job report --story /path/to/story --job draft-1 --format markdown \\
+  --output /outside-the-repo/story-report.md
+```
+
+The default output is versioned JSON (`noveltea-job-report/v1`). The alternative
+Markdown view includes source-linked diagnostic findings, current scope and
+contract version, verified Git HEAD/base/branch/worktree/thread identity,
+historical work items and committed Git revisions, structural/readiness and
+bounded progression witnesses, protected-decision status, independent editorial
+evidence, and IDs/statuses of captured deferred author ideas. Author ideas'
+original wording, full inbox, and private message payloads **never** enter the
+report. Export is exclusive (no overwrites), and destinations under either the
+author checkout or generation worktree are rejected.
+
+Generation `completed|paused|blocked|failed` is **independent** from integration
+`mergeable|conflicts|not assessed`. Only a current, matching versioned plan
+and scope audit with a successful **real Pi** independent editorial verdict
+can yield `completed`; deterministic fixtures remain unverified. A
+historical architecture scheduling placeholder is not a current blocker once
+a downstream specialist has fulfilled it. Paused execution control and
+unresolved binding ideas in the **requested scope** remain explicit. A full
+Story contract treats all binding ideas as in scope; out-of-scope unfinished
+Arcs and deferred ideas do not block a bounded Arc's verdict.
+
+Integration is `not assessed` until requested:
+
+```sh
+pnpm dev job report --story /path/to/story --job draft-1 --preview \\
+  --skills-source /path/to/noveltea-skills
+pnpm dev job report --story /path/to/story --job draft-1 --preview --fixture
+```
+
+`--preview` delegates to the disposable merge-preview command (#29) and
+includes the exact target revision, canonical validation and source-linked
+narrative-conflict options. A textual collision or a deterministic/protected
+decision/semantic conflict is `conflicts`. `mergeable` requires a successful
+combined-Story validator **and** independent narrative review; a fixture's
+positive textual merge remains `not assessed` for literary compatibility.
+A completed Story branch may therefore still have merge conflicts.
+No command automatically integrates or alters protected decisions.
+
+The tests use the public CLI against disposable Git repositories:
+`pnpm exec tsx --test test/job-report.test.ts`. Positive completed status is
+also exercised with a **simulated** prior Pi completion receipt; this is
+projection-only coverage and does not claim that a fixture review is literary
+certification.
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit

@@ -61,6 +61,9 @@ function storyPath(job: JobStartResult, path: string) {
   return prefix ? (path.startsWith(prefix) ? path.slice(prefix.length) : null) : path;
 }
 function recordsAt(job: JobStartResult, path: string, refs: string[]) {
+  // Private deferred author material must never enter ordinary narrative
+  // reviewers through evidence snippets, including a cross-branch conflict.
+  if (/(?:^|\/)\.story-inbox(?:\/|$)/.test(path)) return { ids: [], evidence: [] };
   const ids = new Set<string>();
   const evidence: string[] = [];
   for (const [i, ref] of refs.entries()) {
@@ -294,15 +297,17 @@ export async function previewStoryMerge(input: MergePreviewOptions) {
             path !== null && path.endsWith(".md") && !path.startsWith(".story-inbox/") &&
             !path.split("/").some(segment => segment.startsWith("."))));
         const progression = progressionWitnesses(validation);
+        const publicRisks = risks.filter(x => !x.path.startsWith(".story-inbox/"));
+        const publicAffected = candidate.affected.filter(x => !x.path.startsWith(".story-inbox/"));
         const assignment: ReviewAssignment = {
           contract: { kind: "merge-preview", base: job.baseSha, targetHead, generationHead,
-            overlapRisks: risks, affected: candidate.affected },
-          planVersion: 0, scopeIds: candidate.affected.flatMap(x => x.ids), paths,
+            overlapRisks: publicRisks, affected: publicAffected },
+          planVersion: 0, scopeIds: publicAffected.flatMap(x => x.ids), paths,
           routes: progression.routes, milestoneRoutes: progression.milestoneRoutes,
           puzzleRoutes: progression.puzzleRoutes, outstanding: [],
           uncertainties: ["No inference about branch compatibility from Git merge alone.",
             ...progression.uncertainties],
-          integration: { base: job.baseSha, targetHead, generationHead, risks },
+          integration: { base: job.baseSha, targetHead, generationHead, risks: publicRisks },
         };
         const viewedJob = { ...job, headSha: candidateId,
           worktreeStoryRoot: join(candidateRoot, job.storyRelativePath) };

@@ -214,6 +214,37 @@ test("canonical validator assesses a real combined Story from both revisions", {
   assert.equal(git(root, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
 });
 
+test("private deferred author text is never included in merge-preview evidence", () => {
+  const { root, job, preview } = setup("private-idea-conflict");
+  const path = ".story-inbox/ideas/secret.yaml";
+  const privateDir = join(root, "story", ".story-inbox", "ideas");
+  mkdirSync(privateDir, { recursive: true });
+  const privateWords = "Private motivation: the author wrote a secret never for workers";
+  const baseline = [
+    'id: secret',
+    'original: "' + privateWords + '"',
+    'target: original',
+    ...Array.from({ length: 12 }, (_, i) => "filler" + i + ": unchanged"),
+    'generation: original',
+  ].join("\n") + "\n";
+  writeFileSync(join(root, "story", path), baseline);
+  commit(root, "Private author capture");
+  // This private capture was made on the target after the job forked. To make
+  // a genuine three-way overlap on the same path, first bring it into the job
+  // branch as an independent file.
+  const authored = baseline.replace("target: original", "target: target-authored");
+  const generated = baseline.replace("generation: original", "generation: generated");
+  mkdirSync(join(job.worktreeStoryRoot, ".story-inbox", "ideas"), { recursive: true });
+  writeFileSync(join(job.worktreeStoryRoot, ".story-inbox", "ideas", "secret.yaml"), generated);
+  commit(job.worktreeRoot, "Generated independently");
+  writeFileSync(join(root, "story", path), authored);
+  commit(root, "Author changed private capture");
+  const result = preview();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.result.candidate.status, "text-conflicts");
+  assert.ok(!JSON.stringify(result.result).includes(privateWords));
+});
+
 test("opt-in independent Pi reviewer reports a genuine cross-record contradiction", {
   skip: process.env.NT_LIVE_MERGE_PREVIEW !== "1"
     ? "Set NT_LIVE_MERGE_PREVIEW=1 to test independent Pi editorial reasoning" : false,

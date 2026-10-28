@@ -44,6 +44,8 @@ Usage:
   pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job review run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job review inspect --story /path/to/story --job draft-1
+  pnpm dev job report --story /path/to/story --job draft-1 [--format markdown] [--output /outside/report.md]
+  pnpm dev job report --story /path/to/story --job draft-1 --preview [--fixture]
   pnpm dev job merge preview --story /path/to/story --job draft-1 --fixture
   pnpm dev job merge preview --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job ideas capture --story /path/to/story --job draft-1 --file idea.json
@@ -140,6 +142,12 @@ Job composition (branch-aware Authored Content after interactive design):
   --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
   --thinking low|high     Explicit thinking effort for writer and reviewer
   --fixture               Structural/lexical test adapter, NOT independent literary proof
+
+Job report (read-only generation outcome and integration evidence):
+  --format json|markdown   JSON by default; markdown for a human-readable report
+  --output <path>          Optional exclusive export outside both Story checkout/worktree
+  --preview                Optional disposable integration preview (otherwise not assessed)
+  --fixture                With --preview: deterministic-only, no literary verification
 
 Job merge preview (non-destructive integration assessment):
   --story, --job        Existing Story job; compares the job branch with the author's committed HEAD
@@ -434,6 +442,35 @@ async function main(): Promise<void> {
         file: values.get("--file"), target: values.get("--target") });
     }
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
+  if (process.argv[2] === "job" && process.argv[3] === "report") {
+    const args = process.argv.slice(4);
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    const values = parseJobOptions(args, "report", ["--story", "--job", "--format", "--output",
+      "--preview", "--fixture", "--validator-source", "--skills-source", "--provider", "--model",
+      "--thinking"], ["--preview", "--fixture"]);
+    const story = values.get("--story"), jobId = values.get("--job");
+    if (!story || !jobId) throw new Error("job report requires --story and --job.");
+    const format = values.get("--format") ?? "json";
+    if (format !== "json" && format !== "markdown") throw new Error("Report format must be json or markdown.");
+    if (values.has("--fixture") && !values.has("--preview")) throw new Error("Report --fixture requires --preview.");
+    if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!))
+      throw new Error("Report --thinking supports low or high.");
+    disableJobCloudTracing();
+    const { inspectJobReport, formatJobReport, exportJobReport } = await import("./job-report.js");
+    const { startStoryJob } = await import("./job.js");
+    const report = await inspectJobReport({ story, job: jobId, preview: values.has("--preview"),
+      fixture: values.has("--fixture"), validatorSource: values.get("--validator-source"),
+      skillsSource: values.get("--skills-source"), provider: values.get("--provider"),
+      model: values.get("--model"), thinking: values.get("--thinking") as "low" | "high" | undefined });
+    const content = format === "json" ? JSON.stringify(report, null, 2) + "\n" : formatJobReport(report);
+    if (values.has("--output")) {
+      const current = await startStoryJob({ story, job: jobId }, false);
+      const destination = await exportJobReport(current, values.get("--output")!, content);
+      process.stdout.write(JSON.stringify({ status: "exported", format, destination,
+        generation: report.generation.status, integration: report.integration.status }) + "\n");
+    } else process.stdout.write(content);
     return;
   }
   if (process.argv[2] === "job" && process.argv[3] === "merge") {
