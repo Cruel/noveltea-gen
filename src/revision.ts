@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
+import { withStoryJobLock } from "./job-lock.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { readSignedAuthorEvidence, verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
@@ -508,10 +509,7 @@ export async function runRevisionAction(input: RevisionOptions) {
     throw new Error("--work-item must be a lowercase hyphenated identifier.");
   }
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
-  const lock = join(dirname(job.worktreeRoot), ".revision-running");
-  try { await mkdir(lock); }
-  catch { throw new Error("Another revision operation is active or was interrupted; inspect its lock."); }
-  try {
+  return withStoryJobLock(job, input.workItem, async () => {
     let receipt = await readReceipt(job, input.workItem);
     if (receipt && await recoverCommitted(job, receipt)) return publicStatus(receipt);
     const head = await trustedHead(job);
@@ -612,7 +610,5 @@ export async function runRevisionAction(input: RevisionOptions) {
     }
     if (input.action !== "commit") throw new Error("Unknown revision operation.");
     return publicStatus(await commitRevisionGraph(job, receipt, head), unrelated);
-  } finally {
-    await rmdir(lock).catch(() => {});
-  }
+  });
 }

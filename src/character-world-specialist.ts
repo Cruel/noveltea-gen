@@ -24,6 +24,7 @@ export interface FoundationAssignment {
 export interface SpecialistEvidence {
   claimedPaths: string[];
   piSessionFile?: string;
+  piSessionId?: string;
   skillReads: string[];
   architecturalConflicts?: string[];
   laterObligations?: string[];
@@ -51,7 +52,7 @@ const DOMAINS = {
 /** Real Pi authoring: no commit, validation or authorization power is delegated to the specialist. */
 export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: FoundationAssignment, provider: string, modelId: string,
-  onSession: (path: string) => Promise<void>): Promise<SpecialistEvidence> {
+  onSession: (id: string, path: string) => Promise<void>): Promise<SpecialistEvidence> {
   const selected = DOMAINS[assignment.domain];
   const required = [selected.name + "/SKILL.md", ...CATALOG];
   const project = await openStoryProject(job.worktreeStoryRoot);
@@ -80,7 +81,8 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
   });
   try {
     const sessionFile = session.sessionManager.getSessionFile();
-    if (sessionFile) await onSession(sessionFile);
+    if (!sessionFile) throw new Error("Character/World Pi transcript cannot be persisted before authoring.");
+    await onSession(session.sessionId, sessionFile);
     await session.prompt(
       `You are the NovelTea ${selected.name} specialist assigned ONE bounded canonical Story work item.\n` +
       "Read ALL the pinned guidance below using the read tool before writing:\n" +
@@ -132,6 +134,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     return { claimedPaths: paths, skillReads: reads.filter(path => pinned.includes(path)),
       architecturalConflicts: messages.architecturalConflicts as string[],
       laterObligations: messages.laterObligations as string[],
+      piSessionId: session.sessionId,
       piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
   } finally { session.dispose(); }
 }

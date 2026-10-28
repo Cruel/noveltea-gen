@@ -152,3 +152,72 @@ test("rejects dangling Character Fact references after canonical validation", { 
   assert.equal(receipt.units[0].phase, "committed");
   assert.equal(receipt.units[1].phase, "authored");
 });
+
+test("interrupted World specialist can be reviewed and resumed without rewriting it", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("world-reconciled");
+  const arch = architecture();
+  const invalid = cli(["foundations", "run", "--fixture", "--skills-source", source], "mismatch");
+  assert.notEqual(invalid.status, 0);
+  const inspected = cli(["foundations", "inspect"]);
+  assert.equal(inspected.status, 0, inspected.stderr);
+  const recovery = JSON.parse(inspected.stdout).recovery;
+  assert.equal(recovery.status, "blocked");
+  assert.equal(recovery.candidate.unit, "world-foundations");
+  assert.deepEqual(recovery.candidate.paths, ["facts/evidence-concealed.md", "world-entities/archive.md"]);
+  assert.notEqual(cli(["foundations", "reconcile", "--fixture", "--digest", "0".repeat(64)]).status, 0);
+  const reviewed = cli(["foundations", "reconcile", "--fixture", "--digest", recovery.candidate.digest]);
+  assert.equal(reviewed.status, 0, reviewed.stderr);
+  assert.equal(JSON.parse(reviewed.stdout).status, "authored");
+  const resumed = cli(["foundations", "run", "--fixture"]);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).status, "foundations-committed");
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", arch.headSha + "..HEAD"), "2");
+  assert.match(git(job.worktreeRoot, "log", "-2", "--format=%B"), /NovelTea-Reviewed-Recovery: [a-f0-9]{64}/);
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+});
+
+test("Character commit just before checkpoint is recovered without replaying a second commit", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("character-commit-recovery");
+  const arch = architecture();
+  const first = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(first.status, 0, first.stderr);
+  const head = git(job.worktreeRoot, "rev-parse", "HEAD");
+  const receiptFile = join(job.worktreeRoot, "../character-world.json");
+  const receipt = JSON.parse(readFileSync(receiptFile, "utf8"));
+  assert.equal(receipt.units[1].phase, "committed");
+  receipt.units[1].phase = "authored";
+  delete receipt.units[1].commitSha;
+  writeFileSync(receiptFile, JSON.stringify(receipt));
+  const inspected = cli(["foundations", "inspect"]);
+  assert.equal(inspected.status, 0, inspected.stderr);
+  assert.equal(JSON.parse(inspected.stdout).recovery.status, "recoverable-commit");
+  const resumed = cli(["foundations", "run", "--fixture"]);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).status, "foundations-committed");
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(job.worktreeRoot, "rev-list", "--count", arch.headSha + "..HEAD"), "2");
+});
+
+test("World recovery fails closed for missing Pi transcript and staged changes", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("world-unsafe-recovery");
+  architecture();
+  assert.notEqual(cli(["foundations", "run", "--fixture", "--skills-source", source], "mismatch").status, 0);
+  const receiptFile = join(job.worktreeRoot, "../character-world.json");
+  const receipt = JSON.parse(readFileSync(receiptFile, "utf8"));
+  receipt.worker = "pi";
+  receipt.units[0].piSessionId = "original-only";
+  receipt.units[0].piSessionFile = join(job.worktreeRoot, "../character-world-sessions/world/missing.jsonl");
+  writeFileSync(receiptFile, JSON.stringify(receipt));
+  const missing = cli(["foundations", "inspect"]);
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.match(JSON.parse(missing.stdout).recovery.reason, /Cannot recover Pi session/);
+  assert.notEqual(cli(["foundations", "run"]).status, 0);
+  receipt.worker = "fixture";
+  writeFileSync(receiptFile, JSON.stringify(receipt));
+  git(job.worktreeRoot, "add", "story/facts/evidence-concealed.md");
+  const staged = cli(["foundations", "inspect"]);
+  assert.equal(staged.status, 0, staged.stderr);
+  assert.equal(JSON.parse(staged.stdout).recovery.candidate, undefined);
+  assert.notEqual(cli(["foundations", "reconcile", "--fixture", "--digest", "0".repeat(64)]).status, 0);
+  assert.match(git(job.worktreeRoot, "status", "--porcelain"), /^A /m);
+});

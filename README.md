@@ -258,6 +258,85 @@ in the job state directory (`architecture.json`, `architecture-sessions/`).
 Never reset an interrupted writer's uncommitted work; inspect and reconcile it.
 No changes are automatically merged into the author's normal checkout.
 
+### Story work-item crash recovery (#23)
+
+Job state lives beside the persistent job worktree. `job.json` pins Git,
+branch/worktree, trusted base and thread identity; `foundation.json` and
+`architecture.json` pin current work-item state, the last expected verified
+HEAD, authoring files/digests and Pi-session identity. The model and skills
+snapshot and independently pinned validator are unchanged on resume.
+
+`job architecture inspect --story <original-story> --job <id>` reports
+`recovery` with actual HEAD, uncommitted paths and either `ready`,
+`recoverable-commit` or `blocked`. When blocked, the top-level status
+is also `blocked`, with the reason and preserved Git state. No worker is
+invoked by inspection. Retrying `architecture run` from a safely authored
+receipt revalidates *the same recorded bytes*, or recognizes an exact
+single work-item commit (parent SHA, paths, digest and provenance) that
+completed before receipt publication. It cannot create a second accepted
+commit. Validation failures retain the original writer's files and receipt.
+
+A crash after a worker starts but before a complete authored receipt is
+**not** permission to create a new Pi conversation or overwrite partial
+Markdown. Restoring the original session transcript is required; missing or
+corrupt transcripts, ambiguous edits and unexpected Git/staged changes
+produce a reviewable block. Inspect the actual changed files, finish or
+correct them manually if necessary, and take the exact
+`recovery.candidate.digest` from `architecture inspect`:
+
+```sh
+pnpm dev job architecture reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
+pnpm dev job architecture run --story /path/to/story --job draft-1 --fixture
+```
+
+The second command uses `--fixture` **only when the original worker was a fixture**.
+For Pi-authored jobs, omit it. `reconcile` records human review of the
+existing bytes, with distinct Git provenance; it does not rerun the writer,
+approve protected decisions, or skip canonical validation. If the candidate
+is absent, resolve unexpected file/staging changes first, or start a
+separate job. Never edit receipt hashes to bypass this review.
+
+Foundation work items also pin authored bytes before their Git commit and
+never restart an interrupted writer automatically. Their parallel inspection
+and explicit-reconciliation interface is:
+
+```sh
+pnpm dev job foundation --story /path/to/story --job draft-1 --inspect
+pnpm dev job foundation --story /path/to/story --job draft-1 --reconcile-digest <reviewed-sha256>
+pnpm dev job foundation --story /path/to/story --job draft-1
+```
+
+For fixture jobs include `--fixture` in each invocation. The digest comes
+from the inspection response's `recovery.candidate.digest`, after
+reviewing the actual `creative-direction/*.md` edit. The resumed run checks
+the same digest, original Pi transcript (when applicable), unchanged Git
+baseline and canonical validation before committing the existing bytes.
+
+Character/World foundation work items use the same job-wide lock and
+recoverable receipt discipline. `job foundations inspect --story <story>
+--job <id>` exposes the interrupted World or Character unit and candidate
+paths/digest. After inspecting the preserved files, use:
+
+```sh
+pnpm dev job foundations reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256> --fixture
+pnpm dev job foundations run --story /path/to/story --job draft-1 --fixture
+```
+
+Omit `--fixture` for a Pi-authored job. Both commands verify the pinned
+original session when applicable and never create another conversation.
+The reviewed files are checked against the specialist's allowed record
+inventory and canonical protection before a single provenance-marked commit.
+Unexpected staging, manual commits, corrupt sessions and unauthorized Arc
+rewrites block without discarding the Story changes.
+
+Foundation, architecture, Character/World and protected revision actions share a single
+per-job `.story-job-running/owner.json` exclusive lock. Concurrent
+processes cannot commit or resume into the same worktree. If the local owner
+PID is definitively dead, a later invocation archives the stale lock as
+`.story-job-stale-<nonce>/` before acquiring a fresh one; remote-host,
+live-process and corrupt/unpublished locks fail closed for inspection.
+Neither the stale evidence nor any Story files or Git history are discarded.
+
 An existing scope cannot be changed by passing a different `--contract` to
 `run`. At a clean, verified work-item boundary, the author may approve an
 exact, versioned proposal:
@@ -326,7 +405,7 @@ does not write engine Rooms or fabricate future Event/state references.
 
 Receipts live at `~/.local/state/noveltea-gen/jobs/<sha256>/character-world.json`,
 with private Pi transcripts under `character-world-sessions/{world,character}/`.
-Shared `.story-writing` and `revisions/verified-head.json` coordinate
+Shared `.story-job-running` and `revisions/verified-head.json` coordinate
 the job with architecture and protected revision work. Source checkout
 changes cannot alter an already pinned specialist snapshot. `--fixture`
 creates a deterministic small Story (two Characters, one consequential
@@ -638,30 +717,5 @@ pnpm studio:trace
 2. Run `pnpm dev run --project <root> --trace --task "Invent a compact locked-room mystery premise"`. Confirm a single graph trace with `pi_coordinator → story_note_worker → pi_continuation`; under the correct graph nodes, expand the Pi agent/turn/provider/tool runs. Verify model usage and a `delegate_to_worker` tool span. If Pi emits a compaction or error, check its status/span rather than expecting one every run.
 3. Run `pnpm dev run --project <root> --trace --task "Write a promotional tagline for a gothic mystery"`. Confirm `pi_coordinator → direct_tagline_worker → pi_continuation` and a model span labeled `pi-ai direct model request` under the direct worker node, with request brief, returned JSON text, stop status and token usage. There must be **no** independent Pi worker session in this branch.
 4. Confirm the graph and child trace correlation identifiers and snapshot Git revision/digest match CLI output. Check that no API key, authorization header, raw provider SDK object or **skill contents in metadata** appear in the runs. Trace payloads may contain user/task/skill **content**, as noted above; review before transmitting. Repeat a run without `--trace` to verify opt-out even with inherited LangSmith environment variables.
-5. Optionally use `pnpm studio`, then `pnpm studio:input` for the same root and inspect the live graph node transitions locally. Hosted tracing for Studio requires `pnpm studio:trace` and a valid LangSmith API key; it is never silently enabled by local Studio.
 
-Automated instrumentation tests: `pnpm exec tsx --test test/tracing.test.ts`. They require no LangSmith key and verify the opt-in gate, disabled Pi extensions, metadata allowlist, direct-model output sanitization and both graph branch configurations. A live hosted trace tree must be inspected with real credentials; fixture tests are not evidence of a successful upload.
-
-### Local nested traces for development (no cloud required)
-
-To capture and inspect the **actual** LangGraph and Pi trace tree on disk, independently of hosted LangSmith:
-
-```sh
-pnpm dev run --project ./scratch-story --thread debug-1 --trace-local \
-  --task "Propose a locked-room mystery twist"
-pnpm trace:show
-pnpm trace:show --json
-pnpm trace:show --file .local/traces/<specific-run>.jsonl
-```
-
-The CLI reports `localTrace` in its result JSON. `trace:show` opens the latest trace and displays graph node transitions, nested Pi agent turns, provider/model spans, tool executions, compactions, status, duration and token usage. `--json` provides the complete merged span records, including inputs and outputs, for deeper debugging and automated inspection. Raw append-only LangSmith-style create/update events are saved under gitignored **`.local/traces/*.jsonl`** (mode `0600`); `NT_LOCAL_TRACE_DIR` overrides the directory for isolated test runs. Failed runs also print the trace path to stderr so partial/error traces can be investigated.
-
-`--trace-local` **never requires a LangSmith key and makes no hosted trace uploads**. Cloud tracing is still **off** unless separately enabled by `--trace`. The two flags can be combined to keep a local copy while explicitly submitting the same run to LangSmith. Local recordings are not pruned automatically; remove files under `.local/traces` when no longer needed.
-
-**Data sensitivity:** Local traces include Story prompts, model messages, skills returned by read tools, and model/tool outputs. Protect or delete them as confidential development data. Known credential fields and configured environment secret values are redacted; this is not a guarantee that arbitrary user-included secrets cannot occur in content. Both local and cloud capture remain opt-in. Pi session JSONL and SQLite checkpoints are still separate from these full execution traces.
-
-Instrumented fixture tests: `pnpm exec tsx --test test/local-trace.test.ts`. The tests exercise both branches locally, require no model credentials and verify trace completion, file permissions, cloud opt-out and credential redaction. A real-Pi smoke test also confirmed an actual local tree containing Pi agent, model, tool and direct-model spans.
-
-## Scope
-
-#2–#10 include the coordinator, worker isolation, SQLite/Pi recovery, controlled and pinned NovelTea skill discovery, the bounded Story authoring demo, local LangGraph Studio and opt-in nested LangSmith observability. This does not claim a production Story orchestration graph or a fully implemented Story engine.
+[Showing lines 1-640 of 668 (50.0KB limit). Use offset=641 to continue.]

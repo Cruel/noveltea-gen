@@ -1,12 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { renderFoundation, type FoundationDraft } from "./demo.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
+import { withStoryJobLock } from "./job-lock.js";
+import { verifyJobPiSession } from "./job-session.js";
+import { trustedHead } from "./revision.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
@@ -42,6 +45,11 @@ interface FoundationState {
   discoverySessionFile?: string;
   snapshot: SkillSnapshot;
   stage: Stage;
+  /** Persisted before giving the writer tools; never restart it blindly after a crash. */
+  writerStarted?: boolean;
+  /** Exact authored bytes pinned before validation/commit, for safe commit recovery. */
+  authoredSha256?: string;
+  reviewedRecoverySha256?: string;
   target?: string;
   piSessionId?: string;
   piSessionFile?: string;
@@ -62,6 +70,8 @@ export interface FoundationJobOptions {
   provider?: string;
   model?: string;
   fixture?: boolean;
+  inspect?: boolean;
+  recoveryDigest?: string;
 }
 
 function gitRaw(job: JobStartResult, ...args: string[]): string {
@@ -162,7 +172,8 @@ async function fixtureAuthor(job: JobStartResult, state: FoundationState, target
     piSessionId: undefined, piSessionFile: undefined };
 }
 
-async function piAuthor(job: JobStartResult, state: FoundationState, target: string, provider: string, modelId: string) {
+async function piAuthor(job: JobStartResult, state: FoundationState, target: string, provider: string, modelId: string,
+  onSession: (id: string, path: string) => Promise<void>) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: state.snapshot.path,
     skillDirs: [], requiredSkills: ["nt-story-discovery", "nt-catalog"] };
@@ -192,6 +203,9 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
   let reads: string[] = [];
   let wrote = false;
   try {
+    const sessionFile = session.sessionManager.getSessionFile();
+    if (!sessionFile) throw new Error("Foundation Pi transcript cannot be persisted; writer will not start.");
+    await onSession(session.sessionId, sessionFile);
     await session.prompt(
       "You are the NovelTea foundation writing specialist in an isolated Git Story worktree. " +
       "Use ordinary Pi read/edit/write and inspection tools to AUTHOR MARKDOWN DIRECTLY, never a structured record authoring tool. " +
@@ -313,6 +327,10 @@ async function saveState(file: string, state: FoundationState) {
   await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   try { await rename(tmp, file); } catch (error) { throw error; }
 }
+async function foundationDigest(job: JobStartResult, target: string) {
+  return createHash("sha256").update(await readFile(join(job.worktreeStoryRoot, target))).digest("hex");
+}
+
 async function existingState(job: JobStartResult): Promise<FoundationState | undefined> {
   if (!existsSync(stateFile(job))) return undefined;
   const state = JSON.parse(await readFile(stateFile(job), "utf8")) as FoundationState;
@@ -334,7 +352,11 @@ function recoveryCommit(job: JobStartResult, state: FoundationState): string | u
   const head = git(job, "rev-parse", "HEAD");
   if (head === job.baseSha) return undefined;
   if (git(job, "rev-parse", "HEAD^") !== job.baseSha ||
-      !git(job, "log", "-1", "--format=%B").includes(`NovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${WORK_ITEM}`)) {
+      !git(job, "log", "-1", "--format=%B").includes(`NovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${WORK_ITEM}`) ||
+      (state.stage !== "committed" &&
+        (!git(job, "log", "-1", "--format=%B").split("\n").includes(`NovelTea-Foundation: ${state.authoredSha256}`) ||
+         (state.reviewedRecoverySha256 && !git(job, "log", "-1", "--format=%B").split("\n")
+           .includes(`NovelTea-Reviewed-Recovery: ${state.reviewedRecoverySha256}`))))) {
     throw new Error("Job branch has an unexpected commit. Preserve it for inspection; no new commit made.");
   }
   const changed = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").split("\n").filter(Boolean);
@@ -388,12 +410,10 @@ function output(job: JobStartResult, state: FoundationState) {
 
 export async function runFoundationJob(input: FoundationJobOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
-  const lock = join(dirname(job.worktreeRoot), ".foundation-running");
-  try { await mkdir(lock); }
-  catch { throw new Error("Foundation work item is already running or was interrupted; inspect the lock and worktree."); }
-  try {
+  return withStoryJobLock(job, "foundation", async () => {
     let state = await existingState(job);
     if (!state) {
+      if (input.inspect || input.recoveryDigest) throw new Error("Foundation has no saved work item to inspect or reconcile.");
       if (!input.task?.trim()) throw new Error("New foundation work item requires --task.");
       if (input.authorInput) throw new Error("Start collaborative discovery before supplying --author-input.");
       assertHead(job, job.baseSha);
@@ -409,6 +429,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         workerMode: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         stage: input.mode === "collaborative" ? "awaiting-author" : "writing",
+        writerStarted: false,
       };
       await saveState(stateFile(job), state);
     } else {
@@ -420,6 +441,43 @@ export async function runFoundationJob(input: FoundationJobOptions) {
           (input.model !== undefined && input.model !== state.model)) {
         throw new Error("Foundation job inputs differ from its persisted brief; start another job for a new assignment.");
       }
+    }
+    if (input.inspect) {
+      const actualHead = git(job, "rev-parse", "HEAD");
+      const changes = gitRaw(job, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        .split("\0").filter(Boolean);
+      let candidate: { target: string; digest: string } | undefined;
+      if (state.stage === "writing" && state.writerStarted && actualHead === job.baseSha && state.target) {
+        try {
+          assertOnlyTarget(job, state.target);
+          await assertSafeTarget(job, state.target);
+          candidate = { target: state.target, digest: await foundationDigest(job, state.target) };
+        } catch { /* Ambiguous changes stay blocked; preserve the actual Git inventory. */ }
+      }
+      let blockedReason: string | undefined;
+      if (state.stage === "committed") {
+        try {
+          if (changes.length) throw new Error("Unexpected uncommitted or staged Story changes after the accepted foundation.");
+          if (actualHead !== state.commitSha) {
+            const trusted = await trustedHead(job);
+            if (actualHead !== trusted) throw new Error("HEAD differs from the last verified work item.");
+            git(job, "merge-base", "--is-ancestor", state.commitSha!, trusted);
+          }
+        } catch (error) {
+          blockedReason = "Completed foundation is no longer at a verified safe boundary: " +
+            (error instanceof Error ? error.message : String(error));
+        }
+      } else if (state.stage === "writing" && state.writerStarted) {
+        blockedReason = "Interrupted writer: inspect preserved Creative Direction and acknowledge its exact digest; no automatic replay.";
+      } else if (actualHead !== job.baseSha || changes.length) {
+        blockedReason = "Foundation baseline has unexpected Git history or worktree edits.";
+      }
+      return {
+        ...output(job, state),
+        status: blockedReason ? "blocked" :
+          state.stage === "committed" ? "committed" : "awaiting-author",
+        recovery: { actualHead, changes, candidate, reason: blockedReason },
+      };
     }
     if (state.stage === "awaiting-author") {
       if (!state.questions) {
@@ -443,9 +501,46 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       await saveState(stateFile(job), state);
     }
     const target = state.target;
+    if (input.recoveryDigest) {
+      if (state.stage !== "writing" || !state.writerStarted ||
+          !/^[a-f0-9]{64}$/.test(input.recoveryDigest)) {
+        throw new Error("Foundation reconciliation requires an interrupted writing work item and the exact reviewed --reconcile-digest.");
+      }
+      assertHead(job, job.baseSha);
+      assertOnlyTarget(job, target);
+      await assertSafeTarget(job, target);
+      if (state.workerMode === "pi") {
+        await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
+      }
+      const actual = await foundationDigest(job, target);
+      if (actual !== input.recoveryDigest) {
+        throw new Error("Foundation review digest differs from the current Story bytes; no changes were adopted.");
+      }
+      state.authoredSha256 = actual;
+      state.reviewedRecoverySha256 = actual;
+      await saveState(stateFile(job), state);
+      return { ...output(job, state), status: "authored",
+        recovery: { target, digest: actual, reviewed: true } };
+    }
+    if (state.stage === "committed" && git(job, "rev-parse", "HEAD") !== state.commitSha) {
+      const head = await trustedHead(job);
+      git(job, "merge-base", "--is-ancestor", state.commitSha!, head);
+      if (changedPaths(job).length) throw new Error("Story worktree contains unexpected edits after the foundation work item.");
+      return output(job, state);
+    }
+    if (state.stage === "writing" && state.writerStarted === undefined) {
+      throw new Error("Legacy foundation writer state cannot prove the specialist was not started; inspect its worktree and Pi session before recovery.");
+    }
     const recovered = recoveryCommit(job, state);
     if (recovered && changedPaths(job).length) {
       throw new Error("Job has unexpected uncommitted changes after its foundation commit.");
+    }
+    if (recovered && state.stage !== "committed" &&
+        (!state.authoredSha256 || await foundationDigest(job, target) !== state.authoredSha256)) {
+      throw new Error("Recovered foundation commit lacks exact recorded authored bytes; preserve it for reconciliation.");
+    }
+    if (state.writerStarted && state.stage !== "committed" && state.workerMode === "pi") {
+      await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
     }
     if (state.stage === "committed") {
       if (recovered !== state.commitSha) throw new Error("Saved foundation commit differs from job HEAD.");
@@ -453,9 +548,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
     }
     state = await executeFoundationGraph(job, state, input, recovered);
     return output(job, state);
-  } finally {
-    await rmdir(lock).catch(() => undefined);
-  }
+  });
 }
 /**
  * Work-item graph: Pi authors Markdown in one node; a separate LangGraph
@@ -473,13 +566,34 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       if (recovered) return {};
       const target = foundation.target!;
       assertHead(job, job.baseSha);
+      if (foundation.writerStarted) {
+        if (!foundation.authoredSha256) {
+          throw new Error("Interrupted foundation writer; preserve unfinished files and original Pi session. Never replay writer tools.");
+        }
+        assertOnlyTarget(job, target);
+        await assertSafeTarget(job, target);
+        if (await foundationDigest(job, target) !== foundation.authoredSha256) {
+          throw new Error("Authored foundation bytes changed after interruption; manual reconciliation is required.");
+        }
+        if (foundation.workerMode === "pi") {
+          await verifyJobPiSession(job, "foundation", foundation.piSessionFile, foundation.piSessionId);
+        }
+        return {};
+      }
       if (changedPaths(job).length) {
         throw new Error("Unfinished foundation edits exist. Inspect and reconcile them; the specialist will not blindly rerun.");
       }
+      foundation.writerStarted = true;
+      await saveState(stateFile(job), foundation);
       const authored = foundation.workerMode === "fixture"
         ? await fixtureAuthor(job, foundation, target)
-        : await piAuthor(job, foundation, target, foundation.provider, foundation.model);
-      const next = { ...foundation, ...authored };
+        : await piAuthor(job, foundation, target, foundation.provider, foundation.model,
+          async (id, path) => {
+            foundation.piSessionId = id;
+            foundation.piSessionFile = path;
+            await saveState(stateFile(job), foundation);
+          });
+      const next = { ...foundation, ...authored, authoredSha256: await foundationDigest(job, target) };
       await saveState(stateFile(job), next);
       assertHead(job, job.baseSha);
       assertOnlyTarget(job, target);
@@ -492,6 +606,9 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       const validation = await validateStoryJob(job, input.validatorSource ?? input.skillsSource ?? config.novelteaSkills);
       const verified = assertValidation(job, validation);
       assertOnlyTargetForCommit(job, target, recovered);
+      if (!foundation.authoredSha256 || await foundationDigest(job, target) !== foundation.authoredSha256) {
+        throw new Error("Foundation bytes differ from the exact authored work item; commit refused.");
+      }
       if (!recovered) {
         assertHead(job, job.baseSha);
         git(job, "add", "--", storyPath(job, target));
@@ -500,7 +617,8 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
         }
         git(job, "-c", `user.name=${AGENT_NAME}`, "-c", `user.email=${AGENT_EMAIL}`,
           "commit", "--only", "-m",
-          `Generate Creative Direction [${job.jobId}/${WORK_ITEM}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${WORK_ITEM}\nNovelTea-Validation: ${verified}`,
+          `Generate Creative Direction [${job.jobId}/${WORK_ITEM}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${WORK_ITEM}\nNovelTea-Validation: ${verified}\nNovelTea-Foundation: ${foundation.authoredSha256}` +
+          (foundation.reviewedRecoverySha256 ? `\nNovelTea-Reviewed-Recovery: ${foundation.reviewedRecoverySha256}` : ""),
           "--", storyPath(job, target));
       }
       if (changedPaths(job).length) {

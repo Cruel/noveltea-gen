@@ -26,10 +26,14 @@ Usage:
   pnpm dev job start --story /path/to/story --job draft-1
   pnpm dev job validate --story /path/to/story --job draft-1
   pnpm dev job foundation --story /path/to/story --job draft-1 --mode autonomous --task "A mystery premise"
+  pnpm dev job foundation --story /path/to/story --job draft-1 --inspect
+  pnpm dev job foundation --story /path/to/story --job draft-1 --reconcile-digest <reviewed-sha256>
   pnpm dev job architecture run --story /path/to/story --job draft-1 --contract scope.json --skills-source /path/to/noveltea-skills
   pnpm dev job architecture inspect --story /path/to/story --job draft-1
+  pnpm dev job architecture reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
   pnpm dev job foundations run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job foundations inspect --story /path/to/story --job draft-1
+  pnpm dev job foundations reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --signed-evidence /path/to/offline-signed-plan.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
@@ -60,11 +64,12 @@ Job revision:
                          No unsigned author approval/review flags are accepted
 
 Job architecture:
-  run|inspect|propose|approve  Author a scoped architecture, inspect DAG, or version its authorization
+  run|inspect|propose|approve|reconcile  Author, inspect, replan or explicitly reconcile saved edits
   --contract <json-file>    Completion contract: scope {kind,depth,targets,branches}, constraints,
                             envelope {presentation,hardLimits,preferences}
   --mode <mode>            autonomous requires contract; collaborative may await author scope
   --proposal <sha256>      Exact digest from architecture propose (approve only)
+  --digest <sha256>        Exact reviewed candidate digest from inspect (reconcile only)
   --signed-evidence <file>  Externally signed Ed25519 plan approval from the author
   --skills-source <path>   NovelTea skills checkout to pin
   --validator-source <path>  Canonical validator checkout for initial pin
@@ -72,13 +77,16 @@ Job architecture:
   --fixture                Deterministic test adapter, not live Pi evidence
 
 Job foundations (Character and World foundations after architecture):
-  run|inspect             Serialize Worldbuilding and Character specialist work units
+  run|inspect|reconcile   Serialize and safely recover Worldbuilding and Character specialist work units
+  --digest <sha256>        Exact inspected authored-bytes digest for explicit recovery
   --skills-source <path>   Pinned NovelTea skills checkout (first run)
   --validator-source <path>  Canonical Story validator checkout (first run)
   --provider, --model      Real Pi specialist model (default openai/gpt-6-luna)
   --fixture                Deterministic test adapter, not live Pi evidence
 
 Job foundation:
+  --inspect                Inspect saved writer/crash state without running the specialist
+  --reconcile-digest <sha256>  Explicitly accept inspected unfinished bytes for validation (no replay)
   --task <brief>            Required when starting foundation discovery
   --mode <mode>            autonomous (default) or collaborative
   --envelope <text>        Author's narrative/presentation constraints
@@ -194,8 +202,8 @@ async function main(): Promise<void> {
     const args = process.argv.slice(4);
     const action = args.shift();
     if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
-    if (action !== "run" && action !== "inspect") throw new Error("Expected job foundations run|inspect.");
-    const allowed = new Set(["--story", "--job", "--skills-source", "--validator-source", "--provider", "--model", "--fixture"]);
+    if (!["run", "inspect", "reconcile"].includes(action ?? "")) throw new Error("Expected job foundations run|inspect|reconcile.");
+    const allowed = new Set(["--story", "--job", "--skills-source", "--validator-source", "--provider", "--model", "--fixture", "--digest"]);
     const values = new Map<string, string>();
     while (args.length) {
       const flag = args.shift()!;
@@ -207,11 +215,13 @@ async function main(): Promise<void> {
     }
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job foundations requires --story and --job.");
+    if (action === "reconcile" && !values.has("--digest")) throw new Error("Foundations reconcile requires --digest.");
     process.env.LANGSMITH_TRACING = "false";
     process.env.LANGCHAIN_TRACING_V2 = "false";
     process.env.TRACE_TO_LANGSMITH = "false";
     const { runCharacterWorldJob } = await import("./character-world.js");
-    const result = await runCharacterWorldJob({ story, job, action, skillsSource: values.get("--skills-source"),
+    const result = await runCharacterWorldJob({ story, job, action: action as "run" | "inspect" | "reconcile",
+      recoveryDigest: values.get("--digest"), skillsSource: values.get("--skills-source"),
       validatorSource: values.get("--validator-source"), provider: values.get("--provider"),
       model: values.get("--model"), fixture: values.has("--fixture") });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
@@ -224,10 +234,10 @@ async function main(): Promise<void> {
       process.stdout.write(USAGE);
       return;
     }
-    if (!["run", "inspect", "propose", "approve"].includes(action ?? "")) {
-      throw new Error("Expected job architecture run|inspect|propose|approve.");
+    if (!["run", "inspect", "propose", "approve", "reconcile"].includes(action ?? "")) {
+      throw new Error("Expected job architecture run|inspect|propose|approve|reconcile.");
     }
-    const allowed = new Set(["--story", "--job", "--contract", "--mode", "--proposal", "--signed-evidence",
+    const allowed = new Set(["--story", "--job", "--contract", "--mode", "--proposal", "--digest", "--signed-evidence",
       "--skills-source", "--validator-source", "--provider", "--model", "--fixture"]);
     const values = new Map<string, string>();
     while (args.length) {
@@ -247,6 +257,9 @@ async function main(): Promise<void> {
       throw new Error("Architecture approve requires --proposal and --signed-evidence.");
     }
     if (action === "inspect" && values.has("--contract")) throw new Error("Architecture inspect does not accept --contract.");
+    if (action === "reconcile" && (!values.has("--digest") || values.has("--contract"))) {
+      throw new Error("Architecture reconcile requires --digest and does not accept --contract.");
+    }
     let contract: unknown;
     if (values.has("--contract")) {
       const { readFile } = await import("node:fs/promises");
@@ -257,9 +270,10 @@ async function main(): Promise<void> {
     process.env.TRACE_TO_LANGSMITH = "false";
     const { runArchitectureJob } = await import("./architecture.js");
     const result = await runArchitectureJob({
-      story, job, action: action as "run" | "inspect" | "propose" | "approve",
+      story, job, action: action as "run" | "inspect" | "propose" | "approve" | "reconcile",
       contract, mode: mode as "autonomous" | "collaborative" | undefined,
       proposal: values.get("--proposal"), signedEvidence: values.get("--signed-evidence"),
+      recoveryDigest: values.get("--digest"),
       skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
       provider: values.get("--provider"), model: values.get("--model"), fixture: values.has("--fixture"),
     });
@@ -323,19 +337,22 @@ async function main(): Promise<void> {
     let provider: string | undefined;
     let model: string | undefined;
     let fixture = false;
+    let inspect = false;
+    let recoveryDigest: string | undefined;
     const provided = new Set<string>();
     while (args.length) {
       const flag = args.shift()!;
-      if (flag === "--fixture" && jobCommand === "foundation") {
+      if (["--fixture", "--inspect"].includes(flag) && jobCommand === "foundation") {
         if (provided.has(flag)) throw new Error(`Duplicate job option: ${flag}.`);
         provided.add(flag);
-        fixture = true;
+        if (flag === "--fixture") fixture = true;
+        if (flag === "--inspect") inspect = true;
         continue;
       }
       if (flag !== "--story" && flag !== "--job" &&
           !(jobCommand === "start" && flag === "--noveltea-project") &&
           !(["validate", "foundation"].includes(jobCommand!) && flag === "--validator-source") &&
-          !(jobCommand === "foundation" && ["--task", "--mode", "--envelope", "--author-input", "--skills-source", "--provider", "--model"].includes(flag))) {
+          !(jobCommand === "foundation" && ["--task", "--mode", "--envelope", "--author-input", "--skills-source", "--provider", "--model", "--reconcile-digest"].includes(flag))) {
         throw new Error(`Unknown job option: ${flag}. Use --help for usage.`);
       }
       if (provided.has(flag)) throw new Error(`Duplicate job option: ${flag}.`);
@@ -352,6 +369,7 @@ async function main(): Promise<void> {
       if (flag === "--skills-source") skillsSource = value;
       if (flag === "--provider") provider = value;
       if (flag === "--model") model = value;
+      if (flag === "--reconcile-digest") recoveryDigest = value;
       if (flag === "--mode") {
         if (value !== "autonomous" && value !== "collaborative") throw new Error("--mode must be autonomous or collaborative.");
         mode = value;
@@ -367,7 +385,7 @@ async function main(): Promise<void> {
       process.env.TRACE_TO_LANGSMITH = "false";
       const { runFoundationJob } = await import("./foundation.js");
       const result = await runFoundationJob({ story, job, task, mode, envelope,
-        authorInput, skillsSource, validatorSource, provider, model, fixture });
+        authorInput, skillsSource, validatorSource, provider, model, fixture, inspect, recoveryDigest });
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
       return;
     }
