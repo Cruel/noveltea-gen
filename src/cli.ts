@@ -34,6 +34,8 @@ Usage:
   pnpm dev job event inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job interactive run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
   pnpm dev job interactive inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
+  pnpm dev job composition run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
+  pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --signed-evidence /path/to/offline-signed-plan.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
@@ -90,6 +92,15 @@ Job interactive (Choice Point and Puzzle alternatives after Event design):
   --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
   --thinking low|high     Explicit thinking effort for both Pi specialists
   --fixture               Deterministic test adapter, not live Pi evidence
+
+Job composition (branch-aware Authored Content after interactive design):
+  run|inspect             Pinned composition specialist, independent branch-prose review, and commit
+  --milestone <id>        Required typed Milestone ID from committed interactive work
+  --skills-source <path>  NovelTea skills checkout to pin (first run)
+  --validator-source <path>  Canonical Story validator source (first run)
+  --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
+  --thinking low|high     Explicit thinking effort for writer and reviewer
+  --fixture               Structural/lexical test adapter, NOT independent literary proof
 
 Job event (bounded Event-design work item after Character/World foundations):
   run|inspect             Run or inspect a pinned nt-event-design Milestone work item
@@ -211,6 +222,39 @@ function parseArgs(argv: string[]): CliOptions | null {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "composition") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (action !== "run" && action !== "inspect") throw new Error("Expected job composition run|inspect.");
+    const allowed = new Set(["--story", "--job", "--milestone", "--skills-source",
+      "--validator-source", "--provider", "--model", "--thinking", "--fixture"]);
+    const values = new Map<string, string>();
+    while (args.length) {
+      const flag = args.shift()!;
+      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate composition option: " + flag);
+      if (flag === "--fixture") { values.set(flag, "true"); continue; }
+      const value = args.shift();
+      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing composition option value: " + flag);
+      values.set(flag, value);
+    }
+    const story = values.get("--story"), job = values.get("--job"), milestone = values.get("--milestone");
+    if (!story || !job || !milestone) throw new Error("job composition requires --story, --job and --milestone.");
+    if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!))
+      throw new Error("Composition --thinking supports low or high.");
+    process.env.LANGSMITH_TRACING = "false";
+    process.env.LANGCHAIN_TRACING_V2 = "false";
+    process.env.TRACE_TO_LANGSMITH = "false";
+    const { runCompositionWorkItem } = await import("./composition-work.js");
+    const result = await runCompositionWorkItem({
+      story, job, milestone, action, skillsSource: values.get("--skills-source"),
+      validatorSource: values.get("--validator-source"), provider: values.get("--provider"),
+      model: values.get("--model"), thinking: values.get("--thinking") as "low" | "high" | undefined,
+      fixture: values.has("--fixture"),
+    });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "interactive") {
     const args = process.argv.slice(4);
     const action = args.shift();

@@ -502,6 +502,64 @@ Add `NT_KEEP_FAILED_LIVE=1` to preserve a failed disposable live Story and
 its private transcripts. Neither fixture runs nor successful generation
 automatically merges into the author's normal checkout.
 
+## Branch-aware narrative composition (#21)
+
+After an interactive Choice Point and Puzzle milestone has committed, compose
+the associated Events into player-facing Story prose in the **same job worktree**:
+
+```sh
+pnpm dev job composition run --story /path/to/story --job draft-1 \
+  --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
+pnpm dev job composition inspect --story /path/to/story --job draft-1 \
+  --milestone milestone.disclosure
+pnpm dev job validate --story /path/to/story --job draft-1
+```
+
+The architecture contract must authorize `depth: "composition"` and include
+the same Milestone as a verified target. The interactive two-unit receipt must
+be committed, with valid Choice/Puzzle route witnesses and the previous verified
+HEAD. A pinned real Pi `nt-narrative-composition` specialist receives relevant
+Event, Character, Relationship, Fact, Revelation, Choice, Puzzle, clue and
+route-witness context. It edits **only** new or specifically linked existing
+`authored-content/*.md`, using canonical `events` and `revelations`
+references. Other Story records, including existing Puzzle clues, are read-only.
+It writes the shared entry, visible menu, actual responses to *all* Choice
+outcomes, and actual prose for every alternative Puzzle solution Event. Shared
+text must remain valid on the least-informed route; optional clues and
+branch-exclusive Revelations belong only to their conditional routes.
+
+The graph checks exact Git scope/manifest, pinned validator protection against
+the last verified interactive commit, Event/branch/solution coverage, mandatory
+Authored Content-to-Event/Revelation links and independently read saved text.
+It checks section presence, distinct responses and known branch-exclusive
+lexical leaks, but cannot derive full prose-to-step semantics from the current
+schema. For **real Pi work**, a separate **read-only Pi editorial reviewer**
+must read the saved content, witnesses and pinned guidance and return a
+source-linked verdict covering each route; a blocked review prevents commit.
+This review is editorial judgement, not a claim of mechanically proven
+playability or engine output. A successful work item makes exactly one
+provenance-attributed commit and advances the verified-head marker. The
+author's original checkout is never touched.
+
+The receipt lives in the job state directory at
+`composition-items/<milestone-slug>.json`, with Pi transcripts in
+`composition-sessions/composition-<milestone-slug>/{write,review}/`. Failed or interrupted work
+preserves edited files and receipts; an interrupted `writing` phase is **not**
+automatically restarted. Real runs may consume model usage. Test the public
+workflow without a model with:
+
+```sh
+pnpm exec tsx --test test/composition-work.test.ts
+```
+
+The `--fixture` variant exercises the same Git/validator and structural gates
+but cannot certify semantic editorial meaning. For opt-in **real Pi**
+certification (including the separate reviewer), use
+`NT_LIVE_COMPOSITION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills pnpm exec tsx --test test/composition-work.test.ts`.
+Provider/model/thinking overrides use `NT_PROVIDER`, `NT_MODEL`, and
+`NT_THINKING=low|high`; `NT_KEEP_FAILED_LIVE=1` retains test state for
+diagnosis. Neither mode merges into the author's branch.
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit

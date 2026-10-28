@@ -1,0 +1,543 @@
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { lstat, mkdir, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { authorComposition, reviewComposition, type CompositionAssignment,
+  type CompositionEvidence, type SemanticReview } from "./composition-specialist.js";
+import { startStoryJob, type JobStartResult } from "./job.js";
+import { trustedHead } from "./revision.js";
+import { loadSkillConfig } from "./skills.js";
+import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
+import { validateStoryJob, type ValidationResult } from "./validator.js";
+import type { Plan } from "./architecture.js";
+
+interface RecordItem { path: string; metadata: Record<string, any> & { id: string; type: string; status: string } }
+interface Report {
+  records: RecordItem[];
+  diagnostics: Array<{ path: string; line?: number; column?: number; code: string; message: string }>;
+  protection: { status: string; base: string; changes: unknown[]; warnings: unknown[] };
+  coverage: { search: { truncated: boolean };
+    eventProgress: Array<{ id: string; status: string; witness?: string[] }>;
+    branchProgress: Array<{ event: string; step: string; branch: string; status: string; witness?: string[] }>;
+    puzzleSolutions: Array<{ id: string; solutions: Array<{ event: string; status: string;
+      clueAccess: { status: string } }> }> };
+}
+interface InteractiveReceipt {
+  jobId: string; milestoneId: string; planVersion: number;
+  units: Array<{ id: string; phase: string; commitSha?: string;
+    validation?: { choices?: Array<{ id: string; outcomes: Array<{ name: string; event: string; step: string; branch: string }> }>;
+      puzzles?: Array<{ id: string; solutions: Array<{ event: string; status: string; clueAccess: string }> }> } }>;
+}
+interface ArchReceipt { jobId: string; phase: string; plan?: Plan }
+interface ReviewEvidence { status: "passed"; outcomes: string[]; solutions: string[];
+  sourceEvidence: string[]; reviewer: "independent-pi" | "fixture-structural-only"; sessionFile?: string }
+interface Receipt {
+  version: 1; jobId: string; baseSha: string; milestoneId: string; workItemId: string;
+  planVersion: number; planDigest: string; interactiveHead: string;
+  worker: "fixture" | "pi"; provider: string; model: string; thinking?: "low" | "high";
+  snapshot?: SkillSnapshot; phase: "pending" | "writing" | "authored" | "committed";
+  beforeHead?: string; paths?: string[]; claimedPaths?: string[]; digest?: string;
+  commitSha?: string; sessionFile?: string; reviewSessionFile?: string;
+  skillReads?: string[]; obligations?: string[]; conflicts?: string[]; failure?: string;
+  validation?: { protectionBase: string; validatorSha256: string; branchReview: ReviewEvidence;
+    eventCoverage: Array<{ id: string; witness: string[] }> };
+}
+export interface CompositionOptions {
+  story: string; job: string; action: "run" | "inspect"; milestone: string;
+  skillsSource?: string; validatorSource?: string; fixture?: boolean;
+  provider?: string; model?: string; thinking?: "low" | "high";
+}
+const milestonePattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const hash = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
+function git(job: JobStartResult, ...args: string[]) {
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[key];
+  return execFileSync("git", args, { cwd: job.worktreeRoot, env, encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+const changes = (job: JobStartResult) =>
+  git(job, "status", "--porcelain=v1", "--untracked-files=all", "-z").split("\0").filter(Boolean);
+const repoPath = (job: JobStartResult, path: string) =>
+  job.storyRelativePath ? job.storyRelativePath + "/" + path : path;
+async function save(file: string, data: unknown) {
+  await mkdir(dirname(file), { recursive: true });
+  const tmp = file + "." + randomUUID() + ".tmp";
+  await writeFile(tmp, JSON.stringify(data, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+  await rename(tmp, file);
+}
+function assertHead(job: JobStartResult, head: string) {
+  if (git(job, "rev-parse", "HEAD") !== head || git(job, "symbolic-ref", "--short", "HEAD") !== job.branch)
+    throw new Error("Composition Story branch or verified head changed.");
+}
+function verified(result: ValidationResult, base: string): Report {
+  const r = result.report as unknown as Report | undefined;
+  if (result.status !== "passed" || !r || r.diagnostics?.length ||
+      !Array.isArray(r.records) || r.protection?.status !== "checked" ||
+      r.protection.base !== base || r.protection.changes.length ||
+      r.protection.warnings.length || r.coverage?.search?.truncated ||
+      !Array.isArray(r.coverage?.branchProgress))
+    throw new Error("Composition validator/protection/coverage failed against verified " + base + ": " +
+      JSON.stringify(result).slice(0, 7500));
+  return r;
+}
+function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt, milestoneId: string): CompositionAssignment {
+  const arch = plan.items.find(i => i.id === "global-architecture");
+  if (plan.contract.scope.depth !== "composition" || arch?.status !== "verified" ||
+      !arch.targetIds.includes(milestoneId)) throw new Error("Scope does not authorize composition.");
+  const records = r.records.filter(record => record.metadata.status !== "superseded");
+  const milestone = records.find(record => record.metadata.id === milestoneId);
+  if (!milestone) throw new Error("Missing planned Milestone.");
+  const arcs: string[] = milestone.metadata.arcs;
+  const eventRecords = records.filter(record => record.metadata.type === "event" &&
+    (record.metadata.arcs as string[]).some(id => arcs.includes(id)));
+  const eventIds = eventRecords.map(record => record.metadata.id);
+  const choices = source.units[0]?.validation?.choices ?? [];
+  const puzzles = source.units[1]?.validation?.puzzles ?? [];
+  if (!choices.length || !puzzles.length) throw new Error("Interactive source lacks proven Choice/Puzzle evidence.");
+  const choicePoints = choices.map(c => {
+    const record = records.find(x => x.metadata.type === "choice-point" && x.metadata.id === c.id);
+    const outcomes = record?.metadata.outcomes as string[] | undefined;
+    if (!outcomes?.length || outcomes.length !== c.outcomes.length ||
+        c.outcomes.some(o => !outcomes.includes(o.name) || !eventIds.includes(o.event) ||
+          !r.coverage.branchProgress.some(b => b.event === o.event && b.step === o.step &&
+            b.branch === o.branch && b.status === "reachable")))
+      throw new Error("Choice witnesses are absent or not reachable: " + c.id);
+    return { id: c.id, outcomes: [...outcomes], events: [...new Set(c.outcomes.map(o => o.event))] };
+  });
+  const puzzleSolutions = puzzles.map(p => {
+    const record = records.find(x => x.metadata.type === "puzzle" && x.metadata.id === p.id);
+    const solutions = record?.metadata.solutions as string[] | undefined;
+    if (!solutions || solutions.length < 2 || solutions.some(id =>
+        !eventIds.includes(id) || !p.solutions.some(s => s.event === id && s.status === "reachable" &&
+          s.clueAccess === "reachable") ||
+        !r.coverage.puzzleSolutions.find(q => q.id === p.id)?.solutions.some(s =>
+          s.event === id && s.status === "reachable" && s.clueAccess.status === "reachable")))
+      throw new Error("Puzzle solution/clue witness missing or unverified: " + p.id);
+    return { id: p.id, eventIds: [...solutions] };
+  });
+  const requiredSources = [...new Set([...choicePoints.flatMap(c => c.events),
+    ...puzzleSolutions.flatMap(p => p.eventIds)])].sort();
+  const clues = new Set(records.filter(x => x.metadata.type === "puzzle")
+    .flatMap(x => x.metadata.clues as string[] ?? []));
+  const allowedExistingContent = records.filter(x => x.metadata.type === "authored-content" &&
+    !clues.has(x.metadata.id) && (x.metadata.events as string[]).some(id =>
+      requiredSources.includes(id))).map(x => x.path);
+  const branchWitnesses = r.coverage.branchProgress.filter(b => requiredSources.includes(b.event) &&
+    b.status === "reachable").map(b => ({
+      event: b.event, step: b.step, branch: b.branch, witness: b.witness ?? [],
+    }));
+  // The assignment supplies bounded source evidence, not blanket read/write
+  // permission. Include all route-bearing records, participant voice, nearby
+  // knowledge/relationships and conditional clues, but not unrelated Arcs.
+  const participantIds = new Set(eventRecords.flatMap(e => e.metadata.participants as string[]));
+  const relevantIds = new Set([...eventIds, ...arcs, milestoneId,
+    ...choicePoints.map(c => c.id), ...puzzleSolutions.map(p => p.id)]);
+  const factIds = new Set<string>();
+  for (const event of eventRecords) {
+    const inspect = (v: unknown): void => {
+      if (typeof v === "string" && v.startsWith("fact.")) factIds.add(v);
+      else if (Array.isArray(v)) v.forEach(inspect);
+      else if (v && typeof v === "object") Object.values(v).forEach(inspect);
+    };
+    inspect(event.metadata.steps);
+    inspect(event.metadata.prerequisites);
+  }
+  for (const character of records.filter(x => participantIds.has(x.metadata.id)))
+    for (const entry of character.metadata.initial_knowledge as Array<{ fact: string }> ?? [])
+      factIds.add(entry.fact);
+  const clueIds = new Set(records.filter(x => puzzleSolutions.some(p => p.id === x.metadata.id))
+    .flatMap(x => x.metadata.clues as string[] ?? []));
+  const selected = records.filter(x => x.metadata.type === "creative-direction" ||
+    relevantIds.has(x.metadata.id) || participantIds.has(x.metadata.id) ||
+    factIds.has(x.metadata.id) || clueIds.has(x.metadata.id) ||
+    x.metadata.type === "relationship" &&
+      (x.metadata.characters as string[]).some(id => participantIds.has(id)) ||
+    x.metadata.type === "revelation" && factIds.has(x.metadata.fact) ||
+    x.metadata.type === "authored-content" &&
+      (x.metadata.events as string[]).some(id => eventIds.includes(id)) ||
+    x.metadata.type === "narrative-position" && eventIds.includes(x.metadata.event) ||
+    x.metadata.type === "world-entity");
+  return { milestoneId, workItemId: "composition-" + milestoneId.slice(10),
+    authorContract: plan.contract, eventIds, choicePoints, puzzleSolutions,
+    branchWitnesses, requiredSources, allowedExistingContent,
+    sourcePaths: [...new Set(selected.map(x => x.path))].sort(),
+    mandatoryReads: [...new Set(selected.filter(x => ["event", "character", "relationship",
+      "fact", "revelation", "choice-point", "puzzle", "authored-content"].includes(x.metadata.type))
+      .map(x => x.path))].sort() };
+}
+export async function auditCompositionPaths(job: JobStartResult, assign: CompositionAssignment,
+  claimed: string[]) {
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const paths: string[] = [];
+  for (const change of changes(job)) {
+    if (!["??", " M"].includes(change.slice(0, 2)))
+      throw new Error("Composition specialist staged/removed/renamed a Story file: " + change);
+    const name = change.slice(3);
+    if (!name.startsWith(prefix)) throw new Error("Composition specialist wrote outside Story: " + name);
+    const path = name.slice(prefix.length);
+    if (!/^authored-content\/[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.md$/.test(path))
+      throw new Error("Unauthorized composition edit to read-only Event/Story canon: " + path);
+    if (change.startsWith(" M") && !assign.allowedExistingContent.includes(path))
+      throw new Error("Composition edited unrelated or protected Authored Content: " + path);
+    const target = join(job.worktreeStoryRoot, path);
+    if (await realpath(target) !== target || !(await lstat(target)).isFile())
+      throw new Error("Unsafe composition Story path: " + path);
+    paths.push(path);
+  }
+  paths.sort();
+  if (!paths.length || new Set(claimed).size !== claimed.length ||
+      JSON.stringify(paths) !== JSON.stringify([...claimed].sort()))
+    throw new Error("Composition manifest differs from Git changes: " + JSON.stringify({ paths, claimed }));
+  return paths;
+}
+async function fileDigest(job: JobStartResult, paths: string[]) {
+  return hash(JSON.stringify(await Promise.all(paths.map(async path =>
+    [path, hash(await readFile(join(job.worktreeStoryRoot, path)))]))));
+}
+const heading = (slug: string) => slug.split("-")
+  .map(s => s.slice(0, 1).toUpperCase() + s.slice(1)).join(" ");
+function sections(body: string) {
+  const map = new Map<string, string>();
+  const parts = body.split(/^## (.+)$/gm);
+  for (let i = 1; i < parts.length; i += 2) {
+    const title = parts[i]!.trim();
+    if (map.has(title)) throw new Error("Duplicate prose section: " + title);
+    map.set(title, parts[i + 1]?.trim() ?? "");
+  }
+  return map;
+}
+/** Syntactic/source checks only; a separate read-only Pi reviewer checks semantics. */
+export async function verifyCompositionProse(job: JobStartResult, r: Report,
+  a: CompositionAssignment, paths: string[]) {
+  const records = r.records.filter(x => paths.includes(x.path) && x.metadata.type === "authored-content");
+  if (records.length !== paths.length) throw new Error("Composition output is not canonical Authored Content.");
+  const linked = new Map<string, Array<{ body: string; sections: Map<string, string>; revelations: string[] }>>();
+  for (const record of records) {
+    const file = await readFile(join(job.worktreeStoryRoot, record.path), "utf8");
+    const end = file.indexOf("\n---", 4);
+    if (end < 0) throw new Error("Invalid Authored Content frontmatter.");
+    const body = file.slice(end + 4).trim();
+    if (body.length < 70) throw new Error("Missing playable Authored Content prose: " + record.path);
+    for (const event of record.metadata.events as string[]) {
+      if (!a.eventIds.includes(event)) throw new Error("Authored Content links unrelated Event: " + event);
+      linked.set(event, [...(linked.get(event) ?? []),
+        { body, sections: sections(body), revelations: record.metadata.revelations as string[] }]);
+    }
+  }
+  for (const choice of a.choicePoints) for (const event of choice.events) {
+    const section = linked.get(event)?.find(x => x.sections.has("Shared entry") &&
+      x.sections.has("Choice wording") && choice.outcomes.every(o => x.sections.has(heading(o) + " selected")));
+    if (!section) throw new Error("Missing shared/choice/branch prose sections for " + event);
+    const intro = section.sections.get("Shared entry")!, menu = section.sections.get("Choice wording")!;
+    const labels = menu.split("\n").map(s => s.trim()).filter(Boolean);
+    if (intro.length < 30 || labels.length !== choice.outcomes.length ||
+        choice.outcomes.some(o => !labels.some(s => s.toLowerCase().startsWith("**" + heading(o).toLowerCase() + ":**"))))
+      throw new Error("Choice wording must be selectable labels only, one per outcome.");
+    const reactions = choice.outcomes.map(o => section.sections.get(heading(o) + " selected")!);
+    if (reactions.some(s => s.length < 60) || new Set(reactions).size !== reactions.length)
+      throw new Error("Missing distinct playable choice branch responses.");
+    // A clue from an independent discovery Event cannot be presumed in the
+    // shared pre-choice text. Its identifier is a conservative lexical tripwire,
+    // not semantic proof that every other paraphrase is safe.
+    const clues = r.records.filter(x => x.metadata.type === "puzzle")
+      .flatMap(x => x.metadata.clues as string[] ?? []);
+    for (const clueId of clues) {
+      const clue = r.records.find(x => x.metadata.id === clueId);
+      if (!clue || (clue.metadata.events as string[]).includes(event)) continue;
+      const clueName = clueId.slice("authored-content.".length).replace(/-clue$/, "");
+      if (new RegExp("\\b" + clueName.split("-").join("[- ]") + "\\b", "i").test(intro + "\n" + menu))
+        throw new Error("Optional discovery clue leaked into shared prose: " + clueId);
+    }
+    const record = r.records.find(x => x.metadata.id === event)!;
+    for (const step of record.metadata.steps as Array<{ branches: Array<{ effects: any[] }> }>) {
+      for (const branch of step.branches) for (const effect of branch.effects) {
+        if (effect.kind !== "revealed" || effect.value !== true ||
+            step.branches.every(b => b.effects.some(e => e.kind === "revealed" &&
+              e.revelation === effect.revelation && e.value === true))) continue;
+        const phrase = String(effect.revelation).slice("revelation.".length)
+          .split("-").join("[- ]");
+        if (new RegExp("\\b" + phrase + "\\b", "i").test(intro + "\n" + menu))
+          throw new Error("Branch-exclusive Revelation leaked into shared/menu prose: " + effect.revelation);
+      }
+    }
+  }
+  for (const puzzle of a.puzzleSolutions) for (const event of puzzle.eventIds) {
+    if (!linked.get(event)?.some(c => c.body.length >= 100))
+      throw new Error("Missing substantive solution ending prose linked to " + event);
+  }
+  // The canonical authored-content.revelations link is the only typed
+  // presentation relationship available. It does not identify a step; the
+  // independent review must additionally establish the precise route/line.
+  for (const event of a.requiredSources) {
+    const record = r.records.find(x => x.metadata.id === event);
+    const effects = (record?.metadata.steps as Array<{ branches: Array<{ effects: any[] }> }> ?? [])
+      .flatMap(step => step.branches.flatMap(branch => branch.effects));
+    for (const id of new Set(effects.filter(effect =>
+      effect.kind === "revealed" && effect.value === true).map(effect => effect.revelation as string))) {
+      if (!linked.get(event)?.some(content => content.revelations.includes(id)))
+        throw new Error("Composition missing typed Revelation presentation " + id + " in " + event);
+    }
+  }
+  return { outcomes: [...new Set(a.choicePoints.flatMap(c => c.outcomes))].sort(),
+    solutions: [...new Set(a.puzzleSolutions.flatMap(p => p.eventIds))].sort(),
+    eventCoverage: a.requiredSources.map(id => ({
+      id, witness: r.coverage.eventProgress.find(e => e.id === id)?.witness ?? [],
+    })) };
+}
+async function publishHead(job: JobStartResult, before: string, after: string, id: string) {
+  const file = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  await mkdir(dirname(file), { recursive: true });
+  if (existsSync(file)) {
+    const saved = JSON.parse(await readFile(file, "utf8")) as { version: number; jobId: string; headSha: string };
+    if (saved.version !== 1 || saved.jobId !== job.jobId ||
+        (saved.headSha !== before && saved.headSha !== after))
+      throw new Error("Last verified Story head changed outside composition.");
+    if (saved.headSha === after) return;
+  }
+  await save(file, { version: 1, jobId: job.jobId, headSha: after, workItemId: id });
+}
+function verifyCommit(job: JobStartResult, state: Receipt, sha: string) {
+  if (!state.paths || !state.digest || git(job, "rev-parse", sha + "^") !== state.interactiveHead)
+    throw new Error("Composition commit parent is unverified.");
+  const message = git(job, "log", "-1", "--format=%B", sha);
+  if (!message.includes("NovelTea-Composition: " + state.digest) ||
+      !message.includes("NovelTea-Work-Item: " + state.workItemId + "\n") ||
+      !message.includes("NovelTea-Plan-Version: " + state.planVersion + "\n"))
+    throw new Error("Composition commit provenance mismatch.");
+  const actual = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", sha).split("\n").filter(Boolean).sort();
+  if (JSON.stringify(actual) !== JSON.stringify(state.paths.map(p => repoPath(job, p)).sort()))
+    throw new Error("Composition commit includes unauthorized files.");
+}
+function output(job: JobStartResult, state: Receipt) {
+  return { status: state.phase === "committed" ? "composition-committed" : "in-progress",
+    phase: state.phase, jobId: job.jobId, milestoneId: state.milestoneId,
+    workItemId: state.workItemId, interactiveHead: state.interactiveHead,
+    headSha: state.commitSha ?? state.interactiveHead, worktreeStoryRoot: job.worktreeStoryRoot,
+    paths: state.paths ?? [], validation: state.validation, failure: state.failure,
+    obligations: state.obligations ?? [], skillSnapshot: state.snapshot?.id,
+    sessionFile: state.sessionFile, reviewSessionFile: state.reviewSessionFile,
+    completionEvidence: { deterministicCoverage: state.phase === "committed",
+      editorialReview: state.validation?.branchReview.reviewer ?? "unverified",
+      engineImplementation: "not-started", fullStory: false } };
+}
+async function fixtureAuthor(job: JobStartResult, a: CompositionAssignment): Promise<CompositionEvidence> {
+  const variant = process.env.NT_COMPOSITION_FIXTURE_CASE ?? "";
+  const paths: string[] = [];
+  const write = async (slug: string, events: string[], body: string, revelations: string[] = []) => {
+    const path = "authored-content/" + slug + ".md";
+    await mkdir(dirname(join(job.worktreeStoryRoot, path)), { recursive: true });
+    await writeFile(join(job.worktreeStoryRoot, path),
+      `---\nschema: '0.1'\ntype: authored-content\nid: authored-content.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\nevents: [${events.join(", ")}]\nrevelations: [${revelations.join(", ")}]\n---\n\n${body}\n`, { flag: "wx" });
+    paths.push(path);
+  };
+  const choice = a.choicePoints[0]!;
+  const intro = 'Ada studies the register. Neri waits near the closed folder. "We can decide what to do after we hear the whole story," Ada says.';
+  const menu = choice.outcomes.map(o => "**" + heading(o) + ":** " +
+    (o === "protect" ? "Give Neri a chance to speak." : "Demand a full accounting.")).join("\n");
+  const reactions = choice.outcomes.map(o => "## " + heading(o) + " selected\n\n" +
+    (o === "protect" ? 'Ada lowers her voice. "I will give you a chance before I tell anyone." Neri exhales. "I owe you a real explanation." They return to the archive together.'
+      : 'Ada holds the folder open. "I need an account, not a promise." Neri looks toward the door. "Then ask what you came here to ask." Their alliance feels suddenly uncertain.')).join("\n\n");
+  await write("disclosure-scene", choice.events, "## Shared entry\n\n" +
+    (variant === "shared-leak" ? intro + " The ledger-secret confession proves Neri concealed it."
+      : variant === "shared-optional-clue" ? intro + " Ada already knows the watermark proves the ledger key." : intro) +
+    "\n\n## Choice wording\n\n" + menu + "\n\n" +
+    (variant === "missing-branch" ? reactions.split("## " + heading(choice.outcomes.at(-1)!) + " selected")[0] : reactions),
+    ["revelation.ledger-secret"]);
+  for (const solution of a.puzzleSolutions.flatMap(p => p.eventIds)) {
+    if (variant === "missing-ending" && solution === a.puzzleSolutions[0]!.eventIds.at(-1)) continue;
+    const body = solution.includes("decode")
+      ? 'Ada turns the document sideways. "The watermark is the key, not the signature," she says. With the cipher deciphered, the lost name appears, and Neri watches without speaking.'
+      : 'Ada holds the seal beside the register. "These match," she tells the custodian. He stops pretending not to recognize it. "I witnessed that transfer," he admits, and Neri looks away.';
+    await write(solution.slice(6) + "-ending", [solution],
+      "## Solution consequence\n\n" + body + "\n\nAda realizes this evidence changes what she can ask next.",
+      ["revelation.puzzle-evidence"]);
+  }
+  if (variant === "event-retcon") {
+    const path = "events/disclose-ledger.md";
+    await writeFile(join(job.worktreeStoryRoot, path),
+      (await readFile(join(job.worktreeStoryRoot, path), "utf8")).replace("Ada", "Another Ada"));
+    paths.push(path);
+  }
+  return { modifiedRecords: paths, conflicts: [], obligations: [], skillReads: [] };
+}
+export async function runCompositionWorkItem(input: CompositionOptions) {
+  if (!milestonePattern.test(input.milestone)) throw new Error("--milestone requires exact typed Milestone ID.");
+  const job = await startStoryJob({ story: input.story, job: input.job }, false);
+  const root = dirname(job.worktreeRoot);
+  const file = join(root, "composition-items", input.milestone.slice(10) + ".json");
+  const lock = join(root, ".story-writing");
+  if (input.action === "inspect" && !existsSync(file)) throw new Error("No composition work item receipt.");
+  try { await mkdir(lock); } catch { throw new Error("Story writer lock exists; inspect active or interrupted work."); }
+  try {
+    const sourceFile = join(root, "interactive-items", input.milestone.slice(10) + ".json");
+    if (!existsSync(sourceFile) || !existsSync(join(root, "architecture.json")))
+      throw new Error("Composition requires verified interactive Choice/Puzzle work.");
+    const source = JSON.parse(await readFile(sourceFile, "utf8")) as InteractiveReceipt;
+    const architecture = JSON.parse(await readFile(join(root, "architecture.json"), "utf8")) as ArchReceipt;
+    const units = source.units;
+    if (source.jobId !== job.jobId || source.milestoneId !== input.milestone ||
+        architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
+        !architecture.plan || architecture.plan.contract.scope.depth !== "composition" ||
+        source.planVersion !== architecture.plan.version || units?.length !== 2 ||
+        units.some(u => u.phase !== "committed" || !u.commitSha || !u.validation))
+      throw new Error("Composition requires the same authorized and fully committed interactive milestone.");
+    const interactiveHead = units[1]!.commitSha!;
+    if (git(job, "rev-parse", interactiveHead + "^") !== units[0]!.commitSha ||
+        !git(job, "log", "-1", "--format=%B", interactiveHead)
+          .includes("NovelTea-Work-Item: " + units[1]!.id + "\n"))
+      throw new Error("Interactive commit chain/provenance differs from work item.");
+    const planDigest = hash(JSON.stringify(architecture.plan));
+    let state: Receipt;
+    if (existsSync(file)) {
+      state = JSON.parse(await readFile(file, "utf8")) as Receipt;
+      if (state.version !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha ||
+          state.milestoneId !== input.milestone || state.interactiveHead !== interactiveHead ||
+          state.planVersion !== architecture.plan.version || state.planDigest !== planDigest)
+        throw new Error("Composition receipt mismatches verified plan or interactive source.");
+    } else {
+      if (input.action !== "run") throw new Error("No composition receipt.");
+      if (changes(job).length || git(job, "rev-parse", "HEAD") !== interactiveHead ||
+          await trustedHead(job) !== interactiveHead)
+        throw new Error("Composition requires a clean, verified interactive HEAD.");
+      state = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
+        milestoneId: input.milestone, workItemId: "composition-" + input.milestone.slice(10),
+        planVersion: architecture.plan.version, planDigest, interactiveHead,
+        worker: input.fixture ? "fixture" : "pi", provider: input.provider ?? "openai",
+        model: input.model ?? "gpt-6-luna", thinking: input.thinking, phase: "pending" };
+      await save(file, state);
+    }
+    if (input.action === "inspect") return output(job, state);
+    if (Boolean(input.fixture) !== (state.worker === "fixture") ||
+        input.provider && input.provider !== state.provider ||
+        input.model && input.model !== state.model ||
+        input.thinking && input.thinking !== state.thinking)
+      throw new Error("Composition worker selection differs from persisted assignment.");
+    const config = input.skillsSource
+      ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
+      : state.snapshot
+        ? { discovery: "explicit-only" as const, novelteaSkills: undefined, skillDirs: [], requiredSkills: [] }
+        : await loadSkillConfig(undefined, false);
+    if (!state.snapshot) {
+      const snapshot = await createSkillSnapshot({ ...config,
+        novelteaSkills: input.skillsSource ?? config.novelteaSkills,
+        discovery: "explicit-only", requiredSkills: ["nt-narrative-composition", "nt-catalog"] });
+      if (!snapshot) throw new Error("Composition requires pinned NovelTea skills.");
+      state.snapshot = snapshot; await save(file, state);
+    }
+    if (await openSkillSnapshot(state.snapshot.id) !== state.snapshot.path)
+      throw new Error("Composition skills snapshot changed from immutable pin.");
+    const validate = async (base: string) => validateStoryJob(
+      await startStoryJob({ story: input.story, job: input.job }, false),
+      input.validatorSource ?? input.skillsSource ?? config.novelteaSkills, { ...job, baseSha: base });
+    const Channels = Annotation.Root({ receipt: Annotation<Receipt>() });
+    async function execute(s: Receipt) {
+      const base = s.interactiveHead;
+      if (s.beforeHead && s.beforeHead !== base) throw new Error("Composition authority head changed.");
+      if (s.phase === "committed") {
+        if (!s.commitSha) throw new Error("Missing composition commit.");
+        verifyCommit(job, s, s.commitSha);
+        if (changes(job).length || git(job, "rev-parse", "HEAD") !== s.commitSha)
+          throw new Error("Composition commit chain or worktree diverged.");
+        await publishHead(job, base, s.commitSha, s.workItemId);
+        return;
+      }
+      if (s.phase === "writing")
+        throw new Error("Interrupted composition writer: inspect preserved Story and transcript, no blind retry.");
+      const current = git(job, "rev-parse", "HEAD");
+      const recovering = s.phase === "authored" && current !== base;
+      if (recovering && (!s.digest || !s.paths || changes(job).length ||
+          git(job, "rev-parse", "HEAD^") !== base ||
+          !git(job, "log", "-1", "--format=%B").includes("NovelTea-Composition: " + s.digest)))
+        throw new Error("Unknown interrupted composition commit; manually reconcile.");
+      if (!recovering) {
+        assertHead(job, base);
+        if (s.phase === "pending" && changes(job).length)
+          throw new Error("Composition writer requires clean Story boundary.");
+      }
+      const baseline = verified(await validate(base), base);
+      const assign = selectAssignment(architecture.plan!, baseline, source, input.milestone);
+      if (s.phase === "pending") {
+        s.phase = "writing"; s.beforeHead = base; await save(file, s);
+        try {
+          const verifyDraft = async (evidence: CompositionEvidence) => {
+            const paths = await auditCompositionPaths(job, assign, evidence.modifiedRecords);
+            assertHead(job, base);
+            if (evidence.conflicts.length) throw new Error("Unresolved source conflict: " + evidence.conflicts.join("; "));
+            const result = await validate(base);
+            const report = result.report as unknown as Report | undefined;
+            if (report?.protection?.status !== "checked" || report.protection.base !== base ||
+                report.protection.changes.length || report.protection.warnings.length)
+              throw new Error("Composition protected author decisions changed; repair refused.");
+            if (report.diagnostics.length) return report.diagnostics.slice(0, 24).map(d =>
+              `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
+            if (result.status !== "passed") throw new Error("Canonical validator rejected composition draft.");
+            try { await verifyCompositionProse(job, report, assign, paths); return []; }
+            catch (e) { return [String(e)]; }
+          };
+          const evidence = s.worker === "fixture" ? await fixtureAuthor(job, assign)
+            : await authorComposition(job, s.snapshot!, assign, s.provider, s.model,
+              s.thinking, async session => { s.sessionFile = session; await save(file, s); },
+              verifyDraft);
+          s.claimedPaths = evidence.modifiedRecords;
+          s.paths = await auditCompositionPaths(job, assign, evidence.modifiedRecords);
+          s.conflicts = evidence.conflicts; s.obligations = evidence.obligations;
+          s.skillReads = evidence.skillReads;
+          s.digest = await fileDigest(job, s.paths);
+          s.phase = "authored"; await save(file, s);
+        } catch (e) { s.failure = String(e); await save(file, s); throw e; }
+      }
+      try {
+        if (!s.paths || !s.claimedPaths || !s.digest || s.conflicts?.length ||
+            await fileDigest(job, s.paths) !== s.digest)
+          throw new Error("Composition draft bytes/manifest differ from verified receipt.");
+        const result = await validate(base), report = verified(result, base);
+        for (const prev of baseline.coverage.eventProgress.filter(e => e.status === "reachable")) {
+          if (report.coverage.eventProgress.find(e => e.id === prev.id)?.status !== "reachable")
+            throw new Error("Composition lost previously reachable Event route: " + prev.id);
+        }
+        const structural = await verifyCompositionProse(job, report, assign, s.paths);
+        const review: SemanticReview = s.worker === "fixture"
+          ? { verdict: "pass", sourceEvidence: assign.branchWitnesses.map(b =>
+              `${b.event}#${b.step}/${b.branch}: ${b.witness.join(", ")}`), concerns: [] }
+          : await reviewComposition(job, s.snapshot!, assign, s.paths, s.provider, s.model, s.thinking,
+              async session => { s.reviewSessionFile = session; await save(file, s); });
+        if (review.verdict !== "pass" || review.concerns.length || !review.sourceEvidence.length)
+          throw new Error("Branch-to-prose editorial review blocked: " + review.concerns.join("; "));
+        if (s.worker === "pi" && [...structural.outcomes, ...structural.solutions].some(route =>
+          !review.sourceEvidence.some(line => line.toLowerCase().includes(route.toLowerCase()))))
+          throw new Error("Independent editorial review omitted source-linked evidence for a Choice/Puzzle route.");
+        const branchReview: ReviewEvidence = { status: "passed", outcomes: structural.outcomes,
+          solutions: structural.solutions, sourceEvidence: review.sourceEvidence,
+          reviewer: s.worker === "fixture" ? "fixture-structural-only" : "independent-pi",
+          sessionFile: review.sessionFile };
+        if (!recovering) {
+          assertHead(job, base);
+          const paths = await auditCompositionPaths(job, assign, s.claimedPaths);
+          if (JSON.stringify(paths) !== JSON.stringify(s.paths) ||
+              await fileDigest(job, paths) !== s.digest)
+            throw new Error("Composition changed after editorial review.");
+          git(job, "add", "--", ...paths.map(p => repoPath(job, p)));
+          git(job, "-c", "user.name=NovelTea Generator",
+            "-c", "user.email=noveltea-gen@users.noreply.github.com",
+            "commit", "-m", `Compose branch-aware prose [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${s.workItemId}\nNovelTea-Plan-Version: ${s.planVersion}\nNovelTea-Composition: ${s.digest}`);
+        }
+        if (changes(job).length) throw new Error("Composition commit left dirty Story worktree.");
+        const sha = git(job, "rev-parse", "HEAD");
+        verifyCommit(job, s, sha);
+        s.commitSha = sha; s.phase = "committed";
+        s.validation = { protectionBase: base, validatorSha256: result.validator.sha256,
+          branchReview, eventCoverage: structural.eventCoverage };
+        delete s.failure; await save(file, s);
+        await publishHead(job, base, sha, s.workItemId);
+      } catch (e) { s.failure = String(e); await save(file, s); throw e; }
+    }
+    const graph = new StateGraph(Channels)
+      .addNode("compose_and_review", async ({ receipt }) => {
+        await execute(receipt); return { receipt };
+      }).addEdge(START, "compose_and_review").addEdge("compose_and_review", END).compile();
+    const result = await graph.invoke({ receipt: state });
+    return output(job, result.receipt);
+  } finally { await rmdir(lock).catch(() => undefined); }
+}
