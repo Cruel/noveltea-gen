@@ -122,10 +122,22 @@ test("weak choice and Revelation leak remain independent editorial blocks", () =
     assert.equal(verdict.verdict, "block");
   }
   assert.throws(() => checkEditorialVerdict({ verdict: "pass", findings: [],
-    evidence: ["generic prose is good"] }, assignment), /route witness/);
+    evidence: ["generic prose is good"] }, assignment), /route witness|Story file lines/);
   assert.throws(() => checkEditorialVerdict({ verdict: "pass", findings: [{
     severity: "blocking", dimension: "player-agency", repair: "interactive",
     source: "authored-content/confront.md:12", message: "Weak choice" }], evidence }, assignment), /conflicts/);
+  const blocked = checkEditorialVerdict({ verdict: "block", findings: [{
+    severity: "blocking", dimension: "continuity", repair: "composition",
+    source: "authored-content/confront.md:12", message: "Unproven branch-only disclosure" }],
+    evidence: ["authored-content/confront.md:12: known on the protect route"] },
+  { ...assignment, routes: [...assignment.routes, { event: "event.other", step: "t", branch: "b",
+    status: "unverified", witness: [] }] });
+  assert.equal(blocked.verdict, "block", "Independent blocking findings do not require invented positive witnesses");
+  assert.equal(checkEditorialVerdict({ verdict: "pass", findings: [],
+    evidence: ["event.confront#decision/protect: authored-content/confront.md:12",
+      "milestone.disclosure#alternative 0: milestones/disclosure.md:9"] },
+  { ...assignment, milestoneRoutes: [{ milestone: "milestone.disclosure", alternative: 0,
+    status: "reachable", witness: [] }] }).verdict, "pass");
 });
 function git(cwd: string, ...args: string[]) {
   const x = spawnSync("git", args, { cwd, encoding: "utf8" });

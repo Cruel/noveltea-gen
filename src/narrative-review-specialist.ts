@@ -56,17 +56,23 @@ export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignme
   }
   if ((v.verdict === "pass") !== !v.findings.some(f => f.severity === "blocking"))
     throw new Error("Narrative reviewer verdict conflicts with blocking findings.");
-  // A source-linked attestation for every selected route, not just a generic yes.
-  const routes = [...assignment.routes.map(r => r.event + "#" + r.step + "/" + r.branch),
-    ...assignment.milestoneRoutes.map(r => r.milestone + "#" + r.alternative),
-    ...assignment.puzzleRoutes.map(r => r.puzzle + "/" + r.event)];
-  if (routes.some(route => !v.evidence!.some(line =>
-    line.includes(route) && /[a-z][a-z0-9-]*\/[^\s:]+\.md:[1-9][0-9]*/.test(line)))) {
-    throw new Error("Narrative reviewer omitted a source-linked file:line for a representative route witness.");
+  if (v.verdict === "block" && !v.findings.length)
+    throw new Error("Blocking editorial review must identify actionable source-linked findings.");
+  const linked = (line: string) => /[a-z][a-z0-9-]*\/[^\s:]+\.md:[1-9][0-9]*/.test(line);
+  if (!v.evidence.some(linked))
+    throw new Error("Narrative review requires evidence linked to actual Story file lines.");
+  // An editorial BLOCK is valid with concrete source-linked findings even if
+  // the reviewer cannot attest every route. Only a PASS requires positive
+  // evidence for every representative route: never manufacture coverage.
+  if (v.verdict === "pass") {
+    const routes = [...assignment.routes.map(r => [r.event + "#" + r.step + "/" + r.branch]),
+      ...assignment.milestoneRoutes.map(r => [r.milestone + "#" + r.alternative,
+        r.milestone + "#alternative " + r.alternative]),
+      ...assignment.puzzleRoutes.map(r => [r.puzzle + "/" + r.event])];
+    if (routes.some(labels => !v.evidence!.some(line => linked(line) &&
+      labels.some(label => line.includes(label)))))
+      throw new Error("Passing narrative reviewer omitted a source-linked file:line for a representative route witness.");
   }
-  if (!v.evidence.length || !v.evidence.some(line =>
-    /[a-z][a-z0-9-]*\/[^\s:]+\.md:[1-9][0-9]*/.test(line)))
-    throw new Error("Narrative review cannot pass without source-linked file and line evidence.");
   return { verdict: v.verdict!, findings: v.findings, evidence: v.evidence };
 }
 

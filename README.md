@@ -925,7 +925,19 @@ old completion verdict; prior review receipts are archived outside Story canon.
 audit passes. Real Pi editorial certification is opt-in, incurs model usage and
 requires configured credentials. The review receipt and Pi transcripts live in
 the job state directory (`narrative-review.json`, `review-sessions/`). Test with
-`pnpm exec tsx --test test/narrative-review.test.ts`.
+`pnpm exec tsx --test test/narrative-review.test.ts`. To certify the real,
+separate read-only Pi reviewer against the actual branch-aware Story fixture:
+
+```sh
+NT_LIVE_NARRATIVE_REVIEW=1 NT_PROVIDER=openai NT_MODEL=gpt-6-luna \\
+  NT_THINKING=low pnpm exec tsx --test test/narrative-review-live.test.ts
+```
+
+This fixture intentionally contains continuity/knowledge/Puzzle issues. A
+source-linked **blocking** editorial verdict is the expected successful gate,
+not a failure to certify the generated Story. The test checks the independent
+read-only transcript, protected author checkout, and absence of automatic
+canon edits; actual literary completion remains deliberately blocked.
 
 ## Protected-decision revision and author approval (#16)
 
