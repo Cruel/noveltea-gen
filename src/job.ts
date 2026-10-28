@@ -18,6 +18,8 @@ interface JobManifest {
   worktreeRoot: string;
   worktreeStoryRoot: string;
   threadId: string;
+  /** Set on first validation; missing validator receipt after this is fatal. */
+  validatorSha256?: string;
 }
 
 export interface JobStartResult extends Omit<JobManifest, "version" | "gitCommonDir"> {
@@ -63,7 +65,7 @@ function gitCommonDir(root: string): string {
 }
 
 /** Canonicalize existing ancestors, including symlinks, before allocating job state. */
-async function canonicalDestination(input: string): Promise<string> {
+export async function canonicalDestination(input: string): Promise<string> {
   const missing: string[] = [];
   let cursor = resolve(input);
   while (true) {
@@ -119,7 +121,7 @@ async function validateWorktree(manifest: JobManifest): Promise<string> {
  * Establish a durable, Git-isolated Story generation workspace.
  * This is deliberately separate from the older proof-of-concept 'run' graph.
  */
-export async function startStoryJob(options: JobStartOptions): Promise<JobStartResult> {
+export async function startStoryJob(options: JobStartOptions, create = true): Promise<JobStartResult> {
   if (!options.story.trim()) throw new Error("Missing required --story <path>.");
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(options.job) || options.job.includes("..")) {
     throw new Error("--job must be 1–64 letters, digits, dots, underscores or hyphens, without '..'.");
@@ -173,13 +175,17 @@ export async function startStoryJob(options: JobStartOptions): Promise<JobStartR
         saved.branch !== branch || saved.worktreeRoot !== worktreeRoot ||
         saved.worktreeStoryRoot !== worktreeStoryRoot ||
         !/^[0-9a-f]{40,64}$/.test(saved.baseSha) ||
-        !/^[0-9a-f-]{36}$/.test(saved.threadId)) {
+        !/^[0-9a-f-]{36}$/.test(saved.threadId) ||
+        (saved.validatorSha256 !== undefined && !/^[a-f0-9]{64}$/.test(saved.validatorSha256))) {
       throw new Error("Saved job identity does not match the selected Story, repository or job. No worktree was changed.");
     }
     const headSha = await validateWorktree(saved);
     return { ...publicFields(saved), status: "ready", headSha };
   }
 
+  if (!create) {
+    throw new Error("No existing Story job matches this Story root and job ID. Run 'job start' first.");
+  }
   // Only a new job depends on the author's current Story baseline being clean.
   // Reopen must tolerate later author work and preserves uncommitted job edits.
   const pathspec = storyRelativePath || ".";

@@ -29,6 +29,9 @@ importers:
       '@langchain/langsmith-pi-extension':
         specifier: 0.2.1
         version: 0.2.1(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0)
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
       langsmith:
         specifier: 0.11.1
         version: 0.11.1(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0)

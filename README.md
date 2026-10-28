@@ -112,6 +112,58 @@ Git-backed job. Later Story-orchestration tickets will consume this durable
 job worktree and thread identity. Do not treat `job start` as a completed
 narrative-generation run.
 
+## Pinned standalone Story validation (#14)
+
+After creating a Git-backed job, validate the **Story in that job's
+worktree** with the existing canonical experimental TypeScript validator:
+
+```sh
+pnpm dev job start --story /path/to/git-repo/story --job draft-1
+pnpm dev job validate --story /path/to/git-repo/story --job draft-1
+# If .local/config.json does not name novelteaSkills on the first validation:
+pnpm dev job validate --story /path/to/git-repo/story --job draft-1 \\
+  --validator-source /path/to/noveltea-skills
+```
+
+The first validation compiles `noveltea-skills/src/cli.ts` into a single
+Node.js executable with esbuild, including its runtime dependencies. It
+fingerprints the source files and lockfile, checks for changes during the
+build, and records the checkout revision/dirty state. This pin is **separate**
+from the immutable skills-only snapshot. The first validation stores
+`validator.json` alongside the job's `job.json`, and a hashed read-only
+executable under `~/.cache/noveltea-gen/validator-artifacts/<sha256>/`.
+`NT_VALIDATOR_CACHE_DIR` can override this cache; `XDG_CACHE_HOME` changes
+the default base. Repeated validation checks the exact pinned artifact and
+never rebuilds or automatically replaces it, even if the source checkout
+changes or is removed. Missing, changed or unexpected cache contents fail
+closed. This is an executable pin, **not** a second narrative schema.
+
+The public JSON result includes `contract: "noveltea-validator/v1"`,
+`validator` provenance and SHA-256, job/base/worktree identity, and the
+**unmodified canonical report**: source-located diagnostics; design versus
+approved readiness and stage minima; coverage and explicitly unverified
+conditions; protected decisions, change warnings, and downstream Git impact.
+The adapter passes the job's immutable `baseSha` as `--base`, not the
+worktree's mutable HEAD. The exit status is `0` for no structural or
+protected-decision errors, `1` for a rejected canonical validation, and
+`2` for missing/unverified Git baseline, missing pins, or execution errors.
+A structural pass does **not** mean narrative completeness, editorial
+approval or author authorization. No acknowledgement flags are offered.
+
+**Empty Git baselines:** the experimental validator cannot produce a
+verified Git-protection report when the baseline contains no Story Markdown.
+In this case the adapter preserves the structural/readiness findings but
+returns `status: "unverified"` with exit code `2`; it never reports that
+protected changes were checked. This limitation must be resolved by the
+native Git-impact contract before completion gates can depend on it.
+
+The native replacement is owned by [Cruel/nt#526](https://github.com/Cruel/nt/issues/526)
+and [Cruel/nt#535](https://github.com/Cruel/nt/issues/535). The validator's
+single stable adapter isolates future CLI replacement from graph/agent
+consumers. See [docs/validator-cutover.md](docs/validator-cutover.md)
+for the structural, readiness, protection and impact parity matrix and
+opt-in native parity test. No native behavior is assumed available yet.
+
 ## Run against a Story project
 
 Select an **existing** Story directory using `--project`:

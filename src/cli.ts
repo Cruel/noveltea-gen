@@ -24,6 +24,7 @@ const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
 
 Usage:
   pnpm dev job start --story /path/to/story --job draft-1
+  pnpm dev job validate --story /path/to/story --job draft-1
   pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
   pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
   pnpm dev demo-story --project ./fresh-story --create-project --task "A mystery; choose the rest"
@@ -31,7 +32,9 @@ Usage:
 Job start:
   --story <path>     Required existing canonical Story directory within a Git worktree
   --job <id>         Required stable logical job ID (reopen by repeating the same ID)
-  --noveltea-project <path>  Optional future engine project root (metadata only)
+  --noveltea-project <path>  Optional future engine project root (start only; metadata)
+  --validator-source <path>  Initial validation: canonical noveltea-skills checkout
+                           (otherwise uses configured novelteaSkills)
 
 Options:
   --project <path>    Required Story root (existing directory, independent of app checkout)
@@ -137,7 +140,10 @@ function parseArgs(argv: string[]): CliOptions | null {
 async function main(): Promise<void> {
   if (process.argv[2] === "job") {
     const args = process.argv.slice(3);
-    if (args.shift() !== "start") throw new Error("Expected 'job start'.");
+    const jobCommand = args.shift();
+    if (jobCommand !== "start" && jobCommand !== "validate") {
+      throw new Error("Expected 'job start' or 'job validate'.");
+    }
     if (args.includes("--help") || args.includes("-h")) {
       process.stdout.write(USAGE);
       return;
@@ -145,10 +151,13 @@ async function main(): Promise<void> {
     let story = "";
     let job = "";
     let novelteaProject: string | undefined;
+    let validatorSource: string | undefined;
     const provided = new Set<string>();
     while (args.length) {
       const flag = args.shift()!;
-      if (flag !== "--story" && flag !== "--job" && flag !== "--noveltea-project") {
+      if (flag !== "--story" && flag !== "--job" &&
+          !(jobCommand === "start" && flag === "--noveltea-project") &&
+          !(jobCommand === "validate" && flag === "--validator-source")) {
         throw new Error(`Unknown job option: ${flag}. Use --help for usage.`);
       }
       if (provided.has(flag)) throw new Error(`Duplicate job option: ${flag}.`);
@@ -158,12 +167,27 @@ async function main(): Promise<void> {
       if (flag === "--story") story = value;
       if (flag === "--job") job = value;
       if (flag === "--noveltea-project") novelteaProject = value;
+      if (flag === "--validator-source") validatorSource = value;
     }
     if (!story) throw new Error("Missing required --story <path>.");
     if (!job) throw new Error("Missing required --job <id>.");
     const { startStoryJob } = await import("./job.js");
-    const result = await startStoryJob({ story, job, novelteaProject });
+    const target = await startStoryJob({ story, job, novelteaProject }, jobCommand === "start");
+    if (jobCommand === "start") {
+      process.stdout.write(JSON.stringify(target, null, 2) + "\n");
+      return;
+    }
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    if (!validatorSource && !target.validatorSha256 &&
+        !existsSync(join(target.worktreeRoot, "..", "validator.json"))) {
+      const { loadSkillConfig } = await import("./skills.js");
+      validatorSource = (await loadSkillConfig(undefined, false)).novelteaSkills;
+    }
+    const { validateStoryJob } = await import("./validator.js");
+    const result = await validateStoryJob(target, validatorSource);
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    process.exitCode = result.exitCode;
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -309,5 +333,5 @@ function redactCredentials(message: string): string {
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : "Unknown error";
   process.stderr.write(`noveltea-gen: ${redactCredentials(message)}\n`);
-  process.exitCode = 1;
+  process.exitCode = process.argv[2] === "job" && process.argv[3] === "validate" ? 2 : 1;
 });
