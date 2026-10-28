@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { parseSpecialistJson } from "../src/composition-specialist.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-composition-"));
 after(() => {
@@ -85,6 +86,15 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
   return { repo, original, job, cli, prepare, run, inspect };
 }
 
+test("parses a complete nested manifest despite commentary or fenced JSON", () => {
+  const manifest = JSON.stringify({ modifiedRecords: ["authored-content/disclosure.md"],
+    architecturalConflicts: [], laterObligations: [{ kind: "prose", detail: 'quote "safe"' }] });
+  const input = "Completed.\n\n" + "```json\n" + manifest + "\n```";
+  assert.deepEqual(parseSpecialistJson(input).modifiedRecords, ["authored-content/disclosure.md"]);
+  assert.equal(parseSpecialistJson('review: {"verdict":"pass","sourceEvidence":["event.x"],"concerns":[]}').verdict, "pass");
+  assert.throws(() => parseSpecialistJson('No JSON was returned'), /no parseable JSON/);
+});
+
 test("composes two outcomes and two alternative puzzle endings into validated content and one isolated commit", { skip: !available }, () => {
   const x = setup("reference");
   const before = x.prepare();
@@ -145,7 +155,16 @@ test("refuses missing Puzzle solution ending even when all Events are reachable"
   const prior = x.prepare();
   const result = x.run("missing-ending");
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /missing.*ending|missing.*solution/i);
+  assert.match(result.stderr, /missing.*ending|missing.*solution|missing separate playable Event coverage/i);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), prior);
+});
+
+test("refuses missing distinct protect/challenge aftermath presentation", { skip: !available }, () => {
+  const x = setup("missing-aftermath");
+  const prior = x.prepare();
+  const run = x.run("missing-aftermath");
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /missing separate playable Event coverage|aftermath/i);
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), prior);
 });
 

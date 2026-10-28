@@ -16,6 +16,7 @@ export interface CompositionAssignment {
   mandatoryReads: string[];
   allowedExistingContent: string[];
   eventIds: string[];
+  composeTargets: string[];
   choicePoints: Array<{ id: string; events: string[]; outcomes: string[] }>;
   puzzleSolutions: Array<{ id: string; eventIds: string[] }>;
   branchWitnesses: Array<{ event: string; step: string; branch: string; witness: string[] }>;
@@ -42,15 +43,32 @@ const catalog = [
   "nt-catalog/references/glossary.md",
 ];
 const guidance = ["nt-narrative-composition/SKILL.md", ...catalog];
-function parseJson(text: string): Record<string, unknown> {
-  const candidates = [text.trim(), ...[...text.matchAll(/\{[\s\S]*?\}/g)].map(m => m[0])];
-  for (const candidate of candidates) {
-    try {
-      const data = JSON.parse(candidate) as Record<string, unknown>;
-      if (data && typeof data === "object" && !Array.isArray(data)) return data;
-    } catch { /* continue */ }
+/** Extract the last complete JSON object from model text. A response may
+ * contain a prose preface or fenced block; never parse partial nested braces. */
+export function parseSpecialistJson(text: string): Record<string, unknown> {
+  const objects: Record<string, unknown>[] = [];
+  for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
+    let depth = 0, quoted = false, escaped = false;
+    for (let end = start; end < text.length; end++) {
+      const c = text[end]!;
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') quoted = false;
+      } else if (c === '"') quoted = true;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) {
+        try {
+          const data: unknown = JSON.parse(text.slice(start, end + 1));
+          if (data && typeof data === "object" && !Array.isArray(data)) objects.push(data as Record<string, unknown>);
+        } catch { /* next candidate */ }
+        break;
+      }
+    }
   }
-  throw new Error("Composition specialist returned no parseable JSON manifest.");
+  const match = objects.reverse().find(data => "modifiedRecords" in data || "verdict" in data);
+  if (!match) throw new Error("Composition specialist returned no parseable JSON manifest.");
+  return match;
 }
 function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(s => typeof s === "string" && s.length > 0);
@@ -126,10 +144,23 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "Character or Creative Direction, and do not edit read-only puzzle clue content. " +
       "Existing protected author wording must be preserved. Work from the least-informed reachable entry: " +
       "shared text cannot assume exclusive Choice outcomes, conditional Revelation, or optional clue. " +
-      "Use literal headings '## Shared entry', '## Choice wording', and one '## <Outcome> selected' " +
-      "for EACH declared outcome in its linked Event content. Menu text must contain labels only; write distinct " +
-      "actual dialogue and reactions in each selected section. Compose actual prose for EACH puzzle solution Event, " +
-      "with optional discoveries conditional, not assumed. Do not write editorial directions as playable prose. " +
+      "Create one playable Authored Content document per Event in composeTargets, each with " +
+      "events: [that-single-event] and revelations: [only Revelations presented by that Event]. " +
+      "Do not combine all Event prose into one record; each file has exactly one playback owner. " +
+      "Existing clue Authored Content in sourcePaths already covers its linked discovery Events: read " +
+      "those records, leave them unchanged, and do not double-author their discovery text. " +
+      "In the Choice Event file use literal headings '## Shared entry', '## Choice wording', and " +
+      "'## <Outcome> selected' for EACH declared outcome. Menu contains selectable labels only; " +
+      "the entry and menu never reveal branch-only truths or presume physical props. " +
+      "The Story may begin at the Choice Event with no clues discovered: write the shared entry and " +
+      "choice labels for this least-informed route. Only the challenge branch's revealed effect " +
+      "licenses revelation.ledger-secret, if present in the source; protecting does not. " +
+      "Every later outcome-conditioned Event, including an aftermath, needs distinct playable " +
+      "'## <Outcome> selected' sections for every reachable condition branch, not a generic summary. " +
+      "For each Puzzle solution Event, write standalone playable dialogue/narration under " +
+      "'## Solution consequence' using only clues required on that route. Never place the watermark " +
+      "in the seal/testimony route without an additional prerequisite, nor vice versa. " +
+      "Do not write editorial directions as playable prose. " +
       "If a source lacks a needed route, report a conflict; NEVER manufacture new Event effects or bypass gates. " +
       "Run noveltea narrative validate . --json and inspect Git diff. Do not git add, reset, checkout or commit. " +
       "Finally output ONE unfenced JSON object with the cumulative paths and precise obligations: " +
@@ -138,7 +169,19 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
       await session.prompt(prompt);
-      const text = lastReply(session);
+      let text = lastReply(session);
+      let parsed: Record<string, unknown> | undefined;
+      for (let formatAttempt = 0; formatAttempt < 3; formatAttempt++) {
+        try { parsed = parseSpecialistJson(text); break; }
+        catch (error) {
+          if (formatAttempt === 2) throw error;
+          await session.prompt("Reformat your LAST cumulative modifiedRecords, architecturalConflicts, " +
+            "and laterObligations report as a single valid JSON object. " +
+            "Preserve the already-authored files unchanged; only correct the response format.");
+          text = lastReply(session);
+        }
+      }
+      if (!parsed) throw new Error("Composition specialist manifest was not provided.");
       const calls = toolPaths(session, project.root);
       if (pinned.some(p => !calls.some(c => c.tool === "read" && c.path === p)) ||
           assignment.mandatoryReads.some(p => !calls.some(c => c.tool === "read" && c.relative === p))) {
@@ -147,7 +190,6 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       if (!calls.some(c => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/"))) {
         throw new Error("Composition specialist did not author canonical Authored Content.");
       }
-      const parsed = parseJson(text);
       if (!strings(parsed.modifiedRecords) || !parsed.modifiedRecords.length ||
           !strings(parsed.architecturalConflicts) || !strings(parsed.laterObligations)) {
         throw new Error("Composition specialist must report modifiedRecords, architecturalConflicts and laterObligations.");
@@ -181,16 +223,23 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
       "both Puzzle solution events, character voices, initial knowledge, facts, revelations, and optional " +
       "discovery routes. Do not trust the writer's explanation or Event narrative body as proof of state. " +
       "Compare each line against the least-informed reachable route and the exact source step/branch. " +
-      "Block any leaked branch-only truth in shared/menu prose, leaked or omitted optional discoveries, " +
-      "missing executable route prose, summaries instead of playable lines, author-protected changes " +
-      "or incoherent consequences. Do not edit or invoke shell. Read these pinned references FIRST:\n" +
+      "Block actual authored prose defects: leaked branch-only truth in shared/menu text, " +
+      "unearned optional evidence, missing outcome-conditioned aftermath, missing Event ownership, " +
+      "summaries instead of playable lines, author-protected rewordings or incoherent consequences. " +
+      "One Authored Content record per composeTargets Event is required; existing clue content " +
+      "covers its discovery Event. An Event's narrative body is planning context, NOT proof of " +
+      "player knowledge or a physically present object. Review the actual saved prose ONLY for " +
+      "what can be established from these records; do not block because engine UI/backdrop is " +
+      "outside this ticket or because the schema lacks typed step-level content links. " +
+      "Use headings for branch ownership. Report only actionable contradictions in authored prose. " +
+      "Do not edit or invoke shell. Read these pinned references FIRST:\n" +
       pinned.join("\n") + "\n Read these Story paths:\n" +
       [...new Set([...assignment.sourcePaths, ...paths])].join("\n") +
       "\nReturn unfenced JSON ONLY: " +
       '{"verdict":"pass"|"block","sourceEvidence":["event.X#step/branch licenses ..."],"concerns":[]}. ' +
       "A pass requires explicit source-linked evidence for EVERY choice outcome and BOTH puzzle endings. " +
       "If uncertain, block.\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
-    const parsed = parseJson(lastReply(session));
+    const parsed = parseSpecialistJson(lastReply(session));
     const calls = toolPaths(session, project.root);
     if (pinned.some(p => !calls.some(c => c.tool === "read" && c.path === p)) ||
         [...assignment.mandatoryReads, ...paths].some(p =>

@@ -523,9 +523,12 @@ Event, Character, Relationship, Fact, Revelation, Choice, Puzzle, clue and
 route-witness context. It edits **only** new or specifically linked existing
 `authored-content/*.md`, using canonical `events` and `revelations`
 references. Other Story records, including existing Puzzle clues, are read-only.
-It writes the shared entry, visible menu, actual responses to *all* Choice
-outcomes, and actual prose for every alternative Puzzle solution Event. Shared
-text must remain valid on the least-informed route; optional clues and
+It writes one owned Authored Content record per consequential Event, including
+the shared entry and choice menu, actual responses to *all* Choice outcomes,
+distinct downstream outcome-conditioned aftermath, and standalone prose for
+each alternative Puzzle solution Event. Previously authored Puzzle clues
+remain linked to their own discovery Events without duplicate rewriting.
+Shared text must remain valid on the least-informed route; optional clues and
 branch-exclusive Revelations belong only to their conditional routes.
 
 The graph checks exact Git scope/manifest, pinned validator protection against
@@ -535,9 +538,12 @@ It checks section presence, distinct responses and known branch-exclusive
 lexical leaks, but cannot derive full prose-to-step semantics from the current
 schema. For **real Pi work**, a separate **read-only Pi editorial reviewer**
 must read the saved content, witnesses and pinned guidance and return a
-source-linked verdict covering each route; a blocked review prevents commit.
-This review is editorial judgement, not a claim of mechanically proven
-playability or engine output. A successful work item makes exactly one
+source-linked verdict covering each route. A blocked review returns actionable
+diagnostics to the **same** writer Pi session, with at most two repair turns;
+exhaustion prevents commit and preserves the failed draft and transcripts.
+The passing verdict is bound to the exact reviewed file digest and independently
+rechecked at commit time. This review is editorial judgement, not a claim of
+mechanically proven playability or engine output. A successful work item makes exactly one
 provenance-attributed commit and advances the verified-head marker. The
 author's original checkout is never touched.
 

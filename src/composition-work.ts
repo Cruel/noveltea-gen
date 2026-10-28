@@ -40,6 +40,7 @@ interface Receipt {
   snapshot?: SkillSnapshot; phase: "pending" | "writing" | "authored" | "committed";
   beforeHead?: string; paths?: string[]; claimedPaths?: string[]; digest?: string;
   commitSha?: string; sessionFile?: string; reviewSessionFile?: string;
+  reviewedDigest?: string; reviewedEvidence?: SemanticReview;
   skillReads?: string[]; obligations?: string[]; conflicts?: string[]; failure?: string;
   validation?: { protectionBase: string; validatorSha256: string; branchReview: ReviewEvidence;
     eventCoverage: Array<{ id: string; witness: string[] }> };
@@ -117,8 +118,18 @@ function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt, mil
       throw new Error("Puzzle solution/clue witness missing or unverified: " + p.id);
     return { id: p.id, eventIds: [...solutions] };
   });
-  const requiredSources = [...new Set([...choicePoints.flatMap(c => c.events),
-    ...puzzleSolutions.flatMap(p => p.eventIds)])].sort();
+  // All linked Events need player-facing coverage, including later conditional
+  // payoffs. Existing Puzzle clue content already realizes discovery Events.
+  const requiredSources = [...new Set(eventIds)].sort();
+  const consequential = new Set([...choicePoints.flatMap(c => c.events),
+    ...puzzleSolutions.flatMap(p => p.eventIds)]);
+  const composeTargets = requiredSources.filter(id => consequential.has(id) ||
+    (eventRecords.find(x => x.metadata.id === id)?.metadata.steps as Array<{
+      branches: Array<{ conditions: Array<{ kind: string; value?: string }> }>
+    }> ?? []).some(step => step.branches.some(branch =>
+      branch.conditions.some(condition => condition.kind === "outcome"))) ||
+    !records.some(x => x.metadata.type === "authored-content" &&
+      (x.metadata.events as string[]).includes(id)));
   const clues = new Set(records.filter(x => x.metadata.type === "puzzle")
     .flatMap(x => x.metadata.clues as string[] ?? []));
   const allowedExistingContent = records.filter(x => x.metadata.type === "authored-content" &&
@@ -160,11 +171,12 @@ function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt, mil
     x.metadata.type === "narrative-position" && eventIds.includes(x.metadata.event) ||
     x.metadata.type === "world-entity");
   return { milestoneId, workItemId: "composition-" + milestoneId.slice(10),
-    authorContract: plan.contract, eventIds, choicePoints, puzzleSolutions,
+    authorContract: plan.contract, eventIds, composeTargets, choicePoints, puzzleSolutions,
     branchWitnesses, requiredSources, allowedExistingContent,
     sourcePaths: [...new Set(selected.map(x => x.path))].sort(),
-    mandatoryReads: [...new Set(selected.filter(x => ["event", "character", "relationship",
-      "fact", "revelation", "choice-point", "puzzle", "authored-content"].includes(x.metadata.type))
+    mandatoryReads: [...new Set(selected.filter(x => ["creative-direction", "arc", "milestone",
+      "event", "character", "relationship", "fact", "revelation", "choice-point", "puzzle",
+      "authored-content"].includes(x.metadata.type))
       .map(x => x.path))].sort() };
 }
 export async function auditCompositionPaths(job: JobStartResult, assign: CompositionAssignment,
@@ -202,7 +214,7 @@ function sections(body: string) {
   const map = new Map<string, string>();
   const parts = body.split(/^## (.+)$/gm);
   for (let i = 1; i < parts.length; i += 2) {
-    const title = parts[i]!.trim();
+    const title = parts[i]!.trim().replace(/^([a-z])/, letter => letter.toUpperCase());
     if (map.has(title)) throw new Error("Duplicate prose section: " + title);
     map.set(title, parts[i + 1]?.trim() ?? "");
   }
@@ -220,11 +232,37 @@ export async function verifyCompositionProse(job: JobStartResult, r: Report,
     if (end < 0) throw new Error("Invalid Authored Content frontmatter.");
     const body = file.slice(end + 4).trim();
     if (body.length < 70) throw new Error("Missing playable Authored Content prose: " + record.path);
+    if ((record.metadata.events as string[]).length !== 1)
+      throw new Error("Composition requires one owning Event per composed Authored Content record: " + record.path);
     for (const event of record.metadata.events as string[]) {
       if (!a.eventIds.includes(event)) throw new Error("Authored Content links unrelated Event: " + event);
       linked.set(event, [...(linked.get(event) ?? []),
         { body, sections: sections(body), revelations: record.metadata.revelations as string[] }]);
     }
+  }
+  for (const event of a.composeTargets) {
+    if (!linked.get(event)?.length)
+      throw new Error("Composition missing separate playable Event coverage for " + event);
+  }
+  const authoredByEvent = new Map(r.records.filter(x =>
+    x.metadata.type === "authored-content" && x.metadata.status !== "superseded")
+    .flatMap(x => (x.metadata.events as string[]).map(id => [id, x] as const)));
+  for (const event of a.requiredSources) {
+    if (!linked.has(event) && !authoredByEvent.has(event))
+      throw new Error("Composition has no player-facing Authored Content for Event " + event);
+  }
+  // Events with a selected Choice outcome in their prerequisites or branches
+  // must realize both sides, rather than collapsing downstream consequences
+  // into a shared prose summary.
+  for (const event of a.composeTargets) {
+    const record = r.records.find(x => x.metadata.id === event)!;
+    const conditioned = [...new Set((record.metadata.steps as Array<{ branches: Array<{ conditions: any[] }> }> ?? [])
+      .flatMap(step => step.branches.flatMap(branch =>
+        branch.conditions.filter(c => c.kind === "outcome").map(c => c.value as string))))];
+    if (conditioned.length < 2) continue;
+    if (!linked.get(event)?.some(content => conditioned.every(outcome =>
+      (content.sections.get(heading(outcome) + " selected")?.length ?? 0) >= 60)))
+      throw new Error("Composition missing distinct conditioned outcome sections in later Event " + event);
   }
   for (const choice of a.choicePoints) for (const event of choice.events) {
     const section = linked.get(event)?.find(x => x.sections.has("Shared entry") &&
@@ -264,7 +302,8 @@ export async function verifyCompositionProse(job: JobStartResult, r: Report,
     }
   }
   for (const puzzle of a.puzzleSolutions) for (const event of puzzle.eventIds) {
-    if (!linked.get(event)?.some(c => c.body.length >= 100))
+    if (!linked.get(event)?.some(c =>
+      (c.sections.get("Solution consequence")?.length ?? 0) >= 100))
       throw new Error("Missing substantive solution ending prose linked to " + event);
   }
   // The canonical authored-content.revelations link is the only typed
@@ -345,6 +384,13 @@ async function fixtureAuthor(job: JobStartResult, a: CompositionAssignment): Pro
     "\n\n## Choice wording\n\n" + menu + "\n\n" +
     (variant === "missing-branch" ? reactions.split("## " + heading(choice.outcomes.at(-1)!) + " selected")[0] : reactions),
     ["revelation.ledger-secret"]);
+  if (variant !== "missing-aftermath") {
+    await write("aftermath-continuation", ["event.aftermath"],
+      a.choicePoints[0]!.outcomes.map(o => "## " + heading(o) + " selected\n\n" +
+        (o === "protect"
+          ? 'Ada puts the register aside. "We can work together, but you will answer these questions." Neri nods and pulls up another chair. They begin sorting the leads as partners, warily rebuilding trust.'
+          : 'Ada leaves the ledger where Neri can see it. "I will investigate without you until the record is clear." Neri does not follow. The distance between them settles into something harder than anger.')).join("\n\n"));
+  }
   for (const solution of a.puzzleSolutions.flatMap(p => p.eventIds)) {
     if (variant === "missing-ending" && solution === a.puzzleSolutions[0]!.eventIds.at(-1)) continue;
     const body = solution.includes("decode")
@@ -473,8 +519,26 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             if (report.diagnostics.length) return report.diagnostics.slice(0, 24).map(d =>
               `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
             if (result.status !== "passed") throw new Error("Canonical validator rejected composition draft.");
-            try { await verifyCompositionProse(job, report, assign, paths); return []; }
+            let structural: Awaited<ReturnType<typeof verifyCompositionProse>>;
+            try { structural = await verifyCompositionProse(job, report, assign, paths); }
             catch (e) { return [String(e)]; }
+            // Independent semantic review participates in the SAME bounded
+            // writer repair loop. Never accept a structurally green draft that
+            // an editorial reviewer has already rejected.
+            if (s.worker === "pi") {
+              const review = await reviewComposition(job, s.snapshot!, assign, paths,
+                s.provider, s.model, s.thinking,
+                async session => { s.reviewSessionFile = session; await save(file, s); });
+              const missing = [...structural.outcomes, ...structural.solutions].filter(route =>
+                !review.sourceEvidence.some(line => line.toLowerCase().includes(route.toLowerCase())));
+              if (review.verdict !== "pass" || review.concerns.length || missing.length)
+                return [...review.concerns, ...missing.map(route =>
+                  "Editorial review needs source-linked evidence for " + route)];
+              s.reviewedDigest = await fileDigest(job, paths);
+              s.reviewedEvidence = review;
+              await save(file, s);
+            }
+            return [];
           };
           const evidence = s.worker === "fixture" ? await fixtureAuthor(job, assign)
             : await authorComposition(job, s.snapshot!, assign, s.provider, s.model,
@@ -501,8 +565,10 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         const review: SemanticReview = s.worker === "fixture"
           ? { verdict: "pass", sourceEvidence: assign.branchWitnesses.map(b =>
               `${b.event}#${b.step}/${b.branch}: ${b.witness.join(", ")}`), concerns: [] }
-          : await reviewComposition(job, s.snapshot!, assign, s.paths, s.provider, s.model, s.thinking,
-              async session => { s.reviewSessionFile = session; await save(file, s); });
+          : s.reviewedDigest === s.digest && s.reviewedEvidence
+            ? s.reviewedEvidence
+            : await reviewComposition(job, s.snapshot!, assign, s.paths, s.provider, s.model, s.thinking,
+                async session => { s.reviewSessionFile = session; await save(file, s); });
         if (review.verdict !== "pass" || review.concerns.length || !review.sourceEvidence.length)
           throw new Error("Branch-to-prose editorial review blocked: " + review.concerns.join("; "));
         if (s.worker === "pi" && [...structural.outcomes, ...structural.solutions].some(route =>
