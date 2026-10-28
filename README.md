@@ -195,6 +195,88 @@ NT_LIVE_FOUNDATION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
 
 The opt-in test inspects the Pi session's actual pinned skill reads and Markdown editing tool calls, the validated output and the Git branch. It can incur model charges. Neither fixture passing nor a model's own completion claim substitutes for this evidence.
 
+## Protected-decision revision and author approval (#16)
+
+The job never treats a model request, a validator acknowledgement, a Git commit
+or a record's `approved` status as an author's permission. For a bounded
+revision, edit one tracked canonical Story Markdown file in the **job worktree**
+(the normal author checkout is untouched), and inspect it from the public CLI:
+
+```sh
+pnpm dev job revision inspect --story /path/to/story --job draft-1 \
+  --work-item fix-culprit --path creative-direction/foundation.md
+```
+
+The output contains a `proposalSha256`, individually hashed
+`protectedChanges[].id` values, exact original and latest comparison
+baselines, before/after decision content, affected records, unrelated
+uncommitted paths and pending authorization/review status. The first call pins
+the validator if not already pinned. The work item is stable: changed proposed
+bytes or a changed verified HEAD **cannot inherit earlier approvals**. Start a
+different work-item ID to propose another candidate.
+
+The **author**, through a separate explicitly trusted application/CLI action,
+must approve or reject **each** proposed protected change, including adopting
+user-protected authority for an existing delegated or newly authored decision.
+The exact proposal and change hash must be supplied:
+
+```sh
+pnpm dev job revision authorize --story /path/to/story --job draft-1 \
+  --work-item fix-culprit --proposal <proposalSha256> \
+  --change <protectedChanges.id> --decision approve \
+  --reason "I authorize the exact revised culprit identity and consequences"
+```
+
+A rejection remains durable and blocks that work item. Approval evidence stores
+the decision's stable ID, its before/after content, proposal and change digests,
+explicit author rationale, source and timestamp, separately from canonical
+Story files. The revision worker has **no approval API**. This CLI's caller is
+the trusted local author boundary; broad Pi shell tools are not an OS-level
+identity or permission sandbox. An embedding UI must route these commands
+exclusively through an authenticated author action, never expose them as Pi
+tools or mistake a model/tool assertion for that action.
+
+A separate editorial review is **always required**, even for changes that do
+not alter any protected decision metadata. Compare the source-linked prose
+and its narrative consequences (including indirect contradictions) before
+recording the verdict; metadata equality is not semantic proof:
+
+```sh
+pnpm dev job revision review --story /path/to/story --job draft-1 \
+  --work-item fix-culprit --proposal <proposalSha256> --verdict pass \
+  --evidence "creative-direction/foundation.md:15-45" \
+  --notes "Compared the revised prose and earlier protected culprit constraint; no contradiction remains."
+pnpm dev job revision commit --story /path/to/story --job draft-1 \
+  --work-item fix-culprit --proposal <proposalSha256>
+```
+
+`--verdict block` saves a separate blocking semantic-review finding; a
+positive review is a **reviewer attestation**, not machine proof of coherence.
+The graph-side commit gate re-runs the *pinned canonical validator* in a
+disposable candidate worktree, first against the immutable original base,
+then against the most recently verified commit. It checks every exact
+protected delta and adoption against a durable author approval, independent
+review, structured diagnostics, staged files, current job HEAD and candidate
+bytes. The validated single-file work item is committed as
+`NovelTea Generator`, with job, work-item, proposal, approval and editorial
+trailers. Unrelated **unstaged** files remain in the job worktree unchanged;
+unexpected staged/conflicted edits block. The original author branch is not
+advanced or merged. A verified-head receipt persists across subsequent
+revisions, and an interrupted commit can be reconciled from its exact Git
+trailers rather than duplicated.
+
+Approval/review receipts live outside Story canon under
+`~/.local/state/noveltea-gen/jobs/<sha256>/revisions/<work-item>.json`,
+with `revisions/verified-head.json` tracking the latest verified SHA.
+`NT_STATE_DIR` and `XDG_STATE_HOME` change the base location. The unmodified
+canonical validator report still comes from the pinned adapter, preserving
+the future native `Cruel/nt#535` migration seam.
+
+Run `pnpm exec tsx --test test/revision.test.ts` for disposable Git Story
+fixtures exercising approved/rejected/missing/modified/later-protected changes,
+authority adoption, separate prose review, invalid YAML, unexpected staging
+and unchanged author checkout.
+
 ## Run against a Story project
 
 Select an **existing** Story directory using `--project`:

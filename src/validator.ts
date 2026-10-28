@@ -294,7 +294,18 @@ export const bundledValidatorAdapter: StoryValidatorAdapter = {
   },
 };
 
-export async function validateStoryJob(job: JobStartResult, sourceCheckout?: string): Promise<ValidationResult> {
+/** A bounded revision can be assessed in a disposable Git worktree without
+ * exposing unrelated uncommitted author or specialist edits to the validator.
+ * The pin still belongs to the original job; only the comparison target and
+ * explicit baseline are substituted after the caller verifies the worktree. */
+export interface ValidationView {
+  worktreeRoot: string;
+  worktreeStoryRoot: string;
+  baseSha: string;
+}
+
+export async function validateStoryJob(job: JobStartResult, sourceCheckout?: string,
+  view?: ValidationView): Promise<ValidationResult> {
   // Even a user-provided cache override must never publish into the author's
   // checkout or the job's canonical Story tree, including via symlink aliases.
   const cache = await canonicalDestination(cacheRoot());
@@ -306,5 +317,5 @@ export async function validateStoryJob(job: JobStartResult, sourceCheckout?: str
     throw new Error("NT_VALIDATOR_CACHE_DIR must resolve outside both the author repository and job worktree.");
   }
   const pin = await pinValidator(job, sourceCheckout);
-  return bundledValidatorAdapter.validate(job, pin);
+  return bundledValidatorAdapter.validate(view ? { ...job, ...view } : job, pin);
 }
