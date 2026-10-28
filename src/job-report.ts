@@ -204,6 +204,14 @@ export async function inspectJobReport(input: JobReportOptions) {
   if (scopedIdeaIds.length) blockers.push("Binding in-scope deferred ideas remain unresolved: " + scopedIdeaIds.join(", "));
   const outcome = statusOf(review, audit, plan, head, author, blockers,
     { status: ideas.status, outstanding: scopedIdeaIds }, contractOk && reviewCurrent);
+  // Scope fulfillment describes the verified committed Story, not whether the
+  // coordinator is presently paused or the target branch can integrate it.
+  const scopeFulfillment = reviewCurrent && (audit?.deterministic === "blocked" ||
+    review?.phase === "blocked") ? "blocked" :
+    reviewCurrent && review?.phase === "completed" && review.worker === "pi" &&
+      obj(review.editorial)?.verdict === "pass" && audit?.deterministic === "passed" &&
+      ideas.status === "ready" && scopedIdeaIds.length === 0 && clean && !review.failure
+      ? "complete-in-scope" : "unverified";
   // Git history is the authority for completed work, not a guessed receipt phase.
   const commits = git(job.worktreeRoot, "log", "--reverse", "--format=%H%x09%s", job.baseSha + ".." + head)
     .split("\n").filter(Boolean).map(line => {
@@ -243,7 +251,7 @@ export async function inspectJobReport(input: JobReportOptions) {
     const conflicts = candidate.status === "conflicts-found";
     integration = {
       status: conflicts ? "conflicts" : constructed &&
-        candidate.validation.status === "passed" && candidate.narrative.status === "pass"
+        candidate.status === "compatible-for-author-review"
         ? "mergeable" : "not assessed",
       targetHead: candidate.target.head,
       preview: candidate,
@@ -251,14 +259,15 @@ export async function inspectJobReport(input: JobReportOptions) {
         ? { reason: "Candidate constructed, but independent narrative compatibility is not verified." } : {}),
     };
   }
+  const storyId = "story-" + createHash("sha256")
+    .update(JSON.stringify([job.gitRoot, job.storyRelativePath])).digest("hex").slice(0, 24);
   return { schema: "noveltea-job-report/v1" as const, identity: {
-    storyRoot: job.storyRoot, jobId: job.jobId, threadId: job.threadId,
+    storyId, storyRoot: job.storyRoot, jobId: job.jobId, threadId: job.threadId,
     branch: job.branch, worktreeRoot: job.worktreeRoot, worktreeStoryRoot: job.worktreeStoryRoot,
     baseSha: job.baseSha, headSha: head, clean,
   }, plan: plan ? { version: plan.version, scope: plan.contract.scope, contract: plan.contract,
     phase: arch?.phase ?? "unknown", receipt: "architecture.json" } : null,
-  generation: { status: outcome, scopeFulfillment: outcome === "completed" ? "complete-in-scope" :
-    reviewCurrent && (audit?.deterministic === "blocked" || review?.phase === "blocked") ? "blocked" : "unverified",
+  generation: { status: outcome, scopeFulfillment,
     review: review ? { phase: review.phase, headSha: review.headSha,
       worker: review.worker, current: reviewCurrent } : null,
     blockers, author },
@@ -273,7 +282,7 @@ export function formatJobReport(report: JobReport): string {
   ];
   const p: string[] = [
     "# NovelTea Story job report", "",
-    "Story: " + report.identity.storyRoot,
+    "Story: " + report.identity.storyId + " (" + report.identity.storyRoot + ")",
     "Job: " + report.identity.jobId + " (" + report.identity.threadId + ")",
     "Branch: " + report.identity.branch,
     "Generation HEAD: " + report.identity.headSha,

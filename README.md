@@ -1128,7 +1128,8 @@ pnpm dev job report --story /path/to/story --job draft-1 --format markdown \\
 
 The default output is versioned JSON (`noveltea-job-report/v1`). The alternative
 Markdown view includes source-linked diagnostic findings, current scope and
-contract version, verified Git HEAD/base/branch/worktree/thread identity,
+contract version, path-derived stable Story ID (shared across jobs on that Story),
+verified Git HEAD/base/branch/worktree/thread identity,
 historical work items and committed Git revisions, structural/readiness and
 bounded progression witnesses, protected-decision status, independent editorial
 evidence, and IDs/statuses of captured deferred author ideas. Author ideas'
@@ -1136,7 +1137,10 @@ original wording, full inbox, and private message payloads **never** enter the
 report. Export is exclusive (no overwrites), and destinations under either the
 author checkout or generation worktree are rejected.
 
-Generation `completed|paused|blocked|failed` is **independent** from integration
+Scope fulfillment is derived from the current reviewed Git revision and remains
+separate from execution control: pausing a verified, completed job does not
+invalidate its committed scope evidence. Generation
+`completed|paused|blocked|failed` is **independent** from integration
 `mergeable|conflicts|not assessed`. Only a current, matching versioned plan
 and scope audit with a successful **real Pi** independent editorial verdict
 can yield `completed`; deterministic fixtures remain unverified. A
@@ -1157,8 +1161,9 @@ pnpm dev job report --story /path/to/story --job draft-1 --preview --fixture
 `--preview` delegates to the disposable merge-preview command (#29) and
 includes the exact target revision, canonical validation and source-linked
 narrative-conflict options. A textual collision or a deterministic/protected
-decision/semantic conflict is `conflicts`. `mergeable` requires a successful
-combined-Story validator **and** independent narrative review; a fixture's
+decision/semantic conflict is `conflicts`. `mergeable` requires the merge
+preview’s own compatible-for-author-review verdict, including successful
+combined-Story validation **and** independent narrative review; a fixture's
 positive textual merge remains `not assessed` for literary compatibility.
 A completed Story branch may therefore still have merge conflicts.
 No command automatically integrates or alters protected decisions.

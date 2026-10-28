@@ -16,7 +16,7 @@ function git(cwd: string, ...args: string[]) {
   assert.equal(p.status, 0, p.stderr);
   return p.stdout.trim();
 }
-function setup(name: string) {
+function setup(name: string, unfinishedUnrelatedArc = false) {
   const repo = join(root, name), story = join(repo, "story");
   mkdirSync(join(story, "creative-direction"), { recursive: true });
   writeFileSync(join(story, "creative-direction/foundation.md"), `---
@@ -40,6 +40,22 @@ scope: "Two Characters and a single archive"
 
 Ada questions Neri about the missing witness.
 `);
+  if (unfinishedUnrelatedArc) {
+    mkdirSync(join(story, "arcs"), { recursive: true });
+    writeFileSync(join(story, "arcs", "side.md"), `---
+schema: '0.1'
+type: arc
+id: arc.side
+title: "The unrelated missing heir"
+status: draft
+decisions: []
+dramatic_question: "Who will inherit the distant estate?"
+characters: []
+---
+
+This separate Arc has no Milestones, Events, or authored ending.
+`);
+  }
   git(repo, "init", "-q");
   git(repo, "config", "user.email", "author@example.test");
   git(repo, "config", "user.name", "Author");
@@ -100,6 +116,7 @@ test("public report has stable IDs, no accidental Story writes, explicit unasses
   const report = x.ok(["report"]);
   assert.equal(report.schema, "noveltea-job-report/v1");
   assert.equal(report.identity.baseSha, x.base);
+  assert.match(report.identity.storyId, /^story-[a-f0-9]{24}$/);
   assert.equal(report.identity.headSha, x.base);
   assert.equal(report.identity.branch, x.job.branch);
   assert.equal(report.identity.threadId, x.job.threadId);
@@ -161,6 +178,8 @@ test("bounded Arc and small full-Story fixture reports retain true unverified li
   generate(x, "full", "full-story");
   x.ok(["review", "run", "--fixture", "--skills-source", skills], "full");
   const whole = x.ok(["report"], "full");
+  assert.equal(whole.identity.storyId, report.identity.storyId,
+    "A second job on the same canonical Story retains the same logical Story identity");
   assert.equal(whole.plan.scope.kind, "full-story");
   assert.equal(whole.evidence.scope.deterministic, "passed");
   assert.equal(whole.generation.status, "paused");
@@ -173,8 +192,29 @@ test("bounded Arc and small full-Story fixture reports retain true unverified li
     evidence: ["authored-content/disclosure-scene.md:12"] };
   writeFileSync(fullReceiptPath, JSON.stringify(reviewedFull));
   assert.equal(x.ok(["report"], "full").generation.status, "completed");
+  x.ok(["author", "control", "--state", "paused"], "full");
+  const pausedCompleted = x.ok(["report"], "full");
+  assert.equal(pausedCompleted.generation.status, "paused");
+  assert.equal(pausedCompleted.generation.scopeFulfillment, "complete-in-scope",
+    "Execution control cannot invalidate a verified committed Story's fulfillment");
   assert.equal(git(x.repo, "rev-parse", "HEAD"), x.base);
 });
+test("public bounded-scope report distinguishes an unfinished unrelated Arc", {
+  skip: !available,
+}, () => {
+  const x = setup("unrelated-arc", true);
+  generate(x, "draft");
+  const review = x.ok(["review", "run", "--fixture", "--skills-source", skills]);
+  assert.equal(review.audit.deterministic, "passed", JSON.stringify(review.audit.diagnostics));
+  assert.ok(!review.audit.scopedRecords.includes("arc.side"));
+  const report = x.ok(["report"]);
+  assert.equal(report.evidence.scope.deterministic, "passed");
+  assert.equal(report.plan.scope.kind, "partial");
+  assert.ok(!report.generation.blockers.some((x: string) => x.includes("arc.side")));
+  assert.equal(report.generation.scopeFulfillment, "unverified",
+    "An independent literary review is still required.");
+});
+
 test("in-scope binding idea blocks, out-of-scope idea does not; no private text in report", {
   skip: !available,
 }, () => {
