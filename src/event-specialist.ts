@@ -6,6 +6,7 @@ import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
+import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -69,19 +70,22 @@ export async function authorEventCluster(
     }
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(candidate => candidate.id === modelId)) {
-    throw new Error(`Unavailable Event Pi model or credentials: ${provider}/${modelId}`);
-  }
   const sessionDir = join(dirname(job.worktreeRoot), "event-sessions", assignment.workItemId);
-  await mkdir(sessionDir, { recursive: true });
+  const context = await preparePiContext(job, project, {
+    group: "event:" + assignment.milestoneId, step: "event:" + assignment.workItemId,
+    paths: assignment.sourcePaths, snapshot: snapshot.id,
+    provider, model: modelId, directory: sessionDir,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, resourceLoader: loader, settingsManager,
-    sessionManager: SessionManager.create(project.root, sessionDir),
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
+    sessionManager: context.manager,
     customTools: [await agentValidatorBashTool(job)],
     noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
   });
   try {
+    if (context.thinking && session.thinkingLevel !== context.thinking) {
+      throw new Error("Pi Event specialist did not honor pinned thinking effort.");
+    }
     const file = session.sessionManager.getSessionFile();
     if (file) await onSession(file);
     const required = REQUIRED.map(name => join(snapshot.path, "skills", name));
@@ -108,7 +112,8 @@ export async function authorEventCluster(
       "Run noveltea narrative validate . --json after authoring, inspect diagnostic and reachability evidence, repair and revalidate before reporting. Your own claims are not sufficient evidence; the graph independently checks changes, protection and acceptance.\n" +
       "AUTHORIZED ASSIGNMENT:\n" + JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await session.prompt(prompt);
+      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+      await session.prompt(attempt === 0 ? context.contextNote + prompt : prompt);
       const last = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
         throw new Error("Event specialist Pi turn failed: " + (last?.role === "assistant"
@@ -132,7 +137,10 @@ export async function authorEventCluster(
         sessionFile: session.sessionManager.getSessionFile() ?? undefined,
         skillReads: reads.filter(p => required.includes(p as typeof required[number])) };
       const diagnostics = await verifyDraft(evidence);
-      if (!diagnostics.length) return evidence;
+      if (!diagnostics.length) {
+        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
+        return evidence;
+      }
       if (attempt === 2) throw new Error("Event specialist exhausted bounded repair attempts: " + JSON.stringify(diagnostics));
       prompt = "The independent canonical validator rejected your UNCOMMITTED Event cluster. " +
         "You may repair only files already within the authorized assignment. " +

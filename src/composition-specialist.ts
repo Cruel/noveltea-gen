@@ -5,6 +5,7 @@ import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
+import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -73,9 +74,9 @@ export function parseSpecialistJson(text: string): Record<string, unknown> {
 function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(s => typeof s === "string" && s.length > 0);
 }
-async function createSession(job: JobStartResult, snapshot: SkillSnapshot, workItemId: string,
+async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assignment: CompositionAssignment,
   provider: string, modelId: string, thinking: "low" | "high" | undefined,
-  phase: "write" | "review") {
+  phase: "write" | "review", extraPaths: string[] = []) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: ["nt-narrative-composition", "nt-catalog"] };
@@ -89,23 +90,24 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, workI
     }
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(m => m.id === modelId)) {
-    throw new Error(`Unavailable composition Pi model or credentials: ${provider}/${modelId}`);
-  }
-  const dir = join(dirname(job.worktreeRoot), "composition-sessions", workItemId, phase);
-  await mkdir(dir, { recursive: true });
+  const dir = join(dirname(job.worktreeRoot), "composition-sessions", assignment.workItemId, phase);
+  const context = await preparePiContext(job, project, {
+    group: "composition:" + assignment.milestoneId + ":" + phase,
+    step: "composition:" + assignment.workItemId + ":" + phase,
+    paths: [...assignment.sourcePaths, ...extraPaths], snapshot: snapshot.id,
+    provider, model: modelId, thinking, directory: dir,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, thinkingLevel: thinking, resourceLoader: loader, settingsManager,
-    sessionManager: SessionManager.create(project.root, dir),
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
+    sessionManager: context.manager,
     ...(phase === "write" ? { customTools: [await agentValidatorBashTool(job)] } : {}),
     noTools: "all", tools: phase === "write"
       ? ["read", "write", "edit", "bash", "grep", "find", "ls"] : ["read", "grep", "find", "ls"],
   });
-  if (thinking && session.thinkingLevel !== thinking) {
+  if (context.thinking && session.thinkingLevel !== context.thinking) {
     session.dispose(); throw new Error("Pi did not honor requested thinking effort.");
   }
-  return { session, project, pinned: guidance.map(p => join(snapshot.path, "skills", p)) };
+  return { session, project, context, pinned: guidance.map(p => join(snapshot.path, "skills", p)) };
 }
 function lastReply(session: Awaited<ReturnType<typeof createSession>>["session"]) {
   const last = [...session.messages].reverse().find(m => m.role === "assistant");
@@ -129,7 +131,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
   assignment: CompositionAssignment, provider: string, modelId: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
   verifyDraft: (evidence: CompositionEvidence) => Promise<string[]>): Promise<CompositionEvidence> {
-  const { session, project, pinned } = await createSession(job, snapshot, assignment.workItemId,
+  const { session, project, pinned, context } = await createSession(job, snapshot, assignment,
     provider, modelId, thinking, "write");
   try {
     const sessionFile = session.sessionManager.getSessionFile();
@@ -168,7 +170,8 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "Graph will independently verify sources, actual Markdown, coverage and editorial review.\nASSIGNMENT:\n" +
       JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await session.prompt(prompt);
+      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+      await session.prompt(attempt === 0 ? context.contextNote + prompt : prompt);
       let text = lastReply(session);
       let parsed: Record<string, unknown> | undefined;
       for (let formatAttempt = 0; formatAttempt < 3; formatAttempt++) {
@@ -200,7 +203,10 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
       };
       const problems = await verifyDraft(evidence);
-      if (!problems.length) return evidence;
+      if (!problems.length) {
+        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
+        return evidence;
+      }
       if (attempt === 2) throw new Error("Composition exhausted bounded repairs: " + problems.join("; "));
       prompt = "The independent graph audit rejected the draft. In this SAME session, repair only the " +
         "problems below, without changing Event/Choice/Milestone/Character/Fact/Relationship/author-protected canon. " +
@@ -213,12 +219,13 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
 export async function reviewComposition(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: CompositionAssignment, paths: string[], provider: string, modelId: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>): Promise<SemanticReview> {
-  const { session, project, pinned } = await createSession(job, snapshot, assignment.workItemId,
-    provider, modelId, thinking, "review");
+  const { session, project, pinned, context } = await createSession(job, snapshot, assignment,
+    provider, modelId, thinking, "review", paths);
   try {
     const sessionFile = session.sessionManager.getSessionFile();
     if (sessionFile) await onSession(sessionFile);
-    await session.prompt("You are an INDEPENDENT read-only editorial reviewer. Read the pinned composition " +
+    await context.beforeTurn(sessionFile);
+    await session.prompt(context.contextNote + "You are an INDEPENDENT read-only editorial reviewer. Read the pinned composition " +
       "skill and catalog, the ACTUAL saved authored-content paths, linked Events, all choice outcomes, " +
       "both Puzzle solution events, character voices, initial knowledge, facts, revelations, and optional " +
       "discovery routes. Do not trust the writer's explanation or Event narrative body as proof of state. " +
@@ -250,6 +257,7 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
         !strings(parsed.sourceEvidence) || !strings(parsed.concerns)) {
       throw new Error("Independent composition reviewer returned an invalid source-linked verdict.");
     }
+    await context.completed(sessionFile!, session.sessionId);
     return { verdict: parsed.verdict, sourceEvidence: parsed.sourceEvidence,
       concerns: parsed.concerns, sessionFile: sessionFile ?? undefined };
   } finally { session.dispose(); }

@@ -5,6 +5,7 @@ import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
+import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -79,20 +80,21 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     }
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(candidate => candidate.id === modelId)) {
-    throw new Error(`Unavailable interactive Pi model or credentials: ${provider}/${modelId}`);
-  }
   const dir = join(dirname(job.worktreeRoot), "interactive-sessions", assignment.workItemId, domain);
-  await mkdir(dir, { recursive: true });
+  const context = await preparePiContext(job, project, {
+    group: "interactive:" + assignment.milestoneId + ":" + domain,
+    step: "interactive:" + assignment.workItemId + ":" + domain,
+    paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId,
+    thinking, directory: dir,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, thinkingLevel: thinking, resourceLoader: loader, settingsManager,
-    sessionManager: SessionManager.create(project.root, dir),
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
+    sessionManager: context.manager,
     customTools: [await agentValidatorBashTool(job)],
     noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
   });
   try {
-    if (thinking && session.thinkingLevel !== thinking) {
+    if (context.thinking && session.thinkingLevel !== context.thinking) {
       throw new Error("Pi did not honor requested " + thinking + " thinking level.");
     }
     const sessionFile = session.sessionManager.getSessionFile();
@@ -126,7 +128,8 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       "Run noveltea narrative validate . --json after authoring, inspect Puzzle/Choice route coverage and protection, repair and revalidate before reporting. The graph independently checks all bytes, protection and progression.\nASSIGNMENT:\n" +
       JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await session.prompt(prompt);
+      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+      await session.prompt(attempt === 0 ? context.contextNote + prompt : prompt);
       const last = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
         throw new Error("Interactive Pi turn failed: " +
@@ -150,7 +153,10 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
         obligations: data.obligations, skillReads: reads.filter(p => pinned.includes(p)),
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
       const diagnostics = await verifyDraft(evidence);
-      if (!diagnostics.length) return evidence;
+      if (!diagnostics.length) {
+        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
+        return evidence;
+      }
       if (attempt === 2) throw new Error("Interactive specialist exhausted bounded repair attempts: " + diagnostics.join("; "));
       prompt = "The INDEPENDENT graph audit rejected your uncommitted work. " +
         "In this SAME Pi session, repair only the specific diagnostics below without touching " +

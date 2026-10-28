@@ -6,6 +6,7 @@ import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
+import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -70,19 +71,21 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     }
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(candidate => candidate.id === modelId)) {
-    throw new Error(`Unavailable foundation Pi model/credentials: ${provider}/${modelId}`);
-  }
   const dir = join(dirname(job.worktreeRoot), "character-world-sessions", assignment.domain);
-  await mkdir(dir, { recursive: true });
+  const context = await preparePiContext(job, project, {
+    group: "foundations:" + assignment.domain, step: "foundations:" + assignment.domain,
+    paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId, directory: dir,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, resourceLoader: loader, settingsManager,
-    sessionManager: SessionManager.create(project.root, dir),
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
+    sessionManager: context.manager,
     customTools: [await agentValidatorBashTool(job)],
     noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
   });
   try {
+    if (context.thinking && session.thinkingLevel !== context.thinking) {
+      throw new Error("Pi Character/World specialist did not honor pinned thinking effort.");
+    }
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile) throw new Error("Character/World Pi transcript cannot be persisted before authoring.");
     await onSession(session.sessionId, sessionFile);
@@ -110,7 +113,8 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     // Do not start a second writer or discard its work. The SAME Pi session can
     // receive bounded, source-located validator feedback before commit.
     for (let attempt = 0; attempt < 3; attempt++) {
-      await session.prompt(prompt);
+      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+      await session.prompt(attempt === 0 ? context.contextNote + prompt : prompt);
       const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!assistant || assistant.role !== "assistant" || ["error", "aborted"].includes(assistant.stopReason)) {
         const detail = assistant?.role === "assistant"
@@ -146,7 +150,10 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
         laterObligations: messages.laterObligations as string[],
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
       const diagnostics = await verifyDraft(evidence);
-      if (diagnostics.length === 0) return evidence;
+      if (diagnostics.length === 0) {
+        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
+        return evidence;
+      }
       if (attempt === 2) {
         throw new Error("Specialist failed canonical validation after two bounded repair attempts: " + JSON.stringify(diagnostics));
       }

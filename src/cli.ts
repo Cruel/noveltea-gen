@@ -25,6 +25,8 @@ const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
 Usage:
   pnpm dev job start --story /path/to/story --job draft-1
   pnpm dev job validate --story /path/to/story --job draft-1
+  pnpm dev job pi inspect --story /path/to/story --job draft-1
+  pnpm dev job pi configure --story /path/to/story --job draft-1 --max-steps 5 --max-model-calls 100
   pnpm dev job foundation --story /path/to/story --job draft-1 --mode autonomous --task "A mystery premise"
   pnpm dev job foundation --story /path/to/story --job draft-1 --inspect
   pnpm dev job foundation --story /path/to/story --job draft-1 --reconcile-digest <reviewed-sha256>
@@ -69,6 +71,15 @@ Usage:
   pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
   pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
   pnpm dev demo-story --project ./fresh-story --create-project --task "A mystery; choose the rest"
+
+Job Pi profile and budget (#28):
+  configure|inspect   Pin a model profile, explicitly optional fallback, and safe-boundary budgets
+  --provider, --model          Required profile (default openai/gpt-6-luna)
+  --thinking low|high          Optional required reasoning capability
+  --fallback-provider, --fallback-model  Explicit optional fallback pair; never implicit
+  --max-steps, --max-model-calls, --max-cost-usd  Optional cumulative job limits
+  Budgets count observed Pi transcript usage; increase limits and rerun a paused action.
+  Pi writing sessions are never interrupted mid-edit. Reconcile incomplete writes before resuming.
 
 Job start:
   --story <path>     Required existing canonical Story directory within a Git worktree
@@ -304,6 +315,48 @@ function parseJobOptions(
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "pi") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (action !== "configure" && action !== "inspect") throw new Error("Expected job pi configure|inspect.");
+    const values = parseJobOptions(args, "pi", ["--story", "--job", "--provider", "--model",
+      "--thinking", "--fallback-provider", "--fallback-model",
+      "--max-steps", "--max-model-calls", "--max-cost-usd"]);
+    const story = values.get("--story"), jobId = values.get("--job");
+    if (!story || !jobId) throw new Error("job pi requires --story and --job.");
+    const { startStoryJob } = await import("./job.js");
+    const { inspectPiPolicy, configurePiPolicy } = await import("./job-pi-policy.js");
+    const job = await startStoryJob({ story, job: jobId }, false);
+    if (action === "inspect") {
+      if (values.size !== 2) throw new Error("Pi inspect accepts only --story and --job.");
+    } else {
+      const prev = await inspectPiPolicy(job);
+      const provider = values.get("--provider") ?? prev.resolved?.requested.provider ?? prev.policy.profile.provider;
+      const model = values.get("--model") ?? prev.resolved?.requested.model ?? prev.policy.profile.model;
+      const thinking = values.get("--thinking") ?? prev.policy.profile.thinking;
+      if (thinking !== undefined && thinking !== "low" && thinking !== "high")
+        throw new Error("Pi thinking must be low or high.");
+      const fallbackProvider = values.get("--fallback-provider") ?? prev.policy.profile.optionalFallback?.provider;
+      const fallbackModel = values.get("--fallback-model") ?? prev.policy.profile.optionalFallback?.model;
+      if (Boolean(fallbackProvider) !== Boolean(fallbackModel))
+        throw new Error("Optional Pi fallback requires both --fallback-provider and --fallback-model.");
+      const number = (name: string) => values.has(name) ? Number(values.get(name)) : undefined;
+      await configurePiPolicy(job, {
+        version: 1,
+        profile: { provider, model, ...(thinking ? { thinking: thinking as "low" | "high" } : {}),
+          ...(fallbackProvider && fallbackModel ? { optionalFallback: {
+            provider: fallbackProvider, model: fallbackModel } } : {}) },
+        limits: {
+          steps: number("--max-steps") ?? prev.policy.limits.steps,
+          modelCalls: number("--max-model-calls") ?? prev.policy.limits.modelCalls,
+          costUsd: number("--max-cost-usd") ?? prev.policy.limits.costUsd,
+        },
+      });
+    }
+    process.stdout.write(JSON.stringify(await inspectPiPolicy(job), null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "author") {
     const args = process.argv.slice(4);
     const action = args.shift();
@@ -786,6 +839,12 @@ function redactCredentials(message: string): string {
 }
 
 main().catch((error: unknown) => {
+  if (error instanceof Error && error.name === "PiBudgetPause") {
+    const pause = error as Error & { reason: string; usage: unknown };
+    process.stdout.write(JSON.stringify({ status: "paused-budget", reason: pause.reason,
+      usage: pause.usage, resumable: true }, null, 2) + "\n");
+    return;
+  }
   const message = error instanceof Error ? error.message : "Unknown error";
   process.stderr.write(`noveltea-gen: ${redactCredentials(message)}\n`);
   process.exitCode = process.argv[2] === "job" && process.argv[3] === "validate" ? 2 : 1;

@@ -5,6 +5,7 @@ import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
+import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
@@ -44,24 +45,28 @@ export async function authorArchitecture(
     }
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(candidate => candidate.id === modelId)) {
-    throw new Error(`Unavailable architecture Pi model or credentials: ${provider}/${modelId}`);
-  }
   const sessionDir = join(dirname(job.worktreeRoot), "architecture-sessions");
-  await mkdir(sessionDir, { recursive: true });
+  const context = await preparePiContext(job, project, {
+    group: "architecture", step: "architecture:" + plan.version,
+    paths: ["creative-direction/foundation.md"], snapshot: snapshot.id,
+    provider, model: modelId, directory: sessionDir,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, resourceLoader: loader, settingsManager,
-    sessionManager: SessionManager.create(project.root, sessionDir),
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
+    sessionManager: context.manager,
     customTools: [await agentValidatorBashTool(job)],
     noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
   });
   try {
+    if (context.thinking && session.thinkingLevel !== context.thinking) {
+      throw new Error("Pi architecture specialist did not honor pinned thinking effort.");
+    }
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile) throw new Error("Architecture Pi session transcript cannot be persisted; writer will not begin.");
     await onSession(session.sessionId, sessionFile);
+    await context.beforeTurn(sessionFile);
     await session.prompt(
-      "You are the NovelTea Story architecture specialist, working on an isolated Git-backed Story. " +
+      context.contextNote + "You are the NovelTea Story architecture specialist, working on an isolated Git-backed Story. " +
       "Read the following pinned skill instructions using the read tool before writing:\n" +
       REQUIRED.map(path => join(snapshot.path, "skills", path)).join("\n") +
       "\nRead the actual canonical Creative Direction and any relevant existing Story records. " +
@@ -107,6 +112,7 @@ export async function authorArchitecture(
         resolve(project.root, c.arguments.path as string).slice(project.root.length + 1).split(sep).join("/"),
       ));
     if (!authored) throw new Error("Architecture specialist did not author canonical Arc/Milestone Markdown.");
+    await context.completed(sessionFile, session.sessionId);
     return { piSessionId: session.sessionId, piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
       skillReads: reads.filter(p => required.includes(p)) };
   } finally {

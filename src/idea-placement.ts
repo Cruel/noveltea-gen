@@ -9,6 +9,7 @@ import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { createProjectResourceLoader } from "./pi.js";
+import { preparePiContext } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
 import { processAuthorUpdatesAtBoundary } from "./author-updates.js";
@@ -237,16 +238,26 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
       ![skill, "nt-catalog"].every(name => loaded.skills.some(s =>
         s.name === name && s.filePath.startsWith(join(snapshot.path, "skills") + sep))))
     throw new Error("Idea placement cannot load pinned specialist skills.");
+  const assignment = JSON.parse(instruction.slice(instruction.indexOf("{") >= 0 ?
+    instruction.indexOf("{") : 0)) as { target?: { path?: string };
+    relocationFrom?: { path: string }; alternatives?: Array<{ path: string }> };
+  const required = [assignment.target?.path, assignment.relocationFrom?.path,
+    ...(assignment.alternatives?.map(c => c.path) ?? [])]
+    .filter((p): p is string => !!p).map(p => join(project.root, p));
+  // An idea's original author intent is private. Never share its transcript with
+  // another idea, even if the same specialist and target are selected.
+  const identity = createHash("sha256").update(instruction).digest("hex");
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(m => m.id === modelId))
-    throw new Error("Unavailable idea specialist Pi credentials/model: " + provider + "/" + modelId);
   const dir = join(dirname(job.worktreeRoot), "idea-placement-sessions", skill, writable ? "write" : "review");
-  await mkdir(dir, { recursive: true });
+  const context = await preparePiContext(job, project, {
+    group: "idea:" + identity + ":" + (writable ? "write" : "review"),
+    step: "idea:" + identity + ":" + (writable ? "write" : "review"),
+    paths: required, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, thinkingLevel: thinking,
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking,
     resourceLoader: loader, settingsManager,
-    sessionManager: SessionManager.create(project.root, dir),
+    sessionManager: context.manager,
     noTools: "all", tools: writable ? ["read", "edit", "write"] : ["read"],
   });
   try {
@@ -254,14 +265,9 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
       ...["SKILL.md", "references/records.md", "references/progression.md",
         "references/authority-and-validation.md", "references/glossary.md"]
         .map(p => join(snapshot.path, "skills", "nt-catalog", p))];
-    const assignment = JSON.parse(instruction.slice(instruction.indexOf("{") >= 0 ?
-      instruction.indexOf("{") : 0)) as { target?: { path?: string };
-      relocationFrom?: { path: string }; alternatives?: Array<{ path: string }> };
-    const required = [assignment.target?.path, assignment.relocationFrom?.path,
-      ...(assignment.alternatives?.map(c => c.path) ?? [])]
-      .filter((p): p is string => !!p).map(p => join(project.root, p));
     const mustRead = [...new Set([...pinned, ...required])];
-    await session.prompt("Read ALL pinned skill/catalog files with the read tool, " +
+    await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+    await session.prompt(context.contextNote + "Read ALL pinned skill/catalog files with the read tool, " +
       "then read EVERY canonical candidate record in the assignment, even if you already like " +
       "the target. This task is NOT complete until each individual alternative has actually " +
       "been read; the graph verifies successful read calls for every path. " +
@@ -309,6 +315,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
       throw new Error("Idea specialist did not provide a passing source-linked semantic verdict: " +
         JSON.stringify(response));
     }
+    await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
     return { evidence: response.evidence as string[], reason: String(response.reason ?? ""),
       sessionFile: session.sessionManager.getSessionFile() ?? "" };
   } finally { session.dispose(); }

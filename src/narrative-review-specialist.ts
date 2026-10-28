@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createProjectResourceLoader } from "./pi.js";
+import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import type { JobStartResult } from "./job.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -78,7 +79,7 @@ export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignme
 
 async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider: string,
   modelId: string, thinking: "low" | "high" | undefined, role: "review" | "repair",
-  originalSessionFile?: string) {
+  originalSessionFile?: string, assignment?: ReviewAssignment) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: role === "review"
@@ -92,24 +93,31 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
     throw new Error("Missing or invalid pinned narrative review/repair skills.");
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(m => m.id === modelId))
-    throw new Error("Unavailable narrative reviewer model or credentials: " + provider + "/" + modelId);
   const dir = join(dirname(job.worktreeRoot), "review-sessions", role);
+  const context = role === "review" && assignment
+    ? await preparePiContext(job, project, {
+      group: "narrative-review:" + assignment.planVersion,
+      step: "narrative-review:" + assignment.planVersion + ":" + job.headSha,
+      paths: assignment.paths, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
+    }, runtime) : undefined;
+  if (!context) await guardPiBudget(job, "narrative-repair:" + job.headSha, originalSessionFile);
+  const resolved = context ? undefined : await resolvePiModel(job, runtime, provider, modelId, thinking);
+  const model = context?.model ?? resolved!.model;
+  const selectedThinking = context?.thinking ?? resolved?.resolution.thinking;
   await mkdir(dir, { recursive: true });
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, thinkingLevel: thinking,
+    cwd: project.root, modelRuntime: runtime, model, thinkingLevel: selectedThinking,
     resourceLoader: loader, settingsManager,
     sessionManager: role === "repair" && originalSessionFile
       ? SessionManager.open(originalSessionFile, dirname(originalSessionFile), project.root)
-      : SessionManager.create(project.root, dir),
+      : context?.manager ?? SessionManager.create(project.root, dir),
     noTools: "all", tools: role === "review"
       ? ["read", "grep", "find", "ls"] : ["read", "edit", "write", "grep", "find", "ls"],
   });
-  if (thinking && session.thinkingLevel !== thinking) {
+  if (selectedThinking && session.thinkingLevel !== selectedThinking) {
     session.dispose(); throw new Error("Pi failed to honor narrative review thinking effort.");
   }
-  return { session, project, pinned: (role === "review" ? guidance :
+  return { session, project, context, pinned: (role === "review" ? guidance :
     ["nt-narrative-composition/SKILL.md", ...guidance.slice(1)])
     .map(p => join(snapshot.path, "skills", p)) };
 }
@@ -134,11 +142,12 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
   assignment: ReviewAssignment, provider: string, model: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
 ): Promise<EditorialVerdict> {
-  const { session, project, pinned } = await sessionFor(job, snapshot, provider, model, thinking, "review");
+  const { session, project, pinned, context } = await sessionFor(job, snapshot, provider, model, thinking, "review", undefined, assignment);
   try {
     const file = session.sessionManager.getSessionFile();
     if (file) await onSession(file);
-    await session.prompt("You are the independent nt-narrative-review editor, not the author. " +
+    await context!.beforeTurn(file ?? undefined);
+    await session.prompt(context!.contextNote + "You are the independent nt-narrative-review editor, not the author. " +
       "FIRST read every pinned review/catalog reference and EVERY supplied Story path. " +
       "Examine actual saved prose, not a writer's summary. Analyze continuity, pacing, " +
       "Character voice/motivation, Puzzle fairness and accessible clues, player agency, " +
@@ -159,6 +168,7 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
     if ([...pinned, ...assignment.paths.map(p => join(project.root, p))]
       .some(p => !reads.has(p))) throw new Error("Independent narrative reviewer did not read pinned skills and scoped Story records.");
     const verdict = checkEditorialVerdict(parseSpecialistJson(lastReply(session)), assignment);
+    await context!.completed(file!, session.sessionId);
     return { ...verdict, sessionFile: file ?? undefined };
   } finally { session.dispose(); }
 }
@@ -172,7 +182,7 @@ export async function repairNarrativeProse(job: JobStartResult, snapshot: SkillS
   verify: () => Promise<void>,
 ): Promise<void> {
   const { session, pinned } = await sessionFor(job, snapshot, provider, model, thinking,
-    "repair", originalSessionFile);
+    "repair", originalSessionFile, assignment);
   try {
     const file = session.sessionManager.getSessionFile();
     if (file) await onSession(file);
@@ -186,6 +196,7 @@ export async function repairNarrativeProse(job: JobStartResult, snapshot: SkillS
       "The independent editor found:\n" + JSON.stringify(findings) +
       "\nREFERENCES:\n" + pinned.join("\n") + "\nSOURCES:\n" +
       assignment.paths.join("\n") + "\nALLOWED WRITES:\n" + paths.join("\n");
+    await guardPiBudget(job, "narrative-repair:" + job.headSha, file ?? undefined);
     await session.prompt(prompt);
     await verify();
     // The graph separately validates and performs an independent editorial re-review.

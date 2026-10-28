@@ -12,6 +12,7 @@ import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from ".
 import { verifyJobPiSession } from "./job-session.js";
 import { trustedHead } from "./revision.js";
 import { createProjectResourceLoader } from "./pi.js";
+import { preparePiContext } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -190,15 +191,14 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     }
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(candidate => candidate.id === modelId)) {
-    throw new Error(`Unavailable Pi model or credentials for ${provider}/${modelId}; use pi /login or an API key.`);
-  }
   const sessionDir = join(dirname(job.worktreeRoot), "foundation-sessions");
-  await mkdir(sessionDir, { recursive: true });
+  const context = await preparePiContext(job, project, {
+    group: "foundation:write", step: "foundation:write",
+    paths: [target], snapshot: state.snapshot.id, provider, model: modelId, directory: sessionDir,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, resourceLoader: loader, settingsManager,
-    sessionManager: SessionManager.create(project.root, sessionDir),
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
+    sessionManager: context.manager,
     customTools: [await agentValidatorBashTool(job, validatorSource)],
     // Standard tools remain available, including grep/rg and Git inspection
     // through bash. No structured-record writer or Git commit tool exists.
@@ -207,11 +207,15 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
   let reads: string[] = [];
   let wrote = false;
   try {
+    if (context.thinking && session.thinkingLevel !== context.thinking) {
+      throw new Error("Pi foundation writer did not honor pinned thinking effort.");
+    }
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile) throw new Error("Foundation Pi transcript cannot be persisted; writer will not start.");
     await onSession(session.sessionId, sessionFile);
+    await context.beforeTurn(sessionFile);
     await session.prompt(
-      "You are the NovelTea foundation writing specialist in an isolated Git Story worktree. " +
+      context.contextNote + "You are the NovelTea foundation writing specialist in an isolated Git Story worktree. " +
       "Use ordinary Pi read/edit/write and inspection tools to AUTHOR MARKDOWN DIRECTLY, never a structured record authoring tool. " +
       "Before editing, actually READ these five pinned files with the read tool (absolute paths):\n" +
       REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
@@ -258,6 +262,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       typeof call.arguments?.path === "string" &&
       resolve(project.root, call.arguments.path as string) === join(project.root, target));
     if (!wrote) throw new Error("Pi did not author the canonical Markdown through a standard write/edit tool.");
+    await context.completed(sessionFile, session.sessionId);
     return { skillReads: reads.filter(path => requiredPaths.includes(path)),
       piSessionId: session.sessionId,
       piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
@@ -286,19 +291,22 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
     if (diag.type === "error") throw new Error(`Pi discovery skill error: ${diag.message}`);
   }
   const runtime = await ModelRuntime.create();
-  const model = runtime.getModel(provider, modelId);
-  if (!model || !(await runtime.getAvailable(provider)).some(candidate => candidate.id === modelId)) {
-    throw new Error(`Unavailable Pi model or credentials for ${provider}/${modelId}.`);
-  }
   const sessions = join(dirname(job.worktreeRoot), "foundation-discovery-sessions");
-  await mkdir(sessions, { recursive: true });
+  const context = await preparePiContext(job, project, {
+    group: "foundation:discovery", step: "foundation:discovery",
+    paths: [], snapshot: state.snapshot.id, provider, model: modelId, directory: sessions,
+  }, runtime);
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model, resourceLoader: loader,
-    settingsManager, sessionManager: SessionManager.create(project.root, sessions),
+    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader,
+    settingsManager, sessionManager: context.manager,
     noTools: "all", tools: ["read", "grep", "find", "ls"],
   });
   try {
-    await session.prompt("Collaborative foundation discovery only: DO NOT edit any file. " +
+    if (context.thinking && session.thinkingLevel !== context.thinking) {
+      throw new Error("Pi foundation discovery did not honor pinned thinking effort.");
+    }
+    await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+    await session.prompt(context.contextNote + "Collaborative foundation discovery only: DO NOT edit any file. " +
       "Actually read the pinned nt-story-discovery and nt-catalog guidance and references using read:\n" +
       REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
       "\nInspect the existing Creative Direction if relevant. Following the discovery guidance, " +
@@ -323,6 +331,7 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
     if (REQUIRED.some(name => !reads.includes(join(state.snapshot.path, "skills", name)))) {
       throw new Error("Pi collaborative discovery did not read the pinned narrative skill guidance.");
     }
+    await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
     return { questions, discoverySessionId: session.sessionId,
       discoverySessionFile: session.sessionManager.getSessionFile() ?? undefined };
   } finally {

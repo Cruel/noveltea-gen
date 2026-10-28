@@ -28,6 +28,55 @@ pnpm studio                  # Local graph visualization; no LangSmith API key
 
 Look in **`.local/traces/*.jsonl`** for saved local traces. Each `--trace-local` run reports its exact `localTrace` path; `pnpm trace:show --file <path>` opens a specific saved run. Other important state lives outside the Story project: checkpoints under `~/.local/state/noveltea-gen/<project-id>/`, real Pi sessions under the Pi agent session directory, and pinned skills under `~/.cache/noveltea-gen/skill-snapshots/`. Local configuration and optional LangSmith credentials live in the repo's ignored `.local/` directory. Consult **`AGENTS.md`** for the full storage map and overrides. Cloud tracing is off unless explicitly enabled via `--trace`; `--trace-local` does not upload traces. Real Pi runs may consume model usage, so use `--fixture` for deterministic graph checks.
 
+## Pi context reuse, pinned model policy and resumable budgets (#28)
+
+Git-backed Story jobs keep canonical Markdown and the validated work-item plan authoritative. Pi
+conversations are a reusable optimization, not another Story source of truth. Completed related
+specialist conversations are restored or forked with Pi's supported `SessionManager` APIs into
+the next work item's own session directory. Writer and independent reviewer contexts remain
+separate; unrelated narrative domains and author-only deferred ideas never share conversations.
+The first prompt retains a consistent skill/instruction prefix and explicitly states that saved
+Story files supersede old conversation content. A private receipt records the pinned skill
+snapshot, selected model, successful Story reads, source SHA-256 versions, and conversation
+identity. Changed or newly relevant files are identified on the next assignment; a substantial
+architecture change or overly long history causes a fresh scoped conversation. As with all
+specialists, the Git-diff/validator gate owns publication, not Pi.
+
+The default model is `openai/gpt-6-luna`. To set a **job-level** profile and optional
+budgets before writing, run:
+
+```sh
+pnpm dev job pi configure --story /path/to/story --job draft-1 \
+  --provider openai --model gpt-6-luna --thinking low \
+  --max-steps 8 --max-model-calls 150 --max-cost-usd 10
+pnpm dev job pi inspect --story /path/to/story --job draft-1
+```
+
+You may supply **both** `--fallback-provider` and `--fallback-model` to permit an
+explicit fallback *only if* the requested model/capability is unavailable. The selected
+provider/model and whether fallback occurred are persisted and inspected through
+`job pi inspect`. A resumed workflow will not silently switch from its pinned selection;
+unavailable mandatory models or reasoning capabilities fail explicitly. Work-item CLIs
+that do not specify another model use the configured job profile.
+
+Budgets are optional and cumulative across the job. Pi's saved assistant usage (including
+reported cost) supplies observed model-call/cost totals; shared history from forked
+sessions is counted once. When a cost budget is configured but Pi omits a model
+call's price, the next safe boundary pauses with `cost-unavailable` rather than
+incorrectly treating unknown spend as free. No independent telemetry service is created. A limit reached at
+a safe assignment boundary returns `{"status":"paused-budget","resumable":true}`
+without starting a new specialist turn. Increase the limit via `job pi configure` and
+rerun the same command; counters are not reset. Once a writer has begun an assignment,
+its bounded repair prompts can finish without an artificial mid-edit budget interruption.
+An actual process crash or partial tool edit still requires the established Git/worktree
+reconciliation; do not blindly replay an interrupted writer.
+
+Private receipts live next to the job's `job.json`: `pi-policy.json`,
+`pi-resolution.json`, `pi-budget.json` and `pi-contexts/`. Individual Pi JSONL files
+remain in their existing role-specific session directories. Tokens, latency and cache-hit
+details continue through existing Pi/LangGraph/LangSmith or local traces when available.
+Opt-in live model tests are separate from deterministic CI.
+
 ## Local NovelTea skills configuration (#7)
 
 To load the real `noveltea-skills` packages without installing them into each Story, create **`.local/config.json`** in this application checkout. The `.local/` directory is gitignored:
