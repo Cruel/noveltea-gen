@@ -1,6 +1,6 @@
 # NovelTea-gen
 
-A local-first TypeScript/pnpm Story generator using LangGraph.js to coordinate Git-backed Story jobs and pinned Pi specialists. The production `job generate` entrypoint executes one explicitly scoped Milestone through independent review. The original `run` note/tagline routing proof of concept remains separate, with its own SQLite checkpoints and tracing.
+A local-first TypeScript/pnpm Story generator using LangGraph.js to coordinate Git-backed Story jobs and pinned Pi specialists. The production `job generate` entrypoint schedules an explicitly scoped Story or Arc/Milestone set through independent review. The original `run` note/tagline routing proof of concept remains separate, with its own SQLite checkpoints and tracing.
 
 ## Setup
 
@@ -28,7 +28,7 @@ pnpm studio                  # Local graph visualization; no LangSmith API key
 
 Look in **`.local/traces/*.jsonl`** for saved local traces. Each `--trace-local` run reports its exact `localTrace` path; `pnpm trace:show --file <path>` opens a specific saved run. Other important state lives outside the Story project: checkpoints under `~/.local/state/noveltea-gen/<project-id>/`, real Pi sessions under the Pi agent session directory, and pinned skills under `~/.cache/noveltea-gen/skill-snapshots/`. Local configuration and optional LangSmith credentials live in the repo's ignored `.local/` directory. Consult **`AGENTS.md`** for the full storage map and overrides. Cloud tracing is off unless explicitly enabled via `--trace`; `--trace-local` does not upload traces. Real Pi runs may consume model usage, so use `--fixture` for deterministic graph checks.
 
-## Checkpointed single-Milestone Story generation (#32)
+## Checkpointed scope-driven Story generation (#32, #33)
 
 Start a Git-backed job once, then give the production parent graph an explicit
 objective and completion contract. You do **not** need to invoke each specialist:
@@ -59,32 +59,41 @@ pnpm dev job generate resume --story /path/to/existing/repo/story --job draft-1
 }
 ```
 
-This first production scheduler requires **exactly one Milestone and at most one
-Arc**, not full-Story or multi-Milestone scheduling. It runs Creative Direction,
-architecture, World/Character foundations, Event design, Choice/Puzzle design,
-composition, then independent requested-scope review. `architecture` and
-`interactive` depths omit later authoring stages, but still request independent
-scope assessment; a shallower request is not a promise that all review obligations
-can be satisfied. No iterative whole-Story improvement or automatic integration is
-performed. Canonical Story files remain the direct context source until #22; no
-Context Manifest or dormant author-inbox content is added to ordinary writers.
+The scheduler accepts a **full-Story** contract or a **bounded partial** contract
+targeting one or more Arcs/Milestones. It starts with Creative Direction, architecture
+and World/Character foundations, then selects runnable pending Event,
+Choice/Puzzle and composition work items from the current typed plan and canonical
+scope. Independent clusters can continue after a clean local block; their dependent
+work remains blocked, and cycles, unknown dependencies and unapproved new
+coverage fail closed. Several Milestone fulfillment alternatives retain their
+canonical route witnesses; they are not flattened into an invented all-path
+prerequisite. `architecture` and `interactive` depths omit later authoring stages,
+but still request independent scope assessment. No arbitrary Event/scene counts,
+iterative whole-Story improvement or automatic integration are imposed. Canonical
+Story files remain the direct context source until #22.
 
 `start` pins the objective, contract, fixture/Pi selection and explicit model/source
 options. `resume` accepts no replacement inputs; it uses that same request. Existing
 work-item receipts retain their own stronger brief/model/authorization checks.
-A changed or missing pinned architecture plan blocks the old run rather than
-silently adopting new authorization. Scope changes use the separate signed
-architecture/revision procedures; this bounded parent does not automatically
-reschedule changed scope. It also does not automatically answer required author
-questions or approve protected decisions.
+A missing or unauthenticated architecture plan blocks the run. Approved, signed
+architecture/scope revisions are adopted at a clean boundary, with current
+obligations rebuilt from canonical Story coverage and explicit carry-forward
+verification for unaffected specialist commits. Unapproved scope expansion is
+blocked. The original contract and signed transitions remain in the checkpoint
+history/architecture receipt; `inspect` shows the currently accepted contract.
+No author question or protected decision is automatically approved.
 
 The actual parent StateGraph has `schedule`, `author_update_intake`,
 `specialist_dispatch`, `verify_committed_work`, and `completion_decision` nodes.
 Per-job `generation.sqlite` lives beside `job.json`, under the effective
 `NT_STATE_DIR`/XDG job state directory, with thread `<job-thread>:generation`.
-Inspection returns the pinned request, completed stage/head evidence, next stage,
-checkpoint location and the existing source-linked job report. The checkpoint is
-private operational state, not Story canon. A separate crash-reclaimable parent
+Inspection returns the currently accepted request, original signed history in
+the architecture receipt, per-Milestone completed commit evidence, current
+versioned work inventory with typed dependencies/block reasons, next runnable
+unit, checkpoint location and the existing source-linked job report. The live
+inventory resides only in the parent's private SQLite checkpoints, **not** in
+the signed `architecture.json` plan or Story canon; specialist commits and
+signed plan transitions retain their original immutable authority. A separate crash-reclaimable parent
 lease serializes CLI continuations; every writer still uses the existing shared
 Story writer lock. No checkpoint is assumed to atomically commit Git or Pi effects.
 
@@ -103,8 +112,8 @@ job's budget before `generate resume`. Cancellation is not released by resume.
 A run reports `completed` only when the existing current-scope report confirms
 independent **real Pi** editorial completion. `--fixture` runs all deterministic
 specialists and real Git/validator gates, but ends `blocked` with
-`editorial-unverified`, never literary success. Other blocks include a reason and
-retain the next stage for inspection. The author's original checkout is untouched.
+`editorial-unverified`, never literary success. Other blocks include the unresolved inventory reasons and
+return a resumable state. A blocked dependency is not a completed work item. The author's original checkout is untouched.
 
 **Studio:** `pnpm studio` registers only **`story_generation`**, exported from
 `src/studio.ts`. The old note/tagline prototype is no longer registered. For a fresh
@@ -1541,11 +1550,11 @@ Prepare an existing Git-backed job and generate input for a fresh Studio thread:
 ```sh
 pnpm dev job start --story /path/to/story --job studio-draft
 pnpm studio:input --story /path/to/story --job studio-draft \
-  --task "Develop one mystery Milestone" --contract ./scope.json \
+  --task "Develop the selected Story scope" --contract ./scope.json \
   --skills-source /path/to/noveltea-skills --fixture
 ```
 
-The helper validates the one-Milestone contract and existing job identity, and emits the production `request` object. It does not create a job, invoke a model or edit Story files. Omit `--fixture` to opt into real Pi; optional `--provider` and `--model` override defaults. Specialists pin their own skills and transcripts through the same work-item APIs used by CLI generation.
+The helper validates the full-Story or partial Arc/Milestone contract and existing job identity, and emits the production `request` object. It does not create a job, invoke a model or edit Story files. Omit `--fixture` to opt into real Pi; optional `--provider` and `--model` override defaults. Specialists pin their own skills and transcripts through the same work-item APIs used by CLI generation.
 
 **Studio limits:** Use only one execution surface/thread per job. Studio owns its development-server checkpoints, separate from CLI `generation.sqlite`; use `job generate` for tested durable CLI restart/reconciliation. Never start a fresh thread to overwrite interrupted specialist work. See the production generation section for safe-boundary controls, resume and preserved crash evidence. Legacy `run`/`demo-story` CLI commands remain available, but are not Studio's registered graph.
 

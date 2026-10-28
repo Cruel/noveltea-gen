@@ -9,6 +9,7 @@ import { authorEventCluster, type EventAssignment, type EventEvidence } from "./
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
@@ -298,15 +299,17 @@ function output(job: JobStartResult, state: EventReceipt) {
 }
 async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): Promise<EventEvidence> {
   const variant = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
+  const cluster = fixtureCluster(assignment.milestoneId);
   const files: string[] = [];
   const add = async (slug: string, metadata: string, prose: string) => {
+    slug = cluster.slug(slug); metadata = cluster.text(metadata);
     const local = `events/${slug}.md`;
     await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
     await writeFile(join(job.worktreeStoryRoot, local),
       `---\nschema: '0.1'\ntype: event\nid: event.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${prose}\n`, { flag: "wx" });
     files.push(local);
   };
-  if (["optional", "contradiction", "failed-repair", "repair"].includes(variant)) {
+  if (["optional", "alternative-routes", "contradiction", "failed-repair", "repair"].includes(variant)) {
     await add("inspect-ledger",
       `participants: [character.ada]\narcs: [${assignment.arcIds[0]}]\nconsequences: ["Ada recognizes the handwriting"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: []\n      not_completed: []\nsteps: []`,
       "Ada recognizes the ledger handwriting. Inspecting is optional, not a prerequisite of disclosure.");
@@ -336,7 +339,9 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): 
   const old = await readFile(file, "utf8");
   if (!old.includes("fulfillment: {any_of: []}")) throw new Error("Fixture requires an unbound planning Milestone.");
   await writeFile(file, old.replace("completeness: partial\n", "")
-    .replace("fulfillment: {any_of: []}", "fulfillment: {any_of: [[event.disclose-ledger]]}"));
+    .replace("fulfillment: {any_of: []}", cluster.text(variant === "alternative-routes"
+      ? "fulfillment: {any_of: [[event.inspect-ledger, event.disclose-ledger], [event.disclose-ledger]]}"
+      : "fulfillment: {any_of: [[event.disclose-ledger]]}")));
   files.push(assignment.milestonePath);
   if (variant === "milestone-retcon") {
     await writeFile(file, (await readFile(file, "utf8")).replace("The investigator can no longer act alone", "The investigator must act entirely alone"));

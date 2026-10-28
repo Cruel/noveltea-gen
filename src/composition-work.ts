@@ -10,6 +10,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { verifiedNarrativeSuccessor, verifiedNarrativeChain } from "./job-successor.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
@@ -28,6 +29,9 @@ interface Report {
     branchProgress: Array<{ event: string; step: string; branch: string; status: string; witness?: string[] }>;
     puzzleSolutions: Array<{ id: string; solutions: Array<{ event: string; status: string;
       clueAccess: { status: string } }> }> };
+}
+interface EventSourceReceipt {
+  jobId: string; milestoneId: string; phase: string; paths?: string[]; commitSha?: string;
 }
 interface InteractiveReceipt {
   jobId: string; milestoneId: string; planVersion: number; eventHead?: string;
@@ -89,7 +93,8 @@ function verified(result: ValidationResult, base: string): Report {
       JSON.stringify(result).slice(0, 7500));
   return r;
 }
-function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt, milestoneId: string): CompositionAssignment {
+function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt,
+  eventSource: EventSourceReceipt, milestoneId: string): CompositionAssignment {
   const arch = plan.items.find(i => i.id === "global-architecture");
   if (plan.contract.scope.depth !== "composition" || arch?.status !== "verified" ||
       !arch.targetIds.includes(milestoneId)) throw new Error("Scope does not authorize composition.");
@@ -97,8 +102,10 @@ function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt, mil
   const milestone = records.find(record => record.metadata.id === milestoneId);
   if (!milestone) throw new Error("Missing planned Milestone.");
   const arcs: string[] = milestone.metadata.arcs;
+  const ownedPaths = new Set([...(eventSource.paths ?? []), ...source.units.flatMap(unit => unit.paths ?? [])]);
+  const fulfillment = (milestone.metadata.fulfillment?.any_of as string[][] | undefined)?.flat() ?? [];
   const eventRecords = records.filter(record => record.metadata.type === "event" &&
-    (record.metadata.arcs as string[]).some(id => arcs.includes(id)));
+    (ownedPaths.has(record.path) || fulfillment.includes(record.metadata.id)));
   const eventIds = eventRecords.map(record => record.metadata.id);
   const choices = source.units[0]?.validation?.choices ?? [];
   const puzzles = source.units[1]?.validation?.puzzles ?? [];
@@ -369,8 +376,10 @@ function output(job: JobStartResult, state: Receipt) {
 }
 async function fixtureAuthor(job: JobStartResult, a: CompositionAssignment): Promise<CompositionEvidence> {
   const variant = process.env.NT_COMPOSITION_FIXTURE_CASE ?? "";
+  const cluster = fixtureCluster(a.milestoneId);
   const paths: string[] = [];
   const write = async (slug: string, events: string[], body: string, revelations: string[] = []) => {
+    slug = cluster.slug(slug); events = events.map(cluster.text); revelations = revelations.map(cluster.text);
     const path = "authored-content/" + slug + ".md";
     await mkdir(dirname(join(job.worktreeStoryRoot, path)), { recursive: true });
     await writeFile(join(job.worktreeStoryRoot, path),
@@ -406,6 +415,10 @@ async function fixtureAuthor(job: JobStartResult, a: CompositionAssignment): Pro
       "## Solution consequence\n\n" + body + "\n\nAda realizes this evidence changes what she can ask next.",
       ["revelation.puzzle-evidence"]);
   }
+  if (a.eventIds.includes(cluster.text("event.inspect-ledger"))) {
+    await write("inspect-ledger-scene", ["event.inspect-ledger"],
+      "Ada takes time to examine the handwriting before the conversation. The ledger's marks suggest a deliberate omission.");
+  }
   if (variant === "event-retcon") {
     const path = "events/disclose-ledger.md";
     await writeFile(join(job.worktreeStoryRoot, path),
@@ -423,12 +436,16 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
   return withStoryJobLock(job, "composition-" + input.milestone.slice(10), async () => {
     if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
     const sourceFile = join(root, "interactive-items", input.milestone.slice(10) + ".json");
-    if (!existsSync(sourceFile) || !existsSync(join(root, "architecture.json")))
+    const eventFile = join(root, "event-items", input.milestone.slice(10) + ".json");
+    if (!existsSync(sourceFile) || !existsSync(eventFile) || !existsSync(join(root, "architecture.json")))
       throw new Error("Composition requires verified interactive Choice/Puzzle work.");
     const source = JSON.parse(await readFile(sourceFile, "utf8")) as InteractiveReceipt;
+    const eventSource = JSON.parse(await readFile(eventFile, "utf8")) as EventSourceReceipt;
     const architecture = JSON.parse(await readFile(join(root, "architecture.json"), "utf8")) as ArchReceipt;
     const units = source.units;
     if (source.jobId !== job.jobId || source.milestoneId !== input.milestone ||
+        eventSource.jobId !== job.jobId || eventSource.milestoneId !== input.milestone ||
+        eventSource.phase !== "committed" || !eventSource.commitSha || !eventSource.paths?.length ||
         architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
         !architecture.plan || architecture.plan.contract.scope.depth !== "composition" ||
         units?.length !== 2 ||
@@ -436,6 +453,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       throw new Error("Composition requires the same authorized and fully committed interactive milestone.");
     assertPlanContinuity(job, architecture, "interactive:" + input.milestone, source.planVersion);
     const interactiveHead = units[1]!.commitSha!;
+    if (!source.eventHead) throw new Error("Interactive receipt is missing its Event baseline.");
+    git(job, "merge-base", "--is-ancestor", eventSource.commitSha!, source.eventHead);
     const choiceHead = units[0]!.commitSha!;
     const choiceBaseline = units[0]!.beforeHead ?? source.eventHead;
     const puzzleBaseline = units[1]!.beforeHead ?? choiceHead;
@@ -534,7 +553,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
           throw new Error("Composition writer requires clean Story boundary.");
       }
       const baseline = verified(await validate(base), base);
-      const assign = selectAssignment(architecture.plan!, baseline, source, input.milestone);
+      const assign = selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone);
       if (s.phase === "pending") {
         await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"
           ? { provider: s.provider, model: s.model, thinking: s.thinking } : undefined);

@@ -9,6 +9,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { verifiedNarrativeSuccessor, verifiedCompositionSuccessor } from "./job-successor.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
@@ -529,8 +530,10 @@ function output(job: JobStartResult, receipt: Receipt) {
 async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
   assignment: InteractiveAssignment): Promise<InteractiveEvidence> {
   const variant = process.env.NT_INTERACTIVE_FIXTURE_CASE ?? "reference";
+  const cluster = fixtureCluster(assignment.milestoneId);
   const paths: string[] = [];
   const add = async (folder: string, slug: string, type: string, metadata: string, body: string) => {
+    slug = cluster.slug(slug); metadata = cluster.text(metadata);
     const path = folder + "/" + slug + ".md";
     await mkdir(dirname(join(job.worktreeStoryRoot, path)), { recursive: true });
     await writeFile(join(job.worktreeStoryRoot, path),
@@ -540,13 +543,14 @@ async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
     return path;
   };
   const rewrite = async (path: string, fn: (s: string) => string) => {
+    path = cluster.path(path);
     const target = join(job.worktreeStoryRoot, path);
-    await writeFile(target, fn(await readFile(target, "utf8")));
+    await writeFile(target, cluster.text(fn(await readFile(target, "utf8"))));
     paths.push(path);
   };
   const arc = assignment.arcIds[0]!;
-  const event = assignment.eventIds.includes("event.disclose-ledger")
-    ? "events/disclose-ledger.md" : "events/" + assignment.eventIds[0]!.slice(6) + ".md";
+  const event = assignment.eventIds.includes(cluster.text("event.disclose-ledger"))
+    ? cluster.path("events/disclose-ledger.md") : "events/" + assignment.eventIds[0]!.slice(6) + ".md";
   if (domain === "choice") {
     await add("choice-points", "loyalty", "choice-point",
       'prompt: "Protect Neri or challenge the concealment?"\noutcomes: [protect, challenge]',
@@ -592,7 +596,7 @@ revelations: [revelation.ledger-secret]`,
         text.slice(end);
     });
     if (!["conditional-writing", "choice-id-obligation", "unpaid-choice", "same-event-payoff"].includes(variant)) await add("events", "aftermath", "event",
-      `participants: [character.ada, character.neri]\narcs: [${arc}]\nconsequences: ["A choice changes how Ada and Neri collaborate afterward"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: [${assignment.eventIds[0]}]\n      not_completed: []\nsteps:\n  - id: consequence\n    branches:\n      - id: protect-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: protect\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting\n      - id: challenge-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: challenge\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: estranged`,
+      `participants: [character.ada, character.neri]\narcs: [${arc}]\nconsequences: ["A choice changes how Ada and Neri collaborate afterward"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: [${cluster.text("event.disclose-ledger")}]\n      not_completed: []\nsteps:\n  - id: consequence\n    branches:\n      - id: protect-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: protect\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting\n      - id: challenge-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: challenge\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: estranged`,
       "If Ada protects Neri, they continue investigating as trusted collaborators. If she challenges Neri, the confrontation leaves their alliance damaged.");
     if (variant === "bypass-gate") {
       await rewrite(event, s => s.replace("prerequisites:\n  any_of:",

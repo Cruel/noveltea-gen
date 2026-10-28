@@ -299,16 +299,19 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
 }
 async function fixtureAuthor(job: JobStartResult, state: Receipt) {
   const targets = state.plan!.contract.scope.targets;
-  const arc = targets.find(id => id.startsWith("arc.")) ?? "arc.truth";
-  const milestone = targets.find(id => id.startsWith("milestone.")) ?? "milestone.disclosure";
+  const arcs = targets.filter(id => id.startsWith("arc."));
+  if (!arcs.length) arcs.push("arc.truth");
+  const milestones = targets.filter(id => id.startsWith("milestone."));
+  if (!milestones.length) milestones.push(...arcs.map((_, i) => i === 0 ? "milestone.disclosure" : "milestone.reckoning"));
   const records = [
-    { folder: "arcs", id: arc, type: "arc", fields: 'dramatic_question: "Can truth survive loyalty?"\ncharacters: []',
-      body: "The inquiry puts a friendship under pressure. Each admission makes concealment harder, until loyalty must mean either silence or accountability." },
-    { folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "The hidden evidence becomes a shared responsibility"\narcs: [${arc}]\nfulfillment: {any_of: []}`,
-      body: "The investigator can no longer act alone once the witness discloses the evidence. A future conversation could earn this disclosure through trust; an evidence-led confrontation is another possible route. Event design must establish the prerequisites and consequences before either route is bound. Reuse the inquiry setting and express the revelation through dialogue." },
+    ...arcs.map(arc => ({ folder: "arcs", id: arc, type: "arc", fields: 'dramatic_question: "Can truth survive loyalty?"\ncharacters: []',
+      body: "The inquiry puts a friendship under pressure. Each admission makes concealment harder, until loyalty must mean either silence or accountability." })),
+    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "The hidden evidence becomes a shared responsibility"\narcs: [${arcs[i % arcs.length]}]\nfulfillment: {any_of: []}`,
+      body: "The investigator can no longer act alone once the witness discloses the evidence. A future conversation could earn this disclosure through trust; an evidence-led confrontation is another possible route. Event design must establish the prerequisites and consequences before either route is bound. Reuse the inquiry setting and express the revelation through dialogue." })),
   ];
   for (const r of records) {
     const path = join(job.worktreeStoryRoot, r.folder, r.id.split(".")[1] + ".md");
+    if (existsSync(path)) continue;
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `---\nschema: '0.1'\ntype: ${r.type}\nid: ${r.id}\ntitle: "${r.id}"\nstatus: draft\ndecisions: []\n${r.fields}\n---\n\n${r.body}\n`, { flag: "wx" });
   }

@@ -317,8 +317,8 @@ async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: Foundation
         "characters: [character.ada, character.neri]\ninitial: wary",
         "Ada and Neri were once collaborators, but the missing witness made their mutual trust fragile. Concealment threatens the bond; a confession or confrontation might alter it only through later Events."),
     ];
-    const arc = assign.sourcePaths.find(p => p.startsWith("arcs/"));
-    if (arc) {
+    const arcs = assign.sourcePaths.filter(p => p.startsWith("arcs/"));
+    for (const arc of process.env.NT_FOUNDATIONS_FIXTURE_CASE === "one-arc-only" ? arcs.slice(0, 1) : arcs) {
       const file = join(job.worktreeStoryRoot, arc);
       const old = await readFile(file, "utf8");
       const before = old.match(/^characters:\s*\[([^\]\n]*)\]/m);

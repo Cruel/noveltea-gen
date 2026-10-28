@@ -16,9 +16,12 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryGenerationLock, withStoryJobLock } from "./job-lock.js";
 import { inspectJobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
+import { validateStoryJob } from "./validator.js";
+import { hasPlanContinuity } from "./plan-continuity.js";
+import { generationStages, reconcileInventory, nextExecutionItem, type GenerationStage as Stage,
+  type GenerationEvidence, type GenerationInventory, type ExecutionItem } from "./generation-plan.js";
+export { generationStages, type GenerationEvidence } from "./generation-plan.js";
 
-export const generationStages = ["foundation", "architecture", "foundations", "event", "interactive", "composition", "review"] as const;
-type Stage = typeof generationStages[number];
 export interface GenerationRequest {
   story: string; job: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string;
@@ -30,16 +33,18 @@ export interface GenerationOptions {
   validatorSource?: string; provider?: string; model?: string; pauseAfter?: Stage;
 }
 type Status = "running" | "paused" | "blocked" | "cancelled" | "completed";
-export interface GenerationEvidence { stage: Stage; headSha: string; status: string }
 const Channels = Annotation.Root({
   request: Annotation<GenerationRequest>(),
   cursor: Annotation<number>({ reducer: (_, next) => next, default: () => 0 }),
   completedStages: Annotation<GenerationEvidence[]>({ reducer: (_, next) => next, default: () => [] }),
   status: Annotation<Status>(),
   reason: Annotation<string | null>(),
-  result: Annotation<{ status: string } | null>(),
+  result: Annotation<{ status: string; headSha?: string } | null>(),
   planVersion: Annotation<number | null>(),
   pauseAfter: Annotation<Stage | null>(),
+  inventory: Annotation<GenerationInventory | null>(),
+  active: Annotation<ExecutionItem | null>(),
+  failures: Annotation<Record<string, string>>(),
 });
 type State = typeof Channels.State;
 const openJob = (s: State) => startStoryJob({ story: s.request.story, job: s.request.job }, false);
@@ -52,16 +57,9 @@ function clean(job: JobStartResult) {
 }
 export function parseGenerationContract(value: unknown): CompletionContract {
   const contract = parseContract(value);
-  if (contract.scope.kind !== "partial" || contract.scope.targets.filter(x => x.startsWith("milestone.")).length !== 1 ||
-      contract.scope.targets.filter(x => x.startsWith("arc.")).length > 1) {
-    throw new Error("Generation requires partial scope with exactly one Milestone and at most one Arc; multi-Milestone scheduling is not supported.");
-  }
+  if (contract.scope.kind === "partial" && !contract.scope.targets.length)
+    throw new Error("Partial generation requires explicit Arc/Milestone targets.");
   return contract;
-}
-function stages(s: State): readonly Stage[] {
-  const depth = s.request.contract.scope.depth;
-  return depth === "architecture" ? ["foundation", "architecture", "review"] :
-    depth === "interactive" ? ["foundation", "architecture", "foundations", "event", "interactive", "review"] : generationStages;
 }
 async function checkPlan(job: JobStartResult, request: GenerationRequest, version: number | null | undefined) {
   const file = join(dirname(job.worktreeRoot), "architecture.json");
@@ -72,14 +70,44 @@ async function checkPlan(job: JobStartResult, request: GenerationRequest, versio
   const receipt = JSON.parse(await readFile(file, "utf8"));
   verifyPlanHistory(job, receipt);
   if (receipt.plan && (JSON.stringify(receipt.plan.contract) !== JSON.stringify(request.contract) ||
-      version != null && receipt.plan.version !== version))
-    throw new Error("Stale generation authorization: the approved plan differs from this run's pinned completion contract. Inspect and explicitly replan; no writer was replayed.");
-  return receipt.plan?.version ?? null;
+      version != null && receipt.plan.version !== version)) {
+    const original = receipt.history.find((entry: any) => entry.plan.version === (version ?? 1));
+    if (!original || JSON.stringify(original.plan.contract) !== JSON.stringify(request.contract))
+      throw new Error("Stale generation authorization: no signed transition from the pinned completion contract.");
+  }
+  return receipt;
+}
+async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>> {
+  const receipt = await checkPlan(job, s.request, s.planVersion);
+  const plan = receipt?.plan;
+  const request = plan ? { ...s.request, contract: plan.contract } : s.request;
+  const head = await trustedHead(job);
+  // Failed specialists own persistent recovery receipts. Later commits from
+  // independent clusters do not permit replay against a changed HEAD.
+  // A new authorized plan is the boundary for reconsidering local failures.
+  const failures = s.inventory?.planVersion === (plan?.version ?? null) ? s.failures ?? {} : {};
+  const completedStages = s.completedStages.filter(e => {
+    if (e.stage === "foundation" || !plan) return true;
+    if (e.stage === "architecture") return receipt.phase === "committed";
+    const version = e.planVersion ?? s.planVersion ?? 1;
+    if (e.stage === "review") return version === plan.version && e.headSha === head;
+    return hasPlanContinuity(job, receipt, e.milestone ? `${e.stage}:${e.milestone}` : e.stage, version);
+  });
+  // A signed plan revision may require another architecture unit before downstream work.
+  if (plan && receipt.phase !== "committed") {
+    const inventory = reconcileInventory(plan, undefined, head, completedStages,
+      failures, s.inventory);
+    return { request, planVersion: plan.version, completedStages, failures, inventory, active: nextExecutionItem(inventory) ?? null };
+  }
+  const validation = plan && completedStages.some(e => e.stage === "architecture")
+    ? await validateStoryJob(job, request.validatorSource ?? request.skillsSource, { ...job, baseSha: head }) : undefined;
+  const inventory = reconcileInventory(plan, validation, head, completedStages, failures, s.inventory);
+  return { request, planVersion: plan?.version ?? null, completedStages, failures, inventory, active: nextExecutionItem(inventory) ?? null };
 }
 async function dispatch(s: State) {
   const input = s.request;
-  const milestone = input.contract.scope.targets.find(x => x.startsWith("milestone."))!;
-  switch (stages(s)[s.cursor]) {
+  const milestone = s.active?.milestone!;
+  switch (s.active?.stage) {
     case "foundation": return runFoundationJob({ ...input, envelope: JSON.stringify(input.contract.envelope) });
     case "architecture": return runArchitectureJob({ ...input, action: "run" });
     case "foundations": return runCharacterWorldJob({ ...input, action: "run" });
@@ -112,7 +140,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
     .addNode("schedule", async s => {
       parseGenerationContract(s.request.contract);
       if (!s.request.task?.trim()) throw new Error("Generation requires an explicit objective.");
-      return { status: "running" as const, reason: null };
+      return { status: "running" as const, reason: null, failures: s.failures ?? {} };
     })
     .addNode("author_update_intake", async s => {
       const job = await openJob(s);
@@ -120,8 +148,16 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
         try {
           const stopped = await authorBoundary(job);
           if (stopped) return stopped;
-          const planVersion = await checkPlan(job, s.request, s.planVersion);
-          return { planVersion };
+          const receipt = await checkPlan(job, s.request, s.planVersion);
+          // Preserve an in-flight result. For interrupted external effects, only the
+          // original specialist may reconcile the dirty/unpublished work boundary.
+          if (s.active && (receipt?.plan?.version ?? null) === s.planVersion) {
+            if (s.result) return {};
+            try { clean(job); await trustedHead(job); } catch { return {}; }
+          }
+          if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
+          clean(job);
+          return await reconcile(s, job);
         } catch (error) { return blocked(error); }
       });
     })
@@ -131,7 +167,16 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
       // including a commit published before its receipt; never invent a new writer.
       if (s.result) return {};
       try { return { result: await dispatch(s) }; }
-      catch (error) { return blocked(error); }
+      catch (error) {
+        const stop = blocked(error);
+        if (stop.status === "paused") return stop;
+        const job = await openJob(s);
+        return withStoryJobLock(job, "generation-local-block", async () => {
+          try { clean(job); await trustedHead(job); }
+          catch { return stop; }
+          return { failures: { ...s.failures, [s.active!.id]: stop.reason! }, active: null, result: null };
+        });
+      }
     })
     .addNode("verify_committed_work", async s => {
       const job = await openJob(s);
@@ -139,12 +184,16 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
         try {
           clean(job);
           const headSha = await trustedHead(job);
-          const planVersion = await checkPlan(job, s.request, s.planVersion);
-          const stage = stages(s)[s.cursor]!;
+          const receipt = await checkPlan(job, s.request, s.planVersion);
+          const planVersion = receipt?.plan?.version ?? null;
+          const stage = s.active!.stage;
           if (!s.result || !accepted[stage].includes(s.result.status))
-            return { status: "blocked" as const, reason: s.result?.status ?? "Missing specialist result", result: null };
-          return { cursor: s.cursor + 1, result: null, planVersion,
-            completedStages: [...s.completedStages, { stage, headSha, status: s.result.status }],
+            return { failures: { ...s.failures, [s.active!.id]: s.result?.status ?? "Missing specialist result" },
+              active: null, result: null };
+          const completedStages = [...s.completedStages, { stage, milestone: s.active?.milestone,
+            headSha: s.result.headSha ?? headSha, status: s.result.status, planVersion: planVersion ?? undefined }];
+          const next = await reconcile({ ...s, completedStages, active: null, result: null, planVersion }, job);
+          return { ...next, cursor: s.cursor + 1, result: null,
             ...(s.pauseAfter === stage ? { status: "paused" as const, reason: "Requested safe-boundary pause" } : {}) };
         } catch (error) { return blocked(error); }
       });
@@ -159,15 +208,17 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
           const report = await inspectJobReport(s.request);
           const complete = report.generation.status === "completed";
           return { status: complete ? "completed" as const : "blocked" as const,
-            reason: complete ? null : s.completedStages.at(-1)?.status ?? "Scope remains unverified" };
+            reason: complete ? null : s.inventory?.items.filter(i => i.status !== "verified")
+              .map(i => i.stage === "review" ? i.blockingReason ?? "Scope remains unverified" : `${i.id}: ${i.blockingReason ?? "Unresolved dependencies"}`).join("; ") ||
+              s.completedStages.at(-1)?.status || "Scope remains unverified" };
         } catch (error) { return blocked(error); }
       });
     })
     .addEdge(START, "schedule")
     .addEdge("schedule", "author_update_intake")
     .addConditionalEdges("author_update_intake", s => s.status !== "running" ? END :
-      s.cursor >= stages(s).length ? "completion_decision" : "specialist_dispatch")
-    .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END : "verify_committed_work")
+      s.active ? "specialist_dispatch" : "completion_decision")
+    .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END : s.active ? "verify_committed_work" : "author_update_intake")
     .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END : "author_update_intake")
     .addEdge("completion_decision", END)
     .compile({ checkpointer });
@@ -181,7 +232,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
     const saver = SqliteSaver.fromConnString(path);
     try {
       const graph = createGenerationGraph(saver);
-      const config = { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 };
+      const config = { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 10000 };
       const saved = await graph.getState(config);
       let state = saved.values as State;
       if (options.action === "start") {
@@ -192,7 +243,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           skillsSource: options.skillsSource, validatorSource: options.validatorSource,
           provider: options.provider, model: options.model };
         state = { request, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
-          pauseAfter: options.pauseAfter ?? null };
+          pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {} };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)
@@ -217,15 +268,17 @@ export async function runStoryGeneration(options: GenerationOptions) {
             if (state.cursor > 0) await trustedHead(job);
             if (state.status === "completed" && report.generation.status !== "completed")
               throw new Error("Saved completion is no longer current; inspect the source-linked job report.");
-            return {};
+            return await reconcile(state, job);
           } catch (error) { return blocked(error); }
         });
       }
+      const visible = { ...state, ...current };
       return { schema: "noveltea-generation/v1", status: current.status ?? state.status,
         reason: current.reason ?? state.reason, checkpointStatus: state.status,
         jobId: job.jobId, threadId: config.configurable.thread_id, checkpointPath: path,
-        nextStage: stages(state)[state.cursor] ?? null, completedStages: state.completedStages,
-        pendingNodes: (await graph.getState(config)).next, request: state.request, report };
+        nextStage: visible.active?.stage ?? (visible.inventory ? nextExecutionItem(visible.inventory)?.stage : undefined) ?? null,
+        inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
+        pendingNodes: (await graph.getState(config)).next, request: visible.request, report };
     } finally { saver.db.close(); }
   });
 }
