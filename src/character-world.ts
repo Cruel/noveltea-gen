@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { trustedHead } from "./revision.js";
 import { loadSkillConfig } from "./skills.js";
@@ -439,6 +440,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
   const file = join(parent, "character-world.json");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("Start character-world run before inspect.");
   return withStoryJobLock(job, "character-world", async () => {
+    if (input.action === "run" && !existsSync(file)) await processAuthorUpdatesAtBoundary(job);
     if (!existsSync(join(parent, "architecture.json"))) {
       throw new Error("Character/World foundations require a verified committed architecture cluster.");
     }
@@ -671,6 +673,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       await publishHead(job, before, sha, unit.id);
     }
     const result = await graph.invoke({ receipt });
-    return output(job, result.receipt);
+    const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    return { ...output(job, result.receipt), authorUpdates };
   });
 }

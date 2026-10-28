@@ -467,6 +467,114 @@ unsolicited author messages will be routed here by #25.
 Test with `pnpm exec tsx --test test/ideas.test.ts test/foundation.test.ts
 test/character-world.test.ts`.
 
+## Live author messages and LangGraph approval interrupts (#25)
+
+The author can submit unsolicited narrative updates while a Pi writer is actively
+editing, without interrupting its tool calls or taking its Git writer lock.
+Messages are immutable, per-job JSON records stored **outside canonical Story**
+at the job state directory's `author-updates/messages/<id>.json`; acknowledgements
+are in `author-updates/receipts/<id>.json`. A message ID is an optional explicit
+lowercase slug, or a content-derived stable ID. Duplicate sends return the
+existing receipt; conflicting content under the same ID is rejected. Receipts
+distinguish `queued`, `awaiting-author`, `review-required`, and `applied`.
+
+```sh
+pnpm dev job author send --story /path/to/story --job draft-1 --file ./message.json
+pnpm dev job author inspect --story /path/to/story --job draft-1
+pnpm dev job author process --story /path/to/story --job draft-1
+pnpm dev job author plan --story /path/to/story --job draft-1 --id change-1 --file ./revised-contract.json
+pnpm dev job author resume --story /path/to/story --job draft-1 --file ./response.json
+pnpm dev job author control --story /path/to/story --job draft-1 --state paused
+pnpm dev job author control --story /path/to/story --job draft-1 --state running
+```
+
+Messages use the envelope `{"id":"note-1","kind":"idea","payload":{...}}`.
+The four kinds are:
+
+- **`idea`** — `payload` is the exact #24 deferred-idea capture object
+  (source, original wording, requirements, prerequisites, placement). When
+  processed, it produces its own independently verified, idempotent Git commit.
+  The next ordinary writer receives **no** dormant idea source or dialogue.
+- **`change`** — `payload` has `text`, `affectedIds` (canonical IDs, or an
+  empty array if unknown), and optionally `proposedContract` in the existing
+  architecture completion-contract format. Processing records affected work
+  items, scope/depth/version and an **unverified impact review**. When a
+  contract is given, it creates an exact versioned `job architecture propose`
+  proposal but **does not approve or implement** it. If the author did not
+  submit a contract initially, use `job author plan --id <change-message>`
+  to attach one at a later safe boundary. The message remains
+  `review-required` until independently approved; a matching signed plan
+  approval then marks the review applied.
+- **`question`** — `payload` is
+  `{"question":"Should the witness be trusted?"}`. The graph emits an
+  interrupt and awaits a typed answer, with no speculative writer action.
+- **`approval`** — `payload` is either
+  `{"requestType":"plan","proposalSha256":"<digest>"}` or
+  `{"requestType":"decision","workItemId":"change-witness","proposalSha256":"<digest>","changeId":"<digest>"}`.
+  It pauses on a persistent LangGraph interrupt bound to this precise request.
+  A response alone is not authorization: the Ed25519 signature must verify
+  against the author's public key in the **original Git baseline**, and the
+  proposal, decision, thread and verified HEAD must match. Approval is routed
+  through the existing #16 versioned architecture or protected-revision gate.
+
+The two typed resume-file shapes are:
+
+```json
+{ "type": "answer", "messageId": "note-1", "answer": "Leave it ambiguous." }
+```
+
+```json
+{
+  "type": "decision",
+  "messageId": "approve-the-witness",
+  "signedEvidence": {
+    "payload": { "version": 1, "kind": "decision", "jobId": "draft-1",
+      "threadId": "<original job thread>", "workItemId": "change-witness",
+      "baseSha": "<original base>", "verifiedHead": "<verified HEAD>",
+      "proposalSha256": "<exact proposal digest>",
+      "decision": "creative-direction.foundation#witness",
+      "changeId": "<exact change digest>", "action": "approved",
+      "reason": "Substantive author rationale explaining the specific approval" },
+    "signature": "<base64 Ed25519 signature over JSON.stringify(payload)>"
+  }
+}
+```
+
+For a plan approval, use the exact `authorSigningRequest` returned by
+`job architecture propose` (with a substantive author rationale) and
+provide its signed payload instead. For protected decisions, use the
+`authorSigningRequests.decisions[]` returned by `job revision inspect`.
+Do not invent or edit the proposed digest or protected-change IDs.
+
+`job author process` acquires the shared Story writer lock. The
+`process_author_updates` LangGraph node checkpoints each message into
+`author-updates/checkpoints.sqlite`; questions and approvals resume that
+same saved thread using `Command(resume)`, without restarting Pi sessions
+or regenerating canonical Markdown. A crash after Git capture or signature
+application is reconciled against its durable receipt and Git/signature
+provenance. Generation also checks pending messages **before starting**
+a safe foundation/architecture/Character-World work unit and **after**
+a completed work-unit graph. The resulting `authorUpdates` field reports
+any queued/applied work or outstanding approval without rewriting the
+completed work's commit. There is no external polling daemon: a new
+`job author process` or a subsequent safe job invocation drives the
+next boundary.
+
+Execution controls are separate from narrative messages: `--state paused`
+prevents processing/starting new work without interrupting an in-flight
+Pi writer; `running` explicitly releases this execution pause **but
+does not answer** any LangGraph approval interrupt. `cancelled` and
+`completed` are terminal for that job ID and do not accept new messages.
+New unrelated author messages cannot resume a pending approval or restart a
+canceled/completed job. Do not treat a `review-required` message as a
+completed scope change; only signed, matching author approval resolves it.
+
+Run `NT_SKILLS_CHECKOUT=/path/to/noveltea-skills pnpm exec tsx --test
+test/author-updates.test.ts` to exercise real public CLI/process boundaries,
+separate-process checkpoints, writer-lock contention, exact signed plan and
+protected-decision approvals, crash recovery and negative controls.
+Live Pi/prompt-quality certification is separately tracked under #31.
+
 ## Canonical Character and World foundations (#18)
 
 After `job architecture run` has committed a verified Arc/Milestone cluster,

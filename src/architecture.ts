@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -386,13 +387,13 @@ function output(job: JobStartResult, state: Receipt, recovery?: Reconciliation) 
     piSessionId: state.piSessionId, piSessionFile: state.piSessionFile,
     skillReads: state.skillReads, skillSnapshot: state.snapshot?.id };
 }
-export async function runArchitectureJob(input: ArchitectureOptions) {
+export async function runArchitectureJob(input: ArchitectureOptions, alreadyLocked = false) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const file = join(dirname(job.worktreeRoot), "architecture.json");
   // Initial validator pinning updates job.json; reopen the durable manifest before each validation.
   const validate = async (source?: string, view?: { worktreeRoot: string; worktreeStoryRoot: string; baseSha: string }) =>
     validateStoryJob(await startStoryJob({ story: input.story, job: input.job }, false), source, view);
-  return withStoryJobLock(job, "global-architecture", async () => {
+  const execute = async () => {
     let state: Receipt | undefined = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) : undefined;
     if (state && (state.format !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha ||
       (state.branch !== undefined && state.branch !== job.branch) ||
@@ -401,6 +402,9 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
       throw new Error("Invalid architecture receipt worktree, branch, thread or base identity.");
     }
     if (state) verifyPlanHistory(job, state);
+    if (input.action === "run" && (!state || ["awaiting-author", "ready", "committed"].includes(state.phase))) {
+      await processAuthorUpdatesAtBoundary(job);
+    }
     if (!state) {
       if (input.action !== "run") throw new Error("Start architecture run before inspecting or revising its plan.");
       if (!input.contract && input.mode !== "collaborative") throw new Error("Autonomous architecture requires explicit --contract scope.");
@@ -593,6 +597,8 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
       .addEdge(START, "architecture_specialist").addEdge("architecture_specialist", "validate_and_commit_architecture")
       .addEdge("validate_and_commit_architecture", END).compile();
     const result = await graph.invoke({ receipt: state });
-    return output(job, result.receipt);
-  });
+    const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    return { ...output(job, result.receipt), authorUpdates };
+  };
+  return alreadyLocked ? execute() : withStoryJobLock(job, "global-architecture", execute);
 }

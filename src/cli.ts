@@ -39,12 +39,18 @@ Usage:
   pnpm dev job interactive run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
   pnpm dev job interactive inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job composition run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
-  pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure  pnpm dev job ideas capture --story /path/to/story --job draft-1 --file idea.json
+  pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
+  pnpm dev job ideas capture --story /path/to/story --job draft-1 --file idea.json
   pnpm dev job ideas inspect --story /path/to/story --job draft-1
   pnpm dev job ideas eligibility --story /path/to/story --job draft-1
   pnpm dev job ideas context --story /path/to/story --job draft-1 --target arc.truth
   pnpm dev job ideas placement-context --story /path/to/story --job draft-1 --target event.reveal
-
+  pnpm dev job author send --story /path/to/story --job draft-1 --file author-message.json
+  pnpm dev job author inspect --story /path/to/story --job draft-1
+  pnpm dev job author process --story /path/to/story --job draft-1
+  pnpm dev job author plan --story /path/to/story --job draft-1 --id change-1 --file revised-contract.json
+  pnpm dev job author resume --story /path/to/story --job draft-1 --file typed-response.json
+  pnpm dev job author control --story /path/to/story --job draft-1 --state paused
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --signed-evidence /path/to/offline-signed-plan.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
@@ -119,7 +125,20 @@ Job event (bounded Event-design work item after Character/World foundations):
   --skills-source <path>  NovelTea skills checkout to pin (first run)
   --validator-source <path>  Canonical catalog source to pin (first validation)
   --provider, --model     Pi specialist provider/model (default openai/gpt-6-luna)
-  --fixture               Deterministic tests only, not real Pi evidenceJob ideas (deferred, noncanonical author material):
+  --fixture               Deterministic tests only, not real Pi evidence
+
+Job author updates (live author messaging, #25):
+  send                 Atomically enqueue a stable-ID message while Pi is writing (no job writer lock)
+  inspect              Display queued/applied/review-required receipts and pending author questions
+  process              Process messages at a safe job boundary via process_author_updates LangGraph node
+  plan                 Propose a revised scope for --id <review-required change>, --file <contract.json>
+  resume               Resume an exact persisted question or signed approval interrupt, --file typed-response.json
+  control              Explicit execution state running|paused|cancelled|completed, never inferred from prose
+  --file <json>        Message {id?,kind:idea|change|question|approval,payload:{...}}
+  --state <state>      Only valid with control; paused/cancelled jobs do not auto-run on new messages
+  --limit <count>      Optional per-pass message limit for process
+
+Job ideas (deferred, noncanonical author material):
   capture             Persist exact author intent to .story-inbox/ideas/<id>.yaml in a verified Git commit
   inspect             Author-only full inbox inspection (never a worker context)
   eligibility         Scheduler-only IDs, counts, prerequisites and reasons (no source/wording)
@@ -243,6 +262,42 @@ function parseArgs(argv: string[]): CliOptions | null {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "author") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (!["send", "inspect", "process", "resume", "control", "plan"].includes(action ?? "")) {
+      throw new Error("Expected job author send|inspect|process|resume|control|plan.");
+    }
+    const allowed = new Set(["--story", "--job", "--file", "--id", "--state", "--limit"]);
+    const values = new Map<string, string>();
+    while (args.length) {
+      const flag = args.shift()!;
+      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate author option: " + flag);
+      const value = args.shift();
+      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing author option value: " + flag);
+      values.set(flag, value);
+    }
+    const story = values.get("--story"), job = values.get("--job");
+    if (!story || !job) throw new Error("job author requires --story and --job.");
+    const state = values.get("--state");
+    if (state && !["running", "paused", "cancelled", "completed"].includes(state)) {
+      throw new Error("Invalid execution control state.");
+    }
+    const limit = values.has("--limit") ? Number(values.get("--limit")) : undefined;
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)) {
+      throw new Error("--limit must be an integer from 1 to 1000.");
+    }
+    process.env.LANGSMITH_TRACING = "false";
+    process.env.LANGCHAIN_TRACING_V2 = "false";
+    process.env.TRACE_TO_LANGSMITH = "false";
+    const { runAuthorAction } = await import("./author-updates.js");
+    const result = await runAuthorAction({ story, job, action: action as "send" | "inspect" | "process" | "resume" | "control" | "plan",
+      file: values.get("--file"), id: values.get("--id"), state: state as "running" | "paused" | "cancelled" | "completed" | undefined,
+      limit });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "ideas") {
     const args = process.argv.slice(4);
     const action = args.shift();

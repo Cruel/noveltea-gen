@@ -8,6 +8,7 @@ import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { renderFoundation, type FoundationDraft } from "./demo.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { trustedHead } from "./revision.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -437,6 +438,10 @@ export async function runFoundationJob(input: FoundationJobOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "foundation", async () => {
     let state = await existingState(job);
+    if (!input.inspect && !input.recoveryDigest && (!state || state.stage === "committed" ||
+        state.stage === "awaiting-author" && !state.writerStarted)) {
+      await processAuthorUpdatesAtBoundary(job);
+    }
     if (!state) {
       if (input.inspect || input.recoveryDigest) throw new Error("Foundation has no saved work item to inspect or reconcile.");
       if (!input.task?.trim()) throw new Error("New foundation work item requires --task.");
@@ -574,7 +579,8 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       return output(job, state);
     }
     state = await executeFoundationGraph(job, state, input, recovered);
-    return output(job, state);
+    const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    return { ...output(job, state), authorUpdates };
   });
 }
 /**
