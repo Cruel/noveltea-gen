@@ -504,12 +504,12 @@ async function commitRevisionGraph(job: JobStartResult, receipt: RevisionReceipt
   return (await graph.invoke({ revision: receipt })).revision;
 }
 
-export async function runRevisionAction(input: RevisionOptions) {
+export async function runRevisionAction(input: RevisionOptions, alreadyLocked = false) {
   if (!ID.test(input.workItem) || input.workItem === "verified-head") {
     throw new Error("--work-item must be a lowercase hyphenated identifier.");
   }
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
-  return withStoryJobLock(job, input.workItem, async () => {
+  const execute = async () => {
     let receipt = await readReceipt(job, input.workItem);
     if (receipt && await recoverCommitted(job, receipt)) return publicStatus(receipt);
     const head = await trustedHead(job);
@@ -610,5 +610,6 @@ export async function runRevisionAction(input: RevisionOptions) {
     }
     if (input.action !== "commit") throw new Error("Unknown revision operation.");
     return publicStatus(await commitRevisionGraph(job, receipt, head), unrelated);
-  });
+  };
+  return alreadyLocked ? execute() : withStoryJobLock(job, input.workItem, execute);
 }

@@ -426,6 +426,11 @@ async function load(job: JobStartResult) {
   }
   return ideas.sort((a, b) => a.id.localeCompare(b.id));
 }
+/** Caller MUST own the shared Story job lock. Used by the author-update graph
+ * at a safe boundary; never invoke this directly from message submission. */
+export async function captureIdeaUnderJobLock(job: JobStartResult, payload: unknown) {
+  return capture(job, validate(payload));
+}
 export async function runIdeas(input: IdeaAction) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "deferred-ideas", async () => {

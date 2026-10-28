@@ -1,0 +1,548 @@
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { lstat, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { Annotation, Command, END, START, StateGraph, interrupt } from "@langchain/langgraph";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { startStoryJob, type JobStartResult } from "./job.js";
+import { withStoryJobLock } from "./job-lock.js";
+import { captureIdeaUnderJobLock } from "./ideas.js";
+import { runArchitectureJob } from "./architecture.js";
+import { runRevisionAction } from "./revision.js";
+import { verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
+
+type Kind = "idea" | "change" | "question" | "approval";
+type Phase = "queued" | "awaiting-author" | "applied" | "review-required";
+type Control = "running" | "paused" | "cancelled" | "completed";
+interface Message {
+  version: 1; id: string; jobId: string; threadId: string;
+  kind: Kind; payload: unknown; digest: string; createdAt: string;
+}
+interface Receipt {
+  version: 1; id: string; jobId: string; threadId: string; digest: string;
+  phase: Phase; result?: unknown; pinned?: Pinned;
+}
+interface Pinned {
+  jobId: string; threadId: string; branch: string; baseSha: string;
+  headSha: string; planVersion: number | null; skillSnapshot: string | null;
+  piSessions: { foundation?: string; architecture?: string; world?: string; character?: string };
+}
+interface ResumeAnswer { type: "answer"; messageId: string; answer: string }
+interface ResumeDecision { type: "decision"; messageId: string; signedEvidence: SignedAuthorEvidence }
+type Resume = ResumeAnswer | ResumeDecision;
+export interface AuthorAction {
+  story: string; job: string; action: "send" | "inspect" | "process" | "resume" | "control" | "plan";
+  file?: string; id?: string; state?: Control; limit?: number;
+}
+const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const HASH = /^[a-f0-9]{64}$/;
+const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+function stable(v: unknown): string {
+  if (Array.isArray(v)) return "[" + v.map(stable).join(",") + "]";
+  if (v !== null && typeof v === "object") {
+    const obj = v as Record<string, unknown>;
+    return "{" + Object.keys(obj).sort().map(k => JSON.stringify(k) + ":" + stable(obj[k])).join(",") + "}";
+  }
+  return JSON.stringify(v);
+}
+const root = (job: JobStartResult) => join(dirname(job.worktreeRoot), "author-updates");
+const incoming = (job: JobStartResult, id: string) => join(root(job), "messages", id + ".json");
+const statusFile = (job: JobStartResult, id: string) => join(root(job), "receipts", id + ".json");
+const controlFile = (job: JobStartResult) => join(root(job), "control.json");
+const snapshotFile = (job: JobStartResult, name: string) => join(dirname(job.worktreeRoot), name + ".json");
+function git(job: JobStartResult, ...args: string[]) {
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"]) delete env[key];
+  return execFileSync("git", args, { cwd: job.worktreeRoot, encoding: "utf8", env }).trim();
+}
+async function regular(path: string) {
+  const st = await lstat(path);
+  if (!st.isFile() || st.isSymbolicLink()) throw new Error("Author update state must be a regular file.");
+}
+async function loadJson(path: string): Promise<any> {
+  await regular(path);
+  return JSON.parse(await readFile(path, "utf8"));
+}
+async function persist(path: string, value: unknown) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = path + "." + randomUUID() + ".tmp";
+  await writeFile(tmp, JSON.stringify(value, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+  await rename(tmp, path);
+}
+function parseMessage(value: unknown): { id: string; kind: Kind; payload: unknown; digest: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Author message must be a JSON object.");
+  const v = value as Record<string, unknown>;
+  if (!Object.keys(v).every(k => ["id", "kind", "payload"].includes(k)) ||
+      !["idea", "change", "question", "approval"].includes(String(v.kind)) ||
+      !v.payload || typeof v.payload !== "object" || Array.isArray(v.payload)) {
+    throw new Error("Author message requires kind and object payload; unsupported fields are rejected.");
+  }
+  const kind = v.kind as Kind;
+  const p = v.payload as Record<string, unknown>;
+  if (kind === "change" && (typeof p.text !== "string" || !p.text.trim() ||
+      !Array.isArray(p.affectedIds) || !p.affectedIds.every(x => typeof x === "string" && x.trim()))) {
+    throw new Error("Direct change requires text and explicit affectedIds for impact review.");
+  }
+  if (kind === "question" && (typeof p.question !== "string" || !p.question.trim())) {
+    throw new Error("Author question requires a nonempty question.");
+  }
+  if (kind === "approval" && (!["plan", "decision"].includes(String(p.requestType)) ||
+      typeof p.proposalSha256 !== "string" || !HASH.test(p.proposalSha256) ||
+      (p.requestType === "decision" && (typeof p.workItemId !== "string" ||
+        typeof p.changeId !== "string" || !HASH.test(p.changeId))))) {
+    throw new Error("Approval request must bind an exact signed plan or protected decision proposal.");
+  }
+  const digest = sha(stable({ kind, payload: v.payload }));
+  const id = v.id ?? "message-" + digest.slice(0, 24);
+  if (typeof id !== "string" || !ID.test(id) || id.length > 64) throw new Error("Invalid author message stable ID.");
+  return { id, kind, payload: v.payload, digest };
+}
+async function loadMessage(job: JobStartResult, id: string): Promise<Message> {
+  const m = await loadJson(incoming(job, id)) as Message;
+  if (m.version !== 1 || m.id !== id || m.jobId !== job.jobId || m.threadId !== job.threadId ||
+      !HASH.test(m.digest) || sha(stable({ kind: m.kind, payload: m.payload })) !== m.digest) {
+    throw new Error("Saved author message identity or contents changed.");
+  }
+  return m;
+}
+async function loadReceipt(job: JobStartResult, m: Message): Promise<Receipt> {
+  if (!existsSync(statusFile(job, m.id))) return {
+    version: 1, id: m.id, jobId: job.jobId, threadId: job.threadId, digest: m.digest, phase: "queued",
+  };
+  const r = await loadJson(statusFile(job, m.id)) as Receipt;
+  if (r.version !== 1 || r.id !== m.id || r.jobId !== job.jobId ||
+      r.threadId !== job.threadId || r.digest !== m.digest ||
+      !["queued", "awaiting-author", "applied", "review-required"].includes(r.phase)) {
+    throw new Error("Saved author message acknowledgement is invalid.");
+  }
+  return r;
+}
+async function saveReceipt(job: JobStartResult, r: Receipt) { await persist(statusFile(job, r.id), r); }
+async function control(job: JobStartResult): Promise<Control> {
+  if (!existsSync(controlFile(job))) return "running";
+  const data = await loadJson(controlFile(job)) as { version: 1; jobId: string; state: Control };
+  if (data.version !== 1 || data.jobId !== job.jobId ||
+      !["running", "paused", "cancelled", "completed"].includes(data.state)) {
+    throw new Error("Invalid job execution control state.");
+  }
+  return data.state;
+}
+async function setControl(job: JobStartResult, next: Control) {
+  const previous = await control(job);
+  if (["cancelled", "completed"].includes(previous) && next !== previous) {
+    throw new Error("Canceled or completed jobs cannot be restarted by a new author message.");
+  }
+  await persist(controlFile(job), { version: 1, jobId: job.jobId, state: next, at: new Date().toISOString() });
+}
+async function readPinned(job: JobStartResult): Promise<Pinned> {
+  const arch = existsSync(snapshotFile(job, "architecture")) ? await loadJson(snapshotFile(job, "architecture")) : null;
+  const foundation = existsSync(snapshotFile(job, "foundation")) ? await loadJson(snapshotFile(job, "foundation")) : null;
+  const cw = existsSync(snapshotFile(job, "character-world")) ? await loadJson(snapshotFile(job, "character-world")) : null;
+  return {
+    jobId: job.jobId, threadId: job.threadId, branch: job.branch, baseSha: job.baseSha,
+    headSha: git(job, "rev-parse", "HEAD"),
+    planVersion: arch?.plan?.version ?? null, skillSnapshot: arch?.snapshot?.id ?? foundation?.snapshot?.id ?? cw?.snapshot?.id ?? null,
+    piSessions: { foundation: foundation?.piSessionId, architecture: arch?.piSessionId,
+      world: cw?.units?.[0]?.piSessionId, character: cw?.units?.[1]?.piSessionId },
+  };
+}
+function matchesPinned(actual: Pinned, pinned: Pinned) {
+  return stable(actual) === stable(pinned);
+}
+async function send(job: JobStartResult, input: unknown) {
+  const parsed = parseMessage(input);
+  const path = incoming(job, parsed.id);
+  // Enqueue never takes the job writer lock: it must work WHILE Pi is editing.
+  // A stable ID is atomically created with wx, so parallel sends cannot overwrite.
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  try {
+    await writeFile(path, JSON.stringify({ version: 1, ...parsed, jobId: job.jobId,
+      threadId: job.threadId, createdAt: new Date().toISOString() }, null, 2) + "\n",
+    { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const saved = await loadMessage(job, parsed.id);
+  if (saved.digest !== parsed.digest) throw new Error("Stable author message ID collides with different content.");
+  return loadReceipt(job, saved);
+}
+async function messages(job: JobStartResult) {
+  const dir = join(root(job), "messages");
+  if (!existsSync(dir)) return [] as Message[];
+  const files = (await readdir(dir)).sort();
+  if (files.some(f => !/^[a-z][a-z0-9-]*\.json$/.test(f))) throw new Error("Unexpected author inbox file.");
+  const values = await Promise.all(files.map(f => loadMessage(job, f.slice(0, -5))));
+  return values.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+}
+async function evaluateChange(job: JobStartResult, payload: Record<string, unknown>) {
+  const archFile = snapshotFile(job, "architecture");
+  const arch = existsSync(archFile) ? await loadJson(archFile) : null;
+  const affected = payload.affectedIds as string[];
+  const plan = arch?.plan as { version?: number; contract?: { scope?: { targets?: string[]; depth?: string } };
+    items?: Array<{ id: string; targetIds: string[]; status: string }> } | undefined;
+  const targets = plan?.contract?.scope?.targets ?? [];
+  const items = (plan?.items ?? []).filter(item =>
+    !affected.length || affected.some(id => item.targetIds?.includes(id)));
+  const impact = { request: payload.text, affectedIds: affected, planVersion: plan?.version ?? null,
+    scopeDepth: plan?.contract?.scope?.depth ?? null,
+    inScope: affected.length > 0 && (targets.length === 0 || affected.every(id => targets.includes(id))),
+    impactedWorkItems: items.map(item => ({ id: item.id, status: item.status })),
+    action: "independent-impact-review-required", review: "unverified" };
+  // A proposed contract is not an approval; use the existing versioned,
+  // signed architecture plan gate to accept or reject it later.
+  if (payload.proposedContract !== undefined) {
+    const proposal = await runArchitectureJob({
+      story: job.storyRoot, job: job.jobId, action: "propose", contract: payload.proposedContract,
+    }, true);
+    return { ...impact, proposal, next: "signed-plan-approval-required" };
+  }
+  return { ...impact, next: "author-must-review-impact-and-propose-scope-change-if-needed" };
+}
+async function validateApprovalRequest(job: JobStartResult, payload: Record<string, unknown>) {
+  if (payload.requestType === "plan") {
+    const file = snapshotFile(job, "architecture");
+    if (!existsSync(file)) throw new Error("Approval request has no existing architecture plan proposal.");
+    const receipt = await loadJson(file) as {
+      jobId?: string; phase?: string; expectedHead?: string; proposal?: { digest?: string };
+    };
+    if (receipt.jobId !== job.jobId || receipt.proposal?.digest !== payload.proposalSha256 ||
+        !["ready", "committed"].includes(receipt.phase ?? "") ||
+        receipt.expectedHead !== git(job, "rev-parse", "HEAD")) {
+      throw new Error("Approval request is not bound to a current exact versioned plan proposal.");
+    }
+    return;
+  }
+  const file = join(dirname(job.worktreeRoot), "revisions", String(payload.workItemId) + ".json");
+  if (!existsSync(file)) throw new Error("Protected approval request has no existing revision proposal.");
+  const receipt = await loadJson(file) as { jobId?: string; status?: string; proposalSha256?: string;
+    verifiedHead?: string; changes?: Array<{ id: string }> };
+  if (receipt.jobId !== job.jobId || receipt.status !== "proposed" ||
+      receipt.proposalSha256 !== payload.proposalSha256 ||
+      receipt.verifiedHead !== git(job, "rev-parse", "HEAD") ||
+      !receipt.changes?.some(change => change.id === payload.changeId)) {
+    throw new Error("Protected approval request must match a current exact revision proposal and change digest.");
+  }
+}
+function validateResume(message: Message, raw: unknown): Resume {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid typed author response.");
+  const v = raw as Record<string, unknown>;
+  if (v.messageId !== message.id) throw new Error("Author response belongs to a different pending message.");
+  if (message.kind === "question" && v.type === "answer" &&
+      Object.keys(v).sort().join(",") === "answer,messageId,type" &&
+      typeof v.answer === "string" && v.answer.trim()) return v as unknown as ResumeAnswer;
+  if (message.kind === "approval" && v.type === "decision" &&
+      Object.keys(v).sort().join(",") === "messageId,signedEvidence,type") {
+    return v as unknown as ResumeDecision;
+  }
+  throw new Error("Typed resume must answer the exact question or supply signed evidence for the exact approval.");
+}
+async function previousApproval(job: JobStartResult, signed: SignedAuthorEvidence) {
+  const payload = signed.payload;
+  if (payload.kind === "plan") {
+    const file = snapshotFile(job, "architecture");
+    if (!existsSync(file)) return null;
+    const receipt = await loadJson(file) as { history?: Array<{ signed: SignedAuthorEvidence }> };
+    if (receipt.history?.some(x => x.signed.signature === signed.signature)) {
+      return { action: "signed-plan-approval", proposalSha256: payload.proposalSha256, recorded: true };
+    }
+  }
+  if (payload.kind === "decision") {
+    const file = join(dirname(job.worktreeRoot), "revisions", payload.workItemId + ".json");
+    if (!existsSync(file)) return null;
+    const receipt = await loadJson(file) as { approvals?: Array<{ signed: SignedAuthorEvidence }> };
+    if (receipt.approvals?.some(x => x.signed.signature === signed.signature)) {
+      return { action: "signed-protected-decision", workItemId: payload.workItemId,
+        proposalSha256: payload.proposalSha256, recorded: true };
+    }
+  }
+  return null;
+}
+async function resolveChangedScope(job: JobStartResult, proposalSha256: string) {
+  for (const message of await messages(job)) {
+    if (message.kind !== "change") continue;
+    const receipt = await loadReceipt(job, message);
+    if (receipt.phase !== "review-required") continue;
+    const result = receipt.result as { proposal?: { proposal?: { digest?: string } } } | undefined;
+    if (result?.proposal?.proposal?.digest !== proposalSha256) continue;
+    await saveReceipt(job, { ...receipt, phase: "applied",
+      result: { ...receipt.result as object, review: "explicit-signed-plan-approval",
+        acceptedProposalSha256: proposalSha256 } });
+  }
+}
+function checkApprovalBinding(job: JobStartResult, message: Message, verified: SignedAuthorEvidence,
+  expectedHead?: string) {
+  const request = message.payload as Record<string, unknown>;
+  const p = verified.payload;
+  if (p.proposalSha256 !== request.proposalSha256 ||
+      (expectedHead !== undefined && p.verifiedHead !== expectedHead) ||
+      (request.requestType === "plan" && p.kind !== "plan") ||
+      (request.requestType === "decision" && (p.kind !== "decision" ||
+        p.workItemId !== request.workItemId || p.changeId !== request.changeId))) {
+    throw new Error("Signed author response is not bound to this exact proposal, change and verified Git HEAD.");
+  }
+  if (p.jobId !== job.jobId || p.threadId !== job.threadId) {
+    throw new Error("Signed response belongs to another job thread.");
+  }
+}
+async function applyApproval(job: JobStartResult, message: Message, raw: ResumeDecision) {
+  const verified = verifyAuthorEvidence(job, raw.signedEvidence);
+  const signed = verified.payload;
+  checkApprovalBinding(job, message, verified, git(job, "rev-parse", "HEAD"));
+  const previous = await previousApproval(job, verified);
+  if (previous) {
+    if (signed.kind === "plan") await resolveChangedScope(job, signed.proposalSha256);
+    return previous;
+  }
+  const signedFile = join(root(job), "signed", message.id + ".json");
+  if (!existsSync(signedFile)) {
+    await mkdir(dirname(signedFile), { recursive: true });
+    await writeFile(signedFile, JSON.stringify(verified, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+  } else if (stable(await loadJson(signedFile)) !== stable(verified)) {
+    throw new Error("Previously recorded response signature changed.");
+  }
+  if (signed.kind === "plan") {
+    const result = await runArchitectureJob({ story: job.storyRoot, job: job.jobId, action: "approve",
+      proposal: signed.proposalSha256, signedEvidence: signedFile }, true);
+    await resolveChangedScope(job, signed.proposalSha256);
+    return { action: "signed-plan-approval", proposalSha256: signed.proposalSha256, result };
+  }
+  if (signed.kind === "decision") {
+    const result = await runRevisionAction({ story: job.storyRoot, job: job.jobId,
+      action: "authorize", workItem: signed.workItemId, proposal: signed.proposalSha256,
+      signedEvidence: signedFile }, true);
+    return { action: "signed-protected-decision", proposalSha256: signed.proposalSha256, result };
+  }
+  throw new Error("Only exact signed plan/protected-decision approvals may resume this gate.");
+}
+const Channels = Annotation.Root({
+  messageId: Annotation<string>(),
+  kind: Annotation<Kind>(),
+  pinned: Annotation<Pinned>(),
+  phase: Annotation<Phase>(),
+  result: Annotation<unknown>(),
+});
+async function openGraph(job: JobStartResult) {
+  const file = join(root(job), "checkpoints.sqlite");
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  if (existsSync(file)) await regular(file);
+  const saver = SqliteSaver.fromConnString(file);
+  if (saver.db.pragma("quick_check", { simple: true }) !== "ok") throw new Error("Author update checkpoints are corrupt.");
+  const graph = new StateGraph(Channels)
+    .addNode("process_author_updates", async (state) => {
+      const message = await loadMessage(job, state.messageId);
+      const receipt = await loadReceipt(job, message);
+      if (receipt.phase === "applied" || receipt.phase === "review-required") {
+        return { phase: receipt.phase, result: receipt.result };
+      }
+      if (receipt.phase === "awaiting-author") return { phase: receipt.phase, result: receipt.result };
+      const pinned = await readPinned(job);
+      if (!matchesPinned(pinned, state.pinned)) {
+        throw new Error("Story plan, original Pi sessions, or Git HEAD changed before processing an author message.");
+      }
+      let result: unknown; let phase: Phase;
+      if (message.kind === "idea") {
+        result = await captureIdeaUnderJobLock(job, message.payload);
+        phase = "applied";
+      } else if (message.kind === "change") {
+        result = await evaluateChange(job, message.payload as Record<string, unknown>);
+        phase = "review-required";
+      } else {
+        if (message.kind === "approval") {
+          await validateApprovalRequest(job, message.payload as Record<string, unknown>);
+        }
+        result = { request: message.payload, kind: message.kind,
+          prompt: message.kind === "question" ? (message.payload as { question: string }).question :
+            "Review and externally sign the exact proposed plan or protected decision." };
+        phase = "awaiting-author";
+      }
+      await saveReceipt(job, { ...receipt, phase, result, pinned });
+      return { phase, result, pinned };
+    })
+    .addNode("await_author", async (state) => {
+      const message = await loadMessage(job, state.messageId);
+      const response = interrupt({ messageId: message.id, kind: message.kind,
+        prompt: state.result, expected: message.kind === "question" ? "answer" : "decision" });
+      const typed = validateResume(message, response);
+      const current = await readPinned(job);
+      if (!matchesPinned(current, state.pinned)) {
+        throw new Error("Paused job's Git HEAD, plan, pinned skill, or Pi session identity changed.");
+      }
+      const result = typed.type === "answer"
+        ? { answer: typed.answer, source: "explicit-author-response" }
+        : await applyApproval(job, message, typed);
+      await saveReceipt(job, { version: 1, id: message.id, jobId: job.jobId,
+        threadId: job.threadId, digest: message.digest, phase: "applied", result, pinned: state.pinned });
+      return { phase: "applied" as const, result };
+    })
+    .addEdge(START, "process_author_updates")
+    .addConditionalEdges("process_author_updates",
+      state => state.phase === "awaiting-author" ? "await_author" : END,
+      ["await_author", END])
+    .addEdge("await_author", END)
+    .compile({ checkpointer: saver });
+  return { graph, saver };
+}
+function config(job: JobStartResult, id: string) {
+  return { configurable: { thread_id: "author-update:" + job.threadId + ":" + id } };
+}
+async function processOne(job: JobStartResult, message: Message, response?: Resume) {
+  const before = await loadReceipt(job, message);
+  if (before.phase === "applied" || before.phase === "review-required") return before;
+  // The approval side effect may have committed before the graph's interrupt
+  // checkpoint and message acknowledgement. Verify the original author
+  // signature against the actual versioned approval ledger before reconciling
+  // that narrow crash window; never rerun a protected mutation.
+  if (response?.type === "decision") {
+    const verified = verifyAuthorEvidence(job, response.signedEvidence);
+    checkApprovalBinding(job, message, verified, before.pinned?.headSha);
+    const prior = await previousApproval(job, verified);
+    if (prior) {
+      if (verified.payload.kind === "plan") await resolveChangedScope(job, verified.payload.proposalSha256);
+      const receipt = { ...before, phase: "applied" as const, result: prior };
+      await saveReceipt(job, receipt);
+      return receipt;
+    }
+  }
+  const { graph, saver } = await openGraph(job);
+  try {
+    const cfg = config(job, message.id);
+    const snapshot = await graph.getState(cfg);
+    const next = snapshot.next.map(String);
+    if (next.length && (next.length !== 1 || next[0] !== "await_author")) {
+      throw new Error("Unexpected saved author-update graph transition.");
+    }
+    if (response && next[0] !== "await_author") {
+      throw new Error("This author update has no active LangGraph approval/question interrupt.");
+    }
+    if (!response && next.length) {
+      return before.phase === "awaiting-author" ? before :
+        { ...before, phase: "awaiting-author" as const, result: snapshot.values.result };
+    }
+    let input: typeof Channels.State | Command;
+    if (response) input = new Command({ resume: response });
+    else if (snapshot.values.messageId) {
+      if (snapshot.values.messageId !== message.id || snapshot.values.kind !== message.kind) {
+        throw new Error("Persisted update checkpoint belongs to another author message.");
+      }
+      // A completed graph implies an earlier receipt publication. Never
+      // restart a completed checkpoint with changed source material.
+      if (!next.length) {
+        if (before.phase === "queued") throw new Error("Completed author graph lacks its durable acknowledgement.");
+        return before;
+      }
+      input = null as unknown as typeof Channels.State;
+    } else {
+      input = { messageId: message.id, kind: message.kind, pinned: await readPinned(job),
+        phase: "queued", result: null };
+    }
+    await graph.invoke(input as Parameters<typeof graph.invoke>[0], cfg);
+    const after = await loadReceipt(job, message);
+    return after;
+  } finally {
+    await saver.db.close?.();
+  }
+}
+async function drain(job: JobStartResult, limit = 100) {
+  const state = await control(job);
+  if (state !== "running") return { status: state, processed: [], blockers: [state] };
+  const processed: Array<{ id: string; phase: Phase; result?: unknown }> = [];
+  const blockers: string[] = [];
+  for (const message of await messages(job)) {
+    if (processed.length >= limit) break;
+    const r = await loadReceipt(job, message);
+    if (r.phase === "applied") continue;
+    if (r.phase === "review-required") {
+      blockers.push("review-required:" + message.id);
+      continue;
+    }
+    if (r.phase === "awaiting-author") {
+      blockers.push("awaiting-author:" + message.id);
+      break; // New messages cannot implicitly resume a paused approval.
+    }
+    const current = await processOne(job, message);
+    processed.push({ id: message.id, phase: current.phase, result: current.result });
+    if (current.phase !== "applied") {
+      blockers.push(current.phase + ":" + message.id);
+      break;
+    }
+  }
+  return { status: blockers.length ? "blocked" : "ready", processed, blockers };
+}
+/** Post-work safe boundary: surface a pause/review as author-facing evidence
+ * without retroactively marking an independently committed worker as failed. */
+export async function processAuthorUpdatesAfterWork(job: JobStartResult) {
+  try { return await drain(job); }
+  catch (error) {
+    // A successful specialist commit must not be reported as uncommitted merely
+    // because a newly received author update needs repair or manual review.
+    return { status: "blocked", processed: [], blockers: ["author-update-processing-error"],
+      error: error instanceof Error ? error.message : String(error) };
+  }
+}
+/** Safe-boundary hook; CALL ONLY while already holding withStoryJobLock. */
+export async function processAuthorUpdatesAtBoundary(job: JobStartResult) {
+  const result = await drain(job);
+  if (result.status !== "ready") throw new Error(
+    "Story job cannot advance: queued author update requires action: " + result.blockers.join(", "));
+  return result;
+}
+export async function runAuthorAction(options: AuthorAction) {
+  const job = await startStoryJob({ story: options.story, job: options.job }, false);
+  if (options.action === "send") {
+    if (!options.file || options.state) throw new Error("Send requires --file <message.json>.");
+    const current = await control(job);
+    if (current === "cancelled" || current === "completed") {
+      throw new Error("Canceled/completed job cannot accept new narrative messages.");
+    }
+    return send(job, await loadJson(options.file));
+  }
+  if (options.action === "inspect") {
+    const records = await Promise.all((await messages(job)).map(async message => ({
+      message, acknowledgement: await loadReceipt(job, message),
+    })));
+    return { status: await control(job), jobId: job.jobId, records };
+  }
+  if (options.action === "control") {
+    if (!options.state || options.file) throw new Error("Execution control requires --state running|paused|cancelled|completed.");
+    await setControl(job, options.state);
+    return { status: options.state, jobId: job.jobId };
+  }
+  return withStoryJobLock(job, "process-author-updates", async () => {
+    if (options.action === "plan") {
+      if (!options.id || !ID.test(options.id) || !options.file || options.state || options.limit) {
+        throw new Error("Review replanning requires --id <change-message> and --file <contract.json>.");
+      }
+      if (await control(job) !== "running") throw new Error("Paused/cancelled/completed job cannot replan.");
+      const message = await loadMessage(job, options.id);
+      const receipt = await loadReceipt(job, message);
+      if (message.kind !== "change" || receipt.phase !== "review-required") {
+        throw new Error("Only a pending direct-change impact review can receive a scope proposal.");
+      }
+      if ((receipt.result as { proposal?: unknown })?.proposal) {
+        throw new Error("This change already has a proposed scope; approve or reject it explicitly.");
+      }
+      const contract: unknown = await loadJson(options.file);
+      const proposal = await runArchitectureJob({
+        story: job.storyRoot, job: job.jobId, action: "propose", contract,
+      }, true);
+      const revised = { ...receipt, result: { ...(receipt.result as object),
+        proposal, next: "signed-plan-approval-required" } };
+      await saveReceipt(job, revised);
+      return revised;
+    }
+    if (options.action === "process") {
+      if (options.file || options.state) throw new Error("Process takes no author payload.");
+      return drain(job, options.limit);
+    }
+    if (options.action !== "resume" || !options.file) throw new Error("Resume requires --file <typed-response.json>.");
+    if (await control(job) !== "running") throw new Error("Paused/canceled/completed job cannot resume its approval.");
+    const value: unknown = await loadJson(options.file);
+    const id = (value as { messageId?: unknown })?.messageId;
+    if (typeof id !== "string" || !ID.test(id)) throw new Error("Typed response needs a valid messageId.");
+    const message = await loadMessage(job, id);
+    const typed = validateResume(message, value);
+    if (typed.type === "decision") verifyAuthorEvidence(job, typed.signedEvidence);
+    return processOne(job, message, typed);
+  });
+}
