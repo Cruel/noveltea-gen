@@ -295,36 +295,37 @@ the validator if not already pinned. The work item is stable: changed proposed
 bytes or a changed verified HEAD **cannot inherit earlier approvals**. Start a
 different work-item ID to propose another candidate.
 
-The **author**, through a separate explicitly trusted application/CLI action,
-must approve or reject **each** proposed protected change, including adopting
-user-protected authority for an existing delegated or newly authored decision.
-The exact proposal and change hash must be supplied:
+The **author** must approve or reject **each** protected delta, including
+newly protected or promoted decisions, using a separately signed Ed25519
+approval. Before the job starts, the author must have committed the public key
+`.noveltea/approval-author.pub` in the **original trusted Git baseline**.
+The private signing key must reside on an independent signing device/service
+inaccessible to Pi and its shell tools. `inspect` returns exact unsigned
+`authorSigningRequests` templates; the author reviews the actual patch,
+specifies a rationale, then signs the chosen decision on the separate device.
 
 ```sh
 pnpm dev job revision authorize --story /path/to/story --job draft-1 \
   --work-item fix-culprit --proposal <proposalSha256> \
-  --change <protectedChanges.id> --decision approve \
-  --reason "I authorize the exact revised culprit identity and consequences"
+  --signed-evidence /path/to/author-signed-decision.json
 ```
 
-A rejection remains durable and blocks that work item. Approval evidence stores
-the decision's stable ID, its before/after content, proposal and change digests,
-explicit author rationale, source and timestamp, separately from canonical
-Story files. The revision worker has **no approval API**. This CLI's caller is
-the trusted local author boundary; broad Pi shell tools are not an OS-level
-identity or permission sandbox. An embedding UI must route these commands
-exclusively through an authenticated author action, never expose them as Pi
-tools or mistake a model/tool assertion for that action.
+**Setup and complete offline signing instructions:**
+[Author signing and revision approval](docs/author-signing.md).
 
-**Security limitation (open #16 blocker):** the current local CLI does not
-independently authenticate the human caller or protect revision receipts from
-a writing agent with unrestricted shell access under the same OS identity.
-Such an agent can invoke `authorize` and `review` itself, even though those
-commands record `source: explicit-author-cli`. Those strings are assertions,
-not independently verified author consent. Do **not** treat this prototype as
-a secure approval boundary until an isolated authenticated author channel or
-cryptographically verifiable, externally protected author authorization is
-implemented. An ordinary CLI option alone is not sufficient.
+A rejection remains durable and blocks the work item. Each signature binds
+the original job baseline, unique job thread, last verified head, work-item and proposal hashes,
+stable protected-decision ID, exact change digest and author rationale.
+Unsanctioned flags, model assertions, other keys, changed proposed bytes and
+tampered job-state receipts are rejected. Saved signatures are reverified
+against the **original Git public-key blob** whenever approvals are read;
+an agent changing the working-tree copy of the key cannot authorize a revision.
+The key is not loaded from the mutable job manifest or moving HEAD.
+
+This is a cryptographic author-consent boundary, not an operating-system
+sandbox. Protect the private key from any environment the agent can execute
+commands in. A malicious agent with permission to replace the generator's
+executable itself remains outside this application's trust model.
 
 A separate editorial review is **always required**, even for changes that do
 not alter any protected decision metadata. Compare the source-linked prose
@@ -333,9 +334,8 @@ recording the verdict; metadata equality is not semantic proof:
 
 ```sh
 pnpm dev job revision review --story /path/to/story --job draft-1 \
-  --work-item fix-culprit --proposal <proposalSha256> --verdict pass \
-  --evidence "creative-direction/foundation.md:15-45" \
-  --notes "Compared the revised prose and earlier protected culprit constraint; no contradiction remains."
+  --work-item fix-culprit --proposal <proposalSha256> \
+  --signed-evidence /path/to/author-signed-editorial.json
 pnpm dev job revision commit --story /path/to/story --job draft-1 \
   --work-item fix-culprit --proposal <proposalSha256>
 ```
@@ -348,8 +348,8 @@ then against the most recently verified commit. It checks every exact
 protected delta and adoption against a durable author approval, independent
 review, structured diagnostics, staged files, current job HEAD and candidate
 bytes. The validated single-file work item is committed as
-`NovelTea Generator`, with job, work-item, proposal, approval and editorial
-trailers. Unrelated **unstaged** files remain in the job worktree unchanged;
+`NovelTea Generator`, with job, work-item, proposal, approval, signer authority,
+actual graph committer identity and editorial trailers. Unrelated **unstaged** files remain in the job worktree unchanged;
 unexpected staged/conflicted edits block. The original author branch is not
 advanced or merged. A verified-head receipt persists across subsequent
 revisions, and an interrupted commit can be reconciled from its exact Git

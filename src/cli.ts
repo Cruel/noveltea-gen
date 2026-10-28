@@ -31,8 +31,8 @@ Usage:
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --reason "Explicit author scope revision"
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
-  pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --change <sha256> --decision approve --reason "Author-approved exact replacement"
-  pnpm dev job revision review --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --verdict pass --evidence "creative-direction/foundation.md:1" --notes "Independently reviewed prose and protected intent"
+  pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --signed-evidence /path/to/offline-signed-decision.json
+  pnpm dev job revision review --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --signed-evidence /path/to/offline-signed-editorial.json
   pnpm dev job revision commit --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256>
   pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
   pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
@@ -54,12 +54,8 @@ Job revision:
   --work-item <id>    Required stable lowercase work-item ID
   --path <file>       Story-relative Markdown target on first inspect
   --proposal <hash>   Exact proposal hash required after inspection
-  --change <hash>     Exact protected-change hash required to authorize
-  --decision <value>  approve or reject (authorize)
-  --reason <text>     Specific author rationale (authorize)
-  --verdict <value>   pass or block (review)
-  --evidence <ref>    Source-linked Story path/line (review)
-  --notes <text>      Substantive independent editorial findings (review)
+  --signed-evidence <file>  Externally Ed25519-signed decision/review; key pinned in original Git baseline
+                         No unsigned author approval/review flags are accepted
 
 Job architecture:
   run|inspect|propose|approve  Author a scoped architecture, inspect DAG, or version its authorization
@@ -246,7 +242,7 @@ async function main(): Promise<void> {
       throw new Error("Expected job revision inspect|authorize|review|commit|status.");
     }
     const allowed = new Set(["--story", "--job", "--work-item", "--path", "--proposal",
-      "--change", "--decision", "--reason", "--verdict", "--evidence", "--notes", "--validator-source"]);
+      "--signed-evidence", "--validator-source"]);
     const values = new Map<string, string>();
     while (args.length) {
       const flag = args.shift()!;
@@ -262,10 +258,8 @@ async function main(): Promise<void> {
     process.env.TRACE_TO_LANGSMITH = "false";
     const result = await runRevisionAction({
       story, job, workItem, action: action as "inspect" | "authorize" | "review" | "commit" | "status",
-      path: values.get("--path"), proposal: values.get("--proposal"), change: values.get("--change"),
-      decision: values.get("--decision") as "approve" | "reject" | undefined,
-      reason: values.get("--reason"), verdict: values.get("--verdict") as "pass" | "block" | undefined,
-      notes: values.get("--notes"), evidence: values.get("--evidence"),
+      path: values.get("--path"), proposal: values.get("--proposal"),
+      signedEvidence: values.get("--signed-evidence"),
       validatorSource: values.get("--validator-source"),
     });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");

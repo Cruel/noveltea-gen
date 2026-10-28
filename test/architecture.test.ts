@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -38,6 +39,10 @@ An investigator must decide what loyalty costs when a friend conceals evidence.
 `);
   git(repo, "init", "-q"); git(repo, "config", "user.name", "Author");
   git(repo, "config", "user.email", "author@example.test");
+  const authorKey = generateKeyPairSync("ed25519");
+  mkdirSync(join(repo, ".noveltea"), { recursive: true });
+  writeFileSync(join(repo, ".noveltea/approval-author.pub"),
+    authorKey.publicKey.export({ type: "spki", format: "pem" }));
   git(repo, "add", "."); git(repo, "commit", "-qm", "Foundation");
   const baseline = git(repo, "rev-parse", "HEAD");
   function cli(...args: string[]) {
@@ -50,7 +55,13 @@ An investigator must decide what loyalty costs when a friend conceals evidence.
     });
   }
   const started = cli("start"); assert.equal(started.status, 0, started.stderr);
-  return { repo, story, baseline, cli, job: JSON.parse(started.stdout) };
+  function signEvidence(payload: Record<string, unknown>) {
+    const path = join(root, "signed-architecture-" + Math.random().toString(36).slice(2) + ".json");
+    writeFileSync(path, JSON.stringify({ payload,
+      signature: sign(null, Buffer.from(JSON.stringify(payload)), authorKey.privateKey).toString("base64") }));
+    return path;
+  }
+  return { repo, story, baseline, cli, job: JSON.parse(started.stdout), signEvidence };
 }
 function contract(name: string, kind = "partial", depth = "architecture") {
   const path = join(root, name + ".json");
@@ -228,7 +239,7 @@ test("architecture follows a foundation generated from an empty Git baseline and
 
 
 test("architecture accepts a previously author-approved protected revision against the original base", { skip: !available }, () => {
-  const { cli, job, baseline, repo } = setup("revised-before-architecture", true);
+  const { cli, job, baseline, repo, signEvidence } = setup("revised-before-architecture", true);
   const foundation = join(job.worktreeStoryRoot, "creative-direction/foundation.md");
   writeFileSync(foundation, readFileSync(foundation, "utf8").replace(
     'statement: "Loyalty must matter"', 'statement: "Loyalty can yield to truth"'));
@@ -237,14 +248,16 @@ test("architecture accepts a previously author-approved protected revision again
   assert.equal(inspected.status, 0, inspected.stderr);
   const proposal = JSON.parse(inspected.stdout);
   assert.equal(proposal.protectedChanges.length, 1);
+  const authorDecision = { ...proposal.authorSigningRequests.decisions[0],
+    reason: "I expressly approve the precise revised loyalty decision" };
   const approved = cli("revision", "authorize", "--work-item", "adjust-loyalty",
-    "--proposal", proposal.proposalSha256, "--change", proposal.protectedChanges[0].id,
-    "--decision", "approve", "--reason", "I expressly approve the precise revised loyalty decision");
+    "--proposal", proposal.proposalSha256, "--signed-evidence", signEvidence(authorDecision));
   assert.equal(approved.status, 0, approved.stderr);
+  const editorial = { ...proposal.authorSigningRequests.editorial,
+    evidence: "creative-direction/foundation.md:1-25",
+    notes: "I independently compared the revised decision with the established premise and prose." };
   const review = cli("revision", "review", "--work-item", "adjust-loyalty",
-    "--proposal", proposal.proposalSha256, "--verdict", "pass",
-    "--evidence", "creative-direction/foundation.md:1-25",
-    "--notes", "I independently compared the revised decision with the established premise and prose.");
+    "--proposal", proposal.proposalSha256, "--signed-evidence", signEvidence(editorial));
   assert.equal(review.status, 0, review.stderr);
   const revised = cli("revision", "commit", "--work-item", "adjust-loyalty",
     "--proposal", proposal.proposalSha256);

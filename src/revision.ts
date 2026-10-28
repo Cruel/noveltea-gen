@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
+import { readSignedAuthorEvidence, verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
 
 /** Author authorization is a separate CLI action: never model output, a
  * validator acknowledgement flag, or the mere presence of a Git commit. */
@@ -36,12 +37,14 @@ interface ApprovalEvidence {
   after?: unknown;
   action: "approved" | "rejected";
   reason: string;
-  source: "explicit-author-cli";
+  source: "author-ed25519";
+  signed: SignedAuthorEvidence;
   recordedAt: string;
 }
 interface EditorialEvidence {
   verdict: ReviewVerdict;
-  source: "independent-author-review";
+  source: "author-ed25519-review";
+  signed: SignedAuthorEvidence;
   proposalSha256: string;
   path: string;
   evidence: string;
@@ -85,6 +88,7 @@ export interface RevisionOptions {
   evidence?: string;
   notes?: string;
   validatorSource?: string;
+  signedEvidence?: string;
 }
 
 function sha(text: string | Buffer) { return createHash("sha256").update(text).digest("hex"); }
@@ -139,6 +143,37 @@ async function readReceipt(job: JobStartResult, id: string): Promise<RevisionRec
       !["proposed", "committed"].includes(data.status) ||
       (data.status === "committed" && (!data.commitSha || !SHA.test(data.commitSha)))) {
     throw new Error("Stored revision receipt is invalid; restore it before proceeding.");
+  }
+  // Job-state files are not trusted. Recheck every approval and editorial
+  // signature against the immutable author's original Git blob on every read.
+  for (const approval of data.approvals) {
+    const signed = verifyAuthorEvidence(job, approval.signed);
+    const payload = signed.payload;
+    if (payload.kind !== "decision" || approval.source !== "author-ed25519" ||
+        approval.id !== sha(signed.signature) || approval.action !== payload.action ||
+        approval.reason !== payload.reason || approval.proposalSha256 !== payload.proposalSha256 ||
+        approval.changeId !== payload.changeId || approval.decision !== payload.decision ||
+        payload.workItemId !== id || payload.verifiedHead !== data.verifiedHead ||
+        payload.proposalSha256 !== data.proposalSha256 ||
+        !data.changes.some(change => change.id === approval.changeId &&
+          change.decision === approval.decision &&
+          JSON.stringify(change.before) === JSON.stringify(approval.before) &&
+          JSON.stringify(change.after ?? null) === JSON.stringify(approval.after ?? null))) {
+      throw new Error("Saved author approval evidence does not match the exact signed protected change.");
+    }
+  }
+  if (data.editorial) {
+    const signed = verifyAuthorEvidence(job, data.editorial.signed);
+    const payload = signed.payload;
+    if (payload.kind !== "editorial" || data.editorial.source !== "author-ed25519-review" ||
+        payload.workItemId !== id || payload.verifiedHead !== data.verifiedHead ||
+        payload.proposalSha256 !== data.proposalSha256 ||
+        payload.verdict !== data.editorial.verdict || payload.notes !== data.editorial.notes ||
+        payload.evidence !== data.editorial.evidence ||
+        data.editorial.proposalSha256 !== payload.proposalSha256 ||
+        data.editorial.path !== data.target) {
+      throw new Error("Saved editorial review evidence differs from the author's signed verdict.");
+    }
   }
   return data;
 }
@@ -295,8 +330,9 @@ async function withCandidate<T>(job: JobStartResult, head: string, target: strin
     await rm(parent, { recursive: true, force: true });
   }
 }
-async function inspectProposal(job: JobStartResult, target: string, head: string, source?: string) {
-  const content = await readFile(await candidateFile(job, target));
+async function inspectProposal(job: JobStartResult, target: string, head: string,
+  source?: string, committedBytes?: Buffer) {
+  const content = committedBytes ?? await readFile(await candidateFile(job, target));
   const proposalSha256 = proposedDigest(job, target, head, content);
   const empty = baselineEmpty(job);
   const out = await withCandidate(job, head, target, content, async view => {
@@ -353,16 +389,28 @@ function publicStatus(receipt: RevisionReceipt, unrelated: string[] = []) {
 function assertAuthorReviewed(revision: RevisionReceipt) {
   if (revision.editorial?.verdict !== "pass" ||
       revision.editorial.proposalSha256 !== revision.proposalSha256 ||
-      revision.editorial.source !== "independent-author-review") {
+      revision.editorial.source !== "author-ed25519-review") {
     throw new Error("Independent, source-linked prose/semantic review has not passed; commit blocked.");
   }
   if (revision.changes.some(c => !revision.approvals.some(a =>
       a.changeId === c.id && a.action === "approved" &&
       a.decision === c.decision && a.proposalSha256 === revision.proposalSha256 &&
-      a.source === "explicit-author-cli" &&
+      a.source === "author-ed25519" &&
       JSON.stringify(a.before) === JSON.stringify(c.before) &&
       JSON.stringify(a.after ?? null) === JSON.stringify(c.after ?? null)))) {
     throw new Error("One or more protected decisions lack exact explicit author authorization; commit blocked.");
+  }
+}
+async function assertOriginalProposedChanges(job: JobStartResult, receipt: RevisionReceipt, bytes: Buffer) {
+  // Reconstruct from verified Git objects and the pinned canonical validator.
+  // Receipt JSON alone is writable by the agent, and may NOT be used to erase
+  // a protected delta during an interrupted commit or historical inspection.
+  const verified = await inspectProposal(job, receipt.target, receipt.verifiedHead, undefined, bytes);
+  if (verified.proposalSha256 !== receipt.proposalSha256 ||
+      verified.authoredFileSha256 !== receipt.authoredFileSha256 ||
+      verified.validatorSha256 !== receipt.validatorSha256 ||
+      JSON.stringify(verified.changes) !== JSON.stringify(receipt.changes)) {
+    throw new Error("Revision receipt protected-change inventory differs from canonical Git comparison.");
   }
 }
 async function recoverCommitted(job: JobStartResult, receipt: RevisionReceipt) {
@@ -376,6 +424,7 @@ async function recoverCommitted(job: JobStartResult, receipt: RevisionReceipt) {
     if (sha(blob) !== receipt.authoredFileSha256) {
       throw new Error("Previously committed revision no longer matches its recorded Story bytes.");
     }
+    await assertOriginalProposedChanges(job, receipt, Buffer.from(blob));
     if (head === receipt.commitSha && !existsSync(headFile(job))) {
       await persist(headFile(job), { version: 1, jobId: job.jobId,
         headSha: head, workItemId: receipt.workItemId } satisfies VerifiedHead);
@@ -392,11 +441,13 @@ async function recoverCommitted(job: JobStartResult, receipt: RevisionReceipt) {
     throw new Error("Unexpected job HEAD; revision cannot be recovered.");
   }
   const changed = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", head);
+  const committed = Buffer.from(gitRaw(job, "show", head + ":" + changed));
   if (changed !== targetSpec(job, receipt.target) ||
-      sha(gitRaw(job, "show", head + ":" + changed)) !== receipt.authoredFileSha256 ||
+      sha(committed) !== receipt.authoredFileSha256 ||
       sha(await readFile(await candidateFile(job, receipt.target))) !== receipt.authoredFileSha256) {
     throw new Error("Recovered revision commit does not match the authorized target content.");
   }
+  await assertOriginalProposedChanges(job, receipt, committed);
   receipt.status = "committed";
   receipt.commitSha = head;
   await persist(receiptFile(job, receipt.workItemId), receipt);
@@ -431,7 +482,7 @@ async function commitRevisionGraph(job: JobStartResult, receipt: RevisionReceipt
       const changed = targetSpec(job, revision.target);
       git(job, "-c", `user.name=${AUTHOR}`, "-c", `user.email=${AUTHOR_EMAIL}`,
         "commit", "--only", "-m",
-        `Revise protected Story [${job.jobId}/${revision.workItemId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${revision.workItemId}\nNovelTea-Proposal: ${revision.proposalSha256}\nNovelTea-Approvals: ${revision.approvals.map(a => a.id).join(",") || "none"}\nNovelTea-Editorial-Review: source-linked`,
+        `Revise Story [${job.jobId}/${revision.workItemId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${revision.workItemId}\nNovelTea-Proposal: ${revision.proposalSha256}\nNovelTea-Approvals: ${revision.approvals.map(a => a.id).join(",") || "none"}\nNovelTea-Approval-Authority: original-git-base-ed25519\nNovelTea-Git-Actor: noveltea-gen-graph\nNovelTea-Editorial-Review: signed-source-linked`,
         "--", changed);
       const commitSha = git(job, "rev-parse", "HEAD");
       if (sha(Buffer.from(gitRaw(job, "show", commitSha + ":" + changed))) !== revision.authoredFileSha256) {
@@ -484,8 +535,23 @@ export async function runRevisionAction(input: RevisionOptions) {
         };
         await persist(receiptFile(job, input.workItem), receipt);
       }
-      return { ...publicStatus(receipt, unrelated),
+      const proposed = receipt;
+      return { ...publicStatus(proposed, unrelated),
         patch: gitRaw(job, "diff", "--no-ext-diff", "--", targetSpec(job, target)),
+        authorSigningRequests: {
+          decisions: proposed.changes.map(change => ({
+            version: 1, kind: "decision" as const, jobId: job.jobId, threadId: job.threadId, workItemId: proposed.workItemId,
+            baseSha: job.baseSha, verifiedHead: head, proposalSha256: proposed.proposalSha256,
+            decision: change.decision, changeId: change.id,
+            action: "approved" as const, reason: "AUTHOR: replace this with a specific review rationale",
+          })),
+          editorial: {
+            version: 1, kind: "editorial" as const, jobId: job.jobId, threadId: job.threadId, workItemId: proposed.workItemId,
+            baseSha: job.baseSha, verifiedHead: head, proposalSha256: proposed.proposalSha256,
+            verdict: "pass" as const, evidence: target + ":1",
+            notes: "AUTHOR: replace with findings from an independent source-linked prose review",
+          },
+        },
       };
     }
     if (!receipt) throw new Error("No revision proposal; run 'job revision inspect' first.");
@@ -501,36 +567,45 @@ export async function runRevisionAction(input: RevisionOptions) {
       throw new Error("Canonical protected changes or pinned validator differ from the reviewed proposal.");
     }
     if (input.action === "status") return publicStatus(receipt, unrelated);
-    if (input.action === "authorize") {
-      const change = receipt.changes.find(c => c.id === input.change);
-      if (!change || !input.reason?.trim() || input.reason.trim().length < 12 ||
-          !["approve", "reject"].includes(input.decision || "")) {
-        throw new Error("Author approval requires an exact protected --change, --decision approve|reject, and substantive --reason.");
+    if (input.action === "authorize" || input.action === "review") {
+      if (!input.signedEvidence || input.change || input.reason || input.decision ||
+          input.verdict || input.evidence || input.notes) {
+        throw new Error("Author authorization requires --signed-evidence <file>; unsigned CLI flags are not human permission.");
       }
-      if (receipt.approvals.some(a => a.changeId === change.id)) {
-        throw new Error("Protected-change decision already recorded; use a new work item for a revised proposal.");
+      const signed = await readSignedAuthorEvidence(job, input.signedEvidence);
+      const payload = signed.payload;
+      if (payload.workItemId !== receipt.workItemId ||
+          payload.proposalSha256 !== receipt.proposalSha256 ||
+          payload.verifiedHead !== receipt.verifiedHead) {
+        throw new Error("Signed author evidence is bound to another work item, proposal or verified HEAD.");
       }
-      receipt.approvals.push({
-        id: randomUUID(), changeId: change.id, proposalSha256: receipt.proposalSha256,
-        decision: change.decision, before: change.before, after: change.after,
-        action: input.decision === "approve" ? "approved" : "rejected",
-        reason: input.reason.trim(), source: "explicit-author-cli", recordedAt: new Date().toISOString(),
-      });
-      await persist(receiptFile(job, input.workItem), receipt);
-      return publicStatus(receipt, unrelated);
-    }
-    if (input.action === "review") {
-      if (!["pass", "block"].includes(input.verdict || "") ||
-          !input.notes?.trim() || input.notes.trim().length < 20 ||
-          !input.evidence?.startsWith(receipt.target + ":") ||
-          !/^[0-9]+(?:-[0-9]+)?$/.test(input.evidence.slice(receipt.target.length + 1))) {
-        throw new Error("Independent prose review requires --verdict pass|block, substantive --notes, and --evidence citing the changed Story file.");
+      if (input.action === "authorize") {
+        if (payload.kind !== "decision") throw new Error("authorize requires signed decision evidence.");
+        const change = receipt.changes.find(c => c.id === payload.changeId &&
+          c.decision === payload.decision);
+        if (!change) throw new Error("Signed author decision is not a protected change in this proposal.");
+        if (receipt.approvals.some(a => a.changeId === change.id)) {
+          throw new Error("Protected-change decision already recorded; use a new work item for a revised proposal.");
+        }
+        receipt.approvals.push({
+          id: sha(signed.signature), changeId: change.id, proposalSha256: receipt.proposalSha256,
+          decision: change.decision, before: change.before, after: change.after,
+          action: payload.action, reason: payload.reason,
+          source: "author-ed25519", signed, recordedAt: new Date().toISOString(),
+        });
+        await persist(receiptFile(job, input.workItem), receipt);
+        return publicStatus(receipt, unrelated);
+      }
+      if (payload.kind !== "editorial" ||
+          !payload.evidence.startsWith(receipt.target + ":") ||
+          !/^[0-9]+(?:-[0-9]+)?$/.test(payload.evidence.slice(receipt.target.length + 1))) {
+        throw new Error("review requires signed editorial evidence referencing the changed Story path and source lines.");
       }
       if (receipt.editorial) throw new Error("Editorial review already recorded; use a new work-item proposal.");
       receipt.editorial = {
-        verdict: input.verdict!, source: "independent-author-review", path: receipt.target,
-        proposalSha256: receipt.proposalSha256, evidence: input.evidence,
-        notes: input.notes.trim(), recordedAt: new Date().toISOString(),
+        verdict: payload.verdict, source: "author-ed25519-review", path: receipt.target,
+        proposalSha256: receipt.proposalSha256, evidence: payload.evidence,
+        notes: payload.notes, signed, recordedAt: new Date().toISOString(),
       };
       await persist(receiptFile(job, input.workItem), receipt);
       return publicStatus(receipt, unrelated);
