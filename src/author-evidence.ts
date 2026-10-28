@@ -9,6 +9,11 @@ export const AUTHOR_KEY_PATH = ".noveltea/approval-author.pub";
 
 export type AuthorDecisionPayload =
   | {
+    version: 1; kind: "plan"; jobId: string; threadId: string; workItemId: "global-architecture";
+    baseSha: string; verifiedHead: string; proposalSha256: string; planVersion: number;
+    reason: string;
+  }
+  | {
     version: 1; kind: "decision"; jobId: string; threadId: string; workItemId: string;
     baseSha: string; verifiedHead: string; proposalSha256: string;
     decision: string; changeId: string; action: "approved" | "rejected"; reason: string;
@@ -41,8 +46,8 @@ function validateEvidenceShape(value: unknown): asserts value is SignedAuthorEvi
   }
   const p = payload as Record<string, unknown>;
   const common = ["version", "kind", "jobId", "threadId", "workItemId", "baseSha", "verifiedHead", "proposalSha256"];
-  const extra = p.kind === "decision"
-    ? ["decision", "changeId", "action", "reason"]
+  const extra = p.kind === "plan" ? ["planVersion", "reason"]
+    : p.kind === "decision" ? ["decision", "changeId", "action", "reason"]
     : p.kind === "editorial" ? ["verdict", "evidence", "notes"] : [];
   if (!extra.length || !keysEqual(payload, [...common, ...extra]) || p.version !== 1 ||
       ![p.jobId, p.threadId, p.workItemId, p.baseSha, p.verifiedHead, p.proposalSha256].every(nonempty) ||
@@ -50,6 +55,11 @@ function validateEvidenceShape(value: unknown): asserts value is SignedAuthorEvi
       !/^[a-f0-9]{40,64}$/.test(String(p.baseSha)) ||
       !/^[a-f0-9]{40,64}$/.test(String(p.verifiedHead))) {
     throw new Error("Invalid or incomplete author approval payload.");
+  }
+  if (p.kind === "plan" &&
+      (p.workItemId !== "global-architecture" || !Number.isSafeInteger(p.planVersion) ||
+       Number(p.planVersion) < 2 || !nonempty(p.reason) || p.reason.trim().length < 12)) {
+    throw new Error("Plan approval requires a versioned proposal and substantive author rationale.");
   }
   if (p.kind === "decision" &&
       (!nonempty(p.decision) || !/^[a-f0-9]{64}$/.test(String(p.changeId)) ||

@@ -240,7 +240,8 @@ work and **does not claim** full-Story completion. Partial scope supports
 targeted Arc/Milestone IDs, branch intent, and architecture/interactive/
 composition depths. Branch intent and qualitative constraints require later
 editorial and interactive verification: architectural validation alone does
-not prove a playable route.
+not prove a playable route. A branch-scoped job therefore reports
+`architecture-committed`, not `complete-in-scope`, until branch evidence exists.
 
 The architecture specialist reads pinned `nt-story-architecture` and
 `nt-catalog` guidance, writes canonical `arcs/*.md` and
@@ -264,15 +265,21 @@ exact, versioned proposal:
 ```sh
 pnpm dev job architecture propose --story /path/to/story --job draft-1 \
   --contract ./revised-scope.json
+# Independently review and Ed25519-sign authorSigningRequest from propose.
 pnpm dev job architecture approve --story /path/to/story --job draft-1 \
-  --proposal <digest-from-propose> --reason "Authorizes this precise scope"
+  --proposal <digest-from-propose> --signed-evidence /path/to/signed-plan.json
 pnpm dev job architecture run --story /path/to/story --job draft-1
 ```
 
 A revision reuses already verified architecture only if it meets the new
 contract; otherwise it writes and validates another bounded architecture
-cluster. Approval is explicit CLI author input, not a Pi assertion or a
-validator flag. Test the public interface with
+cluster. Plan revisions require a separately Ed25519-signed author approval,
+using the public key pinned in the original author Git baseline (see
+[offline author signing](docs/author-signing.md)). `propose` returns an
+`authorSigningRequest` containing the exact plan version, head and proposal
+SHA; the author reviews the entire new contract before signing the request.
+Unsigned CLI assertions and model claims are not authorization.
+Test the public interface with
 `pnpm exec tsx --test test/architecture.test.ts`.
 
 ## Protected-decision revision and author approval (#16)

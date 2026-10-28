@@ -9,6 +9,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { trustedHead } from "./revision.js";
+import { readSignedAuthorEvidence, verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
 
 export interface CompletionContract {
   scope: { kind: "full-story" | "partial"; depth: "architecture" | "interactive" | "composition";
@@ -23,7 +24,7 @@ export interface WorkItem {
   dependencies: string[];
   skills: string[];
   checks: string[];
-  authorization: { source: "explicit-author-cli"; planVersion: number; paths: string[] };
+  authorization: { source: "explicit-author-cli" | "author-ed25519"; planVersion: number; paths: string[] };
   planVersion: number;
   status: "pending" | "writing" | "verified" | "blocked";
   blockingReason?: string;
@@ -45,7 +46,8 @@ interface Receipt {
   model: string;
   snapshot?: SkillSnapshot;
   plan?: Plan;
-  history: Array<{ plan: Plan; proposal: string; reason: string; source: "explicit-author-cli" }>;
+  history: Array<{ plan: Plan; proposal: string; approvedContract: CompletionContract;
+    verifiedHead: string; reason: string; source: "author-ed25519"; signed: SignedAuthorEvidence }>;
   proposal?: { digest: string; contract: CompletionContract; version: number };
   phase: "awaiting-author" | "ready" | "writing" | "authored" | "committed";
   paths?: string[];
@@ -67,7 +69,7 @@ export interface ArchitectureOptions {
   story: string; job: string; action: "run" | "inspect" | "propose" | "approve";
   contract?: unknown; mode?: "autonomous" | "collaborative";
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
-  proposal?: string; reason?: string;
+  proposal?: string; signedEvidence?: string;
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -99,13 +101,36 @@ function parseContract(value: unknown): CompletionContract {
   return { scope: { ...c.scope, targets: [...new Set(c.scope.targets)], branches: [...new Set(c.scope.branches)] },
     constraints: c.constraints, envelope: c.envelope };
 }
+function verifyPlanHistory(job: JobStartResult, state: Receipt) {
+  if (!Array.isArray(state.history)) throw new Error("Invalid architecture plan history.");
+  for (const [i, entry] of state.history.entries()) {
+    const signed = verifyAuthorEvidence(job, entry.signed);
+    const payload = signed.payload;
+    if (payload.kind !== "plan" || entry.source !== "author-ed25519" ||
+        entry.reason !== payload.reason || entry.proposal !== payload.proposalSha256 ||
+        entry.verifiedHead !== payload.verifiedHead ||
+        payload.planVersion !== entry.plan.version + 1 ||
+        entry.proposal !== hash(JSON.stringify({
+          plan: entry.plan, head: entry.verifiedHead, contract: entry.approvedContract,
+        })) ||
+        (i > 0 && (entry.plan.version !== state.history[i - 1]!.plan.version + 1 ||
+          JSON.stringify(entry.plan.contract) !== JSON.stringify(state.history[i - 1]!.approvedContract)))) {
+      throw new Error("Architecture plan history lacks matching signed author authorization.");
+    }
+  }
+  const last = state.history.at(-1);
+  if (last && (state.plan?.version !== last.plan.version + 1 ||
+      JSON.stringify(state.plan.contract) !== JSON.stringify(last.approvedContract))) {
+    throw new Error("Current architecture completion contract differs from the signed plan revision.");
+  }
+}
 function workItem(id: string, kind: WorkItem["kind"], targetIds: string[], dependencies: string[], version: number): WorkItem {
   const skills = { architecture: ["nt-story-architecture", "nt-catalog"], realization: ["nt-event-design", "nt-interactive-narrative", "nt-catalog"],
     composition: ["nt-narrative-composition", "nt-catalog"], review: ["nt-narrative-review", "nt-catalog"] };
   return { id, kind, targetIds, dependencies, skills: skills[kind],
     checks: kind === "architecture" ? ["canonical-structure", "protected-decisions", "scope-architecture-coverage"] :
       kind === "review" ? ["independent-editorial-review", "constraints-and-envelope", "branch-coverage"] : ["canonical-structure", "realize-in-scope-obligations"],
-    authorization: { source: "explicit-author-cli", planVersion: version, paths: kind === "architecture" ? ["arcs/*.md", "milestones/*.md"] : [] },
+    authorization: { source: version === 1 ? "explicit-author-cli" : "author-ed25519", planVersion: version, paths: kind === "architecture" ? ["arcs/*.md", "milestones/*.md"] : [] },
     planVersion: version, status: "pending" };
 }
 function newPlan(contract: CompletionContract, version = 1): Plan {
@@ -242,15 +267,22 @@ function finishPlan(state: Receipt, report: CatalogReport, commit: string) {
     ? ["compose-scope"]
     : clusters.length ? clusters.map(item => item.id) : ["global-architecture"];
   plan.items.push(workItem("review-scope", "review", [...ids], reviewDependencies, plan.version));
-  state.outstanding = report.outstanding;
+  state.outstanding = obligations;
   state.phase = "committed";
   state.expectedHead = commit;
 }
 function output(job: JobStartResult, state: Receipt) {
-  const complete = state.phase === "committed" && state.plan?.contract.scope.kind === "partial" && state.plan.contract.scope.depth === "architecture";
+  const complete = state.phase === "committed" && state.plan?.contract.scope.kind === "partial" &&
+    state.plan.contract.scope.depth === "architecture" && state.plan.contract.scope.branches.length === 0;
   return { status: state.phase === "awaiting-author" ? "awaiting-author" : complete ? "complete-in-scope" : state.phase === "committed" ? "architecture-committed" : state.phase,
     jobId: job.jobId, branch: job.branch, worktreeStoryRoot: job.worktreeStoryRoot, headSha: state.expectedHead,
     plan: state.plan, proposal: state.proposal, history: state.history, outstanding: state.outstanding ?? [],
+    authorSigningRequest: state.proposal ? {
+      version: 1, kind: "plan", jobId: job.jobId, threadId: job.threadId,
+      workItemId: "global-architecture", baseSha: job.baseSha,
+      verifiedHead: state.expectedHead, proposalSha256: state.proposal.digest,
+      planVersion: state.proposal.version, reason: "(Replace with substantive author rationale)",
+    } : undefined,
     completionEvidence: { structuralArchitecture: state.phase === "committed", editorial: "unverified",
       constraintsAndEnvelope: "unverified", branchExecution: state.plan?.contract.scope.branches.length ? "unverified" : "not-requested",
       fullStory: false },
@@ -268,6 +300,7 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
   try {
     let state: Receipt | undefined = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) : undefined;
     if (state && (state.format !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha)) throw new Error("Invalid architecture receipt identity.");
+    if (state) verifyPlanHistory(job, state);
     if (!state) {
       if (input.action !== "run") throw new Error("Start architecture run before inspecting or revising its plan.");
       if (!input.contract && input.mode !== "collaborative") throw new Error("Autonomous architecture requires explicit --contract scope.");
@@ -295,14 +328,25 @@ export async function runArchitectureJob(input: ArchitectureOptions) {
         state.proposal = { contract, version: state.plan!.version + 1,
           digest: hash(JSON.stringify({ plan: state.plan, head: state.expectedHead, contract })) };
       } else {
-        if (!state.proposal || input.proposal !== state.proposal.digest || !input.reason?.trim()) throw new Error("Plan approval requires the exact proposal digest and explicit author reason.");
-        state.history.push({ plan: state.plan!, proposal: state.proposal.digest, reason: input.reason, source: "explicit-author-cli" });
+        if (!state.proposal || input.proposal !== state.proposal.digest || !input.signedEvidence) {
+          throw new Error("Plan approval requires the exact proposal digest and externally signed author evidence.");
+        }
+        const signed = await readSignedAuthorEvidence(job, input.signedEvidence);
+        const payload = signed.payload;
+        if (payload.kind !== "plan" || payload.verifiedHead !== state.expectedHead ||
+            payload.proposalSha256 !== state.proposal.digest ||
+            payload.planVersion !== state.proposal.version) {
+          throw new Error("Signed plan approval does not match the exact proposed contract, plan version and verified head.");
+        }
+        state.history.push({ plan: state.plan!, proposal: state.proposal.digest,
+          approvedContract: state.proposal.contract, verifiedHead: state.expectedHead,
+          reason: payload.reason, source: "author-ed25519", signed });
         const prior = state.plan!;
         state.plan = newPlan(state.proposal.contract, state.proposal.version);
         // Accepted architecture remains evidence, not a fresh authorization to rewrite canon.
         if (state.phase === "committed") {
           state.plan.items = prior.items.map(item => ({ ...item, planVersion: state.plan!.version,
-            authorization: { ...item.authorization, planVersion: state.plan!.version } }));
+            authorization: { ...item.authorization, source: "author-ed25519", planVersion: state.plan!.version } }));
           state.phase = "ready";
           // A newly approved work boundary must never reuse the previous commit's
           // uncommitted file inventory or content digest.

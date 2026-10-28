@@ -157,6 +157,7 @@ test("partial target and branch scope is durable and unauthorized scope shrinkag
   const result = JSON.parse(start.stdout);
   assert.deepEqual(result.plan.contract.scope.branches, ["trust-route"]);
   assert.equal(result.completionEvidence.branchExecution, "unverified");
+  assert.equal(result.status, "architecture-committed", "branch-scoped completion cannot be asserted before branch review");
   const smaller = scopedContract("targeted-smaller", {
     kind: "partial", depth: "architecture", targets: ["arc.truth"], branches: [],
   });
@@ -169,7 +170,7 @@ test("partial target and branch scope is durable and unauthorized scope shrinkag
 });
 
 test("exact explicit author approval versions the completion contract without rewriting verified canon", { skip: !available }, () => {
-  const { cli, job } = setup("replan");
+  const { cli, job, signEvidence } = setup("replan");
   const first = cli("architecture", "run", "--fixture", "--contract", contract("replan"), "--skills-source", source);
   assert.equal(first.status, 0, first.stderr);
   const sha = JSON.parse(first.stdout).headSha;
@@ -179,9 +180,20 @@ test("exact explicit author approval versions the completion contract without re
   const proposal = cli("architecture", "propose", "--contract", revised);
   assert.equal(proposal.status, 0, proposal.stderr);
   const digest = JSON.parse(proposal.stdout).proposal.digest;
-  const invalid = cli("architecture", "approve", "--proposal", "0".repeat(64), "--reason", "Explicitly restrict targets");
+  const unsigned = cli("architecture", "approve", "--proposal", digest, "--reason", "Explicitly restrict targets");
+  assert.notEqual(unsigned.status, 0);
+  const payload = { ...JSON.parse(proposal.stdout).authorSigningRequest, reason: "I approve the exact narrower scope" };
+  const signedFile = signEvidence(payload);
+  const invalid = cli("architecture", "approve", "--proposal", "0".repeat(64), "--signed-evidence", signedFile);
   assert.notEqual(invalid.status, 0);
-  const approval = cli("architecture", "approve", "--proposal", digest, "--reason", "Explicitly restrict targets");
+  const forgedKey = generateKeyPairSync("ed25519");
+  const forgedFile = join(root, "forged-plan.json");
+  writeFileSync(forgedFile, JSON.stringify({ payload,
+    signature: sign(null, Buffer.from(JSON.stringify(payload)), forgedKey.privateKey).toString("base64") }));
+  const forged = cli("architecture", "approve", "--proposal", digest, "--signed-evidence", forgedFile);
+  assert.notEqual(forged.status, 0);
+  assert.match(forged.stderr, /signature/i);
+  const approval = cli("architecture", "approve", "--proposal", digest, "--signed-evidence", signedFile);
   assert.equal(approval.status, 0, approval.stderr);
   assert.equal(JSON.parse(approval.stdout).plan.version, 2);
   const replay = cli("architecture", "run", "--fixture");
@@ -191,8 +203,16 @@ test("exact explicit author approval versions the completion contract without re
   assert.equal(data.plan.version, 2);
   assert.equal(data.plan.items[0].verifiedSha, sha);
   assert.equal(data.history.length, 1);
+  assert.equal(data.history[0].source, "author-ed25519");
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), sha);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+  const receipt = join(job.worktreeRoot, "../architecture.json");
+  const tampered = JSON.parse(readFileSync(receipt, "utf8"));
+  tampered.plan.contract.envelope.presentation = "Unauthorized changed presentation";
+  writeFileSync(receipt, JSON.stringify(tampered));
+  const rejected = cli("architecture", "inspect");
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /differs from the signed plan revision/i);
 });
 
 
@@ -275,7 +295,7 @@ test("architecture accepts a previously author-approved protected revision again
 });
 
 test("approved scope expansion authors a new bounded cluster and retains the earlier committed records", { skip: !available }, () => {
-  const { cli, job } = setup("expansion");
+  const { cli, job, signEvidence } = setup("expansion");
   const initial = cli("architecture", "run", "--fixture", "--contract", contract("expansion"),
     "--skills-source", source);
   assert.equal(initial.status, 0, initial.stderr);
@@ -286,8 +306,11 @@ test("approved scope expansion authors a new bounded cluster and retains the ear
   });
   const proposed = cli("architecture", "propose", "--contract", revised);
   assert.equal(proposed.status, 0, proposed.stderr);
+  const proposalData = JSON.parse(proposed.stdout);
+  const signedFile = signEvidence({ ...proposalData.authorSigningRequest,
+    reason: "I explicitly authorize the second Arc/Milestone cluster" });
   const approved = cli("architecture", "approve", "--proposal",
-    JSON.parse(proposed.stdout).proposal.digest, "--reason", "Add a bounded second arc and milestone");
+    proposalData.proposal.digest, "--signed-evidence", signedFile);
   assert.equal(approved.status, 0, approved.stderr);
   const second = cli("architecture", "run", "--fixture");
   assert.equal(second.status, 0, second.stderr);

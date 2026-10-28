@@ -29,7 +29,7 @@ Usage:
   pnpm dev job architecture run --story /path/to/story --job draft-1 --contract scope.json --skills-source /path/to/noveltea-skills
   pnpm dev job architecture inspect --story /path/to/story --job draft-1
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
-  pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --reason "Explicit author scope revision"
+  pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --signed-evidence /path/to/offline-signed-plan.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
   pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --signed-evidence /path/to/offline-signed-decision.json
   pnpm dev job revision review --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --signed-evidence /path/to/offline-signed-editorial.json
@@ -63,7 +63,7 @@ Job architecture:
                             envelope {presentation,hardLimits,preferences}
   --mode <mode>            autonomous requires contract; collaborative may await author scope
   --proposal <sha256>      Exact digest from architecture propose (approve only)
-  --reason <text>          Explicit author rationale for approval
+  --signed-evidence <file>  Externally signed Ed25519 plan approval from the author
   --skills-source <path>   NovelTea skills checkout to pin
   --validator-source <path>  Canonical validator checkout for initial pin
   --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
@@ -191,7 +191,7 @@ async function main(): Promise<void> {
     if (!["run", "inspect", "propose", "approve"].includes(action ?? "")) {
       throw new Error("Expected job architecture run|inspect|propose|approve.");
     }
-    const allowed = new Set(["--story", "--job", "--contract", "--mode", "--proposal", "--reason",
+    const allowed = new Set(["--story", "--job", "--contract", "--mode", "--proposal", "--signed-evidence",
       "--skills-source", "--validator-source", "--provider", "--model", "--fixture"]);
     const values = new Map<string, string>();
     while (args.length) {
@@ -207,8 +207,8 @@ async function main(): Promise<void> {
     const mode = values.get("--mode");
     if (mode && mode !== "autonomous" && mode !== "collaborative") throw new Error("Architecture mode must be autonomous or collaborative.");
     if (action === "propose" && !values.has("--contract")) throw new Error("Architecture propose requires --contract.");
-    if (action === "approve" && (!values.has("--proposal") || !values.has("--reason"))) {
-      throw new Error("Architecture approve requires --proposal and --reason.");
+    if (action === "approve" && (!values.has("--proposal") || !values.has("--signed-evidence"))) {
+      throw new Error("Architecture approve requires --proposal and --signed-evidence.");
     }
     if (action === "inspect" && values.has("--contract")) throw new Error("Architecture inspect does not accept --contract.");
     let contract: unknown;
@@ -223,7 +223,7 @@ async function main(): Promise<void> {
     const result = await runArchitectureJob({
       story, job, action: action as "run" | "inspect" | "propose" | "approve",
       contract, mode: mode as "autonomous" | "collaborative" | undefined,
-      proposal: values.get("--proposal"), reason: values.get("--reason"),
+      proposal: values.get("--proposal"), signedEvidence: values.get("--signed-evidence"),
       skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
       provider: values.get("--provider"), model: values.get("--model"), fixture: values.has("--fixture"),
     });

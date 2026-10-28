@@ -114,6 +114,34 @@ authorization without access to the offline signing key. `--decision`,
 `--reason`, `--verdict` and `--notes` flags on the generator CLI
 **cannot** authorize or approve a Story revision.
 
+## 5. Sign an architecture completion-contract revision (#17)
+
+`job architecture propose --story /repo/story --job draft-1 --contract revised-scope.json`
+returns a precise `proposal.digest` and `authorSigningRequest` with
+`kind: "plan"`, `workItemId: "global-architecture"`, the original job
+baseline/thread ID, the latest verified HEAD, `planVersion` and the exact
+`proposalSha256`. The proposal digest binds the previous plan, verified
+HEAD and complete proposed contract, including its production constraints.
+
+Before signing, review **the entire old and proposed scope**, including any
+removed targets, branches, constraints and production limits. Set `reason`
+to an explicit rationale (at least 12 characters), then sign the reviewed
+payload with the independently held original author key using step 3 above.
+
+```sh
+pnpm dev job architecture approve --story /repo/story --job draft-1 \
+  --proposal <exact-proposal-digest> \
+  --signed-evidence /path/to/signed-plan.json
+pnpm dev job architecture run --story /repo/story --job draft-1
+```
+
+Every imported approval must match the exact outstanding plan proposal and
+verified HEAD. Saved plan revisions and signatures are rechecked whenever
+the architecture receipt is opened. There is no ordinary `--reason` approval
+shortcut. The original plan can be supplied as a completion contract in
+`job architecture run`; signatures are required for **subsequent changes**,
+not for establishing the initial CLI-requested scope.
+
 ## Trust assumptions and rotation
 
 The trusted baseline must be correctly selected when the job is created.
