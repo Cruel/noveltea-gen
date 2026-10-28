@@ -1073,6 +1073,47 @@ not a failure to certify the generated Story. The test checks the independent
 read-only transcript, protected author checkout, and absence of automatic
 canon edits; actual literary completion remains deliberately blocked.
 
+## Non-destructive Story merge preview (#29)
+
+A completed generation branch is not automatically merged into the author's
+branch. Compare its original generation base against the **current committed
+author HEAD** with:
+
+```sh
+pnpm dev job merge preview --story /path/to/story --job draft-1 \\
+  --skills-source /path/to/noveltea-skills
+```
+
+The preview requires a clean, committed generation job branch; it does not
+discard an in-progress writer's edits. A current, completed scoped-review
+receipt is separately indicated; a commit alone is not proof of requested-scope
+completion. Uncommitted target Story changes are
+reported but deliberately **not included**: commit them first if they should be
+part of the comparison. The result pins both revision SHAs, reports the target's
+drift since the generation base, and lists impacted paths and record IDs.
+
+Git constructs a candidate via `merge --no-commit --no-ff` in a detached,
+disposable worktree, not in the author's checkout. Textual Git conflicts return
+record IDs and evidence, with validation marked `not-run`. Once constructible,
+the existing pinned canonical validator assesses the candidate against **both**
+target and generation baselines for typed dependencies, progression and protected
+decisions. The read-only independent narrative reviewer considers motivations,
+Revelation conditions and ending assumptions even when Git merges the text
+without conflict. Overlapping edits to the same record are flagged as semantic
+risks regardless of Git's textual verdict. Findings include uncertainty and
+bounded reconciliation options; neither branch is automatically changed.
+
+`--fixture` exercises the Git merge and validator without a model, returning
+`narrative.status: unverified` rather than a literary attestation. A live Pi
+review requires the pinned `nt-narrative-review` and `nt-catalog` skills and
+configured credentials. Each invocation recomputes against the current target
+HEAD, so a later target commit invalidates the previous preview. The output
+is advisory; any subsequent generation-branch edit requires a separate,
+**explicit author-approved reconciliation task**. Test the public CLI with
+`pnpm exec tsx --test test/merge-preview.test.ts`. Set
+`NT_LIVE_MERGE_PREVIEW=1` with a configured Pi provider/model and the NovelTea
+skills checkout to exercise the opt-in qualitative contradiction test.
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit

@@ -34,6 +34,8 @@ export interface ReviewAssignment {
   puzzleRoutes: Array<{ puzzle: string; event: string; status: string; clueAccess: string }>;
   outstanding: Array<{ id: string; message: string }>;
   uncertainties: string[];
+  integration?: { base: string; targetHead: string; generationHead: string;
+    risks: Array<{ path: string; ids: string[]; summary: string; evidence: string[] }> };
 }
 const guidance = ["nt-narrative-review/SKILL.md", "nt-catalog/SKILL.md",
   "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
@@ -152,6 +154,14 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "Examine actual saved prose, not a writer's summary. Analyze continuity, pacing, " +
       "Character voice/motivation, Puzzle fairness and accessible clues, player agency, " +
       "dramatic payoff, conditional Revelations and branch-exclusive player/Character knowledge. " +
+      (assignment.integration ?
+        "This is an INTEGRATION PREVIEW of two independently edited Story branches. " +
+        "Independently test merged Character motivations, Revelation prerequisites and validity, " +
+        "ending assumptions, protected author decisions and cross-record causal consistency. " +
+        "A clean textual Git merge is not narrative approval. Examine overlap risks, " +
+        "new target dependencies and the merged Story, report uncertainty and bounded alternative " +
+        "reconciliation options in each message. Never alter the generation branch or silently " +
+        "pick a winner. Do not claim exhaustive route verification. " : "") +
       "Use the bounded progression witnesses as representative routes, NOT exhaustive proof. " +
       "Review every listed Choice outcome and Puzzle solution, including least-informed routes. " +
       "Assess scope constraints, production envelope, and binding obligations. " +

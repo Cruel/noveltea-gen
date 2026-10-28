@@ -44,6 +44,8 @@ Usage:
   pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job review run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job review inspect --story /path/to/story --job draft-1
+  pnpm dev job merge preview --story /path/to/story --job draft-1 --fixture
+  pnpm dev job merge preview --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job ideas capture --story /path/to/story --job draft-1 --file idea.json
   pnpm dev job ideas inspect --story /path/to/story --job draft-1
   pnpm dev job ideas eligibility --story /path/to/story --job draft-1
@@ -138,6 +140,14 @@ Job composition (branch-aware Authored Content after interactive design):
   --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
   --thinking low|high     Explicit thinking effort for writer and reviewer
   --fixture               Structural/lexical test adapter, NOT independent literary proof
+
+Job merge preview (non-destructive integration assessment):
+  --story, --job        Existing Story job; compares the job branch with the author's committed HEAD
+  --validator-source   Canonical catalog checkout when first pinning validation
+  --skills-source      NovelTea skills checkout for independent read-only narrative review
+  --provider, --model, --thinking low|high  Independent Pi reviewer profile
+  --fixture            Deterministic-only preview; literary conflicts explicitly unverified
+  No automatic rebase, merge, branch modifications or protected-decision overrides.
 
 Job review (independent end-of-scope completion assessment):
   run|inspect           Validate the versioned scope, review alternate routes and editorial quality
@@ -423,6 +433,26 @@ async function main(): Promise<void> {
         action: action as "capture" | "inspect" | "eligibility" | "context" | "placement-context",
         file: values.get("--file"), target: values.get("--target") });
     }
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
+  if (process.argv[2] === "job" && process.argv[3] === "merge") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (action !== "preview") throw new Error("Expected job merge preview.");
+    const values = parseJobOptions(args, "merge", ["--story", "--job", "--validator-source",
+      "--skills-source", "--provider", "--model", "--thinking", "--fixture"], ["--fixture"]);
+    const story = values.get("--story"), job = values.get("--job");
+    if (!story || !job) throw new Error("job merge preview requires --story and --job.");
+    if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!))
+      throw new Error("Merge preview --thinking supports low or high.");
+    disableJobCloudTracing();
+    const { previewStoryMerge } = await import("./merge-preview.js");
+    const result = await previewStoryMerge({ story, job, fixture: values.has("--fixture"),
+      validatorSource: values.get("--validator-source"), skillsSource: values.get("--skills-source"),
+      provider: values.get("--provider"), model: values.get("--model"),
+      thinking: values.get("--thinking") as "low" | "high" | undefined });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     return;
   }
