@@ -26,6 +26,10 @@ Usage:
   pnpm dev job start --story /path/to/story --job draft-1
   pnpm dev job validate --story /path/to/story --job draft-1
   pnpm dev job foundation --story /path/to/story --job draft-1 --mode autonomous --task "A mystery premise"
+  pnpm dev job architecture run --story /path/to/story --job draft-1 --contract scope.json --skills-source /path/to/noveltea-skills
+  pnpm dev job architecture inspect --story /path/to/story --job draft-1
+  pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
+  pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --reason "Explicit author scope revision"
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
   pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --change <sha256> --decision approve --reason "Author-approved exact replacement"
   pnpm dev job revision review --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --verdict pass --evidence "creative-direction/foundation.md:1" --notes "Independently reviewed prose and protected intent"
@@ -56,6 +60,18 @@ Job revision:
   --verdict <value>   pass or block (review)
   --evidence <ref>    Source-linked Story path/line (review)
   --notes <text>      Substantive independent editorial findings (review)
+
+Job architecture:
+  run|inspect|propose|approve  Author a scoped architecture, inspect DAG, or version its authorization
+  --contract <json-file>    Completion contract: scope {kind,depth,targets,branches}, constraints,
+                            envelope {presentation,hardLimits,preferences}
+  --mode <mode>            autonomous requires contract; collaborative may await author scope
+  --proposal <sha256>      Exact digest from architecture propose (approve only)
+  --reason <text>          Explicit author rationale for approval
+  --skills-source <path>   NovelTea skills checkout to pin
+  --validator-source <path>  Canonical validator checkout for initial pin
+  --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
+  --fixture                Deterministic test adapter, not live Pi evidence
 
 Job foundation:
   --task <brief>            Required when starting foundation discovery
@@ -169,6 +185,55 @@ function parseArgs(argv: string[]): CliOptions | null {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "architecture") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) {
+      process.stdout.write(USAGE);
+      return;
+    }
+    if (!["run", "inspect", "propose", "approve"].includes(action ?? "")) {
+      throw new Error("Expected job architecture run|inspect|propose|approve.");
+    }
+    const allowed = new Set(["--story", "--job", "--contract", "--mode", "--proposal", "--reason",
+      "--skills-source", "--validator-source", "--provider", "--model", "--fixture"]);
+    const values = new Map<string, string>();
+    while (args.length) {
+      const flag = args.shift()!;
+      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate architecture option: " + flag);
+      if (flag === "--fixture") { values.set(flag, "true"); continue; }
+      const value = args.shift();
+      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing value for architecture option " + flag);
+      values.set(flag, value);
+    }
+    const story = values.get("--story"), job = values.get("--job");
+    if (!story || !job) throw new Error("job architecture requires --story and --job.");
+    const mode = values.get("--mode");
+    if (mode && mode !== "autonomous" && mode !== "collaborative") throw new Error("Architecture mode must be autonomous or collaborative.");
+    if (action === "propose" && !values.has("--contract")) throw new Error("Architecture propose requires --contract.");
+    if (action === "approve" && (!values.has("--proposal") || !values.has("--reason"))) {
+      throw new Error("Architecture approve requires --proposal and --reason.");
+    }
+    if (action === "inspect" && values.has("--contract")) throw new Error("Architecture inspect does not accept --contract.");
+    let contract: unknown;
+    if (values.has("--contract")) {
+      const { readFile } = await import("node:fs/promises");
+      contract = JSON.parse(await readFile(values.get("--contract")!, "utf8"));
+    }
+    process.env.LANGSMITH_TRACING = "false";
+    process.env.LANGCHAIN_TRACING_V2 = "false";
+    process.env.TRACE_TO_LANGSMITH = "false";
+    const { runArchitectureJob } = await import("./architecture.js");
+    const result = await runArchitectureJob({
+      story, job, action: action as "run" | "inspect" | "propose" | "approve",
+      contract, mode: mode as "autonomous" | "collaborative" | undefined,
+      proposal: values.get("--proposal"), reason: values.get("--reason"),
+      skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
+      provider: values.get("--provider"), model: values.get("--model"), fixture: values.has("--fixture"),
+    });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "revision") {
     const { runRevisionAction } = await import("./revision.js");
     const args = process.argv.slice(4);

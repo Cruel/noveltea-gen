@@ -142,7 +142,7 @@ async function readReceipt(job: JobStartResult, id: string): Promise<RevisionRec
   }
   return data;
 }
-async function trustedHead(job: JobStartResult) {
+export async function trustedHead(job: JobStartResult) {
   const head = headFile(job);
   if (existsSync(head)) {
     const record = JSON.parse(await readFile(head, "utf8")) as VerifiedHead;

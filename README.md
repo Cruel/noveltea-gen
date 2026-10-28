@@ -195,6 +195,86 @@ NT_LIVE_FOUNDATION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
 
 The opt-in test inspects the Pi session's actual pinned skill reads and Markdown editing tool calls, the validated output and the Git branch. It can incur model charges. Neither fixture passing nor a model's own completion claim substitutes for this evidence.
 
+## Scoped Story architecture and work-item DAG (#17)
+
+After a canonical Creative Direction has passed foundation design readiness, an
+architecture job uses the existing Git-backed Story job/worktree. Scope is a
+typed **author completion contract**, not a model-suggested stopping point.
+Provide a JSON file such as:
+
+```json
+{
+  "scope": {
+    "kind": "partial",
+    "depth": "architecture",
+    "targets": ["arc.mystery", "milestone.first-revelation"],
+    "branches": []
+  },
+  "constraints": ["The revelation must preserve the player's ability to refuse"],
+  "envelope": {
+    "presentation": "Dialogue-led visual novel",
+    "hardLimits": ["Reuse the existing interrogation location"],
+    "preferences": ["Minimize bespoke backgrounds"]
+  }
+}
+```
+
+Run `pnpm dev job start --story /path/to/story --job draft-1` if the
+job does not yet exist, then:
+
+```sh
+pnpm dev job architecture run --story /path/to/story --job draft-1 \
+  --contract ./architecture-scope.json \
+  --skills-source /path/to/noveltea-skills
+pnpm dev job architecture inspect --story /path/to/story --job draft-1
+```
+
+The **autonomous** mode requires the contract up front. In
+`--mode collaborative`, the first run may omit `--contract`, returning
+`awaiting-author` without Story edits; supply the contract on a later `run`
+using the same mode, Story and job. `--fixture` selects a deterministic
+test specialist (and must remain selected on continuation), not real Pi
+authorship. A full-Story contract uses `kind: "full-story"`,
+`depth: "composition"` and empty targets/branches; this plans the downstream
+work and **does not claim** full-Story completion. Partial scope supports
+targeted Arc/Milestone IDs, branch intent, and architecture/interactive/
+composition depths. Branch intent and qualitative constraints require later
+editorial and interactive verification: architectural validation alone does
+not prove a playable route.
+
+The architecture specialist reads pinned `nt-story-architecture` and
+`nt-catalog` guidance, writes canonical `arcs/*.md` and
+`milestones/*.md` directly, and does not fabricate Events. Unbound
+planning-stage Milestones use `completeness: partial` and
+`fulfillment: {any_of: []}`. The pinned validator checks canonical
+structure, architecture readiness, protection and recorded outstanding
+obligations. The graph independently enforces the authorized paths,
+verifies the diff and commits an architecture work item. Inspect the returned
+typed dependency DAG, verified commit SHA, queued realization/composition/
+review items, obligations and unverified editorial evidence. Stored receipts,
+architecture Pi transcripts and the plan's previous authorized versions live
+in the job state directory (`architecture.json`, `architecture-sessions/`).
+Never reset an interrupted writer's uncommitted work; inspect and reconcile it.
+No changes are automatically merged into the author's normal checkout.
+
+An existing scope cannot be changed by passing a different `--contract` to
+`run`. At a clean, verified work-item boundary, the author may approve an
+exact, versioned proposal:
+
+```sh
+pnpm dev job architecture propose --story /path/to/story --job draft-1 \
+  --contract ./revised-scope.json
+pnpm dev job architecture approve --story /path/to/story --job draft-1 \
+  --proposal <digest-from-propose> --reason "Authorizes this precise scope"
+pnpm dev job architecture run --story /path/to/story --job draft-1
+```
+
+A revision reuses already verified architecture only if it meets the new
+contract; otherwise it writes and validates another bounded architecture
+cluster. Approval is explicit CLI author input, not a Pi assertion or a
+validator flag. Test the public interface with
+`pnpm exec tsx --test test/architecture.test.ts`.
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit
