@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { hostname as requireHostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
@@ -113,6 +113,27 @@ test("public CLI commits a reachable causal Event cluster with validated Milesto
   const replay = event();
   assert.equal(replay.status, 0, replay.stderr);
   assert.equal(JSON.parse(replay.stdout).headSha, data.headSha);
+});
+
+test("Event obeys shared job lock and execution pause before writing", { skip: !available }, () => {
+  const x = setup("shared-lock-and-pause");
+  x.prepare();
+  const lock = join(x.job.worktreeRoot, "../.story-job-running");
+  mkdirSync(lock);
+  writeFileSync(join(lock, "owner.json"), JSON.stringify({
+    version: 1, jobId: "draft", pid: process.pid, host: requireHostname(),
+    nonce: "12345678-1234-1234-1234-123456789abc", workItem: "another-writer",
+  }));
+  const blocked = x.event();
+  assert.notEqual(blocked.status, 0);
+  assert.match(blocked.stderr, /already owned/);
+  rmSync(lock, { recursive: true });
+  const paused = x.cli(["author", "control", "--state", "paused"]);
+  assert.equal(paused.status, 0, paused.stderr);
+  const denied = x.event();
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /cannot advance|paused/);
+  assert.equal(existsSync(join(x.job.worktreeRoot, "events/disclose-ledger.md")), false);
 });
 
 test("optional after chronology does not imply a completed prerequisite", { skip: !available }, () => {

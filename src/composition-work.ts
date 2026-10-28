@@ -1,13 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { authorComposition, reviewComposition, type CompositionAssignment,
   type CompositionEvidence, type SemanticReview } from "./composition-specialist.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
+import { verifiedNarrativeSuccessor, verifiedNarrativeChain } from "./job-successor.js";
+import { withStoryJobLock } from "./job-lock.js";
+import { assertPlanContinuity } from "./plan-continuity.js";
+import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -25,8 +29,9 @@ interface Report {
       clueAccess: { status: string } }> }> };
 }
 interface InteractiveReceipt {
-  jobId: string; milestoneId: string; planVersion: number;
-  units: Array<{ id: string; phase: string; commitSha?: string;
+  jobId: string; milestoneId: string; planVersion: number; eventHead?: string;
+  units: Array<{ id: string; phase: string; commitSha?: string; beforeHead?: string;
+    digest?: string; paths?: string[];
     validation?: { choices?: Array<{ id: string; outcomes: Array<{ name: string; event: string; step: string; branch: string }> }>;
       puzzles?: Array<{ id: string; solutions: Array<{ event: string; status: string; clueAccess: string }> }> } }>;
 }
@@ -338,7 +343,7 @@ async function publishHead(job: JobStartResult, before: string, after: string, i
   await save(file, { version: 1, jobId: job.jobId, headSha: after, workItemId: id });
 }
 function verifyCommit(job: JobStartResult, state: Receipt, sha: string) {
-  if (!state.paths || !state.digest || git(job, "rev-parse", sha + "^") !== state.interactiveHead)
+  if (!state.paths || !state.digest || git(job, "rev-parse", sha + "^") !== (state.beforeHead ?? state.interactiveHead))
     throw new Error("Composition commit parent is unverified.");
   const message = git(job, "log", "-1", "--format=%B", sha);
   if (!message.includes("NovelTea-Composition: " + state.digest) ||
@@ -413,10 +418,9 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const root = dirname(job.worktreeRoot);
   const file = join(root, "composition-items", input.milestone.slice(10) + ".json");
-  const lock = join(root, ".story-writing");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("No composition work item receipt.");
-  try { await mkdir(lock); } catch { throw new Error("Story writer lock exists; inspect active or interrupted work."); }
-  try {
+  return withStoryJobLock(job, "composition-" + input.milestone.slice(10), async () => {
+    if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
     const sourceFile = join(root, "interactive-items", input.milestone.slice(10) + ".json");
     if (!existsSync(sourceFile) || !existsSync(join(root, "architecture.json")))
       throw new Error("Composition requires verified interactive Choice/Puzzle work.");
@@ -426,27 +430,52 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     if (source.jobId !== job.jobId || source.milestoneId !== input.milestone ||
         architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
         !architecture.plan || architecture.plan.contract.scope.depth !== "composition" ||
-        source.planVersion !== architecture.plan.version || units?.length !== 2 ||
+        units?.length !== 2 ||
         units.some(u => u.phase !== "committed" || !u.commitSha || !u.validation))
       throw new Error("Composition requires the same authorized and fully committed interactive milestone.");
+    assertPlanContinuity(job, architecture, "interactive:" + input.milestone, source.planVersion);
     const interactiveHead = units[1]!.commitSha!;
-    if (git(job, "rev-parse", interactiveHead + "^") !== units[0]!.commitSha ||
-        !git(job, "log", "-1", "--format=%B", interactiveHead)
-          .includes("NovelTea-Work-Item: " + units[1]!.id + "\n"))
-      throw new Error("Interactive commit chain/provenance differs from work item.");
+    const choiceHead = units[0]!.commitSha!;
+    const choiceBaseline = units[0]!.beforeHead ?? source.eventHead;
+    const puzzleBaseline = units[1]!.beforeHead ?? choiceHead;
+    if (!choiceBaseline) throw new Error("Interactive source Event baseline is not recorded.");
+    for (const [unit, sha, before] of [
+      [units[0]!, choiceHead, choiceBaseline],
+      [units[1]!, interactiveHead, puzzleBaseline],
+    ] as const) {
+      if (git(job, "rev-parse", sha + "^") !== before || !unit.digest || !unit.paths?.length) {
+        throw new Error("Interactive commit chain/provenance differs from work item.");
+      }
+      const lines = git(job, "log", "-1", "--format=%B", sha).split("\n");
+      if (!["NovelTea-Job: " + job.jobId, "NovelTea-Work-Item: " + unit.id,
+        "NovelTea-Plan-Version: " + source.planVersion, "NovelTea-Interactive: " + unit.digest]
+        .every(line => lines.includes(line))) {
+        throw new Error("Interactive commit lacks exact historical specialist provenance.");
+      }
+      const committed = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        .split("\n").filter(Boolean).sort();
+      if (JSON.stringify(committed) !== JSON.stringify(unit.paths.map(p => repoPath(job, p)).sort())) {
+        throw new Error("Interactive specialist commit inventory differs from saved receipt.");
+      }
+    }
+    if (source.eventHead !== choiceBaseline) {
+      await verifiedNarrativeChain(job, source.eventHead!, choiceBaseline);
+    }
+    if (puzzleBaseline !== choiceHead) await verifiedNarrativeChain(job, choiceHead, puzzleBaseline);
     const planDigest = hash(JSON.stringify(architecture.plan));
     let state: Receipt;
     if (existsSync(file)) {
       state = JSON.parse(await readFile(file, "utf8")) as Receipt;
       if (state.version !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha ||
           state.milestoneId !== input.milestone || state.interactiveHead !== interactiveHead ||
-          state.planVersion !== architecture.plan.version || state.planDigest !== planDigest)
+          !state.planVersion || !state.planDigest)
         throw new Error("Composition receipt mismatches verified plan or interactive source.");
+      assertPlanContinuity(job, architecture, "composition:" + input.milestone,
+        state.planVersion, state.planDigest);
     } else {
       if (input.action !== "run") throw new Error("No composition receipt.");
-      if (changes(job).length || git(job, "rev-parse", "HEAD") !== interactiveHead ||
-          await trustedHead(job) !== interactiveHead)
-        throw new Error("Composition requires a clean, verified interactive HEAD.");
+      if (changes(job).length) throw new Error("Composition requires a clean verified worktree.");
+      await verifiedNarrativeSuccessor(job, interactiveHead);
       state = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         milestoneId: input.milestone, workItemId: "composition-" + input.milestone.slice(10),
         planVersion: architecture.plan.version, planDigest, interactiveHead,
@@ -479,14 +508,15 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       input.validatorSource ?? input.skillsSource ?? config.novelteaSkills, { ...job, baseSha: base });
     const Channels = Annotation.Root({ receipt: Annotation<Receipt>() });
     async function execute(s: Receipt) {
-      const base = s.interactiveHead;
+      const base = s.beforeHead ?? (s.phase === "pending"
+        ? await verifiedNarrativeSuccessor(job, s.interactiveHead) : s.interactiveHead);
       if (s.beforeHead && s.beforeHead !== base) throw new Error("Composition authority head changed.");
       if (s.phase === "committed") {
         if (!s.commitSha) throw new Error("Missing composition commit.");
         verifyCommit(job, s, s.commitSha);
-        if (changes(job).length || git(job, "rev-parse", "HEAD") !== s.commitSha)
-          throw new Error("Composition commit chain or worktree diverged.");
-        await publishHead(job, base, s.commitSha, s.workItemId);
+        if (changes(job).length) throw new Error("Composition committed worktree is dirty.");
+        if (git(job, "rev-parse", "HEAD") !== s.commitSha) await verifiedNarrativeSuccessor(job, s.commitSha);
+        else await publishHead(job, base, s.commitSha, s.workItemId);
         return;
       }
       if (s.phase === "writing")
@@ -604,6 +634,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         await execute(receipt); return { receipt };
       }).addEdge(START, "compose_and_review").addEdge("compose_and_review", END).compile();
     const result = await graph.invoke({ receipt: state });
-    return output(job, result.receipt);
-  } finally { await rmdir(lock).catch(() => undefined); }
+    const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    return { ...output(job, result.receipt), authorUpdates };
+  });
 }

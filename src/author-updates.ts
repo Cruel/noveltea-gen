@@ -7,7 +7,7 @@ import { Annotation, Command, END, START, StateGraph, interrupt } from "@langcha
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { captureIdeaUnderJobLock } from "./ideas.js";
+import { captureIdeaUnderJobLock, reconcileCapturedIdeaUnderJobLock } from "./ideas.js";
 import { runArchitectureJob } from "./architecture.js";
 import { runRevisionAction } from "./revision.js";
 import { verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
@@ -33,7 +33,7 @@ interface ResumeDecision { type: "decision"; messageId: string; signedEvidence: 
 type Resume = ResumeAnswer | ResumeDecision;
 export interface AuthorAction {
   story: string; job: string; action: "send" | "inspect" | "process" | "resume" | "control" | "plan";
-  file?: string; id?: string; state?: Control; limit?: number;
+  file?: string; id?: string; state?: Control; limit?: number; carryForward?: string[];
 }
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -204,11 +204,11 @@ async function validateApprovalRequest(job: JobStartResult, payload: Record<stri
     const file = snapshotFile(job, "architecture");
     if (!existsSync(file)) throw new Error("Approval request has no existing architecture plan proposal.");
     const receipt = await loadJson(file) as {
-      jobId?: string; phase?: string; expectedHead?: string; proposal?: { digest?: string };
+      jobId?: string; phase?: string; expectedHead?: string; proposal?: { digest?: string; baselineHead?: string };
     };
     if (receipt.jobId !== job.jobId || receipt.proposal?.digest !== payload.proposalSha256 ||
         !["ready", "committed"].includes(receipt.phase ?? "") ||
-        receipt.expectedHead !== git(job, "rev-parse", "HEAD")) {
+        (receipt.proposal?.baselineHead ?? receipt.expectedHead) !== git(job, "rev-parse", "HEAD")) {
       throw new Error("Approval request is not bound to a current exact versioned plan proposal.");
     }
     return;
@@ -338,11 +338,27 @@ async function openGraph(job: JobStartResult) {
       if (receipt.phase === "awaiting-author") return { phase: receipt.phase, result: receipt.result };
       const pinned = await readPinned(job);
       if (!matchesPinned(pinned, state.pinned)) {
+        // A crash may occur after an exact idea capture's verified commit but
+        // before its author-message acknowledgement or graph checkpoint.
+        // Only that same persisted capture may reconcile the changed HEAD.
+        if (message.kind === "idea") {
+          const captured = await reconcileCapturedIdeaUnderJobLock(job, message.payload, state.pinned.headSha);
+          if (captured) {
+            const acknowledged = { ...receipt, phase: "applied" as const, result: captured, pinned: state.pinned };
+            await saveReceipt(job, acknowledged);
+            return { phase: acknowledged.phase, result: captured, pinned: state.pinned };
+          }
+        }
         throw new Error("Story plan, original Pi sessions, or Git HEAD changed before processing an author message.");
       }
       let result: unknown; let phase: Phase;
       if (message.kind === "idea") {
         result = await captureIdeaUnderJobLock(job, message.payload);
+        // Test-only crash point: the Git commit and capture receipt are durable,
+        // but neither this node nor the message acknowledgement has published.
+        if (process.env.NT_TEST_AUTHOR_CRASH_AFTER_CAPTURE === "1") {
+          throw new Error("Injected crash after verified author idea capture.");
+        }
         phase = "applied";
       } else if (message.kind === "change") {
         result = await evaluateChange(job, message.payload as Record<string, unknown>);
@@ -409,28 +425,76 @@ async function processOne(job: JobStartResult, message: Message, response?: Resu
     const cfg = config(job, message.id);
     const snapshot = await graph.getState(cfg);
     const next = snapshot.next.map(String);
-    if (next.length && (next.length !== 1 || next[0] !== "await_author")) {
+    if (next.length && (next.length !== 1 ||
+        !["await_author", "process_author_updates"].includes(next[0]!))) {
       throw new Error("Unexpected saved author-update graph transition.");
     }
     if (response && next[0] !== "await_author") {
       throw new Error("This author update has no active LangGraph approval/question interrupt.");
     }
-    if (!response && next.length) {
-      return before.phase === "awaiting-author" ? before :
-        { ...before, phase: "awaiting-author" as const, result: snapshot.values.result };
+    if (snapshot.values.messageId && (snapshot.values.messageId !== message.id ||
+        snapshot.values.kind !== message.kind)) {
+      throw new Error("Persisted update checkpoint belongs to another author message.");
+    }
+    if (!response && next[0] === "await_author") {
+      if (!matchesPinned(await readPinned(job), snapshot.values.pinned)) {
+        throw new Error("Pending author interrupt is bound to changed source/plan state.");
+      }
+      const waiting = { ...before, phase: "awaiting-author" as const,
+        result: snapshot.values.result, pinned: snapshot.values.pinned };
+      await saveReceipt(job, waiting);
+      return waiting;
+    }
+    if (!response && !next.length && snapshot.values.messageId) {
+      // Node effects may have been durable before the acknowledgement write.
+      // Reconcile only an exact existing capture or a checkpoint with unchanged
+      // pinned source; never silently rerun a protected approval.
+      const savedPhase = snapshot.values.phase;
+      const pinned = snapshot.values.pinned;
+      if (savedPhase === "applied" && message.kind === "idea") {
+        const captured = await reconcileCapturedIdeaUnderJobLock(job, message.payload, pinned.headSha);
+        if (!captured) throw new Error("Completed idea graph lacks verified capture evidence.");
+        const recovered = { ...before, phase: "applied" as const, result: captured, pinned };
+        await saveReceipt(job, recovered);
+        return recovered;
+      }
+      if (savedPhase === "review-required" && message.kind === "change" &&
+          matchesPinned(await readPinned(job), pinned)) {
+        const result = await evaluateChange(job, message.payload as Record<string, unknown>);
+        if (stable(result) !== stable(snapshot.values.result)) {
+          throw new Error("Completed impact review cannot be reconciled to the saved result.");
+        }
+        const recovered = { ...before, phase: "review-required" as const, result, pinned };
+        await saveReceipt(job, recovered);
+        return recovered;
+      }
+      if (savedPhase === "applied" && message.kind === "question" &&
+          matchesPinned(await readPinned(job), pinned)) {
+        const recovered = { ...before, phase: "applied" as const, result: snapshot.values.result, pinned };
+        await saveReceipt(job, recovered);
+        return recovered;
+      }
+      if (savedPhase === "applied" && message.kind === "approval") {
+        const signedFile = join(root(job), "signed", message.id + ".json");
+        if (existsSync(signedFile)) {
+          const signed = verifyAuthorEvidence(job, await loadJson(signedFile));
+          checkApprovalBinding(job, message, signed, pinned.headSha);
+          const previous = await previousApproval(job, signed);
+          if (previous) {
+            if (signed.payload.kind === "plan") await resolveChangedScope(job, signed.payload.proposalSha256);
+            const recovered = { ...before, phase: "applied" as const, result: previous, pinned };
+            await saveReceipt(job, recovered);
+            return recovered;
+          }
+        }
+      }
+      throw new Error("Completed author graph lacks recoverable durable acknowledgement.");
     }
     let input: typeof Channels.State | Command;
     if (response) input = new Command({ resume: response });
     else if (snapshot.values.messageId) {
-      if (snapshot.values.messageId !== message.id || snapshot.values.kind !== message.kind) {
-        throw new Error("Persisted update checkpoint belongs to another author message.");
-      }
-      // A completed graph implies an earlier receipt publication. Never
-      // restart a completed checkpoint with changed source material.
-      if (!next.length) {
-        if (before.phase === "queued") throw new Error("Completed author graph lacks its durable acknowledgement.");
-        return before;
-      }
+      // Continue the exact pending graph node, not a new message. A previously
+      // committed side effect is reconciled inside process_author_updates.
       input = null as unknown as typeof Channels.State;
     } else {
       input = { messageId: message.id, kind: message.kind, pinned: await readPinned(job),
@@ -487,8 +551,11 @@ export async function processAuthorUpdatesAtBoundary(job: JobStartResult) {
     "Story job cannot advance: queued author update requires action: " + result.blockers.join(", "));
   return result;
 }
-export async function runAuthorAction(options: AuthorAction) {
+export async function runAuthorAction(options: AuthorAction): Promise<unknown> {
   const job = await startStoryJob({ story: options.story, job: options.job }, false);
+  if (options.action !== "plan" && options.carryForward !== undefined) {
+    throw new Error("Only author plan accepts a carry-forward impact review.");
+  }
   if (options.action === "send") {
     if (!options.file || options.state) throw new Error("Send requires --file <message.json>.");
     const current = await control(job);
@@ -525,6 +592,7 @@ export async function runAuthorAction(options: AuthorAction) {
       const contract: unknown = await loadJson(options.file);
       const proposal = await runArchitectureJob({
         story: job.storyRoot, job: job.jobId, action: "propose", contract,
+        carryForward: options.carryForward,
       }, true);
       const revised = { ...receipt, result: { ...(receipt.result as object),
         proposal, next: "signed-plan-approval-required" } };

@@ -426,6 +426,23 @@ async function load(job: JobStartResult) {
   }
   return ideas.sort((a, b) => a.id.localeCompare(b.id));
 }
+/**
+ * Reconcile only a pre-existing capture whose immutable input and predecessor
+ * match the interrupted author-update node. Never start a new capture here.
+ * Caller MUST hold the shared job lock.
+ */
+export async function reconcileCapturedIdeaUnderJobLock(job: JobStartResult, payload: unknown, priorHead: string) {
+  const input = validate(payload);
+  const { id, digest } = captureIdentity(input);
+  const file = receiptFile(job, id);
+  if (!existsSync(file)) return null;
+  const receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  checkReceipt(job, receipt, id, digest);
+  if (receipt.priorHead !== priorHead) throw new Error("Interrupted idea capture is bound to another Git predecessor.");
+  const result = await capture(job, input);
+  if (result.commitSha === priorHead) throw new Error("Interrupted idea capture did not advance the verified HEAD.");
+  return result;
+}
 /** Caller MUST own the shared Story job lock. Used by the author-update graph
  * at a safe boundary; never invoke this directly from message submission. */
 export async function captureIdeaUnderJobLock(job: JobStartResult, payload: unknown) {

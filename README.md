@@ -553,10 +553,50 @@ same saved thread using `Command(resume)`, without restarting Pi sessions
 or regenerating canonical Markdown. A crash after Git capture or signature
 application is reconciled against its durable receipt and Git/signature
 provenance. Generation also checks pending messages **before starting**
-a safe foundation/architecture/Character-World work unit and **after**
-a completed work-unit graph. The resulting `authorUpdates` field reports
+a safe foundation, architecture, Character/World, Event, Interactive or
+Composition work unit and **after** completed work-unit graphs. Interactive
+Choice and Puzzle are distinct safe boundaries. All these writers share
+the same per-job lock; a paused or approval-blocked job cannot start its
+next specialist. The resulting `authorUpdates` field reports
 any queued/applied work or outstanding approval without rewriting the
-completed work's commit. There is no external polling daemon: a new
+completed work's commit. Event-to-Interactive and Interactive-to-Composition
+continuations accept an intervening verified, independently recorded deferred
+idea capture. The new writer starts from its actual verified HEAD while
+retaining the source specialist's historical commit; intervening changes to
+canonical narrative premises require separate impact review. Signed plan
+proposals likewise bind the current verified HEAD without changing historical
+architecture provenance. Puzzle's saved `beforeHead` also permits an exact
+verified idea capture **between Choice and Puzzle**, with both commits
+independently checked before Composition.
+
+After an approved scope replan, previously committed specialists retain their
+historical plan version. They are **not silently upgraded**: an author who has
+reviewed unaffected work must explicitly include its work-item IDs in the
+next signed plan proposal. For example, place
+`["foundations", "event:milestone.disclosure"]` in `unaffected.json` and run:
+
+```sh
+pnpm dev job architecture propose --story /repo/story --job draft-1 \
+  --contract revised-scope.json --carry-forward unaffected.json
+```
+
+`job author plan` also accepts `--carry-forward unaffected.json` for a
+pending direct-change impact review. The proposal digest and Ed25519 signature
+bind this exact list, previous plan, new contract and verified HEAD. Every
+listed work item must have a committed receipt on that branch, and a downstream
+item requires its upstream dependencies (e.g., an Event requires foundations;
+Interactive requires its Event and foundations). The code verifies the
+historical commit provenance, retains original receipt versions and only
+allows *new* specialists under the revised plan. Approval cannot be inferred
+from validation or a version number alone.
+
+Omitted or impacted work remains **blocked**, with an explicit carry-forward
+error rather than an automatic rewrite. The author can review and sign a
+subsequent plan re-evaluation that names still-valid work, even if a previous
+replan did not carry it forward. Work that genuinely requires new canon must
+instead undergo independently authorized revision and work-item replanning;
+the system does not automatically replay previously committed Pi specialists
+over existing canonical files. There is no external polling daemon: a new
 `job author process` or a subsequent safe job invocation drives the
 next boundary.
 

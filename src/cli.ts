@@ -261,6 +261,31 @@ function parseArgs(argv: string[]): CliOptions | null {
   return options;
 }
 
+function disableJobCloudTracing() {
+  process.env.LANGSMITH_TRACING = "false";
+  process.env.LANGCHAIN_TRACING_V2 = "false";
+  process.env.TRACE_TO_LANGSMITH = "false";
+}
+
+/** Shared strict parser for the individual job subcommands. */
+function parseJobOptions(
+  args: string[], command: string, options: readonly string[],
+  booleans: readonly string[] = [], missingPrefix = "Missing " + command + " option value: ",
+) {
+  const allowed = new Set(options);
+  const flags = new Set(booleans);
+  const values = new Map<string, string>();
+  while (args.length) {
+    const flag = args.shift()!;
+    if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate " + command + " option: " + flag);
+    if (flags.has(flag)) { values.set(flag, "true"); continue; }
+    const value = args.shift();
+    if (!value?.trim() || value.startsWith("--")) throw new Error(missingPrefix + flag);
+    values.set(flag, value);
+  }
+  return values;
+}
+
 async function main(): Promise<void> {
   if (process.argv[2] === "job" && process.argv[3] === "author") {
     const args = process.argv.slice(4);
@@ -269,15 +294,7 @@ async function main(): Promise<void> {
     if (!["send", "inspect", "process", "resume", "control", "plan"].includes(action ?? "")) {
       throw new Error("Expected job author send|inspect|process|resume|control|plan.");
     }
-    const allowed = new Set(["--story", "--job", "--file", "--id", "--state", "--limit"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate author option: " + flag);
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing author option value: " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "author", ["--story", "--job", "--file", "--id", "--state", "--limit", "--carry-forward"]);
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job author requires --story and --job.");
     const state = values.get("--state");
@@ -288,11 +305,15 @@ async function main(): Promise<void> {
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)) {
       throw new Error("--limit must be an integer from 1 to 1000.");
     }
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const { runAuthorAction } = await import("./author-updates.js");
-    const result = await runAuthorAction({ story, job, action: action as "send" | "inspect" | "process" | "resume" | "control" | "plan",
+    let carryForward: string[] | undefined;
+    if (values.has("--carry-forward")) {
+      const { readFile } = await import("node:fs/promises");
+      const { parseCarryForward } = await import("./plan-continuity.js");
+      carryForward = parseCarryForward(JSON.parse(await readFile(values.get("--carry-forward")!, "utf8")));
+    }
+    const result = await runAuthorAction({ story, job, carryForward, action: action as "send" | "inspect" | "process" | "resume" | "control" | "plan",
       file: values.get("--file"), id: values.get("--id"), state: state as "running" | "paused" | "cancelled" | "completed" | undefined,
       limit });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
@@ -305,20 +326,10 @@ async function main(): Promise<void> {
     if (!["capture", "inspect", "eligibility", "context", "placement-context"].includes(action ?? "")) {
       throw new Error("Expected job ideas capture|inspect|eligibility|context|placement-context.");
     }
-    const allowed = new Set(["--story", "--job", "--file", "--target"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate ideas option: " + flag);
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing ideas option value: " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "ideas", ["--story", "--job", "--file", "--target"]);
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job ideas requires --story and --job.");
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const { runIdeas } = await import("./ideas.js");
     const result = await runIdeas({ story, job,
       action: action as "capture" | "inspect" | "eligibility" | "context" | "placement-context",
@@ -331,24 +342,13 @@ async function main(): Promise<void> {
     const action = args.shift();
     if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
     if (action !== "run" && action !== "inspect") throw new Error("Expected job composition run|inspect.");
-    const allowed = new Set(["--story", "--job", "--milestone", "--skills-source",
-      "--validator-source", "--provider", "--model", "--thinking", "--fixture"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate composition option: " + flag);
-      if (flag === "--fixture") { values.set(flag, "true"); continue; }
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing composition option value: " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "composition", ["--story", "--job", "--milestone", "--skills-source",
+      "--validator-source", "--provider", "--model", "--thinking", "--fixture"], ["--fixture"]);
     const story = values.get("--story"), job = values.get("--job"), milestone = values.get("--milestone");
     if (!story || !job || !milestone) throw new Error("job composition requires --story, --job and --milestone.");
     if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!))
       throw new Error("Composition --thinking supports low or high.");
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const { runCompositionWorkItem } = await import("./composition-work.js");
     const result = await runCompositionWorkItem({
       story, job, milestone, action, skillsSource: values.get("--skills-source"),
@@ -364,23 +364,12 @@ async function main(): Promise<void> {
     const action = args.shift();
     if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
     if (action !== "run" && action !== "inspect") throw new Error("Expected job interactive run|inspect.");
-    const allowed = new Set(["--story", "--job", "--milestone", "--skills-source",
-      "--validator-source", "--provider", "--model", "--thinking", "--fixture"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate interactive option: " + flag);
-      if (flag === "--fixture") { values.set(flag, "true"); continue; }
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing interactive option value: " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "interactive", ["--story", "--job", "--milestone", "--skills-source",
+      "--validator-source", "--provider", "--model", "--thinking", "--fixture"], ["--fixture"]);
     const story = values.get("--story"), job = values.get("--job"), milestone = values.get("--milestone");
     if (!story || !job || !milestone) throw new Error("job interactive requires --story, --job and --milestone.");
     if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!)) throw new Error("Interactive --thinking supports low or high.");
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const { runInteractiveWorkItem } = await import("./interactive-work.js");
     const result = await runInteractiveWorkItem({
       story, job, milestone, action, skillsSource: values.get("--skills-source"),
@@ -396,22 +385,11 @@ async function main(): Promise<void> {
     const action = args.shift();
     if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
     if (action !== "run" && action !== "inspect") throw new Error("Expected job event run|inspect.");
-    const allowed = new Set(["--story", "--job", "--milestone", "--skills-source",
-      "--validator-source", "--provider", "--model", "--fixture"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate Event option: " + flag);
-      if (flag === "--fixture") { values.set(flag, "true"); continue; }
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing Event option value: " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "Event", ["--story", "--job", "--milestone", "--skills-source",
+      "--validator-source", "--provider", "--model", "--fixture"], ["--fixture"]);
     const story = values.get("--story"), job = values.get("--job"), milestone = values.get("--milestone");
     if (!story || !job || !milestone) throw new Error("job event requires --story, --job and --milestone.");
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const { runEventWorkItem } = await import("./event-work.js");
     const result = await runEventWorkItem({ story, job, milestone, action,
       skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
@@ -425,22 +403,12 @@ async function main(): Promise<void> {
     const action = args.shift();
     if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
     if (!["run", "inspect", "reconcile"].includes(action ?? "")) throw new Error("Expected job foundations run|inspect|reconcile.");
-    const allowed = new Set(["--story", "--job", "--skills-source", "--validator-source", "--provider", "--model", "--fixture", "--digest"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate foundations option: " + flag);
-      if (flag === "--fixture") { values.set(flag, "true"); continue; }
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing foundations option value: " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "foundations", ["--story", "--job", "--skills-source",
+      "--validator-source", "--provider", "--model", "--fixture", "--digest"], ["--fixture"]);
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job foundations requires --story and --job.");
     if (action === "reconcile" && !values.has("--digest")) throw new Error("Foundations reconcile requires --digest.");
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const { runCharacterWorldJob } = await import("./character-world.js");
     const result = await runCharacterWorldJob({ story, job, action: action as "run" | "inspect" | "reconcile",
       recoveryDigest: values.get("--digest"), skillsSource: values.get("--skills-source"),
@@ -459,22 +427,17 @@ async function main(): Promise<void> {
     if (!["run", "inspect", "propose", "approve", "reconcile"].includes(action ?? "")) {
       throw new Error("Expected job architecture run|inspect|propose|approve|reconcile.");
     }
-    const allowed = new Set(["--story", "--job", "--contract", "--mode", "--proposal", "--digest", "--signed-evidence",
-      "--skills-source", "--validator-source", "--provider", "--model", "--fixture"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate architecture option: " + flag);
-      if (flag === "--fixture") { values.set(flag, "true"); continue; }
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing value for architecture option " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "architecture", ["--story", "--job", "--contract", "--mode",
+      "--proposal", "--digest", "--signed-evidence", "--carry-forward", "--skills-source", "--validator-source",
+      "--provider", "--model", "--fixture"], ["--fixture"], "Missing value for architecture option ");
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job architecture requires --story and --job.");
     const mode = values.get("--mode");
     if (mode && mode !== "autonomous" && mode !== "collaborative") throw new Error("Architecture mode must be autonomous or collaborative.");
     if (action === "propose" && !values.has("--contract")) throw new Error("Architecture propose requires --contract.");
+    if (action !== "propose" && values.has("--carry-forward")) {
+      throw new Error("Only architecture propose accepts --carry-forward.");
+    }
     if (action === "approve" && (!values.has("--proposal") || !values.has("--signed-evidence"))) {
       throw new Error("Architecture approve requires --proposal and --signed-evidence.");
     }
@@ -482,18 +445,23 @@ async function main(): Promise<void> {
     if (action === "reconcile" && (!values.has("--digest") || values.has("--contract"))) {
       throw new Error("Architecture reconcile requires --digest and does not accept --contract.");
     }
+    let carryForward: string[] | undefined;
+    if (values.has("--carry-forward")) {
+      const { readFile } = await import("node:fs/promises");
+      const value: unknown = JSON.parse(await readFile(values.get("--carry-forward")!, "utf8"));
+      const { parseCarryForward } = await import("./plan-continuity.js");
+      carryForward = parseCarryForward(value);
+    }
     let contract: unknown;
     if (values.has("--contract")) {
       const { readFile } = await import("node:fs/promises");
       contract = JSON.parse(await readFile(values.get("--contract")!, "utf8"));
     }
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const { runArchitectureJob } = await import("./architecture.js");
     const result = await runArchitectureJob({
       story, job, action: action as "run" | "inspect" | "propose" | "approve" | "reconcile",
-      contract, mode: mode as "autonomous" | "collaborative" | undefined,
+      contract, carryForward, mode: mode as "autonomous" | "collaborative" | undefined,
       proposal: values.get("--proposal"), signedEvidence: values.get("--signed-evidence"),
       recoveryDigest: values.get("--digest"),
       skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
@@ -513,21 +481,11 @@ async function main(): Promise<void> {
     if (!["inspect", "authorize", "review", "commit", "status"].includes(action ?? "")) {
       throw new Error("Expected job revision inspect|authorize|review|commit|status.");
     }
-    const allowed = new Set(["--story", "--job", "--work-item", "--path", "--proposal",
-      "--signed-evidence", "--validator-source"]);
-    const values = new Map<string, string>();
-    while (args.length) {
-      const flag = args.shift()!;
-      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate revision option: " + flag);
-      const value = args.shift();
-      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing value for revision option " + flag);
-      values.set(flag, value);
-    }
+    const values = parseJobOptions(args, "revision", ["--story", "--job", "--work-item",
+      "--path", "--proposal", "--signed-evidence", "--validator-source"], [], "Missing value for revision option ");
     const story = values.get("--story"), job = values.get("--job"), workItem = values.get("--work-item");
     if (!story || !job || !workItem) throw new Error("job revision requires --story, --job and --work-item.");
-    process.env.LANGSMITH_TRACING = "false";
-    process.env.LANGCHAIN_TRACING_V2 = "false";
-    process.env.TRACE_TO_LANGSMITH = "false";
+    disableJobCloudTracing();
     const result = await runRevisionAction({
       story, job, workItem, action: action as "inspect" | "authorize" | "review" | "commit" | "status",
       path: values.get("--path"), proposal: values.get("--proposal"),

@@ -122,6 +122,15 @@ returns a precise `proposal.digest` and `authorSigningRequest` with
 baseline/thread ID, the latest verified HEAD, `planVersion` and the exact
 `proposalSha256`. The proposal digest binds the previous plan, verified
 HEAD and complete proposed contract, including its production constraints.
+For a replan after specialist commits, optionally add `--carry-forward
+/path/to/unaffected.json` to `architecture propose` (or `author plan`).
+The JSON array names exact reviewed, unaffected work units, for example
+`["foundations", "event:milestone.disclosure"]`. The array is part of the
+proposal digest and therefore the signed authorization. Missing work,
+unverified provenance and omitted upstream dependencies are rejected;
+omitting the option leaves older downstream receipts blocked rather than
+implicitly approving their reuse. Later signed proposals may explicitly
+reconcile previously blocked historical work after a fresh impact review.
 
 Before signing, review **the entire old and proposed scope**, including any
 removed targets, branches, constraints and production limits. Set `reason`

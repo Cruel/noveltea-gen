@@ -1,13 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
 import { authorEventCluster, type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
+import { withStoryJobLock } from "./job-lock.js";
+import { assertPlanContinuity } from "./plan-continuity.js";
+import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -352,23 +355,23 @@ export async function runEventWorkItem(input: EventOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const root = dirname(job.worktreeRoot);
   const receiptFile = join(root, "event-items", input.milestone.slice(10) + ".json");
-  const lock = join(root, ".story-writing");
   if (input.action === "inspect" && !existsSync(receiptFile)) throw new Error("No Event work item receipt to inspect.");
-  try { await mkdir(lock); } catch { throw new Error("Story writer is active or interrupted; inspect lock and worktree."); }
-  try {
+  return withStoryJobLock(job, "event-" + input.milestone.slice(10), async () => {
+    if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
     if (!existsSync(join(root, "architecture.json")) || !existsSync(join(root, "character-world.json"))) {
       throw new Error("Event design requires committed architecture and Character/World foundations.");
     }
     const arch = JSON.parse(await readFile(join(root, "architecture.json"), "utf8")) as ArchitectureReceipt;
     const foundation = JSON.parse(await readFile(join(root, "character-world.json"), "utf8")) as FoundationsReceipt;
     if (arch.jobId !== job.jobId || arch.phase !== "committed" || !arch.plan ||
-        foundation.jobId !== job.jobId || foundation.planVersion !== arch.plan.version ||
+        foundation.jobId !== job.jobId ||
         foundation.architectureHead !== arch.expectedHead ||
         foundation.units?.length !== 2 || foundation.units[0]?.id !== "world-foundations" ||
         foundation.units[1]?.id !== "character-foundations" ||
         foundation.units.some(u => u.phase !== "committed" || !u.commitSha)) {
       throw new Error("Event work item requires verified current Character/World foundations and architecture.");
     }
+    assertPlanContinuity(job, arch, "foundations", foundation.planVersion);
     if (!git(job, "log", "-1", "--format=%B", foundation.units[1]!.commitSha!)
       .includes("NovelTea-Work-Item: character-foundations")) {
       throw new Error("Character foundation commit does not carry verified work-item provenance.");
@@ -390,10 +393,10 @@ export async function runEventWorkItem(input: EventOptions) {
     if (existsSync(receiptFile)) {
       receipt = JSON.parse(await readFile(receiptFile, "utf8")) as EventReceipt;
       if (receipt.version !== 1 || receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
-          receipt.milestoneId !== input.milestone || receipt.workItemId !== workItemId ||
-          receipt.planVersion !== arch.plan.version || receipt.planDigest !== planDigest) {
+          receipt.milestoneId !== input.milestone || receipt.workItemId !== workItemId) {
         throw new Error("Event receipt is not bound to the authorized Story plan and job identity.");
       }
+      assertPlanContinuity(job, arch, "event:" + input.milestone, receipt.planVersion, receipt.planDigest);
     } else {
       if (input.action !== "run") throw new Error("No Event work item to inspect.");
       const head = await trustedHead(job);
@@ -557,6 +560,7 @@ export async function runEventWorkItem(input: EventOptions) {
       .addEdge("event_specialist", "validate_and_commit_event")
       .addEdge("validate_and_commit_event", END).compile();
     const result = await graph.invoke({ receipt });
-    return output(job, result.receipt);
-  } finally { await rmdir(lock).catch(() => undefined); }
+    const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    return { ...output(job, result.receipt), authorUpdates };
+  });
 }

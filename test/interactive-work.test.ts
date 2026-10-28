@@ -122,6 +122,39 @@ test("reference adventure authors two independently certified Choice/Puzzle comm
   assert.equal(JSON.parse(replay.stdout).headSha, data.headSha);
 });
 
+test("verified deferred capture between Event and Interactive remains independent", { skip: !available }, () => {
+  const x = setup("capture-between-stages");
+  const eventHead = x.prepare();
+  const file = join(root, "deferred-" + x.job.jobId + "-" + Math.random().toString(36).slice(2) + ".json");
+  writeFileSync(file, JSON.stringify({
+    kind: "event-concept", source: { kind: "author-continuation", reference: "note" },
+    original: "The witness recants in a private interview",
+    requirements: { meaning: [{ text: "The recantation changes trust", binding: true }], wording: [], participants: [] },
+    identities: { known: [], unresolved: ["witness"] }, prerequisites: [],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" }, upstreamConstraints: [],
+  }));
+  const capture = x.cli(["ideas", "capture", "--file", file]);
+  assert.equal(capture.status, 0, capture.stderr);
+  const captured = JSON.parse(capture.stdout).commitSha;
+  const result = x.interactive();
+  assert.equal(result.status, 0, result.stderr);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.eventHead, eventHead);
+  assert.equal(data.specialistUnits[0].validation.protectionBase, captured);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", data.specialistUnits[0].commitSha + "^"), captured);
+});
+
+test("paused Interactive job does not begin Choice work", { skip: !available }, () => {
+  const x = setup("paused-interactive");
+  x.prepare();
+  const pause = x.cli(["author", "control", "--state", "paused"]);
+  assert.equal(pause.status, 0, pause.stderr);
+  const run = x.interactive();
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /paused|cannot advance/);
+  assert.equal(existsSync(join(x.job.worktreeStoryRoot, "choice-points/loyalty.md")), false);
+});
+
 test("Choice specialist may author connected player-facing Authored Content", { skip: !available }, () => {
   const x = setup("choice-content");
   x.prepare();

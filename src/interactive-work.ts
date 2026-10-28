@@ -1,12 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { authorInteractive, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
+import { verifiedNarrativeSuccessor, verifiedCompositionSuccessor } from "./job-successor.js";
+import { withStoryJobLock } from "./job-lock.js";
+import { assertPlanContinuity } from "./plan-continuity.js";
+import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -662,10 +666,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const root = dirname(job.worktreeRoot);
   const file = join(root, "interactive-items", input.milestone.slice(10) + ".json");
-  const lock = join(root, ".story-writing");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("No interactive work item receipt.");
-  try { await mkdir(lock); } catch { throw new Error("Story writing lock exists; inspect the active or interrupted writer."); }
-  try {
+  return withStoryJobLock(job, "interactive-" + input.milestone.slice(10), async () => {
+    if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
     if (!existsSync(join(root, "architecture.json")) || !existsSync(join(root, "character-world.json")) ||
         !existsSync(join(root, "event-items", input.milestone.slice(10) + ".json"))) {
       throw new Error("Interactive design requires verified architecture, foundations and Event design for the Milestone.");
@@ -675,9 +678,10 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     if (architecture.jobId !== job.jobId || architecture.phase !== "committed" || !architecture.plan ||
         architecture.plan.contract.scope.depth === "architecture" ||
         event.jobId !== job.jobId || event.phase !== "committed" || event.milestoneId !== input.milestone ||
-        event.planVersion !== architecture.plan.version || !event.commitSha) {
+        !event.commitSha) {
       throw new Error("Interactive work item requires the same authorized, fully committed Event-design Milestone.");
     }
+    assertPlanContinuity(job, architecture, "event:" + input.milestone, event.planVersion);
     if (!git(job, "log", "-1", "--format=%B", event.commitSha)
       .includes("NovelTea-Work-Item: " + event.workItemId + "\n")) {
       throw new Error("Source Event-design commit does not match its verified work-item provenance.");
@@ -689,17 +693,17 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     if (existsSync(file)) {
       receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
       if (receipt.version !== 1 || receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
-          receipt.milestoneId !== input.milestone || receipt.planVersion !== architecture.plan.version ||
-          receipt.planDigest !== planDigest || receipt.eventHead !== event.commitSha ||
+          receipt.milestoneId !== input.milestone || receipt.eventHead !== event.commitSha ||
           receipt.units?.length !== 2 || receipt.units[0]?.domain !== "choice" ||
           receipt.units[1]?.domain !== "puzzle") {
         throw new Error("Interactive receipt differs from the verified Story plan and Event foundation.");
       }
+      assertPlanContinuity(job, architecture, "interactive:" + input.milestone,
+        receipt.planVersion, receipt.planDigest);
     } else {
       if (input.action !== "run") throw new Error("No saved interactive work item.");
-      if (dirty(job).length || await trustedHead(job) !== event.commitSha || git(job, "rev-parse", "HEAD") !== event.commitSha) {
-        throw new Error("Start interactive design at the clean verified Event work-item head.");
-      }
+      if (dirty(job).length) throw new Error("Interactive design requires a clean verified Story worktree.");
+      await verifiedNarrativeSuccessor(job, event.commitSha);
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         workItemId: "interactive-" + input.milestone.slice(10),
         milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
@@ -742,7 +746,10 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       .addEdge("puzzle_design", END).compile();
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
-      const before = index ? state.units[0]!.commitSha : state.eventHead;
+      if (unit.phase === "pending") await processAuthorUpdatesAtBoundary(job);
+      const sourceHead = index ? state.units[0]!.commitSha : state.eventHead;
+      const before = unit.beforeHead ?? (unit.phase === "pending" && sourceHead
+        ? await verifiedNarrativeSuccessor(job, sourceHead) : sourceHead);
       if (!before) throw new Error("Puzzle specialist is blocked until the Choice work item is committed.");
       if (unit.beforeHead && unit.beforeHead !== before) throw new Error("Interactive unit authority head changed.");
       if (unit.phase === "committed") {
@@ -750,8 +757,16 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         verifyCommit(job, state, unit, before, unit.commitSha);
         const current = git(job, "rev-parse", "HEAD");
         const expected = index ? unit.commitSha : state.units[1]!.commitSha ?? unit.commitSha;
-        if (current !== expected || dirty(job).length) {
-          throw new Error("Interactive branch/working tree differs from its verified commit chain.");
+        if (dirty(job).length) throw new Error("Interactive committed Story worktree is dirty.");
+        if (current !== expected) {
+          try {
+            await verifiedNarrativeSuccessor(job, expected);
+          } catch (error) {
+            // A fully committed Interactive slice may now have separately
+            // verified Composition as its successor, without replaying Choice/Puzzle.
+            if (!state.units.every(saved => saved.phase === "committed")) throw error;
+            await verifiedCompositionSuccessor(job, state.milestoneId, state.units[1]!.commitSha!);
+          }
         }
         if (current === unit.commitSha) await publishHead(job, before, unit.commitSha, unit.id);
         return;
@@ -866,6 +881,14 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         delete unit.failure;
         await persist(file, state);
         await publishHead(job, before, sha, unit.id);
+        // Deterministic fixture seam: model an author message received while
+        // Choice was running, before the Puzzle boundary drains it.
+        if (state.worker === "fixture" && index === 0 &&
+            process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE) {
+          const { runAuthorAction } = await import("./author-updates.js");
+          await runAuthorAction({ story: job.storyRoot, job: job.jobId,
+            action: "send", file: process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE });
+        }
       } catch (error) {
         unit.failure = String(error);
         await persist(file, state);
@@ -873,6 +896,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       }
     }
     const result = await graph.invoke({ receipt });
-    return output(job, result.receipt);
-  } finally { await rmdir(lock).catch(() => undefined); }
+    const authorUpdates = await processAuthorUpdatesAfterWork(job);
+    return { ...output(job, result.receipt), authorUpdates };
+  });
 }

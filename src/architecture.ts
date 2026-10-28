@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { parseCarryForward, verifyCarryForwardCandidates } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { loadSkillConfig } from "./skills.js";
@@ -43,6 +44,8 @@ interface Receipt {
   jobId: string;
   baseSha: string;
   expectedHead: string;
+  /** Current verified work boundary after an approved downstream replan. */
+  executionHead?: string;
   /** Saved worktree and thread identities cannot be silently repointed. */
   branch?: string;
   worktreeRoot?: string;
@@ -54,8 +57,8 @@ interface Receipt {
   snapshot?: SkillSnapshot;
   plan?: Plan;
   history: Array<{ plan: Plan; proposal: string; approvedContract: CompletionContract;
-    verifiedHead: string; reason: string; source: "author-ed25519"; signed: SignedAuthorEvidence }>;
-  proposal?: { digest: string; contract: CompletionContract; version: number };
+    verifiedHead: string; carryForward?: string[]; reason: string; source: "author-ed25519"; signed: SignedAuthorEvidence }>;
+  proposal?: { digest: string; contract: CompletionContract; version: number; baselineHead?: string; carryForward?: string[] };
   manuallyReconciled?: { paths: string[]; digest: string };
   phase: "awaiting-author" | "ready" | "writing" | "authored" | "committed";
   paths?: string[];
@@ -78,7 +81,7 @@ export interface ArchitectureOptions {
   story: string; job: string; action: "run" | "inspect" | "propose" | "approve" | "reconcile";
   contract?: unknown; mode?: "autonomous" | "collaborative";
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
-  proposal?: string; signedEvidence?: string; recoveryDigest?: string;
+  proposal?: string; signedEvidence?: string; recoveryDigest?: string; carryForward?: string[];
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -121,6 +124,7 @@ function verifyPlanHistory(job: JobStartResult, state: Receipt) {
         payload.planVersion !== entry.plan.version + 1 ||
         entry.proposal !== hash(JSON.stringify({
           plan: entry.plan, head: entry.verifiedHead, contract: entry.approvedContract,
+          ...(entry.carryForward !== undefined ? { carryForward: parseCarryForward(entry.carryForward) } : {}),
         })) ||
         (i > 0 && (entry.plan.version !== state.history[i - 1]!.plan.version + 1 ||
           JSON.stringify(entry.plan.contract) !== JSON.stringify(state.history[i - 1]!.approvedContract)))) {
@@ -213,6 +217,7 @@ type Reconciliation = {
 /** Reconcile the receipt with Git, not merely with the last graph node. */
 async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconciliation> {
   const actualHead = git(job, "rev-parse", "HEAD").trim();
+  const workingHead = state.executionHead ?? state.expectedHead;
   const changes = dirty(job);
   const blocked = (reason: string): Reconciliation =>
     ({ status: "blocked", actualHead, changes, reason });
@@ -223,7 +228,7 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
     }
     if (state.phase === "writing") {
       const result = blocked("Interrupted architecture writer: review the preserved files; use job architecture reconcile with the exact candidate digest to accept them without replaying the writer.");
-      if (actualHead === state.expectedHead) {
+      if (actualHead === workingHead) {
         try {
           const paths = await changedPaths(job);
           result.candidate = { paths, digest: await contentDigest(job, paths) };
@@ -242,7 +247,7 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
            JSON.stringify(state.manuallyReconciled.paths) !== JSON.stringify(paths))) {
         return blocked("Manually reviewed recovery differs from the persisted authored inventory.");
       }
-      if (actualHead === state.expectedHead) {
+      if (actualHead === workingHead) {
         if (JSON.stringify(await changedPaths(job)) !== JSON.stringify(paths) ||
             await contentDigest(job, paths) !== state.contentDigest) {
           return blocked("Uncommitted architecture changes differ from the recorded authored work item. Preserve edits and reconcile manually.");
@@ -251,7 +256,7 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
       }
       if (changes.length) return blocked("Uncommitted or staged changes accompany an interrupted commit. Inspect before continuing.");
       const parents = git(job, "rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ");
-      if (parents.length !== 2 || parents[1] !== state.expectedHead) {
+      if (parents.length !== 2 || parents[1] !== workingHead) {
         return blocked("Unexpected Git history after work-item crash; expected exactly one child of the verified head.");
       }
       const message = git(job, "log", "-1", "--format=%B");
@@ -281,7 +286,7 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
         return { status: "ready", actualHead, changes };
       }
     }
-    if (actualHead !== state.expectedHead || changes.length) {
+    if (actualHead !== workingHead || changes.length) {
       return blocked("Story job HEAD, staged content or worktree differs from the saved safe boundary; review manual changes.");
     }
     return { status: "ready", actualHead, changes };
@@ -377,7 +382,7 @@ function output(job: JobStartResult, state: Receipt, recovery?: Reconciliation) 
     authorSigningRequest: state.proposal ? {
       version: 1, kind: "plan", jobId: job.jobId, threadId: job.threadId,
       workItemId: "global-architecture", baseSha: job.baseSha,
-      verifiedHead: state.expectedHead, proposalSha256: state.proposal.digest,
+      verifiedHead: state.proposal.baselineHead ?? state.expectedHead, proposalSha256: state.proposal.digest,
       planVersion: state.proposal.version, reason: "(Replace with substantive author rationale)",
     } : undefined,
     completionEvidence: { structuralArchitecture: state.phase === "committed", editorial: "unverified",
@@ -447,25 +452,32 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       throw new Error("Unauthorized scope/contract change. Propose and explicitly approve an exact versioned plan revision.");
     }
     if (input.action === "propose" || input.action === "approve") {
-      assertHead(job, state.expectedHead);
+      const baselineHead = await trustedHead(job);
       if (dirty(job).length || !["ready", "committed"].includes(state.phase)) throw new Error("Replanning requires a clean safe work-item boundary.");
+      const recovery = await reconcile(job, state);
+      if (recovery.status !== "ready") throw new Error("Replanning requires reconciled verified source: " + recovery.reason);
       if (input.action === "propose") {
         const contract = parseContract(input.contract);
-        state.proposal = { contract, version: state.plan!.version + 1,
-          digest: hash(JSON.stringify({ plan: state.plan, head: state.expectedHead, contract })) };
+        const carryForward = input.carryForward === undefined ? undefined : parseCarryForward(input.carryForward);
+        if (carryForward) verifyCarryForwardCandidates(job, state.plan!.version, baselineHead, carryForward);
+        state.proposal = { contract, version: state.plan!.version + 1, baselineHead, carryForward,
+          digest: hash(JSON.stringify({ plan: state.plan, head: baselineHead, contract,
+            ...(carryForward !== undefined ? { carryForward } : {}) })) };
       } else {
         if (!state.proposal || input.proposal !== state.proposal.digest || !input.signedEvidence) {
           throw new Error("Plan approval requires the exact proposal digest and externally signed author evidence.");
         }
         const signed = await readSignedAuthorEvidence(job, input.signedEvidence);
         const payload = signed.payload;
-        if (payload.kind !== "plan" || payload.verifiedHead !== state.expectedHead ||
+        if (payload.kind !== "plan" || payload.verifiedHead !== (state.proposal.baselineHead ?? state.expectedHead) ||
+            baselineHead !== (state.proposal.baselineHead ?? state.expectedHead) ||
             payload.proposalSha256 !== state.proposal.digest ||
             payload.planVersion !== state.proposal.version) {
           throw new Error("Signed plan approval does not match the exact proposed contract, plan version and verified head.");
         }
         state.history.push({ plan: state.plan!, proposal: state.proposal.digest,
-          approvedContract: state.proposal.contract, verifiedHead: state.expectedHead,
+          approvedContract: state.proposal.contract, verifiedHead: baselineHead,
+          carryForward: state.proposal.carryForward,
           reason: payload.reason, source: "author-ed25519", signed });
         const prior = state.plan!;
         state.plan = newPlan(state.proposal.contract, state.proposal.version);
@@ -474,6 +486,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           state.plan.items = prior.items.map(item => ({ ...item, planVersion: state.plan!.version,
             authorization: { ...item.authorization, source: "author-ed25519", planVersion: state.plan!.version } }));
           state.phase = "ready";
+          state.executionHead = baselineHead;
           // A newly approved work boundary must never reuse the previous commit's
           // uncommitted file inventory or content digest.
           delete state.paths;
@@ -523,9 +536,9 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
     const graph = new StateGraph(Channels)
       .addNode("architecture_specialist", async ({ receipt }) => {
         if (receipt.phase === "authored") return {};
-        assertHead(job, receipt.expectedHead);
+        assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         if (dirty(job).length || receipt.phase === "writing") throw new Error("Interrupted architecture edits/session require inspection; never blindly rerun a writer.");
-        const before = reportOf(await validate(source, { ...job, baseSha: receipt.expectedHead }));
+        const before = reportOf(await validate(source, { ...job, baseSha: receipt.executionHead ?? receipt.expectedHead }));
         if (before.readiness.design.stages.foundation?.minimum !== "passed") throw new Error("Architecture requires a canonical ready Creative Direction.");
         // Reuse verified architecture when it already satisfies the exact newly
         // approved scope; otherwise write an additional coherent architecture unit.
@@ -550,7 +563,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
               await persist(file, receipt);
             }));
         }
-        assertHead(job, receipt.expectedHead);
+        assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         receipt.paths = await changedPaths(job);
         receipt.contentDigest = await contentDigest(job, receipt.paths);
         receipt.phase = "authored"; await persist(file, receipt);
@@ -558,24 +571,25 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       })
       .addNode("validate_and_commit_architecture", async ({ receipt }) => {
         const head = git(job, "rev-parse", "HEAD").trim();
-        const recovering = head !== receipt.expectedHead;
+        const workingHead = receipt.executionHead ?? receipt.expectedHead;
+        const recovering = head !== workingHead;
         const verified = await reconcile(job, receipt);
         if (verified.status === "blocked" || (recovering && verified.status !== "recoverable-commit")) {
           throw new Error("Unexpected architecture commit; preserve it for reconciliation: " + verified.reason);
         }
-        const latest = await validate(source, { ...job, baseSha: receipt.expectedHead });
+        const latest = await validate(source, { ...job, baseSha: workingHead });
         const report = reportOf(latest);
         if (latest.status !== "passed" || report.protection.status !== "checked" || report.protection.changes.length || report.protection.warnings.length) throw new Error("Architecture cannot revise protected decisions; use scoped revision authorization.");
         // Original baseline is also checked. Existing approved revisions are already
         // trusted at expectedHead; architecture cannot change any existing record outside its scope.
         const original = await validate(source);
-        checkOriginalProtection(job, original, receipt.expectedHead);
+        checkOriginalProtection(job, original, workingHead);
         const selected = checkArchitecture(report, receipt.plan!.contract);
         if (receipt.paths) {
           if (await contentDigest(job, receipt.paths) !== receipt.contentDigest) throw new Error("Authored architecture bytes changed; do not reuse acceptance.");
           if (receipt.paths.some(path => !selected.some(r => r.path === path))) throw new Error("Architecture wrote records outside the accepted scope.");
           if (!recovering) {
-            assertHead(job, receipt.expectedHead);
+            assertHead(job, workingHead);
             if (JSON.stringify(await changedPaths(job)) !== JSON.stringify(receipt.paths)) throw new Error("Architecture paths changed before commit.");
             git(job, "add", "--", ...receipt.paths.map(p => repoPath(job, p)));
             git(job, "-c", "user.name=NovelTea Generator", "-c", "user.email=noveltea-gen@users.noreply.github.com", "commit", "-m",
@@ -588,10 +602,14 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         }
         if (dirty(job).length) throw new Error("Architecture commit left unexpected edits.");
         const commit = git(job, "rev-parse", "HEAD").trim();
-        const previousHead = receipt.expectedHead;
-        finishPlan(receipt, report, commit);
+        const previousHead = workingHead;
+        const previousArchitectureHead = receipt.expectedHead;
+        const didWriteArchitecture = Boolean(receipt.paths?.length);
+        finishPlan(receipt, report, didWriteArchitecture ? commit : previousArchitectureHead);
+        if (!didWriteArchitecture) receipt.expectedHead = previousArchitectureHead;
+        delete receipt.executionHead;
         await persist(file, receipt);
-        if (commit !== previousHead) await publishVerifiedHead(job, previousHead, commit);
+        if (didWriteArchitecture && commit !== previousHead) await publishVerifiedHead(job, previousHead, commit);
         return { receipt };
       })
       .addEdge(START, "architecture_specialist").addEdge("architecture_specialist", "validate_and_commit_architecture")

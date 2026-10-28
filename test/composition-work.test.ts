@@ -55,7 +55,8 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     return spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "job", ...args,
       "--story", story, "--job", "draft"], { encoding: "utf8",
       timeout: process.env.NT_LIVE_COMPOSITION === "1" ? 1_000_000 : 120_000,
-      maxBuffer: 24 * 1024 * 1024, env: { ...env, NT_COMPOSITION_FIXTURE_CASE: fixtureCase } });
+      maxBuffer: 24 * 1024 * 1024, env: { ...env, NT_COMPOSITION_FIXTURE_CASE: fixtureCase,
+        NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE: process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE ?? "" } });
   }
   const start = cli(["start"]);
   assert.equal(start.status, 0, start.stderr);
@@ -120,6 +121,69 @@ test("composes two outcomes and two alternative puzzle endings into validated co
   assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
   assert.equal(JSON.parse(x.inspect().stdout).headSha, result.headSha);
   assert.equal(JSON.parse(x.run().stdout).headSha, result.headSha);
+});
+
+test("verified deferred capture between Interactive and Composition does not block prose", { skip: !available }, () => {
+  const x = setup("capture-between-stages");
+  const interactiveHead = x.prepare();
+  const file = join(root, "deferred-" + x.job.jobId + "-" + Math.random().toString(36).slice(2) + ".json");
+  writeFileSync(file, JSON.stringify({
+    kind: "event-concept", source: { kind: "author-continuation", reference: "note" },
+    original: "The witness recants in a private interview",
+    requirements: { meaning: [{ text: "The recantation changes trust", binding: true }], wording: [], participants: [] },
+    identities: { known: [], unresolved: ["witness"] }, prerequisites: [],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" }, upstreamConstraints: [],
+  }));
+  const capture = x.cli(["ideas", "capture", "--file", file]);
+  assert.equal(capture.status, 0, capture.stderr);
+  const captured = JSON.parse(capture.stdout).commitSha;
+  const result = x.run();
+  assert.equal(result.status, 0, result.stderr);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.interactiveHead, interactiveHead);
+  assert.equal(data.validation.protectionBase, captured);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", data.headSha + "^"), captured);
+});
+
+test("Choice → verified capture → Puzzle → Composition retains exact intermediary provenance", { skip: !available }, () => {
+  const x = setup("capture-between-choice-puzzle");
+  const payloadFile = join(root, "capture-between-choice-puzzle-message.json");
+  writeFileSync(payloadFile, JSON.stringify({ id: "choice-puzzle-interruption", kind: "idea", payload: {
+    kind: "event-concept", source: { kind: "author-continuation", reference: "active writing" },
+    original: "The witness interrupts the interrogation",
+    requirements: { meaning: [{ text: "Interruption challenges trust", binding: true }], wording: [], participants: [] },
+    identities: { known: [], unresolved: ["witness"] }, prerequisites: [],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" }, upstreamConstraints: [],
+  }}));
+  const previous = process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE;
+  process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE = payloadFile;
+  try { x.prepare(); }
+  finally {
+    if (previous === undefined) delete process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE;
+    else process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE = previous;
+  }
+  const puzzle = git(x.job.worktreeRoot, "rev-parse", "HEAD");
+  const capture = git(x.job.worktreeRoot, "rev-parse", "HEAD^");
+  const choice = git(x.job.worktreeRoot, "rev-parse", "HEAD^^");
+  assert.match(git(x.job.worktreeRoot, "log", "-1", "--format=%B", capture), /NovelTea-Work-Item: idea-capture/);
+  const interactive = JSON.parse(x.cli(["interactive", "inspect", "--milestone", "milestone.disclosure"]).stdout);
+  assert.equal(interactive.specialistUnits[0].commitSha, choice);
+  assert.equal(interactive.specialistUnits[1].beforeHead, capture);
+  assert.equal(interactive.specialistUnits[1].commitSha, puzzle);
+  const result = x.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).validation.protectionBase, puzzle);
+});
+
+test("paused Composition job does not start writing", { skip: !available }, () => {
+  const x = setup("paused-composition");
+  x.prepare();
+  const pause = x.cli(["author", "control", "--state", "paused"]);
+  assert.equal(pause.status, 0, pause.stderr);
+  const run = x.run();
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /paused|cannot advance/);
+  assert.equal(existsSync(join(x.job.worktreeStoryRoot, "authored-content/disclosure-scene.md")), false);
 });
 
 test("refuses branch-exclusive revelation leaked in shared prose", { skip: !available }, () => {

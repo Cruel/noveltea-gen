@@ -110,6 +110,42 @@ test("multiple queued ideas produce exactly one separate captured commit each, w
   assert.equal(x.inspect().records.every((r: any) => r.acknowledgement.phase === "applied"), true);
 });
 
+test("a completed author graph reconciles a missing acknowledgement without duplicate capture", () => {
+  const x = setup("crash-acknowledgement");
+  x.send({ id: "lost-acknowledgement", kind: "idea", payload: x.idea("The witness recants") });
+  assert.equal(x.process().status, "ready");
+  const head = git(x.job.worktreeRoot, "rev-parse", "HEAD");
+  const file = join(x.job.worktreeRoot, "../author-updates/receipts/lost-acknowledgement.json");
+  const receipt = JSON.parse(readFileSync(file, "utf8"));
+  writeFileSync(file, JSON.stringify({ ...receipt, phase: "queued", result: undefined }));
+  const rerun = x.run("author", "process");
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.equal(JSON.parse(rerun.stdout).status, "ready");
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(x.inspect().records[0].acknowledgement.phase, "applied");
+});
+
+test("crash inside the processing node resumes exactly the recorded idea capture", () => {
+  const x = setup("interrupted-processing-node");
+  x.send({ id: "crashed-mid-node", kind: "idea", payload: x.idea("A secret trial") });
+  const original = process.env.NT_TEST_AUTHOR_CRASH_AFTER_CAPTURE;
+  process.env.NT_TEST_AUTHOR_CRASH_AFTER_CAPTURE = "1";
+  let failed: ReturnType<typeof x.run>;
+  try { failed = x.run("author", "process"); }
+  finally {
+    if (original === undefined) delete process.env.NT_TEST_AUTHOR_CRASH_AFTER_CAPTURE;
+    else process.env.NT_TEST_AUTHOR_CRASH_AFTER_CAPTURE = original;
+  }
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /Injected crash after verified author idea capture/);
+  const committed = git(x.job.worktreeRoot, "rev-parse", "HEAD");
+  const recovered = x.process();
+  assert.equal(recovered.status, "ready");
+  assert.equal(x.inspect().records[0].acknowledgement.phase, "applied");
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), committed);
+  assert.equal(git(x.job.worktreeRoot, "rev-list", "--count", x.base + "..HEAD"), "1");
+});
+
 test("foundation generation processes queued author ideas automatically before its next safe writing assignment", {
   skip: !existsSync(join(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills"), "src/cli.ts")),
 }, () => {
@@ -234,9 +270,10 @@ test("consequential change proposes a versioned scope replan and resolves only a
   assert.equal(reviewed.processed[0].phase, "review-required");
   assert.equal(reviewed.processed[0].result.proposal, undefined);
   const planned = x.ok(x.run("author", "plan", "--id", "route-impact",
-    "--file", x.file(proposedContract)));
+    "--file", x.file(proposedContract), "--carry-forward", x.file([])));
   const proposal = planned.result.proposal.proposal;
   assert.equal(proposal.version, 2);
+  assert.deepEqual(proposal.carryForward, []);
   assert.equal(x.ok(x.run("architecture", "inspect")).plan.version, 1);
   x.send({ id: "route-approval", kind: "approval", payload: {
     requestType: "plan", proposalSha256: proposal.digest,
@@ -256,6 +293,165 @@ test("consequential change proposes a versioned scope replan and resolves only a
     .acknowledgement.phase, "applied");
   assert.equal(x.process().status, "ready");
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), architecture.headSha);
+});
+
+test("scope proposal after a verified successor signs current HEAD without replacing architecture provenance", {
+  skip: !existsSync(join(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills"), "src/cli.ts")),
+}, () => {
+  const x = setup("downstream-replan", true);
+  const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
+  const contract = { scope: { kind: "partial", depth: "composition", targets: [] as string[], branches: [] as string[] },
+    constraints: ["Preserve agency"], envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+  const first = x.ok(x.run("architecture", "run", "--fixture", "--contract", x.file(contract), "--skills-source", source));
+  const captured = x.ok(x.run("ideas", "capture", "--file", x.file(x.idea("A remembered letter"))));
+  const revised = { ...contract, constraints: [...contract.constraints, "Offer an alternate route"] };
+  const proposed = x.ok(x.run("architecture", "propose", "--contract", x.file(revised)));
+  assert.equal(proposed.authorSigningRequest.verifiedHead, captured.commitSha);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), captured.commitSha);
+  const payload = { ...proposed.authorSigningRequest, reason: "I approve the alternate route." };
+  const evidence = x.file({ payload,
+    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
+  x.ok(x.run("architecture", "approve", "--proposal", proposed.proposal.digest, "--signed-evidence", evidence));
+  const after = x.ok(x.run("architecture", "run", "--fixture"));
+  assert.equal(after.plan.version, 2);
+  assert.equal(after.plan.items[0].verifiedSha, first.headSha);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), captured.commitSha);
+  assert.equal(x.ok(x.run("architecture", "inspect")).history[0].verifiedHead, captured.commitSha);
+});
+
+test("author can approve and reconcile scope after committed Event realization", {
+  skip: !existsSync(join(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills"), "src/cli.ts")),
+}, () => {
+  const x = setup("replan-after-event", true);
+  const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
+  const contract = { scope: { kind: "partial", depth: "interactive",
+    targets: ["arc.truth", "milestone.disclosure"], branches: ["trust-route", "confrontation-route"] },
+    constraints: ["Preserve the player's agency"],
+    envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+  const first = x.ok(x.run("architecture", "run", "--fixture", "--contract", x.file(contract), "--skills-source", source));
+  x.ok(x.run("foundations", "run", "--fixture", "--skills-source", source));
+  const event = x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  const revised = { ...contract, constraints: [...contract.constraints, "An alternate consequence is authorized"] };
+  const proposal = x.ok(x.run("architecture", "propose", "--contract", x.file(revised),
+    "--carry-forward", x.file(["foundations", "event:milestone.disclosure"])));
+  assert.deepEqual(proposal.proposal.carryForward, ["foundations", "event:milestone.disclosure"]);
+  assert.equal(proposal.authorSigningRequest.verifiedHead, event.headSha);
+  const payload = { ...proposal.authorSigningRequest, reason: "Explicitly approve alternate consequences." };
+  const evidence = x.file({ payload,
+    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
+  x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence));
+  const current = x.ok(x.run("architecture", "run", "--fixture"));
+  assert.equal(current.plan.version, 2);
+  assert.equal(current.plan.items[0].verifiedSha, first.headSha);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), event.headSha);
+  const recheckedFoundation = x.ok(x.run("foundations", "run", "--fixture", "--skills-source", source));
+  assert.equal(recheckedFoundation.planVersion, 1, "original specialist evidence is never rewritten");
+  const recheckedEvent = x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  assert.equal(recheckedEvent.headSha, event.headSha);
+  const continued = x.ok(x.run("interactive", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  assert.equal(continued.status, "interactive-slice-committed");
+  assert.equal(continued.planVersion, 2, "new specialist is authorized by revised plan");
+  // A metadata-only attack cannot manufacture retroactive carry-forward.
+  const archFile = join(x.job.worktreeRoot, "../architecture.json");
+  const saved = JSON.parse(readFileSync(archFile, "utf8"));
+  saved.history[0].carryForward = ["foundations"];
+  writeFileSync(archFile, JSON.stringify(saved));
+  const rejected = x.run("event", "inspect", "--milestone", "milestone.disclosure");
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /signed proposal|carry-forward/i);
+});
+
+test("signed carry-forward preserves completed Foundation, Event, Interactive and Composition receipts", {
+  skip: !existsSync(join(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills"), "src/cli.ts")),
+}, () => {
+  const x = setup("carry-composed-story", true);
+  const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
+  const contract = { scope: { kind: "partial", depth: "composition",
+    targets: ["arc.truth", "milestone.disclosure"], branches: ["protect", "challenge"] },
+    constraints: ["Preserve the player's agency"],
+    envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+  x.ok(x.run("architecture", "run", "--fixture", "--contract", x.file(contract), "--skills-source", source));
+  x.ok(x.run("foundations", "run", "--fixture", "--skills-source", source));
+  const event = x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  const interactive = x.ok(x.run("interactive", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  const composition = x.ok(x.run("composition", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  const final = git(x.job.worktreeRoot, "rev-parse", "HEAD");
+  const revised = { ...contract, constraints: [...contract.constraints, "Minimize narrator exposition"] };
+  const proposal = x.ok(x.run("architecture", "propose", "--contract", x.file(revised),
+    "--carry-forward", x.file(["foundations", "event:milestone.disclosure",
+      "interactive:milestone.disclosure", "composition:milestone.disclosure"])));
+  const payload = { ...proposal.authorSigningRequest, reason: "Reviewed and affirm existing completed work." };
+  const evidence = x.file({ payload,
+    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
+  x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence));
+  x.ok(x.run("architecture", "run", "--fixture"));
+  x.ok(x.run("foundations", "run", "--fixture", "--skills-source", source));
+  assert.equal(x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source)).headSha, event.headSha);
+  assert.equal(x.ok(x.run("interactive", "run", "--fixture", "--milestone", "milestone.disclosure",
+    "--skills-source", source)).headSha, interactive.headSha);
+  assert.equal(x.ok(x.run("composition", "run", "--fixture", "--milestone", "milestone.disclosure",
+    "--skills-source", source)).headSha, composition.headSha);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), final, "reconciliation does not replay specialists");
+  assert.equal(x.ok(x.run("architecture", "inspect")).plan.version, 2);
+});
+
+test("unreviewed downstream work remains blocked until a later signed carry-forward", {
+  skip: !existsSync(join(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills"), "src/cli.ts")),
+}, () => {
+  const x = setup("late-carry-forward", true);
+  const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
+  const contract = { scope: { kind: "partial", depth: "interactive",
+    targets: ["arc.truth", "milestone.disclosure"], branches: ["trust-route", "confrontation-route"] },
+    constraints: ["Preserve the player's agency"],
+    envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+  x.ok(x.run("architecture", "run", "--fixture", "--contract", x.file(contract), "--skills-source", source));
+  x.ok(x.run("foundations", "run", "--fixture", "--skills-source", source));
+  const event = x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  const approve = (proposal: any) => {
+    const payload = { ...proposal.authorSigningRequest, reason: "Reviewed exact plan changes and retained scope." };
+    const evidence = x.file({ payload,
+      signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
+    x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence));
+    x.ok(x.run("architecture", "run", "--fixture"));
+  };
+  const v2 = x.ok(x.run("architecture", "propose", "--contract",
+    x.file({ ...contract, constraints: [...contract.constraints, "Respect discretion"] })));
+  approve(v2);
+  const denied = x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source);
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /not included in a signed carry-forward|carry-forward/i);
+  const latest = { ...contract, constraints: [...contract.constraints, "Respect discretion", "Keep the witness safe"] };
+  const bad = x.run("architecture", "propose", "--contract", x.file(latest),
+    "--carry-forward", x.file(["event:milestone.disclosure"]));
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /upstream dependency/);
+  const v3 = x.ok(x.run("architecture", "propose", "--contract", x.file(latest),
+    "--carry-forward", x.file(["foundations", "event:milestone.disclosure"])));
+  approve(v3);
+  const continued = x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
+  assert.equal(continued.headSha, event.headSha);
+  assert.equal(x.ok(x.run("interactive", "run", "--fixture", "--milestone", "milestone.disclosure",
+    "--skills-source", source)).planVersion, 3);
+});
+
+test("a plan signature is rejected when a later verified capture changes its proposal baseline", {
+  skip: !existsSync(join(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills"), "src/cli.ts")),
+}, () => {
+  const x = setup("stale-replan-baseline", true);
+  const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
+  const contract = { scope: { kind: "partial", depth: "architecture", targets: [] as string[], branches: [] as string[] },
+    constraints: ["Keep trust"], envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+  x.ok(x.run("architecture", "run", "--fixture", "--contract", x.file(contract), "--skills-source", source));
+  const revised = { ...contract, constraints: ["Keep trust", "Offer a branch"] };
+  const proposal = x.ok(x.run("architecture", "propose", "--contract", x.file(revised)));
+  x.ok(x.run("ideas", "capture", "--file", x.file(x.idea("An unexpected confession"))));
+  const payload = { ...proposal.authorSigningRequest, reason: "I independently approve the changed route." };
+  const evidence = x.file({ payload,
+    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
+  const denied = x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence);
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /baseline|verified|reconcil|HEAD/i);
+  assert.equal(x.ok(x.run("architecture", "inspect")).plan.version, 1);
 });
 
 test("signed author approval resumes the exact LangGraph interrupt and applies versioned architecture plan", {

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { trustedHead } from "./revision.js";
@@ -457,11 +458,11 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           (receipt.branch !== undefined && receipt.branch !== job.branch) ||
           (receipt.worktreeRoot !== undefined && receipt.worktreeRoot !== job.worktreeRoot) ||
           (receipt.threadId !== undefined && receipt.threadId !== job.threadId) ||
-          receipt.architectureHead !== arch.expectedHead || receipt.planVersion !== plan.version ||
-          receipt.contractDigest !== contractDigest || receipt.units?.length !== 2 ||
+          receipt.architectureHead !== arch.expectedHead || receipt.units?.length !== 2 ||
           receipt.units[0]?.domain !== "world" || receipt.units[1]?.domain !== "character") {
         throw new Error("Foundation receipt differs from the authorized architecture plan; reconcile explicitly.");
       }
+      assertPlanContinuity(job, arch, "foundations", receipt.planVersion, receipt.contractDigest, true);
     } else {
       if (input.action !== "run") throw new Error("No foundations receipt to inspect.");
       const startHead = await trustedHead(job);
