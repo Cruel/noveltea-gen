@@ -25,6 +25,7 @@ const USAGE = `NovelTea-gen LangGraph/Pi tracer bullet
 Usage:
   pnpm dev job start --story /path/to/story --job draft-1
   pnpm dev job validate --story /path/to/story --job draft-1
+  pnpm dev job foundation --story /path/to/story --job draft-1 --mode autonomous --task "A mystery premise"
   pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
   pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
   pnpm dev demo-story --project ./fresh-story --create-project --task "A mystery; choose the rest"
@@ -35,6 +36,16 @@ Job start:
   --noveltea-project <path>  Optional future engine project root (start only; metadata)
   --validator-source <path>  Initial validation: canonical noveltea-skills checkout
                            (otherwise uses configured novelteaSkills)
+
+Job foundation:
+  --task <brief>            Required when starting foundation discovery
+  --mode <mode>            autonomous (default) or collaborative
+  --envelope <text>        Author's narrative/presentation constraints
+  --author-input <text>    Respond to the collaborative discovery handoff
+  --skills-source <path>   NovelTea skills checkout to pin (or configured checkout)
+  --validator-source <path>  Canonical validator source for initial pin
+  --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
+  --fixture                Deterministic test adapter, not live Pi evidence
 
 Options:
   --project <path>    Required Story root (existing directory, independent of app checkout)
@@ -141,8 +152,8 @@ async function main(): Promise<void> {
   if (process.argv[2] === "job") {
     const args = process.argv.slice(3);
     const jobCommand = args.shift();
-    if (jobCommand !== "start" && jobCommand !== "validate") {
-      throw new Error("Expected 'job start' or 'job validate'.");
+    if (jobCommand !== "start" && jobCommand !== "validate" && jobCommand !== "foundation") {
+      throw new Error("Expected 'job start', 'job validate' or 'job foundation'.");
     }
     if (args.includes("--help") || args.includes("-h")) {
       process.stdout.write(USAGE);
@@ -152,12 +163,27 @@ async function main(): Promise<void> {
     let job = "";
     let novelteaProject: string | undefined;
     let validatorSource: string | undefined;
+    let task: string | undefined;
+    let envelope: string | undefined;
+    let authorInput: string | undefined;
+    let mode: "autonomous" | "collaborative" | undefined;
+    let skillsSource: string | undefined;
+    let provider: string | undefined;
+    let model: string | undefined;
+    let fixture = false;
     const provided = new Set<string>();
     while (args.length) {
       const flag = args.shift()!;
+      if (flag === "--fixture" && jobCommand === "foundation") {
+        if (provided.has(flag)) throw new Error(`Duplicate job option: ${flag}.`);
+        provided.add(flag);
+        fixture = true;
+        continue;
+      }
       if (flag !== "--story" && flag !== "--job" &&
           !(jobCommand === "start" && flag === "--noveltea-project") &&
-          !(jobCommand === "validate" && flag === "--validator-source")) {
+          !(["validate", "foundation"].includes(jobCommand!) && flag === "--validator-source") &&
+          !(jobCommand === "foundation" && ["--task", "--mode", "--envelope", "--author-input", "--skills-source", "--provider", "--model"].includes(flag))) {
         throw new Error(`Unknown job option: ${flag}. Use --help for usage.`);
       }
       if (provided.has(flag)) throw new Error(`Duplicate job option: ${flag}.`);
@@ -168,9 +194,31 @@ async function main(): Promise<void> {
       if (flag === "--job") job = value;
       if (flag === "--noveltea-project") novelteaProject = value;
       if (flag === "--validator-source") validatorSource = value;
+      if (flag === "--task") task = value;
+      if (flag === "--envelope") envelope = value;
+      if (flag === "--author-input") authorInput = value;
+      if (flag === "--skills-source") skillsSource = value;
+      if (flag === "--provider") provider = value;
+      if (flag === "--model") model = value;
+      if (flag === "--mode") {
+        if (value !== "autonomous" && value !== "collaborative") throw new Error("--mode must be autonomous or collaborative.");
+        mode = value;
+      }
     }
     if (!story) throw new Error("Missing required --story <path>.");
     if (!job) throw new Error("Missing required --job <id>.");
+    if (jobCommand === "foundation") {
+      // Job foundation has no hosted tracing opt-in. Ambient environment
+      // settings must not unexpectedly upload prompts or Story content.
+      process.env.LANGSMITH_TRACING = "false";
+      process.env.LANGCHAIN_TRACING_V2 = "false";
+      process.env.TRACE_TO_LANGSMITH = "false";
+      const { runFoundationJob } = await import("./foundation.js");
+      const result = await runFoundationJob({ story, job, task, mode, envelope,
+        authorInput, skillsSource, validatorSource, provider, model, fixture });
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      return;
+    }
     const { startStoryJob } = await import("./job.js");
     const target = await startStoryJob({ story, job, novelteaProject }, jobCommand === "start");
     if (jobCommand === "start") {

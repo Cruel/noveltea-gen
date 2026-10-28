@@ -247,8 +247,15 @@ export const bundledValidatorAdapter: StoryValidatorAdapter = {
       maxBuffer: 32 * 1024 * 1024, env,
     });
     let result = run(args);
-    const missingBaseline = result.status === 2 && /Git baseline does not contain Story Markdown files/.test(result.stderr);
-    if (missingBaseline) result = run(args.filter(flag => flag !== "--strict-protection"));
+    // The canonical CLI can exit 1 or 2 for the strict-protection no-baseline
+    // condition depending on its version. This exact stderr is the only
+    // authorized retry; do not suppress ordinary structural failures.
+    const missingBaseline = (result.status === 1 || result.status === 2) &&
+      !result.stdout.trim() && /Git baseline does not contain Story Markdown files/.test(result.stderr);
+    // This catalog implementation also treats an explicit --base as a strict
+    // requirement for baseline Markdown. Run structural-only validation with
+    // neither --base nor --strict-protection, and mark protection unverified.
+    if (missingBaseline) result = run([binary, job.worktreeStoryRoot]);
     const envelope: Omit<ValidationResult, "status" | "exitCode"> = {
       contract: CONTRACT, jobId: job.jobId, baseSha: job.baseSha,
       worktreeStoryRoot: job.worktreeStoryRoot, validator: pin,
@@ -269,6 +276,12 @@ export const bundledValidatorAdapter: StoryValidatorAdapter = {
       return { ...envelope, status: "error", exitCode: 2, error: "Validator output is not a supported JSON report." };
     }
     const protection = report.protection as { status?: string; base?: string };
+    if (missingBaseline) {
+      // If a commit was published before the job receipt was saved, structural
+      // fallback may check against moving HEAD. That is NOT the trusted base;
+      // never report it as a successful protected-decision comparison.
+      return { ...envelope, status: "unverified", exitCode: 2, report };
+    }
     if (protection.status === "checked" && protection.base !== job.baseSha) {
       return { ...envelope, status: "error", exitCode: 2,
         error: "Validator reported a Git baseline different from the job\u0027s verified base SHA.", report };

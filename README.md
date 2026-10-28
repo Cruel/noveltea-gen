@@ -164,6 +164,37 @@ consumers. See [docs/validator-cutover.md](docs/validator-cutover.md)
 for the structural, readiness, protection and impact parity matrix and
 opt-in native parity test. No native behavior is assumed available yet.
 
+## Git-backed Creative Direction generation (#15)
+
+Once a Story job has been started, run a pinned Creative Direction work item:
+
+```sh
+pnpm dev job start --story /path/to/git-repo/story --job draft-1
+pnpm dev job foundation --story /path/to/git-repo/story --job draft-1 \
+  --mode autonomous \
+  --task "A mystery aboard a stranded midnight train; invent unspecified details" \
+  --envelope "Dialogue-led visual novel, compact cast, reusable locations"
+```
+
+Configure `.local/config.json` to point to the `noveltea-skills` checkout first, or specify `--skills-source /path/to/noveltea-skills` and `--validator-source /path/to/noveltea-skills` for a new job. A new foundation item pins the exact skills snapshot; its first validation separately pins the canonical catalog executable. Ordinary execution requires Pi credentials. Set `--provider` and `--model` to override the default. Only `--fixture` uses a deterministic non-model specialist; fixture outcomes are **not** Pi evidence.
+
+For collaborative discovery, start with `--mode collaborative --task "..." --envelope "..."`. The first invocation reads pinned guidance (real Pi, or a deterministic fixture) and returns `status: awaiting-author`, a set of author questions and a durable handoff **without writing the Story**. Resume with the same `--story` and `--job` plus `--author-input "Your decisions; delegate everything else"` (and `--fixture` if testing). The worker mode and model/provider are persisted and cannot change silently on continuation. Explicit author constraints become user-protected decisions; delegated choices remain agent-origin. The work item can be reopened without creating another commit.
+
+The writing specialist works inside the isolated job Story directory, reads the actual pinned `nt-story-discovery` and `nt-catalog` skill files and uses ordinary Pi read/write/edit, search and Git inspection tools. There is no structured-record writer. **LangGraph** owns the separate validation/commit node, checks the exact file diff, unexpected staged/out-of-scope changes, branch HEAD and canonical validator report, and makes a single agent-attributed commit with `NovelTea-Job` and `NovelTea-Work-Item` trailers. A job with one existing tracked Creative Direction edits that file; an empty Story creates `creative-direction/foundation.md`. Ambiguous multiple foundations, unauthorized protected changes, missing readiness and unexpected edits block committing. Existing edits are preserved for manual inspection, not automatically reset.
+
+**Empty Story baseline:** the experimental canonical Git-protection contract cannot verify changes against an initial commit without Story Markdown. The graph verifies that absence independently, requires the canonical **structural** and foundation-design readiness checks to pass, and reports `validation: unverified-empty-baseline` instead of claiming user-protection verification. Already-established Story baselines require an actual checked protection report. No author approval, literary quality or full Story completion is implied by a foundation commit. The specialist is not given the optional engine-project root and is directed to work only on Story Markdown; unrestricted shell access is not an operating-system sandbox, so the graph independently gates the Git changes it commits. No automatic merge into the author's checkout occurs.
+
+The job's `foundation.json` (brief, provenance, handoff, target, commit and validation identity) lives beside `job.json` outside the author's checkout. Read-only discovery transcripts are stored in `foundation-discovery-sessions/`; real writing sessions in `foundation-sessions/` in that same job-state directory. After an interrupted partial edit, inspect the preserved worktree instead of blindly restarting the specialist. If the commit completed before its receipt, a one-commit provenance check can recover it. Future tickets expand job-wide checkpoints, approval management and planning.
+
+To certify the public CLI deterministically, run `pnpm exec tsx --test test/foundation.test.ts`; it includes a real canonical-catalog integration case when the sibling skills checkout is present. To certify **real Pi** authoring using your configured Pi credentials, explicitly opt in:
+
+```sh
+NT_LIVE_FOUNDATION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
+  pnpm exec tsx --test test/foundation-live.test.ts
+```
+
+The opt-in test inspects the Pi session's actual pinned skill reads and Markdown editing tool calls, the validated output and the Git branch. It can incur model charges. Neither fixture passing nor a model's own completion claim substitutes for this evidence.
+
 ## Run against a Story project
 
 Select an **existing** Story directory using `--project`:
