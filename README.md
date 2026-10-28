@@ -349,6 +349,67 @@ records, clean worktree and both specialist commits. It can incur model usage.
 Use `NT_KEEP_FAILED_LIVE=1` during a live run to preserve a failed disposable
 Story job and Pi transcripts for diagnosis; successful runs still clean up.
 
+## Causal Event realization for one planned Milestone (#19)
+
+After the architecture and Character/World foundations have been committed
+within a Git Story job, authorize **one exact planned Milestone** per Event
+work item:
+
+```sh
+pnpm dev job event run --story /path/to/story --job draft-1 \
+  --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
+pnpm dev job event inspect --story /path/to/story --job draft-1 \
+  --milestone milestone.disclosure
+pnpm dev job validate --story /path/to/story --job draft-1
+```
+
+The LangGraph work item delegates canonical `events/*.md` to a **real, pinned
+`nt-event-design` Pi specialist**, carrying the authorized architecture
+contract, existing Creative Direction, selected Milestone/Arcs, linked Character,
+Fact, World and Relationship records, and author-decision authority. It may
+make connected scoped Arc/Fact/Revelation/Relationship edits and **only** bind
+the selected Milestone's `fulfillment` (and `completeness`); other Milestones,
+Characters, Creative Direction and engine data are not writable. The graph
+verifies its declared changed files against actual Git changes and permits
+only safe canonical Markdown in its owned directories, with strict protection
+from the previous verified head. Protected retcons require the separate
+author-signed revision workflow, never a specialist's claim.
+
+The pinned canonical validator supplies localized diagnostics, Event and branch
+reachability, Milestone route witnesses and incompleteness obligations. The
+same Pi session can make **up to two bounded repairs** before the work item
+fails closed. `after` is optional chronology (when both Events occur);
+`prerequisites.any_of` contains true enabling conditions. At least one
+authored Event and a deterministically reachable fulfillment route are
+required. Unrelated composition/readiness gaps are not Event acceptance
+requirements, and Editorial/branch-intent proof remains unverified. Any
+unresolved future alternative is explicitly reported as a downstream
+obligation, never filled with a fabricated Event ID.
+
+Independent Milestones can have their own serialized receipts and commits at
+**clean verified work-item boundaries**; failures never implicitly complete
+dependent work. Interrupted writer edits remain in the job worktree and
+must be inspected/reconciled manually before any other Story writer runs.
+Durable status and provenance live under
+`~/.local/state/noveltea-gen/jobs/<sha256>/event-items/<milestone-slug>.json`;
+real Pi transcripts live under `event-sessions/event-<milestone-slug>/`.
+The item reports its expected head, canonical validation SHA, changed paths,
+Git commit and outstanding obligations.
+
+`--fixture` selects a deterministic non-model author and does **not**
+certify Pi authorship. Public CLI positive/negative integration tests:
+
+```sh
+pnpm exec tsx --test test/event-work.test.ts
+```
+
+Optional real specialist certification may consume model usage:
+
+```sh
+NT_LIVE_EVENT=1 NT_PROVIDER=nvidia NT_MODEL=nvidia/nemotron-3-ultra-550b-a55b \
+  pnpm exec tsx --test test/event-live.test.ts
+```
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit
