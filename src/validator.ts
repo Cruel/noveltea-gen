@@ -183,7 +183,18 @@ async function publishValidator(sourceCheckout: string): Promise<ValidatorPin> {
  * verify the exact persisted artifact and work without source checkout. */
 async function pinValidator(job: JobStartResult, sourceCheckout?: string): Promise<ValidatorPin> {
   const saved = pinPath(job);
-  if (job.validatorSha256 && !existsSync(saved)) {
+  // A Pi tool may call the public validator CLI in a subprocess. That process
+  // publishes the first pin while this writer still holds its earlier job
+  // snapshot. Re-read the durable manifest, but require the original identity
+  // and any previously observed pin to remain unchanged.
+  const jobFile = join(dirname(job.worktreeRoot), "job.json");
+  const manifest = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;
+  if (["jobId", "branch", "threadId", "baseSha", "worktreeRoot", "storyRoot", "gitRoot"]
+    .some(key => manifest[key] !== job[key as keyof JobStartResult]) ||
+    (job.validatorSha256 !== undefined && job.validatorSha256 !== manifest.validatorSha256)) {
+    throw new Error("Job identity or previously observed validator pin changed; inspect the durable manifest.");
+  }
+  if (manifest.validatorSha256 && !existsSync(saved)) {
     throw new Error("Job validator pin is missing. Restore its original validator.json; never repin from current source.");
   }
   if (existsSync(saved)) {
@@ -195,7 +206,7 @@ async function pinValidator(job: JobStartResult, sourceCheckout?: string): Promi
       checkPin(parsed);
     }
     catch { throw new Error("Job validator pin is unreadable or corrupt. Restore validator.json before retrying."); }
-    if (parsed.sha256 !== job.validatorSha256) {
+    if (parsed.sha256 !== manifest.validatorSha256) {
       throw new Error("Job validator pin does not match its durable job manifest. Restore the original pin.");
     }
     await verifyArtifact(parsed);

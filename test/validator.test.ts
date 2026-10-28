@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { agentValidatorBashTool } from "../src/validator.js";
+import { agentValidatorBashTool, validateStoryJob } from "../src/validator.js";
+import type { JobStartResult } from "../src/job.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-validators-"));
 after(() => removeTestTree(root));
@@ -108,6 +109,30 @@ test("public job validate pins one artifact, returns diagnostics and preserves e
   assert.equal(bad.output.validator.sha256, ok.output.validator.sha256);
   assert.equal(git(repo, "status", "--porcelain"), "");
   assert.equal(git(repo, "rev-parse", "HEAD"), initial.baseSha);
+});
+
+test("parent accepts a pin published by a child process after loading its job identity", async () => {
+  const repo = repository("subprocess-pin");
+  const state = join(root, "state-subprocess-pin");
+  const source = fakeSource("subprocess-pin-source");
+  const job = start(repo, state) as JobStartResult;
+  assert.equal(job.validatorSha256, undefined);
+  const first = validate(repo, state, source);
+  assert.equal(first.proc.status, 0, first.proc.stderr);
+  const oldState = process.env.NT_STATE_DIR;
+  const oldCache = process.env.NT_VALIDATOR_CACHE_DIR;
+  process.env.NT_STATE_DIR = join(state, "state");
+  process.env.NT_VALIDATOR_CACHE_DIR = join(state, "validators");
+  try {
+    const reused = await validateStoryJob(job, source);
+    assert.equal(reused.status, "passed");
+    assert.equal(reused.validator.sha256, first.output.validator.sha256);
+  } finally {
+    if (oldState === undefined) delete process.env.NT_STATE_DIR;
+    else process.env.NT_STATE_DIR = oldState;
+    if (oldCache === undefined) delete process.env.NT_VALIDATOR_CACHE_DIR;
+    else process.env.NT_VALIDATOR_CACHE_DIR = oldCache;
+  }
 });
 
 test("saved validator works without original checkout and fails closed if its pinned bytes disappear or change", () => {
