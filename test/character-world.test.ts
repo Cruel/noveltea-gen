@@ -1,0 +1,154 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { after, test } from "node:test";
+import { removeTestTree } from "./helpers.js";
+
+const root = mkdtempSync(join(tmpdir(), "nt-character-world-"));
+after(() => removeTestTree(root));
+const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
+const available = existsSync(join(source, "src/cli.ts"));
+
+function git(cwd: string, ...args: string[]) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+function setup(name: string, protectedFoundation = false) {
+  const repo = join(root, name);
+  const story = join(repo, "story");
+  mkdirSync(join(story, "creative-direction"), { recursive: true });
+  writeFileSync(join(story, "creative-direction/foundation.md"), `---
+schema: '0.1'
+type: creative-direction
+id: creative-direction.foundation
+title: "The missing witness"
+status: draft
+${protectedFoundation ? 'decisions:\n  - id: loyalty\n    statement: "Ada must be allowed to defend Neri"\n    origin: user\n    authority: user-protected' : "decisions: []"}
+premise: "A witness disappears before an inquiry"
+central_conflict: "Expose the truth or preserve a friendship"
+genre: "Mystery"
+tone: "Intimate"
+player_experience: "Consequential conversations"
+scope: "A compact dialogue-led story"
+---
+
+Ada investigates a missing witness and Neri's concealed evidence.
+`);
+  git(repo, "init", "-q"); git(repo, "config", "user.name", "Author");
+  git(repo, "config", "user.email", "author@example.test");
+  git(repo, "add", "."); git(repo, "commit", "-qm", "Author's foundation");
+  const baseline = git(repo, "rev-parse", "HEAD");
+  const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
+    NT_CONFIG_FILE: join(root, "missing-config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
+    NT_VALIDATOR_CACHE_DIR: join(root, "validators") };
+  const cli = (args: string[], caseName?: string) => spawnSync(process.execPath,
+    ["--import", "tsx", resolve("src/cli.ts"), "job", ...args, "--story", story, "--job", "draft"],
+    { encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
+      env: { ...env, NT_FOUNDATIONS_FIXTURE_CASE: caseName ?? "" } });
+  const started = cli(["start"]);
+  assert.equal(started.status, 0, started.stderr);
+  const job = JSON.parse(started.stdout);
+  function architecture() {
+    const contract = join(root, name + "-contract.json");
+    writeFileSync(contract, JSON.stringify({ scope: { kind: "partial", depth: "architecture",
+      targets: ["arc.truth", "milestone.disclosure"], branches: ["trust-route"] },
+      constraints: ["Ada may confront Neri or ask for trust; revelation depends on the actual route"],
+      envelope: { presentation: "Dialogue-led visual novel", hardLimits: ["Reuse the archive backdrop"],
+        preferences: ["Two speaking Characters"] } }));
+    const result = cli(["architecture", "run", "--fixture", "--contract", contract, "--skills-source", source]);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  }
+  return { repo, story, baseline, job, cli, architecture };
+}
+
+test("real public CLI creates two separately validated canonical specialist commits with branch-safe knowledge and relationships", { skip: !available }, () => {
+  const { repo, baseline, job, cli, architecture } = setup("complete");
+  const arch = architecture();
+  const result = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(result.status, 0, result.stderr);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.status, "foundations-committed");
+  assert.equal(data.architectureHead, arch.headSha);
+  assert.equal(data.items.length, 2);
+  assert.deepEqual(data.items.map((item: any) => item.phase), ["committed", "committed"]);
+  assert.deepEqual(data.items.map((item: any) => item.specialist), ["nt-worldbuilding", "nt-character-development"]);
+  const head = git(job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(data.headSha, head);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD~2"), arch.headSha);
+  assert.match(git(job.worktreeRoot, "log", "-1", "--format=%B"), /NovelTea-Work-Item: character-foundations/);
+  assert.match(git(job.worktreeRoot, "log", "-2", "--format=%B"), /NovelTea-Work-Item: world-foundations/);
+  const story = job.worktreeStoryRoot;
+  const fact = readFileSync(join(story, "facts/evidence-concealed.md"), "utf8");
+  assert.match(fact, /initial: true/);
+  const ada = readFileSync(join(story, "characters/ada.md"), "utf8");
+  const neri = readFileSync(join(story, "characters/neri.md"), "utf8");
+  assert.match(ada, /fact: fact.evidence-concealed\n    value: disbelieves/);
+  assert.match(neri, /fact: fact.evidence-concealed\n    value: knows/);
+  assert.match(readFileSync(join(story, "relationships/ada-neri.md"), "utf8"), /initial: wary/);
+  assert.match(readFileSync(join(story, "arcs/truth.md"), "utf8"),
+    /characters: \[character.ada, character.neri\]/);
+  assert.ok(existsSync(join(story, "world-entities/archive.md")));
+  assert.ok(!existsSync(join(story, "events")));
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
+  assert.equal(data.completionEvidence.branchKnowledgeTransitions, "deferred-to-event-design");
+  const validated = cli(["validate"]);
+  assert.equal(validated.status, 0, validated.stderr);
+  const report = JSON.parse(validated.stdout);
+  assert.equal(report.status, "passed");
+  assert.ok(report.report.outstanding.some((entry: any) => entry.field === "fulfillment.any_of"));
+  const inspect = cli(["foundations", "inspect"]);
+  assert.equal(inspect.status, 0, inspect.stderr);
+  assert.deepEqual(JSON.parse(inspect.stdout).items, data.items);
+  const replay = cli(["foundations", "run", "--fixture"]);
+  assert.equal(replay.status, 0, replay.stderr);
+  assert.equal(JSON.parse(replay.stdout).headSha, head, "replay must not commit twice");
+});
+
+test("cannot start foundations before architecture and cannot convert a mismatched specialist manifest into a commit", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("mismatch");
+  const before = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.notEqual(before.status, 0);
+  assert.match(before.stderr, /verified committed architecture/);
+  const arch = architecture();
+  const invalid = cli(["foundations", "run", "--fixture", "--skills-source", source], "mismatch");
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /claimed modifiedRecords differ/);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), arch.headSha);
+  const receipt = JSON.parse(readFileSync(join(job.worktreeRoot, "../character-world.json"), "utf8"));
+  assert.equal(receipt.units[0].phase, "writing");
+  const attempted = cli(["foundations", "run", "--fixture"]);
+  assert.notEqual(attempted.status, 0);
+  assert.match(attempted.stderr, /Interrupted specialist writing/);
+});
+
+test("protects user decisions and rejects unscoped retcons without committing", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("protected", true);
+  const arch = architecture();
+  const invalid = cli(["foundations", "run", "--fixture", "--skills-source", source], "retcon");
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /Unauthorized specialist path: creative-direction/);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), arch.headSha);
+  const uncommitted = readFileSync(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8");
+  assert.match(uncommitted, /authority: user-protected/);
+  assert.match(uncommitted, /statement: "Ada must never defend Neri"/,
+    "the deliberately unauthorized user-protected retcon remains visible for inspection");
+  assert.notEqual(git(job.worktreeRoot, "status", "--porcelain"), "", "preserve interrupted edits");
+});
+
+test("rejects dangling Character Fact references after canonical validation", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("dangling");
+  const arch = architecture();
+  const invalid = cli(["foundations", "run", "--fixture", "--skills-source", source], "dangling");
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /canonical|validation|diagnostic/i);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD~1"), arch.headSha, "world unit alone was committed");
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain") !== "", true);
+  const receipt = JSON.parse(readFileSync(join(job.worktreeRoot, "../character-world.json"), "utf8"));
+  assert.equal(receipt.units[0].phase, "committed");
+  assert.equal(receipt.units[1].phase, "authored");
+});

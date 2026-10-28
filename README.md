@@ -282,6 +282,67 @@ Unsigned CLI assertions and model claims are not authorization.
 Test the public interface with
 `pnpm exec tsx --test test/architecture.test.ts`.
 
+## Canonical Character and World foundations (#18)
+
+After `job architecture run` has committed a verified Arc/Milestone cluster,
+develop its Story foundations in the **same isolated job worktree**:
+
+```sh
+pnpm dev job foundations run --story /path/to/story --job draft-1 \
+  --skills-source /path/to/noveltea-skills
+pnpm dev job foundations inspect --story /path/to/story --job draft-1
+pnpm dev job validate --story /path/to/story --job draft-1
+```
+
+`run` uses two **serialized LangGraph work units**. First, the real Pi
+`nt-worldbuilding` specialist authors `world-entities/*.md` and `facts/*.md`,
+including objective initial truth. Then the real Pi
+`nt-character-development` specialist authors `characters/*.md`,
+`relationships/*.md`, honest initial Fact knowledge and (when necessary)
+**only** the `characters` array of a relevant, planned `arcs/*.md` record.
+Each specialist reads its own pinned skill and the canonical catalog,
+receives the current completion contract and a bounded set of relevant
+source files, and reports exactly which records it modified, architectural
+conflicts and deferred downstream work. Neither specialist commits changes.
+
+The graph independently compares the specialist's claimed paths to the
+actual unstaged Git diff, rejects out-of-domain or unsafe paths and
+unauthorized Arc rewrites, validates the canonical Story against the
+**previous verified work-item HEAD** with strict protection, records
+outstanding/partial obligations, and makes a separately attributed Git
+commit. The verified-head marker advances after each work unit. Any
+structural errors, protected changes, unresolved architectural conflicts,
+unexpected staging or mismatched references fail closed. On interruption,
+modified Story files and specialist transcripts remain intact for
+inspection—an interrupted writer cannot be automatically restarted.
+Completed stages are idempotent and commit provenance is rechecked.
+
+The public output reports both work items, specialist names, commit
+identities, actual paths, validator provenance, obligations, and remaining
+Event/branch-dependent tasks. `foundations-committed` confirms these
+**foundations only**; it does not certify a completed interactive route,
+future knowledge transition, literary review or full Story. The generator
+does not write engine Rooms or fabricate future Event/state references.
+
+Receipts live at `~/.local/state/noveltea-gen/jobs/<sha256>/character-world.json`,
+with private Pi transcripts under `character-world-sessions/{world,character}/`.
+Shared `.story-writing` and `revisions/verified-head.json` coordinate
+the job with architecture and protected revision work. Source checkout
+changes cannot alter an already pinned specialist snapshot. `--fixture`
+creates a deterministic small Story (two Characters, one consequential
+Relationship, a World Entity and an objective Fact) for certification, but
+is **not** live Pi evidence. Certify fixtures with
+`pnpm exec tsx --test test/character-world.test.ts`. To certify the **real**
+Pi specialists with configured credentials, explicitly opt in:
+
+```sh
+NT_LIVE_FOUNDATIONS=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \\
+  pnpm exec tsx --test test/character-world-live.test.ts
+```
+
+The live test inspects the actual pinned reads, editing tool calls, canonical
+records, clean worktree and both specialist commits. It can incur model usage.
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit

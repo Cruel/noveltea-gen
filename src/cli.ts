@@ -28,6 +28,8 @@ Usage:
   pnpm dev job foundation --story /path/to/story --job draft-1 --mode autonomous --task "A mystery premise"
   pnpm dev job architecture run --story /path/to/story --job draft-1 --contract scope.json --skills-source /path/to/noveltea-skills
   pnpm dev job architecture inspect --story /path/to/story --job draft-1
+  pnpm dev job foundations run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
+  pnpm dev job foundations inspect --story /path/to/story --job draft-1
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --signed-evidence /path/to/offline-signed-plan.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
@@ -67,6 +69,13 @@ Job architecture:
   --skills-source <path>   NovelTea skills checkout to pin
   --validator-source <path>  Canonical validator checkout for initial pin
   --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
+  --fixture                Deterministic test adapter, not live Pi evidence
+
+Job foundations (Character and World foundations after architecture):
+  run|inspect             Serialize Worldbuilding and Character specialist work units
+  --skills-source <path>   Pinned NovelTea skills checkout (first run)
+  --validator-source <path>  Canonical Story validator checkout (first run)
+  --provider, --model      Real Pi specialist model (default openai/gpt-6-luna)
   --fixture                Deterministic test adapter, not live Pi evidence
 
 Job foundation:
@@ -181,6 +190,33 @@ function parseArgs(argv: string[]): CliOptions | null {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "foundations") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (action !== "run" && action !== "inspect") throw new Error("Expected job foundations run|inspect.");
+    const allowed = new Set(["--story", "--job", "--skills-source", "--validator-source", "--provider", "--model", "--fixture"]);
+    const values = new Map<string, string>();
+    while (args.length) {
+      const flag = args.shift()!;
+      if (!allowed.has(flag) || values.has(flag)) throw new Error("Invalid or duplicate foundations option: " + flag);
+      if (flag === "--fixture") { values.set(flag, "true"); continue; }
+      const value = args.shift();
+      if (!value?.trim() || value.startsWith("--")) throw new Error("Missing foundations option value: " + flag);
+      values.set(flag, value);
+    }
+    const story = values.get("--story"), job = values.get("--job");
+    if (!story || !job) throw new Error("job foundations requires --story and --job.");
+    process.env.LANGSMITH_TRACING = "false";
+    process.env.LANGCHAIN_TRACING_V2 = "false";
+    process.env.TRACE_TO_LANGSMITH = "false";
+    const { runCharacterWorldJob } = await import("./character-world.js");
+    const result = await runCharacterWorldJob({ story, job, action, skillsSource: values.get("--skills-source"),
+      validatorSource: values.get("--validator-source"), provider: values.get("--provider"),
+      model: values.get("--model"), fixture: values.has("--fixture") });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "architecture") {
     const args = process.argv.slice(4);
     const action = args.shift();
