@@ -426,6 +426,18 @@ async function load(job: JobStartResult) {
   }
   return ideas.sort((a, b) => a.id.localeCompare(b.id));
 }
+/** Review-only completion metadata. Never place a dormant idea's original text
+ * or wording in an ordinary Story writer/reviewer assignment. The caller must
+ * hold the shared job lock and use the verified immutable inbox. */
+export async function deferredCompletionObligations(job: JobStartResult) {
+  const ideas = await load(job);
+  return ideas.filter(idea =>
+    [...idea.requirements.meaning, ...idea.requirements.wording, ...idea.requirements.participants]
+      .some(requirement => requirement.binding)).map(idea => ({
+    id: idea.id, scopeIds: idea.placement.scopeIds,
+    message: "Binding deferred author idea has not been integrated: " + idea.id,
+  }));
+}
 /**
  * Reconcile only a pre-existing capture whose immutable input and predecessor
  * match the interrupted author-update node. Never start a new capture here.

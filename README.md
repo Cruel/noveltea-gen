@@ -887,6 +887,46 @@ Provider/model/thinking overrides use `NT_PROVIDER`, `NT_MODEL`, and
 `NT_THINKING=low|high`; `NT_KEEP_FAILED_LIVE=1` retains test state for
 diagnosis. Neither mode merges into the author's branch.
 
+## Independent requested-scope narrative review (#26)
+
+After the planned Story scope has been realized, evaluate the **actual saved
+canonical Story** against its versioned author contract, rather than assuming
+an apparently complete work-item DAG proves the requested narrative is done:
+
+```sh
+pnpm dev job review run --story /path/to/story --job draft-1 \
+  --skills-source /path/to/noveltea-skills
+pnpm dev job review inspect --story /path/to/story --job draft-1
+```
+
+The review uses the pinned canonical validator and representative Event,
+Milestone-alternative, Choice branch, and Puzzle clue/solution witnesses. The
+result separates **scoped deterministic obligations** from **global catalog
+readiness**; an unrelated incomplete Arc does not invalidate a bounded request.
+Truncation, unreachable or uncertain routes, protection failures and binding
+unplaced deferred ideas are explicit scoped findings. An independent, read-only
+`nt-narrative-review` Pi session examines actual prose and source-linked route
+evidence for continuity, pacing, voice, Puzzle fairness, agency, payoff and
+conditional knowledge. A green canonical validator alone is **not** an
+editorial pass. Representative witnesses are not an exhaustive route proof.
+
+Composition-only blocking findings can receive at most two edits **within the
+original Composition writer's persisted Pi session**, limited to that writer's
+previously committed Authored Content. Each attempt undergoes canonical
+revalidation and independent re-review; oscillation, unresolved problems,
+missing provenance, or findings needing Event, architecture or protected
+decisions stop and require explicit reconciliation. Interrupted sessions and
+uncommitted drafts are preserved; neither the review nor repair merges into the
+author's branch. New authorized plans or later verified commits invalidate an
+old completion verdict; prior review receipts are archived outside Story canon.
+
+`--fixture` runs only structural/route checks and explicitly returns
+`editorial-unverified`, **never** `complete-in-scope`, even if the deterministic
+audit passes. Real Pi editorial certification is opt-in, incurs model usage and
+requires configured credentials. The review receipt and Pi transcripts live in
+the job state directory (`narrative-review.json`, `review-sessions/`). Test with
+`pnpm exec tsx --test test/narrative-review.test.ts`.
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit

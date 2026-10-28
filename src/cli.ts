@@ -40,6 +40,8 @@ Usage:
   pnpm dev job interactive inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job composition run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
   pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
+  pnpm dev job review run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
+  pnpm dev job review inspect --story /path/to/story --job draft-1
   pnpm dev job ideas capture --story /path/to/story --job draft-1 --file idea.json
   pnpm dev job ideas inspect --story /path/to/story --job draft-1
   pnpm dev job ideas eligibility --story /path/to/story --job draft-1
@@ -118,6 +120,14 @@ Job composition (branch-aware Authored Content after interactive design):
   --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
   --thinking low|high     Explicit thinking effort for writer and reviewer
   --fixture               Structural/lexical test adapter, NOT independent literary proof
+
+Job review (independent end-of-scope completion assessment):
+  run|inspect           Validate the versioned scope, review alternate routes and editorial quality
+  --skills-source <path> Pinned nt-narrative-review and nt-catalog source (first run)
+  --validator-source <path> Pinned canonical validator source (first run)
+  --provider, --model   Pi reviewer and bounded composition repair specialist
+  --thinking low|high  Explicit thinking effort
+  --fixture             Deterministic structural checks ONLY, never an editorial pass
 
 Job event (bounded Event-design work item after Character/World foundations):
   run|inspect             Run or inspect a pinned nt-event-design Milestone work item
@@ -334,6 +344,27 @@ async function main(): Promise<void> {
     const result = await runIdeas({ story, job,
       action: action as "capture" | "inspect" | "eligibility" | "context" | "placement-context",
       file: values.get("--file"), target: values.get("--target") });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
+  if (process.argv[2] === "job" && process.argv[3] === "review") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (action !== "run" && action !== "inspect") throw new Error("Expected job review run|inspect.");
+    const values = parseJobOptions(args, "review", ["--story", "--job", "--skills-source",
+      "--validator-source", "--provider", "--model", "--thinking", "--fixture"], ["--fixture"]);
+    const story = values.get("--story"), job = values.get("--job");
+    if (!story || !job) throw new Error("job review requires --story and --job.");
+    if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!))
+      throw new Error("Review --thinking supports low or high.");
+    disableJobCloudTracing();
+    const { runNarrativeReview } = await import("./narrative-review.js");
+    const result = await runNarrativeReview({ story, job, action,
+      skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
+      provider: values.get("--provider"), model: values.get("--model"),
+      thinking: values.get("--thinking") as "low" | "high" | undefined,
+      fixture: values.has("--fixture") });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     return;
   }

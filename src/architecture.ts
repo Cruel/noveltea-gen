@@ -113,7 +113,9 @@ function parseContract(value: unknown): CompletionContract {
   return { scope: { ...c.scope, targets: [...new Set(c.scope.targets)], branches: [...new Set(c.scope.branches)] },
     constraints: c.constraints, envelope: c.envelope };
 }
-function verifyPlanHistory(job: JobStartResult, state: Receipt) {
+/** Check every authorized scope revision, including when a later work item
+ * consumes the plan without invoking the architecture writer again. */
+export function verifyPlanHistory(job: JobStartResult, state: Pick<Receipt, "history" | "plan">) {
   if (!Array.isArray(state.history)) throw new Error("Invalid architecture plan history.");
   for (const [i, entry] of state.history.entries()) {
     const signed = verifyAuthorEvidence(job, entry.signed);
