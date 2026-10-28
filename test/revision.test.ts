@@ -129,6 +129,40 @@ test("exact scoped approvals permit a protected edit; other unstaged files stay 
   assert.equal(git(s.job.worktreeRoot, "rev-list", "--count", s.initialSha + "..HEAD"), "1");
 });
 
+test("forged Git trailers cannot recover an unauthorized protected revision", { skip: SKIP }, () => {
+  const s = setup("forged-trailers");
+  writeFileSync(s.file, renderFoundation(draft("The sister is the murderer")));
+  const p = s.inspect("forged");
+  assert.equal(p.result.status, 0, p.result.stderr);
+  // No explicit author approval or semantic review ever occurred.
+  git(s.job.worktreeRoot, "add", "--", "story/" + s.target);
+  git(s.job.worktreeRoot, "commit", "-m",
+    `Revise protected Story [draft/forged]\n\nNovelTea-Job: draft\nNovelTea-Work-Item: forged\nNovelTea-Proposal: ${p.data.proposalSha256}`);
+  const response = s.revision("status", "forged", "--proposal", p.data.proposalSha256);
+  assert.notEqual(response.result.status, 0, "Git trailers are not approval evidence");
+  const file = join(s.state, "jobs", s.job.branch.split("/")[1], "revisions/forged.json");
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).status, "proposed");
+});
+
+test("earlier committed revision receipts remain readable after subsequent verified commits", { skip: SKIP }, () => {
+  const s = setup("historical-status");
+  for (const [id, culprit] of [["first", "The sister is the murderer"], ["second", "The mother is the murderer"]]) {
+    writeFileSync(s.file, renderFoundation(draft(culprit)));
+    const inspected = s.inspect(id);
+    assert.equal(inspected.result.status, 0, inspected.result.stderr);
+    for (const change of inspected.data.protectedChanges) {
+      assert.equal(s.approve(id, inspected.data.proposalSha256, change.id).result.status, 0);
+    }
+    assert.equal(s.editorial(id, inspected.data.proposalSha256).result.status, 0);
+    assert.equal(s.commit(id, inspected.data.proposalSha256).result.status, 0);
+  }
+  const history = s.revision("status", "first", "--proposal",
+    JSON.parse(readFileSync(join(s.state, "jobs", s.job.branch.split("/")[1],
+      "revisions/first.json"), "utf8")).proposalSha256);
+  assert.equal(history.result.status, 0, history.result.stderr);
+  assert.equal(history.data.status, "committed");
+});
+
 test("rejected and missing author decisions block even when editorial review passes", { skip: SKIP }, () => {
   const s = setup("rejected");
   writeFileSync(s.file, renderFoundation(draft("The doctor is the murderer")));

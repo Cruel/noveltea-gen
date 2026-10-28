@@ -236,6 +236,16 @@ identity or permission sandbox. An embedding UI must route these commands
 exclusively through an authenticated author action, never expose them as Pi
 tools or mistake a model/tool assertion for that action.
 
+**Security limitation (open #16 blocker):** the current local CLI does not
+independently authenticate the human caller or protect revision receipts from
+a writing agent with unrestricted shell access under the same OS identity.
+Such an agent can invoke `authorize` and `review` itself, even though those
+commands record `source: explicit-author-cli`. Those strings are assertions,
+not independently verified author consent. Do **not** treat this prototype as
+a secure approval boundary until an isolated authenticated author channel or
+cryptographically verifiable, externally protected author authorization is
+implemented. An ordinary CLI option alone is not sufficient.
+
 A separate editorial review is **always required**, even for changes that do
 not alter any protected decision metadata. Compare the source-linked prose
 and its narrative consequences (including indirect contradictions) before

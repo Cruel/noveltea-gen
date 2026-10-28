@@ -310,9 +310,10 @@ async function inspectProposal(job: JobStartResult, target: string, head: string
     const latest = head === job.baseSha ? { changes: [] as ProtectedDelta[], affected: [] } :
       report(last, head, false);
     const trustedPath = targetSpec(job, target);
-    const restore = execFileSync("git", ["-C", view.worktreeRoot, "restore", "--source=HEAD",
-      "--worktree", "--", trustedPath], { encoding: "utf8" });
-    void restore;
+    // Use the same sanitized Git environment as every other operation;
+    // inherited GIT_DIR/GIT_INDEX_FILE must not redirect this restore.
+    git(job, "-C", view.worktreeRoot, "restore", "--source=HEAD",
+      "--worktree", "--", trustedPath);
     const pristine = await validateStoryJob(pinnedJob, source, { ...view, baseSha: head });
     if (pristine.status !== "passed" || !pristine.report ||
         (pristine.report.diagnostics as unknown[]).length) {
@@ -349,9 +350,42 @@ function publicStatus(receipt: RevisionReceipt, unrelated: string[] = []) {
     commitSha: receipt.commitSha,
   };
 }
+function assertAuthorReviewed(revision: RevisionReceipt) {
+  if (revision.editorial?.verdict !== "pass" ||
+      revision.editorial.proposalSha256 !== revision.proposalSha256 ||
+      revision.editorial.source !== "independent-author-review") {
+    throw new Error("Independent, source-linked prose/semantic review has not passed; commit blocked.");
+  }
+  if (revision.changes.some(c => !revision.approvals.some(a =>
+      a.changeId === c.id && a.action === "approved" &&
+      a.decision === c.decision && a.proposalSha256 === revision.proposalSha256 &&
+      a.source === "explicit-author-cli" &&
+      JSON.stringify(a.before) === JSON.stringify(c.before) &&
+      JSON.stringify(a.after ?? null) === JSON.stringify(c.after ?? null)))) {
+    throw new Error("One or more protected decisions lack exact explicit author authorization; commit blocked.");
+  }
+}
 async function recoverCommitted(job: JobStartResult, receipt: RevisionReceipt) {
   const head = git(job, "rev-parse", "HEAD");
+  if (receipt.status === "committed") {
+    // Old completed receipts are historical facts, not proposals to replay.
+    // The job may have advanced through arbitrarily many later verified items.
+    assertAuthorReviewed(receipt);
+    git(job, "merge-base", "--is-ancestor", receipt.commitSha!, head);
+    const blob = gitRaw(job, "show", receipt.commitSha! + ":" + targetSpec(job, receipt.target));
+    if (sha(blob) !== receipt.authoredFileSha256) {
+      throw new Error("Previously committed revision no longer matches its recorded Story bytes.");
+    }
+    if (head === receipt.commitSha && !existsSync(headFile(job))) {
+      await persist(headFile(job), { version: 1, jobId: job.jobId,
+        headSha: head, workItemId: receipt.workItemId } satisfies VerifiedHead);
+    }
+    return true;
+  }
   if (head === receipt.verifiedHead) return false;
+  // A matching Git message alone is not human authorization. Check the
+  // durable approvals before attempting interrupted-commit recovery.
+  assertAuthorReviewed(receipt);
   if (git(job, "rev-parse", "HEAD^") !== receipt.verifiedHead ||
       !git(job, "log", "-1", "--format=%B").includes(
         `NovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Proposal: ${receipt.proposalSha256}`)) {
@@ -359,6 +393,7 @@ async function recoverCommitted(job: JobStartResult, receipt: RevisionReceipt) {
   }
   const changed = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", head);
   if (changed !== targetSpec(job, receipt.target) ||
+      sha(gitRaw(job, "show", head + ":" + changed)) !== receipt.authoredFileSha256 ||
       sha(await readFile(await candidateFile(job, receipt.target))) !== receipt.authoredFileSha256) {
     throw new Error("Recovered revision commit does not match the authorized target content.");
   }
@@ -377,18 +412,7 @@ async function commitRevisionGraph(job: JobStartResult, receipt: RevisionReceipt
   const Channels = Annotation.Root({ revision: Annotation<RevisionReceipt>() });
   const graph = new StateGraph(Channels)
     .addNode("check_authorization", async ({ revision }) => {
-      if (revision.editorial?.verdict !== "pass" ||
-          revision.editorial.proposalSha256 !== revision.proposalSha256) {
-        throw new Error("Independent, source-linked prose/semantic review has not passed; commit blocked.");
-      }
-      if (revision.changes.some(c => !revision.approvals.some(a =>
-          a.changeId === c.id && a.action === "approved" &&
-          a.decision === c.decision && a.proposalSha256 === revision.proposalSha256 &&
-          a.source === "explicit-author-cli" &&
-          JSON.stringify(a.before) === JSON.stringify(c.before) &&
-          JSON.stringify(a.after ?? null) === JSON.stringify(c.after ?? null)))) {
-        throw new Error("One or more protected decisions lack exact explicit author authorization; commit blocked.");
-      }
+      assertAuthorReviewed(revision);
       if (git(job, "rev-parse", "HEAD") !== head ||
           sha(await readFile(await candidateFile(job, revision.target))) !== revision.authoredFileSha256) {
         throw new Error("Revision target or Git HEAD changed while validating; no commit made.");
