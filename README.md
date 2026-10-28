@@ -157,6 +157,18 @@ returns `status: "unverified"` with exit code `2`; it never reports that
 protected changes were checked. This limitation must be resolved by the
 native Git-impact contract before completion gates can depend on it.
 
+**Temporary Pi-side CLI bridge:** Writing specialists receive `noveltea narrative
+validate . --json` through a job-local `agent-validator-bin/noveltea`
+command that points to `src/noveltea-cli-shim.mjs`. The shim delegates
+to the existing public `job validate` adapter and honors the job's
+trusted Git `--base` and strict protection checks. It is not a separate
+schema or validator. Pi can inspect diagnostics and repair its draft;
+the graph independently revalidates before accepting a commit. The
+bridge is only available to these agent Bash sessions, not globally.
+**When native narrative validation is certified, delete the shim and
+`agentValidatorBashTool` session wiring**, allowing the actual NovelTea
+CLI on `PATH` to be used without changing skill instructions.
+
 The native replacement is owned by [Cruel/nt#526](https://github.com/Cruel/nt/issues/526)
 and [Cruel/nt#535](https://github.com/Cruel/nt/issues/535). The validator's
 single stable adapter isolates future CLI replacement from graph/agent
@@ -409,6 +421,86 @@ Optional real specialist certification may consume model usage:
 NT_LIVE_EVENT=1 NT_PROVIDER=nvidia NT_MODEL=nvidia/nemotron-3-ultra-550b-a55b \
   pnpm exec tsx --test test/event-live.test.ts
 ```
+
+## Interactive Choice Point and Puzzle alternatives (#20)
+
+Run this **after** the Event work item for the same planned Milestone has
+committed. Both stages use the existing job's isolated Git Story worktree:
+
+```sh
+pnpm dev job interactive run --story /path/to/story --job draft-1 \
+  --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
+pnpm dev job interactive inspect --story /path/to/story --job draft-1 \
+  --milestone milestone.disclosure
+pnpm dev job validate --story /path/to/story --job draft-1
+```
+
+The LangGraph workflow serializes two real pinned Pi specialists:
+`nt-interactive-narrative` develops a consequential **Choice Point**, typed
+Event branches, and a later conditional response; `nt-puzzle-design`
+develops a **Puzzle**, two alternative solution Events, discoverable clues in
+linked Authored Content, and observable typed state changes. Both receive
+existing Milestone, Event, Character, Fact, Relationship and author-contract
+context, and read their skill plus the canonical catalog. Each independently
+produces an exact changed-file manifest, validates against the previous
+**verified Git HEAD** with strict protection, and commits a single bounded
+work item. Previously committed Event `prerequisites` are immutable in this
+workflow: a new option cannot bypass an old gate merely by adding an enabling
+route. All previously reachable Events must stay reachable; branches of
+unmodified Events must remain reachable. Authorized interactive work may replace
+steps within a changed Event when its original entry gate is preserved and its
+new outcome branches are proven.
+
+Acceptance checks that **every declared Choice Point outcome** is selected
+by a reachable Event branch, has a distinct typed consequence, and has a
+reachable later conditional consumer or an explicit per-outcome writing
+obligation. Every newly authored Puzzle must have two genuine solution
+Events, distinct consequences, canonical clue-content records and
+`coverage.puzzleSolutions[*].solutions[*].clueAccess.status === reachable`
+for every solution. Invalid/impossible/unverified routes, inaccessible clues,
+staged/out-of-domain files, protected changes and contradictory branches
+fail closed. Existing Milestones and other read-only source records are context,
+not editable targets: `sourcePaths` and the architecture's Milestone targets do
+not grant edit authority. The specialists get up to two localized repairs in
+their original Pi sessions. An unstaged edit to a known read-only source can
+receive a bounded repair diagnostic only when pinned Git protection confirms
+no protected changes; the specialist must restore it exactly, without the graph
+silently reverting or authorizing it. Staged changes, unsafe or unrelated paths,
+and protected violations stop immediately. Failed stages preserve uncommitted source and transcripts;
+**dependent Puzzle design cannot run after Choice failure**.
+
+The progress receipt is at
+`~/.local/state/noveltea-gen/jobs/<sha256>/interactive-items/<milestone-slug>.json`;
+Pi transcripts are in
+`interactive-sessions/interactive-<milestone-slug>/{choice,puzzle}/`.
+The output includes pinned skills, each commit, validator digest, source
+head, choice/solution witnesses and any remaining prose or presentation
+obligations. Structural reachability never certifies a player's subjective
+perception, the quality of a clue or finished engine implementation.
+
+Deterministic tests (no LLM calls):
+
+```sh
+pnpm exec tsx --test test/interactive-work.test.ts
+```
+
+Opt-in **real Pi** certification (incurs provider usage):
+
+```sh
+NT_LIVE_INTERACTIVE=1 NT_PROVIDER=nvidia \
+  NT_MODEL=nvidia/nemotron-3-ultra-550b-a55b \
+  pnpm exec tsx --test test/interactive-live.test.ts
+
+# Compare GPT-6 Luna using explicitly low or high Pi thinking effort:
+NT_LIVE_INTERACTIVE=1 NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
+  NT_THINKING=low pnpm exec tsx --test test/interactive-live.test.ts
+NT_LIVE_INTERACTIVE=1 NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
+  NT_THINKING=high pnpm exec tsx --test test/interactive-live.test.ts
+```
+
+Add `NT_KEEP_FAILED_LIVE=1` to preserve a failed disposable live Story and
+its private transcripts. Neither fixture runs nor successful generation
+automatically merges into the author's normal checkout.
 
 ## Protected-decision revision and author approval (#16)
 
