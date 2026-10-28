@@ -20,6 +20,7 @@ test("opt-in two real Pi specialists author and certify Character/World foundati
     return run.stdout.trim();
   }
   const sourceStatus = git(source, "status", "--porcelain");
+  let completed = false;
   try {
     const repo = join(temp, "author");
     const story = join(repo, "story");
@@ -98,8 +99,13 @@ A ledger implicates a trusted member of the community, threatening a close frien
     assert.equal(records.filter((r: any) => r.metadata.type === "event").length, 0);
     assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
     assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+    completed = true;
   } finally {
     assert.equal(git(source, "status", "--porcelain"), sourceStatus);
-    removeTestTree(temp);
+    if (!completed && process.env.NT_KEEP_FAILED_LIVE === "1") {
+      process.stderr.write("Preserved failed live Story job for inspection: " + temp + "\n");
+    } else {
+      removeTestTree(temp);
+    }
   }
 });

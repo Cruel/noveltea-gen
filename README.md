@@ -310,9 +310,13 @@ actual unstaged Git diff, rejects out-of-domain or unsafe paths and
 unauthorized Arc rewrites, validates the canonical Story against the
 **previous verified work-item HEAD** with strict protection, records
 outstanding/partial obligations, and makes a separately attributed Git
-commit. The verified-head marker advances after each work unit. Any
-structural errors, protected changes, unresolved architectural conflicts,
-unexpected staging or mismatched references fail closed. On interruption,
+commit. The verified-head marker advances after each work unit. For
+canonical structural diagnostics, the same Pi session gets at most two
+bounded repair attempts before acceptance fails. Protected changes,
+unresolved architectural conflicts, unexpected staging, mismatched references
+and unresolved structural errors always fail closed. An Arc's `characters`
+list may be authored in inline or block YAML without permitting edits to any
+other Arc fields or prose. On interruption,
 modified Story files and specialist transcripts remain intact for
 inspection—an interrupted writer cannot be automatically restarted.
 Completed stages are idempotent and commit provenance is rechecked.
@@ -342,6 +346,8 @@ NT_LIVE_FOUNDATIONS=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \\
 
 The live test inspects the actual pinned reads, editing tool calls, canonical
 records, clean worktree and both specialist commits. It can incur model usage.
+Use `NT_KEEP_FAILED_LIVE=1` during a live run to preserve a failed disposable
+Story job and Pi transcripts for diagnosis; successful runs still clean up.
 
 ## Protected-decision revision and author approval (#16)
 

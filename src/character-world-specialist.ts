@@ -39,19 +39,20 @@ const DOMAINS = {
   world: {
     name: "nt-worldbuilding",
     owns: ["world-entities/*.md", "facts/*.md"],
-    guidance: "Define objective initial truth, consequential persistent world elements and the limits of each rule. Never use initial: false to mean undiscovered. Do not invent engine Rooms, speculative Events or future Narrative State snapshots.",
+    guidance: "Create one or two consequential persistent setting elements (world-entity) and objective initial Facts, not a glossary of the cast. People belong in Character records, never in world-entity records. A world-entity has exactly one type-specific field, description (quoted string); a fact has exactly one type-specific field, initial (unquoted boolean). NEVER put description on a fact. EVERY record MUST have substantial readable Markdown narrative prose AFTER its closing --- frontmatter line. Never use initial: false to mean undiscovered. Do not invent engine Rooms, speculative Events or future Narrative State snapshots.",
   },
   character: {
     name: "nt-character-development",
     owns: ["characters/*.md", "relationships/*.md", "arcs/*.md (characters array only)"],
-    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
+    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. Use character records (type-specific fields motivation and optional initial_knowledge) for people, relationship records (characters exactly two distinct IDs and initial) for the bond. Every record MUST have readable narrative prose after its closing --- frontmatter line. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
   },
 } as const;
 
 /** Real Pi authoring: no commit, validation or authorization power is delegated to the specialist. */
 export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: FoundationAssignment, provider: string, modelId: string,
-  onSession: (path: string) => Promise<void>): Promise<SpecialistEvidence> {
+  onSession: (path: string) => Promise<void>,
+  verifyDraft: (evidence: SpecialistEvidence) => Promise<string[]>): Promise<SpecialistEvidence> {
   const selected = DOMAINS[assignment.domain];
   const required = [selected.name + "/SKILL.md", ...CATALOG];
   const project = await openStoryProject(job.worktreeStoryRoot);
@@ -81,7 +82,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
   try {
     const sessionFile = session.sessionManager.getSessionFile();
     if (sessionFile) await onSession(sessionFile);
-    await session.prompt(
+    let prompt =
       `You are the NovelTea ${selected.name} specialist assigned ONE bounded canonical Story work item.\n` +
       "Read ALL the pinned guidance below using the read tool before writing:\n" +
       required.map(path => join(snapshot.path, "skills", path)).join("\n") +
@@ -97,41 +98,58 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       "\nAt the END of your response, provide a JSON object on its own line with the exact Story-relative paths you changed: " +
       '`{"modifiedRecords":["characters/example.md"],"architecturalConflicts":[],"laterObligations":["Bind the disclosure to an Event"]}` (replace example with reality). ' +
       "Report any blocked architectural conflict in architecturalConflicts and all deferred Event/branch dependencies in laterObligations. " +
-      "The graph will check this claim against the actual Git diff; your self-report is not acceptance evidence."
-    );
-    const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
-    if (!assistant || assistant.role !== "assistant" || ["error", "aborted"].includes(assistant.stopReason)) {
-      const detail = assistant?.role === "assistant"
-        ? `stopReason=${assistant.stopReason}; error=${assistant.errorMessage ?? "none"}`
-        : "no assistant turn";
-      throw new Error("Foundation specialist did not finish a successful Pi turn (" + detail + ").");
+      "List ALL paths changed since the beginning of this work item, not just the latest edits. " +
+      "The graph will check this claim against the actual Git diff; your self-report is not acceptance evidence.";
+    // Do not start a second writer or discard its work. The SAME Pi session can
+    // receive bounded, source-located validator feedback before commit.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await session.prompt(prompt);
+      const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
+      if (!assistant || assistant.role !== "assistant" || ["error", "aborted"].includes(assistant.stopReason)) {
+        const detail = assistant?.role === "assistant"
+          ? `stopReason=${assistant.stopReason}; error=${assistant.errorMessage ?? "none"}`
+          : "no assistant turn";
+        throw new Error("Foundation specialist did not finish a successful Pi turn (" + detail + ").");
+      }
+      const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
+        m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
+      const calls = session.messages.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "toolCall") : []);
+      const reads = calls.filter(c => c.name === "read" && completed.has(c.id) && typeof c.arguments?.path === "string")
+        .map(c => resolve(project.root, c.arguments.path as string));
+      const pinned = required.map(p => join(snapshot.path, "skills", p));
+      if (pinned.some(path => !reads.includes(path))) throw new Error("Foundation specialist did not read every required pinned skill reference.");
+      const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
+        typeof c.arguments?.path === "string").map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
+      if (!edits.length) throw new Error("Foundation specialist did not edit canonical Markdown.");
+      const text = assistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+      const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
+      let declared: unknown;
+      try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }
+      const paths = (declared as { modifiedRecords?: unknown })?.modifiedRecords;
+      if (!Array.isArray(paths) || paths.length === 0 || !paths.every(p => typeof p === "string")) {
+        throw new Error("Foundation specialist did not provide a valid modifiedRecords manifest.");
+      }
+      const messages = declared as { architecturalConflicts?: unknown; laterObligations?: unknown };
+      const strings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === "string" && x.trim());
+      if (!strings(messages.architecturalConflicts) || !strings(messages.laterObligations)) {
+        throw new Error("Specialist must explicitly report architectural conflicts and downstream obligations.");
+      }
+      const evidence: SpecialistEvidence = { claimedPaths: paths, skillReads: reads.filter(path => pinned.includes(path)),
+        architecturalConflicts: messages.architecturalConflicts as string[],
+        laterObligations: messages.laterObligations as string[],
+        piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
+      const diagnostics = await verifyDraft(evidence);
+      if (diagnostics.length === 0) return evidence;
+      if (attempt === 2) {
+        throw new Error("Specialist failed canonical validation after two bounded repair attempts: " + JSON.stringify(diagnostics));
+      }
+      prompt = "The independent canonical validator rejected your UNCOMMITTED Story draft. " +
+        "Stay within the exact original authorized scope; repair these file/line diagnostics in your existing files. " +
+        "Read the relevant pinned catalog references again if necessary. Do not stage or commit. " +
+        "Do not change or weaken protected decisions, or fill unknown future routes with fictitious Events. " +
+        "After fixing, repeat the COMPLETE modifiedRecords/architecturalConflicts/laterObligations JSON manifest. " +
+        "Diagnostics:\n" + diagnostics.join("\n");
     }
-    const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-      m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-    const calls = session.messages.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "toolCall") : []);
-    const reads = calls.filter(c => c.name === "read" && completed.has(c.id) && typeof c.arguments?.path === "string")
-      .map(c => resolve(project.root, c.arguments.path as string));
-    const pinned = required.map(p => join(snapshot.path, "skills", p));
-    if (pinned.some(path => !reads.includes(path))) throw new Error("Foundation specialist did not read every required pinned skill reference.");
-    const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
-      typeof c.arguments?.path === "string").map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
-    if (!edits.length) throw new Error("Foundation specialist did not edit canonical Markdown.");
-    const text = assistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
-    const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
-    let declared: unknown;
-    try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }
-    const paths = (declared as { modifiedRecords?: unknown })?.modifiedRecords;
-    if (!Array.isArray(paths) || paths.length === 0 || !paths.every(p => typeof p === "string")) {
-      throw new Error("Foundation specialist did not provide a valid modifiedRecords manifest.");
-    }
-    const messages = declared as { architecturalConflicts?: unknown; laterObligations?: unknown };
-    const strings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === "string" && x.trim());
-    if (!strings(messages.architecturalConflicts) || !strings(messages.laterObligations)) {
-      throw new Error("Specialist must explicitly report architectural conflicts and downstream obligations.");
-    }
-    return { claimedPaths: paths, skillReads: reads.filter(path => pinned.includes(path)),
-      architecturalConflicts: messages.architecturalConflicts as string[],
-      laterObligations: messages.laterObligations as string[],
-      piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
+    throw new Error("Specialist repair loop terminated unexpectedly.");
   } finally { session.dispose(); }
 }

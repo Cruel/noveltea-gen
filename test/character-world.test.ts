@@ -140,6 +140,28 @@ test("protects user decisions and rejects unscoped retcons without committing", 
   assert.notEqual(git(job.worktreeRoot, "status", "--porcelain"), "", "preserve interrupted edits");
 });
 
+test("Character specialist may add Arc links as a canonical YAML block array", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("block-links");
+  architecture();
+  const run = cli(["foundations", "run", "--fixture", "--skills-source", source], "block-links");
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(JSON.parse(run.stdout).status, "foundations-committed");
+  const arc = readFileSync(join(job.worktreeStoryRoot, "arcs/truth.md"), "utf8");
+  assert.match(arc, /characters:\n  - character\.ada\n  - character\.neri\n/);
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+});
+
+test("Arc links may not conceal changed Arc narrative content", { skip: !available }, () => {
+  const { cli, job, architecture } = setup("arc-retcon");
+  architecture();
+  const run = cli(["foundations", "run", "--fixture", "--skills-source", source], "arc-retcon");
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /Arc cross-domain edit changed more than its characters array/);
+  const receipt = JSON.parse(readFileSync(join(job.worktreeRoot, "../character-world.json"), "utf8"));
+  assert.equal(receipt.units[0].phase, "committed");
+  assert.equal(receipt.units[1].phase, "writing");
+});
+
 test("rejects dangling Character Fact references after canonical validation", { skip: !available }, () => {
   const { cli, job, architecture } = setup("dangling");
   const arch = architecture();

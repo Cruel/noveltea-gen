@@ -129,6 +129,37 @@ function assignment(domain: FoundationDomain, plan: Plan, report: CatalogReport,
     decisionAuthority: { existingAuthorChoices: "protected-no-retcon",
       newSpecialistChoices: "agent-delegated", editorialApproval: "not-granted" } };
 }
+/** Compare Arc records with their Character links removed, accepting both canonical
+ * YAML array spellings without tolerating a change to any other field or prose. */
+function normalizeArcCharacterLinks(text: string): { text: string; ids: string[] } {
+  const lines = text.split("\n");
+  if (lines[0] !== "---") throw new Error("Arc frontmatter is missing.");
+  const end = lines.indexOf("---", 1);
+  if (end < 0) throw new Error("Arc frontmatter is not closed.");
+  const start = lines.findIndex((line, i) => i > 0 && i < end && /^characters:/.test(line));
+  if (start < 0) throw new Error("Arc characters field is missing.");
+  const inline = lines[start]!.match(/^characters:[ \t]*\[([^\]\n]*)\][ \t]*$/);
+  let next = start + 1;
+  let ids: string[];
+  if (inline) {
+    ids = inline[1]!.split(",").map(value => value.trim()).filter(Boolean);
+  } else if (/^characters:[ \t]*$/.test(lines[start]!)) {
+    ids = [];
+    while (next < end && /^[ \t]+- /.test(lines[next]!)) {
+      const match = lines[next]!.match(/^[ \t]+- (character\.[a-z][a-z0-9-]*)[ \t]*$/);
+      if (!match) throw new Error("Arc Character list contains an invalid typed reference.");
+      ids.push(match[1]!);
+      next++;
+    }
+    if (!ids.length) throw new Error("Arc has an empty or malformed block Character list.");
+  } else {
+    throw new Error("Arc Character list has an unsupported YAML form.");
+  }
+  return {
+    text: [...lines.slice(0, start), "characters: [audited]", ...lines.slice(next)].join("\n"),
+    ids,
+  };
+}
 async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAssignment, declared: string[]) {
   const paths: string[] = [];
   for (const entry of dirty(job)) {
@@ -153,15 +184,14 @@ async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAss
       // its creative content. Compare against HEAD, not against its own claim.
       const oldText = git(job, "show", "HEAD:" + repoPath(job, local));
       const newText = await readFile(file, "utf8");
-      const link = /^characters:\s*\[[^\]\n]*\]/m;
-      const before = oldText.match(link)?.[0], after = newText.match(link)?.[0];
-      if (!before || !after || oldText.trimEnd().replace(link, "characters: []") !== newText.trimEnd().replace(link, "characters: []")) {
+      const previous = normalizeArcCharacterLinks(oldText);
+      const current = normalizeArcCharacterLinks(newText);
+      if (previous.text.trimEnd() !== current.text.trimEnd()) {
         throw new Error("Arc cross-domain edit changed more than its characters array: " + local);
       }
-      const parse = (line: string) => line.slice(line.indexOf("[") + 1, -1).split(",").map(v => v.trim()).filter(Boolean);
-      const previous = parse(before), current = parse(after);
-      if (!previous.every(id => current.includes(id)) || current.some(id => !/^character\.[a-z][a-z0-9-]*$/.test(id)) ||
-          new Set(current).size !== current.length) {
+      if (!previous.ids.every(id => current.ids.includes(id)) ||
+          current.ids.some(id => !/^character\.[a-z][a-z0-9-]*$/.test(id)) ||
+          new Set(current.ids).size !== current.ids.length) {
         throw new Error("Arc link edit removes or invents invalid Character IDs: " + local);
       }
     }
@@ -280,7 +310,12 @@ async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: Foundation
       if (!before) throw new Error("Fixture Arc has no characters list to link.");
       const prior = before[1]!.split(",").map(v => v.trim()).filter(Boolean);
       const merged = [...new Set([...prior, "character.ada", "character.neri"])];
-      await writeFile(file, old.replace(/^characters:\s*\[[^\]\n]*\]/m, "characters: [" + merged.join(", ") + "]"));
+      const block = ["block-links", "arc-retcon"].includes(process.env.NT_FOUNDATIONS_FIXTURE_CASE ?? "");
+      const linked = old.replace(/^characters:\s*\[[^\]\n]*\]/m,
+        block ? "characters:\n" + merged.map(id => "  - " + id).join("\n") : "characters: [" + merged.join(", ") + "]");
+      await writeFile(file, process.env.NT_FOUNDATIONS_FIXTURE_CASE === "arc-retcon"
+        ? linked.replace("The inquiry puts a friendship under pressure.", "The inquiry eliminates the player's loyalty choice.")
+        : linked);
       paths.push(arc);
     }
   }
@@ -427,7 +462,31 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         let evidence: SpecialistEvidence;
         if (state.worker === "fixture") evidence = await fixtureAuthor(job, unit, assign);
         else evidence = await authorCharacterWorld(job, state.snapshot!, assign, state.provider, state.model,
-          async session => { unit.piSessionFile = session; await persist(file, state); });
+          async session => { unit.piSessionFile = session; await persist(file, state); },
+          async proposed => {
+            // Inspect the actual working tree BEFORE showing validator diagnostics
+            // to Pi. Unexpected paths, staging or forged manifests fail closed.
+            const paths = await auditPaths(job, unit, assign, proposed.claimedPaths);
+            assertHead(job, before);
+            if (proposed.architecturalConflicts?.length) {
+              throw new Error("Specialist reported architectural conflicts: " + JSON.stringify(proposed.architecturalConflicts));
+            }
+            const draft = await validate(before);
+            const report = draft.report as unknown as CatalogReport | undefined;
+            if (!report?.protection || report.protection.status !== "checked" ||
+                report.protection.changes.length || report.protection.warnings.length) {
+              throw new Error("Draft contains unverified or protected changes; no automated specialist repair allowed.");
+            }
+            if (report.diagnostics.length) {
+              return report.diagnostics.slice(0, 16).map(d => JSON.stringify(d));
+            }
+            const candidate: Unit = { ...unit, paths };
+            if (draft.status === "passed") {
+              await checkOutput(job, report, candidate, assign);
+              return [];
+            }
+            throw new Error("Canonical validator rejected the draft without actionable structural diagnostics.");
+          });
         unit.claimedPaths = evidence.claimedPaths;
         unit.architecturalConflicts = evidence.architecturalConflicts;
         unit.laterObligations = evidence.laterObligations;
