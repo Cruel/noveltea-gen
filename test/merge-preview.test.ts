@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -176,6 +176,41 @@ test("repeat preview incorporates target changes without stale caching or source
   assert.notEqual(first.result.target.head, second.result.target.head);
   assert.equal(first.result.target.drift.length, 0);
   assert.equal(second.result.target.drift.length, 1);
+  assert.equal(git(root, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
+});
+
+test("canonical validator assesses a real combined Story from both revisions", {
+  skip: !existsSync(join(resolve("../noveltea-skills"), "fixtures/reference-story/creative-direction/last-bell.md"))
+    ? "NovelTea canonical checkout is unavailable" : false,
+}, () => {
+  const name = "canonical-combined";
+  const root = fixture(name);
+  const story = join(root, "story");
+  cpSync(join(resolve("../noveltea-skills"), "fixtures/reference-story"), story, { recursive: true });
+  commit(root, "Reference Story baseline");
+  const started = run(["start", "--story", story, "--job", "draft"], name);
+  assert.equal(started.status, 0, started.stderr);
+  const job = started.result;
+  const change = (cwd: string, path: string, line: string) => {
+    const full = join(cwd, "story", path);
+    writeFileSync(full, readFileSync(full, "utf8") + "\\n" + line + "\\n");
+    commit(cwd, "Narrative detail");
+  };
+  change(job.worktreeRoot, "characters/mara.md", "Mara remembers the lighthouse at low tide.");
+  change(root, "world-entities/tide-well.md", "The well remains accessible at dusk.");
+  const originalHead = git(root, "rev-parse", "HEAD");
+  const generatedHead = git(job.worktreeRoot, "rev-parse", "HEAD");
+  const preview = run(["merge", "preview", "--story", story, "--job", "draft",
+    "--fixture", "--validator-source", resolve("../noveltea-skills")], name);
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.equal(preview.result.candidate.status, "constructed");
+  assert.equal(preview.result.validation.status, "passed", JSON.stringify(preview.result.validation));
+  assert.equal(preview.result.validation.results.length, 2);
+  assert.ok(preview.result.candidate.affected.some((file: { path: string; ids: string[] }) =>
+    file.path === "characters/mara.md" && file.ids.includes("character.mara")));
+  assert.equal(preview.result.narrative.status, "unverified");
+  assert.equal(git(root, "rev-parse", "HEAD"), originalHead);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), generatedHead);
   assert.equal(git(root, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
 });
 
