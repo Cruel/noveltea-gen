@@ -859,6 +859,39 @@ New unrelated author messages cannot resume a pending approval or restart a
 canceled/completed job. Do not treat a `review-required` message as a
 completed scope change; only signed, matching author approval resolves it.
 
+**Cooperative active Pi cancellation (#36).** A `cancelled` control is
+delivered across processes to the running Pi specialist (including repair and
+review turns) through Pi's supported `abort()` lifecycle. It is not merely
+polled at the next work boundary. The active `job author control --state
+cancelled` result is an *intent*, not proof of termination. Query `job author
+inspect` for `activeSpecialist`: `cancellation-requested-not-yet-settled`
+means the owner can still be editing; `cooperative-aborted` requires a
+new Pi assistant stop reason of `aborted` and a settled turn.
+`cancelled-at-boundary` means the turn settled without a confirmed abort;
+`cancellation-unverified` means an abort was sent but Pi did not report an
+aborted turn. `provider-failed` and `owner-exited-without-pi-settlement`
+distinguish provider errors and process crashes. `abort-unavailable` means
+the provider/abort could not be verified idle and the Story writer lock
+has been retained. No hard real-time
+termination or exactly-once external effects are promised.
+
+The private job-state `active-specialist.json` records the exact work item,
+original Pi session file/ID, expected and actual HEAD, and dirty file inventory.
+Earlier commits and unfinished Markdown remain in the isolated worktree.
+The specialist receipt still requires explicit inspection/reconciliation;
+cancellation never creates a commit, resets edits, deletes the worktree or
+replays Pi writers. If abort fails or a provider remains unresponsive, inspect
+the owner PID, retained `.story-job-running` lock, Pi transcript and worktree
+before any recovery. A dead owner's stale lock is archived by normal recovery,
+not silently erased. Unlike cancellation, `paused` never aborts Pi: it waits
+until the current serialized work unit reaches a safe boundary.
+
+To verify cross-process behavior deterministically, run `pnpm exec tsx
+--test test/story-interruption.test.ts`. An opt-in live Pi cancellation smoke
+test is available with `NT_LIVE_CANCEL=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills
+pnpm exec tsx --test test/story-interruption-live.test.ts` (requires working Pi
+credentials and a long enough live turn to deliver the abort).
+
 Run `NT_SKILLS_CHECKOUT=/path/to/noveltea-skills pnpm exec tsx --test
 test/author-updates.test.ts` to exercise real public CLI/process boundaries,
 separate-process checkpoints, writer-lock contention, exact signed plan and

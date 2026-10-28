@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -171,14 +172,14 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      await session.prompt(attempt === 0 ? context.contextNote + prompt : prompt);
+      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
       let text = lastReply(session);
       let parsed: Record<string, unknown> | undefined;
       for (let formatAttempt = 0; formatAttempt < 3; formatAttempt++) {
         try { parsed = parseSpecialistJson(text); break; }
         catch (error) {
           if (formatAttempt === 2) throw error;
-          await session.prompt("Reformat your LAST cumulative modifiedRecords, architecturalConflicts, " +
+          await promptStorySpecialist(session, "Reformat your LAST cumulative modifiedRecords, architecturalConflicts, " +
             "and laterObligations report as a single valid JSON object. " +
             "Preserve the already-authored files unchanged; only correct the response format.");
           text = lastReply(session);
@@ -226,7 +227,7 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
     const sessionFile = session.sessionManager.getSessionFile();
     if (sessionFile) await onSession(sessionFile);
     await context.beforeTurn(sessionFile);
-    await session.prompt(context.contextNote + "You are an INDEPENDENT read-only editorial reviewer. Read the pinned composition " +
+    await promptStorySpecialist(session, context.contextNote + "You are an INDEPENDENT read-only editorial reviewer. Read the pinned composition " +
       "skill and catalog, the ACTUAL saved authored-content paths, linked Events, all choice outcomes, " +
       "both Puzzle solution events, character voices, initial knowledge, facts, revelations, and optional " +
       "discovery routes. Do not trust the writer's explanation or Event narrative body as proof of state. " +

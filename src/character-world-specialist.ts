@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -114,7 +115,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     // receive bounded, source-located validator feedback before commit.
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      await session.prompt(attempt === 0 ? context.contextNote + prompt : prompt);
+      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
       const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!assistant || assistant.role !== "assistant" || ["error", "aborted"].includes(assistant.stopReason)) {
         const detail = assistant?.role === "assistant"

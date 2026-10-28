@@ -291,7 +291,14 @@ test("generation honors author pause, questions, cancellation and cumulative bud
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   f.cli(["author", "control", "--state", "cancelled"]);
   assert.equal(f.cli(["generate", "resume"]).status, "cancelled");
+  // A cancelled Pi writer can leave these bytes after its checkpoint. Neither
+  // inspect nor resume may reopen dispatch or mistake dirty recovery for a
+  // generic scheduling failure on the terminal job.
+  const partial = join(f.job.worktreeStoryRoot, "interrupted-specialist.md");
+  writeFileSync(partial, "Original unfinished specialist work");
+  assert.equal(f.cli(["generate", "inspect"]).status, "cancelled");
   assert.equal(f.cli(["generate", "resume"]).status, "cancelled");
+  assert.equal(readFileSync(partial, "utf8"), "Original unfinished specialist work");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 

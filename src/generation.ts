@@ -14,6 +14,7 @@ import { runNarrativeReview } from "./narrative-review.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryGenerationLock, withStoryJobLock } from "./job-lock.js";
+import { readJobControl } from "./job-control.js";
 import { inspectJobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
@@ -126,7 +127,8 @@ const accepted: Record<Stage, readonly string[]> = {
 };
 function blocked(error: unknown): Partial<State> {
   const e = error as { message?: string; name?: string };
-  return { status: e.name === "PiBudgetPause" ? "paused" : "blocked", reason: e.message ?? String(error), result: null };
+  return { status: e.name === "PiBudgetPause" ? "paused" : e.name === "StoryCancelledError" ? "cancelled" : "blocked",
+    reason: e.message ?? String(error), result: null };
 }
 async function authorBoundary(job: JobStartResult): Promise<Partial<State> | null> {
   const updates = await processAuthorUpdatesAfterWork(job);
@@ -169,7 +171,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
       try { return { result: await dispatch(s) }; }
       catch (error) {
         const stop = blocked(error);
-        if (stop.status === "paused") return stop;
+        if (stop.status === "paused" || stop.status === "cancelled") return stop;
         const job = await openJob(s);
         return withStoryJobLock(job, "generation-local-block", async () => {
           try { clean(job); await trustedHead(job); }
@@ -253,15 +255,25 @@ export async function runStoryGeneration(options: GenerationOptions) {
             options.provider !== undefined || options.model !== undefined)
           throw new Error("Resume/inspect use the pinned generation request; new worker inputs are forbidden.");
       }
+      const cancelled = await readJobControl(job) === "cancelled";
+      const cancellation = {
+        status: "cancelled" as const,
+        reason: "Author cancelled this Story job; inspect the preserved specialist session, receipt and worktree before reconciliation.",
+      };
+      if (options.action === "start" && cancelled) {
+        throw new Error("Cannot start generation for a terminally cancelled Story job.");
+      }
       if (options.action !== "inspect") {
-        // Always re-enter the safe boundary, even after an interrupted graph node.
-        // The saved cursor/result and specialist receipts reconcile external effects.
-        state = await graph.invoke({ ...state, pauseAfter: options.pauseAfter ?? null }, config);
+        // A terminal cancellation never re-enters a checkpointed dispatch:
+        // an unfinished writer's original session and dirty worktree must
+        // remain available for explicit, non-destructive reconciliation.
+        state = cancelled ? { ...state, ...cancellation } :
+          await graph.invoke({ ...state, pauseAfter: options.pauseAfter ?? null }, config);
       }
       const report = await inspectJobReport({ story: job.storyRoot, job: job.jobId });
       let current: Partial<State> = {};
       if (options.action === "inspect") {
-        current = await withStoryJobLock(job, "generation-inspect", async () => {
+        current = cancelled ? cancellation : await withStoryJobLock(job, "generation-inspect", async () => {
           try {
             clean(job);
             await checkPlan(job, state.request, state.planVersion);

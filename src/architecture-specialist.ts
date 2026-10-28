@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -65,7 +66,7 @@ export async function authorArchitecture(
     if (!sessionFile) throw new Error("Architecture Pi session transcript cannot be persisted; writer will not begin.");
     await onSession(session.sessionId, sessionFile);
     await context.beforeTurn(sessionFile);
-    await session.prompt(
+    await promptStorySpecialist(session,
       context.contextNote + "You are the NovelTea Story architecture specialist, working on an isolated Git-backed Story. " +
       "Read the following pinned skill instructions using the read tool before writing:\n" +
       REQUIRED.map(path => join(snapshot.path, "skills", path)).join("\n") +

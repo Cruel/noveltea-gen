@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -129,7 +130,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      await session.prompt(attempt === 0 ? context.contextNote + prompt : prompt);
+      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
       const last = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
         throw new Error("Interactive Pi turn failed: " +

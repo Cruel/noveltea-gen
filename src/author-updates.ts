@@ -8,6 +8,8 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { readJobControl as control, setJobControl as setControl, type JobControl } from "./job-control.js";
+import { inspectActiveStorySpecialist } from "./story-interruption.js";
 import { captureIdeaUnderJobLock, reconcileCapturedIdeaUnderJobLock } from "./ideas.js";
 import { runArchitectureJob } from "./architecture.js";
 import { runRevisionAction } from "./revision.js";
@@ -15,7 +17,7 @@ import { verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-eviden
 
 type Kind = "idea" | "change" | "question" | "approval";
 type Phase = "queued" | "awaiting-author" | "applied" | "review-required";
-type Control = "running" | "paused" | "cancelled" | "completed";
+type Control = JobControl;
 interface Message {
   version: 1; id: string; jobId: string; threadId: string;
   kind: Kind; payload: unknown; digest: string; createdAt: string;
@@ -50,7 +52,6 @@ function stable(v: unknown): string {
 const root = (job: JobStartResult) => join(dirname(job.worktreeRoot), "author-updates");
 const incoming = (job: JobStartResult, id: string) => join(root(job), "messages", id + ".json");
 const statusFile = (job: JobStartResult, id: string) => join(root(job), "receipts", id + ".json");
-const controlFile = (job: JobStartResult) => join(root(job), "control.json");
 const snapshotFile = (job: JobStartResult, name: string) => join(dirname(job.worktreeRoot), name + ".json");
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
@@ -120,22 +121,6 @@ async function loadReceipt(job: JobStartResult, m: Message): Promise<Receipt> {
   return r;
 }
 async function saveReceipt(job: JobStartResult, r: Receipt) { await persist(statusFile(job, r.id), r); }
-async function control(job: JobStartResult): Promise<Control> {
-  if (!existsSync(controlFile(job))) return "running";
-  const data = await loadJson(controlFile(job)) as { version: 1; jobId: string; state: Control };
-  if (data.version !== 1 || data.jobId !== job.jobId ||
-      !["running", "paused", "cancelled", "completed"].includes(data.state)) {
-    throw new Error("Invalid job execution control state.");
-  }
-  return data.state;
-}
-async function setControl(job: JobStartResult, next: Control) {
-  const previous = await control(job);
-  if (["cancelled", "completed"].includes(previous) && next !== previous) {
-    throw new Error("Canceled or completed jobs cannot be restarted by a new author message.");
-  }
-  await persist(controlFile(job), { version: 1, jobId: job.jobId, state: next, at: new Date().toISOString() });
-}
 async function readPinned(job: JobStartResult): Promise<Pinned> {
   const arch = existsSync(snapshotFile(job, "architecture")) ? await loadJson(snapshotFile(job, "architecture")) : null;
   const foundation = existsSync(snapshotFile(job, "foundation")) ? await loadJson(snapshotFile(job, "foundation")) : null;
@@ -577,12 +562,12 @@ export async function runAuthorAction(options: AuthorAction): Promise<unknown> {
     const records = await Promise.all((await messages(job)).map(async message => ({
       message, acknowledgement: await loadReceipt(job, message),
     })));
-    return { status: await control(job), jobId: job.jobId, records };
+    return { status: await control(job), jobId: job.jobId, activeSpecialist: await inspectActiveStorySpecialist(job), records };
   }
   if (options.action === "control") {
     if (!options.state || options.file) throw new Error("Execution control requires --state running|paused|cancelled|completed.");
     await setControl(job, options.state);
-    return { status: options.state, jobId: job.jobId };
+    return { status: options.state, jobId: job.jobId, activeSpecialist: await inspectActiveStorySpecialist(job) };
   }
   return withStoryJobLock(job, "process-author-updates", async () => {
     if (options.action === "plan") {

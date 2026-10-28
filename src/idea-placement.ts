@@ -5,6 +5,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { promptStorySpecialist } from "./story-interruption.js";
 import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -267,7 +268,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
         .map(p => join(snapshot.path, "skills", "nt-catalog", p))];
     const mustRead = [...new Set([...pinned, ...required])];
     await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-    await session.prompt(context.contextNote + "Read ALL pinned skill/catalog files with the read tool, " +
+    await promptStorySpecialist(session, context.contextNote + "Read ALL pinned skill/catalog files with the read tool, " +
       "then read EVERY canonical candidate record in the assignment, even if you already like " +
       "the target. This task is NOT complete until each individual alternative has actually " +
       "been read; the graph verifies successful read calls for every path. " +
@@ -300,7 +301,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
     for (let retry = 0; retry < 2; retry++) {
       const missing = mustRead.filter(p => !completedReads().has(p));
       if (!missing.length) break;
-      await session.prompt("Your earlier response omitted required source inspection. " +
+      await promptStorySpecialist(session, "Your earlier response omitted required source inspection. " +
         "READ each of the following exact files using the read tool NOW, then compare the " +
         "candidate locations and reassess whether your integration/fulfillment is sound. " +
         "Correct the permitted canonical target if necessary (writer only). " +

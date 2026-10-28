@@ -8,6 +8,7 @@ import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { renderFoundation, type FoundationDraft } from "./demo.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { promptStorySpecialist } from "./story-interruption.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { trustedHead } from "./revision.js";
@@ -214,7 +215,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     if (!sessionFile) throw new Error("Foundation Pi transcript cannot be persisted; writer will not start.");
     await onSession(session.sessionId, sessionFile);
     await context.beforeTurn(sessionFile);
-    await session.prompt(
+    await promptStorySpecialist(session,
       context.contextNote + "You are the NovelTea foundation writing specialist in an isolated Git Story worktree. " +
       "Use ordinary Pi read/edit/write and inspection tools to AUTHOR MARKDOWN DIRECTLY, never a structured record authoring tool. " +
       "Before editing, actually READ these five pinned files with the read tool (absolute paths):\n" +
@@ -306,7 +307,7 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
       throw new Error("Pi foundation discovery did not honor pinned thinking effort.");
     }
     await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-    await session.prompt(context.contextNote + "Collaborative foundation discovery only: DO NOT edit any file. " +
+    await promptStorySpecialist(session, context.contextNote + "Collaborative foundation discovery only: DO NOT edit any file. " +
       "Actually read the pinned nt-story-discovery and nt-catalog guidance and references using read:\n" +
       REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
       "\nInspect the existing Creative Direction if relevant. Following the discovery guidance, " +

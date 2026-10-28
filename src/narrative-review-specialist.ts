@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { promptStorySpecialist } from "./story-interruption.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
@@ -149,7 +150,7 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
     const file = session.sessionManager.getSessionFile();
     if (file) await onSession(file);
     await context!.beforeTurn(file ?? undefined);
-    await session.prompt(context!.contextNote + "You are the independent nt-narrative-review editor, not the author. " +
+    await promptStorySpecialist(session, context!.contextNote + "You are the independent nt-narrative-review editor, not the author. " +
       "FIRST read every pinned review/catalog reference and EVERY supplied Story path. " +
       "Examine actual saved prose, not a writer's summary. Analyze continuity, pacing, " +
       "Character voice/motivation, Puzzle fairness and accessible clues, player agency, " +
@@ -207,7 +208,7 @@ export async function repairNarrativeProse(job: JobStartResult, snapshot: SkillS
       "\nREFERENCES:\n" + pinned.join("\n") + "\nSOURCES:\n" +
       assignment.paths.join("\n") + "\nALLOWED WRITES:\n" + paths.join("\n");
     await guardPiBudget(job, "narrative-repair:" + job.headSha, file ?? undefined);
-    await session.prompt(prompt);
+    await promptStorySpecialist(session, prompt);
     await verify();
     // The graph separately validates and performs an independent editorial re-review.
   } finally { session.dispose(); }

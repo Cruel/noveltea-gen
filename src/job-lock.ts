@@ -1,8 +1,21 @@
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { hostname } from "node:os";
 import { mkdir, readFile, rename, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { JobStartResult } from "./job.js";
+
+export interface StoryWriterContext {
+  job: JobStartResult;
+  workItem: string;
+  /** Keep an ambiguous writer lock for manual inspection; never allow another writer. */
+  retainLease: boolean;
+  active: boolean;
+}
+const storyWriter = new AsyncLocalStorage<StoryWriterContext>();
+export function activeStoryWriter(): StoryWriterContext | undefined {
+  return storyWriter.getStore();
+}
 
 interface Owner {
   version: 1;
@@ -87,12 +100,17 @@ async function withJobLease<T>(job: JobStartResult, workItem: string, prefix: st
     }
   }
   let published = false;
+  const leaseContext: StoryWriterContext = { job, workItem, retainLease: false, active: true };
   try {
     await writeFile(join(lock, "owner.json"), JSON.stringify(owner) + "\n", { flag: "wx", mode: 0o600 });
     published = true;
+    if (prefix === ".story-job") {
+      return await storyWriter.run(leaseContext, run);
+    }
     return await run();
   } finally {
-    if (published) {
+    leaseContext.active = false;
+    if (published && !(prefix === ".story-job" && leaseContext.retainLease)) {
       // If the owner changed unexpectedly, retain the lock and block future
       // operations. Never remove another process's lock.
       try {
