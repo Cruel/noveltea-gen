@@ -287,8 +287,13 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
         }
         if (await trustedHead(job) !== task.priorHead) throw new Error("Idea selection's verified Git base changed.");
         await persist(file, { jobId: job.jobId, task, phase: "running" });
-        const result = await runIdeaPlacement({ ...s.request, action: task.action,
-          id: task.id, ...(task.action === "place" ? { autoSelect: true } : { record: true }) }) as IdeaResult;
+        const result = await runIdeaPlacement({ ...s.request,
+          // Opt-in integration evaluation: fixture Story generation with real
+          // pinned Pi placement/semantic review, never a fixture-only attestation.
+          fixture: s.request.fixture && process.env.NT_LIVE_GENERATION_IDEA === "1"
+            ? false : s.request.fixture,
+          action: task.action, id: task.id,
+          ...(task.action === "place" ? { autoSelect: true } : { record: true }) }) as IdeaResult;
         await persist(file, { jobId: job.jobId, task, phase: "returned", result });
         return { ideaResult: result };
       } catch (error) { return blocked(error); }

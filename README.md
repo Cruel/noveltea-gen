@@ -216,8 +216,10 @@ continues to expose integration/merge-preview status.
 Deterministic fixtures exercise the graph, Git isolation, provenance, rejection,
 reconsideration and restart behavior without asserting literary quality.
 Set `NT_IDEA_FIXTURE_REJECT=<idea-id>` only for deterministic rejected-location
-tests; it has no effect on real Pi placement. For the opt-in real Pi
-candidate-selection and independent-semantic-review evaluation, set
+tests; it has no effect on real Pi placement. The opt-in evaluation runs
+fixture Story stages but uses real Pi for candidate selection, bounded craft
+integration, and independent fulfillment review. It does not certify the
+fixture-generated Story as a whole. To run it, set
 `NT_LIVE_GENERATION_IDEA=1` and `NT_SKILLS_CHECKOUT` to the canonical skills
 checkout, then run `pnpm exec tsx --test --test-name-pattern='opt-in real Pi generation semantically chooses' test/generation.test.ts`.
 

@@ -11,7 +11,8 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
 after(() => {
-  if (process.env.NT_LIVE_GENERATION === "1" && process.env.NT_KEEP_FAILED_LIVE === "1")
+  if ((process.env.NT_LIVE_GENERATION === "1" ||
+    process.env.NT_LIVE_GENERATION_IDEA === "1") && process.env.NT_KEEP_FAILED_LIVE === "1")
     console.error("Preserved disposable generation evidence: " + root);
   else removeTestTree(root);
 });
@@ -540,18 +541,28 @@ test("opt-in real Pi generation semantically chooses and reviews a deferred idea
     upstreamConstraints: [],
   }));
   f.cli(["ideas", "capture", "--file", file]);
-  const args = f.start.filter(x => x !== "--fixture");
+  const args = [...f.start];
   if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
   if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
   const result = f.cli(args);
-  assert.ok(result.ideaHistory.some((entry: any) => entry.id === "witness-bell" &&
-    entry.status === "integrated"), JSON.stringify(result));
   const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot,
     ".story-inbox/ideas/witness-bell.yaml"), "utf8"));
   assert.equal(inbox.original, original);
-  assert.equal(inbox.lifecycle.placements[0].verified, "pi");
-  assert.ok(inbox.lifecycle.placements[0].sessionFiles.length >= 3,
-    "selection, craft writing and independent review require distinct pinned sessions");
+  const integrated = result.ideaHistory.some((entry: any) => entry.id === "witness-bell" &&
+    entry.status === "integrated");
+  if (integrated) {
+    assert.equal(inbox.lifecycle.placements.at(-1).verified, "pi");
+    assert.ok(inbox.lifecycle.placements[0].sessionFiles.length >= 3,
+      "selection, craft writing and independent review require distinct pinned sessions");
+  } else {
+    // A semantic rejection is a valid evaluation outcome; it must not be
+    // laundered into a verified canonical realization or completed generation.
+    assert.notEqual(result.status, "completed");
+    assert.ok(result.reason, "a rejected or interrupted Pi placement needs actionable evidence");
+    assert.ok(result.ideaHistory.length > 0 ||
+      existsSync(join(dirname(f.job.worktreeRoot), "generation-idea-dispatch.json")),
+      "the parent must record attempted Pi selection for inspection");
+  }
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
   console.error(JSON.stringify({ status: result.status, reason: result.reason,
     ideas: result.ideaHistory, escalation: result.escalation }));

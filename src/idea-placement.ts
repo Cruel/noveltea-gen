@@ -288,9 +288,10 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
       "Respond with ONE unfenced JSON object: " + (selecting
         ? '{"verdict":"pass|block","target":"one candidate ID or null","evidence":["path.md:line"],"reason":"..."}'
         : '{"verdict":"pass|block","evidence":["path.md:line"],"reason":"..."}') +
-      ". Evidence must compare the ORIGINAL author intent and every binding requirement " +
-      "against actual player-facing lines when applicable. Do NOT equate a canonical reference " +
-      "or typed ID alone with semantic fulfillment. \nPINNED:\n" + pinned.join("\n") +
+      (selecting
+        ? ". This is a PROSPECTIVE PLACEMENT decision, not proof of fulfillment. Compare the original author intent, binding requirements and causal/branch context at ALL developed candidate locations. Choose a target only if the idea could be integrated coherently without a protected-decision change; otherwise block with null target. Cite actual candidate lines as suitability evidence."
+        : ". Evidence must compare the ORIGINAL author intent and every binding requirement against actual player-facing lines when applicable. Do NOT equate a canonical reference or typed ID alone with semantic fulfillment.") +
+      "\nPINNED:\n" + pinned.join("\n") +
       "\nASSIGNMENT:\n" + instruction);
     const latest = () => {
       const reply = [...session.messages].reverse().find(m => m.role === "assistant");
