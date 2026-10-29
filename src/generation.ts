@@ -11,6 +11,8 @@ import { runEventWorkItem } from "./event-work.js";
 import { runInteractiveWorkItem } from "./interactive-work.js";
 import { runCompositionWorkItem } from "./composition-work.js";
 import { runNarrativeReview } from "./narrative-review.js";
+import { runFocusedWorkItem } from "./focused-work.js";
+import { isFocusedScope } from "./focused-scope.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryGenerationLock, withStoryJobLock } from "./job-lock.js";
@@ -59,7 +61,7 @@ function clean(job: JobStartResult) {
 export function parseGenerationContract(value: unknown): CompletionContract {
   const contract = parseContract(value);
   if (contract.scope.kind === "partial" && !contract.scope.targets.length)
-    throw new Error("Partial generation requires explicit Arc/Milestone targets.");
+    throw new Error("Partial generation requires explicit typed Story record targets.");
   return contract;
 }
 async function checkPlan(job: JobStartResult, request: GenerationRequest, version: number | null | undefined) {
@@ -87,13 +89,26 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
   // independent clusters do not permit replay against a changed HEAD.
   // A new authorized plan is the boundary for reconsidering local failures.
   const failures = s.inventory?.planVersion === (plan?.version ?? null) ? s.failures ?? {} : {};
-  const completedStages = s.completedStages.filter(e => {
+  let completedStages = s.completedStages.filter(e => {
     if (e.stage === "foundation" || !plan) return true;
     if (e.stage === "architecture") return receipt.phase === "committed";
     const version = e.planVersion ?? s.planVersion ?? 1;
     if (e.stage === "review") return version === plan.version && e.headSha === head;
     return hasPlanContinuity(job, receipt, e.milestone ? `${e.stage}:${e.milestone}` : e.stage, version);
   });
+  // A focused request starts from committed canonical Story context. Never
+  // dispatch whole-Story discovery to fill a missing prerequisite implicitly.
+  if (isFocusedScope(request.contract) && !completedStages.some(e => e.stage === "foundation")) {
+    const baseline = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
+      { ...job, baseSha: head });
+    const report = baseline.report as { readiness?: { design?: { stages?: {
+      foundation?: { minimum?: string } } } }; protection?: { status?: string; changes?: unknown[]; warnings?: unknown[] } } | undefined;
+    if (baseline.status !== "passed" || report?.readiness?.design?.stages?.foundation?.minimum !== "passed" ||
+        report?.protection?.status !== "checked" || report.protection.changes?.length || report.protection.warnings?.length)
+      throw new Error("Focused scope is missing verified upstream Creative Direction or protected canonical context. " +
+        "Author must supply or authorize prerequisite development; whole-Story foundation will not run automatically.");
+    completedStages = [{ stage: "foundation", headSha: head, status: "committed" }, ...completedStages];
+  }
   // A signed plan revision may require another architecture unit before downstream work.
   if (plan && receipt.phase !== "committed") {
     const inventory = reconcileInventory(plan, undefined, head, completedStages,
@@ -115,6 +130,7 @@ async function dispatch(s: State) {
     case "event": return runEventWorkItem({ ...input, milestone, action: "run" });
     case "interactive": return runInteractiveWorkItem({ ...input, milestone, action: "run" });
     case "composition": return runCompositionWorkItem({ ...input, milestone, action: "run" });
+    case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task });
     case "review": return runNarrativeReview({ ...input, action: "run" });
     default: throw new Error("Invalid generation stage.");
   }
@@ -123,6 +139,7 @@ const accepted: Record<Stage, readonly string[]> = {
   foundation: ["committed"], architecture: ["architecture-committed", "complete-in-scope"],
   foundations: ["foundations-committed"], event: ["event-cluster-committed"],
   interactive: ["interactive-slice-committed"], composition: ["composition-committed"],
+  focus: ["focused-committed"],
   review: ["complete-in-scope", "editorial-unverified", "blocked"],
 };
 function blocked(error: unknown): Partial<State> {

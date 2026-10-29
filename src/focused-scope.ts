@@ -1,0 +1,82 @@
+import type { CompletionContract } from "./architecture.js";
+
+export interface CanonicalScopeRecord {
+  path: string;
+  metadata: { id: string; type: string; status: string; [key: string]: unknown };
+}
+const hierarchy = ["arc", "milestone"];
+
+/** Focused records are goals, not a request to realize every enclosing cluster. */
+export function isFocusedScope(contract: CompletionContract): boolean {
+  return contract.scope.kind === "partial" &&
+    contract.scope.targets.some(id => !hierarchy.some(type => id.startsWith(type + ".")));
+}
+const ids = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+const references = (value: unknown, known: Set<string>): string[] => {
+  const found = new Set<string>();
+  const visit = (v: unknown): void => {
+    if (typeof v === "string" && known.has(v)) found.add(v);
+    else if (Array.isArray(v)) v.forEach(visit);
+    else if (v && typeof v === "object") Object.values(v).forEach(visit);
+  };
+  visit(value);
+  return [...found];
+};
+export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: CompletionContract) {
+  const active = records.filter(r => r.metadata.status !== "superseded");
+  const byId = new Map(active.map(r => [r.metadata.id, r]));
+  const selectedIds = [...new Set([...contract.scope.targets, ...(contract.scope.supportingTargets ?? [])])];
+  const selected = selectedIds.map(id => {
+    const record = byId.get(id);
+    if (!record || record.metadata.type !== id.split(".")[0] ||
+        !/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(record.path) ||
+        record.path.split("/")[0] === ".story-inbox")
+      throw new Error("Missing, superseded or invalid canonical scope target: " + id +
+        ". Author must select an existing typed record; no automatic expansion.");
+    return record;
+  });
+  const known = new Set(byId.keys());
+  const primary = selected.filter(r => contract.scope.targets.includes(r.metadata.id));
+  const context = new Set(contract.scope.targets);
+  for (const record of primary) {
+    references(record.metadata, known).forEach(id => context.add(id));
+    if (record.metadata.type === "character") {
+      for (const arc of active.filter(r => r.metadata.type === "arc" &&
+        ids(r.metadata.characters).includes(record.metadata.id))) context.add(arc.metadata.id);
+    }
+    if (record.metadata.type === "event") {
+      for (const milestone of active.filter(r => {
+        const fulfillment = r.metadata.fulfillment as { any_of?: string[][] } | undefined;
+        return r.metadata.type === "milestone" &&
+          (fulfillment?.any_of ?? []).flat().includes(record.metadata.id);
+      })) context.add(milestone.metadata.id);
+    }
+  }
+  for (const id of [...context]) {
+    const record = byId.get(id);
+    if (record?.metadata.type === "milestone")
+      ids(record.metadata.arcs).forEach(arc => context.add(arc));
+  }
+  // A supporting edit must be related to a primary target, not an arbitrary
+  // record smuggled into a broader writable set. Reverse references permit
+  // bounded parent/child repairs (e.g. a target Character and its Arc).
+  const primaryIds = new Set(contract.scope.targets);
+  for (const supporting of selected.filter(r => !primaryIds.has(r.metadata.id))) {
+    if (!context.has(supporting.metadata.id) &&
+        !references(supporting.metadata, primaryIds).length) {
+      throw new Error("Unauthorized supporting scope expansion: " + supporting.metadata.id +
+        " is unrelated to selected goals; request a separately authorized target.");
+    }
+    context.add(supporting.metadata.id);
+    references(supporting.metadata, known).forEach(id => context.add(id));
+  }
+  // Context may be broad enough to understand prerequisites, but is NEVER
+  // granted write authority by being included in this set.
+  for (const r of active.filter(r => r.metadata.type === "creative-direction")) context.add(r.metadata.id);
+  const missingContext = [...context].filter(id => !byId.has(id));
+  if (missingContext.length) throw new Error("Missing upstream context: " + missingContext.join(", ") +
+    ". Request author authorization to repair these prerequisites.");
+  return { selected, context: [...context].map(id => byId.get(id)!).filter(Boolean),
+    allowedPaths: selected.map(r => r.path).sort() };
+}

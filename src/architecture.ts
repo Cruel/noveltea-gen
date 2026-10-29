@@ -15,10 +15,11 @@ import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./sn
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { trustedHead } from "./revision.js";
 import { readSignedAuthorEvidence, verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
+import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 
 export interface CompletionContract {
   scope: { kind: "full-story" | "partial"; depth: "architecture" | "interactive" | "composition";
-    targets: string[]; branches: string[] };
+    targets: string[]; branches: string[]; supportingTargets?: string[]; preset?: "architecture-outline" | "interactive-development" | "full-composition" };
   constraints: string[];
   envelope: { presentation: string; hardLimits: string[]; preferences: string[] };
 }
@@ -100,18 +101,39 @@ async function persist(path: string, value: unknown) {
 export function parseContract(value: unknown): CompletionContract {
   const c = value as CompletionContract;
   const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === "string" && x.trim());
+  const presets = { "architecture-outline": "architecture", "interactive-development": "interactive",
+    "full-composition": "composition" } as const;
+  const preset = c?.scope?.preset;
+  const depth = preset && Object.hasOwn(presets, preset) ? presets[preset as keyof typeof presets] : c?.scope?.depth;
+  const targetPattern = /^(arc|milestone|event|character|world-entity|relationship|fact|revelation|choice-point|puzzle|authored-content)\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
   if (!c || !["full-story", "partial"].includes(c.scope?.kind) ||
-      !["architecture", "interactive", "composition"].includes(c.scope?.depth) ||
+      !["architecture", "interactive", "composition"].includes(depth) ||
+      (preset !== undefined && (typeof preset !== "string" || !Object.hasOwn(presets, preset))) ||
+      (c.scope.depth !== undefined && c.scope.depth !== depth) ||
       !strings(c.scope.targets) || !strings(c.scope.branches) || !strings(c.constraints) ||
+      (c.scope.supportingTargets !== undefined && !strings(c.scope.supportingTargets)) ||
       typeof c.envelope?.presentation !== "string" || !c.envelope.presentation.trim() ||
       !strings(c.envelope.hardLimits) || !strings(c.envelope.preferences) ||
-      !c.scope.targets.every(id => /^(arc|milestone)\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id))) {
-    throw new Error("Invalid completion contract: specify scope kind/depth/targets/branches, constraints, and a production envelope.");
+      !c.scope.targets.every(id => targetPattern.test(id)) ||
+      !(c.scope.supportingTargets ?? []).every(id => targetPattern.test(id)) ||
+      c.scope.supportingTargets?.some(id => c.scope.targets.includes(id))) {
+    throw new Error("Invalid completion contract: specify typed targets, depth/preset, branches, constraints, and a production envelope.");
   }
-  if (c.scope.kind === "full-story" && (c.scope.depth !== "composition" || c.scope.targets.length || c.scope.branches.length)) {
+  if (c.scope.kind === "partial" && c.scope.targets.some(id => /^(arc|milestone)\./.test(id)) &&
+      c.scope.targets.some(id => !/^(arc|milestone)\./.test(id))) {
+    throw new Error("Mixed Arc/Milestone cluster and individual record targets require separately authorized contracts; no automatic scope expansion.");
+  }
+  if (c.scope.targets.some(id =>
+    (depth === "architecture" && /^(event|choice-point|puzzle|authored-content)\./.test(id)) ||
+    (depth === "interactive" && id.startsWith("authored-content.")))) {
+    throw new Error("Focused target requires a compatible narrative depth: Events/interactive branches need interactive, Authored Content needs composition.");
+  }
+  if (c.scope.kind === "full-story" && (depth !== "composition" || c.scope.targets.length || c.scope.branches.length || c.scope.supportingTargets?.length)) {
     throw new Error("Full-Story scope requires composition depth and cannot exclude targets or branches; use partial scope for an outline.");
   }
-  return { scope: { ...c.scope, targets: [...new Set(c.scope.targets)], branches: [...new Set(c.scope.branches)] },
+  const { preset: _preset, ...rest } = c.scope;
+  return { scope: { ...rest, depth: depth!, targets: [...new Set(c.scope.targets)], branches: [...new Set(c.scope.branches)],
+      ...(c.scope.supportingTargets ? { supportingTargets: [...new Set(c.scope.supportingTargets)] } : {}) },
     constraints: c.constraints, envelope: c.envelope };
 }
 /** Check every authorized scope revision, including when a later work item
@@ -164,6 +186,7 @@ function reportOf(result: ValidationResult): CatalogReport {
 }
 function selectRecords(report: CatalogReport, contract: CompletionContract) {
   const current = report.records.filter(r => r.metadata.status !== "superseded");
+  if (isFocusedScope(contract)) return resolveFocusedScope(current, contract).context as CatalogRecord[];
   const targets = contract.scope.targets;
   return current.filter(r => !targets.length || targets.includes(r.metadata.id) ||
     r.metadata.arcs?.some(id => targets.includes(id)) || current.some(m => targets.includes(m.metadata.id) && m.metadata.arcs?.includes(r.metadata.id)));
@@ -175,8 +198,9 @@ function checkArchitecture(report: CatalogReport, contract: CompletionContract) 
   if (contract.scope.targets.some(id => !ids.has(id))) throw new Error("Architecture did not deliver every authorized target ID.");
   const arcs = records.filter(r => r.metadata.type === "arc");
   const milestones = records.filter(r => r.metadata.type === "milestone");
-  if (!arcs.length || !milestones.length || arcs.some(a => !milestones.some(m => m.metadata.arcs?.includes(a.metadata.id))) ||
-      report.outstanding.some(o => ids.has(o.id) && ["foundation", "architecture"].includes(o.requiredBy))) {
+  if ((!isFocusedScope(contract) && (!arcs.length || !milestones.length || arcs.some(a => !milestones.some(m => m.metadata.arcs?.includes(a.metadata.id))))) ||
+      report.outstanding.some(o => ids.has(o.id) && ["foundation", "architecture"].includes(o.requiredBy) &&
+        (!isFocusedScope(contract) || ![...contract.scope.targets, ...(contract.scope.supportingTargets ?? [])].includes(o.id)))) {
     throw new Error("Scope architecture coverage is incomplete.");
   }
   if (!contract.scope.targets.length && report.readiness.design.stages.architecture?.minimum !== "passed") {
@@ -363,7 +387,30 @@ function finishPlan(state: Receipt, report: CatalogReport, commit: string) {
   const selected = checkArchitecture(report, plan.contract);
   const ids = new Set(selected.map(r => r.metadata.id));
   plan.items[0] = { ...plan.items[0]!, targetIds: selected.filter(r => ["arc", "milestone"].includes(r.metadata.type)).map(r => r.metadata.id), status: "verified", verifiedSha: commit };
-  const obligations = report.outstanding.filter(o => ids.has(o.id));
+  const obligations = report.outstanding.filter(o => ids.has(o.id) &&
+    (!isFocusedScope(plan.contract) || plan.contract.scope.targets.includes(o.id)));
+  if (isFocusedScope(plan.contract)) {
+    const focused = plan.contract.scope.targets.map(id => {
+      const kind = id.startsWith("authored-content.") ? "composition" as const : "realization" as const;
+      const item = workItem("focus-" + id.replace(".", "-"), kind, [id], ["global-architecture"], plan.version);
+      const skill = id.startsWith("character.") || id.startsWith("relationship.") ? "nt-character-development" :
+        id.startsWith("event.") ? "nt-event-design" :
+        id.startsWith("authored-content.") ? "nt-narrative-composition" :
+        id.startsWith("choice-point.") || id.startsWith("puzzle.") ? "nt-interactive-narrative" : "nt-worldbuilding";
+      item.skills = [skill, "nt-catalog"];
+      item.checks = ["exact-target-files", "canonical-structure", "protected-decisions", "scoped-review"];
+      item.authorization.paths = selected.filter(r => r.metadata.id === id ||
+        id === plan.contract.scope.targets[0] && plan.contract.scope.supportingTargets?.includes(r.metadata.id))
+        .map(r => r.path);
+      return item;
+    });
+    plan.items = [plan.items[0]!, ...focused, workItem("review-scope", "review", [...ids],
+      focused.map(item => item.id), plan.version)];
+    state.outstanding = obligations;
+    state.phase = "committed";
+    state.expectedHead = commit;
+    return;
+  }
   const clusters = [...new Set(obligations.map(o => o.id))].map(id => workItem("realize-" + id.replace(".", "-"), "realization", [id], ["global-architecture"], plan.version));
   for (const item of clusters) { item.status = "blocked"; item.blockingReason = "Tracked downstream obligation; execute with the Event/interactive specialist in a later work unit."; }
   plan.items = [plan.items[0], ...clusters];
@@ -546,6 +593,14 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         if (dirty(job).length || receipt.phase === "writing") throw new Error("Interrupted architecture edits/session require inspection; never blindly rerun a writer.");
         const before = reportOf(await validate(source, { ...job, baseSha: receipt.executionHead ?? receipt.expectedHead }));
         if (before.readiness.design.stages.foundation?.minimum !== "passed") throw new Error("Architecture requires a canonical ready Creative Direction.");
+        // A focused existing-record request adopts only verified canonical context;
+        // it MUST NOT launch the whole-Story architecture writer to invent context.
+        if (isFocusedScope(receipt.plan!.contract)) {
+          checkArchitecture(before, receipt.plan!.contract);
+          receipt.plan!.items[0] = { ...receipt.plan!.items[0]!, status: "verified",
+            verifiedSha: receipt.executionHead ?? receipt.expectedHead };
+          return {};
+        }
         // Reuse verified architecture when it already satisfies the exact newly
         // approved scope; otherwise write an additional coherent architecture unit.
         if (receipt.plan!.items[0]?.status === "verified") {

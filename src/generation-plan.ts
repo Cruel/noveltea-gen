@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { type Plan, type WorkItem } from "./architecture.js";
 import { auditNarrativeScope, type ScopeAudit } from "./narrative-review.js";
 import { type ValidationResult } from "./validator.js";
+import { isFocusedScope } from "./focused-scope.js";
 
-export const generationStages = ["foundation", "architecture", "foundations", "event", "interactive", "composition", "review"] as const;
+export const generationStages = ["foundation", "architecture", "foundations", "event", "interactive", "composition", "focus", "review"] as const;
 export type GenerationStage = typeof generationStages[number];
 export interface GenerationEvidence {
   stage: GenerationStage; milestone?: string; headSha: string; status: string; planVersion?: number;
@@ -29,7 +30,8 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
     const targets = milestone ? [milestone] :
       stage === "foundation" ? ["creative-direction.foundation"] : plan?.items[0]?.targetIds ?? [];
     const planned = plan?.items.filter(i => stage === "foundation" || stage === "foundations" ? false : stage === "architecture" ? i.kind === "architecture" :
-      stage === "review" ? i.kind === "review" : stage === "composition" ? i.kind === "composition" :
+      stage === "review" ? i.kind === "review" : stage === "focus" ? i.id === "focus-" + milestone?.replace(".", "-") :
+      stage === "composition" ? i.kind === "composition" :
       i.kind === "realization" && i.targetIds.some(t => targets.includes(t))) ?? [];
     const evidence = [...completed].reverse().find(e => e.stage === stage && e.milestone === milestone);
     const reason = stage === "review" && evidence && evidence.status !== "complete-in-scope"
@@ -51,10 +53,17 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
   };
   add("foundation", []);
   add("architecture", ["foundation"]);
+  const focused = !!plan && isFocusedScope(plan.contract);
   let audit: ScopeAudit | undefined;
   if (plan && validation && items[1]!.status === "verified") {
     audit = auditNarrativeScope(plan, validation, headSha);
-    if (plan.contract.scope.depth !== "architecture") {
+    if (focused) {
+      // Existing-record revisions are not Milestone-wide realization requests.
+      // The first target owns explicitly listed supporting-record edits; all
+      // other targets remain independent work units.
+      for (const target of plan.contract.scope.targets) add("focus", ["architecture"], target);
+      add("review", plan.contract.scope.targets.map(target => "focus:" + target));
+    } else if (plan.contract.scope.depth !== "architecture") {
       add("foundations", ["architecture"]);
       const authorized = new Set(plan.items.find(i => i.id === "global-architecture" && i.status === "verified")?.targetIds);
       const milestones = audit.scopedRecords.filter(id => id.startsWith("milestone.")).sort();

@@ -12,6 +12,7 @@ import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
+import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import type { PlanHistoryStep } from "./plan-continuity.js";
 import { deferredCompletionObligations } from "./ideas.js";
 import type { auditIdeasUnderJobLock } from "./idea-placement.js";
@@ -123,12 +124,20 @@ export function auditNarrativeScope(plan: Plan, result: ValidationResult, headSh
   const active = report.records.filter(r => r.metadata.status !== "superseded");
   const lookup = new Map(active.map(r => [r.metadata.id, r]));
   const scope = contract.scope;
-  const knownTargets = scope.targets.filter(id => lookup.has(id));
+  const focused = isFocusedScope(contract);
+  const knownTargets = [...scope.targets, ...(scope.supportingTargets ?? [])].filter(id => lookup.has(id));
+  const focusedIds = focused ? new Set([...scope.targets, ...(scope.supportingTargets ?? [])]) : undefined;
+  let focusedError: string | undefined;
+  if (focused) {
+    try { resolveFocusedScope(active, contract); }
+    catch (error) { focusedError = String(error); }
+  }
   const inScope = new Set(scope.kind === "full-story" ? active
     .filter(r => ["arc", "milestone"].includes(r.metadata.type)).map(r => r.metadata.id)
     : knownTargets);
   const diagnostics: ScopedDiagnostic[] = [];
-  for (const missing of scope.targets.filter(id => !lookup.has(id)))
+  if (focusedError) diagnostics.push(problem("scope-context-unverified", "scope", focusedError, "architecture"));
+  for (const missing of [...scope.targets, ...(scope.supportingTargets ?? [])].filter(id => !lookup.has(id)))
     diagnostics.push(problem("scope-target-missing", missing, "Declared target is not in the current Story.", "architecture"));
   // Expand from requested Arc/Milestone to its generated Event/interactive/
   // prose cluster; do not turn an unrelated incomplete Arc into a blocker.
@@ -150,10 +159,17 @@ export function auditNarrativeScope(plan: Plan, result: ValidationResult, headSh
       });
   }
   const arcRequested = scope.kind === "full-story" || [...arcs].some(a => inScope.has(a));
-  const eventRecords = active.filter(r => r.metadata.type === "event" &&
-    (scope.kind === "full-story" || inScope.has(r.metadata.id) ||
-      milestoneEvents.has(r.metadata.id) ||
-      (arcRequested && ids(r, "arcs").some(a => arcs.has(a)))));
+  const focusedEvents = new Set(focused ? active.filter(r => focusedIds?.has(r.metadata.id))
+    .flatMap(r => [...ids(r, "events"), ...ids(r, "solutions")]) : []);
+  const eventRecords = active.filter(r => {
+    if (r.metadata.type !== "event") return false;
+    if (inScope.has(r.metadata.id)) return true;
+    if (focused) return focusedEvents.has(r.metadata.id) ||
+      active.some(target => focusedIds?.has(target.metadata.id) &&
+        JSON.stringify(r.metadata.steps ?? []).includes(target.metadata.id));
+    return scope.kind === "full-story" || milestoneEvents.has(r.metadata.id) ||
+      (arcRequested && ids(r, "arcs").some(a => arcs.has(a)));
+  });
   const events = new Set(eventRecords.map(r => r.metadata.id));
   eventRecords.forEach(r => inScope.add(r.metadata.id));
   const referenced = new Set<string>();
@@ -165,9 +181,9 @@ export function auditNarrativeScope(plan: Plan, result: ValidationResult, headSh
   eventRecords.forEach(r => scanIds(r.metadata));
   const extra = active.filter(r => {
     if (["choice-point", "puzzle", "authored-content"].includes(r.metadata.type)) {
-      return scope.kind === "full-story" || inScope.has(r.metadata.id) ||
+      return inScope.has(r.metadata.id) || (!focused && (scope.kind === "full-story" ||
         referenced.has(r.metadata.id) || ids(r, "events").some(e => events.has(e)) ||
-        ids(r, "solutions").some(e => events.has(e));
+        ids(r, "solutions").some(e => events.has(e))));
     }
     return false;
   });
@@ -192,8 +208,9 @@ export function auditNarrativeScope(plan: Plan, result: ValidationResult, headSh
   for (const d of reportProblems)
     diagnostics.push(problem(d.code, d.path ? d.path + ":" + (d.line ?? 1) : "catalog",
       d.message, "architecture"));
-  const outstanding = report.outstanding.filter(o => inScope.has(o.id) ||
-    scopedPaths.has(o.path) || inScope.has(o.requiredBy)).map(o => ({ id: o.id, message: o.message }));
+  const outstanding = report.outstanding.filter(o => focused ? focusedIds?.has(o.id) :
+    inScope.has(o.id) || scopedPaths.has(o.path) || inScope.has(o.requiredBy))
+    .map(o => ({ id: o.id, message: o.message }));
   for (const idea of deferred.filter(idea => scope.kind === "full-story" ||
     idea.scopeIds.some(id => inScope.has(id) || arcs.has(id)))) {
     outstanding.push({ id: idea.id, message: idea.message });
@@ -212,7 +229,7 @@ export function auditNarrativeScope(plan: Plan, result: ValidationResult, headSh
     .flatMap(p => p.solutions.map(s => ({ puzzle: p.id, event: s.event,
       status: s.status, clueAccess: s.clueAccess.status })));
   if (scope.depth !== "architecture") {
-    if (!milestoneIds.size || !eventRecords.length)
+    if (!focused && (!milestoneIds.size || !eventRecords.length))
       diagnostics.push(problem("unrealized-scope", "scope",
         "Requested interactive/composition scope lacks a realized Milestone and Event route.", "event"));
     for (const milestone of milestoneIds) {
@@ -233,7 +250,8 @@ export function auditNarrativeScope(plan: Plan, result: ValidationResult, headSh
       diagnostics.push(problem("puzzle-unfair", p.puzzle + "/" + p.event,
         "Solution " + p.status + "; clue access " + p.clueAccess, "interactive",
         p.status !== "unreachable" && p.clueAccess !== "unreachable"));
-    const choices = extra.filter(record => record.metadata.type === "choice-point");
+    const choices = active.filter(record => record.metadata.type === "choice-point" &&
+      (!focused || referenced.has(record.metadata.id) || focusedIds?.has(record.metadata.id)));
     const hasRequestedRoute = (outcome: string) => {
       const owned = choices.filter(choice => ids(choice, "outcomes").includes(outcome));
       if (!owned.length) return routes.some(route =>
@@ -258,7 +276,7 @@ export function auditNarrativeScope(plan: Plan, result: ValidationResult, headSh
       diagnostics.push(problem("progression-truncated", "coverage",
         "Bounded progression search is truncated; branch completeness is unverified.", "interactive", true));
   }
-  if (scope.depth === "composition") {
+  if (scope.depth === "composition" && (!focused || eventRecords.length)) {
     if (!eventRecords.length) diagnostics.push(problem("no-events", "scope",
       "Composition scope contains no Event realizations.", "event"));
     for (const e of eventRecords) {

@@ -72,6 +72,55 @@ but still request independent scope assessment. No arbitrary Event/scene counts,
 iterative whole-Story improvement or automatic integration are imposed. Canonical
 Story files remain the direct context source until #22.
 
+### Focused record scopes (#35)
+
+A partial scope can instead target existing typed canonical records directly, for
+example `character.ada`, `event.disclose-ledger`, `choice-point.loyalty`,
+`puzzle.ledger-proof` or `authored-content.disclosure-scene`. Such a scope
+**adopts verified existing Creative Direction and architecture context without
+running discovery, global Character/World, or unrelated Milestone specialists**.
+Each focused target becomes a checkpointed, independently committed `focus:<id>`
+work item. A committed Story baseline and valid upstream references are required;
+missing prerequisites block with an explicit authorization requirement, not an
+automatically expanded Story generation pass. Source context is not write
+permission. Only existing targeted records may be edited. To authorize a narrowly
+bounded supporting change, list its typed record ID in `supportingTargets`; these
+files are committed in the first targeted work item and independently reviewed.
+Editing anything else blocks the commit and preserves the dirty worktree and Pi
+session for manual recovery. Unrelated incomplete records do not become scoped
+completion obligations. Real Pi works through the pinned domain-specific skill
+and Context Manifest adapter; fixtures only verify mechanical contracts, never
+literary completeness.
+
+For instance, the same public `job generate start` entrypoint accepts:
+
+```json
+{
+  "scope": {
+    "kind": "partial", "preset": "full-composition",
+    "targets": ["authored-content.disclosure-scene"],
+    "branches": ["protect"], "supportingTargets": []
+  },
+  "constraints": ["Preserve both choices' consequences"],
+  "envelope": {
+    "presentation": "Dialogue-led visual novel",
+    "hardLimits": [], "preferences": []
+  }
+}
+```
+
+Optional presets `architecture-outline`, `interactive-development`, and
+`full-composition` normalize to the existing `architecture`, `interactive`,
+and `composition` depths before the versioned completion contract is saved.
+The legacy explicit `depth` form remains supported; a conflicting explicit
+depth/preset is rejected. Combining an Arc/Milestone-wide generation target with
+individual-record targets in one contract is rejected; use separate explicitly
+authorized scopes to keep the requested write set unambiguous. Branch requirements are independently checked against
+reachable Choice/branch witnesses, and no preset inserts a fixed number of
+Arcs, Events, scenes or acts. A focused task that needs edits to unlisted
+records must be replanned with explicit author authorization rather than
+silently widening the write set.
+
 `start` pins the objective, contract, fixture/Pi selection and explicit model/source
 options. `resume` accepts no replacement inputs; it uses that same request. Existing
 work-item receipts retain their own stronger brief/model/authorization checks.
