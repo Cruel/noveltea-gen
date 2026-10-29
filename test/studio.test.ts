@@ -3,11 +3,37 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { z } from "zod";
+import { createGenerationGraph, GenerationInputSchema } from "../src/generation.js";
 
 test("langgraph.json registers only production Story generation", () => {
   const config = JSON.parse(readFileSync(resolve("langgraph.json"), "utf8"));
   assert.deepEqual(config.graphs, { story_generation: "./src/studio.ts:graph" });
   assert.deepEqual(config.dependencies, ["."]);
+});
+
+test("Studio validates the mandatory generation request and advertises nested required fields", async () => {
+  const compiled = createGenerationGraph();
+  assert.equal(Reflect.get(compiled.builder, "_inputRuntimeDefinition"), GenerationInputSchema);
+  const schema = z.toJSONSchema(GenerationInputSchema);
+  assert.deepEqual(schema.required, ["request"]);
+  const request = schema.properties?.request as { required?: string[]; properties?: Record<string, unknown> };
+  assert.deepEqual(request.required, ["story", "job", "task", "contract"]);
+  const contract = request.properties?.contract as { required?: string[]; properties?: Record<string, unknown> };
+  assert.deepEqual(contract.required, ["scope", "constraints", "envelope"]);
+  const scope = contract.properties?.scope as { required?: string[] };
+  assert.deepEqual(scope.required, ["kind", "targets", "branches"]);
+  const envelope = contract.properties?.envelope as { required?: string[] };
+  assert.deepEqual(envelope.required, ["presentation", "hardLimits", "preferences"]);
+  assert.ok(!request.required.includes("fixture"));
+  assert.ok(!schema.required?.includes("pauseAfter"));
+  const missing = GenerationInputSchema.safeParse({ request: { story: "/repo/story", job: "draft", task: "Scene" } });
+  assert.equal(missing.success, false);
+  assert.ok(!missing.success && missing.error.issues.some(i => i.path.join(".") === "request.contract"));
+  await assert.rejects(() => compiled.invoke({}), (error: unknown) =>
+    !!error && typeof error === "object" && "issues" in error &&
+    Array.isArray(error.issues) && error.issues.some((i: { path: string[] }) =>
+      i.path.join(".") === "request"));
 });
 
 test("Studio selects and persists a fresh snapshot per graph invocation, including changed checkout sources", async t => {

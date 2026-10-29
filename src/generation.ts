@@ -6,6 +6,7 @@ import { load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { z } from "zod";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
 import { runFoundationJob } from "./foundation.js";
 import { runCharacterWorldJob } from "./character-world.js";
@@ -92,6 +93,40 @@ function selectIdeaTask(s: State, head: string, tasks: Awaited<ReturnType<typeof
   }
   return null;
 }
+/** External graph invocation, distinct from persisted internal checkpoint state.
+ * Studio uses this to mark mandatory author inputs as required. The stable
+ * state channels below remain available to replay/resume independently. */
+export const GenerationInputSchema = z.object({
+  request: z.object({
+    story: z.string().trim().min(1),
+    job: z.string().trim().min(1),
+    task: z.string().trim().min(1),
+    contract: z.object({
+      scope: z.object({
+        kind: z.enum(["full-story", "partial"]),
+        depth: z.enum(["architecture", "interactive", "composition"]).optional(),
+        preset: z.enum(["architecture-outline", "interactive-development", "full-composition"]).optional(),
+        targets: z.array(z.string()),
+        branches: z.array(z.string()),
+        supportingTargets: z.array(z.string()).optional(),
+      }).refine(scope => scope.depth !== undefined || scope.preset !== undefined,
+        "Provide scope.depth or scope.preset"),
+      constraints: z.array(z.string()),
+      envelope: z.object({
+        presentation: z.string().trim().min(1),
+        hardLimits: z.array(z.string()),
+        preferences: z.array(z.string()),
+      }),
+    }),
+    fixture: z.boolean().optional(),
+    skillsSource: z.string().optional(),
+    validatorSource: z.string().optional(),
+    provider: z.string().optional(),
+    model: z.string().optional(),
+  }),
+  pauseAfter: z.enum(generationStages).nullable().optional(),
+});
+
 const Channels = Annotation.Root({
   request: Annotation<GenerationRequest>(),
   cursor: Annotation<number>({ reducer: (_, next) => next, default: () => 0 }),
@@ -215,11 +250,16 @@ async function authorBoundary(job: JobStartResult): Promise<Partial<State> | nul
 }
 /** The production parent graph. Specialists retain ownership of side effects and recovery. */
 export function createGenerationGraph(checkpointer?: SqliteSaver) {
-  return new StateGraph(Channels)
+  return new StateGraph(Channels, { input: GenerationInputSchema })
     .addNode("schedule", async s => {
-      parseGenerationContract(s.request.contract);
-      if (!s.request.task?.trim()) throw new Error("Generation requires an explicit objective.");
-      return { status: "running" as const, reason: null, failures: s.failures ?? {} };
+      const input = GenerationInputSchema.shape.request.safeParse(s.request);
+      if (!input.success) return blocked(new Error("Invalid generation request: " +
+        input.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ")));
+      try {
+        const contract = parseGenerationContract(input.data.contract);
+        return { request: { ...input.data, fixture: input.data.fixture ?? false, contract },
+          status: "running" as const, reason: null, failures: s.failures ?? {} };
+      } catch (error) { return blocked(error); }
     })
     .addNode("author_update_intake", async s => {
       const job = await openJob(s);
@@ -394,7 +434,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
       });
     })
     .addEdge(START, "schedule")
-    .addEdge("schedule", "author_update_intake")
+    .addConditionalEdges("schedule", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("author_update_intake", s => s.status !== "running" ? END :
       s.ideaTask ? "idea_integration" : s.active ? "specialist_dispatch" : "completion_decision")
     .addConditionalEdges("idea_integration", s => s.status !== "running" ? END : "verify_idea_integration")

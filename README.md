@@ -169,6 +169,16 @@ return a resumable state. A blocked dependency is not a completed work item. The
 disposable job, Studio input is `{"request":{"story":"/absolute/story",
 "job":"draft-1","task":"Your objective","contract":{...},"fixture":true,
 "skillsSource":"/absolute/noveltea-skills"}}`, using the full contract above.
+Studio requires `request.story`, `request.job`, `request.task`, and the nested
+`request.contract` (`scope`, `constraints`, `envelope`); `fixture`, provider/model,
+and source overrides are optional. Specify `scope.depth` or `scope.preset`.
+Generate a validated payload with `pnpm studio:input` rather than submitting an
+empty request. LangGraph's API serializes its top-level graph input as a partial
+state update, so Studio may still label the outer `Request` group **Optional**;
+its nested mandatory fields are accurately marked required and the runtime
+rejects a missing request before any specialist is dispatched. The external
+Studio input schema is separate from the internal checkpoint state, whose
+fields are not new-run form inputs.
 Studio owns its server checkpoints; CLI `generate resume` uses the per-job SQLite
 store, not Studio's thread. Use one execution surface per job, no concurrent
 Studio/CLI runs, and the CLI for tested process-restart recovery. Studio resume
