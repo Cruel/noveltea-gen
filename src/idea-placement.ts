@@ -34,6 +34,8 @@ export interface PlacementOptions {
   id?: string; target?: string; fixture?: boolean; skillsSource?: string;
   validatorSource?: string; provider?: string; model?: string; thinking?: "low" | "high";
   signedEvidence?: string; record?: boolean;
+  /** Parent-only: a private, read-only semantic comparison chooses among eligible targets. */
+  autoSelect?: boolean;
 }
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 const entryFile = (job: JobStartResult, id: string, revision: number) =>
@@ -181,8 +183,14 @@ function schedule(job: JobStartResult, ideas: PersistedIdea[], catalog: Map<stri
     const eligibility = assess(idea, catalog);
     const candidates = eligibility.eligible ? candidatesFor(idea, catalog) : [];
     const current = confirmed(idea);
+    const signature = sha(JSON.stringify({ status: idea.lifecycle.status,
+      candidates: candidates.map(c => c.id), current: current?.recordIds,
+      digest: current?.recordIds.map(id => catalog.get(id)?.path)
+        .filter((p): p is string => !!p).map(p => sha(tree(job, p))),
+      reviewed: current?.verified }));
     return {
-      id: idea.id, status: idea.lifecycle.status, eligible: eligibility.eligible,
+      id: idea.id, scopeIds: idea.placement.scopeIds, signature,
+      status: idea.lifecycle.status, eligible: eligibility.eligible,
       reasons: eligibility.reasons, breadth: eligibility.breadth, candidates,
       currentRealizations: current?.recordIds ?? [],
       reviewRequired: Boolean(current) && (current!.verified !== "pi" ||
@@ -202,7 +210,7 @@ function schedule(job: JobStartResult, ideas: PersistedIdea[], catalog: Map<stri
  * ordinary writer's assignment or starts another simultaneous writer. */
 export async function scheduleIdeasAtBoundary(job: JobStartResult, boundary: string) {
   const ideas = await load(job);
-  if (!ideas.length) return { pending: 0, blocked: 0 };
+  if (!ideas.length) return { tasks: [] as ReturnType<typeof schedule>, pending: 0, blocked: 0 };
   const current = await trustedHead(job);
   const file = join(dirname(job.worktreeRoot), "idea-placement-tasks.json");
   const earlier = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) as {
@@ -217,7 +225,7 @@ export async function scheduleIdeasAtBoundary(job: JobStartResult, boundary: str
     earlier.history.push({ head: current, boundary, tasks });
     await persist(file, earlier);
   }
-  return { pending: tasks.filter(t => t.eligible && t.status === "dormant" && t.candidates.length).length,
+  return { tasks, pending: tasks.filter(t => t.eligible && t.status === "dormant" && t.candidates.length).length,
     blocked: tasks.filter(t => t.reviewRequired).length };
 }
 
@@ -227,7 +235,8 @@ function specialistSkill(kind: string) {
 }
 async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: string,
   instruction: string, provider: string, modelId: string,
-  thinking: "low" | "high" | undefined, writable: boolean, insideWriter = false) {
+  thinking: "low" | "high" | undefined, writable: boolean, insideWriter = false,
+  selecting = false) {
   if (await openSkillSnapshot(snapshot.id) !== snapshot.path) throw new Error("Pinned placement skills changed.");
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
@@ -276,8 +285,9 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
         "Edit ONLY the allowed target/previous canonical Markdown files stated in the assignment using the existing craft skill. " +
         "Do not alter frontmatter IDs, protected requirements, other records or the .story-inbox. " :
         "Read-only independent semantic assessment. Never edit files. ") +
-      "Respond with ONE unfenced JSON object: " +
-      '{"verdict":"pass|block","evidence":["path.md:line"],"reason":"..."}' +
+      "Respond with ONE unfenced JSON object: " + (selecting
+        ? '{"verdict":"pass|block","target":"one candidate ID or null","evidence":["path.md:line"],"reason":"..."}'
+        : '{"verdict":"pass|block","evidence":["path.md:line"],"reason":"..."}') +
       ". Evidence must compare the ORIGINAL author intent and every binding requirement " +
       "against actual player-facing lines when applicable. Do NOT equate a canonical reference " +
       "or typed ID alone with semantic fulfillment. \nPINNED:\n" + pinned.join("\n") +
@@ -310,14 +320,19 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
       response = latest();
     }
     if (mustRead.some(p => !completedReads().has(p)) ||
-        response.verdict !== "pass" || !Array.isArray(response.evidence) ||
-        !response.evidence.some((e: unknown) => typeof e === "string" &&
-          /(?:events|milestones|authored-content)\/[a-z0-9-]+\.md:[1-9][0-9]*/.test(e))) {
+        (!selecting || response.verdict !== "block") && response.verdict !== "pass" ||
+        !Array.isArray(response.evidence) ||
+        (response.verdict === "pass" && !response.evidence.some((e: unknown) => typeof e === "string" &&
+          /(?:events|milestones|authored-content)\/[a-z0-9-]+\.md:[1-9][0-9]*/.test(e))) ||
+        (selecting && (response.verdict === "pass"
+          ? !assignment.alternatives?.some(c => (c as { id?: string }).id === response.target)
+          : response.target != null))) {
       throw new Error("Idea specialist did not provide a passing source-linked semantic verdict: " +
         JSON.stringify(response));
     }
     await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
     return { evidence: response.evidence as string[], reason: String(response.reason ?? ""),
+      target: selecting && response.verdict === "pass" ? String(response.target) : null,
       sessionFile: session.sessionManager.getSessionFile() ?? "" };
   } finally { session.dispose(); }
 }
@@ -469,7 +484,37 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     if (input.action !== "place" && input.action !== "relocate")
       throw new Error("Unsupported idea placement action.");
     if (!eligibility.eligible) return { status: "deferred", reasons: eligibility.reasons };
-    const candidate = alternatives.find(c => c.id === input.target);
+    let target = input.target;
+    let selection: { evidence: string[]; reason: string; sessionFile: string } | undefined;
+    if (!target && input.autoSelect && input.action === "place") {
+      if (!alternatives.length) return { status: "deferred", reason: "No developed placement candidates" };
+      if (input.fixture) {
+        if (process.env.NT_IDEA_FIXTURE_REJECT === idea.id)
+          return { status: "deferred", reason: "Fixture rejected every current placement candidate" };
+        // A deterministic fixture exercises the orchestration and Git gates,
+        // NOT semantic selection. Prefer the most developed kind, with a stable tie-break.
+        const specificity = (kind: string) => kind === "authored-content" ? 3 : kind === "event" ? 2 : 1;
+        target = [...alternatives].sort((a, b) => specificity(b.kind) - specificity(a.kind) ||
+          b.id.localeCompare(a.id))[0]!.id;
+      } else {
+        const snapshot = await createSkillSnapshot({ discovery: "explicit-only",
+          novelteaSkills: input.skillsSource, skillDirs: [],
+          requiredSkills: ["nt-narrative-review", "nt-catalog"] });
+        if (!snapshot) throw new Error("Automatic idea selection requires pinned review skills.");
+        const assignment = JSON.stringify({ original: idea.original, requirements: idea.requirements,
+          identities: idea.identities, prerequisites: idea.prerequisites,
+          alternatives, scopeIds: idea.placement.scopeIds,
+          instruction: "Compare ALL candidates and choose one reasonable semantic location, or block with null target if none fits. Do not edit." }, null, 2);
+        const decision = await piWork(job, snapshot, "nt-narrative-review", assignment,
+          input.provider ?? "openai", input.model ?? "gpt-6-luna", input.thinking,
+          false, false, true);
+        if (!decision.target) return { status: "deferred", reason: decision.reason,
+          alternatives: alternatives.map(a => ({ recordId: a.id, rationale: a.rationale })) };
+        target = decision.target;
+        selection = decision;
+      }
+    }
+    const candidate = alternatives.find(c => c.id === target);
     if (!candidate) throw new Error("Choose one of the eligible candidate record IDs; compare ideas plan first.");
     if (input.action === "place" && current) throw new Error("Already integrated; use reassess/relocate.");
     if (input.action === "relocate" && !current) throw new Error("Relocation requires a previously integrated idea.");
@@ -576,11 +621,13 @@ export async function runIdeaPlacement(input: PlacementOptions) {
       action: oldRecord ? "relocated" : "integrated", priorHead: prior,
       recordIds: [candidate.id], rationale: (oldRecord ? "Relocated from " + oldRecord.id + " to " :
         "Chosen ") + candidate.id + " after comparison of " +
-        alternatives.length + " eligible contexts; " + candidate.rationale,
+        alternatives.length + " eligible contexts; " + candidate.rationale +
+        (selection ? "; semantic selection: " + selection.reason :
+          input.autoSelect && input.fixture ? "; fixture selection only, not semantic" : ""),
       alternatives: all.map(c => ({ recordId: c.id, rationale: c.rationale })),
       verified: input.fixture ? "fixture-unverified" : "pi",
-      evidence: [...writerEvidence, ...editorialEvidence],
-      sessionFiles: [writerSession, reviewSession].filter(Boolean),
+      evidence: [...(selection?.evidence ?? []), ...writerEvidence, ...editorialEvidence],
+      sessionFiles: [selection?.sessionFile, writerSession, reviewSession].filter((p): p is string => !!p),
       realizationDigest: workingDigest,
     };
     const revised: PersistedIdea = { ...idea, lifecycle: { ...idea.lifecycle,

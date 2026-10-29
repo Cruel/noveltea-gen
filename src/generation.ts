@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { load, persist } from "./ideas.js";
+import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
@@ -17,7 +19,7 @@ import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryGenerationLock, withStoryJobLock } from "./job-lock.js";
 import { readJobControl } from "./job-control.js";
-import { inspectJobReport } from "./job-report.js";
+import { inspectJobReport, type JobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
@@ -36,6 +38,60 @@ export interface GenerationOptions {
   validatorSource?: string; provider?: string; model?: string; pauseAfter?: Stage;
 }
 type Status = "running" | "paused" | "blocked" | "cancelled" | "completed";
+export interface IdeaTask { id: string; action: "place" | "reassess"; signature: string; priorHead: string }
+export interface IdeaResult { status: string; commitSha?: string; reason?: string }
+export interface IdeaAttempt { signature: string; action: IdeaTask["action"]; status: string; reason?: string; commitSha?: string }
+export interface IdeaHistoryEntry extends IdeaAttempt { id: string }
+export interface GenerationEscalation {
+  kind: "protected-approval" | "dependency-replan" | "targeted-repair";
+  sources: Array<{ source: string; message: string; repair: string }>;
+  requiresSignedApproval: boolean;
+  action: string;
+}
+function reviewEscalation(report: JobReport, inventory: GenerationInventory | null): GenerationEscalation | null {
+  const sources = [
+    ...(report.evidence.scope?.diagnostics ?? inventory?.audit?.diagnostics ?? [])
+      .filter(d => d.severity === "blocking" &&
+        !(d.code === "unfulfilled-obligation" &&
+          report.evidence.deferredIdeas.scopedOutstanding.includes(d.source))).map(d =>
+        ({ source: d.source, message: d.message, repair: d.repair })),
+    ...report.evidence.editorial.findings.filter(f => f.severity === "blocking").map(f =>
+      ({ source: String(f.source), message: String(f.message), repair: String(f.repair) })),
+    ...(inventory?.items ?? []).filter(i => i.status === "blocked" && i.stage !== "review" &&
+      i.blockingReason && !i.blockingReason.startsWith("Blocked dependency:")).map(i =>
+      ({ source: i.id, message: i.blockingReason!, repair: "architecture" })),
+  ];
+  if (!sources.length) return null;
+  const protectedChange = sources.some(s => s.repair === "protected");
+  const replan = sources.some(s => ["architecture", "event", "interactive"].includes(s.repair));
+  return {
+    kind: protectedChange ? "protected-approval" : replan ? "dependency-replan" : "targeted-repair",
+    sources, requiresSignedApproval: protectedChange || replan,
+    action: protectedChange
+      ? "Protected decisions cannot be edited automatically. Obtain exact signed author authorization through the existing revision/approval workflow."
+      : replan
+        ? "Affect only the listed source/dependency scope. Propose and obtain a signed architecture/scope revision with explicit carry-forward, or authorize a bounded targeted repair; do not widen coverage automatically."
+        : "The narrative reviewer exhausted or could not use its original-writer bounded repair path. Inspect the blocked review and authorize a targeted repair.",
+  };
+}
+const MAX_IDEA_ATTEMPTS = 3;
+const ideaDispatchFile = (job: JobStartResult) => join(dirname(job.worktreeRoot), "generation-idea-dispatch.json");
+function selectIdeaTask(s: State, head: string, tasks: Awaited<ReturnType<typeof scheduleIdeasAtBoundary>>["tasks"],
+  next: ExecutionItem | null): IdeaTask | null {
+  if (!s.inventory || !s.inventory.items.some(i => i.stage === "architecture" && i.status === "verified") ||
+      isFocusedScope(s.request.contract)) return null;
+  const scope = new Set(s.inventory.audit?.scopedRecords ?? s.request.contract.scope.targets);
+  for (const task of tasks) {
+    if (!task.eligible || !task.candidates.length ||
+        s.request.contract.scope.kind !== "full-story" && !task.scopeIds.some(id => scope.has(id))) continue;
+    const action = task.status === "dormant" ? "place" : task.reviewRequired ? "reassess" : null;
+    if (!action || action === "place" && task.candidates.length < 2 && next?.stage !== "review" && next !== null) continue;
+    const attempted = s.ideaHistory.filter(h => h.id === task.id);
+    if (attempted.length >= MAX_IDEA_ATTEMPTS || attempted.some(a => a.signature === task.signature)) continue;
+    return { id: task.id, action, signature: task.signature, priorHead: head };
+  }
+  return null;
+}
 const Channels = Annotation.Root({
   request: Annotation<GenerationRequest>(),
   cursor: Annotation<number>({ reducer: (_, next) => next, default: () => 0 }),
@@ -48,6 +104,10 @@ const Channels = Annotation.Root({
   inventory: Annotation<GenerationInventory | null>(),
   active: Annotation<ExecutionItem | null>(),
   failures: Annotation<Record<string, string>>(),
+  ideaTask: Annotation<IdeaTask | null>(),
+  ideaResult: Annotation<IdeaResult | null>(),
+  ideaHistory: Annotation<IdeaHistoryEntry[]>({ reducer: (_, next) => next, default: () => [] }),
+  escalation: Annotation<GenerationEscalation | null>(),
 });
 type State = typeof Channels.State;
 const openJob = (s: State) => startStoryJob({ story: s.request.story, job: s.request.job }, false);
@@ -170,13 +230,94 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
           const receipt = await checkPlan(job, s.request, s.planVersion);
           // Preserve an in-flight result. For interrupted external effects, only the
           // original specialist may reconcile the dirty/unpublished work boundary.
+          if (s.ideaTask) return {};
           if (s.active && (receipt?.plan?.version ?? null) === s.planVersion) {
             if (s.result) return {};
             try { clean(job); await trustedHead(job); } catch { return {}; }
           }
           if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
           clean(job);
-          return await reconcile(s, job);
+          const next = await reconcile(s, job);
+          const head = await trustedHead(job);
+          const scheduled = await scheduleIdeasAtBoundary(job, "parent-generation");
+          const selected = selectIdeaTask({ ...s, ...next } as State, head, scheduled.tasks,
+            next.active ?? null);
+          return { ...next, ideaTask: selected, escalation: null };
+        } catch (error) { return blocked(error); }
+      });
+    })
+    .addNode("idea_integration", async s => {
+      if (s.ideaResult) return {};
+      const task = s.ideaTask!;
+      const job = await openJob(s);
+      const file = ideaDispatchFile(job);
+      try {
+        // External Git and Pi effects cannot be replayed merely because the
+        // LangGraph checkpoint was interrupted. A private receipt fences repeats.
+        if (existsSync(file)) {
+          const saved = JSON.parse(await readFile(file, "utf8")) as {
+            jobId: string; task: IdeaTask; phase: string; result?: IdeaResult;
+          };
+          if (saved.jobId !== job.jobId) throw new Error("Idea dispatch receipt belongs to another job.");
+          if (JSON.stringify(saved.task) === JSON.stringify(task)) {
+            if (saved.result) return { ideaResult: saved.result };
+            const ideas = await withStoryJobLock(job, "idea-dispatch-reconciliation", () => load(job));
+            const last = ideas.find(i => i.id === task.id)?.lifecycle.placements.at(-1);
+            if (last?.priorHead === task.priorHead &&
+                (last.action === "integrated" && task.action === "place" ||
+                 last.action === "reassessed" && task.action === "reassess")) {
+              const entryFile = join(dirname(job.worktreeRoot), "idea-placements",
+                task.id + "-" + last.revision + ".json");
+              const receipt = JSON.parse(await readFile(entryFile, "utf8")) as {
+                priorHead: string; commitSha: string;
+              };
+              const commitSha = await trustedHead(job);
+              if (receipt.priorHead !== task.priorHead || receipt.commitSha !== commitSha)
+                throw new Error("Automated idea recovery requires the exact verified placement commit, not a later unrelated HEAD.");
+              const result = { status: last.action === "integrated"
+                ? last.verified === "pi" ? "integrated" : "integrated-editorial-unverified"
+                : last.verified === "pi" ? "reassessed" : "reassessed-editorial-unverified", commitSha };
+              await persist(file, { ...saved, phase: "returned", result });
+              return { ideaResult: result };
+            }
+            throw new Error("Interrupted automated idea selection/writer; inspect its Pi session, placement receipt and Git worktree before manual reconciliation.");
+          }
+          if (saved.phase !== "verified")
+            throw new Error("Previous automated idea dispatch has not been verified; reconcile it manually.");
+        }
+        if (await trustedHead(job) !== task.priorHead) throw new Error("Idea selection's verified Git base changed.");
+        await persist(file, { jobId: job.jobId, task, phase: "running" });
+        const result = await runIdeaPlacement({ ...s.request, action: task.action,
+          id: task.id, ...(task.action === "place" ? { autoSelect: true } : { record: true }) }) as IdeaResult;
+        await persist(file, { jobId: job.jobId, task, phase: "returned", result });
+        return { ideaResult: result };
+      } catch (error) { return blocked(error); }
+    })
+    .addNode("verify_idea_integration", async s => {
+      const job = await openJob(s);
+      return withStoryJobLock(job, "generation-idea-verification", async () => {
+        try {
+          clean(job);
+          const head = await trustedHead(job);
+          const task = s.ideaTask!, result = s.ideaResult!;
+          if (result.commitSha && head !== result.commitSha)
+            throw new Error("Idea integration commit differs from the verified Story HEAD.");
+          if (result.commitSha) {
+            const idea = (await load(job)).find(i => i.id === task.id);
+            const last = idea?.lifecycle.placements.at(-1);
+            if (last?.priorHead !== task.priorHead ||
+                (task.action === "place" ? last.action !== "integrated" : last.action !== "reassessed"))
+              throw new Error("Idea integration result lacks matching committed provenance.");
+          } else if (head !== task.priorHead)
+            throw new Error("Deferred idea result changed Git without a verified integration commit.");
+          const history = [...s.ideaHistory, { id: task.id, action: task.action,
+            signature: task.signature, status: result.status,
+            ...(result.reason ? { reason: result.reason } : {}),
+            ...(result.commitSha ? { commitSha: result.commitSha } : {}) }];
+          await persist(ideaDispatchFile(job), { jobId: job.jobId, task, phase: "verified", result });
+          const next = await reconcile({ ...s, ideaHistory: history, active: null, result: null }, job);
+          return { ...next, ideaTask: null, ideaResult: null, ideaHistory: history,
+            cursor: s.cursor + 1 };
         } catch (error) { return blocked(error); }
       });
     })
@@ -226,17 +367,33 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
           if (stopped) return stopped;
           const report = await inspectJobReport(s.request);
           const complete = report.generation.status === "completed";
-          return { status: complete ? "completed" as const : "blocked" as const,
-            reason: complete ? null : s.inventory?.items.filter(i => i.status !== "verified")
-              .map(i => i.stage === "review" ? i.blockingReason ?? "Scope remains unverified" : `${i.id}: ${i.blockingReason ?? "Unresolved dependencies"}`).join("; ") ||
-              s.completedStages.at(-1)?.status || "Scope remains unverified" };
+          const escalation = complete ? null : reviewEscalation(report, s.inventory);
+          const details = s.inventory?.items.filter(i => i.status !== "verified")
+            .map(i => i.stage === "review" ? i.blockingReason ?? "Scope remains unverified" :
+              `${i.id}: ${i.blockingReason ?? "Unresolved dependencies"}`).join("; ");
+          const unfulfilledIdeas = report.evidence.deferredIdeas.scopedOutstanding;
+          const budgeted = s.ideaHistory.filter(h => unfulfilledIdeas.includes(h.id) &&
+            s.ideaHistory.filter(other => other.id === h.id).length >= MAX_IDEA_ATTEMPTS);
+          return {
+            // Needing a *proposal* is blocked; only a real outstanding author
+            // approval interrupt or execution control may report paused.
+            status: complete ? "completed" as const : "blocked" as const,
+            escalation,
+            reason: complete ? null : [details || s.completedStages.at(-1)?.status ||
+              "Scope remains unverified",
+              ...(unfulfilledIdeas.length ? ["Binding deferred ideas unresolved: " + unfulfilledIdeas.join(", ")] : []),
+              ...(budgeted.length ? ["Automated idea reassessment limit reached; author review required."] : []),
+              ...(escalation ? [escalation.action] : [])].join("; "),
+          };
         } catch (error) { return blocked(error); }
       });
     })
     .addEdge(START, "schedule")
     .addEdge("schedule", "author_update_intake")
     .addConditionalEdges("author_update_intake", s => s.status !== "running" ? END :
-      s.active ? "specialist_dispatch" : "completion_decision")
+      s.ideaTask ? "idea_integration" : s.active ? "specialist_dispatch" : "completion_decision")
+    .addConditionalEdges("idea_integration", s => s.status !== "running" ? END : "verify_idea_integration")
+    .addConditionalEdges("verify_idea_integration", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END : s.active ? "verify_committed_work" : "author_update_intake")
     .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END : "author_update_intake")
     .addEdge("completion_decision", END)
@@ -262,7 +419,8 @@ export async function runStoryGeneration(options: GenerationOptions) {
           skillsSource: options.skillsSource, validatorSource: options.validatorSource,
           provider: options.provider, model: options.model };
         state = { request, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
-          pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {} };
+          pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
+          ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)
@@ -305,8 +463,11 @@ export async function runStoryGeneration(options: GenerationOptions) {
       return { schema: "noveltea-generation/v1", status: current.status ?? state.status,
         reason: current.reason ?? state.reason, checkpointStatus: state.status,
         jobId: job.jobId, threadId: config.configurable.thread_id, checkpointPath: path,
-        nextStage: visible.active?.stage ?? (visible.inventory ? nextExecutionItem(visible.inventory)?.stage : undefined) ?? null,
+        nextStage: visible.ideaTask ? "idea-integration" : visible.active?.stage ??
+          (visible.inventory ? nextExecutionItem(visible.inventory)?.stage : undefined) ?? null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
+        ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
+        escalation: visible.escalation ?? (state.status === "completed" ? null : reviewEscalation(report, visible.inventory ?? null)),
         pendingNodes: (await graph.getState(config)).next, request: visible.request, report };
     } finally { saver.db.close(); }
   });

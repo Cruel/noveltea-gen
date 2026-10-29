@@ -177,6 +177,50 @@ writer with a fresh Studio thread. Both surfaces invoke the same production grap
 and existing specialist APIs, not the note/tagline graph. Hosted tracing remains
 an independent opt-in (`NT_STUDIO_TRACE=1`); ordinary CLI generation disables it.
 
+### Autonomous deferred-idea integration and editorial escalation (#34)
+
+The production parent graph now examines the existing noncanonical idea-placement
+task snapshots at safe work boundaries. After architecture is committed, eligible
+in-scope ideas are placed when developed competing candidates exist (or the
+generation is ready for final review). Dormant ideas remain invisible to normal
+Story writers. A **separate read-only Pi reviewer** compares all candidate
+canonical records, may reject them all, and chooses a reasonable location.
+The existing dedicated placement specialist edits only the chosen canonical
+record; the independent fulfillment reviewer checks original author intent,
+meaning, wording, and participants before its Git-backed placement commit.
+Neither a rejected placement nor a fixture-only integration satisfies a binding
+completion obligation.
+
+When new alternatives appear or the current realization changes, the parent
+runs the existing semantic `ideas reassess --record` path. It never relocates
+an integrated idea without the exact signed Ed25519 relocation approval.
+Automation is capped at three candidate/context attempts per idea; further
+reconsideration requires author action. The noncanonical
+`generation-idea-dispatch.json` receipt fences interrupted Pi/editorial work.
+If a writer was interrupted without a published placement receipt, inspect its
+transcript and preserved worktree; **resume never blindly replays the writer**.
+A verified integration and assessment trail is visible in `job generate
+inspect` as `ideaHistory`. The pinned parent contract, original source text,
+typed placement links, rationale, and full historical commits remain authoritative.
+
+The parent delegates composition-only editorial repairs to the existing bounded
+narrative reviewer. Structural and protected findings return an inspectable
+`escalation` (`dependency-replan` or `protected-approval`) rather than
+silently changing Story scope. The author must approve the existing exact signed
+architecture/revision proposal before the scheduler reconciles dependencies,
+preserves explicitly carried-forward work, and revalidates affected branches.
+`completed` requires the independent real-Pi review and all in-scope binding
+ideas; `blocked` and `paused` are not completion. The separate job report
+continues to expose integration/merge-preview status.
+
+Deterministic fixtures exercise the graph, Git isolation, provenance, rejection,
+reconsideration and restart behavior without asserting literary quality.
+Set `NT_IDEA_FIXTURE_REJECT=<idea-id>` only for deterministic rejected-location
+tests; it has no effect on real Pi placement. For the opt-in real Pi
+candidate-selection and independent-semantic-review evaluation, set
+`NT_LIVE_GENERATION_IDEA=1` and `NT_SKILLS_CHECKOUT` to the canonical skills
+checkout, then run `pnpm exec tsx --test --test-name-pattern='opt-in real Pi generation semantically chooses' test/generation.test.ts`.
+
 Verification (canonical sibling skills checkout required for fixtures):
 
 ```sh

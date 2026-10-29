@@ -37,7 +37,8 @@ function setup(name: string, seed?: (story: string) => void) {
   function cli(args: string[], success = true) {
     const result = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
       "job", ...args, "--story", story, "--job", "single"], {
-      encoding: "utf8", env, timeout: process.env.NT_LIVE_GENERATION === "1" ? 1_800_000 : 240_000, maxBuffer: 32 * 1024 * 1024 });
+      encoding: "utf8", env, timeout: process.env.NT_LIVE_GENERATION === "1" ||
+        process.env.NT_LIVE_GENERATION_IDEA === "1" ? 1_800_000 : 240_000, maxBuffer: 32 * 1024 * 1024 });
     if (!success) { assert.notEqual(result.status, 0); return result.stderr; }
     assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout);
   }
@@ -51,6 +52,112 @@ function setup(name: string, seed?: (story: string) => void) {
     "--contract", contract, "--fixture", "--skills-source", source];
   return { repo, story, initial, cli, job, start, contract, env };
 }
+
+test("parent integrates eligible deferred ideas through the dedicated placement workflow and preserves source intent", { skip: !available }, () => {
+  const f = setup("ideas-parent");
+  const file = join(root, "ideas-parent-idea.json");
+  const original = "The archive bell proves someone visited after midnight.";
+  writeFileSync(file, JSON.stringify({
+    id: "archive-bell", kind: "event-concept",
+    source: { kind: "author-onboarding", reference: "opening-notes" },
+    original,
+    requirements: {
+      meaning: [{ text: "The bell establishes the timeline", binding: true }],
+      wording: [], participants: [],
+    },
+    identities: { known: [], unresolved: [] },
+    prerequisites: ["milestone.disclosure"],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  const captured = f.cli(["ideas", "capture", "--file", file]);
+  const paused = f.cli([...f.start, "--pause-after", "event"]);
+  assert.equal(paused.status, "paused");
+  assert.equal(paused.ideaHistory?.length ?? 0, 0, "safe-boundary pause precedes idea scheduling");
+  const result = f.cli(["generate", "resume"]);
+  assert.equal(result.status, "blocked", JSON.stringify(result));
+  assert.ok(result.ideaHistory.some((entry: any) => entry.id === "archive-bell" &&
+    entry.status === "integrated-editorial-unverified"));
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot, ".story-inbox/ideas/archive-bell.yaml"), "utf8"));
+  assert.equal(inbox.original, original);
+  assert.equal(inbox.lifecycle.status, "integrated");
+  assert.ok(inbox.lifecycle.placements[0].alternatives.length >= 2);
+  assert.equal(inbox.lifecycle.placements[0].verified, "fixture-unverified");
+  const target = inbox.lifecycle.placements[0].recordIds[0];
+  assert.ok(readFileSync(join(f.job.worktreeStoryRoot, target.replace(".", "s/") + ".md"), "utf8").includes(original));
+  assert.deepEqual(result.report.evidence.deferredIdeas.scopedOutstanding, ["archive-bell"]);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  assert.notEqual(captured.commitSha, git(f.job.worktreeRoot, "rev-parse", "HEAD"));
+  const history = result.ideaHistory;
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.deepEqual(f.cli(["generate", "resume"]).ideaHistory, history);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("later canonical development triggers a bounded persisted idea reassessment", { skip: !available }, () => {
+  const f = setup("ideas-reassessment");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope.targets = ["arc.truth", "milestone.disclosure", "milestone.reckoning"];
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const file = join(root, "ideas-reassessment.json");
+  writeFileSync(file, JSON.stringify({
+    id: "bell-revisit", kind: "event-concept",
+    source: { kind: "author-onboarding", reference: "draft-notes" },
+    original: "A bell echoes from the locked archive.",
+    requirements: { meaning: [{ text: "A bell explains the chronology", binding: true }],
+      wording: [], participants: [] },
+    identities: { known: [], unresolved: [] },
+    prerequisites: ["milestone.disclosure"],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  f.cli(["ideas", "capture", "--file", file]);
+  f.cli([...f.start, "--pause-after", "event"]);
+  const second = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(second.status, "paused", JSON.stringify(second));
+  assert.ok(second.ideaHistory.some((h: any) => h.action === "place"));
+  const done = f.cli(["generate", "resume"]);
+  assert.equal(done.status, "blocked", JSON.stringify(done));
+  const steps = done.ideaHistory.filter((h: any) => h.id === "bell-revisit");
+  assert.equal(steps[0].action, "place");
+  assert.ok(steps.length >= 2 && steps.length <= 3, "reconsideration is bounded");
+  assert.ok(steps.slice(1).every((h: any) => h.action === "reassess" &&
+    h.status === "reassessed-editorial-unverified"));
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot, ".story-inbox/ideas/bell-revisit.yaml"), "utf8"));
+  assert.equal(inbox.lifecycle.placements.length, steps.length);
+  assert.ok(inbox.lifecycle.placements.slice(1).every((p: any) => p.action === "reassessed"));
+  const checkpoint = done.ideaHistory;
+  assert.deepEqual(f.cli(["generate", "inspect"]).ideaHistory, checkpoint);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
+test("rejected placement remains dormant, blocks binding completion, and is not blindly retried", { skip: !available }, () => {
+  const f = setup("ideas-rejected");
+  f.env.NT_IDEA_FIXTURE_REJECT = "rejected-concept";
+  const file = join(root, "ideas-rejected.json");
+  writeFileSync(file, JSON.stringify({
+    id: "rejected-concept", kind: "event-concept",
+    source: { kind: "author-onboarding", reference: "editor-notes" },
+    original: "An unverified clue should not be forced into a scene.",
+    requirements: { meaning: [{ text: "The clue must be causal", binding: true }],
+      wording: [], participants: [] },
+    identities: { known: [], unresolved: [] }, prerequisites: ["milestone.disclosure"],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  f.cli(["ideas", "capture", "--file", file]);
+  const result = f.cli(f.start);
+  assert.equal(result.status, "blocked", JSON.stringify(result));
+  assert.ok(result.ideaHistory.some((h: any) => h.id === "rejected-concept" &&
+    h.status === "deferred"));
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot, ".story-inbox/ideas/rejected-concept.yaml"), "utf8"));
+  assert.equal(inbox.lifecycle.status, "dormant");
+  assert.deepEqual(inbox.lifecycle.placements, []);
+  assert.deepEqual(result.report.evidence.deferredIdeas.scopedOutstanding, ["rejected-concept"]);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.deepEqual(f.cli(["generate", "resume"]).ideaHistory, result.ideaHistory);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
 
 test("single-Milestone generation checkpoints foundation then resumes all specialists in a new process", { skip: !available }, () => {
   const f = setup("complete");
@@ -191,6 +298,9 @@ test("an unknown typed dependency blocks its cluster without silently dropping i
   const result = f.cli(["generate", "resume"]);
   assert.equal(result.status, "blocked");
   assert.match(result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure").blockingReason, /nonexistent-dependency/);
+  assert.equal(result.escalation?.kind, "dependency-replan");
+  assert.equal(result.escalation?.requiresSignedApproval, true);
+  assert.ok(result.escalation.sources.some((s: any) => s.source === "event:milestone.disclosure"));
   assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.reckoning").status, "verified");
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
@@ -213,6 +323,8 @@ test("cyclic typed dependencies block their work without dispatch", { skip: !ava
   assert.equal(result.status, "blocked");
   assert.match(result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure").blockingReason, /Cyclic/);
   assert.match(result.inventory.items.find((i: any) => i.id === "event:milestone.reckoning").blockingReason, /Cyclic/);
+  assert.equal(result.escalation?.kind, "dependency-replan");
+  assert.ok(result.escalation?.sources.some((s: any) => /Cyclic/.test(s.message)));
   assert.equal(result.inventory.items.filter((i: any) => i.stage === "event" && i.status === "verified").length, 0);
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
@@ -265,6 +377,58 @@ test("a signed later scope revision adds a cluster without repeating unaffected 
   assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.disclosure").verifiedSha, oldCommit);
   assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.reckoning").status, "verified");
   assert.equal(git(f.job.worktreeRoot, "log", "--format=%B").split("NovelTea-Work-Item: composition-disclosure").length - 1, 1);
+});
+
+test("approved scope expansion activates an early deferred idea without replaying prior specialist commits", { skip: !available }, () => {
+  const keys = generateKeyPairSync("ed25519");
+  const f = setup("idea-replan", story => {
+    mkdirSync(join(dirname(story), ".noveltea"));
+    writeFileSync(join(dirname(story), ".noveltea/approval-author.pub"),
+      keys.publicKey.export({ type: "spki", format: "pem" }));
+    plannedCluster(story, "truth", "reckoning");
+  });
+  const idea = join(root, "idea-replan.json");
+  writeFileSync(idea, JSON.stringify({
+    id: "replan-witness", kind: "event-concept",
+    source: { kind: "author-onboarding", reference: "plot-notes" },
+    original: "The witness finally admits why they hid the ledger.",
+    requirements: { meaning: [{ text: "The witness explains their earlier secrecy", binding: true }],
+      wording: [], participants: [] },
+    identities: { known: [], unresolved: [] },
+    prerequisites: ["milestone.reckoning"],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  f.cli(["ideas", "capture", "--file", idea]);
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope.targets = ["milestone.disclosure"];
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const first = f.cli([...f.start, "--pause-after", "composition"]);
+  assert.equal(first.status, "paused", JSON.stringify(first));
+  assert.equal(first.ideaHistory.length, 0, "idea waits for the authorized second Milestone");
+  const oldCommit = first.inventory.items.find((i: any) => i.id === "composition:milestone.disclosure").verifiedSha;
+  contract.scope.targets = ["arc.truth"];
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const carry = join(root, "idea-replan-carry.json");
+  writeFileSync(carry, JSON.stringify(["foundations", "event:milestone.disclosure",
+    "interactive:milestone.disclosure", "composition:milestone.disclosure"]));
+  const proposal = f.cli(["architecture", "propose", "--contract", f.contract, "--carry-forward", carry]);
+  const payload = { ...proposal.authorSigningRequest, reason: "Authorize a second Milestone and keep the first." };
+  const evidence = join(root, "idea-replan-approved.json");
+  writeFileSync(evidence, JSON.stringify({ payload,
+    signature: sign(null, Buffer.from(JSON.stringify(payload)), keys.privateKey).toString("base64") }));
+  f.cli(["architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence]);
+  const result = f.cli(["generate", "resume"]);
+  assert.equal(result.status, "blocked", JSON.stringify(result));
+  assert.equal(result.inventory.planVersion, 2);
+  assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.disclosure").verifiedSha, oldCommit);
+  assert.ok(result.ideaHistory.some((h: any) => h.id === "replan-witness" &&
+    h.status === "integrated-editorial-unverified"), JSON.stringify(result.ideaHistory));
+  assert.equal(result.report.evidence.deferredIdeas.scopedOutstanding.includes("replan-witness"), true);
+  const finalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(f.cli(["generate", "resume"]).status, "blocked");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), finalHead);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
 });
 
 test("generation honors author pause, questions, cancellation and cumulative budgets without dispatching", { skip: !available }, () => {
@@ -354,6 +518,43 @@ test("parent restart reconciles a specialist commit made before receipt/checkpoi
   assert.equal(recovered.completedStages[0].headSha, head);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(JSON.parse(readFileSync(file, "utf8")).stage, "committed");
+});
+
+test("opt-in real Pi generation semantically chooses and reviews a deferred idea", {
+  skip: process.env.NT_LIVE_GENERATION_IDEA !== "1"
+    ? "set NT_LIVE_GENERATION_IDEA=1 for paid semantic placement evaluation" : false,
+  timeout: 3_600_000,
+}, () => {
+  assert.ok(available);
+  const f = setup("live-idea-parent");
+  const file = join(root, "live-idea-parent.json");
+  const original = "The missing witness heard the archive bell after midnight.";
+  writeFileSync(file, JSON.stringify({
+    id: "witness-bell", kind: "event-concept",
+    source: { kind: "author-onboarding", reference: "story-seed" }, original,
+    requirements: { meaning: [{ text: "The bell changes the timeline", binding: true }],
+      wording: [], participants: [{ text: "character.ada", binding: true }] },
+    identities: { known: ["character.ada"], unresolved: [] },
+    prerequisites: ["milestone.disclosure"],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  f.cli(["ideas", "capture", "--file", file]);
+  const args = f.start.filter(x => x !== "--fixture");
+  if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
+  if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
+  const result = f.cli(args);
+  assert.ok(result.ideaHistory.some((entry: any) => entry.id === "witness-bell" &&
+    entry.status === "integrated"), JSON.stringify(result));
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot,
+    ".story-inbox/ideas/witness-bell.yaml"), "utf8"));
+  assert.equal(inbox.original, original);
+  assert.equal(inbox.lifecycle.placements[0].verified, "pi");
+  assert.ok(inbox.lifecycle.placements[0].sessionFiles.length >= 3,
+    "selection, craft writing and independent review require distinct pinned sessions");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  console.error(JSON.stringify({ status: result.status, reason: result.reason,
+    ideas: result.ideaHistory, escalation: result.escalation }));
 });
 
 test("opt-in real Pi single-Milestone generation uses pinned skills and reports honest completion", {
