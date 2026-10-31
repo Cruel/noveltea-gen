@@ -119,7 +119,7 @@ function launch(args: string[], name: string) {
   return spawnSync(process.execPath, ["--import", "tsx", cli, "job", ...args], {
     cwd: resolve("."), encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, NT_STATE_DIR: state, NT_SKILL_CACHE_DIR: join(root, "skills-cache"),
-      NT_VALIDATOR_CACHE_DIR: join(root, "validator-cache"),
+      NT_VALIDATOR_CACHE_DIR: join(root, "validator-cache"), NT_VALIDATOR_TEST_LEGACY: "1",
       NT_CONFIG_FILE: join(root, "test-config.json") },
   });
 }

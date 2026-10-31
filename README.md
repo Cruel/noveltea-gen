@@ -399,69 +399,42 @@ Git-backed job. The production `job generate` parent consumes this durable
 job worktree and thread identity. Do not treat `job start` as a completed
 narrative-generation run.
 
-## Pinned standalone Story validation (#14)
+## Native Story validation (#14, #22)
 
 After creating a Git-backed job, validate the **Story in that job's
-worktree** with the existing canonical experimental TypeScript validator:
+worktree** with the native NovelTea CLI. Install `noveltea` on `PATH` or set
+`NT_NATIVE_CLI` to an absolute executable path:
 
 ```sh
 pnpm dev job start --story /path/to/git-repo/story --job draft-1
 pnpm dev job validate --story /path/to/git-repo/story --job draft-1
-# If .local/config.json does not name novelteaSkills on the first validation:
-pnpm dev job validate --story /path/to/git-repo/story --job draft-1 \\
-  --validator-source /path/to/noveltea-skills
 ```
 
-The first validation compiles `noveltea-skills/src/cli.ts` into a single
-Node.js executable with esbuild, including its runtime dependencies. It
-fingerprints the source files and lockfile, checks for changes during the
-build, and records the checkout revision/dirty state. This pin is **separate**
-from the immutable skills-only snapshot. The first validation stores
-`validator.json` alongside the job's `job.json`, and a hashed read-only
-executable under `~/.cache/noveltea-gen/validator-artifacts/<sha256>/`.
-`NT_VALIDATOR_CACHE_DIR` can override this cache; `XDG_CACHE_HOME` changes
-the default base. Repeated validation checks the exact pinned artifact and
-never rebuilds or automatically replaces it, even if the source checkout
-changes or is removed. Missing, changed or unexpected cache contents fail
-closed. This is an executable pin, **not** a second narrative schema.
+New jobs use only `noveltea narrative validate` with the verified Git
+`--base` and `noveltea narrative readiness`. Native context selection uses
+`noveltea narrative context`. The generator does not compile a TypeScript
+catalog or implement a second narrative schema. The native executable's
+resolved path and SHA-256 are pinned in `validator.json` and `job.json`;
+missing or changed binaries fail closed. Replace or restore the originally
+pinned binary explicitly rather than silently switching versions mid-job.
+A valid historical commit with no Story Markdown is a checked empty Story
+baseline: newly authored records appear in `protection.impact.changed`.
 
-The public JSON result includes `contract: "noveltea-validator/v1"`,
-`validator` provenance and SHA-256, job/base/worktree identity, and the
-**unmodified canonical report**: source-located diagnostics; design versus
-approved readiness and stage minima; coverage and explicitly unverified
-conditions; protected decisions, change warnings, and downstream Git impact.
-The adapter passes the job's immutable `baseSha` as `--base`, not the
-worktree's mutable HEAD. The exit status is `0` for no structural or
-protected-decision errors, `1` for a rejected canonical validation, and
-`2` for missing/unverified Git baseline, missing pins, or execution errors.
-A structural pass does **not** mean narrative completeness, editorial
-approval or author authorization. No acknowledgement flags are offered.
+`job validate` preserves the `noveltea-validator/v1` envelope used by
+existing generation stages: status, diagnostics, readiness, coverage,
+protected-decision findings and downstream impact. Structural validity does
+not confer author approval, editorial completeness, or engine playability.
+Pi writing specialists use the dedicated `story_validate` tool, which binds
+the trusted job baseline automatically; no fake `noveltea` executable or
+PATH interception is installed. Agent Bash remains available for ordinary
+authoring and inspection, not as the source of authorization.
 
-**Empty Git baselines:** the experimental validator cannot produce a
-verified Git-protection report when the baseline contains no Story Markdown.
-In this case the adapter preserves the structural/readiness findings but
-returns `status: "unverified"` with exit code `2`; it never reports that
-protected changes were checked. This limitation must be resolved by the
-native Git-impact contract before completion gates can depend on it.
-
-**Temporary Pi-side CLI bridge:** Writing specialists receive `noveltea narrative
-validate . --json` through a job-local `agent-validator-bin/noveltea`
-command that points to `src/noveltea-cli-shim.mjs`. The shim delegates
-to the existing public `job validate` adapter and honors the job's
-trusted Git `--base` and strict protection checks. It is not a separate
-schema or validator. Pi can inspect diagnostics and repair its draft;
-the graph independently revalidates before accepting a commit. The
-bridge is only available to these agent Bash sessions, not globally.
-**When native narrative validation is certified, delete the shim and
-`agentValidatorBashTool` session wiring**, allowing the actual NovelTea
-CLI on `PATH` to be used without changing skill instructions.
-
-The native replacement is owned by [Cruel/nt#526](https://github.com/Cruel/nt/issues/526)
-and [Cruel/nt#535](https://github.com/Cruel/nt/issues/535). The validator's
-single stable adapter isolates future CLI replacement from graph/agent
-consumers. See [docs/validator-cutover.md](docs/validator-cutover.md)
-for the structural, readiness, protection and impact parity matrix and
-opt-in native parity test. No native behavior is assumed available yet.
+Historical jobs already pinned to `canonical-typescript-bundle` continue
+using their original verified, content-addressed artifacts; missing or
+corrupted pins fail closed. New jobs never bundle the experimental validator.
+`--validator-source` is retained only for compatibility with such jobs.
+See [docs/validator-cutover.md](docs/validator-cutover.md) for native parity
+tests and legacy compatibility details.
 
 ## Git-backed Creative Direction generation (#15)
 
@@ -475,7 +448,7 @@ pnpm dev job foundation --story /path/to/git-repo/story --job draft-1 \
   --envelope "Dialogue-led visual novel, compact cast, reusable locations"
 ```
 
-Configure `.local/config.json` to point to the `noveltea-skills` checkout first, or specify `--skills-source /path/to/noveltea-skills` and `--validator-source /path/to/noveltea-skills` for a new job. A new foundation item pins the exact skills snapshot; its first validation separately pins the canonical catalog executable. Ordinary execution requires Pi credentials. Set `--provider` and `--model` to override the default. Only `--fixture` uses a deterministic non-model specialist; fixture outcomes are **not** Pi evidence.
+Configure `.local/config.json` to point to the `noveltea-skills` checkout first, or specify `--skills-source /path/to/noveltea-skills` for a new job. A new foundation item pins the exact skills snapshot; validation independently pins the native NovelTea executable. Ordinary execution requires Pi credentials. Set `--provider` and `--model` to override the default. Only `--fixture` uses a deterministic non-model specialist; fixture outcomes are **not** Pi evidence.
 
 For collaborative discovery, start with `--mode collaborative --task "..." --envelope "..."`. The first invocation reads pinned guidance (real Pi, or a deterministic fixture) and returns `status: awaiting-author`, a set of author questions and a durable handoff **without writing the Story**. Resume with the same `--story` and `--job` plus `--author-input "Your decisions; delegate everything else"` (and `--fixture` if testing). The worker mode and model/provider are persisted and cannot change silently on continuation. Explicit author constraints become user-protected decisions; delegated choices remain agent-origin. The work item can be reopened without creating another commit.
 
@@ -1639,7 +1612,7 @@ pnpm dev demo-story --project ./scratch-story-foundation --create-project \
 
 The agent is directed to actually load `nt-story-discovery/SKILL.md`, `nt-catalog/SKILL.md`, `nt-catalog/references/records.md`, `authority-and-validation.md` and `glossary.md` through its restricted `read` tool. The one allowlisted `write_creative_direction` tool **refuses to write until those reads succeed**. It accepts constrained structured inputs and creates only `creative-direction/foundation.md`, with `schema: '0.1'`, `status: draft`, required foundation fields, Markdown prose and individually attributed Creative Decisions. User-supplied choices are `origin: user` / `authority: user-protected`; choices filled within the explicitly delegated scope remain `origin: agent` / `authority: delegated`. There is no approval implied by the draft status.
 
-The directory must be **empty**, even if it already exists. The tool cannot overwrite canon or create additional records, an engine project, or an entire Story. The response reports the skill digest and Git provenance, exact read paths, Pi transcript file, created artifact, and `catalogValidation: "unverified"`. The demo performs constrained input checks and reads the written file back, but does **not** claim native catalog validation, foundation readiness, creative quality, author approval or NovelTea engine playability. This installed NovelTea CLI currently does not expose `noveltea narrative validate`; if it becomes available, use its documented interface separately. In a `noveltea-skills` development checkout only, you can explicitly run `pnpm catalog /absolute/path/to/scratch-story-foundation` to see diagnostics and the **design** versus **approved** foundation minimums. That temporary validator is not a production dependency.
+The directory must be **empty**, even if it already exists. The tool cannot overwrite canon or create additional records, an engine project, or an entire Story. The response reports the skill digest and Git provenance, exact read paths, Pi transcript file, created artifact, and `catalogValidation: "unverified"`. The demo performs constrained input checks and reads the written file back, but does **not** claim native catalog validation, foundation readiness, creative quality, author approval or NovelTea engine playability. The installed native NovelTea CLI exposes `noveltea narrative validate` and `noveltea narrative readiness`; use them separately for canonical diagnostics and design versus approved foundation minimums. The demonstration itself does not claim these checks were performed.
 
 To exercise the same file boundary deterministically without credentials or a model:
 
@@ -1655,7 +1628,7 @@ NT_LIVE_TEST=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
   pnpm exec tsx --test --test-name-pattern='opt-in real Pi authors' test/live.test.ts
 ```
 
-Set `NT_PROVIDER` and `NT_MODEL` if needed. The real-model test may incur usage; it uses a disposable Story root and isolated local state/cache paths. It expects `pnpm catalog` to be usable in the development skills checkout. The normal `run` command remains a graph-routing proof of concept with **no Story write permissions**.
+Set `NT_PROVIDER` and `NT_MODEL` if needed. The real-model test may incur usage; it uses a disposable Story root and isolated local state/cache paths. Canonical Story validation is provided by the native `noveltea` CLI; the normal `run` command remains a graph-routing proof of concept with **no Story write permissions**.
 
 ## Certification of the integration proof (#11)
 

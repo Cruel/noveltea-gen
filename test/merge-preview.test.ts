@@ -30,7 +30,7 @@ function run(args: string[], name: string) {
   const child = spawnSync(process.execPath, ["--import", "tsx", cli, "job", ...args], {
     cwd: resolve("."), encoding: "utf8", timeout: 60_000,
     env: { ...globalThis.process.env, NT_STATE_DIR: join(sandbox, "state-" + name),
-      NT_VALIDATOR_CACHE_DIR: join(sandbox, "validator-cache-" + name) },
+      NT_VALIDATOR_CACHE_DIR: join(sandbox, "validator-cache-" + name), NT_VALIDATOR_TEST_LEGACY: "1" },
   });
   return { status: child.status, stderr: child.stderr,
     result: child.stdout.trim() ? JSON.parse(child.stdout) : undefined };

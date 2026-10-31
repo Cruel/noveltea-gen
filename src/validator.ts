@@ -1,11 +1,11 @@
 import { spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createBashToolDefinition, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { nativeValidate } from "./native-validator.js";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { build } from "esbuild";
 import { canonicalDestination, type JobStartResult } from "./job.js";
 
@@ -23,6 +23,13 @@ interface ValidatorPin {
   sourceCheckout: string;
 }
 
+export interface NativeValidatorPin {
+  contract: typeof CONTRACT;
+  implementation: "native-cli";
+  sha256: string;
+  executable: string;
+}
+
 export interface ValidationResult {
   contract: typeof CONTRACT;
   status: "passed" | "rejected" | "unverified" | "error";
@@ -30,13 +37,13 @@ export interface ValidationResult {
   jobId: string;
   baseSha: string;
   worktreeStoryRoot: string;
-  validator: ValidatorPin;
+  validator: ValidatorPin | NativeValidatorPin;
   report?: Record<string, unknown>;
   error?: string;
 }
 
-/** The adapter is deliberately schema-agnostic. Swap its executable backend to
- * 'noveltea narrative validate' once native #526/#535 are certified. */
+/** Historical adapter for jobs previously pinned to the experimental catalog.
+ * New jobs use the native CLI without compiling a second Story validator. */
 export interface StoryValidatorAdapter {
   validate(job: JobStartResult, pin: ValidatorPin): Promise<ValidationResult>;
 }
@@ -317,52 +324,110 @@ export interface ValidationView {
   baseSha: string;
 }
 
-/** Temporary compatibility bridge for agent-side validation. The Bash hook isolates
- * PATH and job identity to this Pi session, without mutating global process.env.
- * It delegates back to the pinned validator adapter through the public job CLI.
- * Remove with src/noveltea-cli-shim.mjs when native CLI validation is certified. */
-export async function agentValidatorBashTool(job: JobStartResult, sourceCheckout?: string): Promise<ToolDefinition> {
-  const bin = join(dirname(job.worktreeRoot), "agent-validator-bin");
-  const target = fileURLToPath(new URL("./noveltea-cli-shim.mjs", import.meta.url));
-  const command = join(bin, "noveltea");
-  await mkdir(bin, { recursive: true });
-  try {
-    await symlink(target, command);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "EEXIST") ||
-        await readlink(command).catch(() => null) !== target) {
-      throw new Error("Agent validator command conflicts with the job's pinned shim.");
-    }
+/** A Pi tool binds validation to the verified job identity, never to the
+ * model's chosen --base argument or the current Git HEAD. */
+export function createStoryValidateTool(job: JobStartResult): ToolDefinition {
+  return {
+    name: "story_validate",
+    label: "Validate Story with the trusted Git baseline",
+    description: "Run the canonical native NovelTea Story validator, readiness and protected-decision checks " +
+      "against this job's verified Story root and trusted Git base. No approval is granted.",
+    parameters: { type: "object", properties: {}, additionalProperties: false } as ToolDefinition["parameters"],
+    executionMode: "sequential",
+    async execute() {
+      const result = await validateStoryJob(job);
+      return { content: [{ type: "text", text: JSON.stringify(result) }], details: undefined };
+    },
+  };
+}
+
+function nativeExecutable(): string {
+  const selected = process.env.NT_NATIVE_CLI;
+  const name = process.platform === "win32" ? "noveltea.exe" : "noveltea";
+  if (selected) {
+    if (!isAbsolute(selected)) throw new Error("NT_NATIVE_CLI must be an absolute executable path.");
+    return selected;
   }
-  return createBashToolDefinition(job.worktreeStoryRoot, {
-    spawnHook: ({ command, cwd, env }) => ({
-      command, cwd, env: {
-        ...env,
-        PATH: bin + (env.PATH ? ":" + env.PATH : ""),
-        NT_AGENT_STORY_ROOT: job.worktreeStoryRoot,
-        NT_AGENT_ORIGINAL_STORY_ROOT: job.storyRoot,
-        NT_AGENT_JOB_ID: job.jobId,
-        NT_AGENT_TRUSTED_BASE: job.baseSha,
-        NT_AGENT_VALIDATOR_SOURCE: sourceCheckout ?? "",
-      },
-    }),
-  // Pi declares customTools with an invariant broad schema; the Bash tool has
-  // the same runtime shape but a narrower typed command parameter schema.
-  }) as unknown as ToolDefinition;
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("The native 'noveltea' executable is required for Story validation (set NT_NATIVE_CLI or PATH).");
+}
+async function verifyNativePin(pin: NativeValidatorPin): Promise<void> {
+  if (pin.contract !== CONTRACT || pin.implementation !== "native-cli" ||
+      !/^[a-f0-9]{64}$/.test(pin.sha256) || !isAbsolute(pin.executable) ||
+      !(await stat(pin.executable)).isFile() ||
+      sha(await readFile(pin.executable)) !== pin.sha256) {
+    throw new Error("Pinned native NovelTea validator is missing or changed; restore the exact executable, never silently switch validators.");
+  }
+}
+async function nativePin(job: JobStartResult): Promise<NativeValidatorPin> {
+  const jobRoot = dirname(job.worktreeRoot);
+  const jobFile = join(jobRoot, "job.json");
+  const saved = pinPath(job);
+  const manifest = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;
+  if (["jobId", "branch", "threadId", "baseSha", "worktreeRoot", "storyRoot", "gitRoot"]
+    .some(k => manifest[k] !== job[k as keyof JobStartResult]) ||
+    (job.validatorSha256 !== undefined && job.validatorSha256 !== manifest.validatorSha256)) {
+    throw new Error("Saved Story job identity changed; refusing validator reuse.");
+  }
+  if (existsSync(saved)) {
+    const pin = JSON.parse(await readFile(saved, "utf8")) as NativeValidatorPin;
+    if (pin.sha256 !== manifest.validatorSha256) throw new Error("Job validator pin differs from durable manifest.");
+    await verifyNativePin(pin);
+    return pin;
+  }
+  if (manifest.validatorSha256) throw new Error("Job validator receipt is missing; never repin.");
+  const lock = join(jobRoot, ".validator-pinning");
+  try { await mkdir(lock); }
+  catch { throw new Error("Validator pinning already in progress or interrupted."); }
+  try {
+    const executable = await realpath(nativeExecutable());
+    const pin: NativeValidatorPin = { contract: CONTRACT, implementation: "native-cli",
+      sha256: sha(await readFile(executable)), executable };
+    await verifyNativePin(pin);
+    const current = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;
+    if (current.jobId !== job.jobId || current.branch !== job.branch ||
+        current.validatorSha256 !== undefined)
+      throw new Error("Job manifest changed during native validator pinning.");
+    const temp = join(jobRoot, `job.validator.${process.pid}.tmp`);
+    try {
+      await writeFile(temp, JSON.stringify({ ...current, validatorSha256: pin.sha256 }, null, 2) + "\n",
+        { flag: "wx", mode: 0o600 });
+      await rename(temp, jobFile);
+    } finally { await unlink(temp).catch(() => {}); }
+    await writeFile(saved, JSON.stringify(pin, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    return pin;
+  } finally { await rmdir(lock).catch(() => {}); }
 }
 
 export async function validateStoryJob(job: JobStartResult, sourceCheckout?: string,
   view?: ValidationView): Promise<ValidationResult> {
-  // Even a user-provided cache override must never publish into the author's
-  // checkout or the job's canonical Story tree, including via symlink aliases.
-  const cache = await canonicalDestination(cacheRoot());
-  const within = (root: string) => {
-    const rel = relative(root, cache);
-    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-  };
-  if (within(job.gitRoot) || within(job.worktreeRoot)) {
-    throw new Error("NT_VALIDATOR_CACHE_DIR must resolve outside both the author repository and job worktree.");
+  const saved = pinPath(job);
+  // Historical jobs must keep their original experimental validator and digest.
+  // Only the test-only fixture flag can create an *additional* legacy pin.
+  let previous: { implementation?: string } | undefined;
+  if (existsSync(saved)) {
+    try { previous = JSON.parse(await readFile(saved, "utf8")) as { implementation?: string }; }
+    catch { throw new Error("Job validator pin is unreadable or corrupt. Restore the original receipt."); }
   }
-  const pin = await pinValidator(job, sourceCheckout);
-  return bundledValidatorAdapter.validate(view ? { ...job, ...view } : job, pin);
+  if (previous?.implementation === "canonical-typescript-bundle" ||
+      (!previous && process.env.NT_VALIDATOR_TEST_LEGACY === "1")) {
+    const cache = await canonicalDestination(cacheRoot());
+    const within = (root: string) => {
+      const rel = relative(root, cache);
+      return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    };
+    if (within(job.gitRoot) || within(job.worktreeRoot)) {
+      throw new Error("NT_VALIDATOR_CACHE_DIR must resolve outside both the author repository and job worktree.");
+    }
+    const pin = await pinValidator(job, sourceCheckout);
+    return bundledValidatorAdapter.validate(view ? { ...job, ...view } : job, pin);
+  }
+  if (previous && previous.implementation !== "native-cli")
+    throw new Error("Job validator receipt has an unknown implementation; no automatic migration.");
+  const pin = await nativePin(job);
+  return nativeValidate(view ? { ...job, ...view } : job, pin);
 }

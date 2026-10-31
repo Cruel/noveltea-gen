@@ -5,7 +5,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
-import { agentValidatorBashTool } from "./validator.js";
+import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -55,8 +55,8 @@ export async function authorArchitecture(
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
+    customTools: [createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -86,7 +86,7 @@ export async function authorArchitecture(
       "The graph independently validates, inspects and commits your changes. " +
       "Production economy is an explicit constraint, not a universal fixed budget. " +
       "Frontmatter free-text YAML scalars must be quoted; avoid invalid colon-containing unquoted values. " +
-      "Before finishing, run noveltea narrative validate . --json, inspect diagnostics and coverage, repair problems and rerun validation; the graph independently decides acceptance. Explain downstream obligations.\n" +
+      "Before finishing, call story_validate with no arguments, inspect diagnostics and coverage, repair problems and rerun validation; the graph independently decides acceptance. Explain downstream obligations.\n" +
       "AUTHORIZED PLAN AND SCOPE:\n" + JSON.stringify(plan, null, 2) +
       "\nOnly implement the global architecture work item now, not the downstream realization or composition items.",
     );

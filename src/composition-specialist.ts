@@ -5,7 +5,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
-import { agentValidatorBashTool } from "./validator.js";
+import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import { completedContextReads } from "./story-context.js";
 import type { SkillConfig } from "./skills.js";
@@ -104,9 +104,9 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
     customTools: phase === "write"
-      ? [await agentValidatorBashTool(job), context.contextTool] : [context.contextTool],
+      ? [createStoryValidateTool(job), context.contextTool] : [context.contextTool],
     noTools: "all", tools: phase === "write"
-      ? ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"]
+      ? ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"]
       : ["read", "grep", "find", "ls", "story_context"],
   });
   if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -172,7 +172,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "in the seal/testimony route without an additional prerequisite, nor vice versa. " +
       "Do not write editorial directions as playable prose. " +
       "If a source lacks a needed route, report a conflict; NEVER manufacture new Event effects or bypass gates. " +
-      "Run noveltea narrative validate . --json and inspect Git diff. Do not git add, reset, checkout or commit. " +
+      "Call story_validate with no arguments and inspect Git diff. Do not git add, reset, checkout or commit. " +
       "Finally output ONE unfenced JSON object with the cumulative paths and precise obligations: " +
       '{"modifiedRecords":["authored-content/example.md"],"architecturalConflicts":[],"laterObligations":[]}. ' +
       "Graph will independently verify sources, actual Markdown, coverage and editorial review.\nASSIGNMENT:\n" +

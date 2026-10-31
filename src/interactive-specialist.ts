@@ -5,7 +5,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
-import { agentValidatorBashTool } from "./validator.js";
+import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -92,8 +92,8 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
+    customTools: [createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -127,7 +127,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       "Record conditional writing and later payoff obligations explicitly. " +
       "At the end output ONE unfenced JSON object with the exact cumulative Story-relative file inventory: " +
       '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":["Review branch-specific prose before composition"]}. ' +
-      "Run noveltea narrative validate . --json after authoring, inspect Puzzle/Choice route coverage and protection, repair and revalidate before reporting. The graph independently checks all bytes, protection and progression.\nASSIGNMENT:\n" +
+      "Call story_validate with no arguments after authoring, inspect Puzzle/Choice route coverage and protection, repair and revalidate before reporting. The graph independently checks all bytes, protection and progression.\nASSIGNMENT:\n" +
       JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);

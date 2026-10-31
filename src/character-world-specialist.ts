@@ -6,7 +6,7 @@ import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
-import { agentValidatorBashTool } from "./validator.js";
+import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -81,8 +81,8 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
+    customTools: [createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -110,7 +110,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       '`{"modifiedRecords":["characters/example.md"],"architecturalConflicts":[],"laterObligations":["Bind the disclosure to an Event"]}` (replace example with reality). ' +
       "Report any blocked architectural conflict in architecturalConflicts and all deferred Event/branch dependencies in laterObligations. " +
       "List ALL paths changed since the beginning of this work item, not just the latest edits. " +
-      "Run noveltea narrative validate . --json, inspect diagnostics and coverage, repair and revalidate before reporting. " +
+      "Call story_validate with no arguments, inspect diagnostics and coverage, repair and revalidate before reporting. " +
       "The graph will check this claim against the actual Git diff; your self-report is not acceptance evidence.";
     // Do not start a second writer or discard its work. The SAME Pi session can
     // receive bounded, source-located validator feedback before commit.

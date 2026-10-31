@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { agentValidatorBashTool, validateStoryJob } from "../src/validator.js";
+import { createStoryValidateTool, validateStoryJob } from "../src/validator.js";
 import type { JobStartResult } from "../src/job.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-validators-"));
@@ -32,7 +32,7 @@ function launch(args: string[], state: string, otherEnv: NodeJS.ProcessEnv = {})
   return spawnSync(process.execPath, ["--import", "tsx", cli, "job", ...args], {
     cwd: resolve("."), encoding: "utf8", timeout: 45_000, maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, NT_STATE_DIR: join(state, "state"),
-      NT_VALIDATOR_CACHE_DIR: join(state, "validators"), ...otherEnv },
+      NT_VALIDATOR_CACHE_DIR: join(state, "validators"), NT_VALIDATOR_TEST_LEGACY: "1", ...otherEnv },
   });
 }
 function start(story: string, state: string, job = "novel") {
@@ -415,45 +415,104 @@ test("native #526/#535 cutover parity for canonical valid, structural and protec
   assert.notEqual(invalidBase.json.catalog.protection.status, "checked");
 });
 
-test("agent-side temporary noveltea CLI validates against the pinned Git baseline", async () => {
-  const repo = repository("agent-cli-shim");
+test("agent story_validate tool binds a legacy job to its existing trusted baseline without a CLI shim", async () => {
+  const repo = repository("agent-tool");
   writeFileSync(join(repo, "story.md"), "VALID");
   git(repo, "add", "story.md");
   git(repo, "commit", "-qm", "Protected Story baseline");
-  const state = join(root, "state-agent-shim");
+  const state = join(root, "state-agent-tool");
   const job = start(repo, state);
-  const source = fakeSource("agent-cli-source");
-  const tool = await agentValidatorBashTool(job, source);
-  const prefix = `NT_STATE_DIR=${JSON.stringify(join(state, "state"))} ` +
-    `NT_VALIDATOR_CACHE_DIR=${JSON.stringify(join(state, "validators"))} `;
-  const ctx = { cwd: job.worktreeStoryRoot, sessionManager: {
-    getSessionId: () => "test-session", getSessionFile: () => null,
-  }, thinkingLevel: "medium" } as any;
-  const call = async (command: string) => {
-    const output = await tool.execute("agent-test", { command: prefix + command }, undefined, undefined, ctx);
-    return output.content.filter((c): c is { type: "text"; text: string } =>
-      c.type === "text").map(c => c.text).join("\n");
+  const source = fakeSource("agent-tool-source");
+  validate(repo, state, source);
+  const tool = createStoryValidateTool(job);
+  const call = async () => {
+    const prior = process.env.NT_VALIDATOR_CACHE_DIR;
+    process.env.NT_VALIDATOR_CACHE_DIR = join(state, "validators");
+    try {
+      const output = await tool.execute("agent-test", {}, undefined, undefined, {} as any);
+      const item = output.content.find(c => c.type === "text");
+      return JSON.parse(item && item.type === "text" ? item.text : "");
+    } finally {
+      if (prior === undefined) delete process.env.NT_VALIDATOR_CACHE_DIR;
+      else process.env.NT_VALIDATOR_CACHE_DIR = prior;
+    }
   };
-  const good = await call("noveltea narrative validate . --json");
-  assert.equal(JSON.parse(good).validationStatus, "passed");
-  assert.equal(JSON.parse(good).protection.status, "checked");
-  assert.equal(JSON.parse(good).protection.base, job.baseSha);
-  assert.equal(existsSync(join(job.worktreeRoot, "..", "validator.json")), true);
-  assert.equal(existsSync(join(job.worktreeRoot, "..", "agent-validator-bin", "noveltea")), true);
-
+  const good = await call();
+  assert.equal(good.status, "passed");
+  assert.equal(good.report.protection.base, job.baseSha);
+  assert.equal(existsSync(join(job.worktreeRoot, "..", "agent-validator-bin", "noveltea")), false);
   writeFileSync(join(job.worktreeStoryRoot, "story.md"), "INVALID CHANGED");
-  const bad = await call("noveltea narrative validate . --json");
-  const report = JSON.parse(bad.split("\n\nCommand exited with code")[0]!);
-  assert.equal(report.validationStatus, "rejected");
-  assert.equal(report.diagnostics[0].code, "schema");
-  assert.equal(report.protection.warnings.length, 1);
-  assert.match(bad, /Command exited with code 1/);
-  const unverified = await call("TEST_NO_BASELINE=yes noveltea narrative validate . --json");
-  assert.equal(JSON.parse(unverified.split("\n\nCommand exited with code")[0]!).validationStatus, "unverified");
-  assert.match(unverified, /Command exited with code 2/);
-  const otherBase = "a".repeat(40);
-  assert.match(await call(`noveltea narrative validate . --base ${otherBase} --json`), /untrusted --base/);
-  assert.match(await call("noveltea narrative validate /tmp --json"), /Story root is not the active job Story/);
-  assert.match(await call("noveltea narrative --help"), /Usage: noveltea narrative validate/);
+  const bad = await call();
+  assert.equal(bad.status, "rejected");
+  assert.equal(bad.report.diagnostics[0].code, "schema");
+  assert.equal(bad.report.protection.warnings.length, 1);
   assert.equal(git(repo, "status", "--porcelain"), "");
+});
+
+test("new jobs pin native CLI without a skills validator and check the empty historical Story", {
+  skip: !process.env.NT_NATIVE_CLI || !existsSync(join(process.env.NT_SKILLS_CHECKOUT ||
+    resolve("../noveltea-skills"), "fixtures/reference-story/creative-direction/last-bell.md")),
+}, () => {
+  const source = process.env.NT_SKILLS_CHECKOUT || resolve("../noveltea-skills");
+  const repo = repository("native-job");
+  const story = join(repo, "story");
+  mkdirSync(story);
+  const state = join(root, "state-native-job");
+  const job = start(story, state);
+  cpSync(join(source, "fixtures/reference-story"), job.worktreeStoryRoot, { recursive: true });
+  const unavailable = launch(["validate", "--story", story, "--job", "novel"], state,
+    { NT_VALIDATOR_TEST_LEGACY: "0", NT_NATIVE_CLI: "/nonexistent/native-noveltea" });
+  assert.notEqual(unavailable.status, 0, "Missing native CLI must fail closed, not bundle scripts");
+  assert.equal(existsSync(join(job.worktreeRoot, "..", "validator.json")), false);
+  const first = launch(["validate", "--story", story, "--job", "novel"], state,
+    { NT_VALIDATOR_TEST_LEGACY: "0" });
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  const data = JSON.parse(first.stdout);
+  assert.equal(data.validator.implementation, "native-cli");
+  assert.equal(data.report.protection.status, "checked");
+  assert.equal(data.report.protection.base, job.baseSha);
+  assert.equal(data.report.protection.checkedDecisions, 0);
+  assert.equal(data.report.protection.changes.length, 0);
+  assert.equal(data.report.protection.warnings.length, 0);
+  assert.equal(data.report.outstanding.length >= 0, true);
+  assert.equal(data.report.readiness.design.stages.foundation.minimum, "passed");
+  assert.equal(data.report.protection.impact.changed.length, data.report.records.length);
+  assert.equal(data.report.protection.authorizationVerified, false);
+  const marker = JSON.parse(readFileSync(join(job.worktreeRoot, "..", "job.json"), "utf8"));
+  assert.equal(marker.validatorSha256, data.validator.sha256);
+  const second = launch(["validate", "--story", story, "--job", "novel"], state,
+    { NT_VALIDATOR_TEST_LEGACY: "0", NT_NATIVE_CLI: "/nonexistent/invalid" });
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).validator.sha256, data.validator.sha256);
+  const tool = createStoryValidateTool(job);
+  assert.equal(tool.name, "story_validate");
+  assert.equal(existsSync(join(job.worktreeRoot, "..", "agent-validator-bin", "noveltea")), false);
+
+  // Native protection must also reject real edits to previously protected
+  // content, with actionable decision and impact data in the stable envelope.
+  const protectedRepo = repository("native-protected-job");
+  const protectedStory = join(protectedRepo, "story");
+  cpSync(join(source, "fixtures/reference-story"), protectedStory, { recursive: true });
+  const recordPath = "creative-direction/last-bell.md";
+  const original = readFileSync(join(protectedStory, recordPath), "utf8").replace(
+    "origin: agent\n    authority: delegated", "origin: user\n    authority: user-protected");
+  writeFileSync(join(protectedStory, recordPath), original);
+  git(protectedRepo, "add", ".");
+  git(protectedRepo, "commit", "-qm", "Protect the author's canonical decision");
+  const protectedState = join(root, "state-native-protected-job");
+  const protectedJob = start(protectedStory, protectedState);
+  writeFileSync(join(protectedJob.worktreeStoryRoot, recordPath),
+    original.replace("repair rather than revenge", "revenge rather than repair"));
+  const refused = launch(["validate", "--story", protectedStory, "--job", "novel"], protectedState,
+    { NT_VALIDATOR_TEST_LEGACY: "0" });
+  assert.equal(refused.status, 1, refused.stderr);
+  const bad = JSON.parse(refused.stdout);
+  assert.equal(bad.status, "rejected");
+  assert.equal(bad.report.protection.base, protectedJob.baseSha);
+  assert.equal(bad.report.protection.changes[0].decision, "creative-direction.last-bell#repair-not-revenge");
+  assert.equal(bad.report.protection.changes[0].kind, "changed");
+  assert.ok(bad.report.protection.impact.affected.length > 0);
+  assert.equal(bad.report.protection.authorizationVerified, false);
+  assert.equal(bad.report.protection.warnings.length, 1);
+  assert.equal(git(protectedRepo, "status", "--porcelain"), "");
 });

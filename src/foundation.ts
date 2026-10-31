@@ -17,7 +17,7 @@ import { preparePiContext, preflightPiAssignment } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
-import { agentValidatorBashTool, validateStoryJob, type ValidationResult } from "./validator.js";
+import { createStoryValidateTool, validateStoryJob, type ValidationResult } from "./validator.js";
 
 type Mode = "autonomous" | "collaborative";
 type Stage = "awaiting-author" | "writing" | "committed";
@@ -200,10 +200,10 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job, validatorSource), context.contextTool],
+    customTools: [createStoryValidateTool(job), context.contextTool],
     // Standard tools remain available, including grep/rg and Git inspection
     // through bash. No structured-record writer or Git commit tool exists.
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
   });
   let reads: string[] = [];
   let wrote = false;
@@ -233,7 +233,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       "For YAML frontmatter, DOUBLE-QUOTE every free-text scalar (title, premise, central_conflict, genre, tone, " +
       "player_experience, scope and decision statements); escape embedded quote characters as needed. " +
       "Plain unquoted prose with colons is INVALID YAML. Verify your frontmatter is parseable before finishing. " +
-      "Run noveltea narrative validate . --json after authoring, inspect diagnostics and readiness, repair and revalidate before finishing. " +
+      "Call story_validate with no arguments after authoring, inspect diagnostics and readiness, repair and revalidate before finishing. " +
       "Honor the requested narrative/presentation envelope as constraints rather than universal plot counts. " +
       "Do not claim validation, approval or a commit; the graph performs those independently. " +
       `Collaboration mode: ${state.mode}.\nAuthor brief: ${state.task}\n` +

@@ -34,7 +34,7 @@ function setup(name: string, seed?: (story: string) => void) {
   writeFileSync(join(root, "config.json"), JSON.stringify({ novelteaSkills: source, skillDiscovery: "explicit-only" }));
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-    NT_VALIDATOR_CACHE_DIR: join(root, "validators") };
+    NT_VALIDATOR_CACHE_DIR: join(root, "validators"), NT_VALIDATOR_TEST_LEGACY: "1" };
   function cli(args: string[], success = true) {
     const result = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
       "job", ...args, "--story", story, "--job", "single"], {

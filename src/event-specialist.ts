@@ -6,7 +6,7 @@ import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
-import { agentValidatorBashTool } from "./validator.js";
+import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -82,8 +82,8 @@ export async function authorEventCluster(
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
+    customTools: [createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -112,7 +112,7 @@ export async function authorEventCluster(
       "REPORT an exact JSON object at the end (no markdown fences): " +
       '{"modifiedRecords":["events/example.md","milestones/example.md"],"architecturalConflicts":[],"laterObligations":["Future alternative requires Event design"]}. ' +
       "The modifiedRecords list MUST include every Story-relative file changed in this ENTIRE work item. " +
-      "Run noveltea narrative validate . --json after authoring, inspect diagnostic and reachability evidence, repair and revalidate before reporting. Your own claims are not sufficient evidence; the graph independently checks changes, protection and acceptance.\n" +
+      "Call story_validate with no arguments after authoring, inspect diagnostic and reachability evidence, repair and revalidate before reporting. Your own claims are not sufficient evidence; the graph independently checks changes, protection and acceptance.\n" +
       "AUTHORIZED ASSIGNMENT:\n" + JSON.stringify(assignment, null, 2);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
