@@ -19,7 +19,7 @@
     "studio:trace": "NT_STUDIO_TRACE=1 LANGSMITH_TRACING=true LANGCHAIN_TRACING_V2=true TRACE_TO_LANGSMITH=true langgraphjs dev --no-browser --n-jobs-per-worker 1",
     "studio:input": "tsx src/studio-input.ts",
     "trace:show": "tsx src/trace-show.ts",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm --filter @noveltea/studio check"
   },
   "engines": {
     "node": ">=22"

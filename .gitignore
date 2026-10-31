@@ -8,6 +8,11 @@ dist/
 .local/
 .cache/
 .projects/
+web/.output/
+web/.tanstack/
+web/src/routeTree.gen.ts
+web/*.sqlite*
+web/*.db*
 
 # LangGraph API
 .langgraph_api
