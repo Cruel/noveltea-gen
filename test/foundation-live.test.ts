@@ -52,7 +52,7 @@ test("opt-in real Pi specialist reads pinned skills and directly writes validate
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const outcome = JSON.parse(result.stdout);
     assert.equal(outcome.status, "committed");
-    assert.equal(outcome.validation, "unverified-empty-baseline");
+    assert.equal(outcome.validation, "passed", "Native CLI must verify valid empty Git baselines");
     assert.equal(outcome.skillReads.length, 5);
     const entries = readFileSync(outcome.piSessionFile, "utf8").trim().split("\n").map(JSON.parse);
     const calls = entries.flatMap((entry: any) => entry.message?.content ?? [])
@@ -62,6 +62,8 @@ test("opt-in real Pi specialist reads pinned skills and directly writes validate
     assert.ok(outcome.skillReads.every((path: string) => reads.includes(path)));
     assert.ok(calls.some((item: any) => item.name === "write" || item.name === "edit"),
       "Actual Pi must write/edit Markdown itself, not call a record authoring tool");
+    assert.ok(calls.some((item: any) => item.name === "story_validate"),
+      "Actual Pi must invoke native story_validate, not merely claim a validation pass");
     const record = readFileSync(join(job.worktreeStoryRoot, outcome.target), "utf8");
     assert.match(record, /^---\nschema: ['"]?0\.1/);
     assert.match(record, /origin: user\n\s+authority: user-protected/);

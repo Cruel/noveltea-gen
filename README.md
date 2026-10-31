@@ -11,6 +11,12 @@ pnpm install
 pnpm check
 ```
 
+Production Git-backed Story generator certification is tracked in
+[docs/story-generator-certification.md](docs/story-generator-certification.md).
+Run `pnpm certify:story` with an installed native CLI and canonical fixture to
+require real native validation (no skipped checks). Opt-in real Pi results are
+reported separately; deterministic fixtures do not certify narrative quality.
+
 Authenticate using Pi's supported mechanism, for example `pi /login` for your OpenAI sign-in, or configure a provider API key through Pi/environment variables. NovelTea-gen has **no additional model credential store**; Pi manages saved credentials and OAuth refresh.
 
 ## Developer quick start: run, inspect, locate

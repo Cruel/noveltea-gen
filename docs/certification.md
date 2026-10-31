@@ -1,5 +1,8 @@
 # Integration proof certification (#11)
 
+For the later production Git-backed Story generator (#31), see
+[story-generator-certification.md](story-generator-certification.md).
+
 This historical checklist certifies the **local-first LangGraph.js + Pi proof of concept**, not the later production Story-generation system. For production #32 verification, see [README](../README.md#checkpointed-single-milestone-story-generation-32) and `test/generation.test.ts`; Studio now registers only that production graph. Start in the `noveltea-gen` checkout with Node.js 22+, pnpm and installed dependencies. The offline suite does not require a model, network access, a LangSmith key or a real `noveltea-skills` checkout; it creates disposable Git skill packages, Story roots, state directories and caches, then removes them.
 
 ```sh
