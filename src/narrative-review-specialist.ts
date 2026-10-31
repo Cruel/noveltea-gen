@@ -3,6 +3,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { createProjectResourceLoader } from "./pi.js";
+import { completedContextReads } from "./story-context.js";
 import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import type { JobStartResult } from "./job.js";
@@ -102,6 +103,7 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
       group: "narrative-review:" + assignment.planVersion,
       step: "narrative-review:" + assignment.planVersion + ":" + job.headSha,
       paths: assignment.paths, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
+      task: { kind: "review", ids: assignment.scopeIds, scope: "related" },
     }, runtime) : undefined;
   if (!context) await guardPiBudget(job, "narrative-repair:" + job.headSha, originalSessionFile);
   const resolved = context ? undefined : await resolvePiModel(job, runtime, provider, modelId, thinking);
@@ -114,8 +116,9 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
     sessionManager: role === "repair" && originalSessionFile
       ? SessionManager.open(originalSessionFile, dirname(originalSessionFile), project.root)
       : context?.manager ?? SessionManager.create(project.root, dir),
+    ...(context ? { customTools: [context.contextTool] } : {}),
     noTools: "all", tools: role === "review"
-      ? ["read", "grep", "find", "ls"] : ["read", "edit", "write", "grep", "find", "ls"],
+      ? ["read", "grep", "find", "ls", "story_context"] : ["read", "edit", "write", "grep", "find", "ls"],
   });
   if (selectedThinking && session.thinkingLevel !== selectedThinking) {
     session.dispose(); throw new Error("Pi failed to honor narrative review thinking effort.");
@@ -134,11 +137,12 @@ function completedReads(session: Awaited<ReturnType<typeof sessionFor>>["session
   const completed = new Set(session.messages.filter(
     (m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult" && !m.isError)
     .map(m => m.toolCallId));
-  return session.messages.flatMap(m => m.role === "assistant"
+  const direct = session.messages.flatMap(m => m.role === "assistant"
     ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
       c.type === "toolCall" && c.name === "read" &&
       completed.has(c.id) && typeof c.arguments?.path === "string")
       .map(c => resolve(root, c.arguments.path as string)) : []);
+  return [...direct, ...completedContextReads(session.messages, root).map(path => resolve(root, path))];
 }
 
 export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapshot,

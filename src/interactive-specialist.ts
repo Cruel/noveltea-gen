@@ -86,13 +86,14 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     group: piNarrativeGroup("interactive:" + domain, assignment.sourcePaths, assignment.milestoneId),
     step: "interactive:" + assignment.workItemId + ":" + domain,
     paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId,
+    task: { kind: "puzzle", ids: [...assignment.eventIds, assignment.milestoneId], scope: "related" },
     thinking, directory: dir,
   }, runtime);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job)],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
+    customTools: [await agentValidatorBashTool(job), context.contextTool],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {

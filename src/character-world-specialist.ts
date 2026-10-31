@@ -76,12 +76,13 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
   const context = await preparePiContext(job, project, {
     group: "foundations:" + assignment.domain, step: "foundations:" + assignment.domain,
     paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId, directory: dir,
+    task: { kind: "character", ids: assignment.milestoneIds, scope: "related" },
   }, runtime);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job)],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
+    customTools: [await agentValidatorBashTool(job), context.contextTool],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {

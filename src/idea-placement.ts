@@ -267,8 +267,9 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking,
     resourceLoader: loader, settingsManager,
-    sessionManager: context.manager,
-    noTools: "all", tools: writable ? ["read", "edit", "write"] : ["read"],
+    sessionManager: context.manager, customTools: [context.contextTool],
+    noTools: "all", tools: writable
+      ? ["read", "edit", "write", "story_context"] : ["read", "story_context"],
   });
   try {
     const pinned = [join(snapshot.path, "skills", skill, "SKILL.md"),

@@ -70,7 +70,19 @@ canonical route witnesses; they are not flattened into an invented all-path
 prerequisite. `architecture` and `interactive` depths omit later authoring stages,
 but still request independent scope assessment. No arbitrary Event/scene counts,
 iterative whole-Story improvement or automatic integration are imposed. Canonical
-Story files remain the direct context source until #22.
+Story Markdown remains authoritative. Under #22, Pi specialists can call
+`story_context` to consume the native read-only `noveltea narrative context`
+manifest and batch-read new or revised canonical files. Set `NT_NATIVE_CLI` to
+an installed native binary or put `noveltea` on `PATH`. Without the native
+command, the tool can only read the scheduler's explicitly supplied paths;
+it cannot resolve new typed targets or reconstruct the Story graph. Native
+manifests preserve source revisions, record status, priorities, typed inclusion
+witnesses and unresolved dependencies; additional lookups require a reason
+and never expand edit authority. The separate experimental validator and Pi
+validation shim remain until native validation/protection parity is certified.
+Run native context integration tests with `NT_NATIVE_CLI=/path/to/noveltea
+NT_SKILLS_CHECKOUT=/path/to/noveltea-skills pnpm exec tsx --test
+test/story-context.test.ts`.
 
 ### Focused record scopes (#35)
 

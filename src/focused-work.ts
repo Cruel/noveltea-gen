@@ -80,11 +80,16 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) 
     step: receipt.workItemId + ":" + receipt.planVersion,
     paths: receipt.context, snapshot: receipt.snapshot!.id, provider: receipt.provider,
     model: receipt.model, directory: join(dirname(job.worktreeRoot), "focused-sessions", receipt.target),
+    task: { kind: receipt.target.startsWith("event.") ? "event" :
+      receipt.target.startsWith("puzzle.") || receipt.target.startsWith("choice-point.") ? "puzzle" :
+      receipt.target.startsWith("authored-content.") ? "dialogue" : "character",
+      ids: [receipt.target], scope: "focused" },
   }, runtime);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager, noTools: "all", tools: ["read", "edit", "grep", "find", "ls"],
+    sessionManager: context.manager, customTools: [context.contextTool],
+    noTools: "all", tools: ["read", "edit", "grep", "find", "ls", "story_context"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking)

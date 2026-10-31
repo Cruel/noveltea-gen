@@ -200,10 +200,10 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [await agentValidatorBashTool(job, validatorSource)],
+    customTools: [await agentValidatorBashTool(job, validatorSource), context.contextTool],
     // Standard tools remain available, including grep/rg and Git inspection
     // through bash. No structured-record writer or Git commit tool exists.
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
+    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"],
   });
   let reads: string[] = [];
   let wrote = false;

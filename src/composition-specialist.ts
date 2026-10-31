@@ -7,6 +7,7 @@ import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { agentValidatorBashTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
+import { completedContextReads } from "./story-context.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -96,14 +97,17 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
     group: piNarrativeGroup("composition:" + phase, assignment.sourcePaths, assignment.milestoneId),
     step: "composition:" + assignment.workItemId + ":" + phase,
     paths: [...assignment.sourcePaths, ...extraPaths], snapshot: snapshot.id,
+    task: { kind: "dialogue", ids: assignment.eventIds, scope: "related" },
     provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    ...(phase === "write" ? { customTools: [await agentValidatorBashTool(job)] } : {}),
+    customTools: phase === "write"
+      ? [await agentValidatorBashTool(job), context.contextTool] : [context.contextTool],
     noTools: "all", tools: phase === "write"
-      ? ["read", "write", "edit", "bash", "grep", "find", "ls"] : ["read", "grep", "find", "ls"],
+      ? ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context"]
+      : ["read", "grep", "find", "ls", "story_context"],
   });
   if (context.thinking && session.thinkingLevel !== context.thinking) {
     session.dispose(); throw new Error("Pi did not honor requested thinking effort.");
@@ -120,13 +124,16 @@ function lastReply(session: Awaited<ReturnType<typeof createSession>>["session"]
 function toolPaths(session: Awaited<ReturnType<typeof createSession>>["session"], projectRoot: string) {
   const done = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
     m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-  return session.messages.flatMap(m => m.role === "assistant"
+  const direct = session.messages.flatMap(m => m.role === "assistant"
     ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
       c.type === "toolCall" && done.has(c.id) &&
       typeof c.arguments?.path === "string").map(c => ({
         tool: c.name, path: resolve(projectRoot, c.arguments.path as string),
         relative: relative(projectRoot, resolve(projectRoot, c.arguments.path as string)).split(sep).join("/"),
       })) : []);
+  return [...direct, ...completedContextReads(session.messages, projectRoot).map(relativePath => ({
+    tool: "read", path: resolve(projectRoot, relativePath), relative: relativePath,
+  }))];
 }
 export async function authorComposition(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: CompositionAssignment, provider: string, modelId: string,

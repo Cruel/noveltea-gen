@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { StoryProject } from "./project.js";
+import { createStoryContextTool, StoryContextReader, type StoryContextRequest } from "./story-context.js";
 
 /** Private, job-local Pi optimization state. The Git Story remains authoritative. */
 export interface PiPolicy {
@@ -29,6 +30,7 @@ interface ContextReceipt {
   snapshot: string;
   model: string;
   sources: Record<string, string>;
+  nativeRevisions?: Record<string, string>;
 }
 interface BudgetState {
   version: 1;
@@ -320,6 +322,8 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   group: string; step: string; paths: string[]; snapshot: string;
   provider: string; model: string; thinking?: "low" | "high";
   directory: string;
+  /** Public native task-scoped Context Manifest query. Omit for discovery-only work. */
+  task?: StoryContextRequest;
   /** An independent review nested inside an active writer must not pause mid-edit. */
   insideWriter?: boolean;
 }, runtime: ModelRuntime): Promise<{
@@ -327,6 +331,7 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   thinking?: "low" | "high";
   manager: SessionManager;
   contextNote: string;
+  contextTool: ReturnType<typeof createStoryContextTool>;
   beforeTurn: (file?: string) => Promise<void>;
   completed: (file: string, id: string) => Promise<void>;
 }> {
@@ -371,9 +376,17 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
     }
   }
   manager ??= SessionManager.create(project.root, options.directory);
+  const storyReader = new StoryContextReader({ root: project.root, initialPaths: options.paths,
+    task: options.task, previouslyRead: reused ? previous?.nativeRevisions : undefined });
+  const contextTool = createStoryContextTool(storyReader);
   // Stable instructions precede this delta. Prior source text is explicitly nonauthoritative.
   const contextNote = "CONTEXT VERSION POLICY: Canonical Story files currently on disk supersede " +
     "any older Pi conversation content. Never rely on remembered file contents for edits. " +
+    (options.paths.length || options.task ?
+      "Use story_context with {} before writing to batch-read the public native Context Manifest " +
+      "and the source text missing or changed in this Pi session. Reinvoke after edits or for " +
+      "justified typed-ID/position lookups; no Story lookup grants write permission. " +
+      "If native CLI is absent, the tool offers ONLY a temporary scoped direct-file fallback. " : "") +
     "Re-read all task-required files, especially changed records. " +
     (reused ? "Continuing a related specialist conversation. " : "Starting a fresh scoped specialist conversation. ") +
     "Changed/new source paths and SHA-256: " +
@@ -383,7 +396,7 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
     JSON.stringify(Object.fromEntries(Object.entries(versions).filter(([p]) => !changed.includes(p)))) +
     "; model provenance: " + resolution.source + " (" + expectedModel + ").\n\n";
   return {
-    model, thinking: resolution.thinking, manager, contextNote,
+    model, thinking: resolution.thinking, manager, contextNote, contextTool,
     async beforeTurn(sessionFile) {
       if (!options.insideWriter) await guardPiBudget(job, options.step, sessionFile);
     },
@@ -392,7 +405,9 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
       await persist(file, { version: 1, group: options.group, file: sessionFile, sessionId: id,
         snapshot: options.snapshot, model: expectedModel,
         sources: await sourceVersions(project.root,
-          [...Object.keys(versions), ...await loadedStoryPaths(sessionFile, project.root)]) } satisfies ContextReceipt);
+          [...Object.keys(versions), ...Object.keys(storyReader.loadedRevisions()),
+            ...await loadedStoryPaths(sessionFile, project.root)]),
+        nativeRevisions: storyReader.loadedRevisions() } satisfies ContextReceipt);
     },
   };
 }
