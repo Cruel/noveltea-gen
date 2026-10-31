@@ -11,7 +11,7 @@ import { createStoryContextTool, StoryContextReader, type StoryContextRequest } 
 /** Private, job-local Pi optimization state. The Git Story remains authoritative. */
 export interface PiPolicy {
   version: 1;
-  profile: { provider: string; model: string; thinking?: "low" | "high";
+  profile: { provider: string; model: string; thinking?: "low" | "medium" | "high";
     optionalFallback?: { provider: string; model: string } };
   limits: { steps?: number; modelCalls?: number; costUsd?: number };
 }
@@ -20,7 +20,7 @@ interface Resolution {
   requested: { provider: string; model: string };
   selected: { provider: string; model: string };
   source: "required" | "explicit-optional-fallback";
-  thinking?: "low" | "high";
+  thinking?: "low" | "medium" | "high";
 }
 interface ContextReceipt {
   version: 1;
@@ -98,7 +98,7 @@ export async function configurePiPolicy(job: JobStartResult, next: PiPolicy): Pr
 }
 
 export async function resolvePiModel(job: JobStartResult, runtime: ModelRuntime,
-  requestedProvider: string, requestedModel: string, thinking?: "low" | "high"):
+  requestedProvider: string, requestedModel: string, thinking?: "low" | "medium" | "high"):
   Promise<{ model: NonNullable<ReturnType<ModelRuntime["getModel"]>>; resolution: Resolution }> {
   const configured = await json<PiPolicy>(policyPath(job));
   const policy = configured ?? { ...defaultPolicy(), profile: { provider: requestedProvider, model: requestedModel } };
@@ -287,7 +287,7 @@ export async function guardPiBudget(job: JobStartResult, step: string, sessionFi
  * started. Failures to resolve credentials, requirements, or budgets cannot
  * masquerade as interrupted filesystem edits. Fixtures also count steps. */
 export async function preflightPiAssignment(job: JobStartResult, step: string,
-  profile?: { provider: string; model: string; thinking?: "low" | "high" }): Promise<void> {
+  profile?: { provider: string; model: string; thinking?: "low" | "medium" | "high" }): Promise<void> {
   await guardPiBudget(job, step);
   if (profile) {
     const runtime = await ModelRuntime.create();
@@ -320,7 +320,7 @@ export function piNarrativeGroup(role: string, paths: string[], fallback: string
 /** Each completed, clean specialist turn may be reused within its scoped narrative group. */
 export async function preparePiContext(job: JobStartResult, project: StoryProject, options: {
   group: string; step: string; paths: string[]; snapshot: string;
-  provider: string; model: string; thinking?: "low" | "high";
+  provider: string; model: string; thinking?: "low" | "medium" | "high";
   directory: string;
   /** Public native task-scoped Context Manifest query. Omit for discovery-only work. */
   task?: StoryContextRequest;
@@ -328,7 +328,7 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   insideWriter?: boolean;
 }, runtime: ModelRuntime): Promise<{
   model: NonNullable<ReturnType<ModelRuntime["getModel"]>>;
-  thinking?: "low" | "high";
+  thinking?: "low" | "medium" | "high";
   manager: SessionManager;
   contextNote: string;
   contextTool: ReturnType<typeof createStoryContextTool>;

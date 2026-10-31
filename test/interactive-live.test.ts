@@ -82,9 +82,9 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
     const args = ["interactive", "run", "--milestone", "milestone.disclosure", "--skills-source", source];
     if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
     if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
-    if (["low", "high"].includes(process.env.NT_THINKING ?? "")) args.push("--thinking", process.env.NT_THINKING!);
+    if (["low", "medium", "high"].includes(process.env.NT_THINKING ?? "")) args.push("--thinking", process.env.NT_THINKING!);
     const result = cli(...args);
-    if (["low", "high"].includes(process.env.NT_THINKING ?? "")) assert.equal(result.thinking, process.env.NT_THINKING);
+    if (["low", "medium", "high"].includes(process.env.NT_THINKING ?? "")) assert.equal(result.thinking, process.env.NT_THINKING);
     assert.equal(result.status, "interactive-slice-committed");
     assert.deepEqual(result.specialistUnits.map((u: any) => u.phase), ["committed", "committed"]);
     assert.equal(result.specialistUnits[0].validation.protectionBase, event.headSha);
@@ -93,7 +93,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
       assert.equal(unit.skillReads.length, 6);
       assert.match(unit.commitSha, /^[0-9a-f]{40}$/);
       const messages = readFileSync(unit.piSessionFile, "utf8").trim().split("\n").map(JSON.parse);
-      if (["low", "high"].includes(process.env.NT_THINKING ?? "")) {
+      if (["low", "medium", "high"].includes(process.env.NT_THINKING ?? "")) {
         assert.ok(messages.some((m: any) => m.message?.role === "assistant" &&
           m.message?.thinkingLevel === process.env.NT_THINKING), "Pi assistant messages must confirm requested thinking effort");
       }
@@ -116,8 +116,9 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
     completed = true;
   } finally {
     assert.equal(git(source, "status", "--porcelain"), originalSkillsStatus);
-    if (!completed && process.env.NT_KEEP_FAILED_LIVE === "1") {
-      process.stderr.write("Preserved failed interactive Pi Story job: " + temp + "\n");
+    if (process.env.NT_KEEP_LIVE_EVIDENCE === "1" ||
+        (!completed && process.env.NT_KEEP_FAILED_LIVE === "1")) {
+      process.stderr.write("Preserved interactive Pi Story job evidence: " + temp + "\n");
     } else {
       removeTestTree(temp);
     }

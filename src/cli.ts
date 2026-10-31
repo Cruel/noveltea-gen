@@ -82,7 +82,7 @@ Usage:
 Job Pi profile and budget (#28):
   configure|inspect   Pin a model profile, explicitly optional fallback, and safe-boundary budgets
   --provider, --model          Required profile (default openai/gpt-6-luna)
-  --thinking low|high          Optional required reasoning capability
+  --thinking low|medium|high   Optional required reasoning capability
   --fallback-provider, --fallback-model  Explicit optional fallback pair; never implicit
   --max-steps, --max-model-calls, --max-cost-usd  Optional cumulative job limits
   Budgets count observed Pi transcript usage; increase limits and rerun a paused action.
@@ -134,7 +134,7 @@ Job interactive (Choice Point and Puzzle alternatives after Event design):
   --skills-source <path>  NovelTea skills checkout to pin (first run)
   --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
-  --thinking low|high     Explicit thinking effort for both Pi specialists
+  --thinking low|medium|high     Explicit thinking effort for both Pi specialists
   --fixture               Deterministic test adapter, not live Pi evidence
 
 Job composition (branch-aware Authored Content after interactive design):
@@ -380,8 +380,8 @@ async function main(): Promise<void> {
       const provider = values.get("--provider") ?? prev.resolved?.requested.provider ?? prev.policy.profile.provider;
       const model = values.get("--model") ?? prev.resolved?.requested.model ?? prev.policy.profile.model;
       const thinking = values.get("--thinking") ?? prev.policy.profile.thinking;
-      if (thinking !== undefined && thinking !== "low" && thinking !== "high")
-        throw new Error("Pi thinking must be low or high.");
+      if (thinking !== undefined && !["low", "medium", "high"].includes(thinking))
+        throw new Error("Pi thinking must be low, medium or high.");
       const fallbackProvider = values.get("--fallback-provider") ?? prev.policy.profile.optionalFallback?.provider;
       const fallbackModel = values.get("--fallback-model") ?? prev.policy.profile.optionalFallback?.model;
       if (Boolean(fallbackProvider) !== Boolean(fallbackModel))
@@ -389,7 +389,7 @@ async function main(): Promise<void> {
       const number = (name: string) => values.has(name) ? Number(values.get(name)) : undefined;
       await configurePiPolicy(job, {
         version: 1,
-        profile: { provider, model, ...(thinking ? { thinking: thinking as "low" | "high" } : {}),
+        profile: { provider, model, ...(thinking ? { thinking: thinking as "low" | "medium" | "high" } : {}),
           ...(fallbackProvider && fallbackModel ? { optionalFallback: {
             provider: fallbackProvider, model: fallbackModel } } : {}) },
         limits: {
@@ -572,13 +572,13 @@ async function main(): Promise<void> {
       "--validator-source", "--provider", "--model", "--thinking", "--fixture"], ["--fixture"]);
     const story = values.get("--story"), job = values.get("--job"), milestone = values.get("--milestone");
     if (!story || !job || !milestone) throw new Error("job interactive requires --story, --job and --milestone.");
-    if (values.has("--thinking") && !["low", "high"].includes(values.get("--thinking")!)) throw new Error("Interactive --thinking supports low or high.");
+    if (values.has("--thinking") && !["low", "medium", "high"].includes(values.get("--thinking")!)) throw new Error("Interactive --thinking supports low, medium or high.");
     disableJobCloudTracing();
     const { runInteractiveWorkItem } = await import("./interactive-work.js");
     const result = await runInteractiveWorkItem({
       story, job, milestone, action, skillsSource: values.get("--skills-source"),
       validatorSource: values.get("--validator-source"), provider: values.get("--provider"),
-      model: values.get("--model"), thinking: values.get("--thinking") as "low" | "high" | undefined,
+      model: values.get("--model"), thinking: values.get("--thinking") as "low" | "medium" | "high" | undefined,
       fixture: values.has("--fixture"),
     });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");

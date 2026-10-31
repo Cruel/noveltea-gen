@@ -80,6 +80,20 @@ credential-gated live tests are skipped by default.
   test exceeded the 290-second execution limit; the process did not produce
   complete test output. Do not count as pass or fail. A separately retained
   private test worktree may contain agent transcripts; never commit them.
+- **PASS — GPT-6.1 Sol, medium thinking, interactive (follow-up):** The
+  real Choice and Puzzle specialists committed, with validated protect/confront
+  outcomes, distinct relationship states, reachable conditional consumers,
+  two reachable Puzzle solutions and separately accessible clues. `story_validate`
+  and the final native audit passed. Elapsed ~337 seconds; 18 Pi assistant
+  responses; 426,456 recorded tokens including cache reads; estimated Pi
+  usage cost ~$0.278.
+- **PASS — GPT-6 Luna, high thinking, interactive (follow-up):** The same
+  independent live acceptance test passed on a fresh job, with both
+  specialized units committed and two reachable Puzzle solutions. Elapsed
+  ~223 seconds; 29 assistant responses; 674,880 recorded tokens including
+  cache reads; estimated Pi usage cost ~$0.019. The runs overlapped, so the
+  wall-clock comparison is not a controlled performance benchmark. One pass
+  per profile does not establish a reliable success rate or prose quality.
 - **NOT RUN:** Live full small Story to scoped continuation; independent
   real Pi editorial pass of fully composed interactive Story; live deferred
   idea fulfillment/reassessment; complete cross-provider and cross-platform
@@ -94,9 +108,10 @@ self-report is not independent evidence.
 
 ## Findings and constraints
 
-1. The live Choice failure should be repaired by clearer downstream causal
-   obligations or an actual reachable consumer in authorized Event/Choice
-   records, then rerun with persisted evidence. Tracked in
+1. The initial live Choice failure remains a reliability finding despite
+   later passing Sol-medium and Luna-high runs. Investigate the failing
+   context and keep explicit downstream causal obligations; rerun across
+   repeated seeds/settings with persisted evidence. Tracked in
    [noveltea-gen#37](https://github.com/Cruel/noveltea-gen/issues/37).
    Do not accept a branch merely because its Choice Point record exists or
    its selection branch is reachable.

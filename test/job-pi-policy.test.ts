@@ -65,10 +65,11 @@ test("public job Pi CLI configures and inspects a pinned profile and safe budget
     ["--import", "tsx", cli, "job", "pi", ...args, "--story", story, "--job", "policy"],
     { encoding: "utf8", cwd: resolve("."), env: { ...process.env }, timeout: 30000 });
   const configured = run("configure", "--provider", "example", "--model", "required",
-    "--fallback-provider", "example", "--fallback-model", "fallback",
+    "--fallback-provider", "example", "--fallback-model", "fallback", "--thinking", "medium",
     "--max-steps", "0", "--max-model-calls", "8", "--max-cost-usd", "2.5");
   assert.equal(configured.status, 0, configured.stderr);
   assert.equal(JSON.parse(configured.stdout).policy.profile.optionalFallback.model, "fallback");
+  assert.equal(JSON.parse(configured.stdout).policy.profile.thinking, "medium");
   await assert.rejects(guardPiBudget(job, "event:first"),
     (err: unknown) => err instanceof PiBudgetPause && err.reason === "steps");
   const inspected = run("inspect");

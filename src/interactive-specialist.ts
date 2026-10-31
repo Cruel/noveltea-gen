@@ -63,7 +63,7 @@ function parseManifest(text: string) {
 }
 export async function authorInteractive(job: JobStartResult, snapshot: SkillSnapshot,
   domain: InteractiveDomain, assignment: InteractiveAssignment, provider: string, modelId: string,
-  thinking: "low" | "high" | undefined,
+  thinking: "low" | "medium" | "high" | undefined,
   onSession: (file: string) => Promise<void>,
   verifyDraft: (evidence: InteractiveEvidence) => Promise<string[]>): Promise<InteractiveEvidence> {
   const project = await openStoryProject(job.worktreeStoryRoot);

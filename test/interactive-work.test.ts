@@ -82,6 +82,16 @@ const inspect = (x: ReturnType<typeof setup>) => {
   return JSON.parse(result.stdout);
 };
 
+test("interactive CLI accepts and persists medium thinking for both specialist stages", { skip: !available }, () => {
+  const x = setup("medium-thinking");
+  x.prepare();
+  const result = x.cli(["interactive", "run", "--fixture", "--milestone", "milestone.disclosure",
+    "--skills-source", source, "--thinking", "medium"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).thinking, "medium");
+  assert.equal(inspect(x).thinking, "medium");
+});
+
 test("reference adventure authors two independently certified Choice/Puzzle commits", { skip: !available }, () => {
   const x = setup("reference");
   const prior = x.prepare();

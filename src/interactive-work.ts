@@ -30,7 +30,7 @@ interface Unit {
 interface Receipt {
   version: 1; jobId: string; baseSha: string; workItemId: string; milestoneId: string;
   planVersion: number; planDigest: string; eventHead: string; worker: "fixture" | "pi";
-  provider: string; model: string; thinking?: "low" | "high"; snapshot?: SkillSnapshot; units: [Unit, Unit];
+  provider: string; model: string; thinking?: "low" | "medium" | "high"; snapshot?: SkillSnapshot; units: [Unit, Unit];
 }
 interface SourceReceipt {
   jobId: string; phase: string; milestoneId: string; commitSha?: string;
@@ -61,7 +61,7 @@ interface ChoiceEvidence {
 interface PuzzleEvidence { id: string; solutions: Array<{ event: string; status: Status; clueAccess: Status; clueIds: string[] }> }
 export interface InteractiveOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
-  skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; thinking?: "low" | "high";
+  skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; thinking?: "low" | "medium" | "high";
 }
 const validMilestone = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
