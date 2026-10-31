@@ -44,6 +44,20 @@ const appMigrations = [
       `CREATE INDEX studio_sessions_owner_idx ON studio_sessions (owner_user_id, updated_at)`,
     ],
   },
+  {
+    version: 2,
+    statements: [
+      `CREATE TABLE github_install_flows (
+         state_hash TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+         desired_repository TEXT,
+         created_at INTEGER NOT NULL,
+         expires_at INTEGER NOT NULL,
+         status TEXT NOT NULL CHECK(status IN ('started','used','pending'))
+       )`,
+      `CREATE INDEX github_install_flows_owner ON github_install_flows (owner_user_id, status, expires_at)`,
+    ],
+  },
 ] as const
 
 export async function migrateStudio(store: StudioDatabase, auth: StudioAuth) {

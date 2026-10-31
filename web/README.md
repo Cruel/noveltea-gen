@@ -4,8 +4,9 @@ The web application is a separate pnpm workspace package; the existing Story
 generator and Skein server stay unchanged. This slice implements an authenticated
 TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
 cross-provider linking, an encrypted persisted OAuth account store, and tenant-
-scoped Story/repository/session catalog tables. Repository import, generation,
-SSE, and publication are separate tickets; no implicit clone occurs.
+scoped Story/repository/session catalog tables. #41 adds GitHub App installation-
+aware repository discovery, Add by URL, and catalog connection without cloning.
+Story discovery, generation, SSE, and publication remain separate tickets.
 
 ## Setup
 
@@ -32,8 +33,8 @@ email. For future repository operations, configure repository permissions
 **Contents: read/write** and **Pull requests: read/write**; **Metadata: read**
 is added automatically. Configure repository installation access for selected
 repositories. Keep **Request user authorization (OAuth) during installation**
-off: login and Add Repository are intentionally separate flows. Add a setup
-callback for the later Add Repository installation flow only when it exists.
+off: login and Add Repository are intentionally separate flows. Configure the
+GitHub App setup URL to `<BETTER_AUTH_URL>/api/github/install/callback` and enable **Redirect on update** to return after changes to selected repositories. Set `GITHUB_APP_SLUG` (the slug in `github.com/apps/<slug>`) in addition to the App client credentials. Keep the OAuth callback separately set to `/api/auth/callback/github`. GitHub App installation selection uses a short-lived, one-use state bound to the existing signed-in user, with an HttpOnly SameSite=Lax installation cookie to survive GitHub setup redirects that omit the state parameter; it never asks for OAuth login again.
 GitHub App user tokens derive permissions from the app installation and user,
 not OAuth App scopes; `offline_access` is the only requested GitHub OAuth
 scope (for refreshable user tokens). An authorized GitHub identity does not
@@ -42,8 +43,9 @@ itself grant access to uninstalled repositories.
 GitLab receives `api` and `write_repository` (its default `read_user` is also
 included). GitLab requires the `api` scope for merge-request APIs;
 `write_repository` alone covers Git-over-HTTP but not those API calls.
-Repository installation and import are handled by later tickets. Future
-GitHub installation-token issuance also requires the App ID and private key;
+GitHub repository connection is available from **Dashboard → Add GitHub repository**. Browse installations and their push-access repositories, or enter `owner/repository` or a `https://github.com/owner/repository` URL. If an App installation is missing or a selected repository is not covered, choose **Install / update access**. The GitHub setup callback verifies installation access using the existing GitHub user token, and can complete the requested repository connection automatically. Organizations may require an administrator to approve an installation or selection update: the pending import remains visible for 24 hours, with a retry action. If you prefer to adjust an existing installation, use **Configure access on GitHub** and return to the Add Repository screen after approval. Only repositories with actual push permission are accepted; suspended installations and installations without Contents: write are unavailable. Catalog connection creates a lightweight record, **not** a Git clone or Story. Repository permissions are checked again when connecting, not trusted from browser selection. GitHub installations are scoped to the authenticated App user; signing in with GitLab does not grant GitHub access until the user explicitly links their GitHub identity.
+
+Future GitHub installation-token issuance also requires the App ID and private key;
 those are not needed by the #40 sign-in screen.
 
 From the repository root:
