@@ -313,38 +313,99 @@ test("native #526/#535 cutover parity for canonical valid, structural and protec
   const job = start(story, state);
   const worktreeRecord = join(job.worktreeStoryRoot, "creative-direction/last-bell.md");
 
-  function comparable(report: Record<string, any>) {
-    return {
-      diagnostics: report.diagnostics.map((d: {path: string; code: string}) => d.path + ":" + d.code).sort(),
-      foundation: report.readiness.design.stages.foundation.minimum,
-      architecture: report.readiness.design.stages.architecture.minimum,
-      unverified: [...report.coverage.unverified].sort(),
-      protection: report.protection.status,
-      decisions: report.protection.changes.map((c: {decision: string; kind: string}) =>
-        c.decision + ":" + c.kind).sort(),
-      impacted: report.protection.impact?.affected.map((a: {id: string;reason: string}) =>
-        a.id + ":" + a.reason).sort(),
-    };
+  function invokeNative(...args: string[]) {
+    const proc = spawnSync(process.env.NT_NATIVE_CLI!, ["--json", "narrative", ...args],
+      { encoding: "utf8", timeout: 30_000, maxBuffer: 32 * 1024 * 1024 });
+    assert.equal(proc.error, undefined, proc.error?.message);
+    assert.ok(proc.stdout, proc.stderr);
+    return { proc, json: JSON.parse(proc.stdout) as Record<string, any> };
   }
-  function parity() {
+  function diagnostics(report: { diagnostics: Array<{ path: string; code: string }> }) {
+    return report.diagnostics.map(d => `${d.path}:${d.code}`).sort();
+  }
+  function parity(label: string) {
     const experimental = validate(story, state, source);
     assert.ok(experimental.output?.report, experimental.proc.stderr);
-    // This is the planned standalone native CLI contract in #526/#535.
-    // When that interface ships, run against the same worktree/base SHA;
-    // any differences require adapter review rather than silent fallback.
-    const native = spawnSync(process.env.NT_NATIVE_CLI!, [
-      "narrative", "validate", job.worktreeStoryRoot, "--base", job.baseSha,
-    ], { encoding: "utf8", timeout: 30_000, maxBuffer: 16 * 1024 * 1024 });
-    assert.equal(native.error, undefined, native.error?.message);
-    const nativeReport = JSON.parse(native.stdout);
-    assert.deepEqual(comparable(nativeReport), comparable(experimental.output.report));
+    const older = experimental.output.report;
+    const { proc, json } = invokeNative("validate", job.worktreeStoryRoot, "--base", job.baseSha);
+    assert.equal(proc.status, experimental.proc.status, label + ": exit class");
+    assert.equal(json.exitCode, experimental.output.exitCode, label + ": JSON exit class");
+    const actual = json.catalog;
+    assert.ok(actual, label + ": missing native catalog");
+    assert.deepEqual(diagnostics(actual), diagnostics(older), label + ": structural diagnostics");
+    assert.equal(actual.protection.status, older.protection.status, label + ": Git protection");
+    assert.equal(actual.protection.base, job.baseSha, label + ": trusted baseline");
+    assert.equal(actual.protection.authorizationVerified, false,
+      label + ": CLI never asserts human approval");
+    assert.ok(actual.coverage.unverified.length > 0 && older.coverage.unverified.length > 0,
+      label + ": retain explicit uncertainty");
+    const nativeDecisions = actual.protection.findings.map((f: { decisionId: string; category: string }) =>
+      `${f.decisionId}:${f.category}`).sort();
+    const previousDecisions = older.protection.changes.map((f: { decision: string; kind: string }) =>
+      `${f.decision}:${f.kind}`).sort();
+    if (!actual.diagnostics.length) {
+      assert.deepEqual(nativeDecisions, previousDecisions, label + ": protected decisions");
+    } else {
+      // An invalid current record can be omitted by native metadata admission:
+      // TypeScript calls its decision 'removed'; native calls its record 'record-deleted'.
+      // Neither is a trustworthy clean protection comparison while parsing failed.
+      assert.equal(actual.protection.complete, false, label + ": incomplete protection");
+      assert.equal(actual.authorization.status, "indeterminate", label + ": unresolved authorization");
+      assert.deepEqual(nativeDecisions.map(d => d.split(":")[0]),
+        previousDecisions.map(d => d.split(":")[0]), label + ": decision identities");
+    }
+    assert.deepEqual([...actual.protection.impact.changed].sort(),
+      [...older.protection.impact.changed].sort(), label + ": changed IDs");
+    assert.deepEqual(actual.protection.impact.affected.map((a: { id: string }) => a.id).sort(),
+      older.protection.impact.affected.map((a: { id: string }) => a.id).sort(),
+      label + ": downstream impacted IDs");
+    // The native contract separates stage readiness from structural validation;
+    // both backends must agree about minimums for a structurally valid Story.
+    if (!actual.diagnostics.length) {
+      const ready = invokeNative("readiness", job.worktreeStoryRoot, "--stage", "architecture", "--view", "design");
+      assert.equal(ready.proc.status, 0, label + ": native readiness");
+      assert.equal(ready.json.readiness.design.stages.foundation.minimum,
+        older.readiness.design.stages.foundation.minimum, label + ": foundation minimum");
+      assert.equal(ready.json.readiness.design.stages.architecture.minimum,
+        older.readiness.design.stages.architecture.minimum, label + ": architecture minimum");
+      const approved = invokeNative("readiness", job.worktreeStoryRoot,
+        "--stage", "architecture", "--view", "approved");
+      assert.equal(approved.proc.status, 0, label + ": approved readiness command");
+      assert.equal(approved.json.readiness.approved.stages.foundation.minimum,
+        older.readiness.approved.stages.foundation.minimum, label + ": approved foundation minimum");
+      assert.equal(approved.json.readiness.approved.stages.architecture.minimum,
+        older.readiness.approved.stages.architecture.minimum, label + ": approved architecture minimum");
+    }
   }
-  parity();
+  parity("unchanged reference Story");
   writeFileSync(worktreeRecord, protectedSource.replace("repair rather than revenge", "revenge rather than repair"));
-  parity();
+  parity("changed protected decision");
   writeFileSync(worktreeRecord, protectedSource.replace("central_conflict:",
     "unsupported_field: true\ncentral_conflict:"));
-  parity();
+  parity("invalid structural metadata");
+
+  // A new Story can begin with no Markdown in its trusted Git baseline. The
+  // native replacement must evaluate exactly that empty baseline, not HEAD.
+  const emptyRepo = repository("native-empty-story-base");
+  const emptyState = join(root, "state-native-empty-story-base");
+  const fresh = start(emptyRepo, emptyState);
+  cpSync(join(source, "fixtures/reference-story"), fresh.worktreeStoryRoot, { recursive: true });
+  const emptyBase = invokeNative("validate", fresh.worktreeStoryRoot, "--base", fresh.baseSha);
+  // Native #535 intentionally fails closed for an empty trusted Story baseline;
+  // the generator must retain its structural-only/unverified first-run behavior.
+  assert.equal(emptyBase.proc.status, 1);
+  assert.ok(emptyBase.json.diagnostics.some((d: {code: string; message: string}) =>
+    d.code === "baseline-invalid" && /no tracked Story Markdown/.test(d.message)));
+  assert.equal(emptyBase.json.catalog.protection.status, "unavailable");
+  assert.notEqual(emptyBase.json.catalog.authorization.status, "unchanged");
+  const structuralOnly = invokeNative("validate", fresh.worktreeStoryRoot);
+  assert.equal(structuralOnly.proc.status, 0);
+  assert.deepEqual(structuralOnly.json.diagnostics, []);
+  assert.equal(structuralOnly.json.catalog.authorization.status, "not-assessed");
+  const invalidBase = invokeNative("validate", fresh.worktreeStoryRoot, "--base", "0".repeat(40));
+  assert.equal(invalidBase.proc.status, 1);
+  assert.ok(invalidBase.json.diagnostics.some((d: {code: string}) => d.code === "baseline-invalid"));
+  assert.notEqual(invalidBase.json.catalog.protection.status, "checked");
 });
 
 test("agent-side temporary noveltea CLI validates against the pinned Git baseline", async () => {

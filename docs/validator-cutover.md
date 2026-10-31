@@ -12,10 +12,12 @@ is not loaded from the source checkout on subsequent job runs.
 
 Native [Cruel/nt#526](https://github.com/Cruel/nt/issues/526) owns public
 read-only Story validation; [Cruel/nt#535](https://github.com/Cruel/nt/issues/535)
-owns verified Git-baseline protection and change-impact diagnostics. Neither
-is implemented here or presumed usable. Replace
+owns verified Git-baseline protection and change-impact diagnostics. Both
+native contracts are implemented in the `nt` checkout as of commit `0f296921d`
+(2026-10-30), and the native acceptance and generator parity suites passed.
+The generator itself is **not yet cut over**. Replace
 `bundledValidatorAdapter` in `src/validator.ts` with a native-backed
-adapter only after both native contracts are certified. Keep previously pinned
+adapter as part of the explicit cutover, retaining the stable job envelope. Keep previously pinned
 experimental bundles usable by their original jobs (or perform an explicit,
 auditable migration); never silently reinterpret old pins as new validators.
 
@@ -56,9 +58,31 @@ NT_NATIVE_CLI=/absolute/path/to/noveltea \
   pnpm exec tsx --test test/validator.test.ts
 ```
 
-The test currently anticipates `noveltea narrative validate
-<story-root> --base <sha>` with JSON output. Align the invocation with the
-*certified* native CLI flags during cutover; do not guess that a future
-unreleased command already meets the contract. Report native parity as
-**not run** until both upstream implementations and the opt-in test pass.
+The current native command is `noveltea --json narrative validate <story-root>
+--base <sha>` and returns `catalog` inside the standard `success`/`exitCode`
+JSON envelope. Readiness is a separate `noveltea --json narrative readiness`
+command. The opt-in parity test now checks both readiness views, diagnostics,
+protected decisions, impacted IDs, invalid source, and empty/invalid baselines.
+
+**Verified 2026-10-30:** `nt` native `narrative.py` and `narrative_git.py`
+acceptance passed, and all 11 generator validator tests passed with
+`NT_NATIVE_CLI` pointing at the refreshed `build/cli/linux/noveltea`. The
+native parser classifies a protected decision in a structurally invalid record
+as `record-deleted`, whereas the TypeScript catalog uses `removed`; both block
+and mark authorization indeterminate. The generator must not erase this
+uncertainty when adapting the report.
+
+**Remaining cutover work:** Pi currently gets a job-local `noveltea` symlink
+that supplies the trusted base implicitly. Simply deleting the shim is unsafe:
+the Pi prompts use `noveltea narrative validate . --json` (native requires
+the global `--json` option before `narrative`) and omit `--base`. Update agent
+Bash wiring and instructions so the real native executable is selected and
+validation is bound to the correct worktree and trusted job baseline. Update
+the job validation adapter to normalize native diagnostics, readiness, impact,
+and protection into `noveltea-validator/v1`, without silently replacing
+historical pinned TypeScript bundles. For a trusted commit containing no Story
+Markdown, native `--base` currently returns `baseline-invalid` / protection
+`unavailable`; preserve the existing structural-only **unverified** first-run
+handling, without converting invalid or missing baselines into a pass. Remove
+the shim only with end-to-end agent/job certification of that replacement.
 Do not keep a long-term independent Node narrative authority afterward.
