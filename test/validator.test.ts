@@ -391,13 +391,20 @@ test("native #526/#535 cutover parity for canonical valid, structural and protec
   const fresh = start(emptyRepo, emptyState);
   cpSync(join(source, "fixtures/reference-story"), fresh.worktreeStoryRoot, { recursive: true });
   const emptyBase = invokeNative("validate", fresh.worktreeStoryRoot, "--base", fresh.baseSha);
-  // Native #535 intentionally fails closed for an empty trusted Story baseline;
-  // the generator must retain its structural-only/unverified first-run behavior.
-  assert.equal(emptyBase.proc.status, 1);
-  assert.ok(emptyBase.json.diagnostics.some((d: {code: string; message: string}) =>
-    d.code === "baseline-invalid" && /no tracked Story Markdown/.test(d.message)));
-  assert.equal(emptyBase.json.catalog.protection.status, "unavailable");
-  assert.notEqual(emptyBase.json.catalog.authorization.status, "unchanged");
+  // A valid commit predating Story files is a verified empty historical catalog.
+  // First authoring is not permission to waive protection for later revisions.
+  assert.equal(emptyBase.proc.status, 0);
+  assert.deepEqual(emptyBase.json.diagnostics, []);
+  const emptyProtection = emptyBase.json.catalog.protection;
+  assert.equal(emptyProtection.status, "checked");
+  assert.equal(emptyProtection.base, fresh.baseSha);
+  assert.equal(emptyProtection.checkedDecisions, 0);
+  assert.deepEqual(emptyProtection.findings, []);
+  assert.equal(emptyProtection.authorizationVerified, false);
+  assert.equal(emptyBase.json.catalog.authorization.status, "unchanged");
+  assert.equal(emptyBase.json.catalog.authorization.verified, false);
+  assert.deepEqual([...emptyProtection.impact.changed].sort(),
+    emptyBase.json.catalog.records.map((r: { metadata: { id: string } }) => r.metadata.id).sort());
   const structuralOnly = invokeNative("validate", fresh.worktreeStoryRoot);
   assert.equal(structuralOnly.proc.status, 0);
   assert.deepEqual(structuralOnly.json.diagnostics, []);

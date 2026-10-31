@@ -13,8 +13,9 @@ is not loaded from the source checkout on subsequent job runs.
 Native [Cruel/nt#526](https://github.com/Cruel/nt/issues/526) owns public
 read-only Story validation; [Cruel/nt#535](https://github.com/Cruel/nt/issues/535)
 owns verified Git-baseline protection and change-impact diagnostics. Both
-native contracts are implemented in the `nt` checkout as of commit `0f296921d`
-(2026-10-30), and the native acceptance and generator parity suites passed.
+native contracts are implemented in the `nt` checkout, with flexible CLI option
+positioning in `4113da1ae` and valid empty-Story Git baselines in `dcefded2a`
+(2026-10-30). The native acceptance and generator parity suites passed.
 The generator itself is **not yet cut over**. Replace
 `bundledValidatorAdapter` in `src/validator.ts` with a native-backed
 adapter as part of the explicit cutover, retaining the stable job envelope. Keep previously pinned
@@ -36,7 +37,7 @@ project, without requiring `pnpm`, schema duplication, or creating engine files.
 | Impossible Event/Puzzle conditions | Logic diagnostics and bounded reachability; do not infer creative completeness from a zero-error result |
 | Changed or deleted user-protected decision | Stable decision IDs, change kind and source paths; action required remains separate from verified author approval |
 | Related record changed | Changed/moved ID lists, downstream affected IDs and relationship evidence |
-| Empty or invalid Git baseline | Explicitly unverified/error status, never a protection pass based on HEAD |
+| Empty or invalid Git baseline | Valid commits without Story Markdown are checked against zero historical records; invalid commits or malformed history fail closed |
 | Canonical paths and monorepo sibling Stories | Same relative paths and only the selected Story; no engine reads |
 | Lost executable on an old job | Fail closed, do not replace from current source or native runtime |
 
@@ -74,15 +75,16 @@ uncertainty when adapting the report.
 
 **Remaining cutover work:** Pi currently gets a job-local `noveltea` symlink
 that supplies the trusted base implicitly. Simply deleting the shim is unsafe:
-the Pi prompts use `noveltea narrative validate . --json` (native requires
-the global `--json` option before `narrative`) and omit `--base`. Update agent
-Bash wiring and instructions so the real native executable is selected and
-validation is bound to the correct worktree and trusted job baseline. Update
-the job validation adapter to normalize native diagnostics, readiness, impact,
-and protection into `noveltea-validator/v1`, without silently replacing
-historical pinned TypeScript bundles. For a trusted commit containing no Story
-Markdown, native `--base` currently returns `baseline-invalid` / protection
-`unavailable`; preserve the existing structural-only **unverified** first-run
-handling, without converting invalid or missing baselines into a pass. Remove
-the shim only with end-to-end agent/job certification of that replacement.
+the Pi prompts use `noveltea narrative validate . --json` without `--base`.
+The native CLI now accepts the prompt's option order, but validation without
+an explicit baseline does **not** assess protected decisions. Update agent Bash
+wiring so the real native executable is selected and validation is bound to
+the correct worktree and trusted job baseline. Update the job validation
+adapter to normalize native diagnostics, readiness, impact, and protection into
+`noveltea-validator/v1`, without silently replacing historical pinned TypeScript
+bundles. Native `--base` now checks a valid Git commit containing no Story
+Markdown against zero historical records and reports newly created records in
+`impact.changed`. Invalid or unreadable commits and malformed historical
+records must still fail closed. Remove the shim only with end-to-end agent/job
+certification of that replacement.
 Do not keep a long-term independent Node narrative authority afterward.
