@@ -19,6 +19,7 @@ import { isFocusedScope } from "./focused-scope.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryGenerationLock, withStoryJobLock } from "./job-lock.js";
+import { claimServerGeneration, ensureNotServerOwned } from "./generation-owner.js";
 import { readJobControl } from "./job-control.js";
 import { inspectJobReport, type JobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
@@ -249,15 +250,19 @@ async function authorBoundary(job: JobStartResult): Promise<Partial<State> | nul
     reason: updates.blockers.join(", ") + ("error" in updates ? ": " + updates.error : "") };
 }
 /** The production parent graph. Specialists retain ownership of side effects and recovery. */
-export function createGenerationGraph(checkpointer?: SqliteSaver) {
+export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner: "server" | "cli" = "server") {
   return new StateGraph(Channels, { input: GenerationInputSchema })
-    .addNode("schedule", async s => {
+    .addNode("schedule", async (s, config) => {
       const input = GenerationInputSchema.shape.request.safeParse(s.request);
       if (!input.success) return blocked(new Error("Invalid generation request: " +
         input.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ")));
       try {
         const contract = parseGenerationContract(input.data.contract);
-        return { request: { ...input.data, fixture: input.data.fixture ?? false, contract },
+        const request = { ...input.data, fixture: input.data.fixture ?? false, contract };
+        const job = await openJob({ ...s, request } as State);
+        if (executionOwner === "cli") ensureNotServerOwned(job);
+        else await claimServerGeneration(job, config.configurable?.thread_id as string | undefined, request);
+        return { request,
           status: "running" as const, reason: null, failures: s.failures ?? {} };
       } catch (error) { return blocked(error); }
     })
@@ -448,11 +453,12 @@ export function createGenerationGraph(checkpointer?: SqliteSaver) {
 export async function runStoryGeneration(options: GenerationOptions) {
   const job = await startStoryJob({ story: options.story, job: options.job }, false);
   return withStoryGenerationLock(job, async () => {
+    ensureNotServerOwned(job);
     const path = join(dirname(job.worktreeRoot), "generation.sqlite");
     if (options.action !== "start" && !existsSync(path)) throw new Error("No generation run exists; use generate start.");
     const saver = SqliteSaver.fromConnString(path);
     try {
-      const graph = createGenerationGraph(saver);
+      const graph = createGenerationGraph(saver, "cli");
       const config = { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 10000 };
       const saved = await graph.getState(config);
       let state = saved.values as State;
