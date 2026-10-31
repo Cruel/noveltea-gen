@@ -43,6 +43,15 @@ itself grant access to uninstalled repositories.
 GitLab receives `api` and `write_repository` (its default `read_user` is also
 included). GitLab requires the `api` scope for merge-request APIs;
 `write_repository` alone covers Git-over-HTTP but not those API calls.
+GitLab.com repositories can be connected from **Dashboard → Add GitLab project**.
+Discovery uses the existing signed-in or explicitly linked GitLab token, lists
+personal and group projects with Developer (access level 30) or higher access,
+and checks the authenticated membership list again before connecting a stable
+numeric GitLab project ID to the user's catalog. An archived project is excluded.
+No filesystem clone occurs. Per-branch protection and later Git push authorization
+are independently enforced when publishing. Expired or revoked provider access
+blocks new discovery and connections with a reconnect diagnostic; stored catalog
+entries remain until explicitly removed. GitLab.com is the only supported host.
 GitHub repository connection is available from **Dashboard → Add GitHub repository**. Browse installations and their push-access repositories, or enter `owner/repository` or a `https://github.com/owner/repository` URL. If an App installation is missing or a selected repository is not covered, choose **Install / update access**. The GitHub setup callback verifies installation access using the existing GitHub user token, and can complete the requested repository connection automatically. Organizations may require an administrator to approve an installation or selection update: the pending import remains visible for 24 hours, with a retry action. If you prefer to adjust an existing installation, use **Configure access on GitHub** and return to the Add Repository screen after approval. Only repositories with actual push permission are accepted; suspended installations and installations without Contents: write are unavailable. Catalog connection creates a lightweight record, **not** a Git clone or Story. Repository permissions are checked again when connecting, not trusted from browser selection. GitHub installations are scoped to the authenticated App user; signing in with GitLab does not grant GitHub access until the user explicitly links their GitHub identity.
 
 Future GitHub installation-token issuance also requires the App ID and private key;

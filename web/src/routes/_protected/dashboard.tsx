@@ -54,7 +54,7 @@ function Dashboard() {
       </section>
     </div>
     <section style={{ marginTop: '1rem' }}><h2>Repositories</h2>
-      <p><a href="/repositories/add">Add GitHub repository</a></p>
+      <p><a href="/repositories/add">Add GitHub repository</a> · <a href="/repositories/gitlab">Add GitLab project</a></p>
       {dashboard.repositories.length ? <ul>{dashboard.repositories.map(repo => <li key={repo.id}>{repo.name} <span className="pill">{repo.provider}</span></li>)}</ul> : <p>No repositories connected yet.</p>}
     </section>
   </main>

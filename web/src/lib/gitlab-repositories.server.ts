@@ -1,0 +1,95 @@
+import { randomUUID } from 'node:crypto'
+import type { StudioAuth } from './auth'
+import type { StudioDatabase } from '../db/connection'
+import { requireUser, getRepositoryToken } from './access.server'
+
+type Project = {
+  id: number; path_with_namespace: string; name_with_namespace: string
+  web_url: string; visibility: string; archived: boolean; empty_repo?: boolean
+  permissions?: { project_access?: { access_level: number } | null; group_access?: { access_level: number } | null }
+}
+
+class ProviderFailure extends Error {
+  constructor(readonly status: number, message: string) { super(message) }
+}
+const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } })
+function failure(err: unknown) {
+  return err instanceof ProviderFailure ? reply({ error: err.message }, err.status)
+    : reply({ error: 'GitLab is temporarily unavailable. Try again later.' }, 502)
+}
+async function gitlab<T>(token: string, path: string): Promise<{ data: T; next: number | null }> {
+  let response: Response
+  try {
+    response = await fetch('https://gitlab.com/api/v4' + path, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      redirect: 'error', signal: AbortSignal.timeout(10000),
+    })
+  } catch { throw new ProviderFailure(502, 'Could not contact GitLab. Retry later.') }
+  if (response.status === 401) throw new ProviderFailure(409, 'GitLab authorization expired or was revoked. Reconnect GitLab.')
+  if (response.status === 403) throw new ProviderFailure(403, 'GitLab denied access. Check group membership and OAuth permissions.')
+  if (response.status === 429) throw new ProviderFailure(503, 'GitLab API rate limit reached. Retry later.')
+  if (!response.ok) throw new ProviderFailure(502, 'GitLab project lookup failed. Retry later.')
+  let data: T
+  try { data = await response.json() as T } catch { throw new ProviderFailure(502, 'GitLab returned invalid JSON') }
+  const nextRaw = response.headers.get('x-next-page')
+  const next = nextRaw && /^[1-9]\d*$/.test(nextRaw) ? Number(nextRaw) : null
+  return { data, next }
+}
+async function actor(auth: StudioAuth, store: StudioDatabase, headers: Headers) {
+  const user = await requireUser(auth, headers)
+  if (!user) throw new ProviderFailure(401, 'Sign in required')
+  let token: string | null
+  try { token = await getRepositoryToken(auth, store, headers, 'gitlab') }
+  catch { throw new ProviderFailure(409, 'GitLab authorization expired or was revoked. Reconnect GitLab.') }
+  if (!token) throw new ProviderFailure(409, 'Link your GitLab account to connect projects')
+  return { id: user.id, token }
+}
+function eligible(project: Project) {
+  return Number.isSafeInteger(project.id) && project.id > 0 &&
+    typeof project.path_with_namespace === 'string' &&
+    typeof project.name_with_namespace === 'string' && !project.archived
+}
+async function page(token: string, number: number) {
+  const result = await gitlab<Project[]>(token, `/projects?membership=true&min_access_level=30&simple=false&per_page=100&page=${number}&order_by=id&sort=asc`)
+  if (!Array.isArray(result.data)) throw new ProviderFailure(502, 'GitLab returned an invalid project list')
+  return result
+}
+export async function gitlabRepositoryRequest(auth: StudioAuth, store: StudioDatabase, request: Request): Promise<Response> {
+  if (request.method !== 'GET' && request.method !== 'POST') return reply({ error: 'Method not allowed' }, 405)
+  if (request.method === 'POST') {
+    const origin = new URL(request.url).origin
+    if (request.headers.get('origin') !== origin) return reply({ error: 'Cross-origin write refused' }, 403)
+  }
+  try {
+    const user = await actor(auth, store, request.headers)
+    if (request.method === 'GET') {
+      const raw = new URL(request.url).searchParams.get('page') || '1'
+      if (!/^[1-9]\d*$/.test(raw) || Number(raw) > 100) return reply({ error: 'Invalid page' }, 400)
+      const result = await page(user.token, Number(raw))
+      return reply({ projects: result.data.filter(eligible).map(project => ({
+        id: project.id, name: project.name_with_namespace, path: project.path_with_namespace,
+        visibility: project.visibility, empty: !!project.empty_repo,
+      })), page: Number(raw), nextPage: result.next })
+    }
+    const body = await request.json().catch(() => null)
+    if (!Number.isSafeInteger(body?.projectId) || body.projectId <= 0) return reply({ error: 'Invalid GitLab project' }, 400)
+    // Re-list via the authenticated membership endpoint at commit time.
+    // Never trust browser IDs, path strings, visibility or push claims.
+    let matched: Project | undefined
+    for (let i = 1; i <= 100; i++) {
+      const result = await page(user.token, i)
+      matched = result.data.find(p => p.id === body.projectId && eligible(p))
+      if (matched) break
+      if (!result.next) break
+      if (i === 100) throw new ProviderFailure(503, 'Too many projects to verify safely')
+    }
+    if (!matched) return reply({ error: 'Project not found among your push-access GitLab projects' }, 403)
+    store.sqlite.prepare(`INSERT INTO repositories (id, owner_user_id, provider, provider_repository_id, name, created_at)
+      VALUES (?, ?, 'gitlab', ?, ?, ?)
+      ON CONFLICT(owner_user_id, provider, provider_repository_id) DO UPDATE SET name=excluded.name`)
+      .run(randomUUID(), user.id, String(matched.id), matched.path_with_namespace, new Date().toISOString())
+    const repository = store.sqlite.prepare(`SELECT id, name, provider FROM repositories
+      WHERE owner_user_id=? AND provider='gitlab' AND provider_repository_id=?`).get(user.id, String(matched.id))
+    return reply({ repository })
+  } catch (err) { return failure(err) }
+}
