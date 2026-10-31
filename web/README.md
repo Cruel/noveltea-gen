@@ -19,16 +19,32 @@ Do not commit OAuth secrets. `BETTER_AUTH_SECRET` is **required**, at least
 provider tokens; back it up separately from SQLite. For rotations, see Better
 Auth's versioned `BETTER_AUTH_SECRETS` guidance.
 
-Configure callbacks in both provider apps:
+Configure callbacks in both provider applications:
 
-- GitHub: `<BETTER_AUTH_URL>/api/auth/callback/github`
-- GitLab.com: `<BETTER_AUTH_URL>/api/auth/callback/gitlab`
+- **GitHub App** (not a GitHub OAuth App): `<BETTER_AUTH_URL>/api/auth/callback/github`
+- GitLab.com OAuth application: `<BETTER_AUTH_URL>/api/auth/callback/gitlab`
 
 For development the base URL is `http://localhost:3000`; deploy with HTTPS.
-GitHub receives `repo`, `read:user`, and `user:email` OAuth scopes.
-GitLab receives `api` and `write_repository` (its default `read_user` is also included). GitLab requires the `api` scope for merge-request APIs; `write_repository` alone covers Git-over-HTTP but not those API calls.
-OAuth grants enable repository operations where the user is authorized;
-GitHub App installations and repository import are handled by later tickets.
+Create a GitHub App under Developer settings > GitHub Apps and copy its **Client ID**
+and **Client Secret** (not the GitHub App ID). Give it **Email addresses:
+read-only** under account permissions so Better Auth can retrieve a sign-in
+email. For future repository operations, configure repository permissions
+**Contents: read/write** and **Pull requests: read/write**; **Metadata: read**
+is added automatically. Configure repository installation access for selected
+repositories. Keep **Request user authorization (OAuth) during installation**
+off: login and Add Repository are intentionally separate flows. Add a setup
+callback for the later Add Repository installation flow only when it exists.
+GitHub App user tokens derive permissions from the app installation and user,
+not OAuth App scopes; `offline_access` is the only requested GitHub OAuth
+scope (for refreshable user tokens). An authorized GitHub identity does not
+itself grant access to uninstalled repositories.
+
+GitLab receives `api` and `write_repository` (its default `read_user` is also
+included). GitLab requires the `api` scope for merge-request APIs;
+`write_repository` alone covers Git-over-HTTP but not those API calls.
+Repository installation and import are handled by later tickets. Future
+GitHub installation-token issuance also requires the App ID and private key;
+those are not needed by the #40 sign-in screen.
 
 From the repository root:
 
@@ -69,6 +85,6 @@ and `Cache-Control: no-store` for all responses.
 
 The isolated migration/restart and user-ownership tests do not invoke live
 GitHub/GitLab authorization servers. Complete OAuth redirect, refresh and
-organization-permission acceptance requires registering both real OAuth apps
-and running the provider flows. Login and linking buttons are present but
-will not work without those credentials.
+organization-permission acceptance requires registering a real GitHub App and
+GitLab.com OAuth application and running the provider flows. Login and linking
+buttons are present but will not work without those credentials.

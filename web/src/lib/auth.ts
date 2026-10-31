@@ -38,7 +38,10 @@ export function createStudioAuth(store: StudioDatabase, config: StudioAuthConfig
     secret: config.secret,
     emailAndPassword: { enabled: false },
     socialProviders: {
-      github: { ...config.github, scope: ['repo', 'read:user', 'user:email'] },
+      // GitHub App user authorization uses registered fine-grained permissions,
+      // not OAuth App's repo/read:user/user:email scopes. offline_access is
+      // the only supported scope, for expiring user tokens and refresh.
+      github: { ...config.github, disableDefaultScope: true, scope: ['offline_access'] },
       // GitLab's write_repository covers Git-over-HTTP but not the API used
       // for project discovery and draft merge requests; those need api.
       gitlab: { ...config.gitlab, scope: ['api', 'write_repository'] },

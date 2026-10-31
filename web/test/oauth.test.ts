@@ -73,6 +73,9 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     await migrateStudio(store, auth)
     const sign = await begin(auth, 'sign-in/social')
     assert.match(sign.data.url, /^https:\/\/github.com\/login\/oauth\/authorize/)
+    // GitHub Apps ignore OAuth App repository scopes; request only the
+    // supported refreshable-token scope.
+    assert.equal(new URL(sign.data.url).searchParams.get('scope'), 'offline_access')
     const state = new URL(sign.data.url).searchParams.get('state')
     assert.ok(state)
     const callback = await auth.handler(new Request(`${origin}/api/auth/callback/github?code=good&state=${encodeURIComponent(state)}`, {
