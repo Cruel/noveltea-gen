@@ -22,7 +22,6 @@ const projects = [
 test('GitLab signed-in and linked users browse scoped projects, import stable IDs, and fail closed on revocation', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'nt-gitlab-'))
   const store = openStudioDatabase(join(dir, 'studio.sqlite'))
-  const auth = createStudioAuth(store, config)
   const original = globalThis.fetch
   let revoked = false
   const seen: string[] = []
@@ -35,7 +34,8 @@ test('GitLab signed-in and linked users browse scoped projects, import stable ID
       Response.json(projects, { headers: { 'x-next-page': '' } })
   }
   try {
-    await migrateStudio(store, auth)
+    await migrateStudio(store, config)
+    const auth = createStudioAuth(store, config)
     const ctx = await auth.$context
     const alice = await ctx.internalAdapter.createUser({ name: 'Alice', email: 'alice@test.dev', emailVerified: true }, { method: 'test' })
     const bob = await ctx.internalAdapter.createUser({ name: 'Bob', email: 'bob@test.dev', emailVerified: true }, { method: 'test' })

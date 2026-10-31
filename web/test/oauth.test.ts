@@ -54,7 +54,7 @@ async function begin(auth: ReturnType<typeof createStudioAuth>, endpoint: string
 test('OAuth callback persists encrypted GitHub token, explicit GitLab link and session across restart', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'noveltea-oauth-'))
   let store = openStudioDatabase(join(directory, 'studio.sqlite'))
-  let auth = createStudioAuth(store, config)
+  let auth: ReturnType<typeof createStudioAuth>
   const originalFetch = globalThis.fetch
   const calls: string[] = []
   globalThis.fetch = async (input, init) => {
@@ -70,7 +70,8 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
-    await migrateStudio(store, auth)
+    await migrateStudio(store, config)
+    auth = createStudioAuth(store, config)
     const sign = await begin(auth, 'sign-in/social')
     assert.match(sign.data.url, /^https:\/\/github.com\/login\/oauth\/authorize/)
     // GitHub Apps ignore OAuth App repository scopes; request only the
@@ -112,8 +113,8 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     assert.equal(await getRepositoryToken(auth, store, new Headers(), 'github'), null)
     store.sqlite.close()
     store = openStudioDatabase(join(directory, 'studio.sqlite'))
+    await migrateStudio(store, config)
     auth = createStudioAuth(store, config)
-    await migrateStudio(store, auth)
     assert.equal((await dashboardResponse(auth, store, new Request(`${origin}/api/dashboard`, { headers: ghCookies }))).status, 200)
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-access-sensitive')
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-access-sensitive')

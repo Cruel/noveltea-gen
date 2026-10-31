@@ -67,10 +67,26 @@ pnpm --filter @noveltea/studio build
 pnpm --filter @noveltea/studio start
 ```
 
-Migrations use Better Auth's Kysely SQLite migration and an append-only,
-transactional studio application migration journal. Run `migrate` before
-starting any web process; runtime does **not** silently initialize missing
-tables. The SQLite path defaults to
+Migrations have two deliberate schema owners, orchestrated by **one**
+`pnpm --filter @noveltea/studio migrate` command. Better Auth's supported
+Kysely migration planner inspects and brings its own `user`, `account`,
+`session`, `verification`, and `rateLimit` tables up to the pinned Better Auth
+schema; it does not maintain an application-style versioned SQL history.
+NovelTea's app tables use an append-only transactional
+`studio_schema_migrations` journal. The command runs the auth migration first,
+then the app migrations, waits for Better Auth's actual schema check, and runs
+SQLite integrity and foreign-key checks **before** reporting success. A failed
+check exits unsuccessfully. The migration command does not start a competing
+auth-runtime schema check before tables exist.
+
+Run `migrate` as an explicit deployment step **before** starting web processes
+(and while application writers are stopped); runtime never silently applies
+migrations. Keep Better Auth pinned and review database changes on upgrades:
+its migrator is schema-diff based, not an audited version-by-version journal.
+Back up the database and separately stored encryption secret before upgrades;
+use the same stable secret and database path on migration and runtime.
+
+The SQLite path defaults to
 `$XDG_STATE_HOME/noveltea-gen/studio.sqlite` or
 `~/.local/state/noveltea-gen/studio.sqlite`. Configure
 `NT_STUDIO_DB_PATH` as an absolute durable-volume path in production.

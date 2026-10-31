@@ -1,4 +1,4 @@
-import { betterAuth } from 'better-auth'
+import { betterAuth, type BetterAuthOptions } from 'better-auth'
 import { tanstackStartCookies } from 'better-auth/tanstack-start'
 import type { StudioDatabase } from '../db/connection'
 
@@ -30,8 +30,11 @@ export function readAuthConfig(env: NodeJS.ProcessEnv = process.env): StudioAuth
   }
 }
 
-export function createStudioAuth(store: StudioDatabase, config: StudioAuthConfig) {
-  return betterAuth({
+// Use one option source for the migration planner and runtime authentication.
+// Constructing Better Auth itself triggers an asynchronous schema check, so
+// the migrator must access these options without starting the auth runtime.
+export function studioAuthOptions(store: StudioDatabase, config: StudioAuthConfig) {
+  return {
     appName: 'NovelTea Studio',
     database: store.sqlite,
     baseURL: config.baseURL,
@@ -60,7 +63,11 @@ export function createStudioAuth(store: StudioDatabase, config: StudioAuthConfig
     },
     rateLimit: { enabled: true, storage: 'database' },
     plugins: [tanstackStartCookies()],
-  })
+  } satisfies BetterAuthOptions
+}
+
+export function createStudioAuth(store: StudioDatabase, config: StudioAuthConfig) {
+  return betterAuth(studioAuthOptions(store, config))
 }
 
 export type StudioAuth = ReturnType<typeof createStudioAuth>

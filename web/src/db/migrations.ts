@@ -1,6 +1,6 @@
 import type { StudioDatabase } from './connection'
 import { getMigrations } from 'better-auth/db/migration'
-import type { StudioAuth } from '../lib/auth'
+import { createStudioAuth, studioAuthOptions, type StudioAuthConfig } from '../lib/auth'
 
 // App migrations are append-only and applied transactionally. Auth tables are
 // managed by Better Auth's own schema migrator using the same SQLite database.
@@ -60,8 +60,10 @@ const appMigrations = [
   },
 ] as const
 
-export async function migrateStudio(store: StudioDatabase, auth: StudioAuth) {
-  const { runMigrations } = await getMigrations(auth.options)
+export async function migrateStudio(store: StudioDatabase, config: StudioAuthConfig) {
+  // Better Auth's supported Kysely migration planner reads its options without
+  // constructing an auth instance (which would concurrently check the unmigrated schema).
+  const { runMigrations } = await getMigrations(studioAuthOptions(store, config))
   await runMigrations()
   store.sqlite.exec('CREATE TABLE IF NOT EXISTS studio_schema_migrations (version INTEGER PRIMARY KEY NOT NULL)')
   const applied = new Set(
@@ -78,4 +80,16 @@ export async function migrateStudio(store: StudioDatabase, auth: StudioAuth) {
       store.sqlite.prepare('INSERT INTO studio_schema_migrations (version) VALUES (?)').run(migration.version)
     })()
   }
+  // Now it is safe to initialize Better Auth and await the *same* schema
+  // validation that normal runtime requests use, before closing SQLite or
+  // reporting migration success. A failure rejects this command.
+  const context = await createStudioAuth(store, config).$context
+  if (!context.checkSchema) throw new Error('Better Auth adapter does not support schema validation')
+  await context.checkSchema()
+  const integrity = store.sqlite.pragma('integrity_check') as Array<{ integrity_check: string }>
+  if (integrity.length !== 1 || integrity[0]?.integrity_check !== 'ok') {
+    throw new Error('Studio SQLite integrity check failed')
+  }
+  const foreignKeys = store.sqlite.pragma('foreign_key_check') as Array<unknown>
+  if (foreignKeys.length) throw new Error('Studio SQLite foreign-key check failed')
 }

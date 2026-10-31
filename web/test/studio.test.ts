@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
-import { createStudioAuth, readAuthConfig } from '../src/lib/auth'
+import { createStudioAuth, readAuthConfig, studioAuthOptions } from '../src/lib/auth'
 import { dashboardResponse, getDashboardData, getRepositoryToken } from '../src/lib/access.server'
 import { repositories, sessions, stories } from '../src/db/schema'
 
@@ -40,9 +40,9 @@ test('migrations survive restart, account identity is persisted, and catalog is 
   const path = join(directory, 'studio.sqlite')
   let store = openStudioDatabase(path)
   try {
+    await migrateStudio(store, config)
+    await migrateStudio(store, config)
     let auth = createStudioAuth(store, config)
-    await migrateStudio(store, auth)
-    await migrateStudio(store, auth)
     const ctx = await auth.$context
     const alice = await ctx.internalAdapter.createUser({
       name: 'Alice', email: 'alice@example.test', emailVerified: true,
@@ -96,8 +96,8 @@ test('migrations survive restart, account identity is persisted, and catalog is 
     store.sqlite.close()
 
     store = openStudioDatabase(path)
+    await migrateStudio(store, config)
     auth = createStudioAuth(store, config)
-    await migrateStudio(store, auth)
     const persisted = await getDashboardData(auth, store, headers)
     assert.equal(persisted?.user.id, alice.id)
     assert.deepEqual(persisted?.stories.map(story => story.id), ['story-alice'])
@@ -115,10 +115,10 @@ function readUserIds(store: ReturnType<typeof openStudioDatabase>, ownerId: stri
 test('encrypted OAuth tokens and disabled implicit linking are required auth policy', () => {
   const store = openStudioDatabase(':memory:')
   try {
-    const auth = createStudioAuth(store, config)
-    assert.equal(auth.options.account?.encryptOAuthTokens, true)
-    assert.equal(auth.options.account?.accountLinking?.disableImplicitLinking, true)
-    assert.equal(auth.options.emailAndPassword?.enabled, false)
-    assert.deepEqual(auth.options.account?.accountLinking?.trustedProviders, ['github','gitlab'])
+    const options = studioAuthOptions(store, config)
+    assert.equal(options.account.encryptOAuthTokens, true)
+    assert.equal(options.account.accountLinking.disableImplicitLinking, true)
+    assert.equal(options.emailAndPassword.enabled, false)
+    assert.deepEqual(options.account.accountLinking.trustedProviders, ['github','gitlab'])
   } finally { store.sqlite.close() }
 })

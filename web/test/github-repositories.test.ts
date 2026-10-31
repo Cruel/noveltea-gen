@@ -29,7 +29,6 @@ const accessible = { total_count: 3, repositories: [
 test('GitHub App connection: only authenticated, installed push repositories are browsable/importable; pending install resumes without OAuth', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'noveltea-gh-'))
   const store = openStudioDatabase(join(dir, 'studio.sqlite'))
-  const auth = createStudioAuth(store, config)
   const original = globalThis.fetch
   const requests: string[] = []
   globalThis.fetch = async (input, init) => {
@@ -43,7 +42,8 @@ test('GitHub App connection: only authenticated, installed push repositories are
     throw new Error('unexpected URL')
   }
   try {
-    await migrateStudio(store, auth)
+    await migrateStudio(store, config)
+    const auth = createStudioAuth(store, config)
     const context = await auth.$context
     const alice = await context.internalAdapter.createUser({ name: 'Alice', email: 'alice@example.test', emailVerified: true }, { method: 'test' })
     const bob = await context.internalAdapter.createUser({ name: 'Bob', email: 'bob@example.test', emailVerified: true }, { method: 'test' })
