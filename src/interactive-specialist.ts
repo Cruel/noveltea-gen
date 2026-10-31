@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
@@ -81,7 +81,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     }
   }
   const runtime = await ModelRuntime.create();
-  const dir = join(dirname(job.worktreeRoot), "interactive-sessions", assignment.workItemId, domain);
+  const dir = join(job.stateDir, "interactive-sessions", assignment.workItemId, domain);
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("interactive:" + domain, assignment.sourcePaths, assignment.milestoneId),
     step: "interactive:" + assignment.workItemId + ":" + domain,

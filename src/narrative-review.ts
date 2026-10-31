@@ -78,7 +78,7 @@ export interface NarrativeReviewOptions {
   provider?: string; model?: string; thinking?: "low" | "high";
 }
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
-const fileFor = (job: JobStartResult) => join(dirname(job.worktreeRoot), "narrative-review.json");
+const fileFor = (job: JobStartResult) => join(job.stateDir, "narrative-review.json");
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
   for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[k];
@@ -334,7 +334,7 @@ interface RepairOrigin {
 async function repairOrigin(job: JobStartResult, audit: ScopeAudit, findings: EditorialFinding[],
   planVersion: number): Promise<RepairOrigin | null> {
   const milestones = audit.scopedRecords.filter(id => id.startsWith("milestone."));
-  const stateRoot = dirname(job.worktreeRoot);
+  const stateRoot = job.stateDir;
   const candidates: RepairOrigin[] = [];
   for (const milestone of milestones) {
     const file = join(stateRoot, "composition-items", milestone.slice("milestone.".length) + ".json");
@@ -369,7 +369,7 @@ function changed(job: JobStartResult): string[] {
     .split("\n").filter(Boolean).map(s => s.slice(3)).map(p => p.startsWith(prefix) ? p.slice(prefix.length) : p);
 }
 async function publishVerifiedHead(job: JobStartResult, prior: string, head: string) {
-  const file = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  const file = join(job.stateDir, "revisions", "verified-head.json");
   await mkdir(dirname(file), { recursive: true });
   if (existsSync(file)) {
     const state = JSON.parse(await readFile(file, "utf8")) as { version: number; jobId: string; headSha: string };
@@ -390,7 +390,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
     const file = fileFor(job);
     const state: Receipt | undefined = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) : undefined;
     if (!state) return output(job, state);
-    const planFile = join(dirname(job.worktreeRoot), "architecture.json");
+    const planFile = join(job.stateDir, "architecture.json");
     const plan = existsSync(planFile) ? (JSON.parse(await readFile(planFile, "utf8")) as {
       plan?: Plan }).plan : undefined;
     const current = await trustedHead(job);
@@ -404,7 +404,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "final-review");
     const file = fileFor(job);
-    const archFile = join(dirname(job.worktreeRoot), "architecture.json");
+    const archFile = join(job.stateDir, "architecture.json");
     if (!existsSync(archFile)) throw new Error("Narrative review requires an approved architecture plan.");
     const arch = JSON.parse(await readFile(archFile, "utf8")) as {
       jobId: string; phase: string; plan?: Plan; history: Array<PlanHistoryStep & { reason: string }> };

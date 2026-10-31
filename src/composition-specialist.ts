@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
@@ -92,7 +92,7 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
     }
   }
   const runtime = await ModelRuntime.create();
-  const dir = join(dirname(job.worktreeRoot), "composition-sessions", assignment.workItemId, phase);
+  const dir = join(job.stateDir, "composition-sessions", assignment.workItemId, phase);
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("composition:" + phase, assignment.sourcePaths, assignment.milestoneId),
     step: "composition:" + assignment.workItemId + ":" + phase,

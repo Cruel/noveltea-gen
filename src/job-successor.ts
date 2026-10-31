@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 
@@ -17,7 +17,7 @@ function git(job: JobStartResult, ...args: string[]) {
  * the review on a later authorized plan revision. */
 function verifyReviewRepair(job: JobStartResult, commit: string, parent: string,
   paths: string[], message: string[]) {
-  const root = dirname(job.worktreeRoot);
+  const root = job.stateDir;
   const history = join(root, "review-history");
   const candidates = [join(root, "narrative-review.json"),
     ...(existsSync(history) ? readdirSync(history).filter(name =>
@@ -92,7 +92,7 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       throw new Error("A deferred capture may only add its own immutable inbox file.");
     }
     const id = paths[0]!.slice(prefix.length, -5);
-    const receiptFile = join(dirname(job.worktreeRoot), "ideas", id + ".json");
+    const receiptFile = join(job.stateDir, "ideas", id + ".json");
     if (!existsSync(receiptFile)) throw new Error("Deferred successor lacks its durable capture receipt.");
     const receipt = JSON.parse(readFileSync(receiptFile, "utf8")) as {
       jobId?: string; phase?: string; commitSha?: string; priorHead?: string;
@@ -128,7 +128,7 @@ export async function verifiedNarrativeSuccessor(job: JobStartResult, source: st
 export async function verifiedCompositionSuccessor(
   job: JobStartResult, milestone: string, interactiveHead: string,
 ) {
-  const file = join(dirname(job.worktreeRoot), "composition-items",
+  const file = join(job.stateDir, "composition-items",
     milestone.slice("milestone.".length) + ".json");
   if (!existsSync(file)) throw new Error("Interactive successor lacks a verified Composition receipt.");
   const state = JSON.parse(readFileSync(file, "utf8")) as {

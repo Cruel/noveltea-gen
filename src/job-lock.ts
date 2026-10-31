@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { hostname } from "node:os";
 import { mkdir, readFile, rename, rmdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 
 export interface StoryWriterContext {
@@ -68,7 +68,7 @@ export async function withStoryGenerationLock<T>(job: JobStartResult, run: () =>
 }
 
 async function withJobLease<T>(job: JobStartResult, workItem: string, prefix: string, run: () => Promise<T>): Promise<T> {
-  const jobRoot = dirname(job.worktreeRoot);
+  const jobRoot = job.stateDir;
   const lock = join(jobRoot, prefix + "-running");
   const reclaim = join(jobRoot, prefix + "-reclaim");
   const owner: Owner = {

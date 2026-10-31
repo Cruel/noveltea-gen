@@ -115,10 +115,10 @@ function targetSpec(job: JobStartResult, target: string) {
   return job.storyRelativePath ? job.storyRelativePath + "/" + target : target;
 }
 function receiptFile(job: JobStartResult, id: string) {
-  return join(dirname(job.worktreeRoot), "revisions", id + ".json");
+  return join(job.stateDir, "revisions", id + ".json");
 }
 function headFile(job: JobStartResult) {
-  return join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  return join(job.stateDir, "revisions", "verified-head.json");
 }
 async function persist(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true });
@@ -190,7 +190,7 @@ export async function trustedHead(job: JobStartResult) {
     }
     return record.headSha;
   }
-  const initial = join(dirname(job.worktreeRoot), "foundation.json");
+  const initial = join(job.stateDir, "foundation.json");
   if (existsSync(initial)) {
     const data = JSON.parse(await readFile(initial, "utf8")) as { stage?: string; commitSha?: string };
     if (data.stage !== "committed" || !data.commitSha || !SHA.test(data.commitSha)) {

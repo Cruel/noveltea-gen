@@ -49,10 +49,10 @@ function stable(v: unknown): string {
   }
   return JSON.stringify(v);
 }
-const root = (job: JobStartResult) => join(dirname(job.worktreeRoot), "author-updates");
+const root = (job: JobStartResult) => join(job.stateDir, "author-updates");
 const incoming = (job: JobStartResult, id: string) => join(root(job), "messages", id + ".json");
 const statusFile = (job: JobStartResult, id: string) => join(root(job), "receipts", id + ".json");
-const snapshotFile = (job: JobStartResult, name: string) => join(dirname(job.worktreeRoot), name + ".json");
+const snapshotFile = (job: JobStartResult, name: string) => join(job.stateDir, name + ".json");
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"]) delete env[key];
@@ -199,7 +199,7 @@ async function validateApprovalRequest(job: JobStartResult, payload: Record<stri
     }
     return;
   }
-  const file = join(dirname(job.worktreeRoot), "revisions", String(payload.workItemId) + ".json");
+  const file = join(job.stateDir, "revisions", String(payload.workItemId) + ".json");
   if (!existsSync(file)) throw new Error("Protected approval request has no existing revision proposal.");
   const receipt = await loadJson(file) as { jobId?: string; status?: string; proposalSha256?: string;
     verifiedHead?: string; changes?: Array<{ id: string }> };
@@ -234,7 +234,7 @@ async function previousApproval(job: JobStartResult, signed: SignedAuthorEvidenc
     }
   }
   if (payload.kind === "decision") {
-    const file = join(dirname(job.worktreeRoot), "revisions", payload.workItemId + ".json");
+    const file = join(job.stateDir, "revisions", payload.workItemId + ".json");
     if (!existsSync(file)) return null;
     const receipt = await loadJson(file) as { approvals?: Array<{ signed: SignedAuthorEvidence }> };
     if (receipt.approvals?.some(x => x.signed.signature === signed.signature)) {

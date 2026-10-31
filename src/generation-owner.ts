@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { GenerationRequest } from "./generation.js";
 
@@ -11,7 +11,7 @@ interface Owner {
   threadId: string;
   requestSha256: string;
 }
-const file = (job: JobStartResult) => join(dirname(job.worktreeRoot), "generation-server-owner.json");
+const file = (job: JobStartResult) => join(job.stateDir, "generation-server-owner.json");
 const sha = (request: GenerationRequest) => createHash("sha256")
   .update(JSON.stringify(request)).digest("hex");
 
@@ -27,8 +27,8 @@ export async function claimServerGeneration(job: JobStartResult, threadId: strin
   request: GenerationRequest): Promise<void> {
   if (!threadId || typeof threadId !== "string")
     throw new Error("Generation requires a durable server thread identity.");
-  if (existsSync(join(dirname(job.worktreeRoot), "generation.sqlite")) ||
-      existsSync(join(dirname(job.worktreeRoot), ".story-generation-running"))) {
+  if (existsSync(join(job.stateDir, "generation.sqlite")) ||
+      existsSync(join(job.stateDir, ".story-generation-running"))) {
     throw new Error("This Story job has a CLI generation checkpoint or active CLI generation; server takeover is forbidden.");
   }
   const expected: Owner = {

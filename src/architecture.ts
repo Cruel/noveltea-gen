@@ -341,7 +341,7 @@ async function fixtureAuthor(job: JobStartResult, state: Receipt) {
   }
 }
 async function publishVerifiedHead(job: JobStartResult, previous: string, commit: string) {
-  const file = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  const file = join(job.stateDir, "revisions", "verified-head.json");
   await mkdir(dirname(file), { recursive: true });
   if (existsSync(file)) {
     const saved = JSON.parse(await readFile(file, "utf8")) as {
@@ -447,7 +447,7 @@ function output(job: JobStartResult, state: Receipt, recovery?: Reconciliation) 
 }
 export async function runArchitectureJob(input: ArchitectureOptions, alreadyLocked = false) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
-  const file = join(dirname(job.worktreeRoot), "architecture.json");
+  const file = join(job.stateDir, "architecture.json");
   // Initial validator pinning updates job.json; reopen the durable manifest before each validation.
   const validate = async (source?: string, view?: { worktreeRoot: string; worktreeStoryRoot: string; baseSha: string }) =>
     validateStoryJob(await startStoryJob({ story: input.story, job: input.job }, false), source, view);

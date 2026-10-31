@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract, Plan } from "./architecture.js";
 import { verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
@@ -32,7 +32,7 @@ function git(job: JobStartResult, ...args: string[]) {
 }
 
 function receiptFile(job: JobStartResult, stage: string) {
-  const base = dirname(job.worktreeRoot);
+  const base = job.stateDir;
   if (stage === "foundations") return join(base, "character-world.json");
   const [kind, milestone] = stage.split(":");
   if (!["event", "interactive", "composition"].includes(kind ?? "") ||

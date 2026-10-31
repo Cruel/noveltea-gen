@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
@@ -209,7 +209,7 @@ export async function previewStoryMerge(input: MergePreviewOptions) {
   const overlaps = generated.filter(file => targetChanges.has(file));
   const dirtyTarget = lines(git(job.gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "--", job.storyRelativePath || "."));
   // A clean commit alone does not establish completion of the requested scope.
-  const reviewBytes = await readFile(join(dirname(job.worktreeRoot), "narrative-review.json"), "utf8")
+  const reviewBytes = await readFile(join(job.stateDir, "narrative-review.json"), "utf8")
     .catch(() => undefined);
   let reviewedScope = false;
   if (reviewBytes) {

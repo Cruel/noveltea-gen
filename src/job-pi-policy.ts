@@ -41,7 +41,7 @@ interface BudgetState {
 
 const defaultProfile = { provider: "openai", model: "gpt-6-luna" };
 const defaultPolicy = (): PiPolicy => ({ version: 1, profile: { ...defaultProfile }, limits: {} });
-const stateDir = (job: JobStartResult) => dirname(job.worktreeRoot);
+const stateDir = (job: JobStartResult) => job.stateDir;
 const policyPath = (job: JobStartResult) => join(stateDir(job), "pi-policy.json");
 const resolutionPath = (job: JobStartResult) => join(stateDir(job), "pi-resolution.json");
 const budgetPath = (job: JobStartResult) => join(stateDir(job), "pi-budget.json");

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
@@ -77,7 +77,7 @@ function reviewEscalation(report: JobReport, inventory: GenerationInventory | nu
   };
 }
 const MAX_IDEA_ATTEMPTS = 3;
-const ideaDispatchFile = (job: JobStartResult) => join(dirname(job.worktreeRoot), "generation-idea-dispatch.json");
+const ideaDispatchFile = (job: JobStartResult) => join(job.stateDir, "generation-idea-dispatch.json");
 function selectIdeaTask(s: State, head: string, tasks: Awaited<ReturnType<typeof scheduleIdeasAtBoundary>>["tasks"],
   next: ExecutionItem | null): IdeaTask | null {
   if (!s.inventory || !s.inventory.items.some(i => i.stage === "architecture" && i.status === "verified") ||
@@ -161,7 +161,7 @@ export function parseGenerationContract(value: unknown): CompletionContract {
   return contract;
 }
 async function checkPlan(job: JobStartResult, request: GenerationRequest, version: number | null | undefined) {
-  const file = join(dirname(job.worktreeRoot), "architecture.json");
+  const file = join(job.stateDir, "architecture.json");
   if (!existsSync(file)) {
     if (version != null) throw new Error("Pinned architecture receipt is missing; restore it before resuming.");
     return null;
@@ -311,7 +311,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
             if (last?.priorHead === task.priorHead &&
                 (last.action === "integrated" && task.action === "place" ||
                  last.action === "reassessed" && task.action === "reassess")) {
-              const entryFile = join(dirname(job.worktreeRoot), "idea-placements",
+              const entryFile = join(job.stateDir, "idea-placements",
                 task.id + "-" + last.revision + ".json");
               const receipt = JSON.parse(await readFile(entryFile, "utf8")) as {
                 priorHead: string; commitSha: string;
@@ -454,7 +454,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
   const job = await startStoryJob({ story: options.story, job: options.job }, false);
   return withStoryGenerationLock(job, async () => {
     ensureNotServerOwned(job);
-    const path = join(dirname(job.worktreeRoot), "generation.sqlite");
+    const path = join(job.stateDir, "generation.sqlite");
     if (options.action !== "start" && !existsSync(path)) throw new Error("No generation run exists; use generate start.");
     const saver = SqliteSaver.fromConnString(path);
     try {

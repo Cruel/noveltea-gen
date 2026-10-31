@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
@@ -72,7 +72,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     }
   }
   const runtime = await ModelRuntime.create();
-  const dir = join(dirname(job.worktreeRoot), "character-world-sessions", assignment.domain);
+  const dir = join(job.stateDir, "character-world-sessions", assignment.domain);
   const context = await preparePiContext(job, project, {
     group: "foundations:" + assignment.domain, step: "foundations:" + assignment.domain,
     paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId, directory: dir,

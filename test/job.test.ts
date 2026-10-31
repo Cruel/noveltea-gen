@@ -27,11 +27,11 @@ function repo(name: string) {
   return root;
 }
 
-function start(story: string, job: string, state: string, extra: string[] = []) {
+function start(story: string, job: string, state: string, extra: string[] = [], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath,
     ["--import", "tsx", cli, "job", "start", "--story", story, "--job", job, ...extra],
     { cwd: resolve("."), encoding: "utf8", timeout: 30_000, env: {
-      ...process.env, NT_STATE_DIR: state,
+      ...process.env, NT_GIT_CACHE_DIR: undefined, NT_STATE_DIR: state, ...env,
     } },
   );
 }
@@ -66,6 +66,123 @@ test("public CLI creates a persistent isolated job without changing author check
   const reopened = start(story, "draft", state);
   assert.equal(reopened.status, 0, reopened.stderr);
   assert.deepEqual(JSON.parse(reopened.stdout), job);
+});
+
+test("cache-backed worktrees retain durable state, pinned Git identity and fail closed on eviction", () => {
+  const author = repo("cached");
+  const story = join(author, "story");
+  mkdirSync(story);
+  writeFileSync(join(story, "foundation.md"), "original canon\n");
+  git(author, "add", "story/foundation.md");
+  git(author, "commit", "-qm", "Story canon");
+  const state = join(fixtures, "cached-state");
+  const cache = join(fixtures, "evictable-git-cache");
+  const started = start(story, "draft", state, [], { NT_GIT_CACHE_DIR: cache });
+  assert.equal(started.status, 0, started.stderr);
+  const job = JSON.parse(started.stdout);
+  assert.equal(job.cacheRoot, cache);
+  assert.ok(job.worktreeRoot.startsWith(join(cache, "worktrees")));
+  assert.ok(job.stateDir.startsWith(join(state, "jobs")));
+  assert.equal(existsSync(join(job.stateDir, "job.json")), true);
+  assert.equal(existsSync(join(cache, "job.json")), false);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "--git-common-dir"),
+    git(author, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+
+  writeFileSync(join(job.stateDir, "recovery.json"), "durable receipt\n");
+  writeFileSync(join(job.worktreeStoryRoot, "foundation.md"), "new draft\n");
+  git(job.worktreeRoot, "add", "story/foundation.md");
+  git(job.worktreeRoot, "commit", "-qm", "Draft change");
+  writeFileSync(join(job.worktreeStoryRoot, "unfinished.md"), "partial edit\n");
+  // The initial cache setting is pinned; a later process need not supply it.
+  const reopened = start(story, "draft", state);
+  assert.equal(reopened.status, 0, reopened.stderr);
+  assert.equal(JSON.parse(reopened.stdout).worktreeRoot, job.worktreeRoot);
+  assert.equal(JSON.parse(reopened.stdout).stateDir, job.stateDir);
+  assert.notEqual(JSON.parse(reopened.stdout).headSha, job.baseSha);
+  assert.equal(readFileSync(join(job.worktreeStoryRoot, "unfinished.md"), "utf8"), "partial edit\n");
+
+  git(author, "worktree", "remove", "--force", job.worktreeRoot);
+  const missing = start(story, "draft", state, [], { NT_GIT_CACHE_DIR: cache });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /worktree is missing|restore/i);
+  assert.equal(readFileSync(join(job.stateDir, "recovery.json"), "utf8"), "durable receipt\n");
+  assert.equal(existsSync(join(job.stateDir, "job.json")), true);
+  assert.equal(existsSync(job.worktreeRoot), false);
+});
+
+test("trusted callers can choose a per-repository cache root independently of the process default", () => {
+  const author = repo("controller-cache");
+  const story = join(author, "story");
+  mkdirSync(story);
+  const state = join(fixtures, "controller-state");
+  const cache = join(fixtures, "user", "repository");
+  const input = { story, job: "controller", worktreeCacheRoot: cache };
+  const executed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval",
+    `import { startStoryJob } from "./src/job.ts"; console.log(JSON.stringify(await startStoryJob(${JSON.stringify(input)})));`], {
+    cwd: resolve("."), encoding: "utf8", timeout: 30_000,
+    env: { ...process.env, NT_STATE_DIR: state,
+      NT_GIT_CACHE_DIR: join(fixtures, "other-global-cache") },
+  });
+  assert.equal(executed.status, 0, executed.stderr);
+  const job = JSON.parse(executed.stdout);
+  assert.equal(job.cacheRoot, cache);
+  assert.ok(job.worktreeRoot.startsWith(join(cache, "worktrees")));
+  assert.ok(job.stateDir.startsWith(join(state, "jobs")));
+  assert.equal(existsSync(join(fixtures, "other-global-cache")), false);
+});
+
+test("legacy job manifests reopen without migration when a Git cache is configured", () => {
+  const author = repo("legacy-cache");
+  const state = join(fixtures, "legacy-cache-state");
+  const started = start(author, "legacy", state);
+  assert.equal(started.status, 0, started.stderr);
+  const job = JSON.parse(started.stdout);
+  const file = join(job.stateDir, "job.json");
+  const manifest = JSON.parse(readFileSync(file, "utf8"));
+  delete manifest.stateDir;
+  writeFileSync(file, JSON.stringify(manifest) + "\n");
+  const reopened = start(author, "legacy", state, [], {
+    NT_GIT_CACHE_DIR: join(fixtures, "legacy-future-cache"),
+  });
+  assert.equal(reopened.status, 0, reopened.stderr);
+  assert.deepEqual(JSON.parse(reopened.stdout), job);
+  assert.equal(existsSync(file), true);
+});
+
+test("tampered cache-location metadata cannot redirect an existing job", () => {
+  const author = repo("cache-tamper");
+  const state = join(fixtures, "cache-tamper-state");
+  const cache = join(fixtures, "cache-tamper-root");
+  const started = start(author, "draft", state, [], { NT_GIT_CACHE_DIR: cache });
+  assert.equal(started.status, 0, started.stderr);
+  const job = JSON.parse(started.stdout);
+  const manifestFile = join(job.stateDir, "job.json");
+  const original = JSON.parse(readFileSync(manifestFile, "utf8"));
+  for (const mutation of [
+    { ...original, stateDir: join(fixtures, "other-state") },
+    { ...original, cacheRoot: { unexpected: "object" } },
+    { ...original, cacheRoot: join(fixtures, "other-cache") },
+  ]) {
+    writeFileSync(manifestFile, JSON.stringify(mutation) + "\n");
+    const reopened = start(author, "draft", state, [], { NT_GIT_CACHE_DIR: cache });
+    assert.notEqual(reopened.status, 0);
+    assert.match(reopened.stderr, /identity|match/i);
+    assert.equal(git(job.worktreeRoot, "branch", "--show-current"), job.branch);
+  }
+  writeFileSync(manifestFile, JSON.stringify(original) + "\n");
+  assert.equal(start(author, "draft", state, [], { NT_GIT_CACHE_DIR: cache }).status, 0);
+});
+
+test("cache and durable-state overlap or cache placement inside the author repo is rejected", () => {
+  const author = repo("cache-safety");
+  const state = join(fixtures, "cache-safety-state");
+  const overlapping = start(author, "draft", state, [], { NT_GIT_CACHE_DIR: state });
+  assert.notEqual(overlapping.status, 0);
+  assert.match(overlapping.stderr, /overlap|cache/i);
+  const insideAuthor = start(author, "draft", state, [], { NT_GIT_CACHE_DIR: join(author, "cache") });
+  assert.notEqual(insideAuthor.status, 0);
+  assert.match(insideAuthor.stderr, /checkout|cache/i);
+  assert.equal(existsSync(join(state, "jobs")), false);
 });
 
 test("relevant dirty and untracked Story content blocks a new job but unrelated monorepo edits do not", () => {

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { startStoryJob, canonicalDestination, type JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
 import type { ScopeAudit } from "./narrative-review.js";
@@ -64,7 +64,7 @@ function workItemReceipts(path: string, items: Json[], kind: string, target: str
     path, r.commitSha, r.failure ?? r.conflicts));
 }
 async function workItems(job: JobStartResult, plan: Plan | undefined, arch?: Json) {
-  const root = dirname(job.worktreeRoot);
+  const root = job.stateDir;
   const statuses: WorkItemStatus[] = [];
   const foundation = await receipt(join(root, "foundation.json"), job);
   if (foundation) statuses.push(item("foundation", "creative-direction", foundation.stage,
@@ -108,7 +108,7 @@ async function workItems(job: JobStartResult, plan: Plan | undefined, arch?: Jso
   return statuses;
 }
 async function authorEvidence(job: JobStartResult) {
-  const budget = await receipt(join(dirname(job.worktreeRoot), "pi-budget.json"), job);
+  const budget = await receipt(join(job.stateDir, "pi-budget.json"), job);
   // Reuse the message ledger's own identity/digest checks, including queued
   // messages that have no acknowledgement receipt yet. Only summary IDs and
   // statuses survive; original author payloads never enter report output.
@@ -153,7 +153,7 @@ function statusOf(review: Json | undefined, audit: ScopeAudit | undefined, plan:
 /** Author-facing read-only view. Never copy the private author inbox or raw message payloads. */
 export async function inspectJobReport(input: JobReportOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
-  const root = dirname(job.worktreeRoot);
+  const root = job.stateDir;
   const arch = await receipt(join(root, "architecture.json"), job);
   const plan = obj(arch?.plan) as unknown as Plan | undefined;
   const review = await receipt(join(root, "narrative-review.json"), job);

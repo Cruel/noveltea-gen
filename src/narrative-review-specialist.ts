@@ -97,7 +97,7 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
     throw new Error("Missing or invalid pinned narrative review/repair skills.");
   }
   const runtime = await ModelRuntime.create();
-  const dir = join(dirname(job.worktreeRoot), "review-sessions", role);
+  const dir = join(job.stateDir, "review-sessions", role);
   const context = role === "review" && assignment
     ? await preparePiContext(job, project, {
       group: "narrative-review:" + assignment.planVersion,

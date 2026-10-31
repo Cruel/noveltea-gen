@@ -32,7 +32,7 @@ interface InterruptionReceipt {
   error?: string;
   piStopReason?: string;
 }
-const stateFile = (job: JobStartResult) => join(dirname(job.worktreeRoot), "active-specialist.json");
+const stateFile = (job: JobStartResult) => join(job.stateDir, "active-specialist.json");
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"])

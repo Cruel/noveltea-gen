@@ -61,6 +61,7 @@ A witness disappears. The inquiry challenges a friendship.
       "--story", story, "--job", "draft"], {
       encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, NT_CONFIG_FILE: config,
+        NT_GIT_CACHE_DIR: name === "handoff" ? join(root, "evictable-cache") : undefined,
         NT_STATE_DIR: stateRoot, NT_SKILL_CACHE_DIR: join(root, "skills-cache"),
         NT_VALIDATOR_CACHE_DIR: join(root, "validator-cache") },
     });
@@ -68,10 +69,10 @@ A witness disappears. The inquiry challenges a friendship.
   const created = cli("start");
   assert.equal(created.status, 0, created.stderr);
   const job = JSON.parse(created.stdout) as {
-    jobId: string; threadId: string; branch: string; worktreeRoot: string; worktreeStoryRoot: string;
-    baseSha: string;
+    jobId: string; threadId: string; branch: string; stateDir: string;
+    worktreeRoot: string; worktreeStoryRoot: string; baseSha: string;
   };
-  const receiptFile = join(dirname(job.worktreeRoot), "architecture.json");
+  const receiptFile = join(job.stateDir, "architecture.json");
   const readReceipt = () => JSON.parse(readFileSync(receiptFile, "utf8"));
   const saveReceipt = (receipt: unknown) => writeFileSync(receiptFile, JSON.stringify(receipt, null, 2));
   const authored = () => {
@@ -94,6 +95,8 @@ function digest(path: string) {
 
 test("separate-process handoff and resume accept exactly one architecture commit", { skip: !available }, () => {
   const x = setup("handoff");
+  assert.ok(x.job.worktreeRoot.startsWith(join(root, "evictable-cache")));
+  assert.ok(x.job.stateDir.startsWith(join(root, "handoff-state", "jobs")));
   const handoff = expectOk(x.cli("architecture", "run", "--mode", "collaborative", "--fixture"));
   assert.equal(handoff.status, "awaiting-author");
   assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
@@ -106,6 +109,9 @@ test("separate-process handoff and resume accept exactly one architecture commit
   assert.equal(receipt.worktreeRoot, x.job.worktreeRoot);
   assert.equal(receipt.threadId, x.job.threadId);
   assert.equal(receipt.expectedHead, completed.headSha);
+  assert.equal(existsSync(join(x.job.stateDir, "validator.json")), true);
+  assert.equal(existsSync(join(x.job.stateDir, "architecture.json")), true);
+  assert.equal(existsSync(join(x.job.worktreeRoot, "architecture.json")), false);
   const replay = expectOk(x.cli("architecture", "run", "--mode", "collaborative", "--fixture"));
   assert.equal(replay.headSha, completed.headSha);
   assert.equal(count(x.job.worktreeRoot, x.base), 1);

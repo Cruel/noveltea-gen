@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
@@ -71,7 +71,7 @@ export async function authorEventCluster(
     }
   }
   const runtime = await ModelRuntime.create();
-  const sessionDir = join(dirname(job.worktreeRoot), "event-sessions", assignment.workItemId);
+  const sessionDir = join(job.stateDir, "event-sessions", assignment.workItemId);
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("event", assignment.sourcePaths, assignment.milestoneId),
     step: "event:" + assignment.workItemId,

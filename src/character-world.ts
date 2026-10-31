@@ -277,7 +277,7 @@ async function checkOutput(job: JobStartResult, report: CatalogReport, unit: Uni
   }
 }
 async function publishHead(job: JobStartResult, previous: string, commit: string, workItemId: string) {
-  const file = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  const file = join(job.stateDir, "revisions", "verified-head.json");
   await mkdir(dirname(file), { recursive: true });
   if (existsSync(file)) {
     const saved = JSON.parse(await readFile(file, "utf8")) as { version?: number; jobId?: string; headSha?: string };
@@ -438,7 +438,7 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
 
 export async function runCharacterWorldJob(input: CharacterWorldOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
-  const parent = dirname(job.worktreeRoot);
+  const parent = job.stateDir;
   const file = join(parent, "character-world.json");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("Start character-world run before inspect.");
   return withStoryJobLock(job, "character-world", async () => {

@@ -87,10 +87,10 @@ export function repoPath(job: JobStartResult, path: string) {
 }
 export function pathFor(id: string) { return INBOX + "/" + id + ".yaml"; }
 function receiptFile(job: JobStartResult, id: string) {
-  return join(dirname(job.worktreeRoot), "ideas", id + ".json");
+  return join(job.stateDir, "ideas", id + ".json");
 }
 function headFile(job: JobStartResult) {
-  return join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  return join(job.stateDir, "revisions", "verified-head.json");
 }
 export async function persist(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true });
@@ -207,7 +207,7 @@ export async function publishHead(job: JobStartResult, prior: string, commit: st
     if (saved.headSha === commit) return;
   } else if (prior !== job.baseSha) {
     // Legacy foundation receipts may precede creation of the shared verified-head marker.
-    const foundation = join(dirname(job.worktreeRoot), "foundation.json");
+    const foundation = join(job.stateDir, "foundation.json");
     if (!existsSync(foundation) ||
         (JSON.parse(await readFile(foundation, "utf8")) as { stage?: string; commitSha?: string }).commitSha !== prior) {
       throw new Error("Cannot establish a trusted predecessor for idea capture.");
@@ -271,7 +271,7 @@ async function capture(job: JobStartResult, input: IdeaInput) {
     const priorHead = await trustedHead(job);
     assertClean(job);
     // Never capture across a partly authored work item, even if its tree happens to be clean.
-    const parent = dirname(job.worktreeRoot);
+    const parent = job.stateDir;
     for (const [name, field, allowed] of [
       ["foundation.json", "stage", ["committed"]],
       ["architecture.json", "phase", ["committed"]],

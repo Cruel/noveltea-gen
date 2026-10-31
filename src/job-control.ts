@@ -6,7 +6,7 @@ import type { JobStartResult } from "./job.js";
 
 export type JobControl = "running" | "paused" | "cancelled" | "completed";
 const controlFile = (job: JobStartResult) =>
-  join(dirname(job.worktreeRoot), "author-updates", "control.json");
+  join(job.stateDir, "author-updates", "control.json");
 
 export async function readJobControl(job: JobStartResult): Promise<JobControl> {
   const file = controlFile(job);

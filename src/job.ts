@@ -15,6 +15,10 @@ interface JobManifest {
   novelteaProjectRoot?: string;
   baseSha: string;
   branch: string;
+  /** Durable receipts, sessions and checkpoints; never inside the evictable cache. */
+  stateDir?: string; // absent in legacy manifests
+  /** Pinned worktree cache root; absent in legacy manifests. */
+  cacheRoot?: string;
   worktreeRoot: string;
   worktreeStoryRoot: string;
   threadId: string;
@@ -22,7 +26,8 @@ interface JobManifest {
   validatorSha256?: string;
 }
 
-export interface JobStartResult extends Omit<JobManifest, "version" | "gitCommonDir"> {
+export interface JobStartResult extends Omit<JobManifest, "version" | "gitCommonDir" | "stateDir"> {
+  stateDir: string;
   status: "ready";
   headSha: string;
 }
@@ -31,6 +36,8 @@ export interface JobStartOptions {
   story: string;
   job: string;
   novelteaProject?: string;
+  /** Trusted controller-selected per-repository cache root; overrides NT_GIT_CACHE_DIR. */
+  worktreeCacheRoot?: string;
 }
 
 function git(cwd: string, ...args: string[]): string {
@@ -153,12 +160,19 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
   const branch = `noveltea-gen/${identity}`;
   const stateRoot = await canonicalDestination(storeRoot());
   const jobRoot = join(stateRoot, "jobs", identity);
-  const worktreeRoot = join(jobRoot, "worktree");
+  const configuredCacheRoot = options.worktreeCacheRoot ?? process.env.NT_GIT_CACHE_DIR;
+  const cacheRoot = configuredCacheRoot
+    ? await canonicalDestination(configuredCacheRoot) : undefined;
+  const worktreeRoot = cacheRoot ? join(cacheRoot, "worktrees", identity) : join(jobRoot, "worktree");
   const worktreeStoryRoot = resolve(worktreeRoot, storyRelativePath);
   const manifestFile = join(jobRoot, "job.json");
   const common = gitCommonDir(gitRoot);
   if (inside(gitRoot, jobRoot)) {
-    throw new Error("NT_STATE_DIR places job worktrees inside the author Git checkout. Select external state storage.");
+    throw new Error("NT_STATE_DIR places durable job state inside the author Git checkout. Select external state storage.");
+  }
+  if (cacheRoot && (inside(cacheRoot, stateRoot) || inside(stateRoot, cacheRoot) ||
+      inside(gitRoot, worktreeRoot))) {
+    throw new Error("NT_GIT_CACHE_DIR must not overlap durable state or place worktrees inside the author checkout.");
   }
 
   if (existsSync(jobRoot)) {
@@ -172,15 +186,20 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
         saved.gitCommonDir !== common || saved.storyRoot !== storyRoot ||
         saved.storyRelativePath !== storyRelativePath ||
         (options.novelteaProject !== undefined && saved.novelteaProjectRoot !== novelteaProjectRoot) ||
-        saved.branch !== branch || saved.worktreeRoot !== worktreeRoot ||
-        saved.worktreeStoryRoot !== worktreeStoryRoot ||
+        saved.branch !== branch || (saved.stateDir !== undefined && saved.stateDir !== jobRoot) ||
+        (saved.cacheRoot !== undefined && (typeof saved.cacheRoot !== "string" || !saved.cacheRoot)) ||
+        saved.worktreeRoot !== (saved.cacheRoot ? join(saved.cacheRoot, "worktrees", identity) : join(jobRoot, "worktree")) ||
+        saved.worktreeStoryRoot !== resolve(saved.worktreeRoot, storyRelativePath) ||
+        (saved.cacheRoot !== undefined && (saved.cacheRoot !== resolve(saved.cacheRoot) ||
+          inside(saved.cacheRoot, stateRoot) || inside(stateRoot, saved.cacheRoot) ||
+          inside(gitRoot, saved.worktreeRoot))) ||
         !/^[0-9a-f]{40,64}$/.test(saved.baseSha) ||
         !/^[0-9a-f-]{36}$/.test(saved.threadId) ||
         (saved.validatorSha256 !== undefined && !/^[a-f0-9]{64}$/.test(saved.validatorSha256))) {
       throw new Error("Saved job identity does not match the selected Story, repository or job. No worktree was changed.");
     }
     const headSha = await validateWorktree(saved);
-    return { ...publicFields(saved), status: "ready", headSha };
+    return { ...publicFields(saved, jobRoot), status: "ready", headSha };
   }
 
   if (!create) {
@@ -199,7 +218,8 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
   const manifest: JobManifest = {
     version: 1, jobId: options.job, gitRoot, gitCommonDir: common,
     storyRoot, storyRelativePath, ...(novelteaProjectRoot ? { novelteaProjectRoot } : {}),
-    baseSha, branch, worktreeRoot, worktreeStoryRoot, threadId: randomUUID(),
+    baseSha, branch, stateDir: jobRoot, ...(cacheRoot ? { cacheRoot } : {}),
+    worktreeRoot, worktreeStoryRoot, threadId: randomUUID(),
   };
   await mkdir(join(stateRoot, "jobs"), { recursive: true });
   try {
@@ -209,6 +229,7 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
   }
   let created = false;
   try {
+    if (cacheRoot) await mkdir(join(cacheRoot, "worktrees"), { recursive: true });
     git(gitRoot, "worktree", "add", "-b", branch, worktreeRoot, baseSha);
     created = true;
     await mkdir(worktreeStoryRoot, { recursive: true });
@@ -230,11 +251,11 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
     }
     throw error;
   }
-  return { ...publicFields(manifest), status: "ready", headSha: baseSha };
+  return { ...publicFields(manifest, jobRoot), status: "ready", headSha: baseSha };
 }
 
-function publicFields(manifest: JobManifest): Omit<JobStartResult, "status" | "headSha"> {
+function publicFields(manifest: JobManifest, stateDir: string): Omit<JobStartResult, "status" | "headSha"> {
   const { version, gitCommonDir, ...visible } = manifest;
   void version; void gitCommonDir;
-  return visible;
+  return { ...visible, stateDir };
 }

@@ -378,7 +378,7 @@ commits in **its own** worktree. The original author branch is never modified
 or automatically merged.
 
 The command prints machine-readable JSON with `jobId`, `storyRoot`,
-`storyRelativePath`, `gitRoot`, `baseSha`, `branch`, `worktreeRoot`,
+`storyRelativePath`, `gitRoot`, `baseSha`, `branch`, `stateDir`, `worktreeRoot`,
 `worktreeStoryRoot`, `headSha`, and the durable `threadId`. The job
 branch is `noveltea-gen/<sha256>`; it is checked out only in its own Git
 worktree. By default persistent job metadata and the worktree live outside
@@ -390,11 +390,32 @@ the author's Git checkout:
 ```
 
 `XDG_STATE_HOME` changes the state base and `NT_STATE_DIR` replaces the
-application state root; storage resolving inside the author Git checkout
-is rejected. Lost, altered or unexpected job worktree/branch identity
-fails closed instead of silently creating another. A second invocation with
-the same Story and job reopens the existing worktree, even if the author's
-checkout has since changed. Optional `--noveltea-project /path/to/engine`
+application state root. To place **new** job worktrees in a separate evictable
+Git cache, set `NT_GIT_CACHE_DIR=/path/to/git-cache` before `job start`:
+
+```text
+$NT_STATE_DIR/jobs/<sha256>/job.json             # durable manifest
+$NT_STATE_DIR/jobs/<sha256>/foundation.json      # durable receipts
+$NT_STATE_DIR/jobs/<sha256>/generation.sqlite    # durable checkpoints
+$NT_STATE_DIR/jobs/<sha256>/*-sessions/          # durable Pi transcripts
+$NT_GIT_CACHE_DIR/worktrees/<sha256>/            # linked Git worktree
+```
+
+`stateDir` is the durable job directory used by all receipts, Pi transcripts,
+validator pins, locks, and job checkpoints. `worktreeRoot` is **only** the Git
+checkout. The cache must not overlap durable state or place the worktree within
+the author checkout. Each manifest pins its worktree path, Git common directory,
+branch, original base and thread. Changing or unsetting `NT_GIT_CACHE_DIR` on
+reopen does not relocate or reconstruct an existing job. Legacy jobs keep their
+original `jobs/<sha256>/worktree/` location without migration or lost state.
+
+**Eviction is not automatic or safe for unfinished jobs.** Only a future
+cache manager that verifies publication and recoverability may remove cached
+worktrees. If a cached worktree is missing, job reopen fails closed and retains
+all durable state; it never regenerates the branch or replays unfinished work.
+Restore the original linked worktree and Git identity before resuming. A second
+invocation with the same Story and job reopens the pinned worktree, even if the
+author's checkout has since changed. Optional `--noveltea-project /path/to/engine`
 stores a separate future engine-project path as metadata only; engine records
 are never opened.
 
@@ -538,7 +559,8 @@ No changes are automatically merged into the author's normal checkout.
 
 ### Story work-item crash recovery (#23)
 
-Job state lives beside the persistent job worktree. `job.json` pins Git,
+Job state always lives in the durable `stateDir`, independently of whether the
+Git worktree resides in the optional cache. `job.json` pins Git,
 branch/worktree, trusted base and thread identity; `foundation.json` and
 `architecture.json` pin current work-item state, the last expected verified
 HEAD, authoring files/digests and Pi-session identity. The model and skills

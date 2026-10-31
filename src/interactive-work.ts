@@ -486,7 +486,7 @@ async function checkOutput(job: JobStartResult, previous: Report, report: Report
   return { choices: [], puzzles: verifyPuzzle(report, unit.paths) };
 }
 async function publishHead(job: JobStartResult, before: string, after: string, id: string) {
-  const file = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  const file = join(job.stateDir, "revisions", "verified-head.json");
   await mkdir(dirname(file), { recursive: true });
   if (existsSync(file)) {
     const saved = JSON.parse(await readFile(file, "utf8")) as { version: number; jobId: string; headSha: string };
@@ -669,7 +669,7 @@ revelations: [revelation.ledger-secret]`,
 export async function runInteractiveWorkItem(input: InteractiveOptions) {
   if (!validMilestone.test(input.milestone)) throw new Error("--milestone requires an exact typed Milestone ID.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
-  const root = dirname(job.worktreeRoot);
+  const root = job.stateDir;
   const file = join(root, "interactive-items", input.milestone.slice(10) + ".json");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("No interactive work item receipt.");
   return withStoryJobLock(job, "interactive-" + input.milestone.slice(10), async () => {

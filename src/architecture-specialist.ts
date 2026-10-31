@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
@@ -46,7 +46,7 @@ export async function authorArchitecture(
     }
   }
   const runtime = await ModelRuntime.create();
-  const sessionDir = join(dirname(job.worktreeRoot), "architecture-sessions");
+  const sessionDir = join(job.stateDir, "architecture-sessions");
   const context = await preparePiContext(job, project, {
     group: "architecture", step: "architecture:" + plan.version,
     paths: ["creative-direction/foundation.md"], snapshot: snapshot.id,

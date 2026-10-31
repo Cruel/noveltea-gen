@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { nativeValidate } from "./native-validator.js";
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { build } from "esbuild";
 import { canonicalDestination, type JobStartResult } from "./job.js";
@@ -57,7 +57,7 @@ function cacheRoot() {
   ));
 }
 function pinPath(job: JobStartResult) {
-  return join(dirname(job.worktreeRoot), RECEIPT);
+  return join(job.stateDir, RECEIPT);
 }
 function artifactDir(pin: ValidatorPin) {
   return join(cacheRoot(), pin.sha256);
@@ -194,7 +194,7 @@ async function pinValidator(job: JobStartResult, sourceCheckout?: string): Promi
   // publishes the first pin while this writer still holds its earlier job
   // snapshot. Re-read the durable manifest, but require the original identity
   // and any previously observed pin to remain unchanged.
-  const jobFile = join(dirname(job.worktreeRoot), "job.json");
+  const jobFile = join(job.stateDir, "job.json");
   const manifest = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;
   if (["jobId", "branch", "threadId", "baseSha", "worktreeRoot", "storyRoot", "gitRoot"]
     .some(key => manifest[key] !== job[key as keyof JobStartResult]) ||
@@ -222,7 +222,7 @@ async function pinValidator(job: JobStartResult, sourceCheckout?: string): Promi
   if (!sourceCheckout) {
     throw new Error("No validator is pinned to this job. Supply --validator-source <noveltea-skills checkout> or configure .local/config.json novelteaSkills for the first validation.");
   }
-  const lock = join(dirname(job.worktreeRoot), ".validator-pinning");
+  const lock = join(job.stateDir, ".validator-pinning");
   try { await mkdir(lock); }
   catch {
     throw new Error("Validator pinning is already in progress or interrupted. Inspect the job state before retrying.");
@@ -231,13 +231,13 @@ async function pinValidator(job: JobStartResult, sourceCheckout?: string): Promi
     const pin = await publishValidator(sourceCheckout);
     // Record the pin hash in the durable job manifest *before* publishing the
     // receipt. An interruption is detected as missing original pin metadata.
-    const jobFile = join(dirname(job.worktreeRoot), "job.json");
+    const jobFile = join(job.stateDir, "job.json");
     const current = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;
     if (current.jobId !== job.jobId || current.branch !== job.branch ||
         current.validatorSha256 !== undefined) {
       throw new Error("Job manifest changed during validator pinning. Inspect the job state before retrying.");
     }
-    const temporary = join(dirname(job.worktreeRoot), `job.validator.${process.pid}.tmp`);
+    const temporary = join(job.stateDir, `job.validator.${process.pid}.tmp`);
     try {
       await writeFile(temporary, JSON.stringify({ ...current, validatorSha256: pin.sha256 }, null, 2) + "\n",
         { flag: "wx", mode: 0o600 });
@@ -364,7 +364,7 @@ async function verifyNativePin(pin: NativeValidatorPin): Promise<void> {
   }
 }
 async function nativePin(job: JobStartResult): Promise<NativeValidatorPin> {
-  const jobRoot = dirname(job.worktreeRoot);
+  const jobRoot = job.stateDir;
   const jobFile = join(jobRoot, "job.json");
   const saved = pinPath(job);
   const manifest = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;

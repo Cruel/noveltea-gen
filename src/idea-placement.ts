@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
@@ -39,7 +39,7 @@ export interface PlacementOptions {
 }
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 const entryFile = (job: JobStartResult, id: string, revision: number) =>
-  join(dirname(job.worktreeRoot), "idea-placements", id + "-" + revision + ".json");
+  join(job.stateDir, "idea-placements", id + "-" + revision + ".json");
 const changes = (job: JobStartResult) => gitRaw(job, "status", "--porcelain=v1", "-z",
   "--untracked-files=all").split("\0").filter(Boolean).map(s => s.slice(3));
 const tree = (job: JobStartResult, path: string, at = "HEAD") =>
@@ -212,7 +212,7 @@ export async function scheduleIdeasAtBoundary(job: JobStartResult, boundary: str
   const ideas = await load(job);
   if (!ideas.length) return { tasks: [] as ReturnType<typeof schedule>, pending: 0, blocked: 0 };
   const current = await trustedHead(job);
-  const file = join(dirname(job.worktreeRoot), "idea-placement-tasks.json");
+  const file = join(job.stateDir, "idea-placement-tasks.json");
   const earlier = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) as {
     version: number; jobId: string;
     history: Array<{ head: string; boundary: string; tasks: ReturnType<typeof schedule> }>;
@@ -258,7 +258,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
   // another idea, even if the same specialist and target are selected.
   const identity = createHash("sha256").update(instruction).digest("hex");
   const runtime = await ModelRuntime.create();
-  const dir = join(dirname(job.worktreeRoot), "idea-placement-sessions", skill, writable ? "write" : "review");
+  const dir = join(job.stateDir, "idea-placement-sessions", skill, writable ? "write" : "review");
   const context = await preparePiContext(job, project, {
     group: "idea:" + identity + ":" + (writable ? "write" : "review"),
     step: "idea:" + identity + ":" + (writable ? "write" : "review"),

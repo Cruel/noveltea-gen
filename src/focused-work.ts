@@ -79,7 +79,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) 
     group: piNarrativeGroup("focused", receipt.context, receipt.target),
     step: receipt.workItemId + ":" + receipt.planVersion,
     paths: receipt.context, snapshot: receipt.snapshot!.id, provider: receipt.provider,
-    model: receipt.model, directory: join(dirname(job.worktreeRoot), "focused-sessions", receipt.target),
+    model: receipt.model, directory: join(job.stateDir, "focused-sessions", receipt.target),
     task: { kind: receipt.target.startsWith("event.") ? "event" :
       receipt.target.startsWith("puzzle.") || receipt.target.startsWith("choice-point.") ? "puzzle" :
       receipt.target.startsWith("authored-content.") ? "dialogue" : "character",
@@ -95,7 +95,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) 
     if (context.thinking && session.thinkingLevel !== context.thinking)
       throw new Error("Focused specialist did not honor the pinned reasoning profile.");
     const file = session.sessionManager.getSessionFile();
-    if (file) { receipt.piSessionFile = file; await save(join(dirname(job.worktreeRoot),
+    if (file) { receipt.piSessionFile = file; await save(join(job.stateDir,
       "focused-items", receipt.target + ".json"), receipt); }
     await context.beforeTurn(file ?? undefined);
     const required = [join(receipt.snapshot!.path, "skills", skill, "SKILL.md"),
@@ -131,7 +131,7 @@ export interface FocusedWorkOptions {
 export async function runFocusedWorkItem(input: FocusedWorkOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "focus:" + input.target, async () => {
-    const archPath = join(dirname(job.worktreeRoot), "architecture.json");
+    const archPath = join(job.stateDir, "architecture.json");
     if (!existsSync(archPath)) throw new Error("Focused work requires a versioned canonical completion contract.");
     const arch = JSON.parse(await readFile(archPath, "utf8")) as {
       jobId: string; phase: string; plan?: { version: number; contract: CompletionContract } };
@@ -141,7 +141,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     const plan = arch.plan;
     if (!input.contract.scope.targets.includes(input.target))
       throw new Error("Focused target is outside the explicit completion contract.");
-    const file = join(dirname(job.worktreeRoot), "focused-items", input.target + ".json");
+    const file = join(job.stateDir, "focused-items", input.target + ".json");
     const current = await trustedHead(job);
     const actual = git(job, "rev-parse", "HEAD").toString().trim();
     if (changes(job).length || actual !== current) throw new Error("Focused worktree has changes requiring explicit reconciliation.");
@@ -238,7 +238,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     if (changes(job).length) throw new Error("Focused commit left unexpected dirty worktree.");
     receipt.commitSha = git(job, "rev-parse", "HEAD").toString().trim();
     receipt.phase = "committed"; await save(file, receipt);
-    const headFile = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+    const headFile = join(job.stateDir, "revisions", "verified-head.json");
     const previous = existsSync(headFile) ? JSON.parse(await readFile(headFile, "utf8")) as {
       jobId: string; headSha: string; version: number } : undefined;
     if (previous && (previous.jobId !== job.jobId || previous.headSha !== current))

@@ -192,7 +192,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     }
   }
   const runtime = await ModelRuntime.create();
-  const sessionDir = join(dirname(job.worktreeRoot), "foundation-sessions");
+  const sessionDir = join(job.stateDir, "foundation-sessions");
   const context = await preparePiContext(job, project, {
     group: "foundation:write", step: "foundation:write",
     paths: [target], snapshot: state.snapshot.id, provider, model: modelId, directory: sessionDir,
@@ -292,7 +292,7 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
     if (diag.type === "error") throw new Error(`Pi discovery skill error: ${diag.message}`);
   }
   const runtime = await ModelRuntime.create();
-  const sessions = join(dirname(job.worktreeRoot), "foundation-discovery-sessions");
+  const sessions = join(job.stateDir, "foundation-discovery-sessions");
   const context = await preparePiContext(job, project, {
     group: "foundation:discovery", step: "foundation:discovery",
     paths: [], snapshot: state.snapshot.id, provider, model: modelId, directory: sessions,
@@ -340,7 +340,7 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
   }
 }
 
-function stateFile(job: JobStartResult) { return join(dirname(job.worktreeRoot), "foundation.json"); }
+function stateFile(job: JobStartResult) { return join(job.stateDir, "foundation.json"); }
 async function saveState(file: string, state: FoundationState) {
   const tmp = `${file}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", { flag: "wx", mode: 0o600 });
@@ -369,7 +369,7 @@ async function existingState(job: JobStartResult): Promise<FoundationState | und
 }
 function workHead(state: FoundationState) { return state.workHead ?? state.baseSha; }
 async function advanceInboxVerifiedHead(job: JobStartResult, state: FoundationState, commit: string) {
-  const file = join(dirname(job.worktreeRoot), "revisions", "verified-head.json");
+  const file = join(job.stateDir, "revisions", "verified-head.json");
   if (!existsSync(file)) return; // Older foundation-first jobs have no shared marker.
   const saved = JSON.parse(await readFile(file, "utf8")) as { version?: number; jobId?: string; headSha?: string };
   if (saved.version !== 1 || saved.jobId !== job.jobId ||
