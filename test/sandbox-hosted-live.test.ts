@@ -25,6 +25,8 @@ import { SandboxClient } from "../src/sandbox-client.js";
 import { startStoryJob } from "../src/job.js";
 import { runFoundationJob } from "../src/foundation.js";
 import { runArchitectureJob } from "../src/architecture.js";
+import { runAuthorAction } from "../src/author-updates.js";
+import { inspectTrustedApproval, requestTrustedApproval } from "../src/trusted-approval.js";
 import { runCharacterWorldJob } from "../src/character-world.js";
 import { runEventWorkItem } from "../src/event-work.js";
 import { hasUserProtectedDecision } from "../src/foundation-record.js";
@@ -194,6 +196,77 @@ test("registered rootless Docker controller supports Foundation through Event st
       assert.ok(markdown("events").length >= 1);
       // No model shell access to the host is necessary for either specialist.
       assert.equal((await client.inspect(id)).status, "running");
+    }
+    if (!resumeDir) {
+      // Exercise a genuine suspended author-update interrupt against the same
+      // job that Pi (or its deterministic fixture) just authored.
+      const current = await runArchitectureJob({ story, job: id, action: "inspect" });
+      assert.ok(current.plan);
+      const updated = {
+        ...current.plan.contract,
+        constraints: [...current.plan.contract.constraints, "Retain the archivist's agency"],
+      };
+      const proposed = await runArchitectureJob({ story, job: id, action: "propose", contract: updated });
+      assert.ok(proposed.proposal);
+      const proposal = proposed.proposal.digest;
+      const messageId = "approval-boundary";
+      const messageFile = join(temporary, "approval-message.json");
+      writeFileSync(messageFile, JSON.stringify({
+        id: messageId, kind: "approval", payload: { requestType: "plan", proposalSha256: proposal },
+      }));
+      await runAuthorAction({ story, job: id, action: "send", file: messageFile });
+      const pending = await runAuthorAction({ story, job: id, action: "process" }) as {
+        status: string; blockers: string[];
+      };
+      assert.equal(pending.status, "blocked");
+      assert.ok(pending.blockers.some(value => value.includes(messageId)));
+
+      // The request is real and pending in the trusted controller ledger.
+      const approvalId = "sandbox-probe";
+      const receipt = await requestTrustedApproval(job, { id: approvalId, kind: "plan" });
+      assert.equal(receipt.phase, "awaiting-controller");
+      const receiptPath = join(job.stateDir, "trusted-approvals", approvalId + ".json");
+
+      // This is the same isolated execution primitive offered to Pi's bash
+      // tool. Even with exact host paths, Pi cannot see the approval ledger,
+      // controller credentials, private socket, job state, or Docker socket.
+      const inaccessible = [receiptPath, job.stateDir, tokenFile, config.socket,
+        join(app, "studio.sqlite"), "/var/run/docker.sock", "/run/docker.sock",
+        "/story/.git", "/story/.story-inbox"];
+      const probeOutput: string[] = [];
+      const probe = await client.execute(id, ["sh", "-c",
+        'for path in "$@"; do if test -e "$path" || test -S "$path"; then echo "exposed:$path" >&2; exit 41; fi; done; echo isolated',
+        "nt-isolation-probe", ...inaccessible], (_stream, value) => probeOutput.push(value));
+      assert.equal(probe, 0, probeOutput.join(""));
+      assert.equal(probeOutput.join("").trim(), "isolated");
+      assert.equal((await inspectTrustedApproval(job, approvalId)).phase, "awaiting-controller");
+      const interrupted = await runAuthorAction({ story, job: id, action: "inspect" }) as {
+        records: Array<{ acknowledgement: { phase: string } }>;
+      };
+      assert.equal(interrupted.records[0]?.acknowledgement.phase, "awaiting-author");
+
+      // A trusted OS terminal can resolve the interrupt; sandbox tools cannot.
+      // This is scripted consent solely for a disposable test job, not a real
+      // author's decision or a model-accessible approval mechanism.
+      const argv = [process.execPath, "--import", "tsx", resolve("src/cli.ts"),
+        "job", "approval", "decide", "--story", story, "--job", id, "--id", approvalId];
+      const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+      const terminal = spawnSync("script",
+        ["-q", "-e", "-c", argv.map(shellQuote).join(" "), "/dev/null"],
+        { input: "APPROVE " + proposal + "\n", encoding: "utf8", timeout: 30000 });
+      assert.equal(terminal.status, 0, terminal.stdout + terminal.stderr);
+      const approved = await inspectTrustedApproval(job, approvalId);
+      assert.equal(approved.phase, "recorded");
+      if (approved.phase !== "recorded") throw new Error("Approval was not recorded.");
+      assert.equal(approved.source, "trusted-cli");
+      const responseFile = join(temporary, "approval-response.json");
+      writeFileSync(responseFile, JSON.stringify({ type: "decision", messageId,
+        approval: { receiptId: approvalId, nonce: receipt.nonce } }));
+      const resumed = await runAuthorAction({ story, job: id, action: "resume", file: responseFile }) as {
+        phase: string;
+      };
+      assert.equal(resumed.phase, "applied");
+      assert.equal((await runArchitectureJob({ story, job: id, action: "inspect" })).plan?.version, 2);
     }
     assert.equal(git(repository, "rev-parse", "HEAD"), base);
     assert.equal(git(repository, "status", "--porcelain"), "");
