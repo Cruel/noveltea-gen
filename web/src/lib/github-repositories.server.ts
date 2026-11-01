@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
+import { StudioSchemaError } from '../db/migrations'
 import { getRepositoryToken, requireUser } from './access.server'
 
 type Options = { appSlug: string; baseURL: string }
@@ -29,8 +30,20 @@ export function json(body: unknown, status = 200): Response {
 }
 export function errorResponse(error: unknown) {
   if (error instanceof GithubError) return json({ error: error.message }, error.status)
-  // Never reflect provider responses, tokens, or account identifiers in errors.
-  return json({ error: 'GitHub is temporarily unavailable. Try again later.' }, 502)
+  if (error instanceof StudioSchemaError) return json({ error: error.message }, 503)
+  // Unexpected local errors must not be attributed to GitHub. Log a usable
+  // incident reference without reflecting internal traces or secrets to users.
+  const reference = randomUUID().slice(0, 8)
+  const name = error instanceof Error ? error.name : typeof error
+  const code = error && typeof error === 'object' && 'code' in error &&
+    typeof error.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : undefined
+  console.error(`[Studio ${reference}] Unexpected server failure`, {
+    name, code,
+    // SQLite diagnostics contain SQL identifiers but not provider tokens.
+    ...(name === 'SqliteError' && error instanceof Error ? { detail: error.message } : {}),
+    stack: error instanceof Error ? error.stack?.split('\n').slice(1, 8).join('\n') : undefined,
+  })
+  return json({ error: `Studio encountered an internal error (reference ${reference}). Check the server logs.` }, 500)
 }
 
 export function readGithubAppOptions(env: NodeJS.ProcessEnv = process.env): Options {

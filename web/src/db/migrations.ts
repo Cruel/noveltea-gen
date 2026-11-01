@@ -66,6 +66,36 @@ const appMigrations = [
   },
 ] as const
 
+const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
+
+export class StudioSchemaError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StudioSchemaError'
+  }
+}
+
+// Runtime must never silently migrate a live database. Check the durable
+// migration journal and the actual column needed by Story registration so a
+// missed deployment migration produces an actionable error, not a provider 502.
+export function assertStudioSchemaCurrent(store: StudioDatabase) {
+  const hasJournal = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='studio_schema_migrations'`).get()
+  const applied = hasJournal
+    ? (store.sqlite.prepare('SELECT max(version) AS version FROM studio_schema_migrations').get() as { version: number | null }).version
+    : null
+  if (applied === null || applied < latestAppSchemaVersion) {
+    throw new StudioSchemaError(`Studio database migrations are pending (requires version ${latestAppSchemaVersion}, found ${applied ?? 0}). Stop Studio, run \`pnpm --filter @noveltea/studio migrate\`, then restart Studio.`)
+  }
+  if (applied > latestAppSchemaVersion) {
+    throw new StudioSchemaError('Studio database schema is newer than this build. Update Studio before using it.')
+  }
+  const columns = store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>
+  if (!columns.some(column => column.name === 'source_commit_sha')) {
+    throw new StudioSchemaError('Studio database migration journal does not match its schema. Check migration status and restore or repair the database before using Story imports.')
+  }
+}
+
 export async function migrateStudio(store: StudioDatabase, config: StudioAuthConfig) {
   // Better Auth's supported Kysely migration planner reads its options without
   // constructing an auth instance (which would concurrently check the unmigrated schema).

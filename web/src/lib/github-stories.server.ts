@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
+import { assertStudioSchemaCurrent } from '../db/migrations'
 import { actorFor, errorResponse, github, GithubError, json, matchingRepository } from './github-repositories.server'
 
 // The cap applies to uncompressed Git blobs at a single pinned commit, not
@@ -325,6 +326,7 @@ export async function githubStoryRequest(
       WHERE id=? AND owner_user_id=? AND provider='github'`)
       .get(repositoryId, actor.id) as { name: string } | undefined
     if (!row) throw new GithubError(404, 'GitHub repository not connected.')
+    if (request.method === 'POST') assertStudioSchemaCurrent(store)
     // A catalog row alone is not current authorization: GitHub installation
     // selection, membership or push rights may have been revoked.
     await matchingRepository(actor.token, row.name)

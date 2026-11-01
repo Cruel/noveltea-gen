@@ -105,7 +105,13 @@ GitHub installation/user permissions block new browsing and selection, but
 existing catalog records are retained. API rate limits or missing access
 surface as retry/reconnect errors. New Story catalog records do not clone,
 validate canonical Markdown contents, or start agents; later tickets own these
-steps.
+steps. Story registration requires app migration 3 (`source_commit_sha`). On an
+older Studio database, POST returns a specific HTTP 503 explaining how to run
+the explicit migration, rather than misreporting a GitHub outage. An inconsistent
+migration journal/schema is rejected without attempting a runtime repair.
+Unexpected internal failures are logged server-side with a short incident
+reference and reported as HTTP 500, without exposing exception details in the
+browser.
 
 Future GitHub installation-token issuance also requires the App ID and private key;
 those are not needed by the #40 sign-in screen.

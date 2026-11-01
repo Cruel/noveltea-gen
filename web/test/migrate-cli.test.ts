@@ -23,7 +23,16 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
     GITLAB_CLIENT_SECRET: 'test-gl-secret',
   }
   try {
-    for (let run = 0; run < 2; run++) {
+    for (let run = 0; run < 3; run++) {
+      if (run === 1) {
+        // Model a user's persisted pre-#43 database, rather than only testing
+        // fresh installations and already-current databases.
+        const oldStore = openStudioDatabase(filename)
+        try {
+          oldStore.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
+          oldStore.sqlite.prepare('DELETE FROM studio_schema_migrations WHERE version=3').run()
+        } finally { oldStore.sqlite.close() }
+      }
       const result = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate-cli.ts'], {
         cwd: webRoot, encoding: 'utf8', env, timeout: 20_000,
       })

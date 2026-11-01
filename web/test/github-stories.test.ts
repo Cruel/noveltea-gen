@@ -8,6 +8,7 @@ import { createStudioAuth } from '../src/lib/auth'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { githubStoryRequest, STORY_LIMIT_BYTES } from '../src/lib/github-stories.server'
+import { errorResponse } from '../src/lib/github-repositories.server'
 
 const origin = 'http://localhost:3000'
 const secret = 'github-story-tests-01234567890123456789012345'
@@ -161,6 +162,21 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     assert.deepEqual((await discovery.json()).stories, ['sample-story'])
 
     const base = { repositoryId: repoId, directory: 'sample-story', commit }
+    // Reproduce upgrading an existing Studio DB without running #43's
+    // migration: browsing succeeds but Story import must report the missing
+    // migration instead of blaming GitHub with a generic 502.
+    store.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
+    store.sqlite.prepare('DELETE FROM studio_schema_migrations WHERE version=3').run()
+    const outdated = await post(base)
+    assert.equal(outdated.status, 503)
+    assert.match((await outdated.json()).error, /database.*migrat|run.*migrate/i)
+    store.sqlite.exec('ALTER TABLE stories ADD COLUMN source_commit_sha TEXT')
+    store.sqlite.prepare('INSERT INTO studio_schema_migrations (version) VALUES (3)').run()
+    store.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
+    const inconsistent = await post(base)
+    assert.equal(inconsistent.status, 503)
+    assert.match((await inconsistent.json()).error, /journal.*schema|repair/i)
+    store.sqlite.exec('ALTER TABLE stories ADD COLUMN source_commit_sha TEXT')
     assert.equal((await post({ ...base, commit: null })).status, 400)
     assert.equal((await post(base, 'https://attacker.invalid')).status, 403)
     assert.equal((await post({ ...base, directory: '../elsewhere' })).status, 400)
@@ -222,4 +238,22 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     store.sqlite.close()
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('unexpected local server errors are logged with a reference, never misreported as GitHub outages', async () => {
+  const original = console.error
+  const logs: unknown[][] = []
+  console.error = (...args: unknown[]) => { logs.push(args) }
+  try {
+    const response = errorResponse(new Error('private-provider-details-MUST-NOT-LEAK'))
+    assert.equal(response.status, 500)
+    const body = await response.json()
+    assert.match(body.error, /Studio encountered an internal error.*reference/)
+    assert.doesNotMatch(body.error, /GitHub|private-provider-details/)
+    assert.equal(logs.length, 1)
+    const reference = body.error.match(/reference ([a-f0-9]{8})/)?.[1]
+    assert.ok(reference)
+    assert.match(JSON.stringify(logs[0]), new RegExp(reference))
+    assert.doesNotMatch(JSON.stringify(logs), /private-provider-details/)
+  } finally { console.error = original }
 })
