@@ -137,7 +137,7 @@ function GithubStories() {
           {busy ? 'Preparing sparse checkout…' : 'Create isolated job worktree'}
         </button>
         {job && <p role="status">Job <code>{job.id}</code> is prepared at base <code>{job.baseSha}</code>.
-          Generation starts through the future job execution flow; no agent has run yet.</p>}
+          {' '}<a href={'/jobs/' + job.id}>Open job and start fixture generation</a>.</p>}
       </div>}
     </section>
     <section>

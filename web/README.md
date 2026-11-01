@@ -404,6 +404,65 @@ user. Browser-facing data never includes tokens, arbitrary per-user paths or
 Git credentials. `/api/dashboard` returns 401 without a valid session,
 and `Cache-Control: no-store` for all responses.
 
+## Authenticated, fixture-only Story generation (#59)
+
+Once a GitHub/GitLab Story job has an isolated cached worktree, open
+**Dashboard → job** or follow **Open job and start fixture generation** after
+acquisition. The job page shows its verified pinned Git baseline, current
+branch HEAD, durable graph thread, request and completed work stages.
+`GET /api/jobs/:jobId` is an owner-scoped, read-only inspection endpoint.
+`POST /api/jobs/:jobId` accepts only `{task,contract}` from a signed-in
+author on the configured same origin. It validates the canonical
+`parseGenerationContract` scope and reads Story, revision, branch and
+worktree identity exclusively from the database and original durable job
+manifest. No filesystem path, provider credential, model or fixture switch
+comes from the browser. Schema migration 5 adds the durable request and
+thread binding.
+
+**This is strictly fixture execution, not production agent hosting.**
+The endpoint forces `fixture: true` and refuses the legacy
+`NT_LIVE_GENERATION_IDEA=1` override. It runs the *existing production
+LangGraph graph* through one server-owned SQLite checkpointer in the durable
+job state directory, pausing at the foundation boundary. The same immutable
+request and thread are recorded in both the application catalog and the
+generator's server-owner receipt. Repeated starts only inspect the existing
+run; they never replay a writer or switch the thread. The CLI cannot
+take over a server-owned generation. The normal native validator pin,
+Git revision checks, protected-decision rules, and specialist receipts
+remain in force. The test-only legacy validator flag must not be enabled
+in production.
+
+Configure `NT_STATE_DIR` (durable), `NT_GIT_CACHE_DIR` (evictable),
+and `NT_NATIVE_CLI` as usual. An optional
+`NT_STUDIO_SKILLS_SOURCE` specifies the trusted server's NovelTea skills
+checkout for fixture skill snapshots; never accept a skills path from an
+HTTP client. Run `pnpm --filter @noveltea/studio migrate` while Studio is
+stopped to apply migration 5. The server and generator checkpoint SQLite
+must be owned by one service process and preserved with the job receipts
+across restarts. A reconnect inspects the same state; a missing checkpoint,
+interrupted writer, unverified Git HEAD, or mismatched request/owner
+fails closed for manual reconciliation rather than silently restarting.
+An unpublished Story initialization draft with an unverified extra Git
+commit can be inspected but cannot be launched until its revision is trusted.
+
+This stage intentionally does not offer live Pi, worker sandbox tools,
+safe-boundary continuation or external Agent Protocol admission; those
+belong to subsequent deployment, sandbox and author-control work. Neither
+a fixture completion nor a successful structural validation establishes
+literary/editorial approval.
+
+Run the authenticated fixture integration test with an existing
+`noveltea-skills` checkout:
+
+```sh
+NT_SKILLS_CHECKOUT=/path/to/noveltea-skills pnpm --filter @noveltea/studio exec tsx --test test/fixture-jobs.test.ts
+```
+
+It exercises a real local Git cache/worktree and production fixture graph,
+anonymous and cross-user rejection, same-origin writes, invalid/foreign
+contracts, run idempotency, owner/thread receipts, checkpoint reconnect,
+and fail-closed tampering.
+
 ## Acceptance/testing limitations
 
 The isolated migration/restart and user-ownership tests do not invoke live

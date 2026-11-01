@@ -70,6 +70,13 @@ const appMigrations = [
       `ALTER TABLE studio_sessions ADD COLUMN source_commit_sha TEXT`,
     ],
   },
+  {
+    version: 5,
+    statements: [
+      `ALTER TABLE studio_sessions ADD COLUMN generation_request_json TEXT`,
+      `ALTER TABLE studio_sessions ADD COLUMN generation_thread_id TEXT`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -99,7 +106,9 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   const columns = store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>
   const sessionColumns = store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>
   if (!columns.some(column => column.name === 'source_commit_sha') ||
-      !sessionColumns.some(column => column.name === 'source_commit_sha')) {
+      !sessionColumns.some(column => column.name === 'source_commit_sha') ||
+      !sessionColumns.some(column => column.name === 'generation_request_json') ||
+      !sessionColumns.some(column => column.name === 'generation_thread_id')) {
     throw new StudioSchemaError('Studio database migration journal does not match its schema. Check migration status and restore or repair the database before using Story imports.')
   }
 }

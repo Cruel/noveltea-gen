@@ -54,10 +54,10 @@ function Dashboard() {
         })}</ul> : <p>No Stories imported yet.</p>}
       </section>
       <section><h2>Active jobs</h2>
-        {dashboard.activeJobs.length ? <ul>{dashboard.activeJobs.map(job => <li key={job.id}>{job.title} <span className="pill">{job.status}</span></li>)}</ul> : <p>No active jobs.</p>}
+        {dashboard.activeJobs.length ? <ul>{dashboard.activeJobs.map(job => <li key={job.id}><a href={'/jobs/' + job.id}>{job.title}</a> <span className="pill">{job.status}</span></li>)}</ul> : <p>No active jobs.</p>}
       </section>
       <section><h2>Recent sessions</h2>
-        {dashboard.recentSessions.length ? <ul>{dashboard.recentSessions.map(job => <li key={job.id}>{job.title} <span className="pill">{job.status}</span></li>)}</ul> : <p>No recent sessions.</p>}
+        {dashboard.recentSessions.length ? <ul>{dashboard.recentSessions.map(job => <li key={job.id}><a href={'/jobs/' + job.id}>{job.title}</a> <span className="pill">{job.status}</span></li>)}</ul> : <p>No recent sessions.</p>}
       </section>
     </div>
     <section style={{ marginTop: '1rem' }}><h2>Repositories</h2>
