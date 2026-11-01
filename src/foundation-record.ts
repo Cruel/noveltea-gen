@@ -21,6 +21,18 @@ function yaml(value: string): string {
   // unintended YAML tags, newlines, aliases, keys or implicit booleans.
   return JSON.stringify(value)
 }
+/** Check the authored Creative Direction's decision provenance without treating body prose as metadata.
+ * The canonical validator separately checks the YAML and decision schema. */
+export function hasUserProtectedDecision(record: string): boolean {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(record)
+  if (!match) return false
+  const frontmatter = match[1]!
+  const decisions = /^decisions:\s*\r?\n((?:[ \t]+.*\r?\n)*)/m.exec(frontmatter)?.[1]
+  if (!decisions) return false
+  return decisions.split(/\r?\n(?=  - id:)/).some(block =>
+    /^    origin: user\s*$/m.test(block) && /^    authority: user-protected\s*$/m.test(block))
+}
+
 export function renderFoundation(draft: FoundationDraft): string {
   const decisions = draft.decisions.flatMap(d => [
     `  - id: ${d.id}`,

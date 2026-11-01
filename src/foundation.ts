@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { renderFoundation, type FoundationDraft } from "./demo.js";
+import { hasUserProtectedDecision } from "./foundation-record.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
@@ -233,7 +234,12 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
         "You may inspect with grep, rg, Git diff, status and history. ") +
       "Preserve every existing user-protected decision verbatim; do not invent author approvals. " +
       "Attribute actual author constraints individually as origin:user/authority:user-protected; " +
-      "agent-chosen decisions as origin:agent/authority:delegated. Mark status draft or proposed, not approved. " +
+      "agent-chosen decisions as origin:agent/authority:delegated. " +
+      "IMPORTANT: The author brief and presentation envelope below contain explicitly author-specified story and production constraints; " +
+      "delegation of UNSPECIFIED choices does not delegate these supplied constraints. " +
+      "Create at least one explicit user/user-protected Creative Decision capturing the actual author constraints, " +
+      "and keep your own newly invented details as separate agent/delegated decisions. " +
+      "Do not relabel an invented choice as the author's. Mark status draft or proposed, not approved. " +
       "For YAML frontmatter, DOUBLE-QUOTE every free-text scalar (title, premise, central_conflict, genre, tone, " +
       "player_experience, scope and decision statements); escape embedded quote characters as needed. " +
       "Plain unquoted prose with colons is INVALID YAML. Verify your frontmatter is parseable before finishing. " +
@@ -245,10 +251,29 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       `Author's explicit discovery response: ${state.authorInput || "(none; autonomous choice of unspecified matters authorized)"}\n` +
       "Produce a substantive foundation, then briefly describe what you wrote.",
     );
-    const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
-    if (!assistant || assistant.role !== "assistant" ||
-        assistant.stopReason === "error" || assistant.stopReason === "aborted") {
-      throw new Error("Pi foundation specialist failed to finish a successful turn.");
+    const lastAssistant = () => [...session.messages].reverse().find(m => m.role === "assistant");
+    const succeeded = () => {
+      const assistant = lastAssistant();
+      return assistant?.role === "assistant" && assistant.stopReason !== "error" && assistant.stopReason !== "aborted";
+    };
+    if (!succeeded()) throw new Error("Pi foundation specialist failed to finish a successful turn.");
+
+    const authoredFile = join(project.root, target);
+    // The canonical validator checks structural correctness, not whether Pi
+    // misattributes the author's explicit constraints to itself. Give one
+    // bounded in-session correction opportunity before accepting the writer.
+    if (!hasUserProtectedDecision(await readFile(authoredFile, "utf8"))) {
+      await promptStorySpecialist(session,
+        `The Creative Direction you wrote at ${target} has NO user-origin/user-protected Creative Decision. ` +
+        "This misattributes the author's explicit brief and presentation constraints to the agent. " +
+        "Read the existing file and edit its decisions to preserve the actual author-specified constraints as " +
+        "origin: user / authority: user-protected, while keeping independently invented details as " +
+        "origin: agent / authority: delegated. Do not invent additional author instructions or claim approval. " +
+        "Keep the existing Story prose and schema intact. Run story_validate again after editing.");
+      if (!succeeded()) throw new Error("Pi foundation provenance correction failed to finish.");
+    }
+    if (!hasUserProtectedDecision(await readFile(authoredFile, "utf8"))) {
+      throw new Error("Pi foundation misattributed all Creative Decisions to the agent; explicit author constraints must be recorded as user-protected before commit. Preserve the draft for review.");
     }
     const calls = session.messages.flatMap(message => message.role === "assistant"
       ? message.content.filter((item): item is Extract<typeof item, { type: "toolCall" }> => item.type === "toolCall")
