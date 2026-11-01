@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { completedContextReads } from "./story-context.js";
 import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
@@ -110,6 +111,7 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   const model = context?.model ?? resolved!.model;
   const selectedThinking = context?.thinking ?? resolved?.resolution.thinking;
   await mkdir(dir, { recursive: true });
+  blockUnroutedHostedPi("Narrative review/repair");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model, thinkingLevel: selectedThinking,
     resourceLoader: loader, settingsManager,

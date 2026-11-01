@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -89,6 +90,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     task: { kind: "puzzle", ids: [...assignment.eventIds, assignment.milestoneId], scope: "related" },
     thinking, directory: dir,
   }, runtime);
+  blockUnroutedHostedPi("Interactive");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,

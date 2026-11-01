@@ -10,6 +10,7 @@ import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
+import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 
 const REQUIRED = [
   "nt-story-architecture/SKILL.md",
@@ -52,11 +53,12 @@ export async function authorArchitecture(
     paths: ["creative-direction/foundation.md"], snapshot: snapshot.id,
     provider, model: modelId, directory: sessionDir,
   }, runtime);
+  const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [createStoryValidateTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -82,7 +84,8 @@ export async function authorArchitecture(
       "Never invent Events, fixed act/ending/Puzzle counts, approvals, or completion claims. " +
       "Preserve existing user-protected decisions; never change an existing record unless safely authorized. " +
       "Honor branch/depth/target selection and do not shrink or redefine the contract yourself. " +
-      "Do not run git add/commit/reset/checkout or alter Git history. Grep, rg, git status/diff and similar inspections are allowed. " +
+      (sandboxTools ? "The shell operates only inside /story, without Git, host credentials or network. Read pinned skills through the read tool; use story_validate for native validation. " :
+        "Do not run git add/commit/reset/checkout or alter Git history. Grep, rg, git status/diff and similar inspections are allowed. ") +
       "The graph independently validates, inspects and commits your changes. " +
       "Production economy is an explicit constraint, not a universal fixed budget. " +
       "Frontmatter free-text YAML scalars must be quoted; avoid invalid colon-containing unquoted values. " +

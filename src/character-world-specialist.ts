@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -78,6 +79,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId, directory: dir,
     task: { kind: "character", ids: assignment.milestoneIds, scope: "related" },
   }, runtime);
+  blockUnroutedHostedPi("Character/World");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,

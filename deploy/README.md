@@ -1,8 +1,10 @@
 # Rootless Compose and host sandbox controller (#51)
 
 This is the deployment *foundation*, not the completed multiuser agent execution
-flow. #52–#54 replace all Pi file/shell/search tools with the private sandbox
-client; #55 performs real-host adversarial containment and restart certification.
+flow. #52 routes Foundation discovery/writing and Arc/Milestone architecture
+Pi file/search/shell tools through the private sandbox client. Other specialists
+explicitly refuse hosted execution until #53/#54 route them; there is no
+implicit host-tool fallback. #55 performs real-host containment and restart certification.
 #59 adds authenticated web execution/admission. Do not expose the raw Skein Agent
 Protocol listener or enable unsandboxed model-directed tool execution.
 
@@ -147,8 +149,18 @@ Durable `noveltea-app` holds Studio OAuth/catalog data;
 - An existing controller socket is **not** automatically unlinked on start;
   confirm the old process is stopped before manual stale-socket cleanup.
   Ambiguous Git/worktree state still needs manual reconciliation.
-- No automatic sandbox acquisition or Pi tool delegation is enabled in the
-  current web job-preparation endpoint. Jobs remain paused until #52/#59.
+- The trusted graph worker acquires and verifies a registered sandbox before
+  opening a Foundation or Architecture Pi session. The agent service requires
+  `NT_REQUIRE_SANDBOX_TOOLS=1`, the private controller socket and token.
+  Pinned skills are read through a digest-verified, read-only trusted-worker
+  adapter; the Story file tools are sandbox-only. The snapshot cache is stored
+  on the durable job-state volume across agent restarts. Native `story_validate`
+  remains bound to the trusted job identity and cannot accept model-provided
+  paths or validator flags. CLI-local workflows without sandbox configuration
+  retain their existing behavior.
+- Other Pi specialists are not yet sandbox-routed and fail closed in hosted mode
+  until #53/#54. The web job-preparation endpoint still does not initiate model
+  execution until authenticated admission and scheduling are connected by #59.
 
 ## Verification
 
@@ -164,7 +176,12 @@ sandbox image and run the actual delayed-writer regression with:
 NT_TEST_ROOTLESS_SANDBOX=1 pnpm --filter @noveltea/studio exec tsx --test test/sandbox-controller.test.ts
 ```
 
-Set `NT_TEST_SANDBOX_IMAGE` if not using `noveltea-sandbox:local`. The test
+The #52 adapter has an additional rootless smoke test for all seven Pi tools:
+`NT_TEST_ROOTLESS_SANDBOX=1 pnpm exec tsx --test test/sandbox-pi-tools.test.ts`.
+It also checks denied host/hidden paths, pinned skill reads and missing-controller
+fail-closed behavior with deterministic fixtures. Run `pnpm check` for the full
+root and Studio suites. Set `NT_TEST_SANDBOX_IMAGE` if not using
+`noveltea-sandbox:local`. The controller test
 checks that a shell-launched background process cannot write after a
 successful command boundary. It intentionally skips on ordinary development
 hosts unless explicitly enabled; it must pass on the deployment host.

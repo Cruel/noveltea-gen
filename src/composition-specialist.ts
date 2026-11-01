@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -100,6 +101,7 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
     task: { kind: "dialogue", ids: assignment.eventIds, scope: "related" },
     provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
+  blockUnroutedHostedPi("Composition");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,

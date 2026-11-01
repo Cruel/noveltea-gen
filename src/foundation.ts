@@ -18,6 +18,7 @@ import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { createStoryValidateTool, validateStoryJob, type ValidationResult } from "./validator.js";
+import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 
 type Mode = "autonomous" | "collaborative";
 type Stage = "awaiting-author" | "writing" | "committed";
@@ -197,13 +198,15 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     group: "foundation:write", step: "foundation:write",
     paths: [target], snapshot: state.snapshot.id, provider, model: modelId, directory: sessionDir,
   }, runtime);
+  const sandboxTools = await selectSandboxPiTools(job, state.snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [createStoryValidateTool(job), context.contextTool],
-    // Standard tools remain available, including grep/rg and Git inspection
-    // through bash. No structured-record writer or Git commit tool exists.
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
+    // In hosted mode every ordinary file/search/shell tool is replaced by the
+    // private controller adapter; CLI-local mode retains the legacy tools.
+    // Neither mode exposes a structured-record writer or Git commit tool.
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
   let reads: string[] = [];
   let wrote = false;
@@ -226,7 +229,8 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       "That reserved Git-tracked directory is noncanonical and author-only; avoid it even with rg --hidden, git grep, git show or broad filesystem scans. " +
       "Use only narrowly scoped author constraints supplied explicitly for this assignment. " +
       "Never run git add, commit, reset, checkout, or alter Git history. Do not touch other files or any NovelTea engine records. " +
-      "You may inspect with grep, rg, Git diff, status and history. " +
+      (sandboxTools ? "The shell runs only in the isolated /story sandbox; Git, host paths, credentials and network are unavailable. Use read for pinned skills and story_validate for native validation. " :
+        "You may inspect with grep, rg, Git diff, status and history. ") +
       "Preserve every existing user-protected decision verbatim; do not invent author approvals. " +
       "Attribute actual author constraints individually as origin:user/authority:user-protected; " +
       "agent-chosen decisions as origin:agent/authority:delegated. Mark status draft or proposed, not approved. " +
@@ -297,9 +301,11 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
     group: "foundation:discovery", step: "foundation:discovery",
     paths: [], snapshot: state.snapshot.id, provider, model: modelId, directory: sessions,
   }, runtime);
+  const sandboxTools = await selectSandboxPiTools(job, state.snapshot, loader.getSkills().skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader,
     settingsManager, sessionManager: context.manager,
+    customTools: (sandboxTools ?? []).filter(tool => ["read", "grep", "find", "ls"].includes(tool.name)),
     noTools: "all", tools: ["read", "grep", "find", "ls"],
   });
   try {

@@ -2,8 +2,9 @@
 
 For rootless Compose deployment, the trusted host sandbox controller and its
 storage/security boundary, see [deploy/README.md](../deploy/README.md) (#51).
-Jobs prepared through this UI remain paused until execution admission and
-sandbox Pi-tool delegation are connected by subsequent issues.
+Jobs prepared through this UI remain paused until authenticated execution
+admission (#59). Foundation and Architecture Pi tools are sandbox-routed by #52;
+other specialist stages remain blocked in hosted mode until #53/#54.
 
 The web application is a separate pnpm workspace package; the existing Story
 generator and Skein server stay unchanged. This slice implements an authenticated

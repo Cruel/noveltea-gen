@@ -40,8 +40,10 @@ services:
       NT_GRAPH_DB: /var/lib/noveltea/graph/skein.sqlite
       NT_STATE_DIR: /var/lib/noveltea/state
       NT_GIT_CACHE_DIR: /var/lib/noveltea/cache
+      NT_SKILL_CACHE_DIR: /var/lib/noveltea/state/skill-snapshots
       NT_SANDBOX_SOCKET: /run/noveltea-controller/controller.sock
       NT_SANDBOX_TOKEN_FILE: /run/secrets/noveltea-controller-token
+      NT_REQUIRE_SANDBOX_TOOLS: "1"
       LANGSMITH_TRACING: "false"
       LANGCHAIN_TRACING_V2: "false"
     volumes:

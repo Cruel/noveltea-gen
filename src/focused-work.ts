@@ -16,6 +16,7 @@ import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { preparePiContext, piNarrativeGroup, preflightPiAssignment } from "./job-pi-policy.js";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
 import { resolveFocusedScope, type CanonicalScopeRecord } from "./focused-scope.js";
 
 interface Receipt {
@@ -85,6 +86,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) 
       receipt.target.startsWith("authored-content.") ? "dialogue" : "character",
       ids: [receipt.target], scope: "focused" },
   }, runtime);
+  blockUnroutedHostedPi("Focused revision");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
