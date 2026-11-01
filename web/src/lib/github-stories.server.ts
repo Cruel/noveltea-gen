@@ -3,19 +3,16 @@ import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { actorFor, errorResponse, github, GithubError, json, matchingRepository } from './github-repositories.server'
+import { CANONICAL_RECORD_DIRS, STORY_LIMIT_BYTES } from './story-discovery.shared'
+export { STORY_LIMIT_BYTES } from './story-discovery.shared'
 
 // The cap applies to uncompressed Git blobs at a single pinned commit, not
 // repository history, Git transfer size, or the eventual worktree disk quota.
-export const STORY_LIMIT_BYTES = 100_000_000
 const MAX_TREE_REQUESTS = 400
 const MAX_BLOBS_TO_INSPECT = 1000
 const MAX_ATTRIBUTES_TO_INSPECT = 100
 const LFS_POINTER_MAX_BYTES = 2048
 const shaPattern = /^[a-f0-9]{40}$/i
-const canonicalDirs = new Set([
-  'creative-direction', 'arcs', 'milestones', 'events', 'beats', 'characters',
-  'world-entities', 'facts', 'relationships', 'revelations', 'choices', 'puzzles',
-])
 
 type TreeEntry = { path: string; type: string; mode: string; sha: string; size?: number }
 type GithubTree = { sha: string; tree: TreeEntry[]; truncated: boolean }
@@ -133,7 +130,7 @@ async function isStory(reader: TreeReader, sha: string): Promise<boolean> {
   const root = await reader.tree(sha)
   if (root.truncated) badTree()
   for (const entry of root.tree) {
-    if (!canonicalDirs.has(entry.path) || entry.type !== 'tree') continue
+    if (!CANONICAL_RECORD_DIRS.has(entry.path) || entry.type !== 'tree') continue
     supportedStoryEntry(entry)
     const contents = await reader.tree(entry.sha)
     if (contents.truncated) badTree()
@@ -160,7 +157,7 @@ async function discover(reader: TreeReader, root: string) {
     const roots = new Set<string>()
     for (const entry of files) {
       const parts = entry.path.split('/')
-      if (parts.length < 2 || !canonicalDirs.has(parts[parts.length - 2]!)) continue
+      if (parts.length < 2 || !CANONICAL_RECORD_DIRS.has(parts[parts.length - 2]!)) continue
       roots.add(parts.slice(0, -2).join('/'))
     }
     return [...roots].sort()

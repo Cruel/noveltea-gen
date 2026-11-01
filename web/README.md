@@ -6,7 +6,7 @@ TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
 cross-provider linking, an encrypted persisted OAuth account store, and tenant-
 scoped Story/repository/session catalog tables. #41 adds GitHub App installation-
 aware repository discovery, Add by URL, and catalog connection without cloning.
-GitLab Story discovery, generation, SSE, and publication remain separate tickets. #43 adds GitHub Story discovery and bounded selection.
+Story generation, SSE, and publication remain separate tickets. #43 adds GitHub Story discovery and bounded selection; #44 adds GitLab Story discovery and bounded selection.
 
 ## Setup
 
@@ -115,6 +115,44 @@ migration journal/schema is rejected without attempting a runtime repair.
 Unexpected internal failures are logged server-side with a short incident
 reference and reported as HTTP 500, without exposing exception details in the
 browser.
+
+## GitLab Story discovery and size preflight (#44)
+
+Connected GitLab.com projects have **Browse Stories** links on the dashboard
+and immediately after connecting. `GET /api/gitlab/stories?repositoryId=<catalog UUID>`
+resolves the default branch to a pinned 40-hex commit and lists its root
+folders; `directory=...` and `commit=<SHA>` browse immutable directory
+metadata, while `mode=discover` scans for Story candidates. Discovery is
+bounded; very large projects may require manual directory browsing.
+`POST /api/gitlab/stories` accepts `{repositoryId,directory,commit}` to
+verify and register the selected Story without cloning or downloading unrelated
+project assets. The server revalidates the owner-scoped catalog record and
+current GitLab project membership at every request. New registration is
+idempotent per Story directory, records the selected commit, and requires
+Studio schema migration 3.
+
+GitLab's paginated REST tree entries do **not** include blob sizes. The 100 MB
+(decimal, inclusive) preflight uses commit-pinned GraphQL `repository.blobs`
+size-only queries in batches of 100 paths. When GraphQL metadata is missing,
+invalid, or unavailable, HEAD requests to the repository-file API verify the
+blob ID, immutable commit ID, ref, and exact `X-Gitlab-Size` before any size
+is accepted. Failures in both paths prevent registration. Pagination reads
+all pages and rejects duplicates, inconsistent paths or malformed page headers;
+the selected Story alone is traversed during preflight, with up to 800 metadata
+requests and 5000 files. Symlinks, Git submodules, unsupported file modes,
+missing/unverifiable sizes, and Story sizes above 100,000,000 bytes fail closed.
+
+Git LFS tracking is checked from `.gitattributes` along the repository/Story
+ancestors and within the selected Story; up to 100 attributes files of at most
+64 KiB are inspected, and up to 1000 small blobs (up to 2048 bytes) are
+retrieved to detect LFS pointers. Blob IDs, sizes and pinned commits are
+revalidated before reading these contents. An unusual nonstandard LFS pointer
+outside that inspection window cannot be proven from tree metadata alone:
+the eventual checkout must independently enforce its own source-size and disk
+limits. These checks detect Story candidates but do not yet validate canonical
+Markdown; native validation is performed at job/worktree creation. API errors
+surface as explicit auth, permission, pagination, rate-limit or verification
+failures rather than a generic GitLab outage for internal server errors.
 
 Future GitHub installation-token issuance also requires the App ID and private key;
 those are not needed by the #40 sign-in screen.

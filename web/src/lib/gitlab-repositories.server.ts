@@ -9,15 +9,21 @@ type Project = {
   permissions?: { project_access?: { access_level: number } | null; group_access?: { access_level: number } | null }
 }
 
-class ProviderFailure extends Error {
+export class ProviderFailure extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
-const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } })
-function failure(err: unknown) {
-  return err instanceof ProviderFailure ? reply({ error: err.message }, err.status)
-    : reply({ error: 'GitLab is temporarily unavailable. Try again later.' }, 502)
+export const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } })
+export function failure(err: unknown) {
+  if (err instanceof ProviderFailure) return reply({ error: err.message }, err.status)
+  const incident = randomUUID().slice(0, 8)
+  console.error(`[Studio GitLab ${incident}] Unexpected server failure`, {
+    name: err instanceof Error ? err.name : typeof err,
+    code: err && typeof err === 'object' && 'code' in err ? String(err.code).slice(0, 40) : undefined,
+    stack: err instanceof Error ? err.stack?.split('\n').slice(1, 8).join('\n') : undefined,
+  })
+  return reply({ error: `Studio encountered an internal error (reference ${incident}). Check the server logs.` }, 500)
 }
-async function gitlab<T>(token: string, path: string): Promise<{ data: T; next: number | null }> {
+export async function gitlab<T>(token: string, path: string): Promise<{ data: T; next: number | null }> {
   let response: Response
   try {
     response = await fetch('https://gitlab.com/api/v4' + path, {
@@ -28,6 +34,7 @@ async function gitlab<T>(token: string, path: string): Promise<{ data: T; next: 
   if (response.status === 401) throw new ProviderFailure(409, 'GitLab authorization expired or was revoked. Reconnect GitLab.')
   if (response.status === 403) throw new ProviderFailure(403, 'GitLab denied access. Check group membership and OAuth permissions.')
   if (response.status === 429) throw new ProviderFailure(503, 'GitLab API rate limit reached. Retry later.')
+  if (response.status === 404) throw new ProviderFailure(404, 'GitLab project, commit or path was not found.')
   if (!response.ok) throw new ProviderFailure(502, 'GitLab project lookup failed. Retry later.')
   let data: T
   try { data = await response.json() as T } catch { throw new ProviderFailure(502, 'GitLab returned invalid JSON') }
@@ -35,7 +42,7 @@ async function gitlab<T>(token: string, path: string): Promise<{ data: T; next: 
   const next = nextRaw && /^[1-9]\d*$/.test(nextRaw) ? Number(nextRaw) : null
   return { data, next }
 }
-async function actor(auth: StudioAuth, store: StudioDatabase, headers: Headers) {
+export async function actor(auth: StudioAuth, store: StudioDatabase, headers: Headers) {
   const user = await requireUser(auth, headers)
   if (!user) throw new ProviderFailure(401, 'Sign in required')
   let token: string | null
@@ -44,12 +51,12 @@ async function actor(auth: StudioAuth, store: StudioDatabase, headers: Headers) 
   if (!token) throw new ProviderFailure(409, 'Link your GitLab account to connect projects')
   return { id: user.id, token }
 }
-function eligible(project: Project) {
+export function eligible(project: Project) {
   return Number.isSafeInteger(project.id) && project.id > 0 &&
     typeof project.path_with_namespace === 'string' &&
     typeof project.name_with_namespace === 'string' && !project.archived
 }
-async function page(token: string, number: number) {
+export async function page(token: string, number: number) {
   const result = await gitlab<Project[]>(token, `/projects?membership=true&min_access_level=30&simple=false&per_page=100&page=${number}&order_by=id&sort=asc`)
   if (!Array.isArray(result.data)) throw new ProviderFailure(502, 'GitLab returned an invalid project list')
   return result

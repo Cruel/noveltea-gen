@@ -9,6 +9,7 @@ function GitLabRepositories() {
   const [page, setPage] = useState<Page | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [connectedId, setConnectedId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   async function load(number = 1) {
     setError(null)
@@ -21,15 +22,16 @@ function GitLabRepositories() {
   }
   useEffect(() => { void load() }, [])
   async function connect(projectId: number) {
-    setBusy(true); setError(null); setNotice(null)
+    setBusy(true); setError(null); setNotice(null); setConnectedId(null)
     try {
       const response = await fetch('/api/gitlab/repositories', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId }),
       })
-      const body = await response.json() as { repository?: { name: string }; error?: string }
+      const body = await response.json() as { repository?: { id: string; name: string }; error?: string }
       if (!response.ok) throw new Error(body.error || 'GitLab project connection failed')
-      setNotice(body.repository!.name + ' connected. Story discovery is a separate step.')
+      setConnectedId(body.repository!.id)
+      setNotice(body.repository!.name + ' connected.')
     } catch (e) { setError(e instanceof Error ? e.message : 'Connection failed') }
     finally { setBusy(false) }
   }
@@ -37,7 +39,7 @@ function GitLabRepositories() {
     <header><div><p className="eyebrow">NovelTea</p><h1>Connect GitLab project</h1></div><nav><a href="/dashboard">Dashboard</a></nav></header>
     <p>Personal and group projects where your linked GitLab.com account has Developer access or higher. Protected branches may impose additional push restrictions when publishing.</p>
     {error && <p role="alert" className="error">{error}</p>}
-    {notice && <p role="status">{notice}</p>}
+    {notice && <p role="status">{notice} {connectedId && <a href={'/repositories/gitlab/' + connectedId}>Browse Stories</a>}</p>}
     <section>
       <h2>Push-access projects</h2>
       <button type="button" disabled={busy} onClick={() => void load(page?.page || 1)}>Refresh</button>
