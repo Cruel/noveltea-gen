@@ -87,7 +87,7 @@ function pinnedRequest(row: SavedJob, job: JobStartResult): GenerationRequest | 
         !request.task?.trim() || !request.contract ||
         JSON.stringify(parseGenerationContract(request.contract)) !== JSON.stringify(request.contract) ||
         request.provider !== undefined || request.model !== undefined ||
-        request.skillsSource !== undefined && request.skillsSource !== process.env.NT_STUDIO_SKILLS_SOURCE ||
+        request.skillsSource !== undefined && typeof request.skillsSource !== 'string' ||
         request.validatorSource !== undefined) {
       throw new Error('invalid persisted request')
     }
@@ -105,8 +105,26 @@ async function inspect(row: SavedJob, owner: string) {
   const pinned = pinnedRequest(row, job)
   const base = { id: row.id, storyId: row.storyId, title: row.title,
     baseSha: job.baseSha, headSha: job.headSha, fixture: true as const }
-  if (!pinned) return { ...base, status: 'prepared', threadId: null, task: null, contract: null,
-    reason: null, completedStages: [] }
+  if (!pinned) {
+    // A crash between the server-owner claim and the database publication
+    // leaves an intentional orphan: it must not appear as a fresh job.
+    if (existsSync(join(job.stateDir, 'generation-server-owner.json'))) {
+      return { ...base, status: 'interrupted', threadId: null, task: null, contract: null,
+        reason: 'Server ownership was claimed without a saved request. Reconcile the original claim before retrying.',
+        completedStages: [] }
+    }
+    if (row.status === 'completed') {
+      throw new JobError(409, 'Completed job has no pinned generation request. Inspect its saved state.')
+    }
+    const status = row.status === 'paused' ? 'prepared' :
+      row.status === 'running' ? 'interrupted' : row.status
+    return { ...base, status, threadId: null, task: null, contract: null,
+      reason: row.status === 'running'
+        ? 'Job was marked running without a pinned request. Reconcile its durable state before starting.'
+        : row.status === 'blocked' ? 'Job is blocked before generation; inspect its saved state.'
+        : row.status === 'cancelled' ? 'Job was cancelled; generation cannot be started.' : null,
+      completedStages: [] }
+  }
   await verifyTrustedRevision(job)
   const checkpoint = join(job.stateDir, 'web-generation.sqlite')
   const running = active.has(row.id)
@@ -132,7 +150,8 @@ async function inspect(row: SavedJob, owner: string) {
         !existsSync(join(job.stateDir, 'generation-server-owner.json'))) {
       throw new JobError(409, 'Generation checkpoint or execution owner differs from the pinned request.')
     }
-    await claimServerGeneration(job, row.threadId!, pinned)
+    try { await claimServerGeneration(job, row.threadId!, pinned) }
+    catch { throw new JobError(409, 'Generation owner receipt conflicts with this job. Inspect saved state before recovery.') }
     const interrupted = state.status === 'running' && !running
     return { ...initial, status: interrupted ? 'interrupted' : (state.status ?? 'interrupted'),
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
@@ -144,8 +163,28 @@ async function inspect(row: SavedJob, owner: string) {
 }
 
 async function readInput(request: Request) {
-  const raw = await request.text()
-  if (raw.length > 64 * 1024) throw new JobError(413, 'Generation request is too large.')
+  // Enforce the limit while reading; Request.text() would buffer an arbitrary
+  // size body before checking its length in this multiuser service.
+  const limit = 64 * 1024
+  const reader = request.body?.getReader()
+  if (!reader) throw new JobError(400, 'Missing generation request body.')
+  const chunks: Uint8Array[] = []
+  let bytes = 0
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      bytes += value.byteLength
+      if (bytes > limit) throw new JobError(413, 'Generation request is too large.')
+      chunks.push(value)
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {})
+    throw error
+  } finally { reader.releaseLock() }
+  let raw: string
+  try { raw = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) }
+  catch { throw new JobError(400, 'Generation request must be UTF-8 JSON.') }
   let input: Record<string, unknown>
   try {
     input = JSON.parse(raw) as Record<string, unknown>
@@ -205,27 +244,33 @@ export async function fixtureJobRequest(auth: StudioAuth, store: StudioDatabase,
       ...(process.env.NT_STUDIO_SKILLS_SOURCE ? { skillsSource: process.env.NT_STUDIO_SKILLS_SOURCE } : {}),
     }
     const threadId = job.threadId + ':generation:web'
+    // Establish durable server ownership before announcing a running request.
+    // Otherwise a CLI start can claim the job between the database update and
+    // the graph's schedule node. An orphaned owner receipt is safely reusable
+    // only by this exact job/thread/request after a crash; it never authorizes
+    // a different writer or request.
+    try { await claimServerGeneration(job, threadId, requestValue) }
+    catch { throw new JobError(409, 'Job cannot be exclusively claimed by this server request. Inspect existing CLI or server state.') }
     const started = store.sqlite.prepare(`UPDATE studio_sessions
       SET generation_request_json=?, generation_thread_id=?, status='running', updated_at=?
-      WHERE id=? AND owner_user_id=? AND generation_request_json IS NULL AND generation_thread_id IS NULL`)
+      WHERE id=? AND owner_user_id=? AND status='paused' AND generation_request_json IS NULL AND generation_thread_id IS NULL`)
       .run(JSON.stringify(requestValue), threadId, new Date().toISOString(), row.id, user.id)
     if (started.changes !== 1) throw new JobError(409, 'Generation was claimed concurrently. Reopen its saved status.')
     active.add(row.id)
-    const checkpoint = join(job.stateDir, 'web-generation.sqlite')
-    const { saver, graph } = openWebFixtureGraph(checkpoint)
     try {
-      const result = await graph.invoke({ request: requestValue, pauseAfter: 'foundation' },
-        { configurable: { thread_id: threadId }, recursionLimit: 10000 })
-      const outcome = result as { status?: string }
-      const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
-        ? outcome.status! : 'blocked'
-      store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
-        WHERE id=? AND owner_user_id=? AND generation_thread_id=?`)
-        .run(state, new Date().toISOString(), row.id, user.id, threadId)
-    } finally {
-      saver.db.close()
-      active.delete(row.id)
-    }
+      const checkpoint = join(job.stateDir, 'web-generation.sqlite')
+      const { saver, graph } = openWebFixtureGraph(checkpoint)
+      try {
+        const result = await graph.invoke({ request: requestValue, pauseAfter: 'foundation' },
+          { configurable: { thread_id: threadId }, recursionLimit: 10000 })
+        const outcome = result as { status?: string }
+        const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
+          ? outcome.status! : 'blocked'
+        store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
+          WHERE id=? AND owner_user_id=? AND generation_thread_id=?`)
+          .run(state, new Date().toISOString(), row.id, user.id, threadId)
+      } finally { saver.db.close() }
+    } finally { active.delete(row.id) }
     return reply({ job: await inspect(selectedJob(store, user.id, id), user.id) }, 201)
   } catch (error) {
     if (error instanceof JobError) return reply({ error: error.message }, error.status)

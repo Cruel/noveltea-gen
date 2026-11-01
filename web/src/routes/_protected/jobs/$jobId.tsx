@@ -22,6 +22,12 @@ async function load(jobId: string): Promise<Job> {
 }
 function JobDetails() {
   const { jobId } = Route.useParams()
+  // A route-param change must not carry a previous job's saved request or
+  // unsent form draft into another job's generation submission.
+  return <JobDetailsForId key={jobId} jobId={jobId} />
+}
+
+function JobDetailsForId({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<Job | null>(null)
   const [task, setTask] = useState('')
   const [contract, setContract] = useState(JSON.stringify(defaultContract, null, 2))

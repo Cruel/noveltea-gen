@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHmac } from 'node:crypto'
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { removeTestTree } from '../../test/helpers'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -11,6 +11,8 @@ import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { fixtureJobRequest } from '../src/lib/fixture-jobs.server'
+import { claimServerGeneration } from '../../src/generation-owner'
+import { parseGenerationContract } from '../../src/generation'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -110,8 +112,20 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal((await api('POST', payload, aliceCookie, 'https://evil.test')).status, 403)
     assert.equal((await api('POST', { ...payload, fixture: false }, aliceCookie)).status, 400)
     assert.equal((await api('POST', { ...payload, contract: {} }, aliceCookie)).status, 422)
+    assert.equal((await api('POST', { ...payload, task: 'x'.repeat(70 * 1024) }, aliceCookie)).status, 413)
+    assert.equal((await api('POST', { ...payload, task: '€'.repeat(30 * 1024) }, aliceCookie)).status, 413)
     store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('cancelled', jobId)
+    assert.equal((await api('GET', undefined, aliceCookie)).body.job.status, 'cancelled')
     assert.equal((await api('POST', payload, aliceCookie)).status, 409)
+    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('blocked', jobId)
+    assert.equal((await api('GET', undefined, aliceCookie)).body.job.status, 'blocked')
+    assert.equal((await api('POST', payload, aliceCookie)).status, 409)
+    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('running', jobId)
+    const orphan = await api('GET', undefined, aliceCookie)
+    assert.equal(orphan.body.job.status, 'interrupted')
+    assert.match(orphan.body.job.reason, /without a pinned request/)
+    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('completed', jobId)
+    assert.equal((await api('GET', undefined, aliceCookie)).status, 409)
     store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('paused', jobId)
     assert.equal((await api('GET', undefined, aliceCookie)).body.job.status, 'prepared')
     // An unpublished initialization draft can be inspected, but an unverified
@@ -126,6 +140,32 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     process.env.NT_LIVE_GENERATION_IDEA = '1'
     assert.equal((await api('POST', payload, aliceCookie)).status, 503)
     delete process.env.NT_LIVE_GENERATION_IDEA
+    // A preexisting CLI checkpoint must be fenced BEFORE publishing a web
+    // request to the application database, not only in LangGraph schedule.
+    const cliCheckpoint = join(acquired.stateDir, 'generation.sqlite')
+    writeFileSync(cliCheckpoint, 'foreign CLI checkpoint')
+    const conflictBeforeClaim = await api('POST', payload, aliceCookie)
+    assert.equal(conflictBeforeClaim.status, 409)
+    const unclaimed = store.sqlite.prepare(`SELECT status, generation_request_json AS request
+      FROM studio_sessions WHERE id=?`).get(jobId) as { status: string; request: string | null }
+    assert.equal(unclaimed.status, 'paused')
+    assert.equal(unclaimed.request, null)
+    assert.equal(existsSync(join(acquired.stateDir, 'generation-server-owner.json')), false)
+    unlinkSync(cliCheckpoint)
+    // Simulate a crash immediately after owner receipt publication but before
+    // the request entered SQLite. GET must expose the interrupted ownership,
+    // a different request must not take it over, and an identical retry may
+    // adopt the same claim without a second thread or CLI writer.
+    await claimServerGeneration(acquired, acquired.threadId + ':generation:web', {
+      story: acquired.storyRoot, job: jobId, task: payload.task,
+      contract: parseGenerationContract(contract), fixture: true, skillsSource: skills,
+    })
+    const orphaned = await api('GET', undefined, aliceCookie)
+    assert.equal(orphaned.body.job.status, 'interrupted')
+    assert.match(orphaned.body.job.reason, /without a saved request/)
+    assert.equal((await api('POST', { ...payload, task: 'Different task' }, aliceCookie)).status, 409)
+    assert.equal((store.sqlite.prepare(`SELECT generation_request_json AS request
+      FROM studio_sessions WHERE id=?`).get(jobId) as { request: string | null }).request, null)
     const started = await api('POST', payload, aliceCookie)
     assert.equal(started.status, 201, JSON.stringify(started.body))
     assert.equal(started.body.job.status, 'paused', JSON.stringify(started.body))
@@ -147,6 +187,9 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     // Simulate a new application process using the same on-disk catalog and graph checkpoint.
     store.sqlite.close()
     store = openStudioDatabase(join(root, 'studio.sqlite'))
+    // A reconnect must use the saved request and immutable skill snapshot;
+    // the current deployment's optional checkout path is not an authority.
+    delete process.env.NT_STUDIO_SKILLS_SOURCE
     const restoredAuth = createStudioAuth(store, config)
     const reopened = await fixtureJobRequest(restoredAuth, store, new Request(config.baseURL + '/api/jobs/' + jobId, {
       headers: { cookie: aliceCookie },

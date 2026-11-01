@@ -442,6 +442,13 @@ must be owned by one service process and preserved with the job receipts
 across restarts. A reconnect inspects the same state; a missing checkpoint,
 interrupted writer, unverified Git HEAD, or mismatched request/owner
 fails closed for manual reconciliation rather than silently restarting.
+Server ownership is claimed durably before publishing the first running request,
+so a concurrent CLI writer cannot acquire that job during the start window.
+An interrupted claim before the request reaches SQLite is reported as
+interrupted, never as an unused prepared job; the same exact request can be
+retried without changing the original thread. Reconnection inspects the
+persisted skills path and pinned snapshot without requiring the current server
+configuration to reference the same checkout directory.
 An unpublished Story initialization draft with an unverified extra Git
 commit can be inspected but cannot be launched until its revision is trusted.
 
