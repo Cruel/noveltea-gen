@@ -5,6 +5,7 @@ import { mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { startStoryJob } from '../../../src/job'
 import { STORY_LIMIT_BYTES } from './story-discovery.shared'
+import { CacheCapacityError, diskFull, withGitCacheQuota } from './git-cache-quota.server'
 
 // Trusted controller boundary: no browser-supplied Git URL, path, or identity
 // reaches this function. Provider adapters authorize the catalog row first.
@@ -158,6 +159,16 @@ export function initialStoryDocument(title: string) {
 }
 
 const FOUNDATION = 'creative-direction/foundation.md'
+const GIT_OPERATION_OVERHEAD = 4 * 1024 * 1024
+
+async function withAdmission<T>(cache: string, repositoryRoot: string, estimatedGrowth: number, action: () => Promise<T>): Promise<T> {
+  try { return await withGitCacheQuota(cache, repositoryRoot, estimatedGrowth, action) }
+  catch (error) {
+    if (error instanceof CacheCapacityError) throw new GitCacheError(error.status, error.message)
+    if (diskFull(error)) throw new GitCacheError(507, 'Git cache storage is full; preserved cached work requires manual recovery or more capacity.')
+    throw error
+  }
+}
 
 /**
  * Only the new isolated NovelTea branch receives this commit. A crash after
@@ -168,46 +179,51 @@ export async function initializeStoryBranch(input: CachedStoryRequest & { title:
   const job = await acquireCachedStory({ ...input, allowAbsentStory: true,
     requireExistingJob: input.requireExistingCommit === true })
   const env = gitEnvironment(input.remoteUrl, input.token)
-  const lock = join(job.stateDir, '.initialization-lock')
-  try {
-    await mkdir(lock)
-  } catch {
-    throw new GitCacheError(409, 'Story initialization already in progress; inspect its job before retrying.')
-  }
-  try {
-    const path = [input.directory, FOUNDATION].filter(Boolean).join('/')
-    const file = join(job.worktreeRoot, path)
-    const expected = initialStoryDocument(input.title)
-    const current = git(job.worktreeRoot, env, 'rev-parse', 'HEAD')
-    const dirty = git(job.worktreeRoot, env, 'status', '--porcelain=v1', '--untracked-files=all')
-    if (current !== input.commit) {
-      // One initialization commit, exactly the expected content and no other
-      // changes, is the only idempotent replay accepted.
-      if (git(job.worktreeRoot, env, 'rev-list', '--count', input.commit + '..HEAD') !== '1' ||
-          git(job.worktreeRoot, env, 'diff', '--name-only', input.commit, 'HEAD') !== path ||
-          git(job.worktreeRoot, env, 'show', 'HEAD:' + path) !== expected.trim() || dirty) {
-        throw new GitCacheError(409, 'Initialized job has changed; inspect its preserved branch before retrying.')
+  const cache = resolve(input.cacheDirectory)
+  const scoped = (value: string) => createHash('sha256').update(value).digest('hex')
+  const repositoryRoot = join(cache, scoped(input.ownerId), scoped(input.repositoryId))
+  return withAdmission(cache, repositoryRoot, GIT_OPERATION_OVERHEAD, async () => {
+    const lock = join(job.stateDir, '.initialization-lock')
+    try {
+      await mkdir(lock)
+    } catch {
+      throw new GitCacheError(409, 'Story initialization already in progress; inspect its job before retrying.')
+    }
+    try {
+      const path = [input.directory, FOUNDATION].filter(Boolean).join('/')
+      const file = join(job.worktreeRoot, path)
+      const expected = initialStoryDocument(input.title)
+      const current = git(job.worktreeRoot, env, 'rev-parse', 'HEAD')
+      const dirty = git(job.worktreeRoot, env, 'status', '--porcelain=v1', '--untracked-files=all')
+      if (current !== input.commit) {
+        // One initialization commit, exactly the expected content and no other
+        // changes, is the only idempotent replay accepted.
+        if (git(job.worktreeRoot, env, 'rev-list', '--count', input.commit + '..HEAD') !== '1' ||
+            git(job.worktreeRoot, env, 'diff', '--name-only', input.commit, 'HEAD') !== path ||
+            git(job.worktreeRoot, env, 'show', 'HEAD:' + path) !== expected.trim() || dirty) {
+          throw new GitCacheError(409, 'Initialized job has changed; inspect its preserved branch before retrying.')
+        }
+        return { ...job, headSha: current }
       }
-      return { ...job, headSha: current }
+      if (input.requireExistingCommit) {
+        throw new GitCacheError(409, 'Saved Story initialization commit is missing; do not recreate it during job reopen.')
+      }
+      if (dirty || existsSync(file)) {
+        throw new GitCacheError(409, 'Story job has uncommitted or conflicting files; inspect it before retrying.')
+      }
+      await mkdir(join(job.worktreeStoryRoot, 'creative-direction'), { recursive: true })
+      await writeFile(file, expected, { flag: 'wx', mode: 0o600 })
+      git(job.worktreeRoot, env, 'add', '--', path)
+      git(job.worktreeRoot, env, '-c', 'user.name=NovelTea Studio',
+        '-c', 'user.email=studio@noveltea.dev', 'commit', '-m', 'Initialize draft NovelTea Story')
+      if (git(job.worktreeRoot, env, 'status', '--porcelain=v1', '--untracked-files=all')) {
+        throw new GitCacheError(409, 'Unexpected changes remain in the initialized Story worktree.')
+      }
+      return { ...job, headSha: git(job.worktreeRoot, env, 'rev-parse', 'HEAD') }
+    } finally {
+      await rm(lock, { recursive: true })
     }
-    if (input.requireExistingCommit) {
-      throw new GitCacheError(409, 'Saved Story initialization commit is missing; do not recreate it during job reopen.')
-    }
-    if (dirty || existsSync(file)) {
-      throw new GitCacheError(409, 'Story job has uncommitted or conflicting files; inspect it before retrying.')
-    }
-    await mkdir(join(job.worktreeStoryRoot, 'creative-direction'), { recursive: true })
-    await writeFile(file, expected, { flag: 'wx', mode: 0o600 })
-    git(job.worktreeRoot, env, 'add', '--', path)
-    git(job.worktreeRoot, env, '-c', 'user.name=NovelTea Studio',
-      '-c', 'user.email=studio@noveltea.dev', 'commit', '-m', 'Initialize draft NovelTea Story')
-    if (git(job.worktreeRoot, env, 'status', '--porcelain=v1', '--untracked-files=all')) {
-      throw new GitCacheError(409, 'Unexpected changes remain in the initialized Story worktree.')
-    }
-    return { ...job, headSha: git(job.worktreeRoot, env, 'rev-parse', 'HEAD') }
-  } finally {
-    await rm(lock, { recursive: true })
-  }
+  })
 }
 
 /**
@@ -229,7 +245,7 @@ export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequ
   const repositoryRoot = join(cache, scoped(input.ownerId), scoped(input.repositoryId))
   const base = join(repositoryRoot, 'base')
   const env = gitEnvironment(input.remoteUrl, input.token)
-  return withRepositoryLock(repositoryRoot, async () => {
+  return withAdmission(cache, repositoryRoot, GIT_OPERATION_OVERHEAD, () => withRepositoryLock(repositoryRoot, async () => {
     try {
       git(repositoryRoot, env, 'check-ref-format', '--branch', input.defaultBranch)
     } catch {
@@ -241,7 +257,8 @@ export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequ
     try {
       git(repositoryRoot, env, 'clone', '--no-checkout', '--filter=blob:none',
         '--depth=1', '--single-branch', '--no-tags', input.remoteUrl, base)
-    } catch {
+    } catch (error) {
+      if (diskFull(error)) throw new GitCacheError(507, 'Git bootstrap ran out of disk space; cached state was preserved.')
       throw new GitCacheError(503, 'Unable to clone empty GitHub repository for initialization.')
     }
     if (await realpath(base) !== base || !(await stat(base)).isDirectory()) {
@@ -268,11 +285,12 @@ export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequ
     }
     try {
       git(base, env, 'push', 'origin', 'HEAD:refs/heads/' + input.defaultBranch)
-    } catch {
+    } catch (error) {
+      if (diskFull(error)) throw new GitCacheError(507, 'Git bootstrap push ran out of disk space; cached state was preserved.')
       throw new GitCacheError(409, 'Initial push failed; preserve cached bootstrap for manual recovery. No force push was attempted.')
     }
     return { commit, directory: input.directory, defaultBranch: input.defaultBranch }
-  })
+  }))
 }
 
 export async function acquireCachedStory(input: CachedStoryRequest) {
@@ -282,14 +300,16 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
   const repositoryRoot = join(cache, scoped(input.ownerId), scoped(input.repositoryId))
   const base = join(repositoryRoot, 'base')
   const environment = gitEnvironment(input.remoteUrl, input.token)
-  return withRepositoryLock(repositoryRoot, async () => {
+  const growth = GIT_OPERATION_OVERHEAD + (input.requireExistingJob ? 0 : input.verifiedSizeBytes ?? STORY_LIMIT_BYTES)
+  return withAdmission(cache, repositoryRoot, growth, () => withRepositoryLock(repositoryRoot, async () => {
     if (!existsSync(base)) {
       // One clone per owner/repository, with objects shared by every job.
       // --no-checkout prevents even root-level monorepo assets being hydrated.
       try {
         git(repositoryRoot, environment, 'clone', '--no-checkout', '--filter=blob:none',
           '--depth=1', '--single-branch', '--no-tags', input.remoteUrl, base)
-      } catch {
+      } catch (error) {
+        if (diskFull(error)) throw new GitCacheError(507, 'Git clone ran out of disk space; cached state was preserved for recovery.')
         // Preserve incomplete clone for investigation; never overwrite an
         // uncertain Git directory or existing job.
         throw new GitCacheError(503, 'Git clone failed; check provider authorization, repository access, and cache state.')
@@ -315,7 +335,8 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
       // without changing any job branch or work files.
       git(base, localEnv, 'sparse-checkout', 'set', '--no-cone', '--', '/.__noveltea_no_content__/**')
       git(base, localEnv, 'checkout', '--detach', input.commit)
-    } catch {
+    } catch (error) {
+      if (diskFull(error)) throw new GitCacheError(507, 'Git fetch ran out of disk space; cached state was preserved for recovery.')
       throw new GitCacheError(503, 'Unable to fetch and pin the selected provider commit. Recheck access and preflight revision.')
     }
     const sizes = treeSizes(base, localEnv, input.commit, input.directory, input.allowAbsentStory)
@@ -337,9 +358,10 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
       return job
     } catch (error) {
       if (error instanceof GitCacheError) throw error
+      if (diskFull(error)) throw new GitCacheError(507, 'Git worktree creation ran out of disk space. Preserve cached state and retry after adding capacity.')
       // The durable job manifest and any existing partial worktree are left
       // intact for explicit recovery; do not overwrite or reset another job.
       throw new GitCacheError(409, 'Git job worktree could not be created or reopened safely. Inspect saved job state and cache.')
     }
-  })
+  }))
 }

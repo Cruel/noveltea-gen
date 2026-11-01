@@ -409,10 +409,33 @@ branch, original base and thread. Changing or unsetting `NT_GIT_CACHE_DIR` on
 reopen does not relocate or reconstruct an existing job. Legacy jobs keep their
 original `jobs/<sha256>/worktree/` location without migration or lost state.
 
-**Eviction is not automatic or safe for unfinished jobs.** Only a future
-cache manager that verifies publication and recoverability may remove cached
-worktrees. If a cached worktree is missing, job reopen fails closed and retains
-all durable state; it never regenerates the branch or replays unfinished work.
+**Studio Git-cache capacity (#50).** Set `NT_GIT_CACHE_MAX_BYTES` (default
+10 GiB) and `NT_GIT_CACHE_MIN_FREE_BYTES` (default 256 MiB) on the Studio
+server; both are integer byte counts. The cache volume must be separate from
+durable `NT_STATE_DIR`. A single filesystem lock serializes all Studio clone,
+fetch, sparse-worktree and initialization admissions, including their estimated
+Story materialization and Git-operation overhead. The manager accounts for
+Git objects, worktree files and transient data, checks actual usage and free
+disk after each operation, and returns HTTP 507 when admission is unsafe.
+Sparse/partial fetches do not guarantee predictable transfer size: if actual
+growth exceeds the reservation, the newly created cache and durable job
+receipt remain intact for recovery; an operator must add capacity or inspect
+the cache. Filesystem/container disk quotas remain the hard upper bound.
+
+**Eviction is conservative.** Reclamation uses repository-directory LRU
+timestamps, never individual worktrees. Only an intact, clean base clone
+with no linked worktrees, local-only branches, unexpected files or referenced
+durable job manifests can be removed. All unfinished, unpublished or even
+completed-but-not-proven-published jobs are protected. There is not yet a
+publication-attestation path in Studio, so a repository with any job cannot
+be evicted automatically; the later publication workflow must verify remote
+recoverability before enabling that case. An unknown or incomplete durable
+manifest prevents eviction rather than silently erasing work. A stale
+`.quota-lock` or `.acquire-lock` is not automatically stolen: inspect it after
+a crash. Never manually delete a protected cache merely to satisfy quota.
+
+If a cached worktree is missing, job reopen fails closed and retains all
+durable state; it never regenerates the branch or replays unfinished work.
 Restore the original linked worktree and Git identity before resuming. A second
 invocation with the same Story and job reopens the pinned worktree, even if the
 author's checkout has since changed. Optional `--noveltea-project /path/to/engine`
