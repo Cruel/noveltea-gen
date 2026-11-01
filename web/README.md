@@ -6,7 +6,7 @@ TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
 cross-provider linking, an encrypted persisted OAuth account store, and tenant-
 scoped Story/repository/session catalog tables. #41 adds GitHub App installation-
 aware repository discovery, Add by URL, and catalog connection without cloning.
-Story discovery, generation, SSE, and publication remain separate tickets.
+GitLab Story discovery, generation, SSE, and publication remain separate tickets. #43 adds GitHub Story discovery and bounded selection.
 
 ## Setup
 
@@ -53,6 +53,57 @@ are independently enforced when publishing. Expired or revoked provider access
 blocks new discovery and connections with a reconnect diagnostic; stored catalog
 entries remain until explicitly removed. GitLab.com is the only supported host.
 GitHub repository connection is available from **Dashboard → Add GitHub repository**. Browse installations and their push-access repositories, or enter `owner/repository` or a `https://github.com/owner/repository` URL. If an App installation is missing or a selected repository is not covered, choose **Install / update access**. The GitHub setup callback verifies installation access using the existing GitHub user token, and can complete the requested repository connection automatically. Organizations may require an administrator to approve an installation or selection update: the pending import remains visible for 24 hours, with a retry action. If you prefer to adjust an existing installation, use **Configure access on GitHub** and return to the Add Repository screen after approval. Only repositories with actual push permission are accepted; suspended installations and installations without Contents: write are unavailable. Catalog connection creates a lightweight record, **not** a Git clone or Story. Repository permissions are checked again when connecting, not trusted from browser selection. GitHub installations are scoped to the authenticated App user; signing in with GitLab does not grant GitHub access until the user explicitly links their GitHub identity.
+
+## GitHub Story discovery and size preflight (#43)
+
+Once connected, a GitHub repository has a **Browse Stories** link on the
+dashboard. The browser resolves the default branch to an immutable 40-hex
+commit SHA; all directory navigation, discovery and Story selection thereafter
+use that exact commit. Refresh HEAD explicitly to pick up new upstream changes.
+Automatic detection looks for canonical Story Markdown under recognized record
+directories (e.g., `creative-direction/*.md`, `arcs/*.md`,
+`milestones/*.md`). Detection is a **candidate** signal, not a claim of
+canonical content or protected-decision validation. The native validator will
+run when a job/worktree exists. Empty, untracked Story directories cannot be
+detected through Git Trees.
+
+`GET /api/github/stories?repositoryId=<catalog UUID>` lists root directories
+and pins a commit; add `directory=...` and `commit=<SHA>` to browse without
+moving revisions. `mode=discover` finds candidate Story roots at that commit.
+`POST /api/github/stories` with `{repositoryId,directory,commit}` checks the
+selected subtree and then registers an owner-scoped catalog Story and its
+source commit. POST requires a same-origin authenticated session and a current
+writable GitHub App repository grant; GET requires the same grant and ownership.
+No request accepts a caller-supplied Git tree SHA, arbitrary provider URL or
+filesystem path. The repository's current default branch is *not* used during
+selection after a commit is pinned.
+
+Preflight counts uncompressed Git blob sizes under only the selected Story
+at that commit, with a **100,000,000-byte (decimal 100 MB) inclusive** cap.
+Unrelated monorepo assets, Git history, and blob downloads are excluded. It
+uses the GitHub recursive Trees API; if that response is truncated, it
+enumerates individual nonrecursive tree objects. Nonrecursive truncation,
+missing/noninteger sizes, symlinks, submodules, unsupported Git objects,
+excessive tree traversal (400 calls), too many small blobs to inspect (1000),
+or more than 100 applicable attributes files fail closed rather than marking
+the Story verified. Files up to 2048 bytes are inspected for Git LFS pointer
+signatures; applicable `.gitattributes` LFS rules are also examined at the
+repository/Story ancestors and inside the Story. An LFS-tracked file or
+recognized LFS pointer blocks selection rather than counting its pointer size.
+Unsupported attributes patterns or attributes over 64 KiB fail closed. A
+nonstandard pointer larger than 2048 bytes inserted without Git LFS tracking
+cannot be identified from Git tree metadata alone, so the later checkout must
+independently enforce source-size and disk limits.
+
+On unusually large/truncated repositories, automatic discovery may fail its
+tree-traversal budget. A **specific small Story can still pass preflight**
+using the directory browser without traversing unrelated directories. Errors
+are explicit and no partial Story catalog registration is written. Revoked
+GitHub installation/user permissions block new browsing and selection, but
+existing catalog records are retained. API rate limits or missing access
+surface as retry/reconnect errors. New Story catalog records do not clone,
+validate canonical Markdown contents, or start agents; later tickets own these
+steps.
 
 Future GitHub installation-token issuance also requires the App ID and private key;
 those are not needed by the #40 sign-in screen.

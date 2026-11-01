@@ -20,14 +20,14 @@ type GithubRepository = {
 }
 type Page<T> = { total_count: number; repositories?: T[]; installations?: T[] }
 
-class GithubError extends Error {
+export class GithubError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 
-function json(body: unknown, status = 200): Response {
+export function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } })
 }
-function errorResponse(error: unknown) {
+export function errorResponse(error: unknown) {
   if (error instanceof GithubError) return json({ error: error.message }, error.status)
   // Never reflect provider responses, tokens, or account identifiers in errors.
   return json({ error: 'GitHub is temporarily unavailable. Try again later.' }, 502)
@@ -58,7 +58,7 @@ function normalizeFullName(raw: unknown): string {
   return name
 }
 
-async function actorFor(auth: StudioAuth, store: StudioDatabase, headers: Headers): Promise<Actor | Response> {
+export async function actorFor(auth: StudioAuth, store: StudioDatabase, headers: Headers): Promise<Actor | Response> {
   const user = await requireUser(auth, headers)
   if (!user) return json({ error: 'Sign in required' }, 401)
   const token = await getRepositoryToken(auth, store, headers, 'github')
@@ -66,7 +66,7 @@ async function actorFor(auth: StudioAuth, store: StudioDatabase, headers: Header
   return { id: user.id, token }
 }
 
-async function github<T>(token: string, path: string): Promise<T> {
+export async function github<T>(token: string, path: string): Promise<T> {
   // Paths are assembled here from validated numeric IDs, never an arbitrary URL.
   let response: Response
   try {
@@ -111,7 +111,7 @@ function usable(installation: Installation) {
   return !installation.suspended_at && installation.permissions?.contents === 'write'
 }
 
-async function matchingRepository(token: string, fullName: string, onlyInstallationId?: number) {
+export async function matchingRepository(token: string, fullName: string, onlyInstallationId?: number) {
   const all = (await installations(token)).filter(usable)
   let forbidden = false
   for (const install of all) {

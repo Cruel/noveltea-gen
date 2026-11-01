@@ -31,6 +31,7 @@ function AddRepository() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [connectedId, setConnectedId] = useState<string | null>(null)
 
   const refresh = async (id: number | null = installation, nextPage = page) => {
     try {
@@ -56,10 +57,11 @@ function AddRepository() {
     await refresh(id, nextPage)
   }
   const add = async (name: string) => {
-    setBusy(true); setError(null); setNotice(null)
+    setBusy(true); setError(null); setNotice(null); setConnectedId(null)
     try {
-      const result = await api<{ repository: { name: string } }>('/api/github/repositories', { fullName: name })
-      setNotice(`${result.repository.name} connected. Story discovery will be available in the next step.`)
+      const result = await api<{ repository: { id: string; name: string } }>('/api/github/repositories', { fullName: name })
+      setConnectedId(result.repository.id)
+      setNotice(`${result.repository.name} connected.`)
       await refresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Cannot connect repository')
@@ -80,7 +82,7 @@ function AddRepository() {
     <header><div><p className="eyebrow">NovelTea</p><h1>Add GitHub repository</h1></div>
       <nav><a href="/dashboard">Dashboard</a></nav></header>
     <p>Connect a repository you can push to. GitHub App installations determine which repositories NovelTea can access; signing in alone does not grant repository access.</p>
-    {notice && <p role="status">{notice}</p>}
+    {notice && <p role="status">{notice} {connectedId && <a href={'/repositories/github/' + connectedId}>Browse Stories</a>}</p>}
     {error && <p role="alert" className="error">{error}</p>}
     <section>
       <h2>Add by URL</h2>

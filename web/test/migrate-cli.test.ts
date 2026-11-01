@@ -38,8 +38,9 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
       assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(), [
-        { version: 1 }, { version: 2 },
+        { version: 1 }, { version: 2 }, { version: 3 },
       ])
+      assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'source_commit_sha'))
       assert.deepEqual(store.sqlite.pragma('integrity_check'), [{ integrity_check: 'ok' }])
       assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
       // Simulate an upgrade to a future Studio version: downgrades must fail,

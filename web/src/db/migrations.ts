@@ -58,6 +58,12 @@ const appMigrations = [
       `CREATE INDEX github_install_flows_owner ON github_install_flows (owner_user_id, status, expires_at)`,
     ],
   },
+  {
+    version: 3,
+    statements: [
+      `ALTER TABLE stories ADD COLUMN source_commit_sha TEXT`,
+    ],
+  },
 ] as const
 
 export async function migrateStudio(store: StudioDatabase, config: StudioAuthConfig) {
