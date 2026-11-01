@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react'
 type Listing = { commit: string; directory: string; isStory: boolean; directories: Array<{ name: string; path: string }> }
 type Discovery = { commit: string; stories: string[] }
 type Selection = { story: { id: string; title: string; directory: string; commit: string }; sizeBytes: number; limitBytes: number; blobCount: number }
+type Initialization = { mode: 'branch' | 'bootstrap'; commit: string | null; defaultBranch: string; directory: string; sizeBytes: number }
+type Initialized = { story: { id: string; title: string }; job: { id: string; baseSha: string; headSha: string; branch: string }; mode: 'branch' | 'bootstrap'; published: boolean }
 
 export const Route = createFileRoute('/_protected/repositories/github/$repositoryId')({
   component: GithubStories,
@@ -30,6 +32,11 @@ function GithubStories() {
   const [pendingJobId, setPendingJobId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [initialization, setInitialization] = useState<Initialization | null>(null)
+  const [initTitle, setInitTitle] = useState('Untitled Story')
+  const [initPath, setInitPath] = useState('')
+  const [initJobId, setInitJobId] = useState<string | null>(null)
+  const [initialized, setInitialized] = useState<Initialized | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -51,6 +58,30 @@ function GithubStories() {
       .catch(e => { if (!cancelled) setDiscoveryError(e instanceof Error ? e.message : 'Discovery incomplete') })
     return () => { cancelled = true }
   }, [repositoryId, commit])
+
+  useEffect(() => { setInitPath(directory) }, [directory])
+
+  useEffect(() => {
+    let cancelled = false
+    setInitialization(null); setInitialized(null); setInitJobId(null)
+    void api<Initialization>('/api/github/initialize?' + new URLSearchParams({ repositoryId, directory: initPath }))
+      .then(result => { if (!cancelled) setInitialization(result) })
+      .catch(() => { if (!cancelled) setInitialization(null) })
+    return () => { cancelled = true }
+  }, [repositoryId, initPath])
+
+  const initialize = async () => {
+    if (!initialization) return
+    const jobId = initJobId ?? crypto.randomUUID()
+    setInitJobId(jobId); setBusy(true); setError(null)
+    try {
+      const result = await api<Initialized>('/api/github/initialize', {
+        repositoryId, directory: initialization.directory, title: initTitle, jobId, commit: initialization.commit,
+      })
+      setInitialized(result); setInitialization(null)
+    } catch (e) { setError(e instanceof Error ? e.message : 'Story initialization failed') }
+    finally { setBusy(false) }
+  }
 
   const select = async () => {
     if (!commit || !listing?.isStory) return
@@ -108,6 +139,38 @@ function GithubStories() {
         {job && <p role="status">Job <code>{job.id}</code> is prepared at base <code>{job.baseSha}</code>.
           Generation starts through the future job execution flow; no agent has run yet.</p>}
       </div>}
+    </section>
+    <section>
+      <h2>Initialize a new Story</h2>
+      <p>Initialize canonical draft Story Markdown in an existing folder or a new path.
+        An existing repository uses an isolated NovelTea branch for later review;
+        its default branch is not changed. Only a completely empty repository
+        can receive a one-time default-branch bootstrap commit.</p>
+      <p>Need a new GitHub repository? <a href="https://github.com/new" target="_blank" rel="noreferrer">Create an empty repository on GitHub</a>,
+        then connect it through <a href="/repositories/add">Add Repository</a> and return here.
+        Do not create a README or initial commit on GitHub if you want the one-time bootstrap.</p>
+      <label>Story directory (relative to repository root; blank for root){' '}
+        <input value={initPath} onChange={e => setInitPath(e.target.value)} disabled={busy} placeholder="stories/my-story" />
+      </label>
+      {initialization && <div>
+        <p>Target: <code>/{initialization.directory}</code>.{' '}</p>
+        <p>{initialization.mode === 'bootstrap'
+          ? `Empty repository: initial commit will be pushed to ${initialization.defaultBranch}.`
+          : `Existing repository: draft will be committed to a new isolated job branch based on ${initialization.commit}.`}</p>
+        <label>Story title{' '}
+          <input value={initTitle} maxLength={120} onChange={e => setInitTitle(e.target.value)} disabled={busy} />
+        </label>{' '}
+        <button type="button" disabled={busy || !initTitle.trim()} onClick={() => void initialize()}>
+          {busy ? 'Initializing…' : 'Initialize draft Story'}
+        </button>
+      </div>}
+      {initialized && <p role="status">
+        Initialized <strong>{initialized.story.title}</strong> as job <code>{initialized.job.id}</code>
+        {' '}at <code>{initialized.job.headSha}</code>.
+        {initialized.published
+          ? ' The first commit was pushed to the previously empty default branch.'
+          : ' The draft commit is local to its NovelTea branch; default is unchanged. Publication and review are separate actions.'}
+      </p>}
     </section>
     <section>
       <h2>Detected Story directories</h2>

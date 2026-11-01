@@ -3,7 +3,7 @@ import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { verifyGithubStorySelection } from './github-stories.server'
-import { acquireCachedStory, GitCacheError } from './git-cache.server'
+import { acquireCachedStory, GitCacheError, initializeStoryBranch } from './git-cache.server'
 
 // Creating/reopening a job is an authenticated controller action, not a Pi tool.
 // The caller identifies a catalog Story, idempotent job UUID and expected
@@ -54,15 +54,28 @@ export async function githubJobRequest(
     }
     // Reverify both the content cap and the exact persisted SHA. The UI cannot
     // replace this commit with a branch name or latest default-branch HEAD.
-    const preflight = await verifyGithubStorySelection(actor.token, row.repository, pinned, row.directory)
+    let preflight: Awaited<ReturnType<typeof verifyGithubStorySelection>> | null = null
+    try {
+      preflight = await verifyGithubStorySelection(actor.token, row.repository, pinned, row.directory)
+    } catch (error) {
+      // A saved initialization job may have started from a directory that
+      // did not exist at its pinned base SHA. Only reopen that exact saved
+      // job, and only if its local initialization commit is still intact.
+      // Never create a Story here or bypass arbitrary provider failures.
+      if (!existing || !(error instanceof GithubError) ||
+          (error.status !== 404 && error.status !== 422)) throw error
+    }
     const cacheDirectory = process.env.NT_GIT_CACHE_DIR
     if (!cacheDirectory) throw new GithubError(503, 'Studio Git cache is not configured. Set NT_GIT_CACHE_DIR to a dedicated absolute cache volume.')
-    const result = await acquireCachedStory({
+    const acquisition = {
       cacheDirectory, ownerId: actor.id, repositoryId: 'github:' + row.providerId,
       remoteUrl: `https://github.com/${row.repository}.git`, token: actor.token,
       directory: row.directory, commit: pinned, jobId: input.jobId,
-      verifiedSizeBytes: preflight.sizeBytes, verifiedBlobCount: preflight.blobCount,
-    })
+    }
+    const result = preflight
+      ? await acquireCachedStory({ ...acquisition,
+        verifiedSizeBytes: preflight.sizeBytes, verifiedBlobCount: preflight.blobCount })
+      : await initializeStoryBranch({ ...acquisition, title: row.title, requireExistingCommit: true })
     const now = new Date().toISOString()
     store.sqlite.prepare(`INSERT INTO studio_sessions
       (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)

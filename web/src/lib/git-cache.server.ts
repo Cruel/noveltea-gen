@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, realpath, rm, stat } from 'node:fs/promises'
+import { mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { startStoryJob } from '../../../src/job'
 import { STORY_LIMIT_BYTES } from './story-discovery.shared'
@@ -19,6 +19,10 @@ export interface CachedStoryRequest {
   jobId: string
   verifiedSizeBytes?: number
   verifiedBlobCount?: number
+  /** Only trusted initialization controllers may acquire an absent Story. */
+  allowAbsentStory?: boolean
+  /** Reopening may never create a replacement job if its manifest is gone. */
+  requireExistingJob?: boolean
 }
 
 export class GitCacheError extends Error {
@@ -76,7 +80,7 @@ async function withRepositoryLock<T>(root: string, action: () => Promise<T>): Pr
   try { return await action() } finally { await rm(lock, { recursive: true }) }
 }
 
-function treeSizes(base: string, env: NodeJS.ProcessEnv, commit: string, directory: string) {
+function treeSizes(base: string, env: NodeJS.ProcessEnv, commit: string, directory: string, allowAbsent = false) {
   const args = ['ls-tree', '-r', '--long', '-z', commit, '--', ...(directory ? [directory] : ['.'])]
   const output = execFileSync('git', args, {
     cwd: base, env, maxBuffer: 32 * 1024 * 1024, timeout: 120_000,
@@ -95,7 +99,7 @@ function treeSizes(base: string, env: NodeJS.ProcessEnv, commit: string, directo
     }
     count++
   }
-  if (!count) throw new GitCacheError(422, 'Selected Story has no Git blobs at the pinned revision.')
+  if (!count && !allowAbsent) throw new GitCacheError(422, 'Selected Story has no Git blobs at the pinned revision.')
   return { bytes, count }
 }
 
@@ -112,6 +116,148 @@ function assertInput(input: CachedStoryRequest) {
       !input.remoteUrl.startsWith('file://')) {
     throw new GitCacheError(400, 'Unsupported authenticated Git remote.')
   }
+}
+
+
+/** A draft with no protected author decisions or invented narrative facts. */
+export function initialStoryDocument(title: string) {
+  return [
+    '---',
+    "schema: '0.1'",
+    'type: creative-direction',
+    'id: creative-direction.foundation',
+    'title: ' + JSON.stringify(title),
+    'status: draft',
+    'decisions: []',
+    'premise: "Pending author discovery"',
+    'central_conflict: "Pending author discovery"',
+    'genre: "Pending author discovery"',
+    'tone: "Pending author discovery"',
+    'player_experience: "Pending author discovery"',
+    'scope: "Pending author discovery"',
+    '---',
+    '',
+    'This is an unreviewed Story initialization draft. Complete author discovery before generating narrative canon.',
+    '',
+  ].join('\n')
+}
+
+const FOUNDATION = 'creative-direction/foundation.md'
+
+/**
+ * Only the new isolated NovelTea branch receives this commit. A crash after
+ * commit but before catalog registration is recovered by verifying the exact
+ * commit and file, not by resetting or replaying the write.
+ */
+export async function initializeStoryBranch(input: CachedStoryRequest & { title: string; requireExistingCommit?: boolean }) {
+  const job = await acquireCachedStory({ ...input, allowAbsentStory: true,
+    requireExistingJob: input.requireExistingCommit === true })
+  const env = gitEnvironment(input.remoteUrl, input.token)
+  const lock = join(job.stateDir, '.initialization-lock')
+  try {
+    await mkdir(lock)
+  } catch {
+    throw new GitCacheError(409, 'Story initialization already in progress; inspect its job before retrying.')
+  }
+  try {
+    const path = [input.directory, FOUNDATION].filter(Boolean).join('/')
+    const file = join(job.worktreeRoot, path)
+    const expected = initialStoryDocument(input.title)
+    const current = git(job.worktreeRoot, env, 'rev-parse', 'HEAD')
+    const dirty = git(job.worktreeRoot, env, 'status', '--porcelain=v1', '--untracked-files=all')
+    if (current !== input.commit) {
+      // One initialization commit, exactly the expected content and no other
+      // changes, is the only idempotent replay accepted.
+      if (git(job.worktreeRoot, env, 'rev-list', '--count', input.commit + '..HEAD') !== '1' ||
+          git(job.worktreeRoot, env, 'diff', '--name-only', input.commit, 'HEAD') !== path ||
+          git(job.worktreeRoot, env, 'show', 'HEAD:' + path) !== expected.trim() || dirty) {
+        throw new GitCacheError(409, 'Initialized job has changed; inspect its preserved branch before retrying.')
+      }
+      return { ...job, headSha: current }
+    }
+    if (input.requireExistingCommit) {
+      throw new GitCacheError(409, 'Saved Story initialization commit is missing; do not recreate it during job reopen.')
+    }
+    if (dirty || existsSync(file)) {
+      throw new GitCacheError(409, 'Story job has uncommitted or conflicting files; inspect it before retrying.')
+    }
+    await mkdir(join(job.worktreeStoryRoot, 'creative-direction'), { recursive: true })
+    await writeFile(file, expected, { flag: 'wx', mode: 0o600 })
+    git(job.worktreeRoot, env, 'add', '--', path)
+    git(job.worktreeRoot, env, '-c', 'user.name=NovelTea Studio',
+      '-c', 'user.email=studio@noveltea.dev', 'commit', '-m', 'Initialize draft NovelTea Story')
+    if (git(job.worktreeRoot, env, 'status', '--porcelain=v1', '--untracked-files=all')) {
+      throw new GitCacheError(409, 'Unexpected changes remain in the initialized Story worktree.')
+    }
+    return { ...job, headSha: git(job.worktreeRoot, env, 'rev-parse', 'HEAD') }
+  } finally {
+    await rm(lock, { recursive: true })
+  }
+}
+
+/**
+ * The only default-branch write authorized by onboarding: an unborn remote
+ * without *any* heads. The push is ordinary, never forced; a concurrent
+ * default-branch initialization rejects our unrelated root commit.
+ */
+export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequest, 'commit' | 'jobId'> & {
+  defaultBranch: string; title: string
+}) {
+  const check = { ...input, commit: '0'.repeat(40), jobId: 'bootstrap' }
+  assertInput(check)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$/.test(input.defaultBranch) ||
+      input.defaultBranch.split('/').some(p => !p || p === '.' || p === '..' || p.endsWith('.lock'))) {
+    throw new GitCacheError(400, 'Invalid GitHub default branch.')
+  }
+  const cache = resolve(input.cacheDirectory)
+  const scoped = (value: string) => createHash('sha256').update(value).digest('hex')
+  const repositoryRoot = join(cache, scoped(input.ownerId), scoped(input.repositoryId))
+  const base = join(repositoryRoot, 'base')
+  const env = gitEnvironment(input.remoteUrl, input.token)
+  return withRepositoryLock(repositoryRoot, async () => {
+    try {
+      git(repositoryRoot, env, 'check-ref-format', '--branch', input.defaultBranch)
+    } catch {
+      throw new GitCacheError(400, 'GitHub default branch is not a valid Git ref.')
+    }
+    if (existsSync(base)) {
+      throw new GitCacheError(409, 'A cached repository already exists; inspect its state before bootstrapping.')
+    }
+    try {
+      git(repositoryRoot, env, 'clone', '--no-checkout', '--filter=blob:none',
+        '--depth=1', '--single-branch', '--no-tags', input.remoteUrl, base)
+    } catch {
+      throw new GitCacheError(503, 'Unable to clone empty GitHub repository for initialization.')
+    }
+    if (await realpath(base) !== base || !(await stat(base)).isDirectory()) {
+      throw new GitCacheError(409, 'Bootstrapped cache has an unexpected filesystem identity.')
+    }
+    // Check all refs, including tags: a tagged repository without branch
+    // heads is not a genuinely empty Git repository.
+    if (git(base, env, 'ls-remote', '--refs', 'origin')) {
+      throw new GitCacheError(409, 'Repository now contains commits. Refresh and initialize on a NovelTea branch instead.')
+    }
+    git(base, env, 'symbolic-ref', 'HEAD', 'refs/heads/' + input.defaultBranch)
+    const path = [input.directory, FOUNDATION].filter(Boolean).join('/')
+    const file = join(base, path)
+    await mkdir(join(base, input.directory, 'creative-direction'), { recursive: true })
+    await writeFile(file, initialStoryDocument(input.title), { flag: 'wx', mode: 0o600 })
+    git(base, env, 'add', '--', path)
+    git(base, env, '-c', 'user.name=NovelTea Studio',
+      '-c', 'user.email=studio@noveltea.dev', 'commit', '-m', 'Bootstrap draft NovelTea Story')
+    const commit = git(base, env, 'rev-parse', 'HEAD')
+    // Recheck immediately before push. A race on the target default ref
+    // fails non-fast-forward; never use --force or alter an existing branch.
+    if (git(base, env, 'ls-remote', '--refs', 'origin')) {
+      throw new GitCacheError(409, 'Repository was initialized concurrently. The local bootstrap is preserved for inspection.')
+    }
+    try {
+      git(base, env, 'push', 'origin', 'HEAD:refs/heads/' + input.defaultBranch)
+    } catch {
+      throw new GitCacheError(409, 'Initial push failed; preserve cached bootstrap for manual recovery. No force push was attempted.')
+    }
+    return { commit, directory: input.directory, defaultBranch: input.defaultBranch }
+  })
 }
 
 export async function acquireCachedStory(input: CachedStoryRequest) {
@@ -157,7 +303,7 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
     } catch {
       throw new GitCacheError(503, 'Unable to fetch and pin the selected GitHub commit. Recheck provider access and preflight revision.')
     }
-    const sizes = treeSizes(base, localEnv, input.commit, input.directory)
+    const sizes = treeSizes(base, localEnv, input.commit, input.directory, input.allowAbsentStory)
     if ((input.verifiedSizeBytes !== undefined && sizes.bytes !== input.verifiedSizeBytes) ||
         (input.verifiedBlobCount !== undefined && sizes.count !== input.verifiedBlobCount)) {
       throw new GitCacheError(422, 'Acquired Git tree does not match the Story API preflight size/count.')
@@ -169,7 +315,7 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
       const job = await startStoryJob({
         story: storyRoot, job: input.jobId, worktreeCacheRoot: repositoryRoot,
         sparseStoryOnly: true, gitTransportEnv: environment,
-      })
+      }, !input.requireExistingJob)
       if (job.baseSha.toLowerCase() !== input.commit.toLowerCase()) {
         throw new GitCacheError(409, 'Saved job is pinned to a different Story commit; create another job rather than moving its baseline.')
       }
