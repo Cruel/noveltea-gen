@@ -176,6 +176,14 @@ Job event (bounded Event-design work item after Character/World foundations):
   --provider, --model     Pi specialist provider/model (default openai/gpt-6-luna)
   --fixture               Deterministic tests only, not real Pi evidence
 
+Job trusted approvals (#57; ledger only, not yet consumed by legacy revision gates):
+  approval request --story <story> --job <job> --id <id> --kind plan|decision
+                   [--work-item <id>] [--change <exact-change-digest>]
+  approval inspect --story <story> --job <job> --id <id>
+  approval decide --story <story> --job <job> --id <id>
+                   Interactive OS-user terminal confirmation only; no noninteractive approval.
+                   Records trusted-controller evidence; #58 will enable it for protected revisions.
+
 Job author updates (live author messaging, #25):
   send                 Atomically enqueue a stable-ID message while Pi is writing (no job writer lock)
   inspect              Display queued/applied/review-required receipts and pending author questions
@@ -336,6 +344,37 @@ function parseJobOptions(
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "job" && process.argv[3] === "approval") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (!["request", "inspect", "decide"].includes(action ?? "")) {
+      throw new Error("Expected job approval request|inspect|decide.");
+    }
+    const values = parseJobOptions(args, "approval",
+      ["--story", "--job", "--id", "--kind", "--work-item", "--change"]);
+    const story = values.get("--story"), jobId = values.get("--job"), id = values.get("--id");
+    if (!story || !jobId || !id) throw new Error("job approval requires --story, --job and --id.");
+    const { startStoryJob } = await import("./job.js");
+    const { requestTrustedApproval, inspectTrustedApproval, decideTrustedCliApproval } =
+      await import("./trusted-approval.js");
+    const job = await startStoryJob({ story, job: jobId }, false);
+    let result;
+    if (action === "request") {
+      const kind = values.get("--kind");
+      if (kind !== "plan" && kind !== "decision") throw new Error("Approval request requires --kind plan|decision.");
+      result = await requestTrustedApproval(job, { id, kind,
+        workItemId: values.get("--work-item"), changeId: values.get("--change") });
+    } else {
+      if (values.has("--kind") || values.has("--work-item") || values.has("--change")) {
+        throw new Error("Approval inspect/decide accept only --story, --job and --id.");
+      }
+      result = action === "inspect" ? await inspectTrustedApproval(job, id) :
+        await decideTrustedCliApproval(job, id);
+    }
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
   if (process.argv[2] === "job" && process.argv[3] === "generate") {
     const args = process.argv.slice(4);
     const action = args.shift();

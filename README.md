@@ -1468,6 +1468,47 @@ also exercised with a **simulated** prior Pi completion receipt; this is
 projection-only coverage and does not claim that a fixture review is literary
 certification.
 
+## Trusted CLI approval receipts (transitional #57)
+
+The standalone trusted controller can now **stage, inspect, and record** a
+decision for an existing, exact architecture-plan or protected-revision proposal.
+This is an additional audit ledger, not yet a replacement authorization path:
+the existing signed `job revision authorize|review|commit`, architecture
+approval and author-update gates **still require Ed25519** until #58. A new
+trusted-controller receipt does not authorize a protected Story edit by itself.
+
+```sh
+pnpm dev job approval request --story /repo/story --job draft-1 \\
+  --id approval-witness --kind decision --work-item fix-witness \\
+  --change <exact-change-id-from-revision-inspect>
+pnpm dev job approval inspect --story /repo/story --job draft-1 --id approval-witness
+pnpm dev job approval decide --story /repo/story --job draft-1 --id approval-witness
+```
+
+For an architecture proposal use `--kind plan` (no change ID); the proposal
+must already exist. The request records the exact proposal SHA-256, current
+verified Git HEAD, original job baseline SHA, job/thread IDs and a single-use
+nonce in `<job-state>/trusted-approvals/`, with independent SQLite LangGraph
+checkpoints. `decide` requires an interactive terminal on the local trusted
+controller, displays the complete binding, and requires typing
+`APPROVE <full-proposal-digest>` or `REJECT <full-proposal-digest>`.
+The OS user ID and account name become the approving principal; there is no
+file-supplied or flag-supplied approval action. An unattended command fails
+closed, leaving its interrupt pending. Re-entering a recorded decision is
+read-only/idempotent; a changed proposal, baseline, head or protected change
+cannot consume the old pending interrupt. An immutable request ID cannot be
+rebound to a new proposal.
+
+**Trust boundary:** this controller must run **outside Pi-accessible tool
+execution** and its job-state directory must not be mounted in an agent
+sandbox. An OS account and pseudo-terminal are not sufficient isolation
+against an unsandboxed, same-user Pi shell; production deployments must enforce
+the controller/sandbox separation defined in #38. Signed approvals remain the
+mandatory protected-revision gate until #58 wires this separate ledger into
+the existing authorization checks. After a crash, inspect the saved receipt
+and graph state rather than rerunning an unresolved worker or treating a
+pending record as consent.
+
 ## Protected-decision revision and author approval (#16)
 
 The job never treats a model request, a validator acknowledgement, a Git commit
