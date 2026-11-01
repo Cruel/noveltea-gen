@@ -302,6 +302,15 @@ async function preflight(reader: TreeReader, root: string, directory: string, sh
   return { sizeBytes: bytes, limitBytes: STORY_LIMIT_BYTES, blobCount: blobs.length }
 }
 
+/** Recheck the original pinned Story with GitHub before any Git transfer. */
+export async function verifyGithubStorySelection(token: string, repository: string, commit: string, directory: string) {
+  const path = directoryPath(directory)
+  const revision = await snapshot(token, repository, commit)
+  const reader = makeReader(token, revision.repository)
+  const tree = await followDirectory(reader, revision.root, path)
+  return preflight(reader, revision.root, path, tree)
+}
+
 export async function githubStoryRequest(
   auth: StudioAuth, store: StudioDatabase, request: Request, baseURL: string,
 ): Promise<Response> {

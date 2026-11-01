@@ -33,6 +33,7 @@ export const sessions = sqliteTable('studio_sessions', {
   ownerUserId: text('owner_user_id').notNull(),
   storyId: text('story_id').notNull(),
   title: text('title').notNull(),
+  sourceCommitSha: text('source_commit_sha'),
   status: text('status', { enum: ['running', 'paused', 'blocked', 'completed', 'cancelled'] }).notNull(),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

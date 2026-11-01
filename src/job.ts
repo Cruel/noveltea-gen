@@ -38,12 +38,20 @@ export interface JobStartOptions {
   novelteaProject?: string;
   /** Trusted controller-selected per-repository cache root; overrides NT_GIT_CACHE_DIR. */
   worktreeCacheRoot?: string;
+  /** Trusted server only: populate just the selected Story in each new linked worktree. */
+  sparseStoryOnly?: boolean;
+  /** Ephemeral authenticated Git transport configuration; never written to a job receipt. */
+  gitTransportEnv?: NodeJS.ProcessEnv;
 }
 
 function git(cwd: string, ...args: string[]): string {
+  return gitWithEnv(cwd, undefined, ...args);
+}
+
+function gitWithEnv(cwd: string, transportEnv: NodeJS.ProcessEnv | undefined, ...args: string[]): string {
   // Ambient GIT_DIR/GIT_WORK_TREE can silently redirect git into a different
   // repository. Always discover identities from the requested filesystem root.
-  const env = { ...process.env };
+  const env = { ...process.env, ...transportEnv };
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) {
     delete env[name];
   }
@@ -51,7 +59,10 @@ function git(cwd: string, ...args: string[]): string {
     return execFileSync("git", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   } catch (cause) {
     const error = cause as Error & { stderr?: Buffer | string };
-    const detail = String(error.stderr || error.message).trim();
+    // Never reflect authenticated transport stderr: some Git/curl errors can
+    // include request headers. The ephemeral token must not enter logs/receipts.
+    const detail = transportEnv ? 'authenticated transport failed; inspect provider access and retry' :
+      String(error.stderr || error.message).trim();
     throw new Error(`Git ${args[0]} failed in "${cwd}": ${detail}`);
   }
 }
@@ -230,8 +241,17 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
   let created = false;
   try {
     if (cacheRoot) await mkdir(join(cacheRoot, "worktrees"), { recursive: true });
-    git(gitRoot, "worktree", "add", "-b", branch, worktreeRoot, baseSha);
-    created = true;
+    if (options.sparseStoryOnly) {
+      // Normal 'worktree add' may inherit the base's empty sparse selection
+      // (or check out the entire monorepo). Configure the exact scope first.
+      git(gitRoot, "worktree", "add", "--no-checkout", "-b", branch, worktreeRoot, baseSha);
+      created = true;
+      gitWithEnv(worktreeRoot, options.gitTransportEnv, "sparse-checkout", "set", "--no-cone", "--", storyRelativePath ? `/${storyRelativePath}/**` : "/**");
+      gitWithEnv(worktreeRoot, options.gitTransportEnv, "reset", "--hard", baseSha);
+    } else {
+      git(gitRoot, "worktree", "add", "-b", branch, worktreeRoot, baseSha);
+      created = true;
+    }
     await mkdir(worktreeStoryRoot, { recursive: true });
     if (await realpath(worktreeStoryRoot) !== worktreeStoryRoot) {
       throw new Error("Worktree Story root unexpectedly resolves through a symlink.");

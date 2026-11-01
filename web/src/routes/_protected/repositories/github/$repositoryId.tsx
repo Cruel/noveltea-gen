@@ -9,8 +9,8 @@ export const Route = createFileRoute('/_protected/repositories/github/$repositor
   component: GithubStories,
 })
 
-async function api<T>(query: string, body?: object): Promise<T> {
-  const response = await fetch('/api/github/stories' + query, body ? {
+async function api<T>(path: string, body?: object): Promise<T> {
+  const response = await fetch(path, body ? {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   } : { cache: 'no-store' })
   const result = await response.json() as T & { error?: string }
@@ -26,15 +26,17 @@ function GithubStories() {
   const [discovered, setDiscovered] = useState<string[] | null>(null)
   const [discoveryError, setDiscoveryError] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection | null>(null)
+  const [job, setJob] = useState<{ id: string; baseSha: string } | null>(null)
+  const [pendingJobId, setPendingJobId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    setListing(null); setError(null); setSelection(null)
+    setListing(null); setError(null); setSelection(null); setJob(null); setPendingJobId(null)
     const params = new URLSearchParams({ repositoryId, directory })
     if (commit) params.set('commit', commit)
-    void api<Listing>('?' + params).then(result => {
+    void api<Listing>('/api/github/stories?' + params).then(result => {
       if (cancelled) return
       setCommit(result.commit); setListing(result)
     }).catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Unable to browse directory') })
@@ -44,7 +46,7 @@ function GithubStories() {
   useEffect(() => {
     if (!commit) return
     let cancelled = false
-    void api<Discovery>('?' + new URLSearchParams({ repositoryId, commit, mode: 'discover' }))
+    void api<Discovery>('/api/github/stories?' + new URLSearchParams({ repositoryId, commit, mode: 'discover' }))
       .then(result => { if (!cancelled) setDiscovered(result.stories) })
       .catch(e => { if (!cancelled) setDiscoveryError(e instanceof Error ? e.message : 'Discovery incomplete') })
     return () => { cancelled = true }
@@ -54,15 +56,28 @@ function GithubStories() {
     if (!commit || !listing?.isStory) return
     setBusy(true); setError(null); setSelection(null)
     try {
-      const result = await api<Selection>('', { repositoryId, directory, commit })
+      const result = await api<Selection>('/api/github/stories', { repositoryId, directory, commit })
       setSelection(result)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Story preflight failed')
     } finally { setBusy(false) }
   }
 
+  const createJob = async () => {
+    if (!selection) return
+    const jobId = pendingJobId ?? crypto.randomUUID()
+    setPendingJobId(jobId); setBusy(true); setError(null)
+    try {
+      const result = await api<{ job: { id: string; baseSha: string } }>('/api/github/jobs', {
+        storyId: selection.story.id, jobId, commit: selection.story.commit,
+      })
+      setJob(result.job)
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to acquire the selected Story') }
+    finally { setBusy(false) }
+  }
+
   const open = (path: string) => {
-    setError(null); setSelection(null); setDirectory(path)
+    setError(null); setSelection(null); setJob(null); setPendingJobId(null); setDirectory(path)
   }
   return <main className="page">
     <header><div><p className="eyebrow">NovelTea</p><h1>GitHub Story discovery</h1></div>
@@ -84,9 +99,15 @@ function GithubStories() {
         <p>Canonical Story Markdown detected here. The 100 MB check must pass before the Story is registered.</p>
         <button type="button" disabled={busy} onClick={() => void select()}>{busy ? 'Verifying…' : 'Verify size and add Story'}</button>
       </div>}
-      {selection && <p role="status">Added <strong>{selection.story.title}</strong> at commit <code>{selection.story.commit}</code>.
+      {selection && <div><p role="status">Added <strong>{selection.story.title}</strong> at commit <code>{selection.story.commit}</code>.
         {' '}{selection.sizeBytes.toLocaleString()} / {selection.limitBytes.toLocaleString()} bytes ({selection.blobCount} Git blobs).
-      </p>}
+      </p>
+        <button type="button" disabled={busy || !!job} onClick={() => void createJob()}>
+          {busy ? 'Preparing sparse checkout…' : 'Create isolated job worktree'}
+        </button>
+        {job && <p role="status">Job <code>{job.id}</code> is prepared at base <code>{job.baseSha}</code>.
+          Generation starts through the future job execution flow; no agent has run yet.</p>}
+      </div>}
     </section>
     <section>
       <h2>Detected Story directories</h2>

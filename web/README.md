@@ -106,15 +106,66 @@ using the directory browser without traversing unrelated directories. Errors
 are explicit and no partial Story catalog registration is written. Revoked
 GitHub installation/user permissions block new browsing and selection, but
 existing catalog records are retained. API rate limits or missing access
-surface as retry/reconnect errors. New Story catalog records do not clone,
-validate canonical Markdown contents, or start agents; later tickets own these
-steps. Story registration requires app migration 3 (`source_commit_sha`). On an
+surface as retry/reconnect errors. New Story catalog records do not clone or validate canonical Markdown
+contents. Job acquisition is an explicit separate action; it does not run an
+agent or replace native narrative validation. Story registration requires app migration 3 (`source_commit_sha`). On an
 older Studio database, POST returns a specific HTTP 503 explaining how to run
 the explicit migration, rather than misreporting a GitHub outage. An inconsistent
 migration journal/schema is rejected without attempting a runtime repair.
 Unexpected internal failures are logged server-side with a short incident
 reference and reported as HTTP 500, without exposing exception details in the
 browser.
+
+## GitHub sparse Git acquisition and job worktrees (#46)
+
+After verifying and adding a GitHub Story, choose **Create isolated job worktree**.
+The authenticated `POST /api/github/jobs` accepts `{storyId,jobId,commit}`;
+`jobId` is a client-generated UUID retained for retry, and `commit` must match
+the server's selected or previously saved job SHA exactly. It is an optimistic
+revision assertion, not permission to choose arbitrary remote revisions. App schema migration
+4 records a durable pinned source SHA on each created session; reopening a job
+continues using that SHA even if its Story is later re-imported at a newer
+commit. Older session rows without this pin cannot be adopted as a Git job. The server resolves
+owner, repository, directory and immutable source SHA exclusively from its
+catalog, rechecks the GitHub App grant and stable repository ID, and reruns
+size/LFS preflight at the same commit. A changed default branch does not move
+an existing job's source revision. Neither Git URLs nor filesystem paths are
+accepted from the browser. The response contains only job ID, status and Git
+SHAs; server paths and tokens remain private.
+
+Configure `NT_GIT_CACHE_DIR` to a dedicated absolute **evictable** cache volume
+outside `NT_STATE_DIR` (or the default `~/.local/state/noveltea-gen`). One
+cache directory per hashed user/repository identity holds a reusable filtered,
+shallow base clone and `worktrees/<job-hash>` linked checkouts. The base Git
+working tree intentionally contains no source files. Each job's sparse checkout
+materializes only the selected Story path, shares repository Git objects but
+has its own branch/index/work files. Large unrelated monorepo assets are not
+checked out. GitHub Git HTTPS authorization is passed as ephemeral subprocess
+configuration, never stored in remote URLs, `.git/config`, application rows,
+or durable job manifests. Only the explicitly selected Story is checked against
+the 100 MB source-size limit; Git cache bytes/history remain a separate disk
+quota concern for subsequent cache-governance work.
+
+The existing job engine retains receipts, locks, Pi sessions and checkpoints
+under durable `NT_STATE_DIR`; a missing/tampered job worktree or a pinned-commit
+mismatch fails closed, preserving recoverable state. Creation and reopen are
+serialized per cached repository, with an unreleased lock requiring operator
+inspection after a crash rather than silent deletion. Blob fetch, Git tree
+verification, or worktree failure is reported explicitly. A Story path with
+Git sparse-pattern metacharacters is rejected, rather than potentially
+materializing content outside its selected subtree. Existing CLI jobs retain
+their original full-checkout behavior; no legacy manifest migration is required.
+
+Job creation currently leaves the job **paused**, prepared for the later web
+execution/interrupt workflow; it does not start LangGraph or Pi. Manual test:
+register a GitHub Story, set the Git cache variable, create two distinct jobs,
+and verify different job IDs and common Git storage. Reopen using the same
+`jobId` via API to confirm its branch/work files survive. The backend test
+`pnpm --filter @noveltea/studio exec tsx --test test/github-acquisition.test.ts`
+uses a local remote to assert sparse selection, object sharing, concurrent
+jobs, recoverable edits, pin and size mismatches, and user isolation. Live
+GitHub App Git transfer, disk quotas and safe cache eviction still need
+provider/deployment certification; no job or worktree is silently evicted.
 
 ## GitLab Story discovery and size preflight (#44)
 
@@ -129,7 +180,7 @@ verify and register the selected Story without cloning or downloading unrelated
 project assets. The server revalidates the owner-scoped catalog record and
 current GitLab project membership at every request. New registration is
 idempotent per Story directory, records the selected commit, and requires
-Studio schema migration 3.
+Studio schema migration 3 for Story selection (migration 4 is needed for job acquisition).
 
 GitLab's paginated REST tree entries do **not** include blob sizes. The 100 MB
 (decimal, inclusive) preflight uses commit-pinned GraphQL `repository.blobs`

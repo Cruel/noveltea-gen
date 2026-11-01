@@ -64,6 +64,12 @@ const appMigrations = [
       `ALTER TABLE stories ADD COLUMN source_commit_sha TEXT`,
     ],
   },
+  {
+    version: 4,
+    statements: [
+      `ALTER TABLE studio_sessions ADD COLUMN source_commit_sha TEXT`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -81,17 +87,19 @@ export class StudioSchemaError extends Error {
 export function assertStudioSchemaCurrent(store: StudioDatabase) {
   const hasJournal = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='studio_schema_migrations'`).get()
-  const applied = hasJournal
-    ? (store.sqlite.prepare('SELECT max(version) AS version FROM studio_schema_migrations').get() as { version: number | null }).version
-    : null
-  if (applied === null || applied < latestAppSchemaVersion) {
-    throw new StudioSchemaError(`Studio database migrations are pending (requires version ${latestAppSchemaVersion}, found ${applied ?? 0}). Stop Studio, run \`pnpm --filter @noveltea/studio migrate\`, then restart Studio.`)
-  }
+  const versions = hasJournal ? new Set((store.sqlite.prepare(
+    'SELECT version FROM studio_schema_migrations').all() as Array<{ version: number }>).map(row => row.version)) : new Set<number>()
+  const applied = Math.max(0, ...versions)
   if (applied > latestAppSchemaVersion) {
     throw new StudioSchemaError('Studio database schema is newer than this build. Update Studio before using it.')
   }
+  if (appMigrations.some(migration => !versions.has(migration.version))) {
+    throw new StudioSchemaError(`Studio database migrations are pending (requires version ${latestAppSchemaVersion}, found ${applied}). Stop Studio, run \`pnpm --filter @noveltea/studio migrate\`, then restart Studio.`)
+  }
   const columns = store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>
-  if (!columns.some(column => column.name === 'source_commit_sha')) {
+  const sessionColumns = store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>
+  if (!columns.some(column => column.name === 'source_commit_sha') ||
+      !sessionColumns.some(column => column.name === 'source_commit_sha')) {
     throw new StudioSchemaError('Studio database migration journal does not match its schema. Check migration status and restore or repair the database before using Story imports.')
   }
 }
