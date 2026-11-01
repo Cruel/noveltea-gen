@@ -505,6 +505,58 @@ The native catalog/owner-scoped integration cases are covered in
 `web/test/story-explorer.test.ts`, with fixture-start binding covered in
 `web/test/fixture-jobs.test.ts`.
 
+## New Story onboarding and author discovery (#63)
+
+GitHub and GitLab repository pages share the **New Story discovery and
+onboarding** wizard. Select a workspace (blank means repository root), then
+review the resolved `<workspace>/story/creative-direction/foundation.md` before
+writing. The trusted author-only `.story-inbox/` is a sibling outside the Story
+content root, never an agent-mounted child. Three successive author-answer
+rounds cover premise/conflict, genre/tone/experience/scope, and a
+user-protected creative decision, Creative Direction prose, generation task and
+constraints. Saving each round persists an owner/repository/workspace-scoped
+revision in SQLite. An outdated tab cannot silently overwrite newer answers.
+
+`GET/PUT /api/onboarding?repositoryId=<UUID>&workspace=<path>` loads and
+persists discovery answers, with authentication, same-origin writes, bounded
+requests and optimistic revision checks. `POST` with the saved revision returns
+the server-reviewed *author-authored* foundation fields and the authoritative
+`parseGenerationContract` full-Story composition proposal. A separate,
+explicit author action invokes the provider's initialization API; the native
+NovelTea validator must accept the canonical schema-0.1 Story document before
+any Git commit. The author decision is tagged `origin: user` and
+`authority: user-protected`, not falsely attributed to Pi.
+
+GitHub now accepts the same native-validated foundation fields as GitLab.
+Existing repositories receive a one-commit isolated job/review branch; GitHub
+stores an initial-content SHA-256 digest so the *same* unpublished draft can be
+reopened without substituting placeholder source. GitLab creates its separate
+remote review branch. Only a genuinely empty repository may create its first
+default-branch commit, without force push or modifying preexisting history.
+After provider initialization, the wizard prepares the saved Git job (for
+GitLab) and saves the initial contract through the owner-scoped configuration
+API introduced in #62. If remote creation succeeds but job/configuration
+persistence fails, the page reports the partial state and retries **only**
+the remaining setup, never the Git commit. Do not blindly repeat a request
+after an ambiguous provider write.
+
+**Deploy:** stop Studio and run `pnpm --filter @noveltea/studio migrate` for
+migrations **7–8** (GitHub reviewed-content digest and durable onboarding
+drafts). The local Git cache, durable job state, and installed native CLI must
+be configured. Tests cover three-round durable answers, multi-user isolation,
+stale revisions, native fail-closed bootstrap, existing-branch nonmutation,
+reopen-by-digest, and the empty-repository exception; run
+`pnpm --filter @noveltea/studio exec tsx --test test/onboarding.test.ts
+test/github-initialize.test.ts test/github-initialize-api.test.ts
+test/gitlab-initialize.test.ts`.
+
+This stage is **author-guided discovery**, not live Pi conversational
+discovery. #56/#66 must supply user-scoped authenticated Pi execution,
+multiple model-generated question/answer exchanges, and independently reviewed
+model proposals before the full #38 onboarding UX is certifiable. Structural
+native validation does not establish editorial quality or grant agent
+authorization over protected decisions.
+
 ## Canonical Story record explorer (#60)
 
 The authenticated job page displays a read-only Story hierarchy and Markdown

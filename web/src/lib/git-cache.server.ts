@@ -175,7 +175,9 @@ async function withAdmission<T>(cache: string, repositoryRoot: string, estimated
  * commit but before catalog registration is recovered by verifying the exact
  * commit and file, not by resetting or replaying the write.
  */
-export async function initializeStoryBranch(input: CachedStoryRequest & { title: string; requireExistingCommit?: boolean }) {
+export async function initializeStoryBranch(input: CachedStoryRequest & {
+  title: string; requireExistingCommit?: boolean; foundationMarkdown?: string; foundationSha256?: string
+}) {
   const job = await acquireCachedStory({ ...input, allowAbsentStory: true,
     requireExistingJob: input.requireExistingCommit === true })
   const env = gitEnvironment(input.remoteUrl, input.token)
@@ -192,15 +194,26 @@ export async function initializeStoryBranch(input: CachedStoryRequest & { title:
     try {
       const path = [input.directory, FOUNDATION].filter(Boolean).join('/')
       const file = join(job.worktreeRoot, path)
-      const expected = initialStoryDocument(input.title)
+      const expected = input.foundationMarkdown ?? initialStoryDocument(input.title)
+      const expectedHash = input.foundationSha256 ?? createHash('sha256').update(expected).digest('hex')
+      if (!/^[a-f0-9]{64}$/.test(expectedHash) ||
+          (input.foundationMarkdown && createHash('sha256').update(expected).digest('hex') !== expectedHash)) {
+        throw new GitCacheError(409, 'Saved initialization content digest is invalid.')
+      }
       const current = git(job.worktreeRoot, env, 'rev-parse', 'HEAD')
       const dirty = git(job.worktreeRoot, env, 'status', '--porcelain=v1', '--untracked-files=all')
       if (current !== input.commit) {
         // One initialization commit, exactly the expected content and no other
         // changes, is the only idempotent replay accepted.
+        // Read exact committed bytes: the line-oriented Git helper trims output,
+        // which is insufficient for an initialization content-integrity digest.
+        const committed = execFileSync('git', ['show', 'HEAD:' + path], {
+          cwd: job.worktreeRoot, env, timeout: 30_000, maxBuffer: 1024 * 1024,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
         if (git(job.worktreeRoot, env, 'rev-list', '--count', input.commit + '..HEAD') !== '1' ||
             git(job.worktreeRoot, env, 'diff', '--name-only', input.commit, 'HEAD') !== path ||
-            git(job.worktreeRoot, env, 'show', 'HEAD:' + path) !== expected.trim() || dirty) {
+            createHash('sha256').update(committed).digest('hex') !== expectedHash || dirty) {
           throw new GitCacheError(409, 'Initialized job has changed; inspect its preserved branch before retrying.')
         }
         return { ...job, headSha: current }
@@ -232,7 +245,7 @@ export async function initializeStoryBranch(input: CachedStoryRequest & { title:
  * default-branch initialization rejects our unrelated root commit.
  */
 export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequest, 'commit' | 'jobId'> & {
-  defaultBranch: string; title: string
+  defaultBranch: string; title: string; foundationMarkdown?: string
 }) {
   const check = { ...input, commit: '0'.repeat(40), jobId: 'bootstrap' }
   assertInput(check)
@@ -273,7 +286,7 @@ export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequ
     const path = [input.directory, FOUNDATION].filter(Boolean).join('/')
     const file = join(base, path)
     await mkdir(join(base, input.directory, 'creative-direction'), { recursive: true })
-    await writeFile(file, initialStoryDocument(input.title), { flag: 'wx', mode: 0o600 })
+    await writeFile(file, input.foundationMarkdown ?? initialStoryDocument(input.title), { flag: 'wx', mode: 0o600 })
     git(base, env, 'add', '--', path)
     git(base, env, '-c', 'user.name=NovelTea Studio',
       '-c', 'user.email=studio@noveltea.dev', 'commit', '-m', 'Bootstrap draft NovelTea Story')

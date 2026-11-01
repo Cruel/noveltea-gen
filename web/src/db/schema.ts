@@ -21,6 +21,7 @@ export const stories = sqliteTable('stories', {
   title: text('title').notNull(),
   createdAt: text('created_at').notNull(),
   sourceCommitSha: text('source_commit_sha'),
+  initialContentSha256: text('initial_content_sha256'),
 }, (table) => [
   foreignKey({ columns: [table.repositoryId, table.ownerUserId], foreignColumns: [repositories.id, repositories.ownerUserId] }),
   uniqueIndex('stories_owner_pair').on(table.id, table.ownerUserId),

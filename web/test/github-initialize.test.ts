@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { renderFoundation } from '../../src/foundation-record'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -73,6 +75,55 @@ test('initializes only an isolated NovelTea branch and reopens the same commit w
     if (oldState === undefined) delete process.env.NT_STATE_DIR
     else process.env.NT_STATE_DIR = oldState
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('reviewed onboarding foundation is committed only in isolated branch and reopens by saved content digest', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'nt-reviewed-branch-'))
+  const previous = process.env.NT_STATE_DIR
+  process.env.NT_STATE_DIR = join(root, 'state')
+  try {
+    const source = join(root, 'source')
+    const remote = join(root, 'remote.git')
+    mkdirSync(source)
+    git(root, 'init', '-q', '--bare', '--initial-branch=main', remote)
+    git(source, 'init', '-q', '--initial-branch=main')
+    git(source, 'config', 'user.name', 'Test')
+    git(source, 'config', 'user.email', 'test@example.test')
+    writeFileSync(join(source, 'README.md'), 'Existing history')
+    git(source, 'add', '.')
+    git(source, 'commit', '-qm', 'Existing repository')
+    git(source, 'remote', 'add', 'origin', remote)
+    git(source, 'push', '-q', 'origin', 'main')
+    const base = git(source, 'rev-parse', 'HEAD')
+    const foundationMarkdown = renderFoundation({
+      id: 'last-bell', title: 'Last Bell', premise: 'An archive mystery',
+      central_conflict: 'Whom to trust', genre: 'Mystery', tone: 'Somber',
+      player_experience: 'Investigate', scope: 'A town',
+      decisions: [{ id: 'initial-direction', statement: 'Preserve ambiguous evidence',
+        origin: 'user', authority: 'user-protected' }],
+      body: 'The author supplied the Creative Direction.',
+    })
+    const hash = createHash('sha256').update(foundationMarkdown).digest('hex')
+    const input = { ownerId: 'alice', repositoryId: 'github:reviewed',
+      remoteUrl: 'file://' + remote, token: 'unused', commit: base,
+      directory: 'projects/demo/story', jobId: 'reviewed-job', title: 'Last Bell',
+      cacheDirectory: join(root, 'cache'), verifiedSizeBytes: 0, verifiedBlobCount: 0 }
+    const initialized = await initializeStoryBranch({ ...input, foundationMarkdown })
+    assert.equal(git(remote, 'rev-parse', 'main'), base)
+    assert.equal(git(initialized.worktreeRoot, 'diff', '--name-only', base, 'HEAD'),
+      'projects/demo/story/creative-direction/foundation.md')
+    assert.equal(readFileSync(join(initialized.worktreeStoryRoot, 'creative-direction/foundation.md'), 'utf8'),
+      foundationMarkdown)
+    const reopened = await initializeStoryBranch({ ...input, foundationSha256: hash, requireExistingCommit: true })
+    assert.equal(reopened.headSha, initialized.headSha)
+    await assert.rejects(() => initializeStoryBranch({ ...input, requireExistingCommit: true,
+      foundationSha256: '0'.repeat(64) }), /changed|inspect/)
+    assert.equal(git(remote, 'rev-parse', 'main'), base)
+  } finally {
+    if (previous === undefined) delete process.env.NT_STATE_DIR
+    else process.env.NT_STATE_DIR = previous
+    rmSync(root, {recursive: true, force: true})
   }
 })
 

@@ -1,10 +1,11 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { directoryPath, inspectGithubStoryInitialization } from './github-stories.server'
 import { storyContentDirectory } from './story-discovery.shared'
+import { candidate, validateNewStory, StoryBootstrapError } from './story-foundation.server'
 import { acquireCachedStory, bootstrapEmptyGithubRepository,
   GitCacheError, initializeStoryBranch, initialStoryDocument } from './git-cache.server'
 
@@ -54,6 +55,15 @@ export async function githubInitializationRequest(
     if (typeof input.jobId !== 'string' || !UUID.test(input.jobId)) {
       throw new GithubError(400, 'A new initialization job UUID is required.')
     }
+    const foundation = input.foundation === undefined ? null : candidate(input.foundation)
+    if (foundation) {
+      if (foundation.title !== title.trim()) {
+        throw new GithubError(400, 'Story title must match the reviewed Creative Direction title.')
+      }
+      await validateNewStory(foundation.file)
+    }
+    const content = foundation?.file ?? initialStoryDocument(title.trim())
+    const contentSha256 = createHash('sha256').update(content).digest('hex')
     const expectedCommit = input.commit
     if (inspected.mode === 'branch'
       ? (typeof expectedCommit !== 'string' || !SHA.test(expectedCommit) ||
@@ -65,15 +75,18 @@ export async function githubInitializationRequest(
     // A Story may have multiple jobs, but initialization may run only once.
     // Replays must name the same persisted job; other jobs cannot overwrite
     // an already connected Story directory.
-    const existingStory = store.sqlite.prepare(`SELECT id FROM stories
+    const existingStory = store.sqlite.prepare(`SELECT id, initial_content_sha256 AS contentSha256 FROM stories
       WHERE repository_id=? AND owner_user_id=? AND directory=?`)
-      .get(repositoryId, actor.id, directory) as { id: string } | undefined
+      .get(repositoryId, actor.id, directory) as { id: string; contentSha256: string | null } | undefined
     const existingJob = store.sqlite.prepare(`SELECT story_id AS storyId, owner_user_id AS ownerId,
       source_commit_sha AS commitSha FROM studio_sessions WHERE id=?`)
       .get(input.jobId) as { storyId: string; ownerId: string; commitSha: string | null } | undefined
     if (existingJob && (!existingStory || existingStory.id !== existingJob.storyId ||
         existingJob.ownerId !== actor.id || existingJob.commitSha !== inspected.commit)) {
       throw new GithubError(409, 'Initialization job ID is assigned to different saved work.')
+    }
+    if (existingStory && existingStory.contentSha256 && existingStory.contentSha256 !== contentSha256) {
+      throw new GithubError(409, 'Initialization content differs from the saved Story draft. Inspect the original job.')
     }
     if (existingStory && !existingJob) {
       throw new GithubError(409, 'This Story directory is already connected. Open its existing Story instead.')
@@ -93,19 +106,19 @@ export async function githubInitializationRequest(
     let branch: string | null = null
     if (inspected.mode === 'bootstrap') {
       const created = await bootstrapEmptyGithubRepository({
-        ...common, defaultBranch: inspected.defaultBranch,
+        ...common, defaultBranch: inspected.defaultBranch, foundationMarkdown: content,
       })
       baseSha = created.commit
       const result = await acquireCachedStory({
         ...common, commit: baseSha, jobId: input.jobId,
-        verifiedSizeBytes: Buffer.byteLength(initialStoryDocument(common.title)),
+        verifiedSizeBytes: Buffer.byteLength(content),
         verifiedBlobCount: 1,
       })
       headSha = result.headSha
       branch = result.branch
     } else {
       const created = await initializeStoryBranch({
-        ...common, commit: inspected.commit, jobId: input.jobId,
+        ...common, commit: inspected.commit, jobId: input.jobId, foundationMarkdown: content,
         verifiedSizeBytes: inspected.sizeBytes, verifiedBlobCount: inspected.blobCount,
       })
       baseSha = inspected.commit
@@ -118,9 +131,9 @@ export async function githubInitializationRequest(
     store.sqlite.transaction(() => {
       if (!existingStory) {
         store.sqlite.prepare(`INSERT INTO stories
-          (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-          VALUES (?,?,?,?,?,?,?)`)
-          .run(storyId, actor.id, repositoryId, directory, common.title, now, baseSha)
+          (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha,initial_content_sha256)
+          VALUES (?,?,?,?,?,?,?,?)`)
+          .run(storyId, actor.id, repositoryId, directory, common.title, now, baseSha, contentSha256)
       }
       store.sqlite.prepare(`INSERT INTO studio_sessions
         (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
@@ -135,7 +148,7 @@ export async function githubInitializationRequest(
       job: { id: input.jobId, baseSha, headSha, branch, status: 'paused' },
       mode: inspected.mode, published: inspected.mode === 'bootstrap' })
   } catch (error) {
-    return errorResponse(error instanceof GitCacheError
+    return errorResponse(error instanceof GitCacheError || error instanceof StoryBootstrapError
       ? new GithubError(error.status, error.message) : error)
   }
 }

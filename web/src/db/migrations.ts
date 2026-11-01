@@ -83,6 +83,27 @@ const appMigrations = [
       `ALTER TABLE studio_sessions ADD COLUMN generation_config_json TEXT`,
     ],
   },
+  {
+    version: 7,
+    statements: [
+      `ALTER TABLE stories ADD COLUMN initial_content_sha256 TEXT`,
+    ],
+  },
+  {
+    version: 8,
+    statements: [
+      `CREATE TABLE story_onboarding_drafts (
+        owner_user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        repository_id TEXT NOT NULL,
+        workspace TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        draft_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (owner_user_id, repository_id, workspace),
+        FOREIGN KEY (repository_id, owner_user_id) REFERENCES repositories (id, owner_user_id) ON DELETE CASCADE
+      )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -109,9 +130,12 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   if (appMigrations.some(migration => !versions.has(migration.version))) {
     throw new StudioSchemaError(`Studio database migrations are pending (requires version ${latestAppSchemaVersion}, found ${applied}). Stop Studio, run \`pnpm --filter @noveltea/studio migrate\`, then restart Studio.`)
   }
+  const hasOnboarding = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='story_onboarding_drafts'`).get()
   const columns = store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>
   const sessionColumns = store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>
-  if (!columns.some(column => column.name === 'source_commit_sha') ||
+  if (!hasOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+      !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||
       !sessionColumns.some(column => column.name === 'generation_thread_id') ||

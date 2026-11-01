@@ -105,6 +105,23 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
     const base = { repositoryId, directory: 'story', jobId: '22222222-2222-4222-8222-222222222222',
       title: 'A new Story', commit }
     assert.equal((await post(base, 'https://attacker.invalid')).status, 403)
+    const foundation = {
+      id: 'last-bell', title: base.title, premise: 'An archive mystery',
+      central_conflict: 'Whom to trust', genre: 'Mystery', tone: 'Somber',
+      player_experience: 'Investigate competing accounts', scope: 'One town',
+      decision: 'Preserve the author-approved conflict', body: 'An original Story premise.',
+    }
+    assert.equal((await post({ ...base, foundation: { ...foundation, id: 'BAD' } })).status, 400)
+    assert.equal((await post({ ...base, foundation: { ...foundation, title: 'Different title' } })).status, 400)
+    const previousNative = process.env.NT_NATIVE_CLI
+    process.env.NT_NATIVE_CLI = join(root, 'not-a-validator')
+    try {
+      assert.equal((await post({ ...base, foundation })).status, 503,
+        'an unavailable native validator must prevent the initial Git commit')
+    } finally {
+      if (previousNative === undefined) delete process.env.NT_NATIVE_CLI
+      else process.env.NT_NATIVE_CLI = previousNative
+    }
     assert.equal((await post({ ...base, commit: sha('9') })).status, 409)
     assert.equal((await post({ ...base, directory: '../x' })).status, 400)
     assert.equal((await post({ ...base, directory: '.private' })).status, 400)

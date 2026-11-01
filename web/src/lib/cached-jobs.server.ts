@@ -8,6 +8,7 @@ export type CachedCatalogStory = {
   directory: string
   title: string
   commitSha: string | null
+  contentSha256: string | null
   repository: string
   providerId: string
 }
@@ -30,7 +31,8 @@ export async function prepareCachedJob(
     throw new GitCacheError(400, 'Select a Story, job UUID and pinned commit.')
   }
   const row = store.sqlite.prepare(`SELECT s.id, s.directory, s.title,
-    s.source_commit_sha AS commitSha, r.name AS repository, r.provider_repository_id AS providerId
+    s.source_commit_sha AS commitSha, s.initial_content_sha256 AS contentSha256,
+    r.name AS repository, r.provider_repository_id AS providerId
     FROM stories s JOIN repositories r ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
     WHERE s.id=? AND s.owner_user_id=? AND r.provider=?`)
     .get(input.storyId, ownerId, provider) as CachedCatalogStory | undefined
@@ -65,7 +67,8 @@ export async function prepareCachedJob(
   // Only an already-registered job may reopen its exact saved one-commit draft;
   // never use this fallback to create a new job or skip identity validation.
   const job = verified.reopenDraft
-    ? await initializeStoryBranch({ ...source, title: row.title, requireExistingCommit: true })
+    ? await initializeStoryBranch({ ...source, title: row.title, requireExistingCommit: true,
+      ...(row.contentSha256 ? { foundationSha256: row.contentSha256 } : {}) })
     : await acquireCachedStory({ ...source,
       verifiedSizeBytes: verified.sizeBytes, verifiedBlobCount: verified.blobCount })
   const now = new Date().toISOString()

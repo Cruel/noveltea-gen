@@ -1,12 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { InitializeStory } from './-InitializeStory'
+import { NewStoryOnboarding } from '../-NewStoryOnboarding'
 
 type Listing = { commit: string; directory: string; isStory: boolean; directories: Array<{ name: string; path: string }> }
 type Discovery = { commit: string; stories: string[] }
 type InitState = { empty: boolean; defaultBranch: string | null; commit: string | null }
-type Created = { story: { id: string; directory: string; title: string; commitSha: string };
-  branch: string; commit: string; mode: 'initial-default' | 'review-branch' }
+type Created = { story: { id: string; directory: string; title: string };
+  jobId: string; headSha: string; branch: string; commit: string; mode: string }
 type Selection = { story: { id: string; title: string; directory: string; commit: string }; sizeBytes: number; limitBytes: number; blobCount: number }
 
 export const Route = createFileRoute('/_protected/repositories/gitlab/$repositoryId')({
@@ -98,12 +98,10 @@ function GitlabStories() {
     {commit && <p><strong>Commit:</strong> <code>{commit}</code>{' '}
       <button type="button" disabled={busy} onClick={() => { setCommit(''); setDirectory(''); setDiscovered(null); setDiscoveryError(null) }}>Refresh HEAD</button></p>}
     {error && <p role="alert" className="error">{error}</p>}
-    {initState && <InitializeStory repositoryId={repositoryId} snapshot={initState}
+    {initState && <NewStoryOnboarding provider="gitlab" repositoryId={repositoryId}
+      initialWorkspace={directory}
       onCreated={result => {
-        setCreated(result); setCommit(result.commit); setDirectory(result.story.directory)
-        setInitState({ empty: false, defaultBranch: result.mode === 'initial-default'
-          ? result.branch : initState.defaultBranch,
-          commit: result.mode === 'initial-default' ? result.commit : initState.commit })
+        setCreated(result)
         setError(null)
       }} />}
     {created && <p role="status">Initialized <strong>{created.story.title}</strong> at
