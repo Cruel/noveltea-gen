@@ -61,6 +61,11 @@ async function restoreJob(row: SavedJob, owner: string): Promise<JobStartResult>
   return job
 }
 
+/** Resolve an owner-scoped registered job without accepting filesystem paths from clients. */
+export async function authorizedStoryJob(store: StudioDatabase, owner: string, id: string): Promise<JobStartResult> {
+  return restoreJob(selectedJob(store, owner, id), owner)
+}
+
 async function verifyTrustedRevision(job: JobStartResult) {
   try { await trustedHead(job) }
   catch { throw new JobError(409, 'Job HEAD is not a verified narrative revision. Reconcile the preserved branch before generation.') }

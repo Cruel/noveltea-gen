@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
+import { StoryExplorer } from './-StoryExplorer'
 
 type Job = {
   id: string; storyId: string; title: string; baseSha: string; headSha: string
@@ -73,6 +74,7 @@ function JobDetails() {
           <li key={index}>{stage.stage}: {stage.status}</li>)}</ul>}
         <button type="button" disabled={busy} onClick={() => void refresh()}>Refresh saved state</button>
       </section>
+      <StoryExplorer jobId={jobId} revision={job.headSha} />
       {job.status === 'prepared' ? <section>
         <h2>Start fixture generation</h2>
         <p>A validated contract is bound permanently to this job and graph thread.

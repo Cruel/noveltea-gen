@@ -463,6 +463,42 @@ anonymous and cross-user rejection, same-origin writes, invalid/foreign
 contracts, run idempotency, owner/thread receipts, checkpoint reconnect,
 and fail-closed tampering.
 
+## Canonical Story record explorer (#60)
+
+The authenticated job page displays a read-only Story hierarchy and Markdown
+source viewer. It builds the index exclusively from the **native canonical
+validator's typed records** for the saved job worktree (or that job's existing
+pinned historical validator), not a directory scan, Docker mount list or
+client-submitted path. Arc membership and Milestone fulfillment relationships
+drive navigation through Arcs, Milestones and Events; other present and future
+typed records are grouped by native type/ID without assuming mount paths.
+A single record is selected by typed ID and its original Markdown is shown
+without executing or rendering user-supplied HTML.
+
+`GET /api/jobs/:jobId/records` returns the bounded typed index, canonical
+validation/protection status, and source-path/line diagnostics. Selecting
+`?id=<typed-id>` returns only the matching indexed Markdown (up to 512 KiB).
+Both requests require the signed-in owner and the original persisted
+job/cache identity. A changed Git HEAD, invalid/missing pinned validator,
+malformed index, symlinked file, hidden path or out-of-root path fails closed;
+no arbitrary filesystem path or revision can be passed from the browser.
+Only the selected content root, typically `<workspace>/story`, is read.
+The sibling trusted-author `.story-inbox/`, Git metadata and unrelated
+repository files are never indexed or returned. Navigation is read-only;
+successful validation does not imply author approval.
+
+Run the explorer integration test with:
+
+```sh
+pnpm --filter @noveltea/studio exec tsx --test test/story-explorer.test.ts
+```
+
+The fixture runs the real session/auth, cached Git worktree and native CLI
+pin/protocol boundary with an offline deterministic validator protocol,
+including cross-user denial, diagnostics, future types, and inbox/symlink
+confinement. For end-to-end native schema certification, configure the actual
+`NT_NATIVE_CLI` and browse an imported Story with its normal job pin.
+
 ## Acceptance/testing limitations
 
 The isolated migration/restart and user-ownership tests do not invoke live
