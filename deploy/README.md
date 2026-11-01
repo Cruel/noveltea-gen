@@ -178,6 +178,35 @@ NT_TEST_ROOTLESS_SANDBOX=1 pnpm --filter @noveltea/studio exec tsx --test test/s
 
 The #52 adapter has an additional rootless smoke test for all seven Pi tools:
 `NT_TEST_ROOTLESS_SANDBOX=1 pnpm exec tsx --test test/sandbox-pi-tools.test.ts`.
+
+To certify Foundation and Architecture against the **real authenticated host
+controller** without deploying Studio OAuth or the unfinished #59 web
+scheduler, use the opt-in disposable registered-job integration test:
+
+```sh
+NT_SKILLS_CHECKOUT=/absolute/path/to/noveltea-skills \\
+  NT_TEST_HOSTED_FIXTURE=1 \\
+  pnpm exec tsx --test test/sandbox-hosted-live.test.ts
+
+# Calls the configured Pi model for both Foundation and Architecture (paid):
+NT_SKILLS_CHECKOUT=/absolute/path/to/noveltea-skills \\
+  NT_LIVE_HOSTED_SANDBOX=1 \\
+  pnpm exec tsx --test test/sandbox-hosted-live.test.ts
+```
+
+Optional `NT_PROVIDER` and `NT_MODEL` select the Pi provider/model. The test
+requires the `noveltea-sandbox:local` image (override with
+`NT_TEST_SANDBOX_IMAGE`) and host-level rootless Docker with enforced cgroup
+limits. It creates an isolated temporary Git repository, registered Studio
+catalog entry, controller socket/token and worktree; it sets
+`NT_REQUIRE_SANDBOX_TOOLS`, `NT_SANDBOX_SOCKET` and
+`NT_SANDBOX_TOKEN_FILE` automatically. It leaves existing Compose volumes and
+Studio data untouched. On a failed run it preserves the disposable directory
+for investigation; `NT_KEEP_FAILED_LIVE=1` also preserves a successful run.
+Unlike the future #59 web-to-Skein flow, this test calls the production
+Foundation and Architecture job functions directly. It proves the agent tool
+routing through the real controller and Docker, **not** web admission or
+Skein-to-controller deployment wiring.
 It also checks denied host/hidden paths, pinned skill reads and missing-controller
 fail-closed behavior with deterministic fixtures. Run `pnpm check` for the full
 root and Studio suites. Set `NT_TEST_SANDBOX_IMAGE` if not using
