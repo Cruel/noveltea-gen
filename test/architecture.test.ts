@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { authorApproval } from "./approval-controller.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-architecture-"));
 after(() => removeTestTree(root));
@@ -39,10 +40,6 @@ An investigator must decide what loyalty costs when a friend conceals evidence.
 `);
   git(repo, "init", "-q"); git(repo, "config", "user.name", "Author");
   git(repo, "config", "user.email", "author@example.test");
-  const authorKey = generateKeyPairSync("ed25519");
-  mkdirSync(join(repo, ".noveltea"), { recursive: true });
-  writeFileSync(join(repo, ".noveltea/approval-author.pub"),
-    authorKey.publicKey.export({ type: "spki", format: "pem" }));
   git(repo, "add", "."); git(repo, "commit", "-qm", "Foundation");
   const baseline = git(repo, "rev-parse", "HEAD");
   function cli(...args: string[]) {
@@ -56,10 +53,7 @@ An investigator must decide what loyalty costs when a friend conceals evidence.
   }
   const started = cli("start"); assert.equal(started.status, 0, started.stderr);
   function signEvidence(payload: Record<string, unknown>) {
-    const path = join(root, "signed-architecture-" + Math.random().toString(36).slice(2) + ".json");
-    writeFileSync(path, JSON.stringify({ payload,
-      signature: sign(null, Buffer.from(JSON.stringify(payload)), authorKey.privateKey).toString("base64") }));
-    return path;
+    return authorApproval(story, "draft", { ...process.env, NT_STATE_DIR: join(root, name + "-state") }, root, payload).file;
   }
   return { repo, story, baseline, cli, job: JSON.parse(started.stdout), signEvidence };
 }
@@ -184,16 +178,16 @@ test("exact explicit author approval versions the completion contract without re
   assert.notEqual(unsigned.status, 0);
   const payload = { ...JSON.parse(proposal.stdout).authorSigningRequest, reason: "I approve the exact narrower scope" };
   const signedFile = signEvidence(payload);
-  const invalid = cli("architecture", "approve", "--proposal", "0".repeat(64), "--signed-evidence", signedFile);
+  const invalid = cli("architecture", "approve", "--proposal", "0".repeat(64), "--approval", signedFile);
   assert.notEqual(invalid.status, 0);
   const forgedKey = generateKeyPairSync("ed25519");
   const forgedFile = join(root, "forged-plan.json");
   writeFileSync(forgedFile, JSON.stringify({ payload,
     signature: sign(null, Buffer.from(JSON.stringify(payload)), forgedKey.privateKey).toString("base64") }));
-  const forged = cli("architecture", "approve", "--proposal", digest, "--signed-evidence", forgedFile);
+  const forged = cli("architecture", "approve", "--proposal", digest, "--approval", forgedFile);
   assert.notEqual(forged.status, 0);
   assert.match(forged.stderr, /signature/i);
-  const approval = cli("architecture", "approve", "--proposal", digest, "--signed-evidence", signedFile);
+  const approval = cli("architecture", "approve", "--proposal", digest, "--approval", signedFile);
   assert.equal(approval.status, 0, approval.stderr);
   assert.equal(JSON.parse(approval.stdout).plan.version, 2);
   const replay = cli("architecture", "run", "--fixture");
@@ -203,7 +197,7 @@ test("exact explicit author approval versions the completion contract without re
   assert.equal(data.plan.version, 2);
   assert.equal(data.plan.items[0].verifiedSha, sha);
   assert.equal(data.history.length, 1);
-  assert.equal(data.history[0].source, "author-ed25519");
+  assert.equal(data.history[0].source, "trusted-controller");
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), sha);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
   const receipt = join(job.worktreeRoot, "../architecture.json");
@@ -212,7 +206,7 @@ test("exact explicit author approval versions the completion contract without re
   writeFileSync(receipt, JSON.stringify(tampered));
   const rejected = cli("architecture", "inspect");
   assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /differs from the signed plan revision/i);
+  assert.match(rejected.stderr, /differs from the approved plan revision/i);
 });
 
 
@@ -271,13 +265,13 @@ test("architecture accepts a previously author-approved protected revision again
   const authorDecision = { ...proposal.authorSigningRequests.decisions[0],
     reason: "I expressly approve the precise revised loyalty decision" };
   const approved = cli("revision", "authorize", "--work-item", "adjust-loyalty",
-    "--proposal", proposal.proposalSha256, "--signed-evidence", signEvidence(authorDecision));
+    "--proposal", proposal.proposalSha256, "--approval", signEvidence(authorDecision));
   assert.equal(approved.status, 0, approved.stderr);
   const editorial = { ...proposal.authorSigningRequests.editorial,
     evidence: "creative-direction/foundation.md:1-25",
     notes: "I independently compared the revised decision with the established premise and prose." };
   const review = cli("revision", "review", "--work-item", "adjust-loyalty",
-    "--proposal", proposal.proposalSha256, "--signed-evidence", signEvidence(editorial));
+    "--proposal", proposal.proposalSha256, "--approval", signEvidence(editorial));
   assert.equal(review.status, 0, review.stderr);
   const revised = cli("revision", "commit", "--work-item", "adjust-loyalty",
     "--proposal", proposal.proposalSha256);
@@ -310,7 +304,7 @@ test("approved scope expansion authors a new bounded cluster and retains the ear
   const signedFile = signEvidence({ ...proposalData.authorSigningRequest,
     reason: "I explicitly authorize the second Arc/Milestone cluster" });
   const approved = cli("architecture", "approve", "--proposal",
-    proposalData.proposal.digest, "--signed-evidence", signedFile);
+    proposalData.proposal.digest, "--approval", signedFile);
   assert.equal(approved.status, 0, approved.stderr);
   const second = cli("architecture", "run", "--fixture");
   assert.equal(second.status, 0, second.stderr);

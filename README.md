@@ -142,11 +142,11 @@ silently widening the write set.
 `start` pins the objective, contract, fixture/Pi selection and explicit model/source
 options. `resume` accepts no replacement inputs; it uses that same request. Existing
 work-item receipts retain their own stronger brief/model/authorization checks.
-A missing or unauthenticated architecture plan blocks the run. Approved, signed
+A missing or unauthenticated architecture plan blocks the run. Controller-approved
 architecture/scope revisions are adopted at a clean boundary, with current
 obligations rebuilt from canonical Story coverage and explicit carry-forward
 verification for unaffected specialist commits. Unapproved scope expansion is
-blocked. The original contract and signed transitions remain in the checkpoint
+blocked. The original contract and approved transitions remain in the checkpoint
 history/architecture receipt; `inspect` shows the currently accepted contract.
 No author question or protected decision is automatically approved.
 
@@ -154,13 +154,13 @@ The actual parent StateGraph has `schedule`, `author_update_intake`,
 `specialist_dispatch`, `verify_committed_work`, and `completion_decision` nodes.
 Per-job `generation.sqlite` lives beside `job.json`, under the effective
 `NT_STATE_DIR`/XDG job state directory, with thread `<job-thread>:generation`.
-Inspection returns the currently accepted request, original signed history in
+Inspection returns the currently accepted request, original approval history in
 the architecture receipt, per-Milestone completed commit evidence, current
 versioned work inventory with typed dependencies/block reasons, next runnable
 unit, checkpoint location and the existing source-linked job report. The live
 inventory resides only in the parent's private SQLite checkpoints, **not** in
-the signed `architecture.json` plan or Story canon; specialist commits and
-signed plan transitions retain their original immutable authority. A separate crash-reclaimable parent
+the approved `architecture.json` plan or Story canon; specialist commits and
+approved plan transitions retain their original immutable authority. A separate crash-reclaimable parent
 lease serializes CLI continuations; every writer still uses the existing shared
 Story writer lock. No checkpoint is assumed to atomically commit Git or Pi effects.
 
@@ -173,7 +173,7 @@ specialist, not authored again. Interrupted writers, dirty worktrees and unexpec
 HEADs preserve edits/transcripts and block for the existing manual reconciliation
 procedures. Author `paused`/`cancelled` controls, pending questions/approvals, and
 cumulative Pi budgets stop downstream dispatch. Use `job author resume` with the
-exact typed response (and signed evidence where required), or explicitly raise the
+exact typed response (and recorded approval reference where required), or explicitly raise the
 job's budget before `generate resume`. Cancellation is not released by resume.
 
 A run reports `completed` only when the existing current-scope report confirms
@@ -221,7 +221,7 @@ completion obligation.
 
 When new alternatives appear or the current realization changes, the parent
 runs the existing semantic `ideas reassess --record` path. It never relocates
-an integrated idea without the exact signed Ed25519 relocation approval.
+an integrated idea without the exact recorded controller relocation approval.
 Automation is capped at three candidate/context attempts per idea; further
 reconsideration requires author action. The noncanonical
 `generation-idea-dispatch.json` receipt fences interrupted Pi/editorial work.
@@ -234,7 +234,7 @@ typed placement links, rationale, and full historical commits remain authoritati
 The parent delegates composition-only editorial repairs to the existing bounded
 narrative reviewer. Structural and protected findings return an inspectable
 `escalation` (`dependency-replan` or `protected-approval`) rather than
-silently changing Story scope. The author must approve the existing exact signed
+silently changing Story scope. The author must approve the existing exact
 architecture/revision proposal before the scheduler reconciles dependencies,
 preserves explicitly carried-forward work, and revalidates affected branches.
 `completed` requires the independent real-Pi review and all in-scope binding
@@ -667,20 +667,20 @@ exact, versioned proposal:
 ```sh
 pnpm dev job architecture propose --story /path/to/story --job draft-1 \
   --contract ./revised-scope.json
-# Independently review and Ed25519-sign authorSigningRequest from propose.
+# Review authorSigningRequest from propose, stage it with approval request --file,
+# then confirm with approval decide and save {receiptId,nonce} as a reference.
 pnpm dev job architecture approve --story /path/to/story --job draft-1 \
-  --proposal <digest-from-propose> --signed-evidence /path/to/signed-plan.json
+  --proposal <digest-from-propose> --approval /path/to/plan-reference.json
 pnpm dev job architecture run --story /path/to/story --job draft-1
 ```
 
 A revision reuses already verified architecture only if it meets the new
 contract; otherwise it writes and validates another bounded architecture
-cluster. Plan revisions require a separately Ed25519-signed author approval,
-using the public key pinned in the original author Git baseline (see
-[offline author signing](docs/author-signing.md)). `propose` returns an
-`authorSigningRequest` containing the exact plan version, head and proposal
-SHA; the author reviews the entire new contract before signing the request.
-Unsigned CLI assertions and model claims are not authorization.
+cluster. Plan revisions require a persisted trusted-controller decision (see
+[trusted author approval](docs/author-signing.md)). `propose` retains the compatibility
+field `authorSigningRequest`, now an unsigned request template containing the exact
+plan version, head and proposal SHA. Review the entire new contract before recording
+a controller decision. Inline CLI assertions and model claims are not authorization.
 Test the public interface with
 `pnpm exec tsx --test test/architecture.test.ts`.
 
@@ -843,15 +843,15 @@ fulfillment until reviewed again.
 
 `relocate` first returns `approval-required` with its precise
 `proposal` (SHA-256 of the current head, old/new ID and competing locations),
-plus affected paths. The caller must produce an offline **Ed25519-signed**
-`kind: decision`, `action: approved` payload bound to `workItemId:
-idea-relocate:<id>`, `verifiedHead`, and `changeId`/`proposalSha256` equal to
-that exact proposal; see `docs/author-signing.md`. Supply it using
-`--signed-evidence /path/to/signed-approval.json`. Only then may a bounded
+plus affected paths and an `approvalRequest`. Stage that exact payload with
+`job approval request --file`, review it through the trusted controller, and
+supply its recorded reference using `--approval /path/to/approval-reference.json`.
+The decision binds `idea-relocate:<id>`, verified HEAD and the exact proposal;
+see `docs/author-signing.md`. Only then may a bounded
 craft specialist edit both old and new realization records. The old occurrence
 is removed, the new one is validated and independently reviewed, and one
 commit records both canonical paths and the inbox's updated current IDs. The
-signed approval itself is retained and verified in historical placement receipts.
+controller approval reference is retained and verified in historical placement receipts.
 
 Run `pnpm exec tsx --test test/idea-placement.test.ts` for deterministic
 full-CLI integration, relocation and tamper tests. To exercise real pinned Pi
@@ -898,7 +898,7 @@ The four kinds are:
   proposal but **does not approve or implement** it. If the author did not
   submit a contract initially, use `job author plan --id <change-message>`
   to attach one at a later safe boundary. The message remains
-  `review-required` until independently approved; a matching signed plan
+  `review-required` until independently approved; a matching controller plan
   approval then marks the review applied.
 - **`question`** — `payload` is
   `{"question":"Should the witness be trusted?"}`. The graph emits an
@@ -907,10 +907,10 @@ The four kinds are:
   `{"requestType":"plan","proposalSha256":"<digest>"}` or
   `{"requestType":"decision","workItemId":"change-witness","proposalSha256":"<digest>","changeId":"<digest>"}`.
   It pauses on a persistent LangGraph interrupt bound to this precise request.
-  A response alone is not authorization: the Ed25519 signature must verify
-  against the author's public key in the **original Git baseline**, and the
-  proposal, decision, thread and verified HEAD must match. Approval is routed
-  through the existing #16 versioned architecture or protected-revision gate.
+  A response alone is not authorization: its receipt reference must resolve to
+  a recorded controller decision, and the proposal, decision, thread and verified
+  HEAD must match. Approval is routed through the existing versioned architecture
+  or protected-revision gate; no model-supplied consent is accepted.
 
 The two typed resume-file shapes are:
 
@@ -922,31 +922,26 @@ The two typed resume-file shapes are:
 {
   "type": "decision",
   "messageId": "approve-the-witness",
-  "signedEvidence": {
-    "payload": { "version": 1, "kind": "decision", "jobId": "draft-1",
-      "threadId": "<original job thread>", "workItemId": "change-witness",
-      "baseSha": "<original base>", "verifiedHead": "<verified HEAD>",
-      "proposalSha256": "<exact proposal digest>",
-      "decision": "creative-direction.foundation#witness",
-      "changeId": "<exact change digest>", "action": "approved",
-      "reason": "Substantive author rationale explaining the specific approval" },
-    "signature": "<base64 Ed25519 signature over JSON.stringify(payload)>"
+  "approval": {
+    "receiptId": "review-witness",
+    "nonce": "<nonce from the recorded controller decision>"
   }
 }
 ```
 
-For a plan approval, use the exact `authorSigningRequest` returned by
-`job architecture propose` (with a substantive author rationale) and
-provide its signed payload instead. For protected decisions, use the
-`authorSigningRequests.decisions[]` returned by `job revision inspect`.
-Do not invent or edit the proposed digest or protected-change IDs.
+For a plan, stage the exact `authorSigningRequest` template returned by
+`job architecture propose`, with a substantive author rationale. For protected
+decisions, use `authorSigningRequests.decisions[]` from `job revision inspect`.
+Those compatibility field names now denote unsigned request templates only.
+After trusted controller confirmation, resume with the recorded reference.
+Do not invent or edit the proposal digest or protected-change IDs.
 
 `job author process` acquires the shared Story writer lock. The
 `process_author_updates` LangGraph node checkpoints each message into
 `author-updates/checkpoints.sqlite`; questions and approvals resume that
 same saved thread using `Command(resume)`, without restarting Pi sessions
-or regenerating canonical Markdown. A crash after Git capture or signature
-application is reconciled against its durable receipt and Git/signature
+or regenerating canonical Markdown. A crash after Git capture or approval
+application is reconciled against its durable receipt and Git/controller
 provenance. Generation also checks pending messages **before starting**
 a safe foundation, architecture, Character/World, Event, Interactive or
 Composition work unit and **after** completed work-unit graphs. Interactive
@@ -967,7 +962,7 @@ independently checked before Composition.
 After an approved scope replan, previously committed specialists retain their
 historical plan version. They are **not silently upgraded**: an author who has
 reviewed unaffected work must explicitly include its work-item IDs in the
-next signed plan proposal. For example, place
+next approved plan proposal. For example, place
 `["foundations", "event:milestone.disclosure"]` in `unaffected.json` and run:
 
 ```sh
@@ -976,7 +971,7 @@ pnpm dev job architecture propose --story /repo/story --job draft-1 \
 ```
 
 `job author plan` also accepts `--carry-forward unaffected.json` for a
-pending direct-change impact review. The proposal digest and Ed25519 signature
+pending direct-change impact review. The proposal digest and controller decision
 bind this exact list, previous plan, new contract and verified HEAD. Every
 listed work item must have a committed receipt on that branch, and a downstream
 item requires its upstream dependencies (e.g., an Event requires foundations;
@@ -986,7 +981,7 @@ allows *new* specialists under the revised plan. Approval cannot be inferred
 from validation or a version number alone.
 
 Omitted or impacted work remains **blocked**, with an explicit carry-forward
-error rather than an automatic rewrite. The author can review and sign a
+error rather than an automatic rewrite. The author can review and approve a
 subsequent plan re-evaluation that names still-valid work, even if a previous
 replan did not carry it forward. Work that genuinely requires new canon must
 instead undergo independently authorized revision and work-item replanning;
@@ -1002,7 +997,7 @@ does not answer** any LangGraph approval interrupt. `cancelled` and
 `completed` are terminal for that job ID and do not accept new messages.
 New unrelated author messages cannot resume a pending approval or restart a
 canceled/completed job. Do not treat a `review-required` message as a
-completed scope change; only signed, matching author approval resolves it.
+completed scope change; only recorded, matching author approval resolves it.
 
 **Cooperative active Pi cancellation (#36).** A `cancelled` control is
 delivered across processes to the running Pi specialist (including repair and
@@ -1039,7 +1034,7 @@ credentials and a long enough live turn to deliver the abort).
 
 Run `NT_SKILLS_CHECKOUT=/path/to/noveltea-skills pnpm exec tsx --test
 test/author-updates.test.ts` to exercise real public CLI/process boundaries,
-separate-process checkpoints, writer-lock contention, exact signed plan and
+separate-process checkpoints, writer-lock contention, exact controller plan and
 protected-decision approvals, crash recovery and negative controls.
 Live Pi/prompt-quality certification is separately tracked under #31.
 
@@ -1134,7 +1129,7 @@ Characters, Creative Direction and engine data are not writable. The graph
 verifies its declared changed files against actual Git changes and permits
 only safe canonical Markdown in its owned directories, with strict protection
 from the previous verified head. Protected retcons require the separate
-author-signed revision workflow, never a specialist's claim.
+controller-approved revision workflow, never a specialist's claim.
 
 The pinned canonical validator supplies localized diagnostics, Event and branch
 reachability, Milestone route witnesses and incompleteness obligations. The
@@ -1468,14 +1463,14 @@ also exercised with a **simulated** prior Pi completion receipt; this is
 projection-only coverage and does not claim that a fixture review is literary
 certification.
 
-## Trusted CLI approval receipts (transitional #57)
+## Trusted author approval receipts (#58)
 
-The standalone trusted controller can now **stage, inspect, and record** a
-decision for an existing, exact architecture-plan or protected-revision proposal.
-This is an additional audit ledger, not yet a replacement authorization path:
-the existing signed `job revision authorize|review|commit`, architecture
-approval and author-update gates **still require Ed25519** until #58. A new
-trusted-controller receipt does not authorize a protected Story edit by itself.
+Both standalone CLI and authenticated web controllers **stage, inspect and record**
+exact decisions in a durable ledger outside model-directed tools. Protected
+revisions, architecture changes, editorial reviews, idea relocation and author-update
+resumes verify that ledger. **No Ed25519 key or committed approval file is required.**
+See [trusted author approval](docs/author-signing.md) for the complete protocol and
+migration limits. Recording consent does not itself commit Story bytes.
 
 ```sh
 pnpm dev job approval request --story /repo/story --job draft-1 \\
@@ -1499,15 +1494,17 @@ read-only/idempotent; a changed proposal, baseline, head or protected change
 cannot consume the old pending interrupt. An immutable request ID cannot be
 rebound to a new proposal.
 
-**Trust boundary:** this controller must run **outside Pi-accessible tool
-execution** and its job-state directory must not be mounted in an agent
-sandbox. An OS account and pseudo-terminal are not sufficient isolation
-against an unsandboxed, same-user Pi shell; production deployments must enforce
-the controller/sandbox separation defined in #38. Signed approvals remain the
-mandatory protected-revision gate until #58 wires this separate ledger into
-the existing authorization checks. After a crash, inspect the saved receipt
-and graph state rather than rerunning an unresolved worker or treating a
-pending record as consent.
+Use `approval request --file payload.json` for an exact reviewed payload,
+including an editorial review. The authenticated same-origin `POST /api/approvals`
+uses the same graph and ledger, with job ownership checked against the app store.
+
+**Trust boundary:** every Git-backed Pi specialist now requires configured sandbox
+tools, including standalone CLI sessions. A terminal is not isolation against a
+same-user host shell. The trusted controller, ledger and checkpoints must never be
+mounted in the sandbox. Missing configuration fails closed rather than enabling
+local file/shell fallback. Fixtures require no sandbox. After a crash, preserve
+worktree edits and transcripts and inspect the saved receipt and graph state.
+Legacy signature-only histories fail closed; no automatic consent import occurs.
 
 ## Protected-decision revision and author approval (#16)
 
@@ -1530,36 +1527,29 @@ bytes or a changed verified HEAD **cannot inherit earlier approvals**. Start a
 different work-item ID to propose another candidate.
 
 The **author** must approve or reject **each** protected delta, including
-newly protected or promoted decisions, using a separately signed Ed25519
-approval. Before the job starts, the author must have committed the public key
-`.noveltea/approval-author.pub` in the **original trusted Git baseline**.
-The private signing key must reside on an independent signing device/service
-inaccessible to Pi and its shell tools. `inspect` returns exact unsigned
-`authorSigningRequests` templates; the author reviews the actual patch,
-specifies a rationale, then signs the chosen decision on the separate device.
+newly protected or promoted decisions, through the trusted controller.
+`inspect` retains the compatibility field `authorSigningRequests` for unsigned
+request templates; these are no longer signed. Review the patch and supply a
+rationale, stage the exact payload with `job approval request --file`, then
+confirm in the authenticated terminal or website. Save the resulting
+`{receiptId,nonce}` as a reference JSON file.
 
 ```sh
 pnpm dev job revision authorize --story /path/to/story --job draft-1 \
   --work-item fix-culprit --proposal <proposalSha256> \
-  --signed-evidence /path/to/author-signed-decision.json
+  --approval /path/to/decision-reference.json
 ```
 
-**Setup and complete offline signing instructions:**
-[Author signing and revision approval](docs/author-signing.md).
+**Complete controller workflow and migration instructions:**
+[Trusted author approval](docs/author-signing.md).
 
-A rejection remains durable and blocks the work item. Each signature binds
-the original job baseline, unique job thread, last verified head, work-item and proposal hashes,
-stable protected-decision ID, exact change digest and author rationale.
-Unsanctioned flags, model assertions, other keys, changed proposed bytes and
-tampered job-state receipts are rejected. Saved signatures are reverified
-against the **original Git public-key blob** whenever approvals are read;
-an agent changing the working-tree copy of the key cannot authorize a revision.
-The key is not loaded from the mutable job manifest or moving HEAD.
-
-This is a cryptographic author-consent boundary, not an operating-system
-sandbox. Protect the private key from any environment the agent can execute
-commands in. A malicious agent with permission to replace the generator's
-executable itself remains outside this application's trust model.
+A rejection remains durable and blocks the work item. Each decision binds the
+original baseline, job/thread, verified HEAD, work-item/proposal hashes, protected
+change, principal and one-time nonce. Unsanctioned flags, model assertions, inline
+payloads and changed candidate bytes cannot confer consent. Saved references are
+reverified against the controller-owned ledger on every read; disposable native
+metadata and Git trailers are never approval authority. Controller compromise is
+outside this trust model, so keep its files and endpoints inaccessible to Pi.
 
 A separate editorial review is **always required**, even for changes that do
 not alter any protected decision metadata. Compare the source-linked prose
@@ -1569,12 +1559,12 @@ recording the verdict; metadata equality is not semantic proof:
 ```sh
 pnpm dev job revision review --story /path/to/story --job draft-1 \
   --work-item fix-culprit --proposal <proposalSha256> \
-  --signed-evidence /path/to/author-signed-editorial.json
+  --approval /path/to/editorial-reference.json
 pnpm dev job revision commit --story /path/to/story --job draft-1 \
   --work-item fix-culprit --proposal <proposalSha256>
 ```
 
-`--verdict block` saves a separate blocking semantic-review finding; a
+Rejecting an editorial request records a separate blocking review finding; a
 positive review is a **reviewer attestation**, not machine proof of coherence.
 The graph-side commit gate re-runs the *pinned canonical validator* in a
 disposable candidate worktree, first against the immutable original base,
@@ -1582,7 +1572,7 @@ then against the most recently verified commit. It checks every exact
 protected delta and adoption against a durable author approval, independent
 review, structured diagnostics, staged files, current job HEAD and candidate
 bytes. The validated single-file work item is committed as
-`NovelTea Generator`, with job, work-item, proposal, approval, signer authority,
+`NovelTea Generator`, with job, work-item, proposal, approval, controller authority,
 actual graph committer identity and editorial trailers. Unrelated **unstaged** files remain in the job worktree unchanged;
 unexpected staged/conflicted edits block. The original author branch is not
 advanced or merged. A verified-head receipt persists across subsequent

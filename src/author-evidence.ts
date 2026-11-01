@@ -1,11 +1,7 @@
-import { execFileSync } from "node:child_process";
-import { createPublicKey, verify, type KeyObject } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { lstat, readFile } from "node:fs/promises";
 import type { JobStartResult } from "./job.js";
-
-/** Public key must be part of the author's ORIGINAL Git baseline, never the
- * agent-controlled job worktree, moving HEAD, or job-state JSON. */
-export const AUTHOR_KEY_PATH = ".noveltea/approval-author.pub";
 
 export type AuthorDecisionPayload =
   | {
@@ -24,7 +20,8 @@ export type AuthorDecisionPayload =
     verdict: "pass" | "block"; evidence: string; notes: string;
   };
 
-export interface SignedAuthorEvidence { payload: AuthorDecisionPayload; signature: string; }
+export interface AuthorApprovalReference { receiptId: string; nonce: string; }
+export interface AuthorApprovalEvidence extends AuthorApprovalReference { payload: AuthorDecisionPayload; }
 
 function keysEqual(obj: object, allowed: string[]) {
   const keys = Object.keys(obj).sort();
@@ -33,16 +30,9 @@ function keysEqual(obj: object, allowed: string[]) {
 function nonempty(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
-function validateEvidenceShape(value: unknown): asserts value is SignedAuthorEvidence {
-  if (!value || typeof value !== "object" || Array.isArray(value) ||
-      !keysEqual(value, ["payload", "signature"])) throw new Error("Invalid signed author evidence envelope.");
-  const data = value as Record<string, unknown>;
-  if (!nonempty(data.signature) || !/^[A-Za-z0-9+/]{86}==$/.test(data.signature)) {
-    throw new Error("Invalid Ed25519 signature encoding.");
-  }
-  const payload = data.payload;
+export function validateAuthorPayload(payload: unknown): asserts payload is AuthorDecisionPayload {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("Signed author payload must be an object.");
+    throw new Error("Author request payload must be an object.");
   }
   const p = payload as Record<string, unknown>;
   const common = ["version", "kind", "jobId", "threadId", "workItemId", "baseSha", "verifiedHead", "proposalSha256"];
@@ -74,59 +64,44 @@ function validateEvidenceShape(value: unknown): asserts value is SignedAuthorEvi
   }
 }
 
-function gitOriginalKey(job: JobStartResult): KeyObject {
-  const env = { ...process.env };
-  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) {
-    delete env[name];
+/** Historical verification deliberately does not compare moving HEAD. Consumers
+ * check the current proposal before application; history remains verifiable after
+ * a commit. The ledger MUST reside outside every model-directed tool boundary. */
+export function verifyAuthorEvidence(job: JobStartResult, evidence: unknown): AuthorApprovalEvidence {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    throw new Error("A persisted controller approval reference is required.");
   }
-  // The writable job manifest is not a trust anchor by itself. The original
-  // base must still belong to the separately managed author's checkout.
-  // A job worker cannot promote a private worktree commit containing its own
-  // public key into the trusted base merely by rewriting job.json.
-  try {
-    execFileSync("git", ["-C", job.gitRoot, "merge-base", "--is-ancestor", job.baseSha, "HEAD"], {
-      env, stdio: ["ignore", "ignore", "pipe"],
-    });
-  } catch {
-    throw new Error("Recorded author baseline is no longer an ancestor of the author-managed checkout; " +
-      "refusing to trust a rebased job signing key.");
+  const ref = evidence as Record<string, unknown>;
+  if ((!keysEqual(ref, ["receiptId", "nonce"]) && !keysEqual(ref, ["receiptId", "nonce", "payload"])) ||
+      typeof ref.receiptId !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(ref.receiptId) ||
+      typeof ref.nonce !== "string" || !/^[0-9a-f-]{36}$/.test(ref.nonce)) {
+    throw new Error("Invalid controller approval receipt reference; signatures and inline decisions are not authority.");
   }
-  let key: Buffer;
-  try {
-    key = execFileSync("git", ["show", job.baseSha + ":" + AUTHOR_KEY_PATH], {
-      cwd: job.worktreeRoot, env, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 32768,
-    });
-  } catch {
-    throw new Error("Author signing public key is absent from the ORIGINAL Git base. Commit " +
-      AUTHOR_KEY_PATH + " in the author repository before starting a revision-capable job.");
+  const path = join(job.stateDir, "trusted-approvals", ref.receiptId + ".json");
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) throw new Error("Invalid approval receipt file.");
+  const r = JSON.parse(readFileSync(path, "utf8"));
+  validateAuthorPayload(r.payload);
+  if (r.version !== 1 || r.id !== ref.receiptId || r.nonce !== ref.nonce ||
+      r.phase !== "recorded" || !["approved", "rejected"].includes(r.decision) ||
+      !["trusted-cli", "trusted-web"].includes(r.source) || !r.principal || !r.recordedAt ||
+      r.jobId !== job.jobId || r.threadId !== job.threadId || r.baseSha !== job.baseSha ||
+      r.payload.jobId !== r.jobId || r.payload.threadId !== r.threadId || r.payload.baseSha !== r.baseSha ||
+      r.payload.verifiedHead !== r.verifiedHead || r.payload.proposalSha256 !== r.proposalSha256 ||
+      r.payload.workItemId !== r.workItemId || r.payload.kind !== r.kind ||
+      (r.kind === "decision" && (r.payload.changeId !== r.changeId || r.payload.action !== r.decision)) ||
+      (r.kind === "editorial" && r.payload.verdict !== (r.decision === "approved" ? "pass" : "block")) ||
+      (r.kind === "plan" && r.decision !== "approved") ||
+      (ref.payload !== undefined && JSON.stringify(ref.payload) !== JSON.stringify(r.payload))) {
+    throw new Error("Controller approval receipt nonce, decision or exact job/proposal binding differs.");
   }
-  try {
-    const publicKey = createPublicKey(key);
-    if (publicKey.asymmetricKeyType !== "ed25519") throw new Error("not Ed25519");
-    return publicKey;
-  } catch {
-    throw new Error("The author's original Git baseline contains an invalid Ed25519 public key.");
-  }
+  return { receiptId: r.id, nonce: r.nonce, payload: r.payload };
 }
 
-export function verifyAuthorEvidence(job: JobStartResult, evidence: unknown): SignedAuthorEvidence {
-  validateEvidenceShape(evidence);
-  const signature = Buffer.from(evidence.signature, "base64");
-  if (signature.length !== 64 || !verify(null, Buffer.from(JSON.stringify(evidence.payload)),
-      gitOriginalKey(job), signature)) {
-    throw new Error("Author signature is invalid for this exact signed proposal; no authorization was recorded.");
-  }
-  if (evidence.payload.jobId !== job.jobId || evidence.payload.threadId !== job.threadId ||
-      evidence.payload.baseSha !== job.baseSha) {
-    throw new Error("Signed author authorization belongs to a different job or trusted baseline.");
-  }
-  return evidence;
-}
-
-export async function readSignedAuthorEvidence(job: JobStartResult, file: string) {
+export async function readAuthorApproval(job: JobStartResult, file: string) {
   const stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384) {
-    throw new Error("Signed author evidence must be a small regular JSON file.");
+    throw new Error("Approval reference must be a small regular JSON file.");
   }
   const evidence: unknown = JSON.parse(await readFile(file, "utf8"));
   return verifyAuthorEvidence(job, evidence);

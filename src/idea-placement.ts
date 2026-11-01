@@ -15,8 +15,8 @@ import { preparePiContext } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
 import { processAuthorUpdatesAtBoundary } from "./author-updates.js";
-import { readSignedAuthorEvidence, verifyAuthorEvidence,
-  type SignedAuthorEvidence } from "./author-evidence.js";
+import { readAuthorApproval, verifyAuthorEvidence,
+  type AuthorApprovalEvidence } from "./author-evidence.js";
 import { git, gitRaw, repoPath, pathFor, persist, assertClean, publishHead,
   records, assess, load, worktreePath, type PersistedIdea, type RecordInfo, type IdeaPlacementHistory } from "./ideas.js";
 
@@ -25,7 +25,7 @@ interface PlacementReceipt {
   version: 1; jobId: string; ideaId: string; revision: number;
   priorHead: string; commitSha: string; entry: IdeaPlacementHistory;
   changed: string[]; digest: string;
-  approval?: SignedAuthorEvidence;
+  approval?: AuthorApprovalEvidence;
   proposal?: string;
   proposedTarget?: string;
 }
@@ -34,7 +34,7 @@ export interface PlacementOptions {
   action: "plan" | "place" | "audit" | "reassess" | "relocate" | "reverse";
   id?: string; target?: string; fixture?: boolean; skillsSource?: string;
   validatorSource?: string; provider?: string; model?: string; thinking?: "low" | "high";
-  signedEvidence?: string; record?: boolean;
+  approvalFile?: string; record?: boolean;
   /** Parent-only: a private, read-only semantic comparison chooses among eligible targets. */
   autoSelect?: boolean;
 }
@@ -114,7 +114,7 @@ export async function verifyPlacementHistory(job: JobStartResult, idea: Persiste
     if (entry.action === "relocated") {
       if (!receipt.approval || !receipt.proposal || !receipt.proposedTarget ||
           entry.recordIds.length !== 1 || entry.recordIds[0] !== receipt.proposedTarget)
-        throw new Error("Relocation lacks original signed author approval provenance.");
+        throw new Error("Relocation lacks original controller approval provenance.");
       const signed = verifyAuthorEvidence(job, receipt.approval).payload;
       if (signed.kind !== "decision" || signed.action !== "approved" ||
           signed.workItemId !== "idea-relocate:" + idea.id ||
@@ -481,7 +481,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
         current: priorTargets, proposals, impact: {
           currentPaths: priorTargets.map(id => catalog.get(id)?.path),
           proposedPaths: proposals.map(c => c.path),
-          requiresSignedAuthorApproval: true,
+          requiresTrustedAuthorApproval: true,
           affectedAuthorRequirements: idea.requirements,
           wouldInvalidatePriorEditorialEvidence: true,
         }, history: idea.lifecycle.placements };
@@ -527,19 +527,29 @@ export async function runIdeaPlacement(input: PlacementOptions) {
       throw new Error("Relocation target is already current.");
     const proposal = sha(JSON.stringify({ ideaId: idea.id, current: current?.recordIds,
       target: candidate.id, prior, alternatives }));
-    let approval: SignedAuthorEvidence | undefined;
+    let approval: AuthorApprovalEvidence | undefined;
     if (input.action === "relocate") {
-      if (!input.signedEvidence) return { status: "approval-required", proposal, alternatives,
+      const approvalRequest = {
+        version: 1 as const, kind: "decision" as const, jobId: job.jobId, threadId: job.threadId,
+        workItemId: "idea-relocate:" + idea.id, baseSha: job.baseSha, verifiedHead: prior,
+        proposalSha256: proposal, changeId: proposal, decision: "idea:" + idea.id,
+        action: "approved" as const, reason: "Author reviewed the exact relocation and affected requirements.",
+      };
+      await persist(join(job.stateDir, "relocation-proposals", idea.id + ".json"), {
+        payload: approvalRequest, proposal: { ideaId: idea.id, current: current?.recordIds,
+          target: candidate.id, prior, alternatives },
+      });
+      if (!input.approvalFile) return { status: "approval-required", proposal, alternatives, approvalRequest,
         impact: { priorRecords: current?.recordIds, target: candidate.id, canonicalPaths: [
           ...(current?.recordIds.map(id => catalog.get(id)?.path) ?? []), candidate.path] } };
-      const signed = await readSignedAuthorEvidence(job, input.signedEvidence);
+      const signed = await readAuthorApproval(job, input.approvalFile);
       const p = signed.payload;
       if (p.kind !== "decision" || p.action !== "approved" ||
           p.workItemId !== "idea-relocate:" + idea.id || p.verifiedHead !== prior ||
           p.proposalSha256 !== proposal || p.changeId !== proposal)
-        throw new Error("Relocation requires exact signed author approval for its current impact proposal.");
+        throw new Error("Relocation requires exact controller approval for its current impact proposal.");
       approval = signed;
-      // The signed exact impact proposal permits one bounded two-record
+      // The controller-approved exact impact proposal permits one bounded two-record
       // specialist revision; it never authorizes unrelated Story rewrites.
     }
     assertClean(job);

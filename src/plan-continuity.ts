@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract, Plan } from "./architecture.js";
-import { verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
+import { verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
 
 export interface PlanHistoryStep {
   plan: Plan;
@@ -12,8 +12,8 @@ export interface PlanHistoryStep {
   approvedContract: CompletionContract;
   verifiedHead: string;
   carryForward?: string[];
-  source: "author-ed25519";
-  signed: SignedAuthorEvidence;
+  source: "trusted-controller";
+  signed: AuthorApprovalEvidence;
 }
 export interface PlanSnapshot {
   jobId: string;
@@ -86,7 +86,7 @@ function checkHistoricalWork(job: JobStartResult, stage: string, version: number
   return receipt;
 }
 
-/** The author's Ed25519 plan signature binds an explicit list of reviewed
+/** The author's persisted controller decision binds an explicit list of reviewed
  * unaffected work items. Omitted items are never implicitly authorized. */
 export function parseCarryForward(value: unknown): string[] {
   if (!Array.isArray(value) || value.some(x => typeof x !== "string") ||
@@ -107,7 +107,7 @@ export function verifyCarryForwardCandidates(
   for (const stage of selected) checkHistoricalWork(job, stage, version, head);
 }
 
-/** Both the signature and proposal digest are verified on every historical
+/** Both the controller receipt and proposal digest are verified on every historical
  * carry-forward, so changing a receipt or an approval ledger cannot silently
  * upgrade old work to a newer plan version. */
 export function hasPlanContinuity(

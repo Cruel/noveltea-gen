@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { test, after } from "node:test";
 import { renderFoundation, type FoundationDraft } from "../src/demo.js";
 import { removeTestTree } from "./helpers.js";
+import { authorApproval } from "./approval-controller.js";
 
 const root = mkdtempSync(join(tmpdir(), "noveltea-revision-tests-"));
 after(() => removeTestTree(root));
@@ -42,12 +43,6 @@ function setup(name: string, existing = true, authorKeyPinned = true) {
   git(repo, "init", "-q");
   git(repo, "config", "user.name", "Original Author");
   git(repo, "config", "user.email", "author@example.test");
-  const keys = generateKeyPairSync("ed25519");
-  if (authorKeyPinned) {
-    mkdirSync(join(repo, ".noveltea"), { recursive: true });
-    writeFileSync(join(repo, ".noveltea/approval-author.pub"),
-      keys.publicKey.export({ type: "spki", format: "pem" }));
-  }
   writeFileSync(join(repo, "README.md"), "Original author branch\n");
   if (existing) {
     mkdirSync(join(story, "creative-direction"));
@@ -82,13 +77,7 @@ function setup(name: string, existing = true, authorKeyPinned = true) {
       "revisions", id + ".json"), "utf8"));
   }
   function signedFile(payload: AuthorDecisionPayload): string {
-    const signed = {
-      payload,
-      signature: sign(null, Buffer.from(JSON.stringify(payload)), keys.privateKey).toString("base64"),
-    };
-    const path = join(root, "signed-" + name + "-" + Math.random().toString(36).slice(2) + ".json");
-    writeFileSync(path, JSON.stringify(signed));
-    return path;
+    return authorApproval(story, "draft", { ...process.env, NT_STATE_DIR: state }, root, payload).file;
   }
   function approvedPayload(id: string, proposal: string, change: string,
     decision = "approve"): AuthorDecisionPayload {
@@ -105,7 +94,7 @@ function setup(name: string, existing = true, authorKeyPinned = true) {
   }
   function approve(id: string, proposal: string, change: string, decision = "approve") {
     return revision("authorize", id, "--proposal", proposal,
-      "--signed-evidence", signedFile(approvedPayload(id, proposal, change, decision)));
+      "--approval", signedFile(approvedPayload(id, proposal, change, decision)));
   }
   function editorial(id: string, proposal: string, verdict = "pass") {
     const details = receipt(id);
@@ -115,14 +104,13 @@ function setup(name: string, existing = true, authorKeyPinned = true) {
       verdict: verdict === "pass" ? "pass" : "block", evidence: target + ":11-31",
       notes: "Independently inspected source prose, narrative consequences, and protected intent.",
     };
-    return revision("review", id, "--proposal", proposal, "--signed-evidence", signedFile(payload));
+    return revision("review", id, "--proposal", proposal, "--approval", signedFile(payload));
   }
   function commit(id: string, proposal: string) {
     return revision("commit", id, "--proposal", proposal);
   }
   return { repo, story, state, job, file, target, initialSha,
-    cliRun, revision, inspect, approve, editorial, commit, signedFile, approvedPayload,
-    publicKey: keys.publicKey.export({ type: "spki", format: "pem" }) };
+    cliRun, revision, inspect, approve, editorial, commit, signedFile, approvedPayload };
 }
 
 test("exact scoped approvals permit a protected edit; other unstaged files stay untouched", { skip: SKIP }, () => {
@@ -142,7 +130,7 @@ test("exact scoped approvals permit a protected edit; other unstaged files stay 
   assert.match(denied.result.stderr, /review|authorization/i);
   const approved = s.approve("change-culprit", proposal, p.data.protectedChanges[0].id);
   assert.equal(approved.result.status, 0, approved.result.stderr);
-  assert.equal(approved.data.authorApprovals[0].source, "author-ed25519");
+  assert.equal(approved.data.authorApprovals[0].source, "trusted-controller");
   assert.equal(s.editorial("change-culprit", proposal).result.status, 0);
   const committed = s.commit("change-culprit", proposal);
   assert.equal(committed.result.status, 0, committed.result.stderr);
@@ -220,14 +208,14 @@ test("unsigned flags, forged signatures, and key replacement cannot grant protec
     payload: forged, signature: sign(null, Buffer.from(JSON.stringify(forged)), otherKey.privateKey).toString("base64"),
   }));
   assert.match(s.revision("authorize", "authorize", "--proposal", hash,
-    "--signed-evidence", fakeFile).result.stderr, /signature/i);
+    "--approval", fakeFile).result.stderr, /signature/i);
 
-  // A malicious agent may edit a public-key file in its own worktree.
-  // The verifier must still use the blob at the original *trusted* Git base.
+  // Disposable native metadata never grants consent.
+  mkdirSync(join(s.job.worktreeRoot, ".noveltea"), { recursive: true });
   writeFileSync(join(s.job.worktreeRoot, ".noveltea/approval-author.pub"),
     otherKey.publicKey.export({ type: "spki", format: "pem" }));
   assert.match(s.revision("authorize", "authorize", "--proposal", hash,
-    "--signed-evidence", fakeFile).result.stderr, /signature/i);
+    "--approval", fakeFile).result.stderr, /signature/i);
   const trueApproval = s.approve("authorize", hash, change);
   assert.equal(trueApproval.result.status, 0, trueApproval.result.stderr);
   assert.equal(trueApproval.data.authorApprovals[0].signed.payload.changeId, change);
@@ -240,32 +228,23 @@ test("a valid signature cannot be replayed for another job thread", { skip: SKIP
   assert.equal(p.result.status, 0, p.result.stderr);
   const payload = s.approvedPayload("thread-proof", p.data.proposalSha256, p.data.protectedChanges[0].id);
   const copied = { ...payload, threadId: "different-signed-job-thread" } as AuthorDecisionPayload;
-  const result = s.revision("authorize", "thread-proof", "--proposal", p.data.proposalSha256,
-    "--signed-evidence", s.signedFile(copied));
-  assert.notEqual(result.result.status, 0);
-  assert.match(result.result.stderr, /different job|trusted baseline/i);
+  assert.throws(() => s.signedFile(copied), /differs from current/i);
 });
 
-test("a newly added worktree key cannot bootstrap missing original author trust", { skip: SKIP }, () => {
-  const s = setup("no-original-key", true, false);
+test("controller approval needs no original or working-tree native metadata", { skip: SKIP }, () => {
+  const s = setup("no-original-key");
+  assert.equal(existsSync(join(s.repo, ".noveltea")), false);
   writeFileSync(s.file, renderFoundation(draft("The sister is the murderer")));
   const p = s.inspect("attempt");
   assert.equal(p.result.status, 0, p.result.stderr);
-  const signature = s.signedFile(s.approvedPayload("attempt", p.data.proposalSha256, p.data.protectedChanges[0].id));
-  const result = s.revision("authorize", "attempt", "--proposal", p.data.proposalSha256,
-    "--signed-evidence", signature);
-  assert.notEqual(result.result.status, 0);
-  assert.match(result.result.stderr, /ORIGINAL Git base|public key/i);
-  mkdirSync(join(s.job.worktreeRoot, ".noveltea"), { recursive: true });
-  writeFileSync(join(s.job.worktreeRoot, ".noveltea/approval-author.pub"), s.publicKey);
-  const stillRejected = s.revision("authorize", "attempt", "--proposal", p.data.proposalSha256,
-    "--signed-evidence", signature);
-  assert.notEqual(stillRejected.result.status, 0);
-  assert.match(stillRejected.result.stderr, /ORIGINAL Git base|public key/i);
+  const approved = s.approve("attempt", p.data.proposalSha256, p.data.protectedChanges[0].id);
+  assert.equal(approved.result.status, 0, approved.result.stderr);
+  assert.equal(existsSync(join(s.job.worktreeRoot, ".noveltea/approval-author.pub")), false);
 });
 test("job-state rebaselining cannot substitute a worker-controlled signing key", { skip: SKIP }, () => {
   const s = setup("manifest-base-forgery");
   const substituted = generateKeyPairSync("ed25519");
+  mkdirSync(join(s.job.worktreeRoot, ".noveltea"), { recursive: true });
   writeFileSync(join(s.job.worktreeRoot, ".noveltea/approval-author.pub"),
     substituted.publicKey.export({ type: "spki", format: "pem" }));
   git(s.job.worktreeRoot, "add", ".noveltea/approval-author.pub");
@@ -286,9 +265,9 @@ test("job-state rebaselining cannot substitute a worker-controlled signing key",
   const file = join(root, "forged-job-anchor.json");
   writeFileSync(file, JSON.stringify(evidence));
   const result = s.revision("authorize", "forged-anchor", "--proposal", p.data.proposalSha256,
-    "--signed-evidence", file);
+    "--approval", file);
   assert.notEqual(result.result.status, 0);
-  assert.match(result.result.stderr, /author-managed checkout|rebased job signing key/);
+  assert.match(result.result.stderr, /signature|receipt reference/);
   assert.equal(git(s.repo, "rev-parse", "HEAD"), s.initialSha);
 });
 test("signed author approval is exact-proposal scoped and saved evidence cannot be altered", { skip: SKIP }, () => {
@@ -299,9 +278,7 @@ test("signed author approval is exact-proposal scoped and saved evidence cannot 
   const change = p.data.protectedChanges[0].id;
   const good = s.approvedPayload("change", p.data.proposalSha256, change);
   const wrong = { ...good, proposalSha256: "e".repeat(64) } as AuthorDecisionPayload;
-  const signedWrong = s.signedFile(wrong);
-  assert.match(s.revision("authorize", "change", "--proposal", p.data.proposalSha256,
-    "--signed-evidence", signedWrong).result.stderr, /bound to another/i);
+  assert.throws(() => s.signedFile(wrong), /differs from current/i);
   const response = s.approve("change", p.data.proposalSha256, change);
   assert.equal(response.result.status, 0, response.result.stderr);
   assert.equal(s.editorial("change", p.data.proposalSha256).result.status, 0);
@@ -310,7 +287,7 @@ test("signed author approval is exact-proposal scoped and saved evidence cannot 
   const altered = JSON.parse(readFileSync(receiptPath, "utf8"));
   altered.approvals[0].signed.payload.action = "rejected";
   writeFileSync(receiptPath, JSON.stringify(altered));
-  assert.match(s.commit("change", p.data.proposalSha256).result.stderr, /signature/i);
+  assert.match(s.commit("change", p.data.proposalSha256).result.stderr, /binding differs/i);
   assert.equal(git(s.job.worktreeRoot, "rev-parse", "HEAD"), s.initialSha);
 });
 

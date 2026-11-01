@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,6 +7,7 @@ import { verifiedNarrativeChain } from "../src/job-successor.js";
 import { startStoryJob } from "../src/job.js";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { authorApproval } from "./approval-controller.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-idea-placement-"));
 after(() => {
@@ -46,10 +46,6 @@ scope: "Two Characters and a single archive"
 
 Ada wants to resolve the witness's disappearance without unjustly condemning Neri.
 `);
-  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  mkdirSync(join(story, "..", ".noveltea"), { recursive: true });
-  writeFileSync(join(repo, ".noveltea/approval-author.pub"),
-    publicKey.export({ format: "pem", type: "spki" }));
   git(repo, "init", "-q"); git(repo, "config", "user.name", "Author");
   git(repo, "config", "user.email", "author@example.test");
   git(repo, "add", "."); git(repo, "commit", "-qm", "Original Story");
@@ -103,7 +99,7 @@ Ada wants to resolve the witness's disappearance without unjustly condemning Ner
     upstreamConstraints: [],
   }));
   const captured = ok("ideas", "capture", "--file", payload);
-  return { repo, story, state, job, baseline, captured, call, ok, privateKey };
+  return { repo, story, state, job, baseline, captured, call, ok, env };
 }
 test("multiple placements, verified inbox provenance and deferred fulfillment via public Story job CLI", {
   skip: !available,
@@ -151,19 +147,13 @@ test("multiple placements, verified inbox provenance and deferred fulfillment vi
   const alternative = task.candidates.find((c: any) => c.id !== "event.disclose-ledger").id;
   const request = x.ok("ideas", "relocate", "--id", "bell-concept", "--target", alternative);
   assert.equal(request.status, "approval-required");
-  const signedFile = join(root, "signed-relocation.json");
-  const payload = { version: 1, kind: "decision", jobId: x.job.jobId,
-    threadId: x.job.threadId, baseSha: x.baseline, verifiedHead: placed.commitSha,
-    workItemId: "idea-relocate:bell-concept", proposalSha256: request.proposal,
-    decision: "Move the bell concept to the better later Event", changeId: request.proposal,
-    action: "approved", reason: "The later Event now offers a stronger causal context." };
-  writeFileSync(signedFile, JSON.stringify({ payload,
-    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.privateKey).toString("base64") }));
+  const payload = { ...request.approvalRequest, reason: "The later Event now offers a stronger causal context." };
+  const signedFile = authorApproval(x.story, x.job.jobId, x.env, root, payload).file;
   const rejected = x.call("ideas", "relocate", "--fixture", "--id", "bell-concept",
-    "--target", alternative, "--signed-evidence", join(root, "nonexistent.json"));
+    "--target", alternative, "--approval", join(root, "nonexistent.json"));
   assert.notEqual(rejected.status, 0);
   const relocated = x.ok("ideas", "relocate", "--fixture", "--id", "bell-concept",
-    "--target", alternative, "--signed-evidence", signedFile, "--skills-source", source);
+    "--target", alternative, "--approval", signedFile, "--skills-source", source);
   assert.equal(relocated.action, "relocated");
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD^"), placed.commitSha);
   assert.equal(x.ok("ideas", "inspect").ideas[0].lifecycle.placements.length, 2);

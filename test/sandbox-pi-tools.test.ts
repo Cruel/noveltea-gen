@@ -87,7 +87,8 @@ test("hosted mode requires complete controller configuration and never falls bac
       else process.env[name] = value;
     }
   }
-  assert.doesNotThrow(() => blockUnroutedHostedPi("Event"), "local CLI workflow retains its preexisting tools");
+  assert.equal(sandboxToolsRequired({}), true, "standalone jobs must also isolate the approval controller");
+  assert.throws(() => blockUnroutedHostedPi("Event"), /refused unsafe host fallback/);
 });
 
 test("private graph server fails at startup rather than offering legacy host tools", () => {

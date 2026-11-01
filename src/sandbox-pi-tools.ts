@@ -30,10 +30,10 @@ const text = (value: string) => ({ content: [{ type: "text" as const, text: valu
 type Input = Record<string, unknown>;
 type Runner = Pick<SandboxClient, "acquire" | "execute">;
 
-/** No half-configured hosted process can silently enable local Pi tools. */
-export function sandboxToolsRequired(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.NT_REQUIRE_SANDBOX_TOOLS === "1" ||
-    env.NT_SANDBOX_SOCKET !== undefined || env.NT_SANDBOX_TOKEN_FILE !== undefined;
+/** Trusted persisted consent cannot coexist with same-user host shell tools.
+ * This applies to standalone CLI jobs as well as hosted jobs. */
+export function sandboxToolsRequired(_env: NodeJS.ProcessEnv = process.env): boolean {
+  return true;
 }
 
 /** Until the remaining specialist stages are routed, refuse any hosted local fallback. */
@@ -44,16 +44,15 @@ export function blockUnroutedHostedPi(stage: string): void {
 }
 
 /**
- * CLI-only sessions retain the historical explicit local mode if neither
- * sandbox env var is provided. Compose always sets NT_REQUIRE_SANDBOX_TOOLS.
- * Every hosted Pi session must acquire a verified registered job before
+ * Both CLI and hosted sessions must acquire an isolated registered job.
+ * A missing controller is a blocked configuration, never a local fallback.
+ * Every Pi session must acquire a verified registered job before
  * receiving ANY model-accessible file tools.
  */
 export async function selectSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[],
   client?: Runner, access: SandboxToolAccess = "writer",
 ): Promise<ToolDefinition[] | undefined> {
-  if (!sandboxToolsRequired()) return undefined;
   if (!process.env.NT_SANDBOX_SOCKET || !process.env.NT_SANDBOX_TOKEN_FILE) {
     throw new Error("Hosted Pi requires a configured private sandbox socket and token; no local tool fallback.");
   }

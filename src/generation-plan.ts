@@ -12,7 +12,7 @@ export interface GenerationEvidence {
 export interface ExecutionItem extends WorkItem {
   stage: GenerationStage;
   milestone?: string;
-  /** Architecture items refined by this executable unit. Never mutate the signed plan. */
+  /** Architecture items refined by this executable unit. Never mutate the author-approved plan. */
   plannedItems: string[];
 }
 export interface GenerationInventory {
@@ -45,7 +45,7 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
       targetIds: targets, dependencies, plannedItems: planned.map(i => i.id),
       skills: [...new Set([...syntheticSkills, ...planned.flatMap(i => i.skills)])],
       checks: [...new Set([...syntheticChecks, ...planned.flatMap(i => i.checks)])],
-      authorization: { source: stage === "foundation" || version === 1 ? "explicit-author-cli" : "author-ed25519",
+      authorization: { source: stage === "foundation" || version === 1 ? "explicit-author-cli" : "trusted-controller",
         planVersion: stage === "foundation" ? 1 : version, paths: [] },
       planVersion: version, status: reason ? "blocked" : evidence ? "verified" : "pending",
       ...(!reason && evidence ? { verifiedSha: evidence.headSha } : {}),
@@ -77,7 +77,7 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
         add("interactive", [`event:${milestone}`], milestone);
         if (plan.contract.scope.depth === "composition") add("composition", [`interactive:${milestone}`], milestone);
       }
-      // Translate the signed architecture DAG into executable prerequisites.
+      // Translate the approved architecture DAG into executable prerequisites.
       // The legacy aggregate composition/review entries are planning placeholders,
       // not global barriers between independently developable Milestones.
       const planById = new Map(plan.items.map(item => [item.id, item]));

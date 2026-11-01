@@ -1,168 +1,126 @@
-# Offline author signatures for Story revision (#16)
+# Trusted author approvals (#58)
 
-The generator cannot authenticate a human from an ordinary `--approve` CLI
-flag. Pi specialists have shell access. Therefore both **protected-decision
-approval/rejection** and the mandatory **source-linked editorial verdict** must
-be Ed25519-signed outside the agent's execution environment.
+Offline Ed25519 signing is retired. No signing key, committed public key, or
+`.noveltea/approval-author.pub` is required or consulted. Native `.noveltea`
+metadata is disposable and cannot grant consent. Old signature envelopes and
+`--signed-evidence` flags are rejected, not silently converted into approvals.
 
-## 1. Establish author authority before starting a job
+## Trust boundary
 
-On a **separate, trusted signing device/service**, generate a private signing
-key. Do not store the key in the Story checkout, a NovelTea job/worktree, a
-machine where Pi has shell access, a Pi transcript, or a config/env variable
-visible to Pi:
+The author controller and durable job state must be outside every model-directed
+file, search and shell tool. Git-backed Pi specialists now require the isolated
+sandbox adapter in **both CLI and hosted execution**. Missing sandbox socket/token
+configuration fails closed; there is no same-user host-tool fallback. A terminal
+or a file mode alone cannot protect consent from an unrestricted same-user agent.
+Deploy the controller with the existing private sandbox configuration; never mount
+job state, checkpoints, app data, credentials or controller endpoints in a sandbox.
+Fixtures do not run Pi and need no sandbox.
 
-```sh
-openssl genpkey -algorithm Ed25519 -out /secure/offline/noveltea-author.key
-openssl pkey -in /secure/offline/noveltea-author.key -pubout -out approval-author.pub
+The trusted CLI identifies the OS user and requires an interactive terminal. The
+website identifies the Better Auth session and checks **job ownership**, not merely
+repository membership or provider write access. The controller records the decision
+through a typed LangGraph `Command(resume)` bound to the exact nonce. There is no
+model-callable approval tool, JSON-supplied principal, or unattended approval flag.
+
+## Inspect, request, decide, apply
+
+1. Run `job revision inspect` or `job architecture propose` and review the actual
+   patch, scope, affected records, protected before/after values and carry-forward
+   list. For relocation run `job ideas relocate` without approval first.
+2. Save the exact proposal payload to `payload.json`. The existing compatibility
+   output fields `authorSigningRequest` (plan) and `authorSigningRequests` (revision)
+   now contain **unsigned request templates**, not signing instructions. Relocation
+   returns `approvalRequest`. Fill in a substantive rationale; editorial requests
+   require a separate source-line reference and independent prose-review notes.
+3. Stage and inspect the request; staging never authorizes a change:
+
+   ```sh
+   pnpm dev job approval request --story /repo/story --job draft-1 \
+     --id review-culprit --file payload.json
+   pnpm dev job approval inspect --story /repo/story --job draft-1 --id review-culprit
+   pnpm dev job approval decide --story /repo/story --job draft-1 --id review-culprit
+   ```
+
+   On the trusted terminal, type `APPROVE <full-proposal-sha256>` or
+   `REJECT <full-proposal-sha256>`. Unattended execution leaves the interrupt
+   pending and reports the interactive-terminal requirement. The displayed receipt
+   includes the exact binding, payload, and proposal review context. Always inspect
+   the actual Story prose independently; a digest is not a literary review.
+4. Save only the returned `id` and `nonce` as a reference:
+
+   ```json
+   { "receiptId": "review-culprit", "nonce": "<recorded nonce>" }
+   ```
+
+5. Apply that reference through the existing gate:
+
+   ```sh
+   pnpm dev job revision authorize --story /repo/story --job draft-1 \
+     --work-item fix-culprit --proposal <exact-sha256> --approval decision-reference.json
+   pnpm dev job revision review --story /repo/story --job draft-1 \
+     --work-item fix-culprit --proposal <exact-sha256> --approval editorial-reference.json
+   pnpm dev job revision commit --story /repo/story --job draft-1 \
+     --work-item fix-culprit --proposal <exact-sha256>
+   ```
+
+   Each protected delta needs its own decision. Editorial review is always separate,
+   even when metadata is unchanged. Rejection/block remains durable and prevents
+   commit. Plan application uses `job architecture approve --proposal <digest>
+   --approval plan-reference.json`; relocation uses `job ideas relocate --id <idea>
+   --target <record-id> --approval relocation-reference.json`.
+
+## Typed author-update and web contracts
+
+A pending author-update approval resumes with a reference, never an inline decision:
+
+```json
+{
+  "type": "decision",
+  "messageId": "approve-the-witness",
+  "approval": { "receiptId": "review-culprit", "nonce": "<recorded nonce>" }
+}
 ```
 
-Transfer **only the public key** to the author's original Git repository.
-In that repository, **before** running `job start`:
+Use `job author resume --file response.json`. Questions retain the existing
+`{type:"answer",messageId,answer}` contract. Paused/cancelled execution controls,
+writer locks, source bindings and interrupted-writer recovery remain independent.
 
-```sh
-mkdir -p .noveltea
-cp /path/to/transferred/approval-author.pub .noveltea/approval-author.pub
-git add .noveltea/approval-author.pub
-git commit -m "Pin offline NovelTea author approval key"
-```
+`POST /api/approvals` is an authenticated, same-origin author-controller endpoint:
 
-The key is a standalone *non-Story* file; the canonical Story validator still
-only owns Markdown. At every authorization check the verifier runs
-`git show <job.baseSha>:.noveltea/approval-author.pub`: not the moving HEAD,
-not the worktree copy, not a key from approval JSON. A job created **before**
-the key was committed cannot retrospectively adopt it. Start a new job from
-the updated author baseline (never rewrite an existing job's `baseSha`).
+- Request: `{action:"request",jobId,id,payload}` (or `kind`, `workItemId`, `changeId`).
+- Inspect: `{action:"inspect",jobId,id}`.
+- Decide: `{action:"decide",jobId,id,nonce,proposalSha256,decision:"approved"|"rejected"}`.
 
-## 2. Inspect the proposed revision
+Paths and principals are resolved server-side from the owned job/catalog and the
+session. The web and CLI controllers share the same ledger and typed graph resume.
+Recording consent does not invoke a writer, commit Story bytes, change execution
+ownership, or implicitly answer another graph's pending question. The resulting
+reference is consumed by the same protected gates and author-update contract.
 
-Edit one tracked Story Markdown record in the job worktree. From the normal
-CLI, inspect the proposed change:
+## Durability, replay and migration
 
-```sh
-pnpm dev job revision inspect --story /repo/story --job draft-1 \
-  --work-item fix-culprit --path creative-direction/foundation.md > proposal.json
-```
+Receipts and SQLite checkpoints live in `<job-state>/trusted-approvals/`, outside
+Story canon, disposable metadata and evictable Git cache. They bind job/thread,
+original baseline, verified HEAD, exact proposal digest, protected change or plan
+version, nonce, principal, source and decision. Every historical authorization is
+rechecked against this ledger. Copied fields in revision/history JSON are not
+independent authority (the historical field name `signed` now holds ledger evidence).
 
-Review the displayed `patch`, protected `before`/`after` values and
-`affectedRecords`. The `authorSigningRequests.decisions[]` array contains
-one **unsigned template per protected change**, each with the exact
-`decision` ID and `changeId`. The `authorSigningRequests.editorial`
-template is separate. **Do not sign an unreviewed template.**
+The same recorded controller decision is idempotent. A conflicting principal,
+nonce, digest or decision fails. Reusing a receipt for a different current proposal,
+work item, plan version or verified HEAD fails at the application gate. Historical
+accepted evidence remains readable after later verified commits. Pending requests
+cannot be rebound to a changed proposal; use a fresh request ID after inspecting it.
+The existing graph-side Git/validator gates still check exact candidate bytes,
+canonical protection, scope, independent review and commit provenance.
 
-Prepare the desired payload as JSON on the trusted signing device, preserving
-all field names and exact proposal/job/thread/base/change values. The signed
-`threadId` prevents replay across distinct jobs sharing a Git baseline. For a protected
-change, choose `action: "approved"` or `"rejected"` and replace the
-placeholder `reason` with a substantive author rationale (12+ characters).
-For the editorial payload, set `verdict: "pass"` or `"block"`,
-`evidence` to an actual `story-relative/path.md:line` or `:first-last`
-reference, and `notes` to a meaningful independent semantic/prose review
-(20+ characters). **A human review is required even if no protected YAML
-metadata changed.** Signing is an attestation, not automatic literary proof.
+Old signing-only histories and transitional #57 receipts without reviewed payloads
+are **not automatically trusted or upgraded**. They fail closed. Preserve original
+receipts, worktrees, Git history and transcripts. Inspect retained work and establish
+a fresh trusted job/proposal for explicit controller review; never rewrite baseline
+SHAs or receipt hashes to bypass migration. This release does not provide an
+in-place importer for historical signature-only jobs.
 
-## 3. Sign on the trusted device
-
-The Ed25519 signature covers the UTF-8 bytes of
-`JSON.stringify(payload)` (compact JSON, no trailing newline), **not**
-the enclosing signature envelope. The verifier rejects extra/unknown payload
-fields and invalid signatures.
-
-Example using a trusted device with Node.js and OpenSSL. Save the reviewed
-payload as `payload.json` and ensure it has the correct values and no extra
-fields. Then normalize, sign and produce the signed envelope:
-
-```sh
-node -e 'const fs=require("node:fs"); fs.writeFileSync("canonical.json",JSON.stringify(JSON.parse(fs.readFileSync("payload.json","utf8"))))'
-openssl pkeyutl -sign -rawin -inkey /secure/offline/noveltea-author.key \
-  -in canonical.json -out signature.bin
-node -e 'const fs=require("node:fs"); const payload=JSON.parse(fs.readFileSync("canonical.json","utf8")); const signature=fs.readFileSync("signature.bin").toString("base64"); fs.writeFileSync("signed-evidence.json",JSON.stringify({payload,signature},null,2))'
-```
-
-Transfer **only `signed-evidence.json`** back to the generator machine. The
-signature can safely be carried through the agent-accessible filesystem:
-it cannot be altered or reused for another proposal without a new valid
-author signature. Never transfer the private key.
-
-## 4. Import signed authorization and editorial review
-
-```sh
-pnpm dev job revision authorize --story /repo/story --job draft-1 \
-  --work-item fix-culprit --proposal <exact-proposal-sha256> \
-  --signed-evidence /path/to/signed-decision.json
-```
-
-Repeat for each protected decision requiring authorization. A signed
-`rejected` decision blocks the work item. Then independently review
-the prose and sign the **editorial** template (step 3, with
-`kind: "editorial"`):
-
-```sh
-pnpm dev job revision review --story /repo/story --job draft-1 \
-  --work-item fix-culprit --proposal <exact-proposal-sha256> \
-  --signed-evidence /path/to/signed-editorial.json
-pnpm dev job revision commit --story /repo/story --job draft-1 \
-  --work-item fix-culprit --proposal <exact-proposal-sha256>
-```
-
-Only the graph commits; the CLI verifies both signatures on ingestion and
-again whenever the saved receipt is read or an interrupted commit is
-recovered. It independently reconstructs the protected delta inventory using
-the pinned canonical validator and original/latest verified Git history.
-An agent can submit an unsigned request, but cannot convert it to an
-authorization without access to the offline signing key. `--decision`,
-`--reason`, `--verdict` and `--notes` flags on the generator CLI
-**cannot** authorize or approve a Story revision.
-
-## 5. Sign an architecture completion-contract revision (#17)
-
-`job architecture propose --story /repo/story --job draft-1 --contract revised-scope.json`
-returns a precise `proposal.digest` and `authorSigningRequest` with
-`kind: "plan"`, `workItemId: "global-architecture"`, the original job
-baseline/thread ID, the latest verified HEAD, `planVersion` and the exact
-`proposalSha256`. The proposal digest binds the previous plan, verified
-HEAD and complete proposed contract, including its production constraints.
-For a replan after specialist commits, optionally add `--carry-forward
-/path/to/unaffected.json` to `architecture propose` (or `author plan`).
-The JSON array names exact reviewed, unaffected work units, for example
-`["foundations", "event:milestone.disclosure"]`. The array is part of the
-proposal digest and therefore the signed authorization. Missing work,
-unverified provenance and omitted upstream dependencies are rejected;
-omitting the option leaves older downstream receipts blocked rather than
-implicitly approving their reuse. Later signed proposals may explicitly
-reconcile previously blocked historical work after a fresh impact review.
-
-Before signing, review **the entire old and proposed scope**, including any
-removed targets, branches, constraints and production limits. Set `reason`
-to an explicit rationale (at least 12 characters), then sign the reviewed
-payload with the independently held original author key using step 3 above.
-
-```sh
-pnpm dev job architecture approve --story /repo/story --job draft-1 \
-  --proposal <exact-proposal-digest> \
-  --signed-evidence /path/to/signed-plan.json
-pnpm dev job architecture run --story /repo/story --job draft-1
-```
-
-Every imported approval must match the exact outstanding plan proposal and
-verified HEAD. Saved plan revisions and signatures are rechecked whenever
-the architecture receipt is opened. There is no ordinary `--reason` approval
-shortcut. The original plan can be supplied as a completion contract in
-`job architecture run`; signatures are required for **subsequent changes**,
-not for establishing the initial CLI-requested scope.
-
-## Trust assumptions and rotation
-
-The trusted baseline must be correctly selected when the job is created.
-The signer must validate **the exact contents and their scope**, not just
-sign a digest suggested by an agent. Retain the author signing key only in a
-protected environment inaccessible to the agent. An agent able to overwrite
-the running verifier itself, the trusted signer, or the original Git objects
-can defeat in-process protections; isolate the writing worker at the OS/container
-boundary for adversarial deployments. Key rotation requires a fresh, trusted
-job baseline: never silently substitute the working-tree key or a supplied
-approval file's key.
-
-The key is an **author identity/consent** key, not an assurance that authored
-prose is semantically consistent. A positive signed editorial review means
-the authorized reviewer attests to having checked the affected narrative.
+Back up durable job state and checkpoints together. A missing/corrupt ledger is a
+block requiring restoration, never permission to reconstruct consent from Story
+metadata, a Git trailer, or a model response.

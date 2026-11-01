@@ -8,6 +8,7 @@ import { after, test } from "node:test";
 import { startStoryJob } from "../src/job.js";
 import { inspectTrustedApproval, requestTrustedApproval } from "../src/trusted-approval.js";
 import { removeTestTree } from "./helpers.js";
+import { verifyAuthorEvidence } from "../src/author-evidence.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-trusted-approval-"));
 after(() => removeTestTree(root));
@@ -73,6 +74,11 @@ test("trusted CLI approval is bound, checkpointed, durable and idempotent across
   assert.equal(decided.source, "trusted-cli");
   assert.equal(decided.principal, principal);
   assert.equal(decided.nonce, first.nonce);
+  // A controller decision, not a committed key or a caller's payload, is authority.
+  const evidence = verifyAuthorEvidence(x.job, { receiptId: decided.id, nonce: decided.nonce });
+  assert.equal(evidence.payload.kind, "plan");
+  assert.equal(evidence.payload.proposalSha256, x.digest);
+  assert.throws(() => verifyAuthorEvidence(x.job, { receiptId: decided.id, nonce: "00000000-0000-0000-0000-000000000000" }), /nonce|receipt/i);
   const replay = decide(x, first.id, x.digest, "REJECT");
   assert.equal(replay.status, 0, replay.stdout + replay.stderr);
   assert.deepEqual(await inspectTrustedApproval(x.job, first.id), decided);
@@ -108,13 +114,13 @@ test("proposal, baseline and nonce changes reject stale or replayed decisions", 
   await assert.rejects(requestTrustedApproval(x.job, { id: "invalid-proof", kind: "plan", changeId: "a".repeat(64) }), /without a change/);
 });
 
-test("protected-decision receipts bind exact change and preserve legacy signed gate", async () => {
+test("protected-decision receipts bind exact change without mutating the revision proposal", async () => {
   const x = await setup("protected");
   const workItemId = "change-witness", changeId = "c".repeat(64), proposalSha256 = "d".repeat(64);
   mkdirSync(join(x.job.stateDir, "revisions"), { recursive: true });
   writeFileSync(join(x.job.stateDir, "revisions", workItemId + ".json"), JSON.stringify({
     version: 1, jobId: x.job.jobId, baseSha: x.base, workItemId, verifiedHead: x.base,
-    status: "proposed", proposalSha256, changes: [{ id: changeId }], approvals: [],
+    status: "proposed", proposalSha256, changes: [{ id: changeId, decision: "creative-direction.foundation#witness" }], approvals: [],
   }));
   await assert.rejects(requestTrustedApproval(x.job,
     { id: "wrong-change", kind: "decision", workItemId, changeId: "e".repeat(64) }), /does not match/i);
@@ -126,7 +132,7 @@ test("protected-decision receipts bind exact change and preserve legacy signed g
   assert.equal(recorded.phase, "recorded");
   assert.equal(recorded.proposalSha256, proposalSha256);
   assert.equal(recorded.changeId, changeId);
-  // The old revision receipt was not modified: #58 owns the actual signing cutover.
+  // Recording consent does not mutate or automatically publish the revision proposal.
   const legacy = JSON.parse(readFileSync(join(x.job.stateDir, "revisions", workItemId + ".json"), "utf8"));
   assert.deepEqual(legacy.approvals, []);
 });
@@ -141,4 +147,17 @@ test("unattended CLI cannot act as trusted approving principal", async () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /interactive authenticated local terminal/);
   assert.equal((await inspectTrustedApproval(x.job, staged.id)).phase, "awaiting-controller");
+});
+
+test("retired signature-only CLI flag is rejected instead of silently granting approval", async () => {
+  const x = await setup("legacy-flag");
+  const before = await requestTrustedApproval(x.job, { id: "approval-legacy", kind: "plan" });
+  const attempt = spawnSync(process.execPath,
+    ["--import", "tsx", resolve("src/cli.ts"), "job", "architecture", "approve",
+      "--story", x.story, "--job", "draft", "--proposal", x.digest,
+      "--signed-evidence", join(x.repo, "fake-signature.json")],
+    { encoding: "utf8", env: { ...process.env, NT_STATE_DIR: x.state }, timeout: 30000 });
+  assert.notEqual(attempt.status, 0);
+  assert.match(attempt.stderr, /--signed-evidence|Unknown|Invalid|option/i);
+  assert.equal((await inspectTrustedApproval(x.job, before.id)).phase, "awaiting-controller");
 });

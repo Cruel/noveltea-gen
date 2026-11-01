@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { authorApproval } from "./approval-controller.js";
 import { createGenerationGraph } from "../src/generation.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 
@@ -300,7 +300,7 @@ test("an unknown typed dependency blocks its cluster without silently dropping i
   assert.equal(result.status, "blocked");
   assert.match(result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure").blockingReason, /nonexistent-dependency/);
   assert.equal(result.escalation?.kind, "dependency-replan");
-  assert.equal(result.escalation?.requiresSignedApproval, true);
+  assert.equal(result.escalation?.requiresTrustedApproval, true);
   assert.ok(result.escalation.sources.some((s: any) => s.source === "event:milestone.disclosure"));
   assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.reckoning").status, "verified");
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
@@ -350,13 +350,8 @@ test("a clean local cluster block does not stop independent work or spin on resu
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
-test("a signed later scope revision adds a cluster without repeating unaffected commits", { skip: !available }, () => {
-  const keys = generateKeyPairSync("ed25519");
-  const f = setup("replan", story => {
-    mkdirSync(join(dirname(story), ".noveltea"));
-    writeFileSync(join(dirname(story), ".noveltea/approval-author.pub"), keys.publicKey.export({ type: "spki", format: "pem" }));
-    plannedCluster(story, "truth", "reckoning");
-  });
+test("a controller-approved later scope revision adds a cluster without repeating unaffected commits", { skip: !available }, () => {
+  const f = setup("replan", story => plannedCluster(story, "truth", "reckoning"));
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   contract.scope.targets = ["milestone.disclosure"];
   writeFileSync(f.contract, JSON.stringify(contract));
@@ -369,9 +364,8 @@ test("a signed later scope revision adds a cluster without repeating unaffected 
   writeFileSync(carry, JSON.stringify(["foundations", "event:milestone.disclosure", "interactive:milestone.disclosure", "composition:milestone.disclosure"]));
   const proposal = f.cli(["architecture", "propose", "--contract", f.contract, "--carry-forward", carry]);
   const payload = { ...proposal.authorSigningRequest, reason: "Test author approves the second Milestone and retains the reviewed first cluster." };
-  const evidence = join(root, "signed-plan.json");
-  writeFileSync(evidence, JSON.stringify({ payload, signature: sign(null, Buffer.from(JSON.stringify(payload)), keys.privateKey).toString("base64") }));
-  f.cli(["architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence]);
+  const evidence = authorApproval(f.story, "single", f.env, root, payload).file;
+  f.cli(["architecture", "approve", "--proposal", proposal.proposal.digest, "--approval", evidence]);
   const result = f.cli(["generate", "resume"]);
   assert.equal(result.reason, "editorial-unverified", JSON.stringify(result));
   assert.equal(result.inventory.planVersion, 2);
@@ -381,13 +375,7 @@ test("a signed later scope revision adds a cluster without repeating unaffected 
 });
 
 test("approved scope expansion activates an early deferred idea without replaying prior specialist commits", { skip: !available }, () => {
-  const keys = generateKeyPairSync("ed25519");
-  const f = setup("idea-replan", story => {
-    mkdirSync(join(dirname(story), ".noveltea"));
-    writeFileSync(join(dirname(story), ".noveltea/approval-author.pub"),
-      keys.publicKey.export({ type: "spki", format: "pem" }));
-    plannedCluster(story, "truth", "reckoning");
-  });
+  const f = setup("idea-replan", story => plannedCluster(story, "truth", "reckoning"));
   const idea = join(root, "idea-replan.json");
   writeFileSync(idea, JSON.stringify({
     id: "replan-witness", kind: "event-concept",
@@ -415,10 +403,8 @@ test("approved scope expansion activates an early deferred idea without replayin
     "interactive:milestone.disclosure", "composition:milestone.disclosure"]));
   const proposal = f.cli(["architecture", "propose", "--contract", f.contract, "--carry-forward", carry]);
   const payload = { ...proposal.authorSigningRequest, reason: "Authorize a second Milestone and keep the first." };
-  const evidence = join(root, "idea-replan-approved.json");
-  writeFileSync(evidence, JSON.stringify({ payload,
-    signature: sign(null, Buffer.from(JSON.stringify(payload)), keys.privateKey).toString("base64") }));
-  f.cli(["architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence]);
+  const evidence = authorApproval(f.story, "single", f.env, root, payload).file;
+  f.cli(["architecture", "approve", "--proposal", proposal.proposal.digest, "--approval", evidence]);
   const result = f.cli(["generate", "resume"]);
   assert.equal(result.status, "blocked", JSON.stringify(result));
   assert.equal(result.inventory.planVersion, 2);

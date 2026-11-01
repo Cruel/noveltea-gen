@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 interface CliOptions {
   command: "run" | "demo-story";
@@ -70,10 +71,10 @@ Usage:
   pnpm dev job author resume --story /path/to/story --job draft-1 --file typed-response.json
   pnpm dev job author control --story /path/to/story --job draft-1 --state paused
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
-  pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --signed-evidence /path/to/offline-signed-plan.json
+  pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --approval /path/to/plan-approval-reference.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
-  pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --signed-evidence /path/to/offline-signed-decision.json
-  pnpm dev job revision review --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --signed-evidence /path/to/offline-signed-editorial.json
+  pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --approval /path/to/decision-approval-reference.json
+  pnpm dev job revision review --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --approval /path/to/editorial-approval-reference.json
   pnpm dev job revision commit --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256>
   pnpm dev run --project /path/to/story --task "Summarize why a story needs a premise."
   pnpm dev run --project ./new-story --create-project --fixture --task "Verify the graph."
@@ -104,8 +105,7 @@ Job revision:
   --work-item <id>    Required stable lowercase work-item ID
   --path <file>       Story-relative Markdown target on first inspect
   --proposal <hash>   Exact proposal hash required after inspection
-  --signed-evidence <file>  Externally Ed25519-signed decision/review; key pinned in original Git baseline
-                         No unsigned author approval/review flags are accepted
+  --approval <file>  Controller reference JSON {receiptId,nonce}; no inline approval claims
 
 Job architecture:
   run|inspect|propose|approve|reconcile  Author, inspect, replan or explicitly reconcile saved edits
@@ -114,7 +114,7 @@ Job architecture:
   --mode <mode>            autonomous requires contract; collaborative may await author scope
   --proposal <sha256>      Exact digest from architecture propose (approve only)
   --digest <sha256>        Exact reviewed candidate digest from inspect (reconcile only)
-  --signed-evidence <file>  Externally signed Ed25519 plan approval from the author
+  --approval <file>         Recorded controller reference JSON {receiptId,nonce}
   --skills-source <path>   NovelTea skills checkout to pin
   --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
@@ -176,8 +176,9 @@ Job event (bounded Event-design work item after Character/World foundations):
   --provider, --model     Pi specialist provider/model (default openai/gpt-6-luna)
   --fixture               Deterministic tests only, not real Pi evidence
 
-Job trusted approvals (#57; ledger only, not yet consumed by legacy revision gates):
-  approval request --story <story> --job <job> --id <id> --kind plan|decision
+Job trusted approvals (#58; shared CLI/web authorization ledger):
+  approval request --story <story> --job <job> --id <id> --file <proposal-payload.json>
+                   Or --kind plan|decision with the selectors below
                    [--work-item <id>] [--change <exact-change-digest>]
   approval inspect --story <story> --job <job> --id <id>
   approval decide --story <story> --job <job> --id <id>
@@ -189,7 +190,7 @@ Job author updates (live author messaging, #25):
   inspect              Display queued/applied/review-required receipts and pending author questions
   process              Process messages at a safe job boundary via process_author_updates LangGraph node
   plan                 Propose a revised scope for --id <review-required change>, --file <contract.json>
-  resume               Resume an exact persisted question or signed approval interrupt, --file typed-response.json
+  resume               Resume an exact question or controller approval interrupt, --file typed-response.json
   control              Explicit execution state running|paused|cancelled|completed, never inferred from prose
   --file <json>        Message {id?,kind:idea|change|question|approval,payload:{...}}
   --state <state>      Only valid with control; paused/cancelled jobs do not auto-run on new messages
@@ -352,7 +353,7 @@ async function main(): Promise<void> {
       throw new Error("Expected job approval request|inspect|decide.");
     }
     const values = parseJobOptions(args, "approval",
-      ["--story", "--job", "--id", "--kind", "--work-item", "--change"]);
+      ["--story", "--job", "--id", "--kind", "--work-item", "--change", "--file"]);
     const story = values.get("--story"), jobId = values.get("--job"), id = values.get("--id");
     if (!story || !jobId || !id) throw new Error("job approval requires --story, --job and --id.");
     const { startStoryJob } = await import("./job.js");
@@ -361,12 +362,14 @@ async function main(): Promise<void> {
     const job = await startStoryJob({ story, job: jobId }, false);
     let result;
     if (action === "request") {
-      const kind = values.get("--kind");
-      if (kind !== "plan" && kind !== "decision") throw new Error("Approval request requires --kind plan|decision.");
+      const payload = values.has("--file") ? JSON.parse(await readFile(values.get("--file")!, "utf8")) : undefined;
+      const kind = values.get("--kind") ?? payload?.kind;
+      if (!["plan", "decision", "editorial"].includes(kind ?? "")) throw new Error("Approval request requires plan, decision or editorial kind.");
       result = await requestTrustedApproval(job, { id, kind,
-        workItemId: values.get("--work-item"), changeId: values.get("--change") });
+        workItemId: values.get("--work-item") ?? payload?.workItemId,
+        changeId: values.get("--change") ?? payload?.changeId, payload });
     } else {
-      if (values.has("--kind") || values.has("--work-item") || values.has("--change")) {
+      if (values.has("--kind") || values.has("--work-item") || values.has("--change") || values.has("--file")) {
         throw new Error("Approval inspect/decide accept only --story, --job and --id.");
       }
       result = action === "inspect" ? await inspectTrustedApproval(job, id) :
@@ -483,7 +486,7 @@ async function main(): Promise<void> {
     }
     const values = parseJobOptions(args, "ideas", ["--story", "--job", "--file", "--target",
       "--id", "--fixture", "--skills-source", "--validator-source", "--provider", "--model",
-      "--thinking", "--signed-evidence", "--record"], ["--fixture", "--record"]);
+      "--thinking", "--approval", "--record"], ["--fixture", "--record"]);
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job ideas requires --story and --job.");
     disableJobCloudTracing();
@@ -500,7 +503,7 @@ async function main(): Promise<void> {
         skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
         provider: values.get("--provider"), model: values.get("--model"),
         thinking: values.get("--thinking") as "low" | "high" | undefined,
-        signedEvidence: values.get("--signed-evidence") });
+        approvalFile: values.get("--approval") });
     } else {
       const { runIdeas } = await import("./ideas.js");
       result = await runIdeas({ story, job,
@@ -671,7 +674,7 @@ async function main(): Promise<void> {
       throw new Error("Expected job architecture run|inspect|propose|approve|reconcile.");
     }
     const values = parseJobOptions(args, "architecture", ["--story", "--job", "--contract", "--mode",
-      "--proposal", "--digest", "--signed-evidence", "--carry-forward", "--skills-source", "--validator-source",
+      "--proposal", "--digest", "--approval", "--carry-forward", "--skills-source", "--validator-source",
       "--provider", "--model", "--fixture"], ["--fixture"], "Missing value for architecture option ");
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job architecture requires --story and --job.");
@@ -681,8 +684,8 @@ async function main(): Promise<void> {
     if (action !== "propose" && values.has("--carry-forward")) {
       throw new Error("Only architecture propose accepts --carry-forward.");
     }
-    if (action === "approve" && (!values.has("--proposal") || !values.has("--signed-evidence"))) {
-      throw new Error("Architecture approve requires --proposal and --signed-evidence.");
+    if (action === "approve" && (!values.has("--proposal") || !values.has("--approval"))) {
+      throw new Error("Architecture approve requires --proposal and --approval.");
     }
     if (action === "inspect" && values.has("--contract")) throw new Error("Architecture inspect does not accept --contract.");
     if (action === "reconcile" && (!values.has("--digest") || values.has("--contract"))) {
@@ -705,7 +708,7 @@ async function main(): Promise<void> {
     const result = await runArchitectureJob({
       story, job, action: action as "run" | "inspect" | "propose" | "approve" | "reconcile",
       contract, carryForward, mode: mode as "autonomous" | "collaborative" | undefined,
-      proposal: values.get("--proposal"), signedEvidence: values.get("--signed-evidence"),
+      proposal: values.get("--proposal"), approvalFile: values.get("--approval"),
       recoveryDigest: values.get("--digest"),
       skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
       provider: values.get("--provider"), model: values.get("--model"), fixture: values.has("--fixture"),
@@ -725,14 +728,14 @@ async function main(): Promise<void> {
       throw new Error("Expected job revision inspect|authorize|review|commit|status.");
     }
     const values = parseJobOptions(args, "revision", ["--story", "--job", "--work-item",
-      "--path", "--proposal", "--signed-evidence", "--validator-source"], [], "Missing value for revision option ");
+      "--path", "--proposal", "--approval", "--validator-source"], [], "Missing value for revision option ");
     const story = values.get("--story"), job = values.get("--job"), workItem = values.get("--work-item");
     if (!story || !job || !workItem) throw new Error("job revision requires --story, --job and --work-item.");
     disableJobCloudTracing();
     const result = await runRevisionAction({
       story, job, workItem, action: action as "inspect" | "authorize" | "review" | "commit" | "status",
       path: values.get("--path"), proposal: values.get("--proposal"),
-      signedEvidence: values.get("--signed-evidence"),
+      approvalFile: values.get("--approval"),
       validatorSource: values.get("--validator-source"),
     });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");

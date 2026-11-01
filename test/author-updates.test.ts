@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID, generateKeyPairSync, sign } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { hostname, tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { authorApproval } from "./approval-controller.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-author-updates-"));
 after(() => removeTestTree(root));
@@ -18,11 +19,7 @@ function setup(name: string, signed = false, protectedDecision = false) {
   const repo = join(root, name), story = join(repo, "story");
   mkdirSync(story, { recursive: true });
   if (!signed) writeFileSync(join(story, "README.md"), "An unfinished author Story\n");
-  const authorKey = signed ? generateKeyPairSync("ed25519") : undefined;
-  if (authorKey) {
-    mkdirSync(join(repo, ".noveltea"), { recursive: true });
-    writeFileSync(join(repo, ".noveltea/approval-author.pub"),
-      authorKey.publicKey.export({ type: "spki", format: "pem" }));
+  if (signed) {
     mkdirSync(join(story, "creative-direction"), { recursive: true });
     writeFileSync(join(story, "creative-direction/foundation.md"), `---
 schema: '0.1'
@@ -86,7 +83,8 @@ The witness disappears and no one agrees why.
     prerequisites: [], placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
     upstreamConstraints: [],
   });
-  return { repo, story, base, state, job, run, ok, file, send, inspect, process: processUpdates, idea, authorKey };
+  const approval = (payload: unknown) => authorApproval(story, "draft", { ...process.env, NT_STATE_DIR: state }, root, payload).reference;
+  return { repo, story, base, state, job, run, ok, file, send, inspect, process: processUpdates, idea, approval };
 }
 
 test("multiple queued ideas produce exactly one separate captured commit each, with stable acknowledgements across processes", () => {
@@ -283,10 +281,9 @@ test("consequential change proposes a versioned scope replan and resolves only a
   const details = x.ok(x.run("architecture", "inspect"));
   const signed = { ...details.authorSigningRequest,
     reason: "I have read and independently approved the new route and the scope it changes." };
-  const signedEvidence = { payload: signed,
-    signature: sign(null, Buffer.from(JSON.stringify(signed)), x.authorKey!.privateKey).toString("base64") };
+  const signedEvidence = x.approval(signed);
   assert.equal(x.ok(x.run("author", "resume", "--file", x.file({
-    type: "decision", messageId: "route-approval", signedEvidence,
+    type: "decision", messageId: "route-approval", approval: signedEvidence,
   }))).phase, "applied");
   assert.equal(x.ok(x.run("architecture", "inspect")).plan.version, 2);
   assert.equal(x.inspect().records.find((entry: any) => entry.message.id === "route-impact")
@@ -309,9 +306,8 @@ test("scope proposal after a verified successor signs current HEAD without repla
   assert.equal(proposed.authorSigningRequest.verifiedHead, captured.commitSha);
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), captured.commitSha);
   const payload = { ...proposed.authorSigningRequest, reason: "I approve the alternate route." };
-  const evidence = x.file({ payload,
-    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
-  x.ok(x.run("architecture", "approve", "--proposal", proposed.proposal.digest, "--signed-evidence", evidence));
+  const evidence = x.file(x.approval(payload));
+  x.ok(x.run("architecture", "approve", "--proposal", proposed.proposal.digest, "--approval", evidence));
   const after = x.ok(x.run("architecture", "run", "--fixture"));
   assert.equal(after.plan.version, 2);
   assert.equal(after.plan.items[0].verifiedSha, first.headSha);
@@ -337,9 +333,8 @@ test("author can approve and reconcile scope after committed Event realization",
   assert.deepEqual(proposal.proposal.carryForward, ["foundations", "event:milestone.disclosure"]);
   assert.equal(proposal.authorSigningRequest.verifiedHead, event.headSha);
   const payload = { ...proposal.authorSigningRequest, reason: "Explicitly approve alternate consequences." };
-  const evidence = x.file({ payload,
-    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
-  x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence));
+  const evidence = x.file(x.approval(payload));
+  x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--approval", evidence));
   const current = x.ok(x.run("architecture", "run", "--fixture"));
   assert.equal(current.plan.version, 2);
   assert.equal(current.plan.items[0].verifiedSha, first.headSha);
@@ -381,9 +376,8 @@ test("signed carry-forward preserves completed Foundation, Event, Interactive an
     "--carry-forward", x.file(["foundations", "event:milestone.disclosure",
       "interactive:milestone.disclosure", "composition:milestone.disclosure"])));
   const payload = { ...proposal.authorSigningRequest, reason: "Reviewed and affirm existing completed work." };
-  const evidence = x.file({ payload,
-    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
-  x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence));
+  const evidence = x.file(x.approval(payload));
+  x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--approval", evidence));
   x.ok(x.run("architecture", "run", "--fixture"));
   x.ok(x.run("foundations", "run", "--fixture", "--skills-source", source));
   assert.equal(x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source)).headSha, event.headSha);
@@ -409,9 +403,8 @@ test("unreviewed downstream work remains blocked until a later signed carry-forw
   const event = x.ok(x.run("event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source));
   const approve = (proposal: any) => {
     const payload = { ...proposal.authorSigningRequest, reason: "Reviewed exact plan changes and retained scope." };
-    const evidence = x.file({ payload,
-      signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
-    x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence));
+    const evidence = x.file(x.approval(payload));
+    x.ok(x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--approval", evidence));
     x.ok(x.run("architecture", "run", "--fixture"));
   };
   const v2 = x.ok(x.run("architecture", "propose", "--contract",
@@ -444,11 +437,10 @@ test("a plan signature is rejected when a later verified capture changes its pro
   x.ok(x.run("architecture", "run", "--fixture", "--contract", x.file(contract), "--skills-source", source));
   const revised = { ...contract, constraints: ["Keep trust", "Offer a branch"] };
   const proposal = x.ok(x.run("architecture", "propose", "--contract", x.file(revised)));
-  x.ok(x.run("ideas", "capture", "--file", x.file(x.idea("An unexpected confession"))));
   const payload = { ...proposal.authorSigningRequest, reason: "I independently approve the changed route." };
-  const evidence = x.file({ payload,
-    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") });
-  const denied = x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--signed-evidence", evidence);
+  const evidence = x.file(x.approval(payload));
+  x.ok(x.run("ideas", "capture", "--file", x.file(x.idea("An unexpected confession"))));
+  const denied = x.run("architecture", "approve", "--proposal", proposal.proposal.digest, "--approval", evidence);
   assert.notEqual(denied.status, 0);
   assert.match(denied.stderr, /baseline|verified|reconcil|HEAD/i);
   assert.equal(x.ok(x.run("architecture", "inspect")).plan.version, 1);
@@ -477,12 +469,11 @@ test("signed author approval resumes the exact LangGraph interrupt and applies v
   assert.equal(x.process().status, "blocked");
   const request = { ...proposed.authorSigningRequest,
     reason: "I have reviewed the new narrative route and approve its scope." };
-  const signedEvidence = { payload: request,
-    signature: sign(null, Buffer.from(JSON.stringify(request)), x.authorKey!.privateKey).toString("base64") };
-  const response = { type: "decision", messageId: "plan-signature", signedEvidence };
+  const signedEvidence = x.approval(request);
+  const response = { type: "decision", messageId: "plan-signature", approval: signedEvidence };
   const result = x.ok(x.run("author", "resume", "--file", x.file(response)));
   assert.equal(result.phase, "applied");
-  assert.equal(result.result.action, "signed-plan-approval");
+  assert.equal(result.result.action, "controller-plan-approval");
   const current = x.ok(x.run("architecture", "inspect"));
   assert.equal(current.plan.version, 2);
   assert.equal(current.history.length, 1);
@@ -520,22 +511,21 @@ test("an exact signed protected-decision approval resumes its own graph gate wit
   assert.equal(x.process().status, "blocked");
   const invalid = x.run("author", "resume", "--file", x.file({
     type: "decision", messageId: "sign-witness",
-    signedEvidence: { payload: { kind: "decision" }, signature: "not-signed" },
+    approval: { payload: { kind: "decision" }, signature: "not-signed" },
   }));
   assert.notEqual(invalid.status, 0);
   assert.equal(x.inspect().records[0].acknowledgement.phase, "awaiting-author");
   const payload = { ...proposed.authorSigningRequests.decisions[0],
     reason: "I independently reviewed this exact protected witness outcome change." };
-  const signedEvidence = { payload,
-    signature: sign(null, Buffer.from(JSON.stringify(payload)), x.authorKey!.privateKey).toString("base64") };
+  const signedEvidence = x.approval(payload);
   const response = x.ok(x.run("author", "resume", "--file", x.file({
-    type: "decision", messageId: "sign-witness", signedEvidence,
+    type: "decision", messageId: "sign-witness", approval: signedEvidence,
   })));
   assert.equal(response.phase, "applied");
   const review = x.ok(x.run("revision", "status", "--work-item", "change-witness",
     "--proposal", proposed.proposalSha256));
   assert.equal(review.authorApprovals.length, 1);
-  assert.equal(review.authorApprovals[0].source, "author-ed25519");
+  assert.equal(review.authorApprovals[0].source, "trusted-controller");
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), x.base);
   assert.equal(git(x.job.worktreeRoot, "status", "--porcelain").includes("creative-direction/foundation.md"), true);
 });

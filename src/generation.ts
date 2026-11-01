@@ -47,7 +47,7 @@ export interface IdeaHistoryEntry extends IdeaAttempt { id: string }
 export interface GenerationEscalation {
   kind: "protected-approval" | "dependency-replan" | "targeted-repair";
   sources: Array<{ source: string; message: string; repair: string }>;
-  requiresSignedApproval: boolean;
+  requiresTrustedApproval: boolean;
   action: string;
 }
 function reviewEscalation(report: JobReport, inventory: GenerationInventory | null): GenerationEscalation | null {
@@ -68,11 +68,11 @@ function reviewEscalation(report: JobReport, inventory: GenerationInventory | nu
   const replan = sources.some(s => ["architecture", "event", "interactive"].includes(s.repair));
   return {
     kind: protectedChange ? "protected-approval" : replan ? "dependency-replan" : "targeted-repair",
-    sources, requiresSignedApproval: protectedChange || replan,
+    sources, requiresTrustedApproval: protectedChange || replan,
     action: protectedChange
-      ? "Protected decisions cannot be edited automatically. Obtain exact signed author authorization through the existing revision/approval workflow."
+      ? "Protected decisions cannot be edited automatically. Obtain exact trusted-controller authorization through the existing revision/approval workflow."
       : replan
-        ? "Affect only the listed source/dependency scope. Propose and obtain a signed architecture/scope revision with explicit carry-forward, or authorize a bounded targeted repair; do not widen coverage automatically."
+        ? "Affect only the listed source/dependency scope. Propose and obtain a controller-approved architecture/scope revision with explicit carry-forward, or authorize a bounded targeted repair; do not widen coverage automatically."
         : "The narrative reviewer exhausted or could not use its original-writer bounded repair path. Inspect the blocked review and authorize a targeted repair.",
   };
 }
@@ -172,7 +172,7 @@ async function checkPlan(job: JobStartResult, request: GenerationRequest, versio
       version != null && receipt.plan.version !== version)) {
     const original = receipt.history.find((entry: any) => entry.plan.version === (version ?? 1));
     if (!original || JSON.stringify(original.plan.contract) !== JSON.stringify(request.contract))
-      throw new Error("Stale generation authorization: no signed transition from the pinned completion contract.");
+      throw new Error("Stale generation authorization: no controller-approved transition from the pinned completion contract.");
   }
   return receipt;
 }
@@ -205,7 +205,7 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
         "Author must supply or authorize prerequisite development; whole-Story foundation will not run automatically.");
     completedStages = [{ stage: "foundation", headSha: head, status: "committed" }, ...completedStages];
   }
-  // A signed plan revision may require another architecture unit before downstream work.
+  // A controller-approved plan revision may require another architecture unit before downstream work.
   if (plan && receipt.phase !== "committed") {
     const inventory = reconcileInventory(plan, undefined, head, completedStages,
       failures, s.inventory);

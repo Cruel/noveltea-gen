@@ -14,7 +14,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { trustedHead } from "./revision.js";
-import { readSignedAuthorEvidence, verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
+import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 
 export interface CompletionContract {
@@ -30,7 +30,7 @@ export interface WorkItem {
   dependencies: string[];
   skills: string[];
   checks: string[];
-  authorization: { source: "explicit-author-cli" | "author-ed25519"; planVersion: number; paths: string[] };
+  authorization: { source: "explicit-author-cli" | "trusted-controller"; planVersion: number; paths: string[] };
   planVersion: number;
   status: "pending" | "writing" | "verified" | "blocked";
   blockingReason?: string;
@@ -59,7 +59,7 @@ interface Receipt {
   snapshot?: SkillSnapshot;
   plan?: Plan;
   history: Array<{ plan: Plan; proposal: string; approvedContract: CompletionContract;
-    verifiedHead: string; carryForward?: string[]; reason: string; source: "author-ed25519"; signed: SignedAuthorEvidence }>;
+    verifiedHead: string; carryForward?: string[]; reason: string; source: "trusted-controller"; signed: AuthorApprovalEvidence }>;
   proposal?: { digest: string; contract: CompletionContract; version: number; baselineHead?: string; carryForward?: string[] };
   manuallyReconciled?: { paths: string[]; digest: string };
   phase: "awaiting-author" | "ready" | "writing" | "authored" | "committed";
@@ -83,7 +83,7 @@ export interface ArchitectureOptions {
   story: string; job: string; action: "run" | "inspect" | "propose" | "approve" | "reconcile";
   contract?: unknown; mode?: "autonomous" | "collaborative";
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
-  proposal?: string; signedEvidence?: string; recoveryDigest?: string; carryForward?: string[];
+  proposal?: string; approvalFile?: string; recoveryDigest?: string; carryForward?: string[];
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -143,7 +143,7 @@ export function verifyPlanHistory(job: JobStartResult, state: Pick<Receipt, "his
   for (const [i, entry] of state.history.entries()) {
     const signed = verifyAuthorEvidence(job, entry.signed);
     const payload = signed.payload;
-    if (payload.kind !== "plan" || entry.source !== "author-ed25519" ||
+    if (payload.kind !== "plan" || entry.source !== "trusted-controller" ||
         entry.reason !== payload.reason || entry.proposal !== payload.proposalSha256 ||
         entry.verifiedHead !== payload.verifiedHead ||
         payload.planVersion !== entry.plan.version + 1 ||
@@ -153,13 +153,13 @@ export function verifyPlanHistory(job: JobStartResult, state: Pick<Receipt, "his
         })) ||
         (i > 0 && (entry.plan.version !== state.history[i - 1]!.plan.version + 1 ||
           JSON.stringify(entry.plan.contract) !== JSON.stringify(state.history[i - 1]!.approvedContract)))) {
-      throw new Error("Architecture plan history lacks matching signed author authorization.");
+      throw new Error("Architecture plan history lacks matching controller authorization.");
     }
   }
   const last = state.history.at(-1);
   if (last && (state.plan?.version !== last.plan.version + 1 ||
       JSON.stringify(state.plan.contract) !== JSON.stringify(last.approvedContract))) {
-    throw new Error("Current architecture completion contract differs from the signed plan revision.");
+    throw new Error("Current architecture completion contract differs from the approved plan revision.");
   }
 }
 function workItem(id: string, kind: WorkItem["kind"], targetIds: string[], dependencies: string[], version: number): WorkItem {
@@ -168,7 +168,7 @@ function workItem(id: string, kind: WorkItem["kind"], targetIds: string[], depen
   return { id, kind, targetIds, dependencies, skills: skills[kind],
     checks: kind === "architecture" ? ["canonical-structure", "protected-decisions", "scope-architecture-coverage"] :
       kind === "review" ? ["independent-editorial-review", "constraints-and-envelope", "branch-coverage"] : ["canonical-structure", "realize-in-scope-obligations"],
-    authorization: { source: version === 1 ? "explicit-author-cli" : "author-ed25519", planVersion: version, paths: kind === "architecture" ? ["arcs/*.md", "milestones/*.md"] : [] },
+    authorization: { source: version === 1 ? "explicit-author-cli" : "trusted-controller", planVersion: version, paths: kind === "architecture" ? ["arcs/*.md", "milestones/*.md"] : [] },
     planVersion: version, status: "pending" };
 }
 function newPlan(contract: CompletionContract, version = 1): Plan {
@@ -517,27 +517,27 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           digest: hash(JSON.stringify({ plan: state.plan, head: baselineHead, contract,
             ...(carryForward !== undefined ? { carryForward } : {}) })) };
       } else {
-        if (!state.proposal || input.proposal !== state.proposal.digest || !input.signedEvidence) {
-          throw new Error("Plan approval requires the exact proposal digest and externally signed author evidence.");
+        if (!state.proposal || input.proposal !== state.proposal.digest || !input.approvalFile) {
+          throw new Error("Plan approval requires the exact proposal digest and a recorded controller reference.");
         }
-        const signed = await readSignedAuthorEvidence(job, input.signedEvidence);
+        const signed = await readAuthorApproval(job, input.approvalFile);
         const payload = signed.payload;
         if (payload.kind !== "plan" || payload.verifiedHead !== (state.proposal.baselineHead ?? state.expectedHead) ||
             baselineHead !== (state.proposal.baselineHead ?? state.expectedHead) ||
             payload.proposalSha256 !== state.proposal.digest ||
             payload.planVersion !== state.proposal.version) {
-          throw new Error("Signed plan approval does not match the exact proposed contract, plan version and verified head.");
+          throw new Error("Controller plan approval does not match the exact proposed contract, plan version and verified head.");
         }
         state.history.push({ plan: state.plan!, proposal: state.proposal.digest,
           approvedContract: state.proposal.contract, verifiedHead: baselineHead,
           carryForward: state.proposal.carryForward,
-          reason: payload.reason, source: "author-ed25519", signed });
+          reason: payload.reason, source: "trusted-controller", signed });
         const prior = state.plan!;
         state.plan = newPlan(state.proposal.contract, state.proposal.version);
         // Accepted architecture remains evidence, not a fresh authorization to rewrite canon.
         if (state.phase === "committed") {
           state.plan.items = prior.items.map(item => ({ ...item, planVersion: state.plan!.version,
-            authorization: { ...item.authorization, source: "author-ed25519", planVersion: state.plan!.version } }));
+            authorization: { ...item.authorization, source: "trusted-controller", planVersion: state.plan!.version } }));
           state.phase = "ready";
           state.executionHead = baselineHead;
           // A newly approved work boundary must never reuse the previous commit's

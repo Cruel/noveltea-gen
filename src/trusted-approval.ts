@@ -9,21 +9,21 @@ import { Annotation, Command, END, START, StateGraph, interrupt } from "@langcha
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { validateAuthorPayload, type AuthorDecisionPayload } from "./author-evidence.js";
 
-/**
- * Transitional trusted-controller ledger (#57). It does NOT authorize an
- * existing protected revision: #58 will migrate the old signed gates to this
- * ledger. Only a controller outside the Pi tool sandbox may call resolve().
- */
+/** Trusted controller ledger. Never mount this state in model-directed tools.
+ * Only authenticated controllers may record decisions; callers can stage requests
+ * but a request or inline payload alone never confers authorization. */
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const HASH = /^[a-f0-9]{64}$/;
-type SubjectKind = "plan" | "decision";
+type SubjectKind = "plan" | "decision" | "editorial";
 type Decision = "approved" | "rejected";
 export interface ApprovalRequest {
   id: string;
   kind: SubjectKind;
   workItemId?: string;
   changeId?: string;
+  payload?: AuthorDecisionPayload;
 }
 interface Identity {
   version: 1;
@@ -37,13 +37,15 @@ interface Identity {
   workItemId: string;
   changeId?: string;
   nonce: string;
+  payload: AuthorDecisionPayload;
+  review: unknown;
 }
 interface Pending extends Identity { phase: "awaiting-controller"; }
 interface Resolved extends Identity {
   phase: "recorded";
   decision: Decision;
   principal: string;
-  source: "trusted-cli";
+  source: "trusted-cli" | "trusted-web";
   recordedAt: string;
 }
 type Receipt = Pending | Resolved;
@@ -101,11 +103,40 @@ async function subject(job: JobStartResult, input: ApprovalRequest): Promise<Omi
         verifiedHead !== current) {
       throw new Error("Architecture proposal does not match this job or current verified Git HEAD.");
     }
-    return { kind: "plan", workItemId: "global-architecture", jobId: job.jobId,
+    const payload: AuthorDecisionPayload = input.payload ?? {
+      version: 1, kind: "plan", workItemId: "global-architecture", jobId: job.jobId,
+      threadId: job.threadId, baseSha: job.baseSha, verifiedHead,
+      proposalSha256: r.proposal.digest, planVersion: r.proposal.version,
+      reason: "Author reviewed the exact proposed completion contract.",
+    };
+    validateAuthorPayload(payload);
+    if (payload.kind !== "plan" || payload.planVersion !== r.proposal.version) throw new Error("Wrong plan version.");
+    const binding = { kind: "plan" as const, workItemId: "global-architecture", jobId: job.jobId,
       threadId: job.threadId, baseSha: job.baseSha, verifiedHead, proposalSha256: r.proposal.digest };
+    if (!bindingMatches(binding, payload)) throw new Error("Payload differs from current proposal.");
+    return { ...binding, payload, review: { previous: r.plan, proposed: r.proposal } };
   }
-  if (input.kind !== "decision" || !input.workItemId || !ID.test(input.workItemId) ||
-      !input.changeId || !HASH.test(input.changeId)) {
+  if (input.kind === "decision" && input.workItemId?.startsWith("idea-relocate:")) {
+    const ideaId = input.workItemId.slice("idea-relocate:".length);
+    checkId(ideaId);
+    const staged = await json(join(job.stateDir, "relocation-proposals", ideaId + ".json"));
+    const payload = input.payload ?? staged.payload;
+    validateAuthorPayload(payload);
+    if (payload.kind !== "decision" || !bindingMatches(payload, staged.payload) ||
+        payload.workItemId !== input.workItemId || payload.changeId !== input.changeId ||
+        payload.jobId !== job.jobId || payload.threadId !== job.threadId || payload.baseSha !== job.baseSha ||
+        payload.verifiedHead !== current || staged.proposal.prior !== current ||
+        staged.proposal.ideaId !== ideaId || payload.changeId !== payload.proposalSha256 ||
+        payload.decision !== "idea:" + ideaId ||
+        createHash("sha256").update(JSON.stringify(staged.proposal)).digest("hex") !== payload.proposalSha256) {
+      throw new Error("Relocation approval differs from the current exact impact proposal.");
+    }
+    return { kind: "decision", workItemId: input.workItemId, changeId: input.changeId,
+      jobId: job.jobId, threadId: job.threadId, baseSha: job.baseSha,
+      verifiedHead: current, proposalSha256: payload.proposalSha256, payload, review: staged.proposal };
+  }
+  if (!["decision", "editorial"].includes(input.kind) || !input.workItemId || !ID.test(input.workItemId) ||
+      (input.kind === "decision" && (!input.changeId || !HASH.test(input.changeId)))) {
     throw new Error("Protected approval requires an exact work item and change digest.");
   }
   const path = join(job.stateDir, "revisions", input.workItemId + ".json");
@@ -114,24 +145,38 @@ async function subject(job: JobStartResult, input: ApprovalRequest): Promise<Omi
   if (r.jobId !== job.jobId || r.workItemId !== input.workItemId ||
       r.baseSha !== job.baseSha || r.status !== "proposed" ||
       !HASH.test(r.proposalSha256 ?? "") || r.verifiedHead !== current ||
-      !Array.isArray(r.changes) || !r.changes.some((c: {id: string}) => c.id === input.changeId)) {
+      !Array.isArray(r.changes) || (input.kind === "decision" && !r.changes.some((c: {id: string}) => c.id === input.changeId))) {
     throw new Error("Protected revision proposal does not match this job, change or verified Git HEAD.");
   }
-  return { kind: "decision", workItemId: input.workItemId, changeId: input.changeId,
+  const binding = { kind: input.kind, workItemId: input.workItemId,
+    ...(input.kind === "decision" ? { changeId: input.changeId } : {}),
     jobId: job.jobId, threadId: job.threadId, baseSha: job.baseSha,
     verifiedHead: current, proposalSha256: r.proposalSha256 };
+  const payload = input.payload ?? (input.kind === "decision" ? {
+    version: 1 as const, ...binding, kind: "decision" as const, changeId: input.changeId!,
+    decision: r.changes.find((c: {id: string}) => c.id === input.changeId).decision,
+    action: "approved" as const, reason: "Author reviewed this exact protected change.",
+  } : undefined);
+  validateAuthorPayload(payload);
+  if (!bindingMatches(binding, payload) || (payload.kind === "decision" &&
+      payload.decision !== r.changes.find((c: {id: string}) => c.id === input.changeId).decision)) {
+    throw new Error("Payload differs from current protected proposal.");
+  }
+  return { ...binding, payload, review: { target: r.target, authoredFileSha256: r.authoredFileSha256,
+    changes: r.changes, affected: r.affected } };
 }
 async function read(job: JobStartResult, id: string): Promise<Receipt> {
   checkId(id);
   const r = await json(file(job, id)) as Receipt;
+  validateAuthorPayload(r.payload);
   if (r.version !== 1 || r.id !== id || r.jobId !== job.jobId ||
       r.threadId !== job.threadId || r.baseSha !== job.baseSha ||
       !HASH.test(r.proposalSha256) || !/^[a-f0-9]{40,64}$/.test(r.verifiedHead) ||
       !/^[0-9a-f-]{36}$/.test(r.nonce) ||
-      !["plan", "decision"].includes(r.kind) ||
+      !["plan", "decision", "editorial"].includes(r.kind) ||
       (r.kind === "decision" && (!r.changeId || !HASH.test(r.changeId))) ||
       !["awaiting-controller", "recorded"].includes(r.phase) ||
-      (r.phase === "recorded" && (r.source !== "trusted-cli" ||
+      (r.phase === "recorded" && (!["trusted-cli", "trusted-web"].includes(r.source) ||
         !["approved", "rejected"].includes(r.decision) || !r.principal?.trim()))) {
     throw new Error("Saved trusted approval receipt has invalid identity or evidence.");
   }
@@ -143,8 +188,8 @@ function bindingMatches(a: Partial<Identity>, b: Partial<Identity>) {
   return BINDING.every(key => a[key] === b[key]);
 }
 async function assertCurrent(job: JobStartResult, r: Identity) {
-  const now = await subject(job, { id: r.id, kind: r.kind, workItemId: r.workItemId, changeId: r.changeId });
-  if (!bindingMatches(now, r)) {
+  const now = await subject(job, { id: r.id, kind: r.kind, workItemId: r.workItemId, changeId: r.changeId, payload: r.payload });
+  if (!bindingMatches(now, r) || JSON.stringify(now.review) !== JSON.stringify(r.review)) {
     throw new Error("Approval is stale: exact proposal, job or verified head changed.");
   }
 }
@@ -166,10 +211,10 @@ async function openGraph(job: JobStartResult) {
         throw new Error("Invalid typed trusted-controller response.");
       }
       const v = response as Record<string, unknown>;
-      if (Object.keys(v).sort().join(",") !== "decision,nonce,principal,type" ||
+      if (Object.keys(v).sort().join(",") !== "decision,nonce,principal,source,type" ||
           v.type !== "decision" || v.nonce !== receipt.nonce ||
           !["approved", "rejected"].includes(String(v.decision)) ||
-          typeof v.principal !== "string" || !/^uid:[0-9]+:[a-zA-Z0-9_.-]+$/.test(v.principal)) {
+          typeof v.principal !== "string" || !validPrincipal(v.source, v.principal)) {
         throw new Error("Trusted controller response does not match the pending nonce and principal.");
       }
       await assertCurrent(job, receipt);
@@ -178,8 +223,10 @@ async function openGraph(job: JobStartResult) {
           !bindingMatches(existing, receipt)) {
         throw new Error("Trusted approval was already consumed or changed.");
       }
-      const decided: Resolved = { ...receipt, phase: "recorded",
-        source: "trusted-cli", decision: v.decision as Decision,
+      const payload = receipt.payload.kind === "decision" ? { ...receipt.payload, action: v.decision as Decision } :
+        receipt.payload.kind === "editorial" ? { ...receipt.payload, verdict: v.decision === "approved" ? "pass" as const : "block" as const } : receipt.payload;
+      const decided: Resolved = { ...receipt, payload, phase: "recorded",
+        source: v.source as Resolved["source"], decision: v.decision as Decision,
         principal: v.principal, recordedAt: new Date().toISOString() };
       await save(job, decided);
       return { receipt: decided };
@@ -188,6 +235,10 @@ async function openGraph(job: JobStartResult) {
     .addEdge("await_controller", END)
     .compile({ checkpointer: saver });
   return { graph, saver };
+}
+function validPrincipal(source: unknown, principal: string) {
+  return source === "trusted-cli" ? /^uid:[0-9]+:[a-zA-Z0-9_.-]+$/.test(principal) :
+    source === "trusted-web" && /^user:[A-Za-z0-9_-]{1,128}$/.test(principal);
 }
 const config = (job: JobStartResult, id: string) =>
   ({ configurable: { thread_id: "trusted-approval:" + job.threadId + ":" + id } });
@@ -201,7 +252,8 @@ export async function requestTrustedApproval(job: JobStartResult, input: Approva
     let receipt: Receipt;
     if (existsSync(path)) {
       receipt = await read(job, input.id);
-      if (!bindingMatches(receipt, binding)) throw new Error("Approval ID already binds a different proposal.");
+      if (!bindingMatches(receipt, binding) || JSON.stringify(receipt.payload) !== JSON.stringify(binding.payload) ||
+          JSON.stringify(receipt.review) !== JSON.stringify(binding.review)) throw new Error("Approval ID already binds a different proposal.");
     } else {
       receipt = { version: 1, id: input.id, ...binding, nonce: randomUUID(), phase: "awaiting-controller" };
       await save(job, receipt);
@@ -230,18 +282,24 @@ export async function inspectTrustedApproval(job: JobStartResult, id: string): P
   return read(job, id);
 }
 /** Called only by an authenticated trusted CLI controller, never from Pi tools or author-message JSON. */
-async function persistControllerDecision(
-  job: JobStartResult, id: string, decision: Decision, principal: string,
+export async function recordTrustedControllerDecision(
+  job: JobStartResult, expected: { id: string; nonce: string; proposalSha256: string },
+  decision: Decision, controller: { source: "trusted-cli" | "trusted-web"; principal: string },
 ): Promise<TrustedApprovalReceipt> {
+  const { id } = expected;
+  const { principal, source } = controller;
   checkId(id);
   if (!["approved", "rejected"].includes(decision) ||
-      !/^uid:[0-9]+:[a-zA-Z0-9_.-]+$/.test(principal)) {
+      !validPrincipal(source, principal)) {
     throw new Error("Authenticated local controller principal and typed decision required.");
   }
   return withStoryJobLock(job, "trusted-approval", async () => {
     const receipt = await read(job, id);
+    if (receipt.nonce !== expected.nonce || receipt.proposalSha256 !== expected.proposalSha256) {
+      throw new Error("Controller response nonce or proposal differs from the exact request.");
+    }
     if (receipt.phase === "recorded") {
-      if (receipt.decision !== decision || receipt.principal !== principal) {
+      if (receipt.decision !== decision || receipt.principal !== principal || receipt.source !== source) {
         throw new Error("Approval nonce was consumed by a different decision or principal.");
       }
       return receipt;
@@ -256,7 +314,7 @@ async function persistControllerDecision(
         throw new Error("No matching pending typed LangGraph interrupt to resume.");
       }
       await graph.invoke(new Command({ resume: { type: "decision", nonce: receipt.nonce,
-        principal, decision } }), config(job, id));
+        principal, source, decision } }), config(job, id));
       const after = await read(job, id);
       if (after.phase !== "recorded") throw new Error("Trusted controller decision was not durably recorded.");
       return after;
@@ -291,5 +349,5 @@ export async function decideTrustedCliApproval(job: JobStartResult, id: string):
   const decision = response === "APPROVE " + receipt.proposalSha256 ? "approved" :
     response === "REJECT " + receipt.proposalSha256 ? "rejected" : undefined;
   if (!decision) throw new Error("Approval not confirmed; pending interrupt is unchanged.");
-  return persistControllerDecision(job, id, decision, principal);
+  return recordTrustedControllerDecision(job, receipt, decision, { source: "trusted-cli", principal });
 }

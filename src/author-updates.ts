@@ -13,7 +13,7 @@ import { inspectActiveStorySpecialist } from "./story-interruption.js";
 import { captureIdeaUnderJobLock, reconcileCapturedIdeaUnderJobLock } from "./ideas.js";
 import { runArchitectureJob } from "./architecture.js";
 import { runRevisionAction } from "./revision.js";
-import { verifyAuthorEvidence, type SignedAuthorEvidence } from "./author-evidence.js";
+import { verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
 
 type Kind = "idea" | "change" | "question" | "approval";
 type Phase = "queued" | "awaiting-author" | "applied" | "review-required";
@@ -32,7 +32,7 @@ interface Pinned {
   piSessions: { foundation?: string; architecture?: string; world?: string; character?: string };
 }
 interface ResumeAnswer { type: "answer"; messageId: string; answer: string }
-interface ResumeDecision { type: "decision"; messageId: string; signedEvidence: SignedAuthorEvidence }
+interface ResumeDecision { type: "decision"; messageId: string; approval: { receiptId: string; nonce: string } }
 type Resume = ResumeAnswer | ResumeDecision;
 export interface AuthorAction {
   story: string; job: string; action: "send" | "inspect" | "process" | "resume" | "control" | "plan";
@@ -93,7 +93,7 @@ function parseMessage(value: unknown): { id: string; kind: Kind; payload: unknow
       typeof p.proposalSha256 !== "string" || !HASH.test(p.proposalSha256) ||
       (p.requestType === "decision" && (typeof p.workItemId !== "string" ||
         typeof p.changeId !== "string" || !HASH.test(p.changeId))))) {
-    throw new Error("Approval request must bind an exact signed plan or protected decision proposal.");
+    throw new Error("Approval request must bind an exact proposed plan or protected decision proposal.");
   }
   const digest = sha(stable({ kind, payload: v.payload }));
   const id = v.id ?? "message-" + digest.slice(0, 24);
@@ -175,13 +175,13 @@ async function evaluateChange(job: JobStartResult, payload: Record<string, unkno
     inScope: affected.length > 0 && (targets.length === 0 || affected.every(id => targets.includes(id))),
     impactedWorkItems: items.map(item => ({ id: item.id, status: item.status })),
     action: "independent-impact-review-required", review: "unverified" };
-  // A proposed contract is not an approval; use the existing versioned,
-  // signed architecture plan gate to accept or reject it later.
+  // A proposed contract is not consent; require the versioned plan's
+  // persisted trusted-controller decision.
   if (payload.proposedContract !== undefined) {
     const proposal = await runArchitectureJob({
       story: job.storyRoot, job: job.jobId, action: "propose", contract: payload.proposedContract,
     }, true);
-    return { ...impact, proposal, next: "signed-plan-approval-required" };
+    return { ...impact, proposal, next: "trusted-plan-approval-required" };
   }
   return { ...impact, next: "author-must-review-impact-and-propose-scope-change-if-needed" };
 }
@@ -218,27 +218,27 @@ function validateResume(message: Message, raw: unknown): Resume {
       Object.keys(v).sort().join(",") === "answer,messageId,type" &&
       typeof v.answer === "string" && v.answer.trim()) return v as unknown as ResumeAnswer;
   if (message.kind === "approval" && v.type === "decision" &&
-      Object.keys(v).sort().join(",") === "messageId,signedEvidence,type") {
+      Object.keys(v).sort().join(",") === "approval,messageId,type") {
     return v as unknown as ResumeDecision;
   }
-  throw new Error("Typed resume must answer the exact question or supply signed evidence for the exact approval.");
+  throw new Error("Typed resume must answer the exact question or supply a controller reference for the exact approval.");
 }
-async function previousApproval(job: JobStartResult, signed: SignedAuthorEvidence) {
+async function previousApproval(job: JobStartResult, signed: AuthorApprovalEvidence) {
   const payload = signed.payload;
   if (payload.kind === "plan") {
     const file = snapshotFile(job, "architecture");
     if (!existsSync(file)) return null;
-    const receipt = await loadJson(file) as { history?: Array<{ signed: SignedAuthorEvidence }> };
-    if (receipt.history?.some(x => x.signed.signature === signed.signature)) {
-      return { action: "signed-plan-approval", proposalSha256: payload.proposalSha256, recorded: true };
+    const receipt = await loadJson(file) as { history?: Array<{ signed: AuthorApprovalEvidence }> };
+    if (receipt.history?.some(x => x.signed.receiptId === signed.receiptId && x.signed.nonce === signed.nonce)) {
+      return { action: "controller-plan-approval", proposalSha256: payload.proposalSha256, recorded: true };
     }
   }
   if (payload.kind === "decision") {
     const file = join(job.stateDir, "revisions", payload.workItemId + ".json");
     if (!existsSync(file)) return null;
-    const receipt = await loadJson(file) as { approvals?: Array<{ signed: SignedAuthorEvidence }> };
-    if (receipt.approvals?.some(x => x.signed.signature === signed.signature)) {
-      return { action: "signed-protected-decision", workItemId: payload.workItemId,
+    const receipt = await loadJson(file) as { approvals?: Array<{ signed: AuthorApprovalEvidence }> };
+    if (receipt.approvals?.some(x => x.signed.receiptId === signed.receiptId && x.signed.nonce === signed.nonce)) {
+      return { action: "controller-protected-decision", workItemId: payload.workItemId,
         proposalSha256: payload.proposalSha256, recorded: true };
     }
   }
@@ -252,11 +252,11 @@ async function resolveChangedScope(job: JobStartResult, proposalSha256: string) 
     const result = receipt.result as { proposal?: { proposal?: { digest?: string } } } | undefined;
     if (result?.proposal?.proposal?.digest !== proposalSha256) continue;
     await saveReceipt(job, { ...receipt, phase: "applied",
-      result: { ...receipt.result as object, review: "explicit-signed-plan-approval",
+      result: { ...receipt.result as object, review: "explicit-controller-plan-approval",
         acceptedProposalSha256: proposalSha256 } });
   }
 }
-function checkApprovalBinding(job: JobStartResult, message: Message, verified: SignedAuthorEvidence,
+function checkApprovalBinding(job: JobStartResult, message: Message, verified: AuthorApprovalEvidence,
   expectedHead?: string) {
   const request = message.payload as Record<string, unknown>;
   const p = verified.payload;
@@ -265,14 +265,14 @@ function checkApprovalBinding(job: JobStartResult, message: Message, verified: S
       (request.requestType === "plan" && p.kind !== "plan") ||
       (request.requestType === "decision" && (p.kind !== "decision" ||
         p.workItemId !== request.workItemId || p.changeId !== request.changeId))) {
-    throw new Error("Signed author response is not bound to this exact proposal, change and verified Git HEAD.");
+    throw new Error("Controller response is not bound to this exact proposal, change and verified Git HEAD.");
   }
   if (p.jobId !== job.jobId || p.threadId !== job.threadId) {
-    throw new Error("Signed response belongs to another job thread.");
+    throw new Error("Controller response belongs to another job thread.");
   }
 }
 async function applyApproval(job: JobStartResult, message: Message, raw: ResumeDecision) {
-  const verified = verifyAuthorEvidence(job, raw.signedEvidence);
+  const verified = verifyAuthorEvidence(job, raw.approval);
   const signed = verified.payload;
   checkApprovalBinding(job, message, verified, git(job, "rev-parse", "HEAD"));
   const previous = await previousApproval(job, verified);
@@ -285,21 +285,21 @@ async function applyApproval(job: JobStartResult, message: Message, raw: ResumeD
     await mkdir(dirname(signedFile), { recursive: true });
     await writeFile(signedFile, JSON.stringify(verified, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   } else if (stable(await loadJson(signedFile)) !== stable(verified)) {
-    throw new Error("Previously recorded response signature changed.");
+    throw new Error("Previously recorded response reference changed.");
   }
   if (signed.kind === "plan") {
     const result = await runArchitectureJob({ story: job.storyRoot, job: job.jobId, action: "approve",
-      proposal: signed.proposalSha256, signedEvidence: signedFile }, true);
+      proposal: signed.proposalSha256, approvalFile: signedFile }, true);
     await resolveChangedScope(job, signed.proposalSha256);
-    return { action: "signed-plan-approval", proposalSha256: signed.proposalSha256, result };
+    return { action: "controller-plan-approval", proposalSha256: signed.proposalSha256, result };
   }
   if (signed.kind === "decision") {
     const result = await runRevisionAction({ story: job.storyRoot, job: job.jobId,
       action: "authorize", workItem: signed.workItemId, proposal: signed.proposalSha256,
-      signedEvidence: signedFile }, true);
-    return { action: "signed-protected-decision", proposalSha256: signed.proposalSha256, result };
+      approvalFile: signedFile }, true);
+    return { action: "controller-protected-decision", proposalSha256: signed.proposalSha256, result };
   }
-  throw new Error("Only exact signed plan/protected-decision approvals may resume this gate.");
+  throw new Error("Only exact controller plan/protected-decision approvals may resume this gate.");
 }
 const Channels = Annotation.Root({
   messageId: Annotation<string>(),
@@ -355,7 +355,7 @@ async function openGraph(job: JobStartResult) {
         }
         result = { request: message.payload, kind: message.kind,
           prompt: message.kind === "question" ? (message.payload as { question: string }).question :
-            "Review and externally sign the exact proposed plan or protected decision." };
+            "Review the exact proposal and record a trusted controller decision." };
         phase = "awaiting-author";
       }
       await saveReceipt(job, { ...receipt, phase, result, pinned });
@@ -401,10 +401,10 @@ async function processOneIsolated(job: JobStartResult, message: Message, respons
   if (before.phase === "applied" || before.phase === "review-required") return before;
   // The approval side effect may have committed before the graph's interrupt
   // checkpoint and message acknowledgement. Verify the original author
-  // signature against the actual versioned approval ledger before reconciling
+  // reference against the actual versioned approval ledger before reconciling
   // that narrow crash window; never rerun a protected mutation.
   if (response?.type === "decision") {
-    const verified = verifyAuthorEvidence(job, response.signedEvidence);
+    const verified = verifyAuthorEvidence(job, response.approval);
     checkApprovalBinding(job, message, verified, before.pinned?.headSha);
     const prior = await previousApproval(job, verified);
     if (prior) {
@@ -589,7 +589,7 @@ export async function runAuthorAction(options: AuthorAction): Promise<unknown> {
         carryForward: options.carryForward,
       }, true);
       const revised = { ...receipt, result: { ...(receipt.result as object),
-        proposal, next: "signed-plan-approval-required" } };
+        proposal, next: "trusted-plan-approval-required" } };
       await saveReceipt(job, revised);
       return revised;
     }
@@ -604,7 +604,7 @@ export async function runAuthorAction(options: AuthorAction): Promise<unknown> {
     if (typeof id !== "string" || !ID.test(id)) throw new Error("Typed response needs a valid messageId.");
     const message = await loadMessage(job, id);
     const typed = validateResume(message, value);
-    if (typed.type === "decision") verifyAuthorEvidence(job, typed.signedEvidence);
+    if (typed.type === "decision") verifyAuthorEvidence(job, typed.approval);
     return processOne(job, message, typed);
   });
 }
