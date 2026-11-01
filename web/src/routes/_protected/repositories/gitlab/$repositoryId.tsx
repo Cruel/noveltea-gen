@@ -1,11 +1,20 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
+import { InitializeStory } from './-InitializeStory'
 
 type Listing = { commit: string; directory: string; isStory: boolean; directories: Array<{ name: string; path: string }> }
 type Discovery = { commit: string; stories: string[] }
+type InitState = { empty: boolean; defaultBranch: string | null; commit: string | null }
+type Created = { story: { id: string; directory: string; title: string; commitSha: string };
+  branch: string; commit: string; mode: 'initial-default' | 'review-branch' }
 type Selection = { story: { id: string; title: string; directory: string; commit: string }; sizeBytes: number; limitBytes: number; blobCount: number }
 
 export const Route = createFileRoute('/_protected/repositories/gitlab/$repositoryId')({
+  validateSearch: (search: Record<string, unknown>) => ({
+    directory: typeof search.directory === 'string' ? search.directory : '',
+    commit: typeof search.commit === 'string' && /^[a-f0-9]{40}$/i.test(search.commit)
+      ? search.commit : '',
+  }),
   component: GitlabStories,
 })
 async function api<T>(path: string, body?: object): Promise<T> {
@@ -18,9 +27,12 @@ async function api<T>(path: string, body?: object): Promise<T> {
 }
 function GitlabStories() {
   const { repositoryId } = Route.useParams()
-  const [commit, setCommit] = useState('')
-  const [directory, setDirectory] = useState('')
+  const pinnedLink = Route.useSearch()
+  const [commit, setCommit] = useState(pinnedLink.commit)
+  const [directory, setDirectory] = useState(pinnedLink.directory)
   const [listing, setListing] = useState<Listing | null>(null)
+  const [initState, setInitState] = useState<InitState | null>(null)
+  const [created, setCreated] = useState<Created | null>(null)
   const [discovered, setDiscovered] = useState<string[] | null>(null)
   const [discoveryError, setDiscoveryError] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection | null>(null)
@@ -30,6 +42,15 @@ function GitlabStories() {
   const [busy, setBusy] = useState(false)
   useEffect(() => {
     let cancelled = false
+    setInitState(null)
+    void api<InitState>('/api/gitlab/initialize?' + new URLSearchParams({ repositoryId }))
+      .then(state => { if (!cancelled) setInitState(state) })
+      .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Unable to verify GitLab project') })
+    return () => { cancelled = true }
+  }, [repositoryId])
+  useEffect(() => {
+    if (initState === null || initState.empty) return
+    let cancelled = false
     setListing(null); setError(null); setSelection(null); setJob(null); setPendingJobId(null)
     const params = new URLSearchParams({ repositoryId, directory })
     if (commit) params.set('commit', commit)
@@ -38,7 +59,7 @@ function GitlabStories() {
       setCommit(result.commit); setListing(result)
     }).catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Unable to browse directory') })
     return () => { cancelled = true }
-  }, [repositoryId, directory, commit])
+  }, [repositoryId, directory, commit, initState])
   useEffect(() => {
     if (!commit) return
     let cancelled = false
@@ -77,7 +98,21 @@ function GitlabStories() {
     {commit && <p><strong>Commit:</strong> <code>{commit}</code>{' '}
       <button type="button" disabled={busy} onClick={() => { setCommit(''); setDirectory(''); setDiscovered(null); setDiscoveryError(null) }}>Refresh HEAD</button></p>}
     {error && <p role="alert" className="error">{error}</p>}
-    <section>
+    {initState && <InitializeStory repositoryId={repositoryId} snapshot={initState}
+      onCreated={result => {
+        setCreated(result); setCommit(result.commit); setDirectory(result.story.directory)
+        setInitState({ empty: false, defaultBranch: result.mode === 'initial-default'
+          ? result.branch : initState.defaultBranch,
+          commit: result.mode === 'initial-default' ? result.commit : initState.commit })
+        setError(null)
+      }} />}
+    {created && <p role="status">Initialized <strong>{created.story.title}</strong> at
+      <code>{created.commit}</code> on <code>{created.branch}</code>.
+      {created.mode === 'review-branch'
+        ? ' Existing default branch was not modified; use the later merge-request publishing flow for review.'
+        : ' This was the initial commit of an empty project.'}
+    </p>}
+    {initState && !initState.empty && <section>
       <h2>Directory browser</h2>
       <p>Current path: <code>/{directory}</code></p>
       {directory && <button type="button" onClick={() => open(directory.split('/').slice(0, -1).join('/'))}>Up one directory</button>}
@@ -99,14 +134,14 @@ function GitlabStories() {
         {job && <p role="status">Job <code>{job.id}</code> is prepared at base <code>{job.baseSha}</code>.
           Generation starts through the future job execution flow; no agent has run yet.</p>}
       </div>}
-    </section>
-    <section>
+    </section>}
+    {initState && !initState.empty && <section>
       <h2>Detected Story directories</h2>
       {discoveryError && <p role="status">{discoveryError} You can still browse directories manually.</p>}
       {discovered === null && !discoveryError && <p>Scanning Git tree metadata…</p>}
       {discovered && (discovered.length
         ? <ul>{discovered.map(path => <li key={path || '/'}><button type="button" onClick={() => open(path)}>{'/' + path}</button></li>)}</ul>
         : <p>No Story records detected at this commit. Browse manually if you expect a Story in a large project.</p>)}
-    </section>
+    </section>}
   </main>
 }

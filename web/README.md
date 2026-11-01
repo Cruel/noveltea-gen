@@ -167,6 +167,53 @@ jobs, recoverable edits, pin and size mismatches, and user isolation. Live
 GitHub App Git transfer, disk quotas and safe cache eviction still need
 provider/deployment certification; no job or worktree is silently evicted.
 
+## Initialize new GitLab Stories and empty projects (#49)
+
+A connected GitLab.com repository's **Browse Stories** page now offers
+**Initialize a new canonical Story**. The author supplies the Creative
+Direction ID, title, premise, conflict, genre, tone, experience, scope,
+a user-protected opening creative decision, and Markdown body. The result
+is the canonical schema-0.1 `creative-direction/foundation.md`, serialized
+by the same pure writer used for the existing Story demo. No engine project,
+`.noveltea` metadata, hidden approval key or agent-authored decision is created.
+The opening decision is marked `origin: user`, `authority: user-protected`;
+a draft does not imply approval, narrative readiness or story completeness.
+
+Configure `NT_NATIVE_CLI` to an installed native `noveltea` binary (or
+make `noveltea` available on Studio's PATH). Studio runs
+`noveltea --json narrative validate <temporary-story-root>` before
+**any** GitLab commit; missing/failed/invalid catalog validation stops
+creation. The temporary source is removed. Existing GitLab projects use an
+explicit immutable default-branch SHA and a new
+`noveltea/story-<UUID>` branch via GitLab's commit API `start_sha`.
+The default branch is never written and no MR is auto-published; a later
+publication workflow handles draft MRs. A genuinely empty project can
+receive the **one initial** commit on the explicitly chosen initial default
+branch (usually `main`, but configurable to respect group conventions).
+The author can select a named Story directory or the repository root.
+
+`GET /api/gitlab/initialize?repositoryId=<catalog UUID>` returns current
+empty/default-branch state and the immutable default SHA (or null for a
+truly empty repository). `POST /api/gitlab/initialize` accepts the
+`repositoryId`, `directory`, `expectedCommit` from that GET,
+`foundation` onboarding fields and an `initialBranch` only for empty
+projects. Authenticated ownership, live GitLab project membership, remote
+identity, path safety, exact pre-commit base SHA, directory vacancy, native
+validation, committed ancestry and GitLab's pinned Story-size/LFS checks
+are enforced server-side. Successful initialization registers the
+new Story with its immutable commit so existing Story browsing and cached
+Git job acquisition can reopen it. Existing registrations are never
+silently overwritten. A failed or ambiguous write reports a conflict or
+explicit recovery requirement; no automatic remote replay, branch removal,
+force push or default-branch rewrite occurs.
+
+Run `pnpm --filter @noveltea/studio exec tsx --test
+test/gitlab-initialize.test.ts` for mocked GitLab write/branch, owner,
+validation and reopen checks. Set `NT_REAL_NATIVE_CLI=/path/to/noveltea`
+for the optional real native CLI validation test. Actual GitLab.com empty
+project and protected-branch behavior remains subject to real-provider
+certification; the API tests do not imply successful remote deployment.
+
 ## GitLab shared Git acquisition and job worktrees (#47)
 
 GitLab.com uses the **same** authenticated, per-user/per-repository Git

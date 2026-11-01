@@ -8,6 +8,9 @@ import {
 import { stateDirectory } from "./checkpoint.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { type StoryProject } from "./project.js";
+import { renderFoundation, type FoundationDraft } from "./foundation-record.js";
+export { renderFoundation };
+export type { FoundationDraft } from "./foundation-record.js";
 import { createSkillReadTool, type SkillConfig } from "./skills.js";
 import { verifiedSkillFiles, type SkillSnapshot, type VerifiedSkillFiles } from "./snapshot.js";
 
@@ -19,26 +22,6 @@ const REQUIRED_READS = [
   ["nt-catalog", "references/authority-and-validation.md"],
   ["nt-catalog", "references/glossary.md"],
 ] as const;
-
-interface Decision {
-  id: string;
-  statement: string;
-  origin: "user" | "agent";
-  authority: "user-protected" | "delegated";
-}
-
-export interface FoundationDraft {
-  id: string;
-  title: string;
-  premise: string;
-  central_conflict: string;
-  genre: string;
-  tone: string;
-  player_experience: string;
-  scope: string;
-  decisions: Decision[];
-  body: string;
-}
 
 const SLUG = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 function record(value: unknown): value is Record<string, unknown> {
@@ -94,41 +77,6 @@ export function validateFoundation(input: unknown): FoundationDraft {
   });
   if (!delegated) throw new Error("Invalid Creative Direction: demonstration requires agent-delegated creative choices.");
   return result as unknown as FoundationDraft;
-}
-
-function yaml(value: string): string {
-  // JSON-escaped double-quoted scalars are valid YAML 1.2 and prevent
-  // unintended YAML tags, newlines, aliases, keys or implicit booleans.
-  return JSON.stringify(value);
-}
-
-export function renderFoundation(draft: FoundationDraft): string {
-  const decisions = draft.decisions.flatMap(d => [
-    `  - id: ${d.id}`,
-    `    statement: ${yaml(d.statement)}`,
-    `    origin: ${d.origin}`,
-    `    authority: ${d.authority}`,
-  ]);
-  return [
-    "---",
-    "schema: '0.1'",
-    "type: creative-direction",
-    `id: creative-direction.${draft.id}`,
-    `title: ${yaml(draft.title)}`,
-    "status: draft",
-    "decisions:",
-    ...decisions,
-    `premise: ${yaml(draft.premise)}`,
-    `central_conflict: ${yaml(draft.central_conflict)}`,
-    `genre: ${yaml(draft.genre)}`,
-    `tone: ${yaml(draft.tone)}`,
-    `player_experience: ${yaml(draft.player_experience)}`,
-    `scope: ${yaml(draft.scope)}`,
-    "---",
-    "",
-    draft.body,
-    "",
-  ].join("\n");
 }
 
 export async function assertFreshStory(project: StoryProject): Promise<void> {

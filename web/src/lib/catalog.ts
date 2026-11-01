@@ -9,6 +9,7 @@ export function readUserDashboard(store: StudioDatabase, userId: string) {
   }).from(repositories).where(eq(repositories.ownerUserId, userId)).all()
   const storyRows = store.db.select({
     id: stories.id, title: stories.title, repositoryId: stories.repositoryId,
+    directory: stories.directory, commitSha: stories.sourceCommitSha,
   }).from(stories).where(eq(stories.ownerUserId, userId)).all()
   const sessionRows = store.db.select({
     id: sessions.id, storyId: sessions.storyId, title: sessions.title,

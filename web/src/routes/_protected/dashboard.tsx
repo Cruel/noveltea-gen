@@ -44,7 +44,14 @@ function Dashboard() {
     </section>
     <div className="grid">
       <section><h2>Stories</h2>
-        {dashboard.stories.length ? <ul>{dashboard.stories.map(story => <li key={story.id}>{story.title}</li>)}</ul> : <p>No Stories imported yet.</p>}
+        {dashboard.stories.length ? <ul>{dashboard.stories.map(story => {
+          const provider = dashboard.repositories.find(repo => repo.id === story.repositoryId)?.provider
+          const href = provider === 'gitlab' && story.commitSha
+            ? '/repositories/gitlab/' + story.repositoryId + '?' +
+              new URLSearchParams({ directory: story.directory, commit: story.commitSha })
+            : null
+          return <li key={story.id}>{href ? <a href={href}>{story.title}</a> : story.title}</li>
+        })}</ul> : <p>No Stories imported yet.</p>}
       </section>
       <section><h2>Active jobs</h2>
         {dashboard.activeJobs.length ? <ul>{dashboard.activeJobs.map(job => <li key={job.id}>{job.title} <span className="pill">{job.status}</span></li>)}</ul> : <p>No active jobs.</p>}
