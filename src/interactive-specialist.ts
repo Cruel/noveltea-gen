@@ -2,7 +2,8 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
+import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
+import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -90,12 +91,12 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     task: { kind: "puzzle", ids: [...assignment.eventIds, assignment.milestoneId], scope: "related" },
     thinking, directory: dir,
   }, runtime);
-  blockUnroutedHostedPi("Interactive");
+  const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [createStoryValidateTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -122,7 +123,9 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       "Existing Event prerequisites are immutable and must remain textually identical. " +
       "You may edit existing authorized Event, Choice Point, Revelation and Authored Content files, " +
       "and create connected new canonical records in your assigned directories. " +
-      "Do not stage, reset, checkout or commit. Grep, rg and Git diff/status inspections are permitted. " +
+      (sandboxTools ?
+        "File and shell tools operate only in the networkless /story sandbox; Git and host paths are unavailable. " :
+        "Do not stage, reset, checkout or commit. Grep, rg and Git diff/status inspections are permitted. ") +
       selected.guidance + "\n" +
       "Report any unavoidable architectural conflict without editing protected or out-of-domain canon. " +
       "A valid structure alone does not prove the reader actually sees the clue or that prose obeys choice branches. " +
@@ -134,6 +137,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
+      const skillReads = await requirePinnedSkillReads(session, project.root, pinned, "Interactive specialist");
       const last = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
         throw new Error("Interactive Pi turn failed: " +
@@ -143,9 +147,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
         m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
       const calls = session.messages.flatMap(m => m.role === "assistant"
         ? m.content.filter(c => c.type === "toolCall") : []);
-      const reads = calls.filter(c => c.name === "read" && completed.has(c.id) &&
-        typeof c.arguments?.path === "string").map(c => resolve(project.root, c.arguments.path as string));
-      if (pinned.some(p => !reads.includes(p))) throw new Error("Interactive specialist omitted pinned skill reads.");
+
       const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
         typeof c.arguments?.path === "string").map(c =>
         relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
@@ -154,7 +156,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       }
       const data = parseManifest(last.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
       const evidence: InteractiveEvidence = { modifiedRecords: data.paths, conflicts: data.conflicts,
-        obligations: data.obligations, skillReads: reads.filter(p => pinned.includes(p)),
+        obligations: data.obligations, skillReads,
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
       const diagnostics = await verifyDraft(evidence);
       if (!diagnostics.length) {
@@ -165,10 +167,10 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       prompt = "The INDEPENDENT graph audit rejected your uncommitted work. " +
         "In this SAME Pi session, repair only the specific diagnostics below without touching " +
         "existing Event prerequisite gates or protected decisions. If a READ-ONLY file was edited, " +
-        "restore precisely that file to the verified Git HEAD using read/edit/write tools, not git checkout/restore/reset; " +
+        "restore precisely that file using read/edit/write tools, not git checkout/restore/reset; " +
         "retain your authorized changes. The sourcePaths inventory and scope.targets are READ-ONLY context/goals, " +
-        "not edit permissions. Recheck every path with Git diff and provide the FULL cumulative modifiedRecords manifest " +
-        "EXCLUDING restored files. " +
+        "not edit permissions. Compare changed files against the originally read sources and provide " +
+        "the FULL cumulative modifiedRecords manifest EXCLUDING restored files. " +
         "Do not claim a conditional or unverified path is proven. Diagnostics:\n" + diagnostics.join("\n");
     }
     throw new Error("Unexpected interactive repair loop termination.");

@@ -2,7 +2,8 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
+import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
+import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -101,20 +102,21 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
     task: { kind: "dialogue", ids: assignment.eventIds, scope: "related" },
     provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
-  blockUnroutedHostedPi("Composition");
+  const sandboxTools = await selectSandboxPiTools(job, snapshot, skills, undefined,
+    phase === "review" ? "read-only" : "writer");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: phase === "write"
-      ? [createStoryValidateTool(job), context.contextTool] : [context.contextTool],
+    customTools: [...(sandboxTools ?? []), ...(phase === "write" ? [createStoryValidateTool(job)] : []), context.contextTool],
     noTools: "all", tools: phase === "write"
-      ? ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"]
-      : ["read", "grep", "find", "ls", "story_context"],
+      ? [...SANDBOX_TOOLS, "story_context", "story_validate"]
+      : [...SANDBOX_READ_ONLY_TOOLS, "story_context"],
   });
   if (context.thinking && session.thinkingLevel !== context.thinking) {
     session.dispose(); throw new Error("Pi did not honor requested thinking effort.");
   }
-  return { session, project, context, pinned: guidance.map(p => join(snapshot.path, "skills", p)) };
+  return { session, project, context, sandboxed: !!sandboxTools,
+    pinned: guidance.map(p => join(snapshot.path, "skills", p)) };
 }
 function lastReply(session: Awaited<ReturnType<typeof createSession>>["session"]) {
   const last = [...session.messages].reverse().find(m => m.role === "assistant");
@@ -141,7 +143,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
   assignment: CompositionAssignment, provider: string, modelId: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
   verifyDraft: (evidence: CompositionEvidence) => Promise<string[]>): Promise<CompositionEvidence> {
-  const { session, project, pinned, context } = await createSession(job, snapshot, assignment,
+  const { session, project, pinned, context, sandboxed } = await createSession(job, snapshot, assignment,
     provider, modelId, thinking, "write");
   try {
     const sessionFile = session.sessionManager.getSessionFile();
@@ -174,7 +176,9 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "in the seal/testimony route without an additional prerequisite, nor vice versa. " +
       "Do not write editorial directions as playable prose. " +
       "If a source lacks a needed route, report a conflict; NEVER manufacture new Event effects or bypass gates. " +
-      "Call story_validate with no arguments and inspect Git diff. Do not git add, reset, checkout or commit. " +
+      (sandboxed ?
+        "Call story_validate with no arguments; Git and host shell access are unavailable in the sandbox. " :
+        "Call story_validate with no arguments and inspect Git diff. Do not git add, reset, checkout or commit. ") +
       "Finally output ONE unfenced JSON object with the cumulative paths and precise obligations: " +
       '{"modifiedRecords":["authored-content/example.md"],"architecturalConflicts":[],"laterObligations":[]}. ' +
       "Graph will independently verify sources, actual Markdown, coverage and editorial review.\nASSIGNMENT:\n" +
@@ -182,6 +186,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
+      await requirePinnedSkillReads(session, project.root, pinned, "Composition specialist");
       let text = lastReply(session);
       let parsed: Record<string, unknown> | undefined;
       for (let formatAttempt = 0; formatAttempt < 3; formatAttempt++) {
@@ -196,8 +201,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       }
       if (!parsed) throw new Error("Composition specialist manifest was not provided.");
       const calls = toolPaths(session, project.root);
-      if (pinned.some(p => !calls.some(c => c.tool === "read" && c.path === p)) ||
-          assignment.mandatoryReads.some(p => !calls.some(c => c.tool === "read" && c.relative === p))) {
+      if (assignment.mandatoryReads.some(p => !calls.some(c => c.tool === "read" && c.relative === p))) {
         throw new Error("Composition specialist omitted pinned skill or essential source reads.");
       }
       if (!calls.some(c => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/"))) {
@@ -257,13 +261,21 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
       '{"verdict":"pass"|"block","sourceEvidence":["event.X#step/branch licenses ..."],"concerns":[]}. ' +
       "A pass requires explicit source-linked evidence for EVERY choice outcome and BOTH puzzle endings. " +
       "If uncertain, block.\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
-    const parsed = parseSpecialistJson(lastReply(session));
-    const calls = toolPaths(session, project.root);
-    if (pinned.some(p => !calls.some(c => c.tool === "read" && c.path === p)) ||
-        [...assignment.mandatoryReads, ...paths].some(p =>
-          !calls.some(c => c.tool === "read" && c.relative === p))) {
+    const missingReads = () => {
+      const calls = toolPaths(session, project.root);
+      return [...pinned, ...[...assignment.mandatoryReads, ...paths].map(p => resolve(project.root, p))]
+        .filter(path => !calls.some(c => c.tool === "read" && c.path === path));
+    };
+    if (missingReads().length) {
+      await promptStorySpecialist(session, "Your independent review is incomplete. Use read to inspect " +
+        "each EXACT missing pinned skill or canonical Story file below; do not edit or invoke shell. " +
+        "Then independently reassess the ACTUAL saved prose and return a new source-linked " +
+        "verdict/sourceEvidence/concerns JSON object.\nMISSING READS:\n" + missingReads().join("\n"));
+    }
+    if (missingReads().length) {
       throw new Error("Independent composition reviewer did not read pinned skill, essential source witnesses and saved prose.");
     }
+    const parsed = parseSpecialistJson(lastReply(session));
     if ((parsed.verdict !== "pass" && parsed.verdict !== "block") ||
         !strings(parsed.sourceEvidence) || !strings(parsed.concerns)) {
       throw new Error("Independent composition reviewer returned an invalid source-linked verdict.");

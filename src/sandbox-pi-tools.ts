@@ -17,9 +17,12 @@ import { verifiedSkillFiles, type SkillSnapshot } from "./snapshot.js";
 import type { JobStartResult } from "./job.js";
 
 export const SANDBOX_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
+export const SANDBOX_READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+export type SandboxToolAccess = "writer" | "read-only";
 const CANONICAL = new Set([
   "creative-direction", "arcs", "milestones", "events", "beats", "characters",
-  "world-entities", "facts", "relationships", "revelations", "choices", "puzzles",
+  "world-entities", "facts", "relationships", "revelations", "choice-points", "puzzles",
+  "authored-content", "choices",
 ]);
 const MAX_WRITE = 128 * 1024;
 const MAX_READ_LINES = 500;
@@ -53,13 +56,13 @@ export function blockUnroutedHostedPi(stage: string): void {
  */
 export async function selectSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[],
-  client?: Runner,
+  client?: Runner, access: SandboxToolAccess = "writer",
 ): Promise<ToolDefinition[] | undefined> {
   if (!sandboxToolsRequired()) return undefined;
   if (!process.env.NT_SANDBOX_SOCKET || !process.env.NT_SANDBOX_TOKEN_FILE) {
     throw new Error("Hosted Pi requires a configured private sandbox socket and token; no local tool fallback.");
   }
-  return createSandboxPiTools(job, snapshot, skills, client ?? new SandboxClient());
+  return createSandboxPiTools(job, snapshot, skills, client ?? new SandboxClient(), access);
 }
 
 /** The same canonical path boundary applies to Pi's tools and model-requested context reads. */
@@ -126,6 +129,7 @@ export async function readSandboxContextFile(
 
 export async function createSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[], client: Runner,
+  access: SandboxToolAccess = "writer",
 ): Promise<ToolDefinition[]> {
   // The host controller checks the trusted Studio catalog, worktree manifest,
   // user identity and Docker rootlessness; no model-controlled mount options.
@@ -283,5 +287,10 @@ export async function createSandboxPiTools(
       },
     },
   ];
-  return definitions;
+  // Never expose a mutating entry point, including arbitrary shell, to an
+  // editorial reviewer. Pi receives only these declared custom tool names;
+  // no built-in file or shell tools are enabled in hosted mode.
+  return access === "read-only"
+    ? definitions.filter(tool => SANDBOX_READ_ONLY_TOOLS.some(name => name === tool.name))
+    : definitions;
 }

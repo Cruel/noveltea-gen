@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
+import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { completedContextReads } from "./story-context.js";
 import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
@@ -111,16 +111,17 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   const model = context?.model ?? resolved!.model;
   const selectedThinking = context?.thinking ?? resolved?.resolution.thinking;
   await mkdir(dir, { recursive: true });
-  blockUnroutedHostedPi("Narrative review/repair");
+  const sandboxTools = await selectSandboxPiTools(job, snapshot, loader.getSkills().skills, undefined,
+    role === "review" ? "read-only" : "writer");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model, thinkingLevel: selectedThinking,
     resourceLoader: loader, settingsManager,
     sessionManager: role === "repair" && originalSessionFile
       ? SessionManager.open(originalSessionFile, dirname(originalSessionFile), project.root)
       : context?.manager ?? SessionManager.create(project.root, dir),
-    ...(context ? { customTools: [context.contextTool] } : {}),
+    customTools: [...(sandboxTools ?? []), ...(context ? [context.contextTool] : [])],
     noTools: "all", tools: role === "review"
-      ? ["read", "grep", "find", "ls", "story_context"] : ["read", "edit", "write", "grep", "find", "ls"],
+      ? [...SANDBOX_READ_ONLY_TOOLS, "story_context"] : ["read", "edit", "write", "grep", "find", "ls"],
   });
   if (selectedThinking && session.thinkingLevel !== selectedThinking) {
     session.dispose(); throw new Error("Pi failed to honor narrative review thinking effort.");
@@ -181,9 +182,21 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "Provide source-linked evidence for EVERY event#step/branch, milestone#alternative, and puzzle/event route.\n" +
       "PINNED REFERENCES:\n" + pinned.join("\n") + "\nSTORY PATHS:\n" +
       assignment.paths.join("\n") + "\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
-    const reads = new Set(completedReads(session, project.root));
-    if ([...pinned, ...assignment.paths.map(p => join(project.root, p))]
-      .some(p => !reads.has(p))) throw new Error("Independent narrative reviewer did not read pinned skills and scoped Story records.");
+    const missingReads = () => {
+      const reads = new Set(completedReads(session, project.root));
+      return [...pinned, ...assignment.paths.map(p => resolve(project.root, p))]
+        .filter(path => !reads.has(path));
+    };
+    if (missingReads().length) {
+      await promptStorySpecialist(session, "Your independent review omitted mandatory source inspection. " +
+        "Read EVERY exact pinned reference and canonical Story file listed below using read. " +
+        "Do not edit files or run shell; reassess the actual saved content and return a NEW " +
+        "complete verdict/findings/evidence JSON with line-linked route witnesses.\nMISSING READS:\n" +
+        missingReads().join("\n"));
+    }
+    if (missingReads().length) {
+      throw new Error("Independent narrative reviewer did not read pinned skills and scoped Story records.");
+    }
     const verdict = checkEditorialVerdict(parseSpecialistJson(lastReply(session)), assignment);
     await context!.completed(file!, session.sessionId);
     return { ...verdict, sessionFile: file ?? undefined };

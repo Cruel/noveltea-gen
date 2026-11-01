@@ -6,7 +6,7 @@ import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-work
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
+import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
 import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -265,11 +265,12 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
     step: "idea:" + identity + ":" + (writable ? "write" : "review"),
     paths: required, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
-  blockUnroutedHostedPi("Idea placement");
+  const sandboxTools = await selectSandboxPiTools(job, snapshot, loaded.skills, undefined,
+    writable ? "writer" : "read-only");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking,
     resourceLoader: loader, settingsManager,
-    sessionManager: context.manager, customTools: [context.contextTool],
+    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool],
     noTools: "all", tools: writable
       ? ["read", "edit", "write", "story_context"] : ["read", "story_context"],
   });

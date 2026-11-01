@@ -98,8 +98,10 @@ test('registered Story job derives one trusted worktree and never mounts git or 
   const { config, story } = fixture('')
   mkdirSync(join(story, '.story-inbox', 'ideas'), { recursive: true })
   writeFileSync(join(story, '.story-inbox', 'ideas', 'secret.yaml'), 'never mounted')
-  mkdirSync(join(story, 'events'), { recursive: true })
-  writeFileSync(join(story, 'events', 'existing.md'), 'safe')
+  for (const name of ['events', 'choice-points', 'authored-content']) {
+    mkdirSync(join(story, name), { recursive: true })
+    writeFileSync(join(story, name, 'existing.md'), 'safe')
+  }
   const { calls, run } = docker()
   const controller = new SandboxController(config, run)
   const acquired = await controller.acquire(ID)
@@ -110,9 +112,11 @@ test('registered Story job derives one trusted worktree and never mounts git or 
   assert.ok(create.includes('no-new-privileges'))
   assert.ok(create.includes('ALL'))
   const mounts = create.filter((v, i) => create[i-1] === '--mount')
-  assert.equal(mounts.length, 12)
+  assert.equal(mounts.length, 14)
   assert.ok(mounts.every(v => v.includes('/story/') && !v.includes('.git') && !v.includes('.story-inbox')))
-  assert.ok(mounts.some(v => v.includes('source=' + join(story, 'events'))))
+  for (const name of ['events', 'choice-points', 'authored-content']) {
+    assert.ok(mounts.some(v => v.includes('source=' + join(story, name)) && v.includes('target=/story/' + name)))
+  }
   assert.ok(!create.some(a => a.includes('docker.sock')))
   assert.deepEqual(controller.inspect(ID), { jobId: ID, status: 'running' })
   assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })

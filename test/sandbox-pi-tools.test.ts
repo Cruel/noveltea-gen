@@ -8,7 +8,7 @@ import { after, test } from "node:test";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "../src/job.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
-import { createSandboxPiTools, SANDBOX_TOOLS, sandboxToolsRequired, selectSandboxPiTools, blockUnroutedHostedPi, readSandboxContextFile } from "../src/sandbox-pi-tools.js";
+import { createSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS, sandboxToolsRequired, selectSandboxPiTools, blockUnroutedHostedPi, readSandboxContextFile } from "../src/sandbox-pi-tools.js";
 import { removeTestTree } from "./helpers.js";
 
 const base = mkdtempSync(join(tmpdir(), "nt-sandbox-pi-"));
@@ -123,6 +123,22 @@ test("all seven Pi file/search/shell names route through the verified sandbox", 
   assert.ok(writeCall, "write runs a base64 decode inside the sandbox");
 });
 
+test("hosted editorial reviewers receive only sandbox-backed read/search tools", async () => {
+  const { snapshot, skills } = await fixture();
+  const runner = client();
+  const reviewer = await createSandboxPiTools(job, snapshot, skills, runner, "read-only");
+  assert.deepEqual(reviewer.map(tool => tool.name), [...SANDBOX_READ_ONLY_TOOLS]);
+  assert.equal(runner.acquired, 1, "reviewer also acquires the registered sandbox");
+  const tools = Object.fromEntries(reviewer.map(tool => [tool.name, tool]));
+  for (const forbidden of ["write", "edit", "bash"]) assert.equal(tools[forbidden], undefined);
+  await call(tools.read!, { path: "authored-content/scene.md" });
+  await call(tools.grep!, { pattern: "scene", path: "choice-points" });
+  await call(tools.find!, { pattern: "*.md", path: "puzzles" });
+  await call(tools.ls!, { path: "authored-content" });
+  assert.equal(runner.calls.length, 4);
+  assert.ok(runner.calls.every(argv => argv[0] === "sh"));
+});
+
 test("host paths, traversal, Git and deferred author ideas are never model-readable or writable", async () => {
   const { snapshot, skills } = await fixture();
   const runner = client();
@@ -197,7 +213,9 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
   const { snapshot, skills } = await fixture();
   const story = join(base, "mounted-story");
   const arcs = join(story, "arcs");
-  mkdirSync(arcs, { recursive: true });
+  const choicePoints = join(story, "choice-points");
+  const authoredContent = join(story, "authored-content");
+  for (const dir of [arcs, choicePoints, authoredContent]) mkdirSync(dir, { recursive: true });
   const name = "noveltea-pi-test-" + process.pid;
   const docker = (...args: string[]) => spawnSync("docker", args, { encoding: "utf8", timeout: 60_000 });
   const created = docker("run", "-d", "--name", name,
@@ -205,6 +223,8 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
     "--security-opt", "no-new-privileges", "--user", "0:0",
     "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m",
     "--mount", "type=bind,source=" + arcs + ",target=/story/arcs",
+    "--mount", "type=bind,source=" + choicePoints + ",target=/story/choice-points",
+    "--mount", "type=bind,source=" + authoredContent + ",target=/story/authored-content",
     "noveltea-sandbox:local", "sleep", "infinity");
   assert.equal(created.status, 0, created.stderr);
   try {
@@ -227,6 +247,14 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
     assert.equal(await readSandboxContextFile(job, "arcs/large.md", remote), larger);
     await call(tools.edit!, { path: "arcs/chapter.md", edits: [{ oldText: "Opening", newText: "Closing" }] });
     assert.equal(readFileSync(join(arcs, "chapter.md"), "utf8"), "Closing scene\n");
+    await call(tools.write!, { path: "choice-points/decision.md", content: "A real choice.\n" });
+    await call(tools.write!, { path: "authored-content/dialogue.md", content: "A real scene.\n" });
+    assert.equal(readFileSync(join(choicePoints, "decision.md"), "utf8"), "A real choice.\n");
+    assert.equal(readFileSync(join(authoredContent, "dialogue.md"), "utf8"), "A real scene.\n");
+    const readonly = Object.fromEntries((await createSandboxPiTools(job, snapshot, skills, remote, "read-only"))
+      .map(tool => [tool.name, tool]));
+    assert.deepEqual(Object.keys(readonly), [...SANDBOX_READ_ONLY_TOOLS]);
+    assert.match(JSON.stringify((await call(readonly.read!, { path: "authored-content/dialogue.md" })).content), /A real scene/);
     assert.match(JSON.stringify((await call(tools.grep!, { pattern: "Closing" })).content), /chapter.md/);
     assert.match(JSON.stringify((await call(tools.find!, { pattern: "*.md" })).content), /chapter.md/);
     assert.match(JSON.stringify((await call(tools.ls!, { path: "arcs" })).content), /chapter.md/);
