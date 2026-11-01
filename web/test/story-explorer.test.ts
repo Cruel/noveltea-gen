@@ -13,6 +13,7 @@ import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { canonicalExplorerIndex, canonicalRelationshipGraph, storyExplorerRequest,
   storyRelationshipsRequest } from '../src/lib/story-explorer.server'
 import { generationConfigurationRequest } from '../src/lib/generation-config.server'
+import { userPiCredentials } from '../src/lib/pi-credentials.server'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -47,10 +48,11 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
   timeout: 180_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-explorer-'))
-  const envKeys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_VALIDATOR_TEST_LEGACY']
+  const envKeys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_VALIDATOR_TEST_LEGACY', 'NT_PI_CREDENTIAL_KEY']
   const previous = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STATE_DIR = join(root, 'durable')
+  process.env.NT_PI_CREDENTIAL_KEY = Buffer.alloc(32, 8).toString('base64')
   delete process.env.NT_VALIDATOR_TEST_LEGACY
   let store = openStudioDatabase(join(root, 'studio.sqlite'))
   try {
@@ -211,6 +213,27 @@ process.exit(exit);
     assert.equal((await configuration('PUT', full, aliceCookie, 'https://evil.test')).status, 403)
     assert.equal((await configuration('PUT', full, bobCookie)).status, 404)
     assert.equal((await configuration('PUT', { ...full, model: { provider: 'openai', id: 'host' } }, aliceCookie)).status, 422)
+    const personal = userPiCredentials(store, alice.id)
+    await personal.modify('openai', async () => ({ type: 'api_key', key: 'ALICE-STORY-KEY' }))
+    const catalog = await configuration('GET', undefined, aliceCookie)
+    assert.ok(catalog.body.models.length > 0, 'only a connected personal Pi provider offers models')
+    const chosen = catalog.body.models[0]
+    const pinnedModel = { provider: chosen.provider, id: chosen.id,
+      ...(chosen.reasoning ? { thinking: 'medium' } : {}) }
+    const modelDraft = { ...full, model: pinnedModel }
+    const savedModel = await configuration('PUT', modelDraft, aliceCookie)
+    assert.equal(savedModel.status, 200, JSON.stringify(savedModel.body))
+    assert.deepEqual(savedModel.body.saved.model, pinnedModel)
+    assert.deepEqual((await configuration('GET', undefined, aliceCookie)).body.saved.model, pinnedModel)
+    assert.equal((await configuration('PUT', modelDraft, bobCookie)).status, 404,
+      'cross-user selection cannot borrow Alice credentials')
+    await personal.delete('openai')
+    const disconnected = await configuration('GET', undefined, aliceCookie)
+    assert.deepEqual(disconnected.body.saved.model, pinnedModel,
+      'revocation retains a pinned draft for recovery without silently switching models')
+    assert.deepEqual(disconnected.body.models, [])
+    assert.equal((await configuration('PUT', modelDraft, aliceCookie)).status, 422,
+      'revoked credentials block new job model selection')
     assert.equal((await configuration('PUT', { ...full, headSha: 'a'.repeat(40) }, aliceCookie)).status, 422)
     assert.equal((await configuration('PUT', { ...full, limits: { steps: -1 } }, aliceCookie)).status, 422)
     assert.equal((await configuration('PUT', {

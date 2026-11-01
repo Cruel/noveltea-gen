@@ -470,7 +470,7 @@ anonymous and cross-user rejection, same-origin writes, invalid/foreign
 contracts, run idempotency, owner/thread receipts, checkpoint reconnect,
 and fail-closed tampering.
 
-## Generation scope editor and saved drafts (#62, pending #56)
+## Generation scope editor and saved drafts (#62, #56)
 
 Before fixture generation, the authenticated job page offers **Entire Story**
 or **Bounded selection**, generation depth, explicit writable targets,
@@ -491,15 +491,39 @@ editable before generation. If a draft exists, fixture launch must match its
 pinned task and canonical contract; a direct POST cannot replace it. An
 invalid/stale/foreign draft fails closed.
 
-The Pi model picker intentionally reports **no available user-scoped model**
-until #56 supplies encrypted per-user credentials and authenticated availability
-enumeration. It does not enumerate the server's host Pi setup. Job-level
-specialist-step, model-call and reported-cost limits can be saved, but they
-are **draft values, not enforced execution limits** until the real Pi controller
-integrates them. Fixture runs do not consume Pi budgets; real Pi generation,
-reasoning selection, wall-clock and sandbox-resource budgets remain blocked.
-The existing fixture-only start route still refuses client-supplied model or
-provider settings, and cannot run live Pi.
+The job's **Pi model and budgets** section now offers per-user API-key connections
+and **ChatGPT device-code OAuth** through the Pi SDK. The selected provider,
+model and optional reasoning level are verified against that signed-in user's
+available Pi catalog and persisted as part of the immutable job draft. The
+GET/POST/DELETE `/api/pi/models` connection endpoint is authenticated,
+origin-checked for writes, and returns only model and credential metadata;
+OAuth device codes are polled by the trusted server. It never exposes tokens.
+Disconnecting or losing authorization removes availability and blocks any new
+selection or fixture start pinned to that model; the existing draft and worktree
+remain intact for recovery. The job cannot silently switch to a host model.
+
+**Operator prerequisite:** set `NT_PI_CREDENTIAL_KEY` to an independently stored,
+base64-encoded random 32-byte key (generate with
+`node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`)
+and run `pnpm --filter @noveltea/studio migrate` with Studio stopped to apply
+migration **9**. The app stores AES-256-GCM encrypted Pi provider credentials
+in `pi_credentials` keyed by the Better Auth user ID, with revision-checked
+OAuth refresh writes. Keep the encryption key outside the Studio SQLite backup
+but back it up securely: **losing/changing the key makes existing connections
+unreadable**, and runtime requests fail closed. The Pi SDK's runtime is built
+with the per-user credential store and with filesystem model configuration
+disabled; it does not read shared host `~/.pi` auth/model files. OAuth flow
+state is transient during device authorization; completed provider credentials
+are durable across restarts. Reconnect if an in-flight device authorization
+is interrupted by a restart or if provider access is revoked. An API key being
+present does not prove the remote vendor will accept it until a real API call.
+
+Job-level specialist-step, model-call and reported-cost limits can be saved,
+but they are **draft values, not enforced execution limits** until the real Pi
+controller integrates them. Fixture runs do not consume Pi budgets. Real Pi
+generation, wall-clock and sandbox-resource enforcement remain work for the
+live execution controller. The existing fixture-only start route still refuses
+client-supplied model/provider settings and cannot run live Pi.
 
 The native catalog/owner-scoped integration cases are covered in
 `web/test/story-explorer.test.ts`, with fixture-start binding covered in

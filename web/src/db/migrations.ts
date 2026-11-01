@@ -104,6 +104,18 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    version: 9,
+    statements: [
+      `CREATE TABLE pi_credentials (
+         owner_user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+         provider TEXT NOT NULL,
+         ciphertext TEXT NOT NULL,
+         revision INTEGER NOT NULL DEFAULT 1,
+         PRIMARY KEY (owner_user_id, provider)
+       )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -134,7 +146,9 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     WHERE type='table' AND name='story_onboarding_drafts'`).get()
   const columns = store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>
   const sessionColumns = store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>
-  if (!hasOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasPiCredentials = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='pi_credentials'`).get()
+  if (!hasOnboarding || !hasPiCredentials || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

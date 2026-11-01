@@ -11,6 +11,7 @@ import { parseGenerationContract, type GenerationRequest } from '../../../src/ge
 import { claimServerGeneration } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
 import { openWebFixtureGraph } from '../../../src/web-fixture-runtime'
+import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 
 class JobError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
@@ -227,9 +228,14 @@ export async function fixtureJobRequest(auth: StudioAuth, store: StudioDatabase,
       let saved: { version?: unknown; headSha?: unknown; task?: unknown; contract?: unknown; model?: unknown }
       try { saved = JSON.parse(row.configJson) as typeof saved }
       catch { throw new JobError(409, 'Saved generation configuration is corrupt; inspect durable state.') }
-      if (saved.version !== 1 || saved.headSha !== job.headSha || saved.model !== null ||
+      if (saved.version !== 1 || saved.headSha !== job.headSha ||
+          (saved.model !== null && !validPiSelection(saved.model)) ||
           JSON.stringify({ task: saved.task, contract: saved.contract }) !== JSON.stringify(input)) {
         throw new JobError(409, 'Fixture start differs from the saved generation configuration or pinned Story revision.')
+      }
+      if (saved.model) {
+        try { await assertUserPiSelection(store, user.id, saved.model as PiSelection) }
+        catch { throw new JobError(409, 'Pinned Pi model credentials are unavailable. Reconnect before starting.') }
       }
     }
     if (row.requestJson) {

@@ -1,4 +1,13 @@
-import { foreignKey, index, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import { foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+
+export const piCredentials = sqliteTable('pi_credentials', {
+  ownerUserId: text('owner_user_id').notNull(),
+  provider: text('provider').notNull(),
+  ciphertext: text('ciphertext').notNull(),
+  revision: integer('revision').notNull().default(1),
+}, table => [
+  primaryKey({ columns: [table.ownerUserId, table.provider] }),
+])
 
 export const repositories = sqliteTable('repositories', {
   id: text('id').primaryKey(),

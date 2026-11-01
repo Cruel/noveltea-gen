@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { PiConnections } from './-PiConnections'
 import type { ExplorerRecord, ExplorerIndex } from '../../../lib/story-explorer.server'
 import type { GenerationDraft } from '../../../lib/generation-config.server'
 type CompletionContract = GenerationDraft['contract']
@@ -34,6 +35,8 @@ export function GenerationConfiguration({ jobId, onStarted }: {
   const [stepLimit, setStepLimit] = useState('')
   const [callLimit, setCallLimit] = useState('')
   const [costLimit, setCostLimit] = useState('')
+  const [selectedModel, setSelectedModel] = useState('')
+  const [thinking, setThinking] = useState('')
   const [rawEditor, setRawEditor] = useState(false)
   const [rawContract, setRawContract] = useState('')
   const [busy, setBusy] = useState(false)
@@ -60,12 +63,21 @@ export function GenerationConfiguration({ jobId, onStarted }: {
           setStepLimit(result.saved.limits.steps?.toString() ?? '')
           setCallLimit(result.saved.limits.modelCalls?.toString() ?? '')
           setCostLimit(result.saved.limits.costUsd?.toString() ?? '')
+          setSelectedModel(result.saved.model ? result.saved.model.provider + '/' + result.saved.model.id : '')
+          setThinking(result.saved.model?.thinking ?? '')
           setSaved(true)
         }
       })
       .catch(e => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Unavailable') })
     return () => controller.abort()
   }, [endpoint])
+  const refreshModels = useCallback(async () => {
+    const response = await fetch('/api/pi/models', { cache: 'no-store' })
+    const next = await response.json() as { models?: Load['models']; error?: string }
+    if (!response.ok) throw new Error(next.error || 'Unable to load Pi models')
+    setData(previous => previous ? { ...previous, models: next.models ?? [],
+      modelAvailability: next.models?.length ? 'Connected user models available.' : 'No Pi models connected.' } : previous)
+  }, [])
   const change = (next: CompletionContract) => {
     setContract(next); setSaved(false)
     if (rawEditor) setRawContract(JSON.stringify(next, null, 2))
@@ -108,7 +120,12 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       }
     }
     if (!data) throw new Error('Story catalog has not loaded.')
-    return { version: 1 as const, headSha: data.index.headSha, task, contract: selected, limits, model: null }
+    const entry = data.models.find(item => item.provider + '/' + item.id === selectedModel)
+    if (selectedModel && !entry) throw new Error('The selected Pi model is no longer available. Reconnect it.')
+    if (thinking && !entry?.reasoning) throw new Error('The selected model does not support reasoning.')
+    return { version: 1 as const, headSha: data.index.headSha, task, contract: selected, limits,
+      model: entry ? { provider: entry.provider, id: entry.id,
+        ...(thinking ? { thinking: thinking as 'low' | 'medium' | 'high' } : {}) } : null }
   }
   const persist = async (start: boolean) => {
     try {
@@ -239,13 +256,28 @@ export function GenerationConfiguration({ jobId, onStarted }: {
         value={rawContract} onChange={e => { setRawContract(e.target.value); setSaved(false) }} />
     </details>
     <h3>Pi model and budgets</h3>
-    <p role="status">{data.modelAvailability} Real-model execution is disabled; no shared host credentials or fallback are used.</p>
+    <PiConnections onUpdate={refreshModels} />
+    <p role="status">{data.modelAvailability} Real Pi execution is not enabled by the fixture-only launch route.</p>
     <div className="generation-controls">
       <label>Model
-        <select disabled value=""><option value="">No user-scoped Pi model available</option></select>
+        <select disabled={busy} value={selectedModel} onChange={e => {
+          setSelectedModel(e.target.value); setThinking(''); setSaved(false)
+        }}>
+          <option value="">No model selected (fixture only)</option>
+          {selectedModel && !data.models.some(m => m.provider + '/' + m.id === selectedModel) &&
+            <option value={selectedModel}>{selectedModel} (disconnected — reconnect)</option>}
+          {data.models.map(model => <option key={model.provider + '/' + model.id}
+            value={model.provider + '/' + model.id}>{model.provider} / {model.id}</option>)}
+        </select>
       </label>
       <label>Reasoning
-        <select disabled value=""><option value="">Requires an available reasoning model</option></select>
+        <select disabled={busy || !data.models.some(m => m.provider + '/' + m.id === selectedModel && m.reasoning)}
+          value={thinking} onChange={e => { setThinking(e.target.value); setSaved(false) }}>
+          <option value="">Provider default</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
       </label>
     </div>
     <div className="generation-controls">

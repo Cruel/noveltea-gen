@@ -6,11 +6,12 @@ import { validatedExplorer, type ExplorerIndex } from './story-explorer.server'
 import { parseGenerationContract } from '../../../src/generation'
 import { isFocusedScope, resolveFocusedScope } from '../../../src/focused-scope'
 import type { CompletionContract } from '../../../src/architecture'
+import { availableUserPiModels, assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 
 type Limits = { steps?: number; modelCalls?: number; costUsd?: number }
 export type GenerationDraft = {
   version: 1; headSha: string; task: string; contract: CompletionContract
-  limits: Limits; model: null
+  limits: Limits; model: PiSelection | null
 }
 class ConfigurationError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
@@ -26,14 +27,13 @@ const object = (value: unknown): value is Record<string, unknown> =>
 const keys = (value: Record<string, unknown>, allowed: readonly string[]) =>
   Object.keys(value).every(key => allowed.includes(key))
 
-/** This is a saved configuration draft, not a claim that model credentials or
- * execution budgets are available. #56 installs the user-scoped Pi capability. */
+/** Draft model profile is validated against the owner's currently connected Pi catalog at save time. */
 export function validateGenerationDraft(value: unknown, index: ExplorerIndex,
   canonicalRecords: unknown): GenerationDraft {
   if (!object(value) || !keys(value, ['version', 'headSha', 'task', 'contract', 'limits', 'model']) ||
       value.version !== 1 || value.headSha !== index.headSha ||
       typeof value.task !== 'string' || !value.task.trim() || value.task.length > 4000 ||
-      value.model !== null || !object(value.limits) ||
+      (value.model !== null && !validPiSelection(value.model)) || !object(value.limits) ||
       !keys(value.limits, ['steps', 'modelCalls', 'costUsd'])) {
     throw new ConfigurationError(422, 'Invalid or stale generation configuration. Refresh the pinned Story before saving.')
   }
@@ -101,7 +101,8 @@ export function validateGenerationDraft(value: unknown, index: ExplorerIndex,
       [...contract.envelope.hardLimits, ...contract.envelope.preferences].some(x => x.length > 1000)) {
     throw new ConfigurationError(422, 'Generation contract exceeds the allowed size.')
   }
-  return { version: 1, headSha: index.headSha, task: value.task.trim(), contract, limits, model: null }
+  return { version: 1, headSha: index.headSha, task: value.task.trim(), contract, limits,
+    model: value.model as PiSelection | null }
 }
 
 async function boundedBody(request: Request): Promise<unknown> {
@@ -146,22 +147,29 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
       const persisted = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
       const saved = persisted && !row.requestJson
         ? validateGenerationDraft(persisted, index, records) : persisted
-      if (saved && row.requestJson && (saved.version !== 1 || saved.model !== null ||
+      if (saved && row.requestJson && (saved.version !== 1 ||
+          (saved.model !== null && !validPiSelection(saved.model)) ||
           typeof saved.headSha !== 'string' || typeof saved.task !== 'string')) {
         throw new ConfigurationError(409, 'Pinned generation configuration is corrupt.')
       }
+      const models = await availableUserPiModels(store, user.id)
       return reply({ index, saved, editable: row.status === 'paused' && !row.requestJson,
-        models: [], modelAvailability: 'Per-user Pi model connections are not configured (#56).' })
+        models, modelAvailability: models.length ? 'Connected user models available.' :
+          'Connect your Pi API key or ChatGPT account to select a model.' })
     }
     if (row.status !== 'paused' || row.requestJson)
       throw new ConfigurationError(409, 'Generation configuration cannot change after the job has started.')
     const draft = validateGenerationDraft(await boundedBody(request), index, records)
+    if (draft.model) {
+      try { await assertUserPiSelection(store, user.id, draft.model) }
+      catch { throw new ConfigurationError(422, 'The selected user Pi model is unavailable. Reconnect the provider.') }
+    }
     const updated = store.sqlite.prepare(`UPDATE studio_sessions
       SET generation_config_json=?, updated_at=? WHERE id=? AND owner_user_id=?
       AND status='paused' AND generation_request_json IS NULL`)
       .run(JSON.stringify(draft), new Date().toISOString(), id, user.id)
     if (updated.changes !== 1) throw new ConfigurationError(409, 'Job was started concurrently; configuration was not saved.')
-    return reply({ saved: draft, modelAvailability: 'Per-user Pi model connections are not configured (#56).' })
+    return reply({ saved: draft, modelAvailability: 'Generation draft pinned to current user model selection.' })
   } catch (error) {
     if (error instanceof ConfigurationError) return reply({ error: error.message }, error.status)
     if (error instanceof Error && 'status' in error && typeof error.status === 'number' &&
