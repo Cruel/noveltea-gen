@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
-import { execFileSync, type spawn } from 'node:child_process'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { execFileSync, spawnSync, type spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { createServer } from 'node:http'
@@ -160,6 +160,57 @@ test('arbitrary UUID, mutated manifest and protected symlinks fail closed before
   assert.equal(calls.filter(v => v[0] === 'create').length, 0)
 })
 
+test('hidden entries, redirected paths, and special files are rejected before Docker is invoked', async () => {
+  const invalid: Array<{ name: string; create: (story: string) => void; error: RegExp }> = [
+    { name: 'hidden file', create: story => writeFileSync(join(story, '.env'), 'secret'), error: /hidden or restricted/ },
+    { name: 'nested hidden directory', create: story => mkdirSync(join(story, 'arcs', '.private'), { recursive: true }), error: /hidden or restricted/ },
+    { name: 'Git directory', create: story => mkdirSync(join(story, '.git')), error: /hidden or restricted/ },
+    { name: 'symlink to host', create: story => symlinkSync('/etc', join(story, 'outside')), error: /unsupported or redirected/ },
+    { name: 'nested symlink to sibling inbox', create: story => {
+      mkdirSync(join(story, 'events'))
+      symlinkSync('../../.story-inbox', join(story, 'events', 'inbox'))
+    }, error: /unsupported or redirected/ },
+  ]
+  if (process.platform !== 'win32') {
+    invalid.push({ name: 'FIFO special file', create: story => {
+      const fifo = spawnSync('mkfifo', [join(story, 'reader')], { encoding: 'utf8' })
+      assert.equal(fifo.status, 0, fifo.stderr)
+    }, error: /unsupported or redirected/ });
+  }
+  for (const scenario of invalid) {
+    const { config, story } = fixture()
+    scenario.create(story)
+    const { calls, run } = docker()
+    await assert.rejects(new SandboxController(config, run).acquire(ID), scenario.error, scenario.name)
+    assert.equal(calls.filter(args => args[0] === 'create').length, 0, scenario.name)
+  }
+})
+
+test('old per-record container layouts are rejected, disposable, and never reused', async () => {
+  const { config } = fixture()
+  const { run, calls } = docker()
+  let legacy = false
+  const manipulated: CommandRunner = args => {
+    const result = run(args)
+    if (legacy && args[0] === 'container' && args[1] === 'inspect' && result.status === 0) {
+      const labels = JSON.parse(result.stdout) as Record<string, string>
+      labels['dev.noveltea.layout'] = 'record-mount-v1'
+      return { ...result, stdout: JSON.stringify(labels) }
+    }
+    return result
+  }
+  const controller = new SandboxController(config, manipulated)
+  await controller.acquire(ID)
+  legacy = true
+  await assert.rejects(controller.acquire(ID), /occupied by another identity/)
+  assert.throws(() => controller.inspect(ID), /occupied by another identity/)
+  assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+  legacy = false
+  assert.equal((await controller.acquire(ID)).status, 'running')
+  assert.equal(calls.filter(args => args[0] === 'create').length, 2)
+  controller.dispose(ID)
+})
+
 test('a Git pointer to another job branch cannot authorize a mount', async () => {
   const { config, story } = fixture()
   const { run, calls } = docker()
@@ -264,6 +315,21 @@ test('exec terminates all container descendants before reporting a writer bounda
   assert.deepEqual(controller.inspect(ID), { jobId: ID, status: 'running' })
 })
 
+test('sandbox output overflow destroys the container and fails closed before reacquisition', async () => {
+  const { config } = fixture()
+  const { run, calls } = docker()
+  const child = new FakeDockerExec()
+  const controller = new SandboxController(config, run, (() => child) as unknown as typeof spawn)
+  await controller.acquire(ID)
+  const execution = controller.execute(ID, ['sh', '-c', 'yes'], () => {})
+  child.stdout.write(Buffer.alloc(65 * 1024, 'x'))
+  await assert.rejects(execution, /output limit/)
+  assert.ok(calls.some(args => args[0] === 'rm' && args[2] === 'noveltea-job-' + ID))
+  assert.throws(() => controller.inspect(ID), /has not been acquired/)
+  assert.equal((await controller.acquire(ID)).status, 'running')
+  controller.dispose(ID)
+})
+
 test('failed Docker stop cannot turn a foreground exit into a successful execution boundary', async () => {
   const { config } = fixture()
   const { run, calls } = docker()
@@ -341,19 +407,76 @@ test('real rootless Docker stops delayed background writers before returning suc
   config.image = process.env.NT_TEST_SANDBOX_IMAGE || 'noveltea-sandbox:local'
   mkdirSync(join(story, 'events'))
   writeFileSync(join(story, 'events', 'late.md'), '')
+  const sibling = join(story, '..', 'other-job', 'story')
+  mkdirSync(sibling, { recursive: true })
+  writeFileSync(join(sibling, 'private.md'), 'other job private record')
+  const inbox = join(story, '..', '.story-inbox', 'ideas')
+  mkdirSync(inbox, { recursive: true })
+  writeFileSync(join(inbox, 'private.yaml'), 'author only')
+  const credential = join(config.appVolume, 'controller-secret')
+  writeFileSync(credential, 'controller credential')
+  const name = 'noveltea-job-' + ID
+  const inspect = (format: string) => JSON.parse(execFileSync('docker', [
+    'inspect', name, '--format', format,
+  ], { encoding: 'utf8' })) as Record<string, unknown> | Array<Record<string, unknown>>
   const controller = new SandboxController(config)
   try {
     await controller.acquire(ID)
+    const mounts = inspect('{{json .Mounts}}') as Array<Record<string, unknown>>
+    assert.equal(mounts.length, 1, 'No extra bind, Docker volume, or host filesystem mount')
+    assert.equal(mounts[0]?.Type, 'bind')
+    assert.equal(mounts[0]?.Source, story)
+    assert.equal(mounts[0]?.Destination, '/story')
+    const host = inspect('{{json .HostConfig}}') as Record<string, unknown>
+    assert.equal(host.NetworkMode, 'none')
+    assert.equal(host.ReadonlyRootfs, true)
+    assert.equal(host.Memory, 512 * 1024 * 1024)
+    assert.equal(host.MemorySwap, 512 * 1024 * 1024)
+    assert.equal(host.PidsLimit, 128)
+    assert.equal(host.NanoCpus, 1_000_000_000)
+    assert.deepEqual(host.CapDrop, ['ALL'])
+    assert.ok((host.SecurityOpt as string[]).includes('no-new-privileges'))
+    const actualLimits: string[] = []
+    assert.equal(await controller.execute(ID,
+      ['sh', '-c', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max'],
+      (_stream, data) => actualLimits.push(data)), 0)
+    const [memory, swap, pids, cpu] = actualLimits.join('').trim().split('\n')
+    assert.equal(memory, String(512 * 1024 * 1024), 'Actual memory cgroup limit')
+    assert.equal(swap, '0', 'Actual swap allowance must be disabled')
+    assert.equal(pids, '128', 'Actual process cgroup limit')
+    assert.match(cpu ?? '', /^\d+ \d+$/, 'Actual CPU quota exists')
+    const [quota, period] = cpu!.split(' ').map(Number)
+    assert.equal(quota, period, 'Actual CPU quota is one CPU')
     // A regression that only checks for absent delayed writes could pass if
     // the sandbox never had write access at all. Prove the authorized bind
     // is writable before checking that background descendants are stopped.
     assert.equal(await controller.execute(ID,
       ['sh', '-c', 'printf allowed > /story/events/allowed.md'], () => {}), 0)
     assert.equal(readFileSync(join(story, 'events', 'allowed.md'), 'utf8'), 'allowed')
+    mkdirSync(join(story, 'future-record-type'))
+    writeFileSync(join(story, 'future-record-type', 'new.md'), 'new content type')
+    const evidence: string[] = []
     assert.equal(await controller.execute(ID, ['sh', '-c',
-      'test ! -e /story/.git && test ! -e /story/.story-inbox && ' +
+      'test "$(cat /story/future-record-type/new.md)" = "new content type" && ' +
       'test ! -e /run/secrets && test ! -e /var/run/docker.sock && ' +
-      '! touch /etc/forbidden 2>/dev/null'], () => {}), 0)
+      'test ! -e /story/.git && test ! -e /story/.story-inbox && ' +
+      'test ! -e /story/../.git && test ! -e /story/../.story-inbox && ' +
+      '! touch /etc/forbidden 2>/dev/null && ' +
+      'for path in "$@"; do if test -e "$path" || test -S "$path"; then echo "exposed:$path"; exit 41; fi; done; echo isolated',
+      'nt-probe', join(sibling, 'private.md'), join(inbox, 'private.yaml'), credential,
+      config.socket, config.stateVolume, config.cacheVolume, '/var/run/docker.sock',
+      '/story/../other-job/story/private.md'], (_stream, data) => evidence.push(data)), 0, evidence.join(''))
+    assert.equal(evidence.join('').trim(), 'isolated')
+    const deniedWrites: string[] = []
+    assert.equal(await controller.execute(ID, ['sh', '-c',
+      'for path in "$@"; do if printf breach > "$path" 2>/dev/null; then echo "write-exposed:$path"; exit 42; fi; done; echo denied',
+      'nt-write-probe', join(sibling, 'private.md'), join(inbox, 'private.yaml'), credential,
+      '/story/../.git', '/story/../other-job/story/private.md'],
+      (stream, data) => { if (stream === 'stdout') deniedWrites.push(data) }), 0, deniedWrites.join(''))
+    assert.equal(deniedWrites.join('').trim(), 'denied')
+    assert.equal(readFileSync(join(sibling, 'private.md'), 'utf8'), 'other job private record')
+    assert.equal(readFileSync(join(inbox, 'private.yaml'), 'utf8'), 'author only')
+    assert.equal(readFileSync(credential, 'utf8'), 'controller credential')
 
     const status = await controller.execute(ID,
       ['sh', '-c', '(sleep 2; printf late >> /story/events/late.md) >/dev/null 2>&1 &'],
@@ -362,6 +485,18 @@ test('real rootless Docker stops delayed background writers before returning suc
     await new Promise<void>(resolve => setTimeout(resolve, 2400))
     assert.equal(readFileSync(join(story, 'events', 'late.md'), 'utf8'), '')
     assert.equal(controller.inspect(ID).status, 'running')
+    execFileSync('docker', ['kill', name])
+    assert.equal(controller.inspect(ID).status, 'stopped')
+    assert.equal((await controller.acquire(ID)).status, 'running', 'Restart stopped sandbox')
+    assert.equal(await controller.execute(ID, ['true'], () => {}), 0)
+    execFileSync('docker', ['rm', '-f', name])
+    assert.throws(() => controller.inspect(ID), /has not been acquired/)
+    await assert.rejects(controller.execute(ID, ['true'], () => {}), /has not been acquired/)
+    assert.equal((await controller.acquire(ID)).status, 'running', 'Recreate lost sandbox')
+    assert.equal(await controller.execute(ID, ['sh', '-c', 'test -f /story/events/allowed.md'], () => {}), 0)
+    assert.equal(controller.dispose(ID).status, 'disposed')
+    assert.equal(controller.dispose(ID).status, 'absent')
+    assert.equal((await controller.acquire(ID)).status, 'running', 'Reacquire disposed sandbox')
   } finally { controller.dispose(ID) }
 })
 

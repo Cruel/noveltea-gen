@@ -1,10 +1,10 @@
 # Rootless Compose and host sandbox controller (#51)
 
 This is the deployment *foundation*, not the completed multiuser agent execution
-flow. #52 routes Foundation discovery/writing and Arc/Milestone architecture
-Pi file/search/shell tools through the private sandbox client. Other specialists
-explicitly refuse hosted execution until #53/#54 route them; there is no
-implicit host-tool fallback. #55 performs real-host containment and restart certification.
+flow. #52–#54 route narrative Pi file/search/shell tools through the private
+sandbox client; reviewers receive read/search only. There is no implicit
+host-tool fallback. #55 certifies real rootless containment and recovery;
+see [sandbox certification](../docs/sandbox-certification.md).
 #59 adds authenticated web execution/admission. Do not expose the raw Skein Agent
 Protocol listener or enable unsandboxed model-directed tool execution.
 
@@ -39,8 +39,8 @@ Protocol listener or enable unsandboxed model-directed tool execution.
 unprivileged host owner write access to shared cache mounts. This is not host
 root. All capabilities are dropped. Non-root *container* user IDs require
 verified idmapped bind-mount support or matching subordinate-UID ACLs; do not
-weaken filesystem access controls just to make them write. #55 must certify
-the chosen host's confinement and quota enforcement before production use.
+weaken filesystem access controls just to make them write. Repeat #55's
+rootless containment and cgroup certification on each target deployment host.
 
 The controller verifies rootless Docker, cgroup v2/systemd, a fixed rootless
 image ID, volume mountpoints, catalog owner/repository/Story/pin, deterministic
@@ -153,17 +153,16 @@ Durable `noveltea-app` holds Studio OAuth/catalog data;
   confirm the old process is stopped before manual stale-socket cleanup.
   Ambiguous Git/worktree state still needs manual reconciliation.
 - The trusted graph worker acquires and verifies a registered sandbox before
-  opening a Foundation or Architecture Pi session. The agent service requires
-  `NT_REQUIRE_SANDBOX_TOOLS=1`, the private controller socket and token.
+  opening any narrative Pi specialist session, including CLI-launched jobs.
+  The agent service requires the private controller socket and token;
+  missing configuration fails closed regardless of `NT_REQUIRE_SANDBOX_TOOLS`.
   Pinned skills are read through a digest-verified, read-only trusted-worker
   adapter; the Story file tools are sandbox-only. The snapshot cache is stored
   on the durable job-state volume across agent restarts. Native `story_validate`
   remains bound to the trusted job identity and cannot accept model-provided
-  paths or validator flags. CLI-local workflows without sandbox configuration
-  retain their existing behavior.
-- Other Pi specialists are not yet sandbox-routed and fail closed in hosted mode
-  until #53/#54. The web job-preparation endpoint still does not initiate model
-  execution until authenticated admission and scheduling are connected by #59.
+  paths or validator flags. There is no host-tool fallback for CLI jobs.
+- Authenticated web scheduling and admission are separate from the containment
+  tests. Passing #55 does not assert a full web-to-agent production workflow.
 
 ## Verification
 
@@ -217,7 +216,9 @@ root and Studio suites. Set `NT_TEST_SANDBOX_IMAGE` if not using
 checks that a shell-launched background process cannot write after a
 successful command boundary. It intentionally skips on ordinary development
 hosts unless explicitly enabled; it must pass on the deployment host.
-Real daemon binding, permitted Story writes, isolation escapes, UID behavior,
-memory/cgroup constraints, cleanup after SIGKILL and Compose backup/restore
-are required for **#55** on a real configured rootless Linux host; fixture
-tests do not certify them.
+The #55 opt-in suite additionally inspects the **actual Docker mount and
+HostConfig** and the **in-container memory, PID and CPU cgroup limits**. It
+probes private paths, unknown record types, stopped/lost-container recovery and
+disposal. Read [the #55 certification and failure-state matrix](../docs/sandbox-certification.md).
+These tests do not certify a production Compose deployment, backup/restore,
+or an independent adversarial penetration test.
