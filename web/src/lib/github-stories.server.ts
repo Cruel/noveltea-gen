@@ -33,7 +33,7 @@ function validSha(value: unknown): value is string {
   return typeof value === 'string' && shaPattern.test(value)
 }
 
-function directoryPath(value: unknown): string {
+export function directoryPath(value: unknown): string {
   if (typeof value !== 'string' || value.length > 1024) throw new GithubError(400, 'Invalid Story directory')
   const path = value.replace(/\/$/, '')
   if (path === '') return ''
@@ -224,7 +224,8 @@ function matchesAttributePattern(pattern: string, relative: string): boolean {
   return new RegExp(regex).test(target)
 }
 
-async function checkLfsAttributes(reader: TreeReader, root: string, directory: string, blobs: TreeEntry[]) {
+async function checkLfsAttributes(reader: TreeReader, root: string, directory: string,
+  blobs: TreeEntry[], allowMissingAncestors = false) {
   const attrs = new Map<string, TreeEntry>()
   let current = root
   let prefix = ''
@@ -236,7 +237,11 @@ async function checkLfsAttributes(reader: TreeReader, root: string, directory: s
     if (attr) attrs.set([prefix, '.gitattributes'].filter(Boolean).join('/'), attr)
     if (!part) break
     const next = page.tree.find(e => e.path === part)
-    if (!next || next.type !== 'tree' || next.mode !== '040000') badTree()
+    if (!next) {
+      if (!allowMissingAncestors) badTree()
+      break // New Story path: check attributes in existing ancestors.
+    }
+    if (next.type !== 'tree' || next.mode !== '040000') badTree()
     current = next.sha
     prefix = [prefix, part].filter(Boolean).join('/')
   }
@@ -300,6 +305,81 @@ async function preflight(reader: TreeReader, root: string, directory: string, sh
     }
   }
   return { sizeBytes: bytes, limitBytes: STORY_LIMIT_BYTES, blobCount: blobs.length }
+}
+
+/**
+ * An initialization is allowed only at the current default-branch revision,
+ * and only when the selected directory has no canonical Story records.
+ * No caller-selected Git SHA can turn an already populated Story into a blank.
+ */
+export async function inspectGithubStoryInitialization(token: string, repository: string, directory: string) {
+  const path = directoryPath(directory)
+  const metadata = await github<{ default_branch: string }>(token, `/repos/${repository}`)
+  if (!metadata || typeof metadata.default_branch !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$/.test(metadata.default_branch) ||
+      metadata.default_branch.split('/').some(part => !part || part === '.' || part === '..')) badTree()
+  let revision: Snapshot
+  try {
+    revision = await snapshot(token, repository, null)
+  } catch (error) {
+    if (error instanceof GithubError && error.status === 409 &&
+        error.message.includes('no commits')) {
+      return { mode: 'bootstrap' as const, commit: null, defaultBranch: metadata.default_branch,
+        directory: path, sizeBytes: 0, blobCount: 0 }
+    }
+    throw error
+  }
+  const reader = makeReader(token, repository)
+  let current = revision.root
+  for (const part of path ? path.split('/') : []) {
+    const listing = await reader.tree(current)
+    if (listing.truncated) badTree()
+    const entry = listing.tree.find(item => item.path === part)
+    if (!entry) {
+      await checkLfsAttributes(reader, revision.root, path, [
+        { path: 'creative-direction/foundation.md', type: 'blob', mode: '100644', sha: '0'.repeat(40), size: 0 },
+      ], true)
+      return { mode: 'branch' as const, commit: revision.commit,
+        defaultBranch: metadata.default_branch, directory: path, sizeBytes: 0, blobCount: 0 }
+    }
+    if (entry.type !== 'tree' || entry.mode !== '040000') {
+      throw new GithubError(409, 'Selected Story directory conflicts with an existing Git file.')
+    }
+    current = entry.sha
+  }
+  const target = await reader.tree(current)
+  if (target.truncated) badTree()
+  const creative = target.tree.find(item => item.path === 'creative-direction')
+  if (creative && (creative.type !== 'tree' || creative.mode !== '040000')) {
+    throw new GithubError(409, 'Creative Direction path conflicts with an existing Git file.')
+  }
+  if (await isStory(reader, current)) {
+    throw new GithubError(409, 'This directory already has Story records. Import the existing Story instead.')
+  }
+  // For an existing non-Story directory, enforce exactly the same size and
+  // LFS/unsupported-object boundaries used for Story import.
+  const blobs = await allBlobs(reader, current)
+  let sizeBytes = 0
+  const small: TreeEntry[] = []
+  for (const entry of blobs) {
+    sizeBytes += entry.size!
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes > STORY_LIMIT_BYTES) {
+      throw new GithubError(422, 'Selected directory exceeds the 100 MB source limit.')
+    }
+    if (entry.size! <= LFS_POINTER_MAX_BYTES) small.push(entry)
+  }
+  if (small.length > MAX_BLOBS_TO_INSPECT) badTree()
+  await checkLfsAttributes(reader, revision.root, path, [
+    ...blobs, { path: 'creative-direction/foundation.md', type: 'blob',
+      mode: '100644', sha: '0'.repeat(40), size: 0 },
+  ])
+  for (const entry of small) {
+    if ((await reader.blob(entry.sha)).startsWith('version https://git-lfs.github.com/spec/v1')) {
+      throw new GithubError(422, 'Selected directory contains Git LFS pointers.')
+    }
+  }
+  return { mode: 'branch' as const, commit: revision.commit,
+    defaultBranch: metadata.default_branch, directory: path, sizeBytes, blobCount: blobs.length }
 }
 
 /** Recheck the original pinned Story with GitHub before any Git transfer. */

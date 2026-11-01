@@ -1,6 +1,6 @@
 import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
-import { acquireCachedStory, GitCacheError } from './git-cache.server'
+import { acquireCachedStory, GitCacheError, initializeStoryBranch } from './git-cache.server'
 
 type Provider = 'github' | 'gitlab'
 export type CachedCatalogStory = {
@@ -11,13 +11,15 @@ export type CachedCatalogStory = {
   repository: string
   providerId: string
 }
-type VerifiedSource = { remoteUrl: string; sizeBytes: number; blobCount: number }
+type VerifiedSource =
+  | { remoteUrl: string; sizeBytes: number; blobCount: number; reopenDraft?: false }
+  | { remoteUrl: string; reopenDraft: true }
 
 // Shared, trusted job-registration boundary for both Git providers. Browser
 // input is only a catalog Story UUID, a retry-safe job UUID and a SHA assertion.
 export async function prepareCachedJob(
   store: StudioDatabase, ownerId: string, token: string, provider: Provider, request: Request,
-  verifySource: (row: CachedCatalogStory, commit: string) => Promise<VerifiedSource>,
+  verifySource: (row: CachedCatalogStory, commit: string, existingJob: boolean) => Promise<VerifiedSource>,
 ) {
   assertStudioSchemaCurrent(store)
   const input = await request.json().catch(() => null)
@@ -49,17 +51,23 @@ export async function prepareCachedJob(
   }
   // Provider membership/repository identity and the same pinned Story's size
   // and LFS properties are reverified immediately before every acquisition.
-  const verified = await verifySource(row, pinned)
+  const verified = await verifySource(row, pinned, Boolean(existing))
   const cacheDirectory = process.env.NT_GIT_CACHE_DIR
   if (!cacheDirectory) {
     throw new GitCacheError(503, 'Studio Git cache is not configured. Set NT_GIT_CACHE_DIR to a dedicated absolute cache volume.')
   }
-  const job = await acquireCachedStory({
+  const source = {
     cacheDirectory, ownerId, repositoryId: provider + ':' + row.providerId,
     remoteUrl: verified.remoteUrl, token,
     directory: row.directory, commit: pinned, jobId: input.jobId,
-    verifiedSizeBytes: verified.sizeBytes, verifiedBlobCount: verified.blobCount,
-  })
+  }
+  // An unpublished GitHub initialization draft is absent at its pinned base.
+  // Only an already-registered job may reopen its exact saved one-commit draft;
+  // never use this fallback to create a new job or skip identity validation.
+  const job = verified.reopenDraft
+    ? await initializeStoryBranch({ ...source, title: row.title, requireExistingCommit: true })
+    : await acquireCachedStory({ ...source,
+      verifiedSizeBytes: verified.sizeBytes, verifiedBlobCount: verified.blobCount })
   const now = new Date().toISOString()
   const saved = store.sqlite.prepare(`INSERT INTO studio_sessions
     (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)

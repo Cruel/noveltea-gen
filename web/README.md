@@ -249,6 +249,58 @@ recovery regressions. A live GitLab.com private-project HTTPS clone and
 provider/deployment certification remain separate acceptance work, as do
 disk quotas and eviction.
 
+## GitHub Story initialization (#48)
+
+On a connected GitHub repository, open **Browse Stories → Initialize a new
+Story**. Enter an existing relative directory or a new nested directory (blank
+means repository root) and a draft Story title. The authenticated
+`GET /api/github/initialize?repositoryId=...&directory=...` checks the
+currently pinned default branch and returns `mode: branch` with a commit SHA
+or `mode: bootstrap` with `commit: null` only when GitHub explicitly reports
+that the repository has no commits. This operation does not start a model.
+
+`POST /api/github/initialize` requires
+`{repositoryId,directory,title,jobId,commit}` and a same-origin signed-in
+session. The `jobId` is a client-generated UUID. GitHub App installation and
+push rights, catalog ownership, remote identity, exact HEAD revision, directory
+nonexistence/no Story records, 100 MB source cap and applicable LFS attributes
+are checked again on the server. Only canonical draft
+`creative-direction/foundation.md` is created: schema 0.1, no author-protected
+decisions or invented narrative facts. Completing author discovery and any
+author approval remains subsequent work. Do not put new Stories inside
+`.noveltea` or `.story-inbox`; no persistent `.noveltea` content is written.
+
+**Existing repository:** the Story is initialized and committed in a new
+isolated `noveltea-gen/...` worktree branch based on the verified immutable
+commit. No remote or default-branch write occurs. Publishing this job for review
+is a separate deliberate action (#56), not an automatic merge. The response
+contains `published: false`, the job UUID, starting SHA, draft HEAD SHA, and
+branch. The catalog points to the starting SHA and the durable job tracks the
+draft commit. An identical retry reopens the exact existing initialization
+commit; unexpected edits, lost job state, or conflicting canonical content fail
+closed and must be reconciled, not overwritten.
+
+**Completely empty GitHub repository:** first create the empty repository on
+GitHub and connect it to Studio with the GitHub App installation. With no branch
+heads at all, Studio may clone that repository, write one draft canonical Story
+file, make the root commit, and perform a normal **non-force** first push to the
+repository's designated default branch. Git checks all remote branch heads
+again immediately before the push. A concurrent initializer that creates the
+target branch causes a non-fast-forward rejection, not a forced overwrite. The
+response contains `published: true`, with the new SHA also used as the job's
+base. A failed push or interrupted bootstrap preserves the cached clone for
+manual inspection; it is never reset or silently retried over unknown history.
+After the successful first commit, further Story initialization uses isolated
+branches like any other existing repository.
+
+Only completed initialization is recorded in the Studio Story/session catalog.
+The Git clone/worktrees are cached separately from durable job manifests.
+Connection revocation, schema mismatch, invalid paths, existing Stories,
+changed default HEAD and unavailable Git/size metadata return actionable
+errors before writing. Existing initialized jobs with unpublished Story paths
+can be reopened by their original job UUID through the GitHub jobs API, but
+new jobs must wait for that Story to be published.
+
 ## GitLab Story discovery and size preflight (#44)
 
 Connected GitLab.com projects have **Browse Stories** links on the dashboard
