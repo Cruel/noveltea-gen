@@ -22,13 +22,13 @@ const active = new Set<string>() // one server process owns each SQLite checkpoi
 type SavedJob = {
   id: string; storyId: string; title: string; commitSha: string | null
   provider: string; providerId: string; directory: string
-  requestJson: string | null; threadId: string | null; status: string
+  requestJson: string | null; threadId: string | null; configJson: string | null; status: string
 }
 function selectedJob(store: StudioDatabase, owner: string, id: string): SavedJob {
   if (!UUID.test(id)) throw new JobError(400, 'Invalid job ID.')
   const row = store.sqlite.prepare(`SELECT j.id, j.story_id AS storyId, j.title, j.status,
     j.source_commit_sha AS commitSha, j.generation_request_json AS requestJson,
-    j.generation_thread_id AS threadId, s.directory,
+    j.generation_thread_id AS threadId, j.generation_config_json AS configJson, s.directory,
     r.provider, r.provider_repository_id AS providerId
     FROM studio_sessions j JOIN stories s ON j.story_id=s.id AND j.owner_user_id=s.owner_user_id
     JOIN repositories r ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
@@ -221,6 +221,17 @@ export async function fixtureJobRequest(auth: StudioAuth, store: StudioDatabase,
     const input = await readInput(request)
     const job = await restoreJob(row, user.id)
     await verifyTrustedRevision(job)
+    if (row.configJson && !row.requestJson) {
+      // Configuration is a durable author-approved draft. The fixture start
+      // may not silently replace it with another task or a wider contract.
+      let saved: { version?: unknown; headSha?: unknown; task?: unknown; contract?: unknown; model?: unknown }
+      try { saved = JSON.parse(row.configJson) as typeof saved }
+      catch { throw new JobError(409, 'Saved generation configuration is corrupt; inspect durable state.') }
+      if (saved.version !== 1 || saved.headSha !== job.headSha || saved.model !== null ||
+          JSON.stringify({ task: saved.task, contract: saved.contract }) !== JSON.stringify(input)) {
+        throw new JobError(409, 'Fixture start differs from the saved generation configuration or pinned Story revision.')
+      }
+    }
     if (row.requestJson) {
       const existing = pinnedRequest(row, job)
       if (JSON.stringify({ task: existing?.task, contract: existing?.contract }) !== JSON.stringify(input)) {

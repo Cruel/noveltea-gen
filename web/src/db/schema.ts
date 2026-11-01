@@ -36,6 +36,7 @@ export const sessions = sqliteTable('studio_sessions', {
   sourceCommitSha: text('source_commit_sha'),
   generationRequestJson: text('generation_request_json'),
   generationThreadId: text('generation_thread_id'),
+  generationConfigJson: text('generation_config_json'),
   status: text('status', { enum: ['running', 'paused', 'blocked', 'completed', 'cancelled'] }).notNull(),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

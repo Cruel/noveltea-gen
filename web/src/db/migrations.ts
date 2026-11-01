@@ -77,6 +77,12 @@ const appMigrations = [
       `ALTER TABLE studio_sessions ADD COLUMN generation_thread_id TEXT`,
     ],
   },
+  {
+    version: 6,
+    statements: [
+      `ALTER TABLE studio_sessions ADD COLUMN generation_config_json TEXT`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -108,7 +114,8 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   if (!columns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||
-      !sessionColumns.some(column => column.name === 'generation_thread_id')) {
+      !sessionColumns.some(column => column.name === 'generation_thread_id') ||
+      !sessionColumns.some(column => column.name === 'generation_config_json')) {
     throw new StudioSchemaError('Studio database migration journal does not match its schema. Check migration status and restore or repair the database before using Story imports.')
   }
 }

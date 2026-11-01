@@ -152,6 +152,15 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(unclaimed.request, null)
     assert.equal(existsSync(join(acquired.stateDir, 'generation-server-owner.json')), false)
     unlinkSync(cliCheckpoint)
+    // A verified saved scope must bind the eventual fixture start, even if
+    // an attacker calls the older start endpoint directly with a new body.
+    store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=? WHERE id=?')
+      .run(JSON.stringify({ version: 1, headSha: acquired.headSha,
+        task: payload.task, contract: parseGenerationContract(contract),
+        limits: { steps: 30 }, model: null }), jobId)
+    assert.equal((await api('POST', { ...payload, task: 'Widen the task' }, aliceCookie)).status, 409)
+    assert.equal((await api('POST', { ...payload, contract: { ...contract,
+      constraints: ['Override author intent'] } }, aliceCookie)).status, 409)
     // Simulate a crash immediately after owner receipt publication but before
     // the request entered SQLite. GET must expose the interrupted ownership,
     // a different request must not take it over, and an identical retry may

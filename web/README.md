@@ -470,6 +470,41 @@ anonymous and cross-user rejection, same-origin writes, invalid/foreign
 contracts, run idempotency, owner/thread receipts, checkpoint reconnect,
 and fail-closed tampering.
 
+## Generation scope editor and saved drafts (#62, pending #56)
+
+Before fixture generation, the authenticated job page offers **Entire Story**
+or **Bounded selection**, generation depth, explicit writable targets,
+separately authorized supporting targets, branches, constraints and production
+envelope. The advanced JSON editor remains available for exact contract review.
+`GET /api/jobs/:jobId/configuration` resolves the current, pinned canonical
+catalog. `PUT` requires the same origin and the job owner, an exact current
+HEAD, and a prepared, not-yet-executing job. It checks record membership and
+active status against the original native report, runs the authoritative
+`parseGenerationContract`, and checks focused supporting dependencies through
+`resolveFocusedScope`. The server does not silently widen write targets from
+the relationship graph or dependency context.
+
+Schema migration **6** adds durable `generation_config_json` to job sessions.
+Run `pnpm --filter @noveltea/studio migrate` with the Studio server stopped
+before deploying the new UI. A saved draft survives a restart and is only
+editable before generation. If a draft exists, fixture launch must match its
+pinned task and canonical contract; a direct POST cannot replace it. An
+invalid/stale/foreign draft fails closed.
+
+The Pi model picker intentionally reports **no available user-scoped model**
+until #56 supplies encrypted per-user credentials and authenticated availability
+enumeration. It does not enumerate the server's host Pi setup. Job-level
+specialist-step, model-call and reported-cost limits can be saved, but they
+are **draft values, not enforced execution limits** until the real Pi controller
+integrates them. Fixture runs do not consume Pi budgets; real Pi generation,
+reasoning selection, wall-clock and sandbox-resource budgets remain blocked.
+The existing fixture-only start route still refuses client-supplied model or
+provider settings, and cannot run live Pi.
+
+The native catalog/owner-scoped integration cases are covered in
+`web/test/story-explorer.test.ts`, with fixture-start binding covered in
+`web/test/fixture-jobs.test.ts`.
+
 ## Canonical Story record explorer (#60)
 
 The authenticated job page displays a read-only Story hierarchy and Markdown

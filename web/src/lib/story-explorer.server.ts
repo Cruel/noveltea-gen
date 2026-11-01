@@ -247,7 +247,7 @@ function json(body: unknown, status = 200) {
   return Response.json(body, { status, headers: { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } })
 }
 
-async function validatedExplorer(auth: StudioAuth, store: StudioDatabase,
+export async function validatedExplorer(auth: StudioAuth, store: StudioDatabase,
   request: Request, jobId: string): Promise<{ job: JobStartResult; result: ValidationResult; index: ExplorerIndex }> {
   assertStudioSchemaCurrent(store)
   const user = await requireUser(auth, request.headers)

@@ -12,6 +12,7 @@ import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { canonicalExplorerIndex, canonicalRelationshipGraph, storyExplorerRequest,
   storyRelationshipsRequest } from '../src/lib/story-explorer.server'
+import { generationConfigurationRequest } from '../src/lib/generation-config.server'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -29,6 +30,7 @@ const records = [
     fulfillment: { any_of: [['event.bell']] }, title: 'The bell rings', status: 'draft' } },
   { path: 'events/bell.md', metadata: { type: 'event', id: 'event.bell', arcs: ['arc.warning'], title: 'Ring the bell', status: 'draft' } },
   { path: 'future-kind/custom.md', metadata: { type: 'future-kind', id: 'future-kind.custom', title: 'New type', status: 'draft' } },
+  { path: 'characters/stranger.md', metadata: { type: 'character', id: 'character.stranger', title: 'Stranger', status: 'draft' } },
 ]
 const diagnostics = [
   { path: 'events/bell.md', line: 7, code: 'missing-field', message: 'A source field is missing' },
@@ -180,6 +182,75 @@ process.exit(exit);
     assert.equal(relation.body.graph.validation, 'rejected')
     assert.equal(relation.body.graph.headSha, acquired.headSha)
     assert.doesNotMatch(JSON.stringify(relation.body), /private.yaml|top-secret-inbox-content/)
+
+    // Generation configuration is an authenticated, native-catalog-validated
+    // job resource. It must never infer writable targets from the UI graph.
+    const configuration = async (method: 'GET' | 'PUT', value?: unknown,
+      session?: string, origin = config.baseURL) => {
+      const response = await generationConfigurationRequest(auth, store,
+        new Request(config.baseURL + '/api/jobs/' + jobId + '/configuration', {
+          method, headers: { origin, ...(session ? { cookie: session } : {}) },
+          ...(method === 'PUT' ? { body: JSON.stringify(value) } : {}),
+        }), jobId, config.baseURL)
+      return { status: response.status, body: await response.json() as any }
+    }
+    assert.equal((await configuration('GET')).status, 401)
+    assert.equal((await configuration('GET', undefined, bobCookie)).status, 404)
+    const initial = await configuration('GET', undefined, aliceCookie)
+    assert.equal(initial.status, 200)
+    assert.equal(initial.body.models.length, 0, 'a host Pi model must not appear in another user’s catalog')
+    assert.equal(initial.body.saved, null)
+    const full = {
+      version: 1, headSha: pinned, task: 'Outline the Story',
+      contract: {
+        scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
+        constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] },
+      },
+      limits: { steps: 20, modelCalls: 5, costUsd: 1.5 }, model: null,
+    }
+    assert.equal((await configuration('PUT', full, aliceCookie, 'https://evil.test')).status, 403)
+    assert.equal((await configuration('PUT', full, bobCookie)).status, 404)
+    assert.equal((await configuration('PUT', { ...full, model: { provider: 'openai', id: 'host' } }, aliceCookie)).status, 422)
+    assert.equal((await configuration('PUT', { ...full, headSha: 'a'.repeat(40) }, aliceCookie)).status, 422)
+    assert.equal((await configuration('PUT', { ...full, limits: { steps: -1 } }, aliceCookie)).status, 422)
+    assert.equal((await configuration('PUT', {
+      ...full, contract: { ...full.contract, scope: { ...full.contract.scope, targets: ['arc.warning'] } },
+    }, aliceCookie)).status, 422, 'no implicit whole-Story scope widening')
+    const partial = { ...full, contract: {
+      ...full.contract, scope: { kind: 'partial', depth: 'composition',
+        targets: ['arc.warning', 'event.bell'], branches: [] },
+    } }
+    assert.equal((await configuration('PUT', partial, aliceCookie)).status, 422, 'mixed cluster and record targets fail')
+    const duplicate = { ...full, contract: { ...full.contract,
+      scope: { kind: 'partial', depth: 'architecture', targets: ['arc.warning', 'arc.warning'], branches: [] } } }
+    assert.equal((await configuration('PUT', duplicate, aliceCookie)).status, 422)
+    const missing = { ...full, contract: { ...full.contract,
+      scope: { kind: 'partial', depth: 'architecture', targets: ['arc.not-real'], branches: [] } } }
+    assert.equal((await configuration('PUT', missing, aliceCookie)).status, 422)
+    const unrelated = { ...full, contract: { ...full.contract,
+      scope: { kind: 'partial', depth: 'composition', targets: ['arc.warning'], branches: [],
+        supportingTargets: ['character.stranger'] } } }
+    assert.equal((await configuration('PUT', unrelated, aliceCookie)).status, 422,
+      'unrelated supporting edits cannot be authorized through context expansion')
+    const focused = { ...full, contract: { ...full.contract,
+      scope: { kind: 'partial', depth: 'interactive', targets: ['event.bell'], branches: ['protect'] } } }
+    const stored = await configuration('PUT', focused, aliceCookie)
+    assert.equal(stored.status, 200, JSON.stringify(stored.body))
+    assert.deepEqual(stored.body.saved.contract.scope.targets, ['event.bell'])
+    assert.deepEqual(stored.body.saved.limits, full.limits)
+    assert.deepEqual((await configuration('GET', undefined, aliceCookie)).body.saved, stored.body.saved)
+    const savedRow = store.sqlite.prepare('SELECT generation_config_json AS config FROM studio_sessions WHERE id=?')
+      .get(jobId) as { config: string }
+    assert.deepEqual(JSON.parse(savedRow.config), stored.body.saved)
+    // Once a job is pinned to execution, configuration is immutable.
+    store.sqlite.prepare('UPDATE studio_sessions SET generation_request_json=?, generation_thread_id=? WHERE id=?')
+      .run('{"pinned":true}', acquired.threadId + ':generation:web', jobId)
+    assert.equal((await configuration('PUT', focused, aliceCookie)).status, 409)
+    const readOnly = await configuration('GET', undefined, aliceCookie)
+    assert.equal(readOnly.status, 200)
+    assert.equal(readOnly.body.editable, false)
+    assert.deepEqual(readOnly.body.saved, stored.body.saved)
+    store.sqlite.prepare('UPDATE studio_sessions SET generation_request_json=NULL, generation_thread_id=NULL WHERE id=?').run(jobId)
 
     // A concurrent change to the worktree must not turn the indexed path
     // into a file read through a symlink, even if the validator fixture lists it.
