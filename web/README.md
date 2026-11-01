@@ -1,5 +1,10 @@
 # NovelTea Story Studio — authentication/bootstrap (#40)
 
+For rootless Compose deployment, the trusted host sandbox controller and its
+storage/security boundary, see [deploy/README.md](../deploy/README.md) (#51).
+Jobs prepared through this UI remain paused until execution admission and
+sandbox Pi-tool delegation are connected by subsequent issues.
+
 The web application is a separate pnpm workspace package; the existing Story
 generator and Skein server stay unchanged. This slice implements an authenticated
 TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
