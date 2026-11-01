@@ -6,6 +6,7 @@
  *
  * NT_LIVE_HOSTED_SANDBOX=1: real Pi calls (paid; requires configured Pi auth)
  * NT_TEST_HOSTED_FIXTURE=1: same Docker/controller plumbing, fixture authors
+ * NT_TEST_HOSTED_STAGES=1: extend either mode through Character/World and Event
  * Both opt-ins are disabled in the ordinary unit-test suite.
  */
 import assert from "node:assert/strict";
@@ -22,11 +23,14 @@ import { SandboxClient } from "../src/sandbox-client.js";
 import { startStoryJob } from "../src/job.js";
 import { runFoundationJob } from "../src/foundation.js";
 import { runArchitectureJob } from "../src/architecture.js";
+import { runCharacterWorldJob } from "../src/character-world.js";
+import { runEventWorkItem } from "../src/event-work.js";
 import { hasUserProtectedDecision } from "../src/foundation-record.js";
 import { removeTestTree } from "./helpers.js";
 
 const live = process.env.NT_LIVE_HOSTED_SANDBOX === "1";
 const fixture = process.env.NT_TEST_HOSTED_FIXTURE === "1";
+const includeStages = process.env.NT_TEST_HOSTED_STAGES === "1";
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 
 function git(cwd: string, ...args: string[]): string {
@@ -35,7 +39,7 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.trim();
 }
 
-test("registered rootless Docker controller hosts real Foundation and Architecture Pi specialists", {
+test("registered rootless Docker controller supports Foundation through Event stages", {
   skip: !(live || fixture) ? "Set NT_LIVE_HOSTED_SANDBOX=1 for paid Pi or NT_TEST_HOSTED_FIXTURE=1 for plumbing-only smoke" : false,
   timeout: 900_000,
 }, async () => {
@@ -148,17 +152,35 @@ test("registered rootless Docker controller hosts real Foundation and Architectu
       provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL,
       skillsSource: source, validatorSource: source,
       contract: {
-        scope: { kind: "partial", depth: "architecture", targets: [], branches: [] },
+        scope: includeStages
+          ? { kind: "partial", depth: "interactive", targets: ["arc.truth", "milestone.disclosure"],
+              branches: ["trust-route", "confrontation-route"] }
+          : { kind: "partial", depth: "architecture", targets: [], branches: [] },
         constraints: ["Preserve the archivist and stranded train mystery"],
         envelope: { presentation: "Dialogue-led visual novel",
           hardLimits: ["Small cast", "Two reusable locations"], preferences: [] },
       },
     });
-    assert.equal(architecture.status, "complete-in-scope", JSON.stringify(architecture));
+    assert.equal(architecture.status, includeStages ? "architecture-committed" : "complete-in-scope", JSON.stringify(architecture));
     assert.ok(existsSync(join(job.worktreeStoryRoot, "arcs")));
     assert.ok(existsSync(join(job.worktreeStoryRoot, "milestones")));
     assert.ok((architecture as { skillReads?: unknown[] }).skillReads?.length === 6 || !live,
       "Real Architecture Pi must read all pinned skill references");
+    if (includeStages) {
+      const foundations = await runCharacterWorldJob({ story, job: id, action: "run", fixture: !live,
+        skillsSource: source, validatorSource: source,
+        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL });
+      assert.equal(foundations.status, "foundations-committed", JSON.stringify(foundations));
+      assert.ok(existsSync(join(job.worktreeStoryRoot, "characters/ada.md")));
+      assert.ok(existsSync(join(job.worktreeStoryRoot, "world-entities/archive.md")));
+      const event = await runEventWorkItem({ story, job: id, action: "run", fixture: !live,
+        milestone: "milestone.disclosure", skillsSource: source, validatorSource: source,
+        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL });
+      assert.equal(event.status, "event-cluster-committed", JSON.stringify(event));
+      assert.ok(existsSync(join(job.worktreeStoryRoot, "events/disclose-ledger.md")));
+      // No model shell access to the host is necessary for either specialist.
+      assert.equal((await client.inspect(id)).status, "running");
+    }
     assert.equal(git(repository, "rev-parse", "HEAD"), base);
     assert.equal(git(repository, "status", "--porcelain"), "");
     assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");

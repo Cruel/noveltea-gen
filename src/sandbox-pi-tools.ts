@@ -7,7 +7,7 @@
  * container. The only exception is a digest-verified, read-only skill resource
  * served by the trusted worker, not an arbitrary host filesystem read.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Skill } from "@earendil-works/pi-coding-agent";
@@ -38,11 +38,10 @@ export function sandboxToolsRequired(env: NodeJS.ProcessEnv = process.env): bool
     env.NT_SANDBOX_SOCKET !== undefined || env.NT_SANDBOX_TOKEN_FILE !== undefined;
 }
 
-/** #53/#54 will route these later stages. Until then, never permit a
- * graph worker to give them Pi's local host file/shell/search tools. */
+/** Until the remaining specialist stages are routed, refuse any hosted local fallback. */
 export function blockUnroutedHostedPi(stage: string): void {
   if (sandboxToolsRequired()) {
-    throw new Error("Hosted Pi " + stage + " is not yet sandbox-routed (#53/#54); refused unsafe host fallback.");
+    throw new Error("Hosted Pi " + stage + " is not yet sandbox-routed; refused unsafe host fallback.");
   }
 }
 
@@ -63,6 +62,68 @@ export async function selectSandboxPiTools(
   return createSandboxPiTools(job, snapshot, skills, client ?? new SandboxClient());
 }
 
+/** The same canonical path boundary applies to Pi's tools and model-requested context reads. */
+function mappedStoryPath(job: JobStartResult, requested: unknown, allowStoryRoot = false): string {
+  if (typeof requested !== "string" || requested.includes("\0") || requested.includes("\\")) {
+    throw new Error("Sandbox path must be a valid Story-relative path.");
+  }
+  const abs = resolve(job.worktreeStoryRoot, requested || ".");
+  const rel = relative(job.worktreeStoryRoot, abs);
+  if (rel === "" && allowStoryRoot) return "/story";
+  const parts = rel.split(sep);
+  if (!CANONICAL.has(parts[0] ?? "") || parts.some(p => !p || p === "." || p === ".." || p.startsWith("."))) {
+    throw new Error("Pi tool path denied: outside canonical Story sandbox projection.");
+  }
+  return "/story/" + parts.join("/");
+}
+
+/** Context Manifest resolution remains trusted, but its file bytes must come
+ * from the SAME registered sandbox as the Pi tools. Read bounded base64 chunks
+ * and verify a stable SHA-256; never reopen a host file if Docker fails. */
+export async function readSandboxContextFile(
+  job: JobStartResult, storyRelativePath: string,
+  client: Pick<SandboxClient, "execute"> = new SandboxClient(),
+): Promise<string> {
+  if (!storyRelativePath.endsWith(".md")) throw new Error("Sandbox context requires canonical Markdown.");
+  const path = mappedStoryPath(job, storyRelativePath);
+  const chunkSize = 24 * 1024;
+  const chunks: Buffer[] = [];
+  let digest: string | undefined;
+  let total = 0;
+  for (let index = 0; index < 7; index++) {
+    let stdout = "", stderr = "";
+    const script = 'file="$1"; [ -f "$file" ] && [ ! -L "$file" ] || exit 2; bytes=$(wc -c < "$file") || exit 2; [ "$bytes" -le 131072 ] || exit 3; sha256sum -- "$file" | cut -c1-64; dd if="$file" bs=24576 skip="$2" count=1 status=none | base64 -w0';
+    const code = await client.execute(job.jobId,
+      ["sh", "-c", script, "nt-context", path, String(index)],
+      (stream, data) => { if (stream === "stdout") stdout += data; else stderr += data; });
+    if (code !== 0) throw new Error("Sandbox context read failed (exit " + code + "): " + stderr.slice(0, 300));
+    const separator = stdout.indexOf("\n");
+    const current = stdout.slice(0, separator);
+    const encoded = stdout.slice(separator + 1);
+    if (separator !== 64 || !/^[a-f0-9]{64}$/.test(current) ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      throw new Error("Sandbox context returned malformed file data.");
+    }
+    if (digest && current !== digest) throw new Error("Sandbox context file changed during read.");
+    digest = current;
+    const part = Buffer.from(encoded, "base64");
+    if (part.length > chunkSize || (part.length === 0 && index === 0 && digest !== createHash("sha256").update("").digest("hex"))) {
+      throw new Error("Sandbox context returned an invalid chunk.");
+    }
+    chunks.push(part);
+    total += part.length;
+    if (total > 128 * 1024) throw new Error("Sandbox context file exceeds 128 KiB.");
+    if (part.length < chunkSize) {
+      const body = Buffer.concat(chunks);
+      if (createHash("sha256").update(body).digest("hex") !== digest) {
+        throw new Error("Sandbox context file changed during read.");
+      }
+      return body.toString("utf8");
+    }
+  }
+  throw new Error("Sandbox context file exceeded bounded read.");
+}
+
 export async function createSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[], client: Runner,
 ): Promise<ToolDefinition[]> {
@@ -77,19 +138,8 @@ export async function createSandboxPiTools(
   const pinnedSkills = skills.filter(s => s.filePath.startsWith(verified.root + sep));
   const pinnedRead = createSkillReadTool(pinnedSkills, verified);
 
-  const mapped = (requested: unknown, allowStoryRoot = false): string => {
-    if (typeof requested !== "string" || requested.includes("\0") || requested.includes("\\")) {
-      throw new Error("Sandbox path must be a valid Story-relative path.");
-    }
-    const abs = resolve(job.worktreeStoryRoot, requested || ".");
-    const rel = relative(job.worktreeStoryRoot, abs);
-    if (rel === "" && allowStoryRoot) return "/story";
-    const parts = rel.split(sep);
-    if (!CANONICAL.has(parts[0] ?? "") || parts.some(p => !p || p === "." || p === ".." || p.startsWith("."))) {
-      throw new Error("Pi tool path denied: outside canonical Story sandbox projection.");
-    }
-    return "/story/" + parts.join("/");
-  };
+  const mapped = (requested: unknown, allowStoryRoot = false): string =>
+    mappedStoryPath(job, requested, allowStoryRoot);
   const run = async (args: string[]): Promise<{ stdout: string; code: number }> => {
     let stdout = "", stderr = "";
     const code = await client.execute(job.jobId, args, (stream, data) => {

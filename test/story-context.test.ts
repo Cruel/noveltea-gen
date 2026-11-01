@@ -50,6 +50,16 @@ test("temporary CLI-absent fallback only reads explicit scheduler files, with no
   }
 });
 
+test("hosted context reader never substitutes a host read when sandbox is unavailable", async () => {
+  const root = story();
+  let attempts = 0;
+  const reader = new StoryContextReader({ root, initialPaths: ["events/only.md"],
+    readContent: async path => { assert.equal(path, "events/only.md"); attempts++; throw new Error("Sandbox controller unavailable"); } });
+  await assert.rejects(reader.get(), /Sandbox controller unavailable/);
+  assert.equal(attempts, 1);
+  assert.deepEqual(reader.loadedRevisions(), {});
+});
+
 test("explicit missing CLI fails closed instead of silently substituting a resolver", async () => {
   const reader = new StoryContextReader({ root: story(), initialPaths: ["events/only.md"],
     cli: join(temp, "no-native-cli"), task: { kind: "event", ids: ["event.only"] } });

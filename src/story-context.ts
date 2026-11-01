@@ -21,6 +21,8 @@ export interface StoryContextOptions {
   /** Existing, successfully read Pi Story files when forking a session. */
   previouslyRead?: Record<string, string>;
   cli?: string;
+  /** Hosted mode supplies a sandbox-only file reader; never use host safeRead as fallback. */
+  readContent?: (storyRelativePath: string) => Promise<string>;
 }
 interface NativeFile {
   path: string;
@@ -153,7 +155,9 @@ export class StoryContextReader {
       if (loaded.length >= batchLimit) { pending.push(file.path); continue; }
       // The temporary fallback only fingerprints *explicit* scheduler paths;
       // it never parses links or reconstructs the canonical relationship graph.
-      const content = await safeRead(this.options.root, file.path);
+      const content = this.options.readContent
+        ? await this.options.readContent(file.path)
+        : await safeRead(this.options.root, file.path);
       const version = file.sourceRevision || "sha256:" + createHash("sha256").update(content).digest("hex");
       if (this.seen.get(file.path) === version) { unchanged.push(file.path); continue; }
       if (loaded.length >= batchLimit) { pending.push(file.path); continue; }

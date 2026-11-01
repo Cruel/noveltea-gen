@@ -7,6 +7,7 @@ import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { StoryProject } from "./project.js";
 import { createStoryContextTool, StoryContextReader, type StoryContextRequest } from "./story-context.js";
+import { readSandboxContextFile, sandboxToolsRequired } from "./sandbox-pi-tools.js";
 
 /** Private, job-local Pi optimization state. The Git Story remains authoritative. */
 export interface PiPolicy {
@@ -377,7 +378,11 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   }
   manager ??= SessionManager.create(project.root, options.directory);
   const storyReader = new StoryContextReader({ root: project.root, initialPaths: options.paths,
-    task: options.task, previouslyRead: reused ? previous?.nativeRevisions : undefined });
+    task: options.task, previouslyRead: reused ? previous?.nativeRevisions : undefined,
+    // The trusted native CLI produces typed manifest metadata on the worker.
+    // Every model-requested Story content read goes through the registered
+    // container; never use the local reader in a hosted session.
+    readContent: sandboxToolsRequired() ? path => readSandboxContextFile(job, path) : undefined });
   const contextTool = createStoryContextTool(storyReader);
   // Stable instructions precede this delta. Prior source text is explicitly nonauthoritative.
   const contextNote = "CONTEXT VERSION POLICY: Canonical Story files currently on disk supersede " +

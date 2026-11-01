@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
+import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -79,12 +79,12 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId, directory: dir,
     task: { kind: "character", ids: assignment.milestoneIds, scope: "related" },
   }, runtime);
-  blockUnroutedHostedPi("Character/World");
+  const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [createStoryValidateTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -105,7 +105,9 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       "Write canonical schema '0.1' Markdown, with quoted YAML prose scalars, draft status and honest completeness. " +
       "Where future conditional truth, discoveries or Relationship transitions depend on a branch, describe the pending Event obligation in prose rather than making false initial state claims. " +
       "Never invent typed Event IDs to fill deferred Milestone fulfillment. " +
-      "Do not run git add, commit, reset or checkout. Inspections with grep/rg/git diff/status are permitted. " +
+      (sandboxTools ?
+        "Shell and file searches run only in networkless /story; Git, host paths and credentials are unavailable. Use story_validate for native checks. " :
+        "Do not run git add, commit, reset or checkout. Inspections with grep/rg/git diff/status are permitted. ") +
       selected.guidance + "\nAUTHORIZED WRITABLE PATHS: " + selected.owns.join(", ") +
       "\nBOUND ASSIGNMENT: " + JSON.stringify(assignment, null, 2) +
       "\nAt the END of your response, provide a JSON object on its own line with the exact Story-relative paths you changed: " +

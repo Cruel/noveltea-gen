@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,7 +8,7 @@ import { after, test } from "node:test";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "../src/job.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
-import { createSandboxPiTools, SANDBOX_TOOLS, sandboxToolsRequired, selectSandboxPiTools, blockUnroutedHostedPi } from "../src/sandbox-pi-tools.js";
+import { createSandboxPiTools, SANDBOX_TOOLS, sandboxToolsRequired, selectSandboxPiTools, blockUnroutedHostedPi, readSandboxContextFile } from "../src/sandbox-pi-tools.js";
 import { removeTestTree } from "./helpers.js";
 
 const base = mkdtempSync(join(tmpdir(), "nt-sandbox-pi-"));
@@ -148,6 +149,48 @@ test("pinned skill read is narrow, digest-verified and never sent as an arbitrar
   assert.match(readFileSync(skills[0]!.filePath, "utf8"), /Pinned rules/);
 });
 
+test("hosted context reads complete verified Markdown only through sandbox, including multi-chunk Unicode", async () => {
+  const content = "A chapter: ☕\n".repeat(4100);
+  const data = Buffer.from(content);
+  let calls = 0;
+  const runner = {
+    async execute(_id: string, args: string[], output: (stream: "stdout" | "stderr", data: string) => void) {
+      calls++;
+      assert.equal(args[0], "sh");
+      assert.equal(args[4], "/story/events/chapter.md");
+      const index = Number(args[5]);
+      const chunk = data.subarray(index * 24576, (index + 1) * 24576);
+      output("stdout", createHash("sha256").update(data).digest("hex") + "\n" + chunk.toString("base64"));
+      return 0;
+    },
+  };
+  const actual = await readSandboxContextFile(job, "events/chapter.md", runner);
+  assert.equal(actual, content);
+  assert.ok(calls >= 2);
+  for (const path of ["/etc/private.md", "../other/events/private.md", ".story-inbox/ideas/private.md"]) {
+    await assert.rejects(readSandboxContextFile(job, path, runner), /denied/);
+  }
+  assert.equal(calls, Math.ceil(data.length / 24576));
+});
+
+test("hosted context cannot fall back to host files on container errors or changed bytes", async () => {
+  const path = join(job.worktreeStoryRoot, "events", "chapter.md");
+  mkdirSync(join(job.worktreeStoryRoot, "events"), { recursive: true });
+  writeFileSync(path, "Host-only private data should not leak.\n");
+  const broken = {
+    async execute() { throw new Error("controller offline"); },
+  };
+  await assert.rejects(readSandboxContextFile(job, "events/chapter.md", broken), /controller offline/);
+  const corrupt = {
+    async execute(_id: string, _args: string[], output: (stream: "stdout" | "stderr", data: string) => void) {
+      output("stdout", createHash("sha256").update("different").digest("hex") + "\n" +
+        Buffer.from("Injected bytes").toString("base64"));
+      return 0;
+    },
+  };
+  await assert.rejects(readSandboxContextFile(job, "events/chapter.md", corrupt), /changed during read/);
+});
+
 test("real rootless sandbox image executes all seven Pi tool operations without host tools", {
   skip: process.env.NT_TEST_ROOTLESS_SANDBOX !== "1",
 }, async () => {
@@ -178,6 +221,10 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
       .map(t => [t.name, t])) as Record<string, Awaited<ReturnType<typeof createSandboxPiTools>>[number]>;
     await call(tools.write!, { path: "arcs/chapter.md", content: "Opening scene\n" });
     assert.match(JSON.stringify((await call(tools.read!, { path: "arcs/chapter.md" })).content), /Opening scene/);
+    assert.equal(await readSandboxContextFile(job, "arcs/chapter.md", remote), "Opening scene\n");
+    const larger = "Canonical evidence with Unicode ☕\n".repeat(1900);
+    await call(tools.write!, { path: "arcs/large.md", content: larger });
+    assert.equal(await readSandboxContextFile(job, "arcs/large.md", remote), larger);
     await call(tools.edit!, { path: "arcs/chapter.md", edits: [{ oldText: "Opening", newText: "Closing" }] });
     assert.equal(readFileSync(join(arcs, "chapter.md"), "utf8"), "Closing scene\n");
     assert.match(JSON.stringify((await call(tools.grep!, { pattern: "Closing" })).content), /chapter.md/);

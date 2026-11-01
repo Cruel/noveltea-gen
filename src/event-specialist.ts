@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { blockUnroutedHostedPi } from "./sandbox-pi-tools.js";
+import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -80,12 +80,12 @@ export async function authorEventCluster(
     task: { kind: "event", ids: [assignment.milestoneId], scope: "related" },
     provider, model: modelId, directory: sessionDir,
   }, runtime);
-  blockUnroutedHostedPi("Event");
+  const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [createStoryValidateTool(job), context.contextTool],
-    noTools: "all", tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -108,7 +108,9 @@ export async function authorEventCluster(
       "You may write events/*.md and strictly connected, authorized arcs/*.md, facts/*.md, revelations/*.md and relationships/*.md. " +
       "All records must contain valid schema '0.1' frontmatter with ONLY allowed fields and nonempty Markdown body prose. " +
       "Do not invent references; preserve user-protected author choices. New work remains draft, not author-approved. " +
-      "Do not run git add, commit, checkout or reset. Git diff/status and grep inspection are permitted. " +
+      (sandboxTools ?
+        "Shell and file searches run only in networkless /story; Git, host paths and credentials are unavailable. Use story_validate for native checks. " :
+        "Do not run git add, commit, checkout or reset. Git diff/status and grep inspection are permitted. ") +
       "If the scope cannot be fulfilled without changing a protected or unrelated record, report an architectural conflict rather than editing it. " +
       "Any unresolved future alternative must be a concrete later obligation, not a fabricated Event ID. " +
       "REPORT an exact JSON object at the end (no markdown fences): " +
