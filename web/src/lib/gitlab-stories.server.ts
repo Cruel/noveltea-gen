@@ -301,6 +301,19 @@ async function preflight(reader: Reader, directory: string, fullPath: string) {
   await verifyLfs(reader, directory, files, sizes)
   return { sizeBytes, limitBytes: STORY_LIMIT_BYTES, blobCount: files.length }
 }
+/** Verify the cataloged GitLab project and pinned Story again before Git transfer. */
+export async function verifyGitlabStorySelection(
+  token: string, projectId: number, repository: string, commit: string, directory: string,
+) {
+  const path = directoryPath(directory)
+  const authorized = await authorizedProject(token, projectId)
+  if (authorized.path_with_namespace !== repository) {
+    invalid('GitLab project identity changed since connection; reconnect it before creating a job.')
+  }
+  const pinned = await commitSnapshot(token, projectId, commit)
+  return preflight(new Reader(token, projectId, pinned), path, authorized.path_with_namespace)
+}
+
 export async function gitlabStoryRequest(auth: StudioAuth, store: StudioDatabase, request: Request): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'POST') return reply({ error: 'Method not allowed' }, 405)
   if (request.method === 'POST' && request.headers.get('origin') !== new URL(request.url).origin) {

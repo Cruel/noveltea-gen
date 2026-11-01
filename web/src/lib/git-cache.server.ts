@@ -36,7 +36,8 @@ function git(cwd: string, env: NodeJS.ProcessEnv, ...args: string[]): string {
   return result.trim()
 }
 
-function gitEnvironment(url: string, token: string): NodeJS.ProcessEnv {
+/** Ephemeral Git child-process environment; never persist or expose to clients. */
+export function gitEnvironment(url: string, token: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1',
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
@@ -46,14 +47,19 @@ function gitEnvironment(url: string, token: string): NodeJS.ProcessEnv {
         key.startsWith('GIT_TRACE') || key === 'GIT_CURL_VERBOSE' || key === 'GIT_ASKPASS') delete env[key]
   }
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
-  if (url.startsWith('https://github.com/')) {
-    // GitHub App user tokens work with Git smart HTTP. Auth is carried in
-    // child-only environment, never URL, argv, remote config, or persistent Git.
-    if (!token) throw new Error('Missing authenticated GitHub Git credential')
+  const github = url.startsWith('https://github.com/')
+  const gitlab = url.startsWith('https://gitlab.com/')
+  if (github || gitlab) {
+    // OAuth tokens for either provider are supplied only to the Git child.
+    // Neither origin URL, argv, on-disk Git config nor durable state stores
+    // the token. GitLab's OAuth HTTPS username is the literal "oauth2".
+    if (!token) throw new GitCacheError(409, 'Git provider authorization is missing; reconnect your account.')
     env.GIT_CONFIG_COUNT = '1'
-    env.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+    env.GIT_CONFIG_KEY_0 = github
+      ? 'http.https://github.com/.extraheader'
+      : 'http.https://gitlab.com/.extraheader'
     env.GIT_CONFIG_VALUE_0 = 'AUTHORIZATION: basic ' +
-      Buffer.from('x-access-token:' + token).toString('base64')
+      Buffer.from((github ? 'x-access-token:' : 'oauth2:') + token).toString('base64')
   }
   return env
 }
@@ -99,6 +105,16 @@ function treeSizes(base: string, env: NodeJS.ProcessEnv, commit: string, directo
   return { bytes, count }
 }
 
+/** Accept provider-derived HTTPS remotes, including GitLab subgroup namespaces. */
+export function allowedGitRemote(url: string): boolean {
+  const github = /^https:\/\/github\.com\/[a-z\d-]+\/[a-z\d_.-]+\.git$/i.test(url)
+  const gitlab = /^https:\/\/gitlab\.com\/(?:[a-z\d_][a-z\d_.-]*\/)+[a-z\d_][a-z\d_.-]*\.git$/i.test(url) &&
+    !url.split('/').some(part => part === '.' || part === '..')
+  // Local file remotes are reachable only via the trusted internal caller,
+  // never from a request body. They are also used by isolated Git tests.
+  return github || gitlab || url.startsWith('file://')
+}
+
 function assertInput(input: CachedStoryRequest) {
   if (!isAbsolute(input.cacheDirectory)) throw new GitCacheError(503, 'Git cache root must be absolute and configured by the server.')
   if (!input.ownerId || !input.repositoryId || !SHA.test(input.commit) ||
@@ -108,8 +124,7 @@ function assertInput(input: CachedStoryRequest) {
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(input.jobId) || input.jobId.includes('..')) {
     throw new GitCacheError(400, 'Invalid cached Story identity, revision, or directory.')
   }
-  if (!/^https:\/\/github\.com\/[a-z\d-]+\/[a-z\d_.-]+\.git$/i.test(input.remoteUrl) &&
-      !input.remoteUrl.startsWith('file://')) {
+  if (!allowedGitRemote(input.remoteUrl)) {
     throw new GitCacheError(400, 'Unsupported authenticated Git remote.')
   }
 }
@@ -131,7 +146,7 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
       } catch {
         // Preserve incomplete clone for investigation; never overwrite an
         // uncertain Git directory or existing job.
-        throw new GitCacheError(503, 'Git clone failed; check GitHub authorization, repository access, and cache state.')
+        throw new GitCacheError(503, 'Git clone failed; check provider authorization, repository access, and cache state.')
       }
     }
     if (await realpath(base) !== base || !(await stat(base)).isDirectory()) {
@@ -155,7 +170,7 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
       git(base, localEnv, 'sparse-checkout', 'set', '--no-cone', '--', '/.__noveltea_no_content__/**')
       git(base, localEnv, 'checkout', '--detach', input.commit)
     } catch {
-      throw new GitCacheError(503, 'Unable to fetch and pin the selected GitHub commit. Recheck provider access and preflight revision.')
+      throw new GitCacheError(503, 'Unable to fetch and pin the selected provider commit. Recheck access and preflight revision.')
     }
     const sizes = treeSizes(base, localEnv, input.commit, input.directory)
     if ((input.verifiedSizeBytes !== undefined && sizes.bytes !== input.verifiedSizeBytes) ||

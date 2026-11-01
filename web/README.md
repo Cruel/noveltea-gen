@@ -167,6 +167,41 @@ jobs, recoverable edits, pin and size mismatches, and user isolation. Live
 GitHub App Git transfer, disk quotas and safe cache eviction still need
 provider/deployment certification; no job or worktree is silently evicted.
 
+## GitLab shared Git acquisition and job worktrees (#47)
+
+GitLab.com uses the **same** authenticated, per-user/per-repository Git
+object cache and independent sparse linked worktrees as GitHub. After verifying
+and adding a GitLab Story, choose **Create isolated job worktree**. The
+`POST /api/gitlab/jobs` endpoint accepts only `{storyId,jobId,commit}`.
+The server derives the GitLab project and Story path from the owner-scoped
+catalog, rechecks current membership and immutable project identity, resolves
+the selected commit, and repeats the full GitLab size/LFS preflight before
+acquiring source. A job retains its own original pinned SHA across subsequent
+Story re-imports; retrying the same job ID reopens its untouched working files
+rather than resetting them. A foreign, unpinned, or mismatched job is rejected.
+
+Set `NT_GIT_CACHE_DIR` to the shared absolute cache volume described above.
+GitLab projects use `https://gitlab.com/<namespace>/<project>.git`, including
+nested group namespaces, without embedding credentials in the remote. The
+connected user's GitLab OAuth token (authorized with `api` and
+`write_repository`) is supplied to Git via a **child-process-only** HTTPS
+Basic `oauth2` header. No credential is persisted in the clone remote, Git
+configuration, job manifest, browser response, or logs. Revoked GitLab
+access blocks new acquisitions without destroying existing job state. Missing
+cache configuration, invalid project/revision, unverified Git blobs,
+unsupported objects, mismatched size counts, and unsafe worktree recovery
+produce explicit errors rather than overwriting files. A concurrent job-ID
+registration conflict is reported as HTTP 409, with any already-created Git
+state preserved for explicit reconciliation rather than silently deleted.
+
+Jobs are prepared **paused** and do not start Pi or LangGraph until the later
+web execution workflow. Run
+`pnpm --filter @noveltea/studio exec tsx --test test/gitlab-jobs.test.ts`
+for provider authorization, revision, transfer credential, shared cache and
+recovery regressions. A live GitLab.com private-project HTTPS clone and
+provider/deployment certification remain separate acceptance work, as do
+disk quotas and eviction.
+
 ## GitLab Story discovery and size preflight (#44)
 
 Connected GitLab.com projects have **Browse Stories** links on the dashboard

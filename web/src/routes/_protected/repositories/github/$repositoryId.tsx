@@ -54,7 +54,7 @@ function GithubStories() {
 
   const select = async () => {
     if (!commit || !listing?.isStory) return
-    setBusy(true); setError(null); setSelection(null)
+    setBusy(true); setError(null); setSelection(null); setJob(null); setPendingJobId(null)
     try {
       const result = await api<Selection>('/api/github/stories', { repositoryId, directory, commit })
       setSelection(result)
