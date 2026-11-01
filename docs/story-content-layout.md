@@ -66,9 +66,11 @@ traces can be inspected.
   Git revision, then initialize/re-register a new Story job. Do not silently
   rewrite active job manifests or auto-migrate author-only receipts.
 - Existing Docker containers with the old per-record mount layout are
-  rejected by the new layout label. They can be disposed through the trusted
-  controller and reacquired with one mount after their Story directory is
-  safe. The image and rootless Docker prerequisites do not change.
+  rejected by the new layout label. An operator must retire those legacy
+  containers before acquiring a migrated job; the controller rejects the
+  legacy registered Story identity and cannot dispose it through the normal
+  job API. Do not rebind an active job in place. The image and rootless Docker
+  prerequisites do not change.
 
 ## Future-ticket acceptance guidance
 
