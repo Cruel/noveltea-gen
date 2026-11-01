@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -62,5 +62,43 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
     assert.notEqual(rejected.status, 0)
     assert.match(rejected.stderr, /newer application/)
     assert.doesNotMatch(rejected.stdout, /SQLite migrations applied/)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('migration CLI loads the Vite development environment including local overrides', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'noveltea-migrate-env-'))
+  const ignoredPath = join(directory, 'ignored.sqlite')
+  const databasePath = join(directory, 'from-env-local.sqlite')
+  // Simulate Vite's env files without reading or changing real OAuth secrets.
+  writeFileSync(join(directory, '.env'), [
+    'BETTER_AUTH_URL=http://localhost:3000',
+    'BETTER_AUTH_SECRET=local-cli-env-test-secret-012345678901234567890',
+    'GITHUB_CLIENT_ID=local-github',
+    'GITHUB_CLIENT_SECRET=local-github-secret',
+    'GITLAB_CLIENT_ID=local-gitlab',
+    'GITLAB_CLIENT_SECRET=local-gitlab-secret',
+    `NT_STUDIO_DB_PATH=${ignoredPath}`,
+  ].join('\n') + '\n')
+  writeFileSync(join(directory, '.env.local'), `NT_STUDIO_DB_PATH=${databasePath}\n`)
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'development' }
+  for (const key of [
+    'BETTER_AUTH_URL', 'BETTER_AUTH_SECRET', 'GITHUB_CLIENT_ID',
+    'GITHUB_CLIENT_SECRET', 'GITLAB_CLIENT_ID', 'GITLAB_CLIENT_SECRET',
+    'NT_STUDIO_DB_PATH',
+  ]) delete env[key]
+  try {
+    const result = spawnSync(join(webRoot, 'node_modules/.bin/tsx'),
+      [join(webRoot, 'src/db/migrate-cli.ts')], {
+        cwd: directory, env, encoding: 'utf8', timeout: 20_000,
+      })
+    assert.equal(result.status, 0, `Migration without exported .env failed: ${result.stderr}`)
+    assert.match(result.stdout, /NovelTea Studio SQLite migrations applied/)
+    assert.ok(existsSync(databasePath), 'Vite .env.local DB path was not used')
+    assert.equal(existsSync(ignoredPath), false, 'Base .env DB path unexpectedly won')
+    const store = openStudioDatabase(databasePath)
+    try {
+      assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(),
+        [{ version: 1 }, { version: 2 }, { version: 3 }])
+    } finally { store.sqlite.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

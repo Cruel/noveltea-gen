@@ -12,10 +12,13 @@ GitLab Story discovery, generation, SSE, and publication remain separate tickets
 
 Use Node.js 24 (Node >=22.12 supported by Better Auth, 24 recommended for
 SQLite compatibility), `pnpm install --frozen-lockfile`, and configure the
-variables documented in `web/.env.example`. Export them in your shell or
-service environment before running `migrate` or `start`: unlike Vite's dev
-server, the standalone migration command does not load a private `.env` file.
-Do not commit OAuth secrets. `BETTER_AUTH_SECRET` is **required**, at least
+variables documented in `web/.env.example`. For local development, place them
+in `web/.env` (optionally overridden by `web/.env.local`). The `migrate`
+command now reads those files with the same Vite environment precedence as
+`dev`, including `NT_STUDIO_DB_PATH` if configured. Export the configuration
+through the service environment when running the production `start` command;
+that standalone server does not load Vite's development `.env` files. Stop
+Studio before running migrations. Do not commit OAuth secrets. `BETTER_AUTH_SECRET` is **required**, at least
 32 characters and stable across restarts. Its loss prevents decrypting saved
 provider tokens; back it up separately from SQLite. For rotations, see Better
 Auth's versioned `BETTER_AUTH_SECRETS` guidance.
