@@ -86,6 +86,13 @@ export async function github<T>(token: string, path: string): Promise<T> {
   if (response.status === 401) throw new GithubError(409, 'GitHub authorization expired. Reconnect your GitHub account.')
   if (response.status === 403 || response.status === 429) throw new GithubError(503, 'GitHub denied or rate-limited the request. Check permissions and retry.')
   if (response.status === 404) throw new GithubError(404, 'GitHub installation or repository not accessible.')
+  if (response.status === 409) {
+    const detail = await response.json().catch(() => null) as { message?: unknown } | null
+    if (detail?.message === 'Git Repository is empty.') {
+      throw new GithubError(409, 'This GitHub repository has no commits. Create an initial commit before browsing Stories.')
+    }
+    throw new GithubError(409, 'GitHub reported a repository conflict. Resolve it and try again.')
+  }
   if (!response.ok) throw new GithubError(502, 'GitHub is temporarily unavailable. Try again.')
   try { return await response.json() as T } catch { throw new GithubError(502, 'GitHub returned an invalid response.') }
 }

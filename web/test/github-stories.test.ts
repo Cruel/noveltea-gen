@@ -48,6 +48,7 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
   let revoke = false
   let unsupported = false
   let defaultBranch = 'main'
+  let repositoryEmpty = false
   let attributes = '*.bin filter=lfs'
   const blobText = () => lfs
     ? 'version https://git-lfs.github.com/spec/v1\noid sha256:' + sha('a') + '\nsize 999999999\n'
@@ -96,6 +97,7 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
       }] })
     if (url.endsWith('/repos/Acme/BigRepo')) return Response.json({ default_branch: defaultBranch })
     if (url.endsWith('/repos/Acme/BigRepo/commits/' + defaultBranch)) {
+      if (repositoryEmpty) return Response.json({ message: 'Git Repository is empty.', status: 409 }, { status: 409 })
       return Response.json({ sha: commit, commit: { tree: { sha: root } } })
     }
     if (url.endsWith('/repos/Acme/BigRepo/git/commits/' + commit)) return Response.json({ sha: commit, tree: { sha: root } })
@@ -144,6 +146,13 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     assert.equal(data.commit, commit)
     assert.deepEqual(data.directories.map((d: { path: string }) => d.path), ['game-assets', 'sample-story'])
     assert.equal(data.isStory, false)
+    // GitHub returns 409 for an empty repository. The API must communicate
+    // that actionable state instead of reporting a generic 502 outage.
+    repositoryEmpty = true
+    const empty = await get(query)
+    assert.equal(empty.status, 409)
+    assert.match((await empty.json()).error, /no commits|empty repository/i)
+    repositoryEmpty = false
     const subdir = await get(query + '&directory=sample-story&commit=' + commit)
     assert.equal(subdir.status, 200)
     assert.equal((await subdir.json()).isStory, true)

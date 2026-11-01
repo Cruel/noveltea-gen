@@ -65,7 +65,9 @@ directories (e.g., `creative-direction/*.md`, `arcs/*.md`,
 `milestones/*.md`). Detection is a **candidate** signal, not a claim of
 canonical content or protected-decision validation. The native validator will
 run when a job/worktree exists. Empty, untracked Story directories cannot be
-detected through Git Trees.
+detected through Git Trees. A repository with **no commits** has no Git tree;
+GitHub returns HTTP 409 (`Git Repository is empty.`), which NovelTea presents
+as an actionable initial-commit requirement rather than a GitHub outage.
 
 `GET /api/github/stories?repositoryId=<catalog UUID>` lists root directories
 and pins a commit; add `directory=...` and `commit=<SHA>` to browse without
