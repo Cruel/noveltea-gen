@@ -319,6 +319,17 @@ test('real rootless Docker stops delayed background writers before returning suc
   const controller = new SandboxController(config)
   try {
     await controller.acquire(ID)
+    // A regression that only checks for absent delayed writes could pass if
+    // the sandbox never had write access at all. Prove the authorized bind
+    // is writable before checking that background descendants are stopped.
+    assert.equal(await controller.execute(ID,
+      ['sh', '-c', 'printf allowed > /story/events/allowed.md'], () => {}), 0)
+    assert.equal(readFileSync(join(story, 'events', 'allowed.md'), 'utf8'), 'allowed')
+    assert.equal(await controller.execute(ID, ['sh', '-c',
+      'test ! -e /story/.git && test ! -e /story/.story-inbox && ' +
+      'test ! -e /run/secrets && test ! -e /var/run/docker.sock && ' +
+      '! touch /etc/forbidden 2>/dev/null'], () => {}), 0)
+
     const status = await controller.execute(ID,
       ['sh', '-c', '(sleep 2; printf late >> /story/events/late.md) >/dev/null 2>&1 &'],
       () => {})
