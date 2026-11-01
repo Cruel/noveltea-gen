@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ExplorerDiagnostic, ExplorerIndex, ExplorerRecord } from '../../../lib/story-explorer.server'
+import { StoryRelationshipGraph } from './-StoryRelationshipGraph'
 
 type LoadedRecord = { record: ExplorerRecord; markdown: string; headSha: string }
 type Category = { title: string; records: ExplorerRecord[] }
@@ -18,6 +19,7 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
   const [error, setError] = useState<string | null>(null)
   const [recordError, setRecordError] = useState<string | null>(null)
   const [refreshToken, setRefreshToken] = useState(0)
+  const treeRef = useRef<HTMLElement>(null)
   const url = '/api/jobs/' + encodeURIComponent(jobId) + '/records'
 
   useEffect(() => {
@@ -28,7 +30,8 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
         const body = await response.json() as { index?: ExplorerIndex; error?: string }
         if (!response.ok || !body.index) throw new Error(body.error || 'Could not load canonical Story index.')
         return body.index
-      }).then(value => setIndex(value))
+      }).then(value => { setIndex(value); setSelected(
+        value.records.find(record => record.type === 'creative-direction')?.id ?? value.records[0]?.id ?? null) })
       .catch(e => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Unable to load Story') })
     return () => controller.abort()
   }, [url, revision, refreshToken])
@@ -48,6 +51,16 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
       .catch(e => { if (!controller.signal.aborted) setRecordError(e instanceof Error ? e.message : 'Unable to read record') })
     return () => controller.abort()
   }, [url, selected, index])
+
+  useEffect(() => {
+    if (!selected) return
+    const buttons = treeRef.current?.querySelectorAll<HTMLButtonElement>('[data-record-id]')
+    const target = [...(buttons ?? [])].find(button => button.dataset.recordId === selected)
+    if (!target) return
+    for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+      if (parent instanceof HTMLDetailsElement) parent.open = true
+    }
+  }, [selected, index])
 
   const groups = useMemo(() => {
     if (!index) return [] as Category[]
@@ -73,6 +86,7 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
   const issueCount = (record: ExplorerRecord) => diagnostics.filter(d => d.path === record.path).length
   const item = (record: ExplorerRecord) => <button type="button" key={record.id}
     className={'story-record-link' + (selected === record.id ? ' selected' : '')}
+    data-record-id={record.id}
     aria-current={selected === record.id ? 'true' : undefined}
     onClick={() => setSelected(record.id)}>
     <span>{record.title}</span><small>{record.id}{issueCount(record) ? ' · ' + issueCount(record) + ' diagnostics' : ''}</small>
@@ -102,7 +116,7 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
         {index.records.length} typed records · {diagnostics.length} diagnostics
       </p>
       <div className="story-explorer-layout">
-        <aside aria-label="Story record hierarchy" className="story-explorer-tree">
+        <aside ref={treeRef} aria-label="Story record hierarchy" className="story-explorer-tree">
           {otherGroups.filter(g => g.records.some(r => r.type === 'creative-direction')).map(group =>
             <details key={group.title} open><summary>{group.title} ({group.records.length})</summary>
               <ul>{group.records.map(record => <li key={record.id}>{item(record)}</li>)}</ul>
@@ -128,6 +142,8 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
             </details>)}
           {!index.records.length && <p>No indexed canonical records.</p>}
         </aside>
+        <div className="story-explorer-detail">
+          <StoryRelationshipGraph jobId={jobId} index={index} selectedId={selected} onSelect={setSelected} />
         <div className="story-record-view" aria-label="Read-only Markdown record">
           {!selected && <p>Select a typed record to read its Markdown.</p>}
           {recordError && <p role="alert" className="error">{recordError}</p>}
@@ -142,6 +158,7 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
                   <li key={i}><strong>{d.code}</strong> (line {d.line ?? '?'}) — {d.message}</li>)}
               </ul></div>}
           </>}
+        </div>
         </div>
       </div>
       <div className="story-diagnostics">

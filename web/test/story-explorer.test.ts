@@ -10,7 +10,8 @@ import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
-import { canonicalExplorerIndex, storyExplorerRequest } from '../src/lib/story-explorer.server'
+import { canonicalExplorerIndex, canonicalRelationshipGraph, storyExplorerRequest,
+  storyRelationshipsRequest } from '../src/lib/story-explorer.server'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -105,13 +106,24 @@ const records = ${JSON.stringify(records)};
 const diagnostics = ${JSON.stringify(diagnostics)};
 const base = args[args.indexOf('--base') + 1];
 const readiness = args.includes('readiness');
-const payload = readiness
+const context = args.includes('context');
+const manifest = { contractRevision: '0.1', unresolved: [], bounded: { truncated: false, maxDepth: 2, maxFiles: 128 },
+  files: [
+    { id: 'event.bell', path: 'events/bell.md', inclusions: [
+      { code: 'requested-id', sourceId: 'event.bell', targetId: 'event.bell' },
+      { code: 'arc-membership', sourceId: 'event.bell', targetId: 'arc.warning', pointer: '/arcs/0' }] },
+    { id: 'arc.warning', path: 'arcs/warning.md', inclusions: [
+      { code: 'arc-membership', sourceId: 'event.bell', targetId: 'arc.warning', pointer: '/arcs/0' }] },
+    { id: 'milestone.bell', path: 'milestones/bell.md', inclusions: [
+      { code: 'fulfillment', sourceId: 'milestone.bell', targetId: 'event.bell' }] },
+  ] };
+const payload = context ? { manifest } : readiness
   ? { readiness: { contractRevision: '0.1', design: { stages: {} }, approved: { stages: {} }, outstanding: [] } }
   : { catalog: { contractRevision: '0.1', records, diagnostics,
       coverage: {}, authorization: {}, protection: { status: 'checked', base,
         authorizationVerified: false, complete: true, findings: [],
         impact: { changed: [], moved: [], affected: [] } } } };
-const exit = readiness ? 0 : 1;
+const exit = readiness || context ? 0 : 1;
 process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: exit,
   success: exit === 0, diagnostics: [], ...payload}));
 process.exit(exit);
@@ -146,12 +158,36 @@ process.exit(exit);
     assert.equal((await api('?id=event.bell&id=arc.warning', aliceCookie)).response.status, 400)
     assert.equal((await api('?id=event.unknown', aliceCookie)).response.status, 404)
 
+    const relationships = async (suffix: string, session?: string) => {
+      const response = await storyRelationshipsRequest(auth, store,
+        new Request(config.baseURL + '/api/jobs/' + jobId + '/relationships' + suffix,
+          { headers: session ? { cookie: session } : {} }), jobId)
+      return { response, body: await response.json() as any }
+    }
+    assert.equal((await relationships('?id=event.bell')).response.status, 401)
+    assert.equal((await relationships('?id=event.bell', bobCookie)).response.status, 404)
+    assert.equal((await relationships('?id=event.unknown', aliceCookie)).response.status, 404)
+    assert.equal((await relationships('?id=event.bell&scope=other', aliceCookie)).response.status, 400)
+    assert.equal((await relationships('?id=event.bell&kind=event', aliceCookie)).response.status, 400)
+    assert.equal((await relationships('?id=event.bell&scope=related&scope=focused', aliceCookie)).response.status, 400)
+    const relation = await relationships('?id=event.bell&scope=related', aliceCookie)
+    assert.equal(relation.response.status, 200, JSON.stringify(relation.body))
+    assert.deepEqual(relation.body.graph.relationships, [
+      { source: 'event.bell', target: 'arc.warning', code: 'arc-membership' },
+      { source: 'milestone.bell', target: 'event.bell', code: 'fulfillment' },
+    ])
+    assert.equal(relation.body.graph.protection, 'checked')
+    assert.equal(relation.body.graph.validation, 'rejected')
+    assert.equal(relation.body.graph.headSha, acquired.headSha)
+    assert.doesNotMatch(JSON.stringify(relation.body), /private.yaml|top-secret-inbox-content/)
+
     // A concurrent change to the worktree must not turn the indexed path
     // into a file read through a symlink, even if the validator fixture lists it.
     const { unlinkSync } = await import('node:fs')
     unlinkSync(join(acquired.worktreeStoryRoot, 'events', 'bell.md'))
     symlinkSync(join(repo, '.story-inbox', 'ideas', 'private.yaml'), join(acquired.worktreeStoryRoot, 'events', 'bell.md'))
     assert.equal((await api('?id=event.bell', aliceCookie)).response.status, 409)
+    assert.equal((await relationships('?id=event.bell', aliceCookie)).response.status, 409)
   } finally {
     store.sqlite.close()
     for (const key of envKeys) {
@@ -182,6 +218,56 @@ test('optional installed native validator supplies real typed index and Mileston
   assert.ok(index.records.some(record => record.type === 'event'))
   assert.ok(index.records.filter(record => record.type === 'milestone').some(record => record.events.length > 0))
   assert.equal(index.diagnostics.length, 0)
+})
+
+test('optional installed native Context Manifest supplies typed relationship evidence, not invented reachability', {
+  skip: !process.env.NT_REAL_NATIVE_CLI ||
+    !existsSync(resolve(process.env.NT_SKILLS_CHECKOUT ?? '../noveltea-skills', 'fixtures/reference-story')),
+}, () => {
+  const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../noveltea-skills')
+  const fixture = join(skills, 'fixtures/reference-story')
+  const baseline = git(skills, 'rev-parse', 'HEAD')
+  const validated = spawnSync(process.env.NT_REAL_NATIVE_CLI!,
+    ['--json', 'narrative', 'validate', fixture, '--base', baseline],
+    { encoding: 'utf8', timeout: 60_000 })
+  assert.equal(validated.status, 0, validated.stderr)
+  const index = canonicalExplorerIndex(JSON.parse(validated.stdout).catalog, baseline, baseline, 'passed')
+  const queried = spawnSync(process.env.NT_REAL_NATIVE_CLI!,
+    ['--json', 'narrative', 'context', fixture, '--kind', 'review',
+      '--id', 'event.question-ivo', '--scope', 'related'],
+    { encoding: 'utf8', timeout: 60_000 })
+  assert.equal(queried.status, 0, queried.stderr)
+  const reply = JSON.parse(queried.stdout)
+  const graph = canonicalRelationshipGraph(reply.manifest, index, 'event.question-ivo', 'related')
+  assert.ok(graph.records.some(r => r.id === 'event.question-ivo'))
+  assert.ok(graph.relationships.some(r => r.code === 'arc-membership' &&
+    r.source === 'event.question-ivo' && r.target === 'arc.stolen-warning'))
+  assert.ok(graph.relationships.every(r => r.source !== r.target))
+  assert.ok(graph.relationships.every(r => graph.records.some(n => n.id === r.source) &&
+    graph.records.some(n => n.id === r.target)))
+})
+
+test('native-only relationship projection refuses unsafe records, truncation and invented edges', () => {
+  const index = canonicalExplorerIndex({ records, diagnostics: [], protection: { status: 'checked' } },
+    'base', 'head', 'passed')
+  const native = (files: unknown[], truncated = false) => ({
+    contractRevision: '0.1', unresolved: [], bounded: { maxFiles: 128, truncated }, files,
+  })
+  const event = { id: 'event.bell', path: 'events/bell.md', inclusions: [
+    { code: 'requested-id', sourceId: 'event.bell', targetId: 'event.bell' },
+  ] }
+  const noEdges = canonicalRelationshipGraph(native([event]), index, 'event.bell', 'focused')
+  assert.deepEqual(noEdges.relationships, [])
+  assert.deepEqual(noEdges.records.map(r => r.id), ['event.bell'])
+  assert.throws(() => canonicalRelationshipGraph(native([event], true), index, 'event.bell', 'focused'), /truncated/)
+  assert.throws(() => canonicalRelationshipGraph(native([]), index, 'event.bell', 'focused'), /omitted the requested/)
+  assert.throws(() => canonicalRelationshipGraph(native([{ ...event, path: '.story-inbox/ideas/private.md' }]),
+    index, 'event.bell', 'focused'), /noncanonical/)
+  assert.throws(() => canonicalRelationshipGraph(native([{ ...event, inclusions: [
+    { code: 'made up!', sourceId: 'event.bell', targetId: 'arc.warning' },
+  ] }]), index, 'event.bell', 'related'), /invalid relationship/)
+  assert.throws(() => canonicalRelationshipGraph(native([event, event]), index, 'event.bell', 'focused'),
+    /noncanonical/)
 })
 
 test('canonical index fails closed on duplicate IDs and outside paths', () => {
