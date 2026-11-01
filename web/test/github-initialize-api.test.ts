@@ -50,7 +50,7 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
         { path: 'README.md', type: 'blob', mode: '100644', sha: sha('f'), size: 12 },
         ...(attrs ? [{ path: '.gitattributes', type: 'blob', mode: '100644',
           sha: attrSha, size: Buffer.byteLength(attrs) }] : []),
-        ...(alreadyStory ? [{ path: 'new-story', type: 'tree', mode: '040000', sha: dirSha }] : []),
+        ...(alreadyStory ? [{ path: 'story', type: 'tree', mode: '040000', sha: dirSha }] : []),
       ],
     })
     if (url.endsWith('/git/trees/' + dirSha)) return Response.json({
@@ -91,7 +91,7 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
       VALUES (?,?,'github','123','Acme/Repo','2026-10-31')`).run(repositoryId, alice.id)
     const get = (session = aliceCookie) => githubInitializationRequest(auth, store,
       new Request(origin + '/api/github/initialize?' + new URLSearchParams({
-        repositoryId, directory: 'new-story',
+        repositoryId, directory: 'story',
       }), { headers: { cookie: session } }), origin)
     const post = (body: object, requestOrigin = origin) => githubInitializationRequest(auth, store,
       new Request(origin + '/api/github/initialize', {
@@ -102,11 +102,14 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
     const available = await get()
     assert.equal(available.status, 200)
     assert.deepEqual((await available.json()).mode, 'branch')
-    const base = { repositoryId, directory: 'new-story', jobId: '22222222-2222-4222-8222-222222222222',
+    const base = { repositoryId, directory: 'story', jobId: '22222222-2222-4222-8222-222222222222',
       title: 'A new Story', commit }
     assert.equal((await post(base, 'https://attacker.invalid')).status, 403)
     assert.equal((await post({ ...base, commit: sha('9') })).status, 409)
     assert.equal((await post({ ...base, directory: '../x' })).status, 400)
+    assert.equal((await post({ ...base, directory: '.private' })).status, 400)
+    assert.equal((await post({ ...base, directory: 'invalid,name' })).status, 400)
+    assert.equal((await post({ ...base, directory: 'invalid=name' })).status, 400)
     assert.equal((await post({ ...base, title: '' })).status, 400)
     moved = true
     assert.equal((await post(base)).status, 409)

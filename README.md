@@ -686,10 +686,14 @@ Test the public interface with
 
 ## Deferred author idea inbox (#24)
 
+The hosted Story workspace layout and single-container-mount boundary are
+specified in [Story content layout](docs/story-content-layout.md).
+
 Deferred Event concepts, conversations, exact dialogue and narrative anchors are **not**
 canonical Story records. They live as one Git-tracked YAML 1.2 file per idea
-under the reserved `.story-inbox/ideas/<stable-id>.yaml` path within the
-**job worktree's Story root**, not in the disposable `.noveltea` cache.
+under the reserved `.story-inbox/ideas/<stable-id>.yaml` path in the **job
+worktree alongside the canonical `story/` directory**, never inside the
+agent-mounted `story/` content root or disposable `.noveltea` cache.
 The files use JSON formatting (a strict, valid subset of YAML 1.2) so literal
 dialogue and individual requirements survive serialization without loss.
 An author's normal checkout is not altered.

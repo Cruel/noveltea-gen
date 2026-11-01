@@ -222,9 +222,7 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
     "--network", "none", "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges", "--user", "0:0",
     "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m",
-    "--mount", "type=bind,source=" + arcs + ",target=/story/arcs",
-    "--mount", "type=bind,source=" + choicePoints + ",target=/story/choice-points",
-    "--mount", "type=bind,source=" + authoredContent + ",target=/story/authored-content",
+    "--mount", "type=bind,source=" + story + ",target=/story",
     "noveltea-sandbox:local", "sleep", "infinity");
   assert.equal(created.status, 0, created.stderr);
   try {
@@ -249,6 +247,8 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
     assert.equal(readFileSync(join(arcs, "chapter.md"), "utf8"), "Closing scene\n");
     await call(tools.write!, { path: "choice-points/decision.md", content: "A real choice.\n" });
     await call(tools.write!, { path: "authored-content/dialogue.md", content: "A real scene.\n" });
+    await call(tools.write!, { path: "future-record-type/sample.md", content: "New Story type.\n" });
+    assert.equal(readFileSync(join(story, "future-record-type/sample.md"), "utf8"), "New Story type.\n");
     assert.equal(readFileSync(join(choicePoints, "decision.md"), "utf8"), "A real choice.\n");
     assert.equal(readFileSync(join(authoredContent, "dialogue.md"), "utf8"), "A real scene.\n");
     const readonly = Object.fromEntries((await createSandboxPiTools(job, snapshot, skills, remote, "read-only"))

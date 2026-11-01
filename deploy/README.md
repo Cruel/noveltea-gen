@@ -26,11 +26,14 @@ Protocol listener or enable unsandboxed model-directed tool execution.
 - **Job sandbox** is a disposable sibling container on the same daemon.
   `--network none`, read-only container filesystem, no capabilities, no new
   privileges, bounded CPU/memory/PIDs/tmpfs/output/execution time and no host
-  controller/socket/credential/Git mounts. Only canonical record directories
-  from its verified job worktree are writable at `/story/<record-type>`.
-  Hidden, symlinked and special entries in mounted trees are rejected. Even
-  when a Story is selected at repository root, `.git` and `.story-inbox`
-  are not mounted. The sandbox has no access to a user's deferred idea inbox.
+  controller/socket/credential/Git mounts. The verified canonical content
+  directory (`<workspace>/story`) is a **single** writable bind mount at
+  `/story`, including newly added record-type directories automatically.
+  Hidden, symlinked and special entries in the mounted tree are rejected.
+  `.git` and the sibling `.story-inbox` remain outside the mount. Legacy
+  repository-root Stories or Stories containing an inbox must migrate before
+  hosted acquisition; the controller fails closed rather than exposing them.
+  See [Story content layout](../docs/story-content-layout.md).
 
 **UID note:** Containers run as namespace UID 0 to give the rootless daemon's
 unprivileged host owner write access to shared cache mounts. This is not host

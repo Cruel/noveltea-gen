@@ -77,7 +77,7 @@ test("onboarding capture creates exactly one verified noncanonical YAML commit a
   assert.equal(first.status, "captured");
   assert.match(first.id, /^idea-[0-9a-f]{24}$/);
   assert.equal(git(x.job.worktreeRoot, "rev-list", "--count", x.base + "..HEAD"), "1");
-  const path = join(x.job.worktreeStoryRoot, ".story-inbox", "ideas", first.id + ".yaml");
+  const path = join(x.job.worktreeRoot, ".story-inbox", "ideas", first.id + ".yaml");
   const saved = JSON.parse(readFileSync(path, "utf8"));
   assert.equal(saved.original, x.idea.original);
   assert.deepEqual(saved.requirements, x.idea.requirements);
@@ -93,7 +93,7 @@ test("onboarding capture creates exactly one verified noncanonical YAML commit a
   assert.equal(again.id, first.id);
   assert.equal(again.commitSha, first.commitSha);
   assert.equal(git(x.job.worktreeRoot, "rev-list", "--count", x.base + "..HEAD"), "1");
-  assert.equal(readdirSync(join(x.job.worktreeStoryRoot, ".story-inbox", "ideas")).length, 1);
+  assert.equal(readdirSync(join(x.job.worktreeRoot, ".story-inbox", "ideas")).length, 1);
   assert.equal(x.ok(x.call("ideas", "inspect")).ideas[0].id, first.id);
 });
 
@@ -127,7 +127,7 @@ test("later relevant breadth makes dialogue available only to in-scope Event wor
   assert.equal(result.ideas[0].original, x.idea.original);
   assert.equal(x.ok(x.call("ideas", "placement-context", "--target", "arc.truth")).ideas.length, 0);
   assert.equal(x.ok(x.call("ideas", "placement-context", "--target", "event.nonexistent")).ideas.length, 0);
-  const committed = JSON.parse(readFileSync(join(x.job.worktreeStoryRoot, ".story-inbox/ideas", id + ".yaml"), "utf8"));
+  const committed = JSON.parse(readFileSync(join(x.job.worktreeRoot, ".story-inbox/ideas", id + ".yaml"), "utf8"));
   assert.equal(committed.lifecycle.status, "dormant", "eligibility does not activate or modify canon");
 });
 
@@ -189,13 +189,13 @@ test("prepared prewrite and fully authored capture receipts recover exact bytes 
       priorHead: x.base, path, blobDigest: sha(content), content, phase: "prepared",
     }));
     if (authored) {
-      mkdirSync(join(x.job.worktreeStoryRoot, ".story-inbox/ideas"), { recursive: true });
-      writeFileSync(join(x.job.worktreeStoryRoot, path), content);
+      mkdirSync(join(x.job.worktreeRoot, ".story-inbox/ideas"), { recursive: true });
+      writeFileSync(join(x.job.worktreeRoot, path), content);
     }
     const result = x.ok(x.capture());
     assert.equal(result.id, id);
     assert.equal(git(x.job.worktreeRoot, "rev-list", "--count", x.base + "..HEAD"), "1");
-    assert.equal(readFileSync(join(x.job.worktreeStoryRoot, path), "utf8"), content);
+    assert.equal(readFileSync(join(x.job.worktreeRoot, path), "utf8"), content);
   }
 });
 

@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { startStoryJob, type JobStartResult } from "./job.js";
+import { siblingInboxPath, startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { trustedHead } from "./revision.js";
 
@@ -82,8 +82,16 @@ export function gitRaw(job: JobStartResult, ...args: string[]) {
     maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
 }
 export function git(job: JobStartResult, ...args: string[]) { return gitRaw(job, ...args).trim(); }
+/** The Git-tracked deferred author inbox stays beside story/, outside the agent mount. */
 export function repoPath(job: JobStartResult, path: string) {
+  const inbox = siblingInboxPath(job.storyRelativePath);
+  if (inbox && (path === ".story-inbox" || path.startsWith(".story-inbox/"))) {
+    return inbox + path.slice(".story-inbox".length);
+  }
   return job.storyRelativePath ? job.storyRelativePath + "/" + path : path;
+}
+export function worktreePath(job: JobStartResult, path: string) {
+  return join(job.worktreeRoot, repoPath(job, path));
 }
 export function pathFor(id: string) { return INBOX + "/" + id + ".yaml"; }
 function receiptFile(job: JobStartResult, id: string) {
@@ -287,7 +295,7 @@ async function capture(job: JobStartResult, input: IdeaInput) {
       if (!items || items.some(item => item.phase !== "committed")) throw new Error("Finish or reconcile the active Character/World work item first.");
     }
     const path = pathFor(id);
-    if (existsSync(join(job.worktreeStoryRoot, path))) {
+    if (existsSync(worktreePath(job, path))) {
       throw new Error("Existing inbox file has no matching capture receipt; preserve it for review.");
     }
     const doc: PersistedIdea = { schema: "0.1", id, ...data, lifecycle: {
@@ -299,12 +307,12 @@ async function capture(job: JobStartResult, input: IdeaInput) {
       id, inputDigest: digest, priorHead, path, blobDigest: sha(bytes), content: bytes, phase: "prepared" };
     await persist(file, receipt);
     // Receipt precedes the Git write. A crash here can never erase an authored file.
-    await mkdir(dirname(join(job.worktreeStoryRoot, path)), { recursive: true });
-    await writeFile(join(job.worktreeStoryRoot, path), bytes, { flag: "wx" });
+    await mkdir(dirname(worktreePath(job, path)), { recursive: true });
+    await writeFile(worktreePath(job, path), bytes, { flag: "wx" });
   }
   const actual = git(job, "rev-parse", "HEAD");
   if (actual === receipt.priorHead) {
-    const target = join(job.worktreeStoryRoot, receipt.path);
+    const target = worktreePath(job, receipt.path);
     if (!existsSync(target)) {
       assertClean(job);
       if (!receipt.content || sha(receipt.content) !== receipt.blobDigest) {

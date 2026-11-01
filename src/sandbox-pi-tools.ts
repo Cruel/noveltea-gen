@@ -19,11 +19,6 @@ import type { JobStartResult } from "./job.js";
 export const SANDBOX_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
 export const SANDBOX_READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export type SandboxToolAccess = "writer" | "read-only";
-const CANONICAL = new Set([
-  "creative-direction", "arcs", "milestones", "events", "beats", "characters",
-  "world-entities", "facts", "relationships", "revelations", "choice-points", "puzzles",
-  "authored-content", "choices",
-]);
 const MAX_WRITE = 128 * 1024;
 const MAX_READ_LINES = 500;
 const MAX_OUTPUT = 48 * 1024;
@@ -74,8 +69,8 @@ function mappedStoryPath(job: JobStartResult, requested: unknown, allowStoryRoot
   const rel = relative(job.worktreeStoryRoot, abs);
   if (rel === "" && allowStoryRoot) return "/story";
   const parts = rel.split(sep);
-  if (!CANONICAL.has(parts[0] ?? "") || parts.some(p => !p || p === "." || p === ".." || p.startsWith("."))) {
-    throw new Error("Pi tool path denied: outside canonical Story sandbox projection.");
+  if (!rel || parts.some(p => !p || p === "." || p === ".." || p.startsWith("."))) {
+    throw new Error("Pi tool path denied: outside the Story content directory.");
   }
   return "/story/" + parts.join("/");
 }

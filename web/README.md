@@ -3,8 +3,8 @@
 For rootless Compose deployment, the trusted host sandbox controller and its
 storage/security boundary, see [deploy/README.md](../deploy/README.md) (#51).
 Jobs prepared through this UI remain paused until authenticated execution
-admission (#59). Foundation and Architecture Pi tools are sandbox-routed by #52;
-other specialist stages remain blocked in hosted mode until #53/#54.
+admission (#59). All implemented narrative Pi specialists now use sandboxed
+file/search/shell tools; independent reviewers receive read/search tools only.
 
 The web application is a separate pnpm workspace package; the existing Story
 generator and Skein server stay unchanged. This slice implements an authenticated
@@ -196,7 +196,9 @@ The default branch is never written and no MR is auto-published; a later
 publication workflow handles draft MRs. A genuinely empty project can
 receive the **one initial** commit on the explicitly chosen initial default
 branch (usually `main`, but configurable to respect group conventions).
-The author can select a named Story directory or the repository root.
+The author selects a workspace directory (blank for repository root); the
+canonical Story records are initialized in its `story/` child. The adjacent
+`.story-inbox/` is reserved for trusted author-only material.
 
 `GET /api/gitlab/initialize?repositoryId=<catalog UUID>` returns current
 empty/default-branch state and the immutable default SHA (or null for a
@@ -258,8 +260,10 @@ disk quotas and eviction.
 ## GitHub Story initialization (#48)
 
 On a connected GitHub repository, open **Browse Stories → Initialize a new
-Story**. Enter an existing relative directory or a new nested directory (blank
-means repository root) and a draft Story title. The authenticated
+Story**. Enter a workspace directory or a new nested workspace path (blank
+means repository root). Studio creates the canonical content under its
+`story/` child and keeps `.story-inbox/` beside it, not in the agent mount.
+Enter a draft Story title. The authenticated
 `GET /api/github/initialize?repositoryId=...&directory=...` checks the
 currently pinned default branch and returns `mode: branch` with a commit SHA
 or `mode: bootstrap` with `commit: null` only when GitHub explicitly reports
@@ -272,8 +276,9 @@ push rights, catalog ownership, remote identity, exact HEAD revision, directory
 nonexistence/no Story records, 100 MB source cap and applicable LFS attributes
 are checked again on the server. Only canonical draft
 `creative-direction/foundation.md` is created: schema 0.1, no author-protected
-decisions or invented narrative facts. Completing author discovery and any
-author approval remains subsequent work. Do not put new Stories inside
+decisions or invented narrative facts. The resulting catalog directory is
+`story` (or `<workspace>/story`), not the workspace itself. Completing author
+discovery and any author approval remains subsequent work. Do not put new Stories inside
 `.noveltea` or `.story-inbox`; no persistent `.noveltea` content is written.
 
 **Existing repository:** the Story is initialized and committed in a new

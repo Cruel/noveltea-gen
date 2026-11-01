@@ -95,9 +95,9 @@ function docker() {
 }
 
 test('registered Story job derives one trusted worktree and never mounts git or inbox', async () => {
-  const { config, story } = fixture('')
-  mkdirSync(join(story, '.story-inbox', 'ideas'), { recursive: true })
-  writeFileSync(join(story, '.story-inbox', 'ideas', 'secret.yaml'), 'never mounted')
+  const { config, story } = fixture()
+  mkdirSync(join(story, '..', '.story-inbox', 'ideas'), { recursive: true })
+  writeFileSync(join(story, '..', '.story-inbox', 'ideas', 'secret.yaml'), 'never mounted')
   for (const name of ['events', 'choice-points', 'authored-content']) {
     mkdirSync(join(story, name), { recursive: true })
     writeFileSync(join(story, name, 'existing.md'), 'safe')
@@ -112,14 +112,35 @@ test('registered Story job derives one trusted worktree and never mounts git or 
   assert.ok(create.includes('no-new-privileges'))
   assert.ok(create.includes('ALL'))
   const mounts = create.filter((v, i) => create[i-1] === '--mount')
-  assert.equal(mounts.length, 14)
-  assert.ok(mounts.every(v => v.includes('/story/') && !v.includes('.git') && !v.includes('.story-inbox')))
-  for (const name of ['events', 'choice-points', 'authored-content']) {
-    assert.ok(mounts.some(v => v.includes('source=' + join(story, name)) && v.includes('target=/story/' + name)))
-  }
+  assert.deepEqual(mounts, [
+    `type=bind,source=${story},target=/story,bind-propagation=rprivate`,
+  ])
+  assert.ok(!mounts[0]!.includes('.git') && !mounts[0]!.includes('.story-inbox'))
   assert.ok(!create.some(a => a.includes('docker.sock')))
+  // New canonical directories are automatically visible without changing a mount allowlist.
+  mkdirSync(join(story, 'new-record-type'))
+  writeFileSync(join(story, 'new-record-type', 'note.md'), 'new')
+  await controller.acquire(ID)
   assert.deepEqual(controller.inspect(ID), { jobId: ID, status: 'running' })
   assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+})
+
+test('whole-root and nested author-inbox mounts fail closed instead of exposing trusted metadata', async () => {
+  for (const directory of ['', 'legacy-story-root']) {
+    const legacy = fixture(directory)
+    const calls = docker()
+    await assert.rejects(new SandboxController(legacy.config, calls.run).acquire(ID),
+      /dedicated story\/ content directory/)
+    assert.equal(calls.calls.filter(args => args[0] === 'create').length, 0)
+  }
+
+  const inboxStory = fixture()
+  mkdirSync(join(inboxStory.story, '.story-inbox', 'ideas'), { recursive: true })
+  writeFileSync(join(inboxStory.story, '.story-inbox', 'ideas', 'secret.yaml'), 'author-only')
+  const inboxCalls = docker()
+  await assert.rejects(new SandboxController(inboxStory.config, inboxCalls.run).acquire(ID),
+    /hidden or restricted/)
+  assert.equal(inboxCalls.calls.filter(args => args[0] === 'create').length, 0)
 })
 
 test('arbitrary UUID, mutated manifest and protected symlinks fail closed before Docker create', async () => {

@@ -101,8 +101,8 @@ test("certification #31: public native Story jobs are isolated, pinned, protecte
 
   // The verified reference is the original committed author tree, not another
   // job's working tree or the mutable HEAD of this job's generation branch.
-  mkdirSync(join(a.worktreeStoryRoot, ".story-inbox/ideas"), { recursive: true });
-  writeFileSync(join(a.worktreeStoryRoot, ".story-inbox/ideas/private.yaml"),
+  mkdirSync(join(a.worktreeRoot, ".story-inbox/ideas"), { recursive: true });
+  writeFileSync(join(a.worktreeRoot, ".story-inbox/ideas/private.yaml"),
     "DO_NOT_LEAK_UNPLACED_AUTHOR_IDEA\n");
   const before = nativeContext(a.worktreeStoryRoot);
   assert.equal(before.success, true);

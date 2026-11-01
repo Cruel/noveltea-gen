@@ -34,17 +34,18 @@ test('initializes only an isolated NovelTea branch and reopens the same commit w
     const input = {
       cacheDirectory: join(root, 'cache'), ownerId: 'alice',
       repositoryId: 'github:1', remoteUrl: 'file://' + remote, token: 'secret',
-      directory: 'new-story', commit: pinned, jobId: 'new-job',
+      directory: 'new-story/story', commit: pinned, jobId: 'new-job',
       verifiedSizeBytes: 0, verifiedBlobCount: 0, title: 'Untitled Adventure',
     }
     const created = await initializeStoryBranch(input)
     assert.equal(created.baseSha, pinned)
     assert.notEqual(created.headSha, pinned)
     assert.match(created.branch, /^noveltea-gen\//)
+    assert.match(git(created.worktreeRoot, 'sparse-checkout', 'list'), /new-story\/\.story-inbox/)
     assert.equal(git(source, 'rev-parse', 'HEAD'), pinned)
     assert.equal(git(remote, 'rev-parse', 'main'), pinned)
     assert.equal(git(created.worktreeRoot, 'diff', '--name-only', pinned, 'HEAD'),
-      'new-story/creative-direction/foundation.md')
+      'new-story/story/creative-direction/foundation.md')
     assert.equal(readFileSync(join(created.worktreeStoryRoot, 'creative-direction/foundation.md'), 'utf8'),
       initialStoryDocument(input.title))
     assert.equal(existsSync(join(created.worktreeRoot, '.noveltea')), false)

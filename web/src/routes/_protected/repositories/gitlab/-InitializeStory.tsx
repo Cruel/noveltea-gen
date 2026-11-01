@@ -56,7 +56,7 @@ export function InitializeStory({ repositoryId, snapshot, onCreated }: {
       The server validates the Story with the installed native NovelTea CLI before committing anything.</p>
     {error && <p role="alert" className="error">{error}</p>}
     <form onSubmit={event => { event.preventDefault(); void create() }}>
-      <p><label>New Story directory (blank for repository root) <input maxLength={240} value={directory}
+      <p><label>Workspace directory (blank for repository root; creates a story/ child) <input maxLength={240} value={directory}
         onChange={e => setDirectory(e.target.value)} placeholder="story" /></label></p>
       {snapshot.empty && <p><label>Initial default branch <input required maxLength={100}
         value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label></p>}

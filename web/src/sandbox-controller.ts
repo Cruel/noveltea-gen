@@ -13,7 +13,6 @@ import { mkdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import Database from 'better-sqlite3'
-import { CANONICAL_RECORD_DIRS } from './lib/story-discovery.shared'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SHA = /^[0-9a-f]{40}$/i
@@ -141,6 +140,11 @@ export function resolveTrustedJob(config: ControllerConfig, jobId: string, image
   if (!row) throw new SandboxError(404, 'Registered job was not found.')
   if (!SHA.test(row.pin) || !canonicalStoryPath(row.directory)) {
     throw new SandboxError(409, 'Registered job source identity is invalid.')
+  }
+  // A legacy registered Story may be a non-hidden workspace subtree. Do not
+  // broaden its old per-record mounts to the whole subtree after deployment.
+  if (row.directory !== 'story' && !row.directory.endsWith('/story')) {
+    throw new SandboxError(409, 'Hosted Story must use a dedicated story/ content directory; migrate the legacy layout.')
   }
 
   const scoped = join(hash(row.ownerId), hash(row.provider + ':' + row.providerId))
@@ -272,11 +276,12 @@ export class SandboxController {
     return resolveTrustedJob(this.config, id, requireCurrentImage ? this.imageId() : '')
   }
 
-  private verifyRunning(job: TrustedJob, requireCurrentImage = true): boolean {
+  private verifyRunning(job: TrustedJob, requireCurrentImage = true, requireCurrentLayout = true): boolean {
     const existing = labels(this.run, containerName(job.id))
     if (!existing) return false
     if (existing['dev.noveltea.job'] !== job.id.toLowerCase() ||
         existing['dev.noveltea.identity'] !== job.identity ||
+        (requireCurrentLayout && existing['dev.noveltea.layout'] !== 'story-content-v2') ||
         !/^sha256:[a-f0-9]{64}$/.test(existing['dev.noveltea.image'] ?? '') ||
         (requireCurrentImage && existing['dev.noveltea.image'] !== job.imageId)) {
       throw new SandboxError(409, 'Sandbox container name is occupied by another identity; inspect it manually.')
@@ -290,22 +295,19 @@ export class SandboxController {
     this.locked.add(id)
     try {
       const exists = this.verifyRunning(job)
-      // Validate on EVERY acquisition, including a restarted container.
-      // Only canonical record directories are mounted, NEVER the Story root.
-      // In particular, root Stories never expose .git or .story-inbox.
-      const mounts: string[] = []
-      for (const name of CANONICAL_RECORD_DIRS) {
-        const path = join(job.storyRoot, name)
-        if (!exists && !existsSync(path)) await mkdir(path, { mode: 0o700 })
-        checkAncestry(this.config.cacheVolume, path)
-        checkRecordTree(path)
-        mounts.push('--mount', `type=bind,source=${path},target=/story/${name},bind-propagation=rprivate`)
-      }
+      // The selected canonical Story content directory is the sole bind mount.
+      // Author-only inbox and Git metadata must live outside this directory.
+      // Validate the complete tree before every acquisition, including restarts.
+      checkAncestry(this.config.cacheVolume, job.storyRoot)
+      checkRecordTree(job.storyRoot)
+      const mounts = ['--mount',
+        `type=bind,source=${job.storyRoot},target=/story,bind-propagation=rprivate`]
       if (!exists) {
         dockerRequired(this.run, [
           'create', '--name', containerName(id),
           '--label', 'dev.noveltea.job=' + id.toLowerCase(),
           '--label', 'dev.noveltea.identity=' + job.identity,
+          '--label', 'dev.noveltea.layout=story-content-v2',
           '--label', 'dev.noveltea.image=' + job.imageId,
           '--network', 'none', '--read-only', '--cap-drop', 'ALL',
           '--security-opt', 'no-new-privileges', '--pids-limit', '128',
@@ -332,7 +334,8 @@ export class SandboxController {
   dispose(id: string) {
     if (this.locked.has(id)) throw new SandboxError(409, 'Job sandbox is executing or being acquired.')
     const job = this.trusted(id, false)
-    if (!this.verifyRunning(job, false)) return { jobId: id, status: 'absent' }
+    // A retired per-directory sandbox can be removed but never reused.
+    if (!this.verifyRunning(job, false, false)) return { jobId: id, status: 'absent' }
     dockerRequired(this.run, ['rm', '-f', containerName(id)])
     return { jobId: id, status: 'disposed' }
   }

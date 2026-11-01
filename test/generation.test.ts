@@ -79,7 +79,7 @@ test("parent integrates eligible deferred ideas through the dedicated placement 
   assert.equal(result.status, "blocked", JSON.stringify(result));
   assert.ok(result.ideaHistory.some((entry: any) => entry.id === "archive-bell" &&
     entry.status === "integrated-editorial-unverified"));
-  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot, ".story-inbox/ideas/archive-bell.yaml"), "utf8"));
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeRoot, ".story-inbox/ideas/archive-bell.yaml"), "utf8"));
   assert.equal(inbox.original, original);
   assert.equal(inbox.lifecycle.status, "integrated");
   assert.ok(inbox.lifecycle.placements[0].alternatives.length >= 2);
@@ -124,7 +124,7 @@ test("later canonical development triggers a bounded persisted idea reassessment
   assert.ok(steps.length >= 2 && steps.length <= 3, "reconsideration is bounded");
   assert.ok(steps.slice(1).every((h: any) => h.action === "reassess" &&
     h.status === "reassessed-editorial-unverified"));
-  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot, ".story-inbox/ideas/bell-revisit.yaml"), "utf8"));
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeRoot, ".story-inbox/ideas/bell-revisit.yaml"), "utf8"));
   assert.equal(inbox.lifecycle.placements.length, steps.length);
   assert.ok(inbox.lifecycle.placements.slice(1).every((p: any) => p.action === "reassessed"));
   const checkpoint = done.ideaHistory;
@@ -151,7 +151,7 @@ test("rejected placement remains dormant, blocks binding completion, and is not 
   assert.equal(result.status, "blocked", JSON.stringify(result));
   assert.ok(result.ideaHistory.some((h: any) => h.id === "rejected-concept" &&
     h.status === "deferred"));
-  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot, ".story-inbox/ideas/rejected-concept.yaml"), "utf8"));
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeRoot, ".story-inbox/ideas/rejected-concept.yaml"), "utf8"));
   assert.equal(inbox.lifecycle.status, "dormant");
   assert.deepEqual(inbox.lifecycle.placements, []);
   assert.deepEqual(result.report.evidence.deferredIdeas.scopedOutstanding, ["rejected-concept"]);
@@ -545,7 +545,7 @@ test("opt-in real Pi generation semantically chooses and reviews a deferred idea
   if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
   if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
   const result = f.cli(args);
-  const inbox = JSON.parse(readFileSync(join(f.job.worktreeStoryRoot,
+  const inbox = JSON.parse(readFileSync(join(f.job.worktreeRoot,
     ".story-inbox/ideas/witness-bell.yaml"), "utf8"));
   assert.equal(inbox.original, original);
   const integrated = result.ideaHistory.some((entry: any) => entry.id === "witness-bell" &&

@@ -9,6 +9,7 @@ import { renderFoundation, type FoundationDraft } from '../../../src/foundation-
 import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
 import { actor, eligible, failure, gitlab, page, ProviderFailure, reply } from './gitlab-repositories.server'
 import { verifyGitlabStorySelection } from './gitlab-stories.server'
+import { storyContentDirectory } from './story-discovery.shared'
 
 type Project = {
   id: number; path_with_namespace: string; name_with_namespace: string; archived: boolean
@@ -34,7 +35,7 @@ const STORY_PATH = /^(?!\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*\\)[a-zA-Z0-9_./-]*
 function directory(value: unknown) {
   if (value === '') return ''
   if (typeof value !== 'string' || value.length > 240 || !STORY_PATH.test(value) ||
-      value.endsWith('/') || value.split('/').some(part => !part || part === '.git' || part === '.noveltea')) {
+      value.endsWith('/') || value.split('/').some(part => !part || part.startsWith('.'))) {
     throw new ProviderFailure(400, 'Choose a new Story directory without traversal or reserved components.')
   }
   return value
@@ -203,7 +204,7 @@ export async function gitlabInitializeRequest(
     }
     assertStudioSchemaCurrent(store)
     const input = data as Initialization
-    const path = directory(input.directory)
+    const path = storyContentDirectory(directory(input.directory))
     const existing = store.sqlite.prepare(`SELECT id FROM stories WHERE repository_id=? AND directory=?`)
       .get(data.repositoryId, path)
     if (existing) {

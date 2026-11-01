@@ -67,6 +67,13 @@ function gitWithEnv(cwd: string, transportEnv: NodeJS.ProcessEnv | undefined, ..
   }
 }
 
+/** Relative path to the trusted inbox, alongside a conventional story/ content root. */
+export function siblingInboxPath(storyRelativePath: string): string | null {
+  if (storyRelativePath === "story") return ".story-inbox";
+  if (storyRelativePath.endsWith("/story")) return dirname(storyRelativePath) + "/.story-inbox";
+  return null;
+}
+
 function inside(root: string, path: string): boolean {
   const rel = relative(root, path);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
@@ -219,7 +226,9 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
   // Only a new job depends on the author's current Story baseline being clean.
   // Reopen must tolerate later author work and preserves uncommitted job edits.
   const pathspec = storyRelativePath || ".";
-  const dirty = git(gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "--", pathspec);
+  const inboxPath = siblingInboxPath(storyRelativePath);
+  const dirty = git(gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "--",
+    pathspec, ...(inboxPath ? [inboxPath] : []));
   if (dirty) {
     throw new Error(`Story baseline "${storyRelativePath || "."}" contains uncommitted or untracked files. Commit or resolve relevant Story changes first; unrelated monorepo changes are allowed.`);
   }
@@ -246,7 +255,12 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
       // (or check out the entire monorepo). Configure the exact scope first.
       git(gitRoot, "worktree", "add", "--no-checkout", "-b", branch, worktreeRoot, baseSha);
       created = true;
-      gitWithEnv(worktreeRoot, options.gitTransportEnv, "sparse-checkout", "set", "--no-cone", "--", storyRelativePath ? `/${storyRelativePath}/**` : "/**");
+      // The trusted author inbox is a sibling of the canonical story/ folder;
+      // retain it in the sparse worktree without exposing it to the sandbox.
+      const inbox = siblingInboxPath(storyRelativePath);
+      gitWithEnv(worktreeRoot, options.gitTransportEnv, "sparse-checkout", "set", "--no-cone", "--",
+        storyRelativePath ? `/${storyRelativePath}/**` : "/**",
+        ...(inbox ? [`/${inbox}/**`] : []));
       gitWithEnv(worktreeRoot, options.gitTransportEnv, "reset", "--hard", baseSha);
     } else {
       git(gitRoot, "worktree", "add", "-b", branch, worktreeRoot, baseSha);

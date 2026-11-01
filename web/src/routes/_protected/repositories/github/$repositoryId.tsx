@@ -149,7 +149,7 @@ function GithubStories() {
       <p>Need a new GitHub repository? <a href="https://github.com/new" target="_blank" rel="noreferrer">Create an empty repository on GitHub</a>,
         then connect it through <a href="/repositories/add">Add Repository</a> and return here.
         Do not create a README or initial commit on GitHub if you want the one-time bootstrap.</p>
-      <label>Story directory (relative to repository root; blank for root){' '}
+      <label>Workspace directory (blank for repository root; creates a story/ child){' '}
         <input value={initPath} onChange={e => setInitPath(e.target.value)} disabled={busy} placeholder="stories/my-story" />
       </label>
       {initialization && <div>

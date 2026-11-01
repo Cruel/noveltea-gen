@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
+import { repoPath } from "./ideas.js";
 
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
@@ -65,7 +66,7 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
   const trusted = await trustedHead(job);
   git(job, "merge-base", "--is-ancestor", source, head);
   git(job, "merge-base", "--is-ancestor", head, trusted);
-  const prefix = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + ".story-inbox/ideas/";
+  const prefix = repoPath(job, ".story-inbox/ideas") + "/";
   if (source === head) return head;
   const commits = git(job, "rev-list", "--reverse", source + ".." + head).split("\n").filter(Boolean);
   for (const commit of commits) {

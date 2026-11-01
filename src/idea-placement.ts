@@ -18,7 +18,7 @@ import { processAuthorUpdatesAtBoundary } from "./author-updates.js";
 import { readSignedAuthorEvidence, verifyAuthorEvidence,
   type SignedAuthorEvidence } from "./author-evidence.js";
 import { git, gitRaw, repoPath, pathFor, persist, assertClean, publishHead,
-  records, assess, load, type PersistedIdea, type RecordInfo, type IdeaPlacementHistory } from "./ideas.js";
+  records, assess, load, worktreePath, type PersistedIdea, type RecordInfo, type IdeaPlacementHistory } from "./ideas.js";
 
 type Candidate = { id: string; path: string; kind: string; rationale: string };
 interface PlacementReceipt {
@@ -454,7 +454,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
         const updated: PersistedIdea = { ...idea, lifecycle: { ...idea.lifecycle,
           placements: [...idea.lifecycle.placements, entry] } };
         const bytes = JSON.stringify(updated, null, 2) + "\n";
-        await writeFile(join(job.worktreeStoryRoot, path), bytes);
+        await writeFile(worktreePath(job, path), bytes);
         const digest = sha(JSON.stringify({ entry, changed: [], blobs: [sha(bytes)] }));
         const receiptPath = entryFile(job, idea.id, entry.revision);
         const data = { version: 1 as const, jobId: job.jobId, ideaId: idea.id,
@@ -638,7 +638,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     const revised: PersistedIdea = { ...idea, lifecycle: { ...idea.lifecycle,
       status: "integrated", activatedAt: idea.lifecycle.activatedAt ?? new Date().toISOString(),
       placedAt: new Date().toISOString(), placements: [...idea.lifecycle.placements, entry] } };
-    const path = pathFor(idea.id), inboxFile = join(job.worktreeStoryRoot, path);
+    const path = pathFor(idea.id), inboxFile = worktreePath(job, path);
     const expected = [path, ...edited];
     await writeFile(inboxFile, JSON.stringify(revised, null, 2) + "\n");
     const blobs = await Promise.all(expected.map(async p =>

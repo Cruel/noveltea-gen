@@ -4,6 +4,7 @@ import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { directoryPath, inspectGithubStoryInitialization } from './github-stories.server'
+import { storyContentDirectory } from './story-discovery.shared'
 import { acquireCachedStory, bootstrapEmptyGithubRepository,
   GitCacheError, initializeStoryBranch, initialStoryDocument } from './git-cache.server'
 
@@ -27,9 +28,10 @@ export async function githubInitializationRequest(
     if (typeof repositoryId !== 'string' || !UUID.test(repositoryId)) {
       throw new GithubError(400, 'Select a connected GitHub repository.')
     }
-    const directory = directoryPath(params?.get('directory') ?? input?.directory ?? '')
-    if (directory.split('/').some(part => part === '.noveltea' || part === '.story-inbox' ||
-        /[*?\[\]!]/.test(part))) {
+    const directory = storyContentDirectory(directoryPath(params?.get('directory') ?? input?.directory ?? ''))
+    // Initialization must not register a path the sandbox controller will later reject.
+    if (directory.split('/').some(part => part.startsWith('.') || part.includes(',') ||
+        part.includes('=') || /[*?\[\]!]/.test(part))) {
       throw new GithubError(400, 'Story initialization cannot write into internal metadata or author-only inbox directories.')
     }
     const row = store.sqlite.prepare(`SELECT provider_repository_id AS providerId, name

@@ -63,7 +63,6 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
   process.env.NT_NATIVE_CLI = native
   const store = openStudioDatabase(join(root, 'studio.sqlite'))
   let empty = false, previousDefault = start, filesAlreadyExist = false, remoteRevision: string | null = null
-  let rootStory = false
   const commits: Array<{ branch: string; start_sha?: string; actions: Array<{ action: string; file_path: string; content: string }> }> = []
   const contacted: string[] = []
   globalThis.fetch = async (input, init) => {
@@ -85,8 +84,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
       const data = JSON.parse(init?.body as string) as (typeof commits)[number]
       commits.push(data)
       assert.deepEqual(data.actions.map(a => a.action), ['create'])
-      assert.equal(data.actions[0]?.file_path, rootStory
-        ? 'creative-direction/foundation.md' : 'story/creative-direction/foundation.md')
+      assert.equal(data.actions[0]?.file_path, 'story/creative-direction/foundation.md')
       assert.equal(data.actions[0]?.content, fixtureContent())
       remoteRevision = committed
       return Response.json({ id: committed, parent_ids: data.start_sha ? [data.start_sha] : [] }, { status: 201 })
@@ -105,13 +103,8 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
         return { id: sha(type === 'tree' ? 'd' : 'e'), name, path: p, type,
           mode: type === 'tree' ? '040000' : '100644' }
       }
-      if (rootStory) {
-        if (path === '') return Response.json([entry('creative-direction')])
-        if (path === 'creative-direction') return Response.json([entry('creative-direction/foundation.md', 'blob')])
-      } else {
-        if (path === 'story') return Response.json([entry('story/creative-direction')])
-        if (path === 'story/creative-direction') return Response.json([entry('story/creative-direction/foundation.md', 'blob')])
-      }
+      if (path === 'story') return Response.json([entry('story/creative-direction')])
+      if (path === 'story/creative-direction') return Response.json([entry('story/creative-direction/foundation.md', 'blob')])
       return Response.json([])
     }
     if (url.endsWith('/api/graphql')) {
@@ -123,8 +116,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     }
     if (url.includes('/repository/files/')) {
       return Response.json({ encoding: 'base64', content: Buffer.from(fixtureContent()).toString('base64'),
-        blob_id: sha('e'), commit_id: committed, file_path: rootStory
-          ? 'creative-direction/foundation.md' : 'story/creative-direction/foundation.md',
+        blob_id: sha('e'), commit_id: committed, file_path: 'story/creative-direction/foundation.md',
         size: Buffer.byteLength(fixtureContent()) })
     }
     throw new Error('Unexpected GitLab request: ' + method + ' ' + url)
@@ -166,6 +158,8 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.equal((await post(payload(), bob)).status, 404)
     assert.equal((await post(payload(), alice, 'https://evil.example')).status, 403)
     assert.equal((await post({ ...payload(), directory: '../bad' })).status, 400)
+    assert.equal((await post({ ...payload(), directory: '.story-inbox' })).status, 400)
+    assert.equal((await post({ ...payload(), directory: '.hidden' })).status, 400)
     assert.equal((await post({ ...payload(), foundation: { ...foundation, id: 'BAD' } })).status, 400)
     assert.equal((await post(payload(sha('f')))).status, 409)
     filesAlreadyExist = true
@@ -204,7 +198,6 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     store.sqlite.prepare('DELETE FROM stories').run()
     empty = true
     remoteRevision = null
-    rootStory = true
     commits.length = 0
     const snapshot = await get()
     assert.equal(snapshot.status, 200)
@@ -222,7 +215,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.equal(initial.branch, 'main')
     assert.equal(initial.baseSha, null)
     assert.equal(initial.story.commitSha, committed)
-    assert.equal(initial.story.directory, '')
+    assert.equal(initial.story.directory, 'story')
     assert.equal(commits.length, 1)
     assert.equal(commits[0]?.branch, 'main')
     assert.equal(commits[0]?.start_sha, undefined)
@@ -232,7 +225,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.equal(commits.length, 1)
     assert.equal((await gitlabStoryRequest(auth, store,
       new Request(origin + '/api/gitlab/stories?repositoryId=' + repositoryId +
-        '&directory=&commit=' + committed, { headers: { cookie: alice } }))).status, 200)
+        '&directory=story&commit=' + committed, { headers: { cookie: alice } }))).status, 200)
   } finally {
     store.sqlite.close()
     globalThis.fetch = oldFetch

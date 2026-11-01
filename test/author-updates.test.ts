@@ -106,7 +106,7 @@ test("multiple queued ideas produce exactly one separate captured commit each, w
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), oldHead);
   assert.equal(git(x.repo, "rev-parse", "HEAD"), x.base);
   assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
-  assert.equal(readdirSync(join(x.job.worktreeStoryRoot, ".story-inbox/ideas")).length, 2);
+  assert.equal(readdirSync(join(x.job.worktreeRoot, ".story-inbox/ideas")).length, 2);
   assert.equal(x.inspect().records.every((r: any) => r.acknowledgement.phase === "applied"), true);
 });
 
