@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
@@ -126,23 +127,24 @@ export async function authorEventCluster(
         throw new Error("Event specialist Pi turn failed: " + (last?.role === "assistant"
           ? last.stopReason + ": " + (last.errorMessage ?? "") : "no assistant response"));
       }
+      const skillReads = await requirePinnedSkillReads(session, project.root, required, "Event specialist");
+      const finalAssistant = [...session.messages].reverse().find(m => m.role === "assistant");
+      if (!finalAssistant || finalAssistant.role !== "assistant") throw new Error("Event specialist reply is missing.");
       const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
         m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
       const calls = session.messages.flatMap(m => m.role === "assistant"
         ? m.content.filter(c => c.type === "toolCall") : []);
-      const reads = calls.filter(c => c.name === "read" && completed.has(c.id) &&
-        typeof c.arguments?.path === "string").map(c => resolve(project.root, c.arguments.path as string));
-      if (required.some(p => !reads.includes(p))) throw new Error("Event specialist did not read the required pinned skill references.");
+
       if (!calls.some(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
           typeof c.arguments?.path === "string" &&
           relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/").startsWith("events/"))) {
         throw new Error("Event specialist did not author canonical Event Markdown with an editing tool.");
       }
-      const summary = parseManifest(last.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
+      const summary = parseManifest(finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
       const evidence: EventEvidence = { claimedPaths: summary.modifiedRecords,
         conflicts: summary.architecturalConflicts, obligations: summary.laterObligations,
         sessionFile: session.sessionManager.getSessionFile() ?? undefined,
-        skillReads: reads.filter(p => required.includes(p as typeof required[number])) };
+        skillReads };
       const diagnostics = await verifyDraft(evidence);
       if (!diagnostics.length) {
         await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);

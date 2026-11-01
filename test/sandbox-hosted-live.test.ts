@@ -7,13 +7,15 @@
  * NT_LIVE_HOSTED_SANDBOX=1: real Pi calls (paid; requires configured Pi auth)
  * NT_TEST_HOSTED_FIXTURE=1: same Docker/controller plumbing, fixture authors
  * NT_TEST_HOSTED_STAGES=1: extend either mode through Character/World and Event
+ * NT_TEST_HOSTED_RESUME_DIR=/tmp/preserved-fixture: recover interrupted live
+ * test from its trusted catalog and job state instead of regenerating writers
  * Both opt-ins are disabled in the ordinary unit-test suite.
  */
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
@@ -56,14 +58,17 @@ test("registered rootless Docker controller supports Foundation through Event st
   assert.match(execFileSync("docker", ["image", "inspect", image, "--format", "{{.Id}}"],
     { encoding: "utf8" }).trim(), /^sha256:[a-f0-9]{64}$/);
 
-  const temporary = mkdtempSync(join(tmpdir(), "nt-hosted-pi-live-"));
+  const resumeDir = process.env.NT_TEST_HOSTED_RESUME_DIR;
+  const temporary = resumeDir ? resolve(resumeDir) : mkdtempSync(join(tmpdir(), "nt-hosted-pi-live-"));
   const app = join(temporary, "app"), state = join(temporary, "state"), cache = join(temporary, "cache");
   const socketDir = join(temporary, "controller");
-  for (const path of [app, state, cache, socketDir]) mkdirSync(path);
+  for (const path of [app, state, cache, socketDir]) mkdirSync(path, { recursive: true });
   const tokenFile = join(socketDir, "controller.token");
-  const token = randomBytes(48).toString("hex");
-  writeFileSync(tokenFile, token + "\n", { mode: 0o600 });
-  const id = randomUUID();
+  const token = resumeDir ? readFileSync(tokenFile, "utf8").trim() : randomBytes(48).toString("hex");
+  if (!resumeDir) writeFileSync(tokenFile, token + "\n", { mode: 0o600 });
+  const id = resumeDir
+    ? (JSON.parse(readFileSync(join(state, "jobs", readdirSync(join(state, "jobs"))[0]!, "job.json"), "utf8")) as { jobId: string }).jobId
+    : randomUUID();
   const owner = "sandbox-integration-owner";
   const providerRepo = "integration-fixture-repository";
   const scoped = join(cache, hash(owner), hash("github:" + providerRepo));
@@ -80,12 +85,14 @@ test("registered rootless Docker controller supports Foundation through Event st
   let passed = false;
   let cleanupFailure: unknown;
   try {
-    git(repository, "init", "-q");
-    git(repository, "config", "user.name", "Sandbox Test Author");
-    git(repository, "config", "user.email", "sandbox@example.test");
-    writeFileSync(join(repository, "README.txt"), "Disposable author baseline\n");
-    git(repository, "add", ".");
-    git(repository, "commit", "-qm", "Author baseline");
+    if (!resumeDir) {
+      git(repository, "init", "-q");
+      git(repository, "config", "user.name", "Sandbox Test Author");
+      git(repository, "config", "user.email", "sandbox@example.test");
+      writeFileSync(join(repository, "README.txt"), "Disposable author baseline\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-qm", "Author baseline");
+    }
     const base = git(repository, "rev-parse", "HEAD");
 
     process.env.NT_STATE_DIR = state;
@@ -93,7 +100,7 @@ test("registered rootless Docker controller supports Foundation through Event st
     process.env.NT_SKILL_CACHE_DIR = join(state, "skill-snapshots");
     process.env.NT_VALIDATOR_CACHE_DIR = join(state, "validator-cache");
     process.env.NT_CONFIG_FILE = join(temporary, "skill-config.json");
-    writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({
+    if (!resumeDir) writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({
       novelteaSkills: source, skillDiscovery: "explicit-only", requiredSkills: ["nt-catalog"], skillDirs: [],
     }));
 
@@ -102,15 +109,17 @@ test("registered rootless Docker controller supports Foundation through Event st
     assert.equal(job.jobId, id);
 
     // Fixture the only trusted catalog fields needed to register this job.
-    const db = new DatabaseSync(join(app, "studio.sqlite"));
-    try {
-      db.exec(`CREATE TABLE studio_sessions (id TEXT, owner_user_id TEXT, story_id TEXT, source_commit_sha TEXT);
-        CREATE TABLE stories (id TEXT, owner_user_id TEXT, repository_id TEXT, directory TEXT);
-        CREATE TABLE repositories (id TEXT, owner_user_id TEXT, provider TEXT, provider_repository_id TEXT);`);
-      db.prepare("INSERT INTO repositories VALUES (?,?,?,?)").run("repo-id", owner, "github", providerRepo);
-      db.prepare("INSERT INTO stories VALUES (?,?,?,?)").run("story-id", owner, "repo-id", "story");
-      db.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?)").run(id, owner, "story-id", base);
-    } finally { db.close(); }
+    if (!resumeDir) {
+      const db = new DatabaseSync(join(app, "studio.sqlite"));
+      try {
+        db.exec(`CREATE TABLE studio_sessions (id TEXT, owner_user_id TEXT, story_id TEXT, source_commit_sha TEXT);
+          CREATE TABLE stories (id TEXT, owner_user_id TEXT, repository_id TEXT, directory TEXT);
+          CREATE TABLE repositories (id TEXT, owner_user_id TEXT, provider TEXT, provider_repository_id TEXT);`);
+        db.prepare("INSERT INTO repositories VALUES (?,?,?,?)").run("repo-id", owner, "github", providerRepo);
+        db.prepare("INSERT INTO stories VALUES (?,?,?,?)").run("story-id", owner, "repo-id", "story");
+        db.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?)").run(id, owner, "story-id", base);
+      } finally { db.close(); }
+    }
 
     const config: ControllerConfig = {
       socket: join(socketDir, "controller.sock"), token, appVolume: app,
@@ -136,48 +145,53 @@ test("registered rootless Docker controller supports Foundation through Event st
     assert.equal(code, 0);
     assert.equal(emitted.join("").trim(), "/story");
 
-    const foundation = await runFoundationJob({
-      story, job: id, task: "Write an intimate mystery about an archivist on a stranded midnight train. Invent unspecified details.",
-      envelope: "Dialogue-led visual novel; a small cast and two reusable locations; no fixed ending count.",
-      skillsSource: source, validatorSource: source,
-      provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL, fixture: !live,
-    });
-    assert.equal(foundation.status, "committed", JSON.stringify(foundation));
-    assert.equal((foundation as { skillReads?: unknown[] }).skillReads?.length, 5);
-    const foundationFile = join(job.worktreeStoryRoot, "creative-direction/foundation.md");
-    assert.ok(hasUserProtectedDecision(readFileSync(foundationFile, "utf8")));
+    if (!resumeDir) {
+      const foundation = await runFoundationJob({
+        story, job: id, task: "Write an intimate mystery about an archivist on a stranded midnight train. Invent unspecified details.",
+        envelope: "Dialogue-led visual novel; a small cast and two reusable locations; no fixed ending count.",
+        skillsSource: source, validatorSource: source,
+        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL, fixture: !live,
+      });
+      assert.equal(foundation.status, "committed", JSON.stringify(foundation));
+      assert.equal((foundation as { skillReads?: unknown[] }).skillReads?.length, 5);
+      const foundationFile = join(job.worktreeStoryRoot, "creative-direction/foundation.md");
+      assert.ok(hasUserProtectedDecision(readFileSync(foundationFile, "utf8")));
 
-    const architecture = await runArchitectureJob({
-      story, job: id, action: "run", fixture: !live,
-      provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL,
-      skillsSource: source, validatorSource: source,
-      contract: {
-        scope: includeStages
-          ? { kind: "partial", depth: "interactive", targets: ["arc.truth", "milestone.disclosure"],
-              branches: ["trust-route", "confrontation-route"] }
-          : { kind: "partial", depth: "architecture", targets: [], branches: [] },
-        constraints: ["Preserve the archivist and stranded train mystery"],
-        envelope: { presentation: "Dialogue-led visual novel",
-          hardLimits: ["Small cast", "Two reusable locations"], preferences: [] },
-      },
-    });
-    assert.equal(architecture.status, includeStages ? "architecture-committed" : "complete-in-scope", JSON.stringify(architecture));
-    assert.ok(existsSync(join(job.worktreeStoryRoot, "arcs")));
-    assert.ok(existsSync(join(job.worktreeStoryRoot, "milestones")));
-    assert.ok((architecture as { skillReads?: unknown[] }).skillReads?.length === 6 || !live,
-      "Real Architecture Pi must read all pinned skill references");
+      const architecture = await runArchitectureJob({
+        story, job: id, action: "run", fixture: !live,
+        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL,
+        skillsSource: source, validatorSource: source,
+        contract: {
+          scope: includeStages
+            ? { kind: "partial", depth: "interactive", targets: ["arc.truth", "milestone.disclosure"],
+                branches: ["trust-route", "confrontation-route"] }
+            : { kind: "partial", depth: "architecture", targets: [], branches: [] },
+          constraints: ["Preserve the archivist and stranded train mystery"],
+          envelope: { presentation: "Dialogue-led visual novel",
+            hardLimits: ["Small cast", "Two reusable locations"], preferences: [] },
+        },
+      });
+      assert.equal(architecture.status, includeStages ? "architecture-committed" : "complete-in-scope", JSON.stringify(architecture));
+      assert.ok(existsSync(join(job.worktreeStoryRoot, "arcs")));
+      assert.ok(existsSync(join(job.worktreeStoryRoot, "milestones")));
+      assert.ok((architecture as { skillReads?: unknown[] }).skillReads?.length === 6 || !live,
+        "Real Architecture Pi must read all pinned skill references");
+    }
     if (includeStages) {
       const foundations = await runCharacterWorldJob({ story, job: id, action: "run", fixture: !live,
         skillsSource: source, validatorSource: source,
         provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL });
       assert.equal(foundations.status, "foundations-committed", JSON.stringify(foundations));
-      assert.ok(existsSync(join(job.worktreeStoryRoot, "characters/ada.md")));
-      assert.ok(existsSync(join(job.worktreeStoryRoot, "world-entities/archive.md")));
+      // Real specialists choose canonical IDs themselves; never require fixture names.
+      const markdown = (directory: string) => readdirSync(join(job.worktreeStoryRoot, directory))
+        .filter(name => /^[a-z][a-z0-9-]*\.md$/.test(name));
+      assert.ok(markdown("characters").length >= 2);
+      assert.ok(markdown("world-entities").length >= 1);
       const event = await runEventWorkItem({ story, job: id, action: "run", fixture: !live,
         milestone: "milestone.disclosure", skillsSource: source, validatorSource: source,
         provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL });
       assert.equal(event.status, "event-cluster-committed", JSON.stringify(event));
-      assert.ok(existsSync(join(job.worktreeStoryRoot, "events/disclose-ledger.md")));
+      assert.ok(markdown("events").length >= 1);
       // No model shell access to the host is necessary for either specialist.
       assert.equal((await client.inspect(id)).status, "running");
     }

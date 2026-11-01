@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
@@ -128,17 +129,18 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
           : "no assistant turn";
         throw new Error("Foundation specialist did not finish a successful Pi turn (" + detail + ").");
       }
+      const pinned = required.map(p => join(snapshot.path, "skills", p));
+      const skillReads = await requirePinnedSkillReads(session, project.root, pinned, "Foundation specialist");
+      const finalAssistant = [...session.messages].reverse().find(m => m.role === "assistant");
+      if (!finalAssistant || finalAssistant.role !== "assistant") throw new Error("Foundation specialist reply is missing.");
       const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
         m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
       const calls = session.messages.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "toolCall") : []);
-      const reads = calls.filter(c => c.name === "read" && completed.has(c.id) && typeof c.arguments?.path === "string")
-        .map(c => resolve(project.root, c.arguments.path as string));
-      const pinned = required.map(p => join(snapshot.path, "skills", p));
-      if (pinned.some(path => !reads.includes(path))) throw new Error("Foundation specialist did not read every required pinned skill reference.");
+
       const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
         typeof c.arguments?.path === "string").map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
       if (!edits.length) throw new Error("Foundation specialist did not edit canonical Markdown.");
-      const text = assistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+      const text = finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
       const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
       let declared: unknown;
       try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }
@@ -151,7 +153,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       if (!strings(messages.architecturalConflicts) || !strings(messages.laterObligations)) {
         throw new Error("Specialist must explicitly report architectural conflicts and downstream obligations.");
       }
-      const evidence: SpecialistEvidence = { claimedPaths: paths, skillReads: reads.filter(path => pinned.includes(path)),
+      const evidence: SpecialistEvidence = { claimedPaths: paths, skillReads,
         architecturalConflicts: messages.architecturalConflicts as string[],
         laterObligations: messages.laterObligations as string[],
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
