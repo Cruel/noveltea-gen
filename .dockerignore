@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/.local
+**/.projects
+**/.langgraph_api
+**/.env
+**/.env.*
+**/dist
+**/.output
+**/.tanstack
+**/*.sqlite
+**/*.sqlite-*

@@ -1,0 +1,82 @@
+# Requires a single HOST-LEVEL ROOTLESS Docker context. The host controller
+# operates outside Compose; no service can access the daemon socket.
+name: noveltea
+x-trusted-volumes: &trusted-volumes
+  - noveltea-app:/var/lib/noveltea/app
+  - noveltea-state:/var/lib/noveltea/state
+  - noveltea-cache:/var/lib/noveltea/cache
+services:
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: noveltea-trusted:local
+    command: ["pnpm", "--filter", "@noveltea/studio", "start"]
+    env_file: ./web/.env
+    environment:
+      NT_STUDIO_DB_PATH: /var/lib/noveltea/app/studio.sqlite
+      NT_STATE_DIR: /var/lib/noveltea/state
+      NT_GIT_CACHE_DIR: /var/lib/noveltea/cache
+      # Install/mount the native validator separately and configure NT_NATIVE_CLI
+      # in web/.env before enabling GitLab Story initialization.
+      HOST: 0.0.0.0
+      PORT: 3000
+    volumes: *trusted-volumes
+    ports:
+      # TLS, request limits and OAuth callbacks require an external reverse proxy.
+      # Never bind the application port publicly without that proxy.
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    networks: [frontend, backend]
+
+  agent:
+    image: noveltea-trusted:local
+    command: ["node", "dist/agent-host.js"]
+    environment:
+      NT_GRAPH_DB: /var/lib/noveltea/graph/skein.sqlite
+      NT_STATE_DIR: /var/lib/noveltea/state
+      NT_GIT_CACHE_DIR: /var/lib/noveltea/cache
+      NT_SANDBOX_SOCKET: /run/noveltea-controller/controller.sock
+      NT_SANDBOX_TOKEN_FILE: /run/secrets/noveltea-controller-token
+      LANGSMITH_TRACING: "false"
+      LANGCHAIN_TRACING_V2: "false"
+    volumes:
+      - noveltea-state:/var/lib/noveltea/state
+      - noveltea-cache:/var/lib/noveltea/cache
+      - noveltea-graph:/var/lib/noveltea/graph
+      # Mount ONLY in the trusted agent process, never in sandboxes or web.
+      - type: bind
+        source: ${NT_CONTROLLER_SOCKET_DIR:?Provide trusted host socket directory}
+        target: /run/noveltea-controller
+        read_only: true
+    secrets: [noveltea-controller-token]
+    # No published ports; only web can reach it via the internal bridge.
+    expose: ["7001"]
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    networks: [backend]
+
+networks:
+  frontend: {}
+  backend: {} # private unpublished bridge; agent still needs model-provider egress
+
+volumes:
+  noveltea-app:
+    name: noveltea-app
+  noveltea-state:
+    name: noveltea-state
+  noveltea-cache:
+    name: noveltea-cache
+  noveltea-graph:
+    name: noveltea-graph
+
+secrets:
+  noveltea-controller-token:
+    file: ${NT_CONTROLLER_TOKEN_FILE:?Provide private controller token file}
