@@ -195,18 +195,22 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
   }
   const runtime = await ModelRuntime.create();
   const sessionDir = join(job.stateDir, "foundation-sessions");
+  const authoredFile = join(project.root, target);
   const context = await preparePiContext(job, project, {
     group: "foundation:write", step: "foundation:write",
-    paths: [target], snapshot: state.snapshot.id, provider, model: modelId, directory: sessionDir,
+    // An initial Foundation has no source file to read. Including a missing
+    // target in the Context Manifest leads Pi to fail before it ever writes.
+    paths: existsSync(authoredFile) ? [target] : [],
+    snapshot: state.snapshot.id, provider, model: modelId, directory: sessionDir,
   }, runtime);
   const sandboxTools = await selectSandboxPiTools(job, state.snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
     customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
-    // In hosted mode every ordinary file/search/shell tool is replaced by the
-    // private controller adapter; CLI-local mode retains the legacy tools.
-    // Neither mode exposes a structured-record writer or Git commit tool.
+    // All Pi file/search/shell tools use the isolated controller adapter,
+    // including standalone CLI jobs. No local host-tool fallback is permitted.
+    // Neither a structured-record writer nor a Git commit tool is exposed.
     noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
   let reads: string[] = [];
@@ -230,8 +234,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       "That reserved Git-tracked directory is noncanonical and author-only; avoid it even with rg --hidden, git grep, git show or broad filesystem scans. " +
       "Use only narrowly scoped author constraints supplied explicitly for this assignment. " +
       "Never run git add, commit, reset, checkout, or alter Git history. Do not touch other files or any NovelTea engine records. " +
-      (sandboxTools ? "The shell runs only in the isolated /story sandbox; Git, host paths, credentials and network are unavailable. Use read for pinned skills and story_validate for native validation. " :
-        "You may inspect with grep, rg, Git diff, status and history. ") +
+      "The shell runs only in the isolated /story sandbox; Git, host paths, credentials and network are unavailable. Use read for pinned skills and story_validate for native validation. " +
       "Preserve every existing user-protected decision verbatim; do not invent author approvals. " +
       "Attribute actual author constraints individually as origin:user/authority:user-protected; " +
       "agent-chosen decisions as origin:agent/authority:delegated. " +
@@ -243,6 +246,10 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       "For YAML frontmatter, DOUBLE-QUOTE every free-text scalar (title, premise, central_conflict, genre, tone, " +
       "player_experience, scope and decision statements); escape embedded quote characters as needed. " +
       "Plain unquoted prose with colons is INVALID YAML. Verify your frontmatter is parseable before finishing. " +
+      (existsSync(authoredFile)
+        ? "The target file exists: read it before editing and preserve its existing decisions. "
+        : "The Foundation target does not exist yet. Create it with write before attempting story_context or read on that file; " +
+          "story_context cannot read nonexistent Story records. ") +
       "Call story_validate with no arguments after authoring, inspect diagnostics and readiness, repair and revalidate before finishing. " +
       "Honor the requested narrative/presentation envelope as constraints rather than universal plot counts. " +
       "Do not claim validation, approval or a commit; the graph performs those independently. " +
@@ -258,7 +265,21 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     };
     if (!succeeded()) throw new Error("Pi foundation specialist failed to finish a successful turn.");
 
-    const authoredFile = join(project.root, target);
+    if (!existsSync(authoredFile)) {
+      // Pi occasionally treats an unavailable initial context read or mistyped
+      // pinned skill path as a reason to stop without writing. Give the same
+      // isolated session one explicit recovery opportunity, never a host fallback.
+      await promptStorySpecialist(session,
+        `No Story file was created at ${target}. This is a new record, so do NOT call story_context on it before writing. ` +
+        "Use the sandbox write tool to create the canonical Markdown file. " +
+        "If a pinned skill read failed, retry its FULL exact absolute path from the earlier list (do not shorten the snapshot hash):\n" +
+        REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
+        "\nValidate the new file with story_validate before finishing.");
+      if (!succeeded()) throw new Error("Pi foundation creation recovery failed to finish.");
+    }
+    if (!existsSync(authoredFile)) {
+      throw new Error("Pi foundation specialist did not create the required Story Markdown after one in-session recovery attempt; preserve the Pi transcript for review.");
+    }
     // The canonical validator checks structural correctness, not whether Pi
     // misattributes the author's explicit constraints to itself. Give one
     // bounded in-session correction opportunity before accepting the writer.

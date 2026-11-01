@@ -18,6 +18,23 @@ test("foundation provenance recognizes explicit protected author decisions", () 
   ])), true);
 });
 
+test("foundation provenance accepts valid YAML-quoted origins and authorities from live Pi", () => {
+  const original = direction([
+    { id: "author-setting", statement: "Stranded train", origin: "user", authority: "user-protected" },
+    { id: "agent-clue", statement: "Missing ledger", origin: "agent", authority: "delegated" },
+  ]);
+  const doubleQuoted = original
+    .replace("origin: user", 'origin: "user"')
+    .replace("authority: user-protected", 'authority: "user-protected"')
+    .replace("origin: agent", 'origin: "agent"');
+  assert.equal(hasUserProtectedDecision(doubleQuoted), true);
+  const singleQuoted = original
+    .replace("origin: user", "origin: 'user'")
+    .replace("authority: user-protected", "authority: 'user-protected'");
+  assert.equal(hasUserProtectedDecision(singleQuoted), true);
+  assert.equal(hasUserProtectedDecision(doubleQuoted.replace('origin: "user"', 'origin: "agent"')), false);
+});
+
 test("foundation provenance detects the real Pi failure: every decision attributed to the agent", () => {
   assert.equal(hasUserProtectedDecision(direction([
     { id: "archivist-protagonist", statement: "The player follows an archivist", origin: "agent", authority: "delegated" },

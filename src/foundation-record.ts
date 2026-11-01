@@ -29,8 +29,12 @@ export function hasUserProtectedDecision(record: string): boolean {
   const frontmatter = match[1]!
   const decisions = /^decisions:\s*\r?\n((?:[ \t]+.*\r?\n)*)/m.exec(frontmatter)?.[1]
   if (!decisions) return false
+  // YAML permits plain, single-quoted and double-quoted enum scalars.
+  // The validator checks the full schema separately; this guard only detects
+  // paired provenance fields on the same canonical decision item.
   return decisions.split(/\r?\n(?=  - id:)/).some(block =>
-    /^    origin: user\s*$/m.test(block) && /^    authority: user-protected\s*$/m.test(block))
+    /^    origin:[ \t]*(?:user|"user"|'user')[ \t]*$/m.test(block) &&
+    /^    authority:[ \t]*(?:user-protected|"user-protected"|'user-protected')[ \t]*$/m.test(block))
 }
 
 export function renderFoundation(draft: FoundationDraft): string {

@@ -109,6 +109,14 @@ test("required model rejection, explicit fallback, immutable resolution and reas
   assert.equal(configured.resolution.thinking, "high");
 });
 
+test("a brand-new Story record is not presented as required pre-write context", async () => {
+  const { job, project } = await fixture();
+  const context = await preparePiContext(job, project,
+    options(job, "new-foundation", [], "foundation:write"), runtime());
+  assert.doesNotMatch(context.contextNote, /Use story_context with \{\} before writing/);
+  assert.match(context.contextNote, /Starting a fresh scoped specialist conversation/);
+});
+
 test("completed related sessions fork the saved prefix into their own work-item transcripts", async () => {
   const { job, project } = await fixture();
   const first = await preparePiContext(job, project, options(job, "first"), runtime());
