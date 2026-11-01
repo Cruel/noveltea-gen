@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { execFileSync, type spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
@@ -68,9 +72,10 @@ function docker() {
   const calls: string[][] = []
   const containers = new Map<string, Record<string, string>>()
   let started = false
+  let image: string | null = IMAGE
   const run: CommandRunner = args => {
     calls.push(args)
-    if (args[0] === 'image') return { stdout: IMAGE, stderr: '', status: 0 }
+    if (args[0] === 'image') return { stdout: image ?? '', stderr: '', status: image ? 0 : 1 }
     if (args[0] === 'container' && args[1] === 'inspect') {
       const result = containers.get(args[2]!)
       return { stdout: result ? JSON.stringify(result) : '', stderr: '', status: result ? 0 : 1 }
@@ -80,12 +85,13 @@ function docker() {
       containers.set(name, Object.fromEntries(args.filter((v, i) => args[i-1] === '--label').map(v => v.split('=').length > 1 ? [v.slice(0,v.indexOf('=')),v.slice(v.indexOf('=')+1)] : [v,''])))
     }
     if (args[0] === 'start') started = true
+    if (args[0] === 'stop') started = false
     if (args[0] === 'rm') containers.delete(args[2]!)
     if (args[0] === 'inspect' && args[1] === 'noveltea-job-' + ID)
       return { stdout: String(started), stderr: '', status: 0 }
     return { stdout: '', stderr: '', status: 0 }
   }
-  return { calls, run }
+  return { calls, run, setImage: (next: string | null) => { image = next } }
 }
 
 test('registered Story job derives one trusted worktree and never mounts git or inbox', async () => {
@@ -190,6 +196,137 @@ test('uppercase persisted job UUIDs retain their exact Git identity through clie
     assert.equal((await client.acquire(upperId)).jobId, upperId)
     assert.equal((await client.inspect(upperId)).jobId, upperId)
   } finally { server.close(); await once(server, 'close') }
+})
+
+class FakeDockerExec extends EventEmitter {
+  readonly stdout = new PassThrough()
+  readonly stderr = new PassThrough()
+  kill() { return true }
+}
+
+test('exec terminates all container descendants before reporting a writer boundary; streams UTF-8 safely', async () => {
+  const { config } = fixture()
+  const { calls, run } = docker()
+  const child = new FakeDockerExec()
+  const spawnExec = (() => child) as unknown as typeof spawn
+  const controller = new SandboxController(config, run, spawnExec)
+  await controller.acquire(ID)
+  const out: string[] = []
+  const err: string[] = []
+  const execution = controller.execute(ID, ['sh', '-c', '(sleep 60; echo late >> /story/events/x.md) &'],
+    (stream, data) => (stream === 'stdout' ? out : err).push(data))
+
+  await assert.rejects(controller.execute(ID, ['true'], () => {}), /active operation/)
+  assert.throws(() => controller.dispose(ID), /executing or being acquired/)
+  const accent = Buffer.from('café')
+  const emoji = Buffer.from('🍵')
+  child.stdout.write(accent.subarray(0, 4))
+  child.stdout.write(accent.subarray(4))
+  child.stderr.write(emoji.subarray(0, 2))
+  child.stderr.write(emoji.subarray(2))
+  child.stdout.end()
+  child.stderr.end()
+  // A successful foreground exit must not resolve the request until the
+  // sandbox has stopped (killing descendants) and restarted its clean init.
+  child.emit('close', 0)
+  assert.equal(await execution, 0)
+  assert.equal(out.join(''), 'café')
+  assert.equal(err.join(''), '🍵')
+  const stop = calls.findIndex(args => args[0] === 'stop')
+  assert.ok(stop > 0)
+  assert.deepEqual(calls[stop]!.slice(0, 4), ['stop', '--time', '0', 'noveltea-job-' + ID])
+  assert.ok(calls.slice(stop + 1).some(args => args[0] === 'start'))
+  assert.deepEqual(controller.inspect(ID), { jobId: ID, status: 'running' })
+})
+
+test('failed Docker stop cannot turn a foreground exit into a successful execution boundary', async () => {
+  const { config } = fixture()
+  const { run, calls } = docker()
+  const child = new FakeDockerExec()
+  const failingStop: CommandRunner = args =>
+    args[0] === 'stop' ? { stdout: '', stderr: '', status: 1 } : run(args)
+  const controller = new SandboxController(config, failingStop,
+    (() => child) as unknown as typeof spawn)
+  await controller.acquire(ID)
+  const execution = controller.execute(ID, ['sh', '-c', 'true'], () => {})
+  child.stdout.end()
+  child.stderr.end()
+  child.emit('close', 0)
+  await assert.rejects(execution, /stopped writer boundary/)
+  assert.ok(calls.some(args => args[0] === 'rm' && args[2] === 'noveltea-job-' + ID))
+  assert.throws(() => controller.inspect(ID), /has not been acquired/)
+})
+
+test('dispose checks the job identity, not the current image tag, after rebuild/removal', async () => {
+  const { config } = fixture()
+  const { run, calls, setImage } = docker()
+  const controller = new SandboxController(config, run)
+  await controller.acquire(ID)
+  setImage('sha256:' + 'b'.repeat(64))
+  assert.throws(() => controller.inspect(ID), /occupied by another identity/)
+  assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+  await controller.acquire(ID)
+  setImage(null)
+  assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+  assert.equal(calls.filter(args => args[0] === 'rm').length, 2)
+})
+
+test('sandbox client decodes NDJSON whose UTF-8 accents and emoji split across socket chunks', async () => {
+  const { config } = fixture()
+  mkdirSync(join(config.socket, '..'), { recursive: true })
+  const tokenFile = join(config.appVolume, 'controller-token')
+  writeFileSync(tokenFile, config.token, { mode: 0o600 })
+  const server = createServer(async (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson' })
+    const payload = Buffer.from('{"stream":"stdout","data":"café 🍵"}\n{"exitCode":0}\n')
+    const accent = payload.indexOf(Buffer.from('é'))
+    const emoji = payload.indexOf(Buffer.from('🍵'))
+    for (const chunk of [
+      payload.subarray(0, accent + 1),
+      payload.subarray(accent + 1, emoji + 2),
+      payload.subarray(emoji + 2),
+    ]) {
+      res.write(chunk)
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    res.end()
+  })
+  server.listen(config.socket)
+  await once(server, 'listening')
+  try {
+    const out: string[] = []
+    const client = new SandboxClient(config.socket, tokenFile)
+    assert.equal(await client.execute(ID, ['echo', 'ignored'], (_stream, value) => out.push(value)), 0)
+    assert.equal(out.join(''), 'café 🍵')
+  } finally { server.close(); await once(server, 'close') }
+})
+
+test('real rootless Docker stops delayed background writers before returning success', {
+  skip: process.env.NT_TEST_ROOTLESS_SANDBOX !== '1' &&
+    'Set NT_TEST_ROOTLESS_SANDBOX=1 on a cgroup-v2/systemd rootless Docker host with the sandbox image.',
+}, async () => {
+  const flags = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .SecurityOptions}}'], {
+    encoding: 'utf8',
+  })) as string[]
+  assert.ok(flags.some(flag => /(^|=)rootless$/.test(flag)), 'Requires a rootless Docker daemon')
+  assert.equal(execFileSync('docker', ['info', '--format', '{{.CgroupVersion}}/{{.CgroupDriver}}'], {
+    encoding: 'utf8',
+  }).trim(), '2/systemd')
+  const { config, story } = fixture()
+  config.image = process.env.NT_TEST_SANDBOX_IMAGE || 'noveltea-sandbox:local'
+  mkdirSync(join(story, 'events'))
+  writeFileSync(join(story, 'events', 'late.md'), '')
+  const controller = new SandboxController(config)
+  try {
+    await controller.acquire(ID)
+    const status = await controller.execute(ID,
+      ['sh', '-c', '(sleep 2; printf late >> /story/events/late.md) >/dev/null 2>&1 &'],
+      () => {})
+    assert.equal(status, 0)
+    await new Promise<void>(resolve => setTimeout(resolve, 2400))
+    assert.equal(readFileSync(join(story, 'events', 'late.md'), 'utf8'), '')
+    assert.equal(controller.inspect(ID).status, 'running')
+  } finally { controller.dispose(ID) }
 })
 
 test('controller HTTP rejects missing bearer, only accepts registered opaque job ids', async () => {

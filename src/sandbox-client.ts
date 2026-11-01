@@ -4,6 +4,7 @@
  */
 import { request } from 'node:http'
 import { readFileSync } from 'node:fs'
+import { StringDecoder } from 'node:string_decoder'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export type SandboxResult = { jobId: string; status: string }
@@ -87,6 +88,7 @@ export class SandboxClient {
           return
         }
         let text = ''
+        const decoder = new StringDecoder('utf8')
         let size = 0
         let code: number | undefined
         let failed = false
@@ -98,7 +100,7 @@ export class SandboxClient {
             res.destroy(new Error('Sandbox output exceeded the client limit.'))
             return
           }
-          text += part.toString('utf8')
+          text += decoder.write(part)
           try {
             while (text.includes('\n')) {
               const end = text.indexOf('\n')
@@ -120,6 +122,7 @@ export class SandboxClient {
         res.on('error', no)
         res.on('end', () => {
           if (failed) return
+          text += decoder.end()
           if (code === undefined || text.trim()) no(new Error('Sandbox ended without a complete execution status.'))
           else yes(code)
         })

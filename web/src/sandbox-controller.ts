@@ -10,6 +10,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { existsSync, lstatSync, realpathSync, readdirSync, readFileSync, chmodSync } from 'node:fs'
 import { mkdir, stat } from 'node:fs/promises'
+import { StringDecoder } from 'node:string_decoder'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import Database from 'better-sqlite3'
 import { CANONICAL_RECORD_DIRS } from './lib/story-discovery.shared'
@@ -253,7 +254,11 @@ function labels(run: CommandRunner, name: string): Record<string, string> | null
 /** Small transport, no Docker commands are constructed using untrusted flags. */
 export class SandboxController {
   private readonly locked = new Set<string>()
-  constructor(readonly config: ControllerConfig, readonly run: CommandRunner = shellFreeDocker) {}
+  constructor(
+    readonly config: ControllerConfig,
+    readonly run: CommandRunner = shellFreeDocker,
+    private readonly spawnExec: typeof spawn = spawn,
+  ) {}
 
   private imageId(): string {
     const id = dockerRequired(this.run, ['image', 'inspect', this.config.image, '--format', '{{.Id}}'])
@@ -261,16 +266,19 @@ export class SandboxController {
     return id
   }
 
-  private trusted(id: string) {
-    return resolveTrustedJob(this.config, id, this.imageId())
+  private trusted(id: string, requireCurrentImage = true) {
+    // Disposal must work even when an image tag has moved or been deleted.
+    // Worktree, catalog, and registered Git identity remain mandatory.
+    return resolveTrustedJob(this.config, id, requireCurrentImage ? this.imageId() : '')
   }
 
-  private verifyRunning(job: TrustedJob): boolean {
+  private verifyRunning(job: TrustedJob, requireCurrentImage = true): boolean {
     const existing = labels(this.run, containerName(job.id))
     if (!existing) return false
     if (existing['dev.noveltea.job'] !== job.id.toLowerCase() ||
         existing['dev.noveltea.identity'] !== job.identity ||
-        existing['dev.noveltea.image'] !== job.imageId) {
+        !/^sha256:[a-f0-9]{64}$/.test(existing['dev.noveltea.image'] ?? '') ||
+        (requireCurrentImage && existing['dev.noveltea.image'] !== job.imageId)) {
       throw new SandboxError(409, 'Sandbox container name is occupied by another identity; inspect it manually.')
     }
     return true
@@ -322,62 +330,99 @@ export class SandboxController {
   }
 
   dispose(id: string) {
-    const job = this.trusted(id)
-    if (!this.verifyRunning(job)) return { jobId: id, status: 'absent' }
+    if (this.locked.has(id)) throw new SandboxError(409, 'Job sandbox is executing or being acquired.')
+    const job = this.trusted(id, false)
+    if (!this.verifyRunning(job, false)) return { jobId: id, status: 'absent' }
     dockerRequired(this.run, ['rm', '-f', containerName(id)])
     return { jobId: id, status: 'disposed' }
   }
 
-  /** Execution is intentionally limited to a fixed container and /story cwd. */
+  /**
+   * Execute in the registered container, but never treat docker exec's exit as
+   * a writer boundary. Descendants can outlive their foreground parent. Stop
+   * the entire container (SIGKILL after zero grace) and start its clean init
+   * process before returning ANY exit status to the trusted worker.
+   */
   async execute(id: string, argv: string[], onData: (stream: 'stdout' | 'stderr', data: string) => void) {
-    const job = this.trusted(id)
-    if (!this.verifyRunning(job)) throw new SandboxError(404, 'Job sandbox has not been acquired.')
-    if (!Array.isArray(argv) || argv.length === 0 || argv.length > 64 ||
-        argv.some(a => typeof a !== 'string' || a.length > 4096 || a.includes('\0'))) {
-      throw new SandboxError(400, 'Invalid sandbox command arguments.')
-    }
-    // Spawn with argv, never through a host shell; the requested command runs
-    // ONLY inside the already scoped container. Hard bounded output and time.
-    return new Promise<number>((resolvePromise, reject) => {
-      const child = spawn('docker', ['exec', '--workdir', '/story', containerName(id), ...argv], {
-        stdio: ['ignore', 'pipe', 'pipe'],
+    if (this.locked.has(id)) throw new SandboxError(409, 'Job sandbox already has an active operation.')
+    this.locked.add(id)
+    try {
+      const job = this.trusted(id)
+      if (!this.verifyRunning(job)) throw new SandboxError(404, 'Job sandbox has not been acquired.')
+      if (!Array.isArray(argv) || argv.length === 0 || argv.length > 64 ||
+          argv.some(a => typeof a !== 'string' || a.length > 4096 || a.includes('\0'))) {
+        throw new SandboxError(400, 'Invalid sandbox command arguments.')
+      }
+      // Spawn with argv, never through a host shell. All child processes are
+      // confined to the container's PID namespace and rootless cgroup.
+      return await new Promise<number>((resolvePromise, reject) => {
+        const name = containerName(id)
+        const child = this.spawnExec('docker', ['exec', '--workdir', '/story', name, ...argv], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
+        let bytes = 0
+        let finished = false
+        const finish = () => { finished = true; clearTimeout(timer) }
+        const abortContainer = (reason: SandboxError) => {
+          if (finished) return
+          finish()
+          child.kill('SIGKILL')
+          // The Docker client dying alone is insufficient: an exec process
+          // can survive inside the still-running container.
+          const removed = this.run(['rm', '-f', name])
+          reject(removed.status === 0 ? reason :
+            new SandboxError(503, 'Sandbox could not be stopped safely; operator intervention required.'))
+        }
+        const timer = setTimeout(() => {
+          abortContainer(new SandboxError(504, 'Sandbox command exceeded the execution timeout. Inspect job before retrying.'))
+        }, 30_000)
+        const chunk = (stream: 'stdout' | 'stderr', buf: Buffer) => {
+          if (finished) return
+          bytes += buf.byteLength
+          if (bytes > LIMIT_OUTPUT) {
+            abortContainer(new SandboxError(413, 'Sandbox command exceeded the output limit.'))
+            return
+          }
+          try {
+            const text = decoders[stream].write(buf)
+            if (text) onData(stream, text)
+          } catch {
+            abortContainer(new SandboxError(500, 'Sandbox output delivery failed.'))
+          }
+        }
+        child.stdout.on('data', (b: Buffer) => chunk('stdout', b))
+        child.stderr.on('data', (b: Buffer) => chunk('stderr', b))
+        child.on('error', () => abortContainer(new SandboxError(503, 'Sandbox Docker execution failed.')))
+        child.on('close', code => {
+          if (finished) return
+          try {
+            for (const stream of ['stdout', 'stderr'] as const) {
+              const rest = decoders[stream].end()
+              if (rest) onData(stream, rest)
+            }
+          } catch {
+            abortContainer(new SandboxError(500, 'Sandbox output delivery failed.'))
+            return
+          }
+          // A foreground exit cannot establish quiescence. Stopping the
+          // entire PID namespace kills detached children, even setsid
+          // descendants; only a successful stop is a safe writer boundary.
+          if (this.run(['stop', '--time', '0', name]).status !== 0) {
+            abortContainer(new SandboxError(503, 'Sandbox did not reach a stopped writer boundary.'))
+            return
+          }
+          if (this.run(['start', name]).status !== 0) {
+            abortContainer(new SandboxError(503, 'Sandbox could not restart after its writer boundary.'))
+            return
+          }
+          finish()
+          resolvePromise(code ?? 1)
+        })
       })
-      let bytes = 0
-      let finished = false
-      const end = (error?: Error, code?: number) => {
-        if (finished) return
-        finished = true
-        clearTimeout(timer)
-        if (error) reject(error)
-        else resolvePromise(code ?? 1)
-      }
-      const abortContainer = () => {
-        child.kill('SIGKILL')
-        // Killing the Docker client does NOT reliably stop a command already
-        // executing in its container. Destroy it, preserving Git work files.
-        const stopped = this.run(['rm', '-f', containerName(id)])
-        if (stopped.status !== 0) {
-          end(new SandboxError(503, 'Sandbox could not be stopped safely; operator intervention required.'))
-          return false
-        }
-        return true
-      }
-      const timer = setTimeout(() => {
-        if (abortContainer()) end(new SandboxError(504, 'Sandbox command exceeded the execution timeout. Inspect job before retrying.'))
-      }, 30_000)
-      const chunk = (stream: 'stdout' | 'stderr', buf: Buffer) => {
-        bytes += buf.byteLength
-        if (bytes > LIMIT_OUTPUT) {
-          if (abortContainer()) end(new SandboxError(413, 'Sandbox command exceeded the output limit.'))
-          return
-        }
-        onData(stream, buf.toString('utf8'))
-      }
-      child.stdout.on('data', (b: Buffer) => chunk('stdout', b))
-      child.stderr.on('data', (b: Buffer) => chunk('stderr', b))
-      child.on('error', e => end(e))
-      child.on('close', code => end(undefined, code ?? 1))
-    })
+    } finally {
+      this.locked.delete(id)
+    }
   }
 }
 

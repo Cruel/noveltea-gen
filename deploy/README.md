@@ -116,9 +116,14 @@ accepted; IDs are not filesystem paths. Do not forward browser requests here.
 
 The agent-side `SandboxClient` implements all four operations without exposing
 Docker options. Exec runs inside the sandbox with a fixed `/story` working
-directory. Output is bounded to 64 KiB per call and commands to 30 seconds;
-timeouts and abnormal exit are failures, not grounds for blindly replaying an
-interrupted writer.
+directory. Output is bounded to 64 KiB per call and commands to 30 seconds.
+After each foreground command (including nonzero exit), the controller stops
+the entire container with zero grace and restarts a clean init before returning
+the command result. This kills orphaned/background writers before the trusted
+worker's validation or commit boundary. While an exec is active, acquire,
+another exec, and dispose for that job are rejected. A failed stop/start tears
+down the sandbox and fails closed; a timeout or output overrun destroys it.
+Never blindly replay an interrupted writer.
 
 ## State, restart and failure behavior
 
@@ -136,7 +141,9 @@ Durable `noveltea-app` holds Studio OAuth/catalog data;
   does not fall back to local shell execution.
 - Stopping/restarting the web and agent processes retains all volumes.
   Controller restart retains containers but re-verifies labels and job
-  identity before reuse. Disposal never deletes Git working files.
+  identity before reuse. Image replacement prevents reusing an old container
+  for execution, but does not block authorized disposal. Disposal never
+  deletes Git working files.
 - An existing controller socket is **not** automatically unlinked on start;
   confirm the old process is stopped before manual stale-socket cleanup.
   Ambiguous Git/worktree state still needs manual reconciliation.
@@ -148,7 +155,19 @@ Durable `noveltea-app` holds Studio OAuth/catalog data;
 Run `pnpm --filter @noveltea/studio exec tsx --test
 test/sandbox-controller.test.ts` to verify read-only catalog identity,
 tampered worktree refusal, symlink denial, scoped mounts and authenticated
-controller requests. Run `pnpm check` for existing Story/Studio regressions.
+controller requests, UTF-8 chunk boundaries, background-writer cleanup
+ordering and image-replacement disposal. Run `pnpm check` for existing
+Story/Studio regressions. On a configured rootless Docker host, build the
+sandbox image and run the actual delayed-writer regression with:
+
+```sh
+NT_TEST_ROOTLESS_SANDBOX=1 pnpm --filter @noveltea/studio exec tsx --test test/sandbox-controller.test.ts
+```
+
+Set `NT_TEST_SANDBOX_IMAGE` if not using `noveltea-sandbox:local`. The test
+checks that a shell-launched background process cannot write after a
+successful command boundary. It intentionally skips on ordinary development
+hosts unless explicitly enabled; it must pass on the deployment host.
 Real daemon binding, permitted Story writes, isolation escapes, UID behavior,
 memory/cgroup constraints, cleanup after SIGKILL and Compose backup/restore
 are required for **#55** on a real configured rootless Linux host; fixture
