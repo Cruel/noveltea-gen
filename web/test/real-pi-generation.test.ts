@@ -8,6 +8,8 @@ import { join, resolve } from 'node:path'
 import { createServer as createNetServer } from 'node:net'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
+import type { JobStartResult } from '../../src/job'
+import { SandboxClient } from '../../src/sandbox-client'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
@@ -82,6 +84,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
   let store = openStudioDatabase(join(app, 'studio.sqlite'))
   const server = createControllerServer(new SandboxController(sandbox))
   let agent: ChildProcess | undefined
+  let acquiredJob: JobStartResult | undefined
   try {
     await migrateStudio(store, config)
     const auth = createStudioAuth(store, config)
@@ -93,8 +96,11 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       createHmac('sha256', config.secret).update(session.token).digest('base64')
     const repo = join(root, 'source')
     mkdirSync(join(repo, 'story'), { recursive: true })
+    // Git needs an initial tracked file, but Story Markdown (.md) must carry
+    // canonical YAML frontmatter. Keep the placeholder noncanonical so the
+    // first Foundation is genuinely a new Story record with an empty baseline.
     const baselineStory = 'A new mystery visual-novel Story\n'
-    writeFileSync(join(repo, 'story/README.md'), baselineStory)
+    writeFileSync(join(repo, 'story/README.txt'), baselineStory)
     const git = (dir: string, ...args: string[]) => execFileSync('git', args, { cwd: dir,
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
     git(repo, 'init', '-q')
@@ -103,10 +109,14 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     git(repo, 'add', '.')
     git(repo, 'commit', '-qm', 'Story baseline')
     const commit = git(repo, 'rev-parse', 'HEAD')
+    assert.equal(git(repo, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'story')
+      .split('\n').filter(path => path.endsWith('.md')).length, 0,
+      'live Foundation baseline must not contain unvalidated Story Markdown')
     const jobId = randomUUID(), storyId = randomUUID(), repositoryId = randomUUID()
     const job = await acquireCachedStory({ cacheDirectory: cache, ownerId: user.id,
       repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story',
       commit, jobId, verifiedSizeBytes: Buffer.byteLength(baselineStory), verifiedBlobCount: 1 })
+    acquiredJob = job
     store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
       VALUES (?,?,'github','123','Story/Live','2026-11-01')`).run(repositoryId, user.id)
     store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
@@ -133,7 +143,8 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       // Two specialist steps cannot complete the skill-read + authoring +
       // native-validation sequence with a real model. Keep a bounded budget
       // without forcing a premature stop before the first verified commit.
-      .run(JSON.stringify({ version: 1, headSha: job.headSha, ...request, limits: { steps: 8 }, model: selected }), jobId)
+      .run(JSON.stringify({ version: 1, headSha: job.headSha, ...request,
+        limits: { steps: 8 }, pauseAfter: 'foundation', model: selected }), jobId)
     server.listen(socket)
     await once(server, 'listening')
     // Web admission no longer executes LangGraph. It must dispatch through
@@ -219,6 +230,31 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
         if (/prompt|assistant|tool|specialist/.test(text)) return 'specialist'
         return text ? 'other' : 'none'
       }
+      if (process.env.NT_TEST_WEB_PI_DIAGNOSTIC === '1') {
+        // This explicit opt-in belongs only to the trusted local certification
+        // process, NEVER the public Studio event log. Preserve the specific
+        // failure for diagnosis before disposable state is destroyed.
+        const failure = (checkpoint.reason ?? '(no checkpoint reason)')
+          .replaceAll(root, '<test-root>')
+          .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+          .replace(/(access_token|refresh_token|api_key|authorization)[=:]\s*["']?[^\s,"']+/gi,
+            '$1=[redacted]')
+          .slice(0, 5000)
+        console.error('Trusted local graph failure detail:', failure)
+        const foundationPath = join(job.stateDir, 'foundation.json')
+        if (existsSync(foundationPath)) {
+          const persisted = JSON.parse(readFileSync(foundationPath, 'utf8')) as {
+            stage?: string; writerStarted?: boolean; piSessionFile?: string;
+            authoredSha256?: string; validation?: unknown
+          }
+          console.error('Foundation execution state:', JSON.stringify({
+            stage: persisted.stage, writerStarted: persisted.writerStarted,
+            sessionExists: !!persisted.piSessionFile && existsSync(persisted.piSessionFile),
+            authored: !!persisted.authoredSha256,
+            hasValidation: !!persisted.validation,
+          }))
+        }
+      }
       console.error('Live generation stopped before foundation verification:', JSON.stringify({
         events, queuePhase: queueRecord(store, jobId)?.phase,
         checkpointStatus: checkpoint.status,
@@ -235,7 +271,12 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
           ([key, reason]) => [key, classify(reason)])),
       }))
     }
-    assert.ok(verified, 'real Pi foundation must validate and commit before later budget pause')
+    assert.ok(verified, 'real Pi foundation must validate and commit before the safe-boundary pause')
+    const terminal = listGenerationEvents(store, user.id, jobId, 0)
+    assert.equal(terminal.find(e => e.kind === 'finished')?.status, 'paused',
+      'Foundation-only certification must stop at the first verified boundary')
+    assert.equal(terminal.some(e => e.kind === 'verified' && e.stage !== 'foundation'), false,
+      'Foundation-only certification must not launch additional generation stages')
     assert.ok(existsSync(join(job.worktreeStoryRoot, 'creative-direction/foundation.md')))
     assert.notEqual(git(job.worktreeRoot, 'rev-parse', 'HEAD'), commit)
     assert.equal(git(repo, 'rev-parse', 'HEAD'), commit, 'source repository remains untouched')
@@ -254,6 +295,9 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
         await once(agent, 'exit')
       }
     }
+    // A test timeout must not strand an executing rootless sandbox after
+    // shutting down its agent. The trusted test controller is still alive.
+    if (acquiredJob) await new SandboxClient().dispose(acquiredJob.jobId).catch(() => {})
     store.sqlite.close()
     if (server.listening) {
       server.close()

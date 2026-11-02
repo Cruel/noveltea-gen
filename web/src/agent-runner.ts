@@ -23,8 +23,10 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   if (!pinned || row.status !== 'paused' || queueRecord(store, row.id)?.phase !== 'running')
     throw new Error('Queued generation state changed before execution.')
   const config = row.configJson ? JSON.parse(row.configJson) as {
-    model?: PiSelection | null; limits?: PiPolicy['limits']
+    model?: PiSelection | null; limits?: PiPolicy['limits']; pauseAfter?: 'foundation'
   } : null
+  if (config?.pauseAfter !== undefined && config.pauseAfter !== 'foundation')
+    throw new Error('Unsupported pinned generation stage pause.')
   const selected = config?.model ?? null
   if (selected && !validPiSelection(selected)) throw new Error('Saved Pi model is invalid.')
   if (pinned.fixture === !!selected) throw new Error('Saved Pi model disagrees with pinned execution.')
@@ -83,7 +85,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       let working = '', verified = stages.length
       let previousHead = stages.at(-1)?.headSha ?? job.headSha
       for await (const patch of await graph.stream({ request: pinned,
-        pauseAfter: item.intent === 'start' && pinned.fixture ? 'foundation' : null },
+        pauseAfter: item.intent === 'start' && (pinned.fixture || config?.pauseAfter === 'foundation')
+          ? 'foundation' : null },
         { configurable: { thread_id: threadId }, recursionLimit: 10000, streamMode: 'updates' })) {
         const updates = patch as Record<string, unknown>
         const intake = updates.author_update_intake as { active?: {
