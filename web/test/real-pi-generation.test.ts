@@ -130,7 +130,10 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       contract: { scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
         constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } } }
     store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=? WHERE id=?')
-      .run(JSON.stringify({ version: 1, headSha: job.headSha, ...request, limits: { steps: 2 }, model: selected }), jobId)
+      // Two specialist steps cannot complete the skill-read + authoring +
+      // native-validation sequence with a real model. Keep a bounded budget
+      // without forcing a premature stop before the first verified commit.
+      .run(JSON.stringify({ version: 1, headSha: job.headSha, ...request, limits: { steps: 8 }, model: selected }), jobId)
     server.listen(socket)
     await once(server, 'listening')
     // Web admission no longer executes LangGraph. It must dispatch through
