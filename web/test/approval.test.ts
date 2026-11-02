@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -13,6 +14,7 @@ import { approvalRequest } from '../src/lib/approval.server'
 import { fixtureJobRequest } from '../src/lib/fixture-jobs.server'
 import { availableUserPiModels, userPiCredentials } from '../src/lib/pi-credentials.server'
 import { authorInteractionRequest } from '../src/lib/author-interactions.server'
+import { startAgentServer } from '../src/agent-service'
 import { runAuthorAction } from '../../src/author-updates'
 import { runArchitectureJob } from '../../src/architecture'
 import { verifyAuthorEvidence } from '../../src/author-evidence'
@@ -24,7 +26,11 @@ test('authenticated owner records an exact durable decision; foreign users, inli
   const root = mkdtempSync(join(tmpdir(), 'nt-web-approval-'))
   const previous = { state: process.env.NT_STATE_DIR, cache: process.env.NT_GIT_CACHE_DIR,
     key: process.env.NT_PI_CREDENTIAL_KEY, strict: process.env.NT_REQUIRE_USER_PI_RUNTIME,
-    socket: process.env.NT_SANDBOX_SOCKET, token: process.env.NT_SANDBOX_TOKEN_FILE }
+    socket: process.env.NT_SANDBOX_SOCKET, token: process.env.NT_SANDBOX_TOKEN_FILE,
+    rpcUrl: process.env.NT_AGENT_RPC_URL, rpcToken: process.env.NT_AGENT_RPC_TOKEN }
+  let agent: Awaited<ReturnType<typeof startAgentServer>> | undefined
+  delete process.env.NT_AGENT_RPC_URL
+  delete process.env.NT_AGENT_RPC_TOKEN
   process.env.NT_STATE_DIR = join(root, 'state')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   const store = openStudioDatabase(join(root, 'studio.sqlite'))
@@ -114,6 +120,13 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     assert.equal(verifyAuthorEvidence(job, { receiptId: pending.id, nonce: pending.nonce }).payload.proposalSha256, digest)
     assert.equal(git('rev-parse', 'HEAD'), commit)
 
+    const token = randomBytes(48).toString('hex')
+    agent = await startAgentServer(store, token, 0, '127.0.0.1')
+    process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:' + agent.port
+    process.env.NT_AGENT_RPC_TOKEN = token
+    assert.equal((await fetch(process.env.NT_AGENT_RPC_URL + '/v1/author', {
+      method: 'POST', body: '{}',
+    })).status, 401, 'agent RPC must reject unauthenticated commands')
     const author = (body: unknown, session = aliceCookie, origin = config.baseURL) =>
       authorInteractionRequest(auth, store, new Request(config.baseURL + '/api/jobs/' + jobId + '/author', {
         method: 'POST', headers: { origin, cookie: session, 'content-type': 'application/json' },
@@ -211,11 +224,43 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     assert.equal(pendingView.items[2].phase, 'awaiting-author', 'denial does not resume the protected writer')
     assert.equal(pendingView.items[2].approval.decision, 'rejected')
     assert.equal(JSON.parse(readFileSync(architectureFile, 'utf8')).plan.version, 2)
+    // New author messages are admitted through the agent without processing
+    // an in-progress writer or changing the canonical Git revision.
+    const sent = await author({ action: 'send', message: { id: 'change-after-review',
+      kind: 'change', payload: { text: 'Revisit the second witness', affectedIds: ['arc.truth'] },
+    } })
+    assert.equal(sent.status, 202, await sent.clone().text())
+    assert.equal((await sent.json() as any).acknowledgement.phase, 'queued')
+    assert.equal(git('rev-parse', 'HEAD'), commit)
+    assert.equal((await author({ action: 'send', message: { kind: 'change', payload: { text: '' } } })).status,
+      409, 'invalid author message cannot enter the durable inbox')
+    const unicode = 'A hidden witness speaks: 証言と秘密'
+    const bytes = Buffer.from(JSON.stringify({ ownerId: alice.id, jobId, command: {
+      action: 'send', message: { id: 'unicode-author-update', kind: 'change',
+        payload: { text: unicode, affectedIds: ['arc.truth'] } },
+    } }))
+    const fragment = Buffer.from('証')
+    const split = bytes.indexOf(fragment) + 1
+    assert.ok(split > 1, 'expected a multibyte character')
+    const unicodeStatus = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(process.env.NT_AGENT_RPC_URL! + '/v1/author', {
+        method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+      }, response => { response.resume(); response.on('end', () => resolve(response.statusCode ?? 0)) })
+      req.on('error', reject)
+      req.write(bytes.subarray(0, split))
+      setTimeout(() => req.end(bytes.subarray(split)), 10)
+    })
+    assert.equal(unicodeStatus, 202)
+    const inbox = await runAuthorAction({ story: job.storyRoot, job: jobId, action: 'inspect' }) as any
+    assert.equal(inbox.records.find((record: any) => record.message.id === 'unicode-author-update')?.message.payload.text,
+      unicode, 'split UTF-8 must preserve the exact author message')
   } finally {
+    if (agent) await agent.close()
     store.sqlite.close()
     for (const [key, value] of [['NT_STATE_DIR', previous.state], ['NT_GIT_CACHE_DIR', previous.cache],
       ['NT_PI_CREDENTIAL_KEY', previous.key], ['NT_REQUIRE_USER_PI_RUNTIME', previous.strict],
-      ['NT_SANDBOX_SOCKET', previous.socket], ['NT_SANDBOX_TOKEN_FILE', previous.token]] as const) {
+      ['NT_SANDBOX_SOCKET', previous.socket], ['NT_SANDBOX_TOKEN_FILE', previous.token],
+      ['NT_AGENT_RPC_URL', previous.rpcUrl], ['NT_AGENT_RPC_TOKEN', previous.rpcToken]] as const) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value
     }
     rmSync(root, { recursive: true, force: true })

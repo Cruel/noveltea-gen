@@ -5,8 +5,8 @@ import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
-import { authorizedStoryJob, generationJobRequest } from './fixture-jobs.server'
-import { queueGeneration, queueRecord, dequeueBeforeStart, fenceAbandonedRuns } from './generation-queue.server'
+import { authorizedStoryJob } from './fixture-jobs.server'
+import { queueGeneration, queueRecord, dequeueBeforeStart } from './generation-queue.server'
 import { readJobControl, setJobControl } from '../../../src/job-control'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { trustedHead } from '../../../src/revision'
@@ -79,7 +79,6 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
     const user = await requireUser(auth, request.headers)
     if (!user) return reply({ error: 'Sign in required' }, 401)
     const job = await authorizedStoryJob(store, user.id, id)
-    fenceAbandonedRuns(store)
     const saved = store.sqlite.prepare(`SELECT status, generation_request_json AS request,
       generation_thread_id AS thread FROM studio_sessions WHERE id=? AND owner_user_id=?`)
       .get(id, user.id) as { status: string; request: string | null; thread: string | null }
@@ -194,16 +193,8 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       }
       queueGeneration(store, user.id, id, intent, 'paused')
     })()
-    const pinned = JSON.parse(saved.request) as { task: string; contract: unknown }
-    // Reattach through the exact same owner-authenticated start admission.
-    // This cannot accept new model, Git, or Story paths.
-    const internal = new Request(baseURL + '/api/jobs/' + id, {
-      method: 'POST',
-      headers: { origin: baseURL, cookie: request.headers.get('cookie') ?? '',
-        'content-type': 'application/json' },
-      body: JSON.stringify({ task: pinned.task, contract: pinned.contract }),
-    })
-    return generationJobRequest(auth, store, internal, id, baseURL)
+    // The agent polls this durable queue. No HTTP request owns execution.
+    return reply({ control: 'running', queue: 'queued', intent }, 202)
   } catch (error) {
     const status = error instanceof Error && 'status' in error &&
       typeof error.status === 'number' ? error.status :

@@ -54,6 +54,12 @@ test('SQLite queue reserves two concurrent slots, is FIFO, preserves interrupted
     assert.equal(fenceAbandonedRuns(db), 1)
     assert.equal(queueRecord(db, ids[1]!)?.phase, 'interrupted')
     assert.throws(() => queueGeneration(db, owner, ids[1]!, 'resume', 'paused'), /reconciliation/)
+    // A Compose restart may assign the same process PID (often PID 1).
+    // The distinct incarnation still must be fenced, never automatically rerun.
+    db.sqlite.prepare('UPDATE generation_run_queue SET worker_id=? WHERE job_id=?')
+      .run(`${hostname()}:${process.pid}:previous-container`, ids[2])
+    assert.equal(fenceAbandonedRuns(db), 1)
+    assert.equal(queueRecord(db, ids[2]!)?.phase, 'interrupted')
     process.env.NT_STUDIO_MAX_ACTIVE_JOBS = '1'
     assert.equal(claimNext(db), null)
     process.env.NT_STUDIO_MAX_ACTIVE_JOBS = 'bogus'

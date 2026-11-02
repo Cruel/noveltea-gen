@@ -18,8 +18,10 @@ type AuthorState = { status: string; items: Item[] }
 export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChanged: () => void }) {
   const [state, setState] = useState<AuthorState | null>(null)
   const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [idea, setIdea] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const url = '/api/jobs/' + encodeURIComponent(jobId) + '/author'
   const refresh = async () => {
     const response = await fetch(url, { cache: 'no-store' })
@@ -53,12 +55,41 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
     } catch (e) { setError(e instanceof Error ? e.message : 'Author response failed') }
     finally { setBusy(null) }
   }
+  const sendIdea = async () => {
+    const original = idea.trim()
+    if (!original) return
+    setBusy('new-idea'); setError(null)
+    try {
+      const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'send', message: {
+          kind: 'idea', payload: { kind: 'event-concept',
+            source: { kind: 'author-continuation', reference: 'Studio author message' },
+            original, requirements: { meaning: [{ text: original, binding: false }], wording: [], participants: [] },
+            identities: { known: [], unresolved: [] }, prerequisites: [],
+            placement: { scopeIds: [], flexible: true, earliest: 'event' }, upstreamConstraints: [],
+          },
+        } }),
+      })
+      const result = await response.json() as { error?: string }
+      if (!response.ok) throw new Error(result.error || 'Unable to queue author idea')
+      setIdea(''); setNotice('Idea queued for the next safe work boundary.'); onChanged()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to queue author idea') }
+    finally { setBusy(null) }
+  }
   const items = state?.items.filter(item => item.phase === 'awaiting-author' || item.approval?.phase === 'recorded') ?? []
   return <section aria-label="Author questions and approvals">
     <h2>Author questions and approvals</h2>
+    <label htmlFor="author-new-idea">Send an idea to this job</label>
+    <textarea id="author-new-idea" rows={3} maxLength={2500} value={idea}
+      onChange={e => setIdea(e.target.value)} disabled={busy !== null}
+      placeholder="New narrative idea or constraint for the next safe work boundary" />
+    <button type="button" onClick={() => void sendIdea()} disabled={busy !== null || !idea.trim()}>
+      Save idea for next safe boundary
+    </button>
     <p className="muted">Responses are bound to this job's saved graph interrupt.
       Protected changes require reviewing the exact proposal and confirming the trusted approval.</p>
     {error && <p className="error" role="alert">{error}</p>}
+    {notice && <p role="status">{notice}</p>}
     {!state && !error && <p>Checking saved author interrupts…</p>}
     {state && items.length === 0 && <p>No author responses are awaiting review.</p>}
     {items.map(item => <article key={item.id}>

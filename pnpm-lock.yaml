@@ -27,21 +27,9 @@ importers:
       '@langchain/langgraph-checkpoint-sqlite':
         specifier: 1.0.4
         version: 1.0.4(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(@langchain/langgraph-checkpoint@1.2.1(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0)))
-      '@langchain/langgraph-sdk':
-        specifier: 1.12.9
-        version: 1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
       '@langchain/langsmith-pi-extension':
         specifier: 0.2.1
         version: 0.2.1(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0)
-      '@skein-js/agent-protocol':
-        specifier: 0.23.0
-        version: 0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)
-      '@skein-js/express':
-        specifier: 0.23.0
-        version: 0.23.0(b0d442448137b6b251896228d0c1257c)
-      '@skein-js/local':
-        specifier: 0.23.0
-        version: 0.23.0(93efd988a737583bf29628425db67725)
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
@@ -121,34 +109,6 @@ importers:
         version: 8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)
 
 packages:
-
-  '@a2a-js/sdk@1.3.0':
-    resolution: {integrity: sha512-OpK4nygUnLKlpTFZlM2IrYu7f3c/B7c4u4Z14+vgMq24lEINTVCxH/BqZx+GL92rNf7CoBL5oTP5UhNsl75yyg==}
-    engines: {node: '>=20'}
-    hasBin: true
-    peerDependencies:
-      '@bufbuild/protobuf': ^2.10.2
-      '@grpc/grpc-js': ^1.11.0
-      better-sqlite3: ^12.0.0 || ^13.0.0
-      express: ^4.21.2 || ^5.1.0
-      kysely: ^0.28.17 || ^0.29.0
-      mysql2: ^3.0.0
-      pg: ^8.0.0
-    peerDependenciesMeta:
-      '@bufbuild/protobuf':
-        optional: true
-      '@grpc/grpc-js':
-        optional: true
-      better-sqlite3:
-        optional: true
-      express:
-        optional: true
-      kysely:
-        optional: true
-      mysql2:
-        optional: true
-      pg:
-        optional: true
 
   '@alloc/quick-lru@5.3.0':
     resolution: {integrity: sha512-U4+70Pc5ZS9osnCBCE5Jha/ciHM+Yp+CNMNC/7HvYbNRk1Ldd+f7qO65W5qfhu/TCv+/ozljlXXe9Nj8419DMA==}
@@ -699,11 +659,6 @@ packages:
       react-dom:
         optional: true
 
-  '@langchain/langgraph-ui@1.4.2':
-    resolution: {integrity: sha512-rGsuI9sW86xnyYo/BTQ0MSNc0s/kziOXf2C8K52ckX5PWWvJp7ObiHdx9Te9OFWXwm87F8SyVBaQLHmQNq5vOA==}
-    engines: {node: ^18.19.0 || >=20.16.0}
-    hasBin: true
-
   '@langchain/langgraph-ui@1.5.5':
     resolution: {integrity: sha512-GCu0JMrXVKXLSv+nuUHnKTSg2eV5ebjErYW9hOQvlhc4dd05ZT6ClRl5LNAMU9qaG1xXr3qG65fw/MI7LASgrQ==}
     engines: {node: ^18.19.0 || >=20.16.0}
@@ -894,67 +849,6 @@ packages:
   '@sindresorhus/merge-streams@4.0.0':
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
-
-  '@skein-js/agent-protocol@0.23.0':
-    resolution: {integrity: sha512-UcV1cziwPmdsb0steTcKquCixHyBVONP0zDZUqwLxNZdbgdHCqhHHChZaqO08g3AtkXrUdE/JoBoNQSkLLbeMg==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@langchain/langgraph': ^1.4.0
-      '@langchain/langgraph-sdk': ^1.9.0
-    peerDependenciesMeta:
-      '@langchain/langgraph':
-        optional: true
-
-  '@skein-js/config@0.23.0':
-    resolution: {integrity: sha512-FIsxMTZzUVjMNkRX9UHoJlczlbdissoV6nGR/pjAIb099lr2AAP2/cv85luLJeb3sL05sNLEapUQzqAwza8qEg==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@langchain/langgraph': ^1.4.0
-      '@langchain/langgraph-sdk': ^1.9.0
-
-  '@skein-js/core@0.23.0':
-    resolution: {integrity: sha512-HfrT6vu/SQ8qft5UuekhPlg2EcT8TI0EJPnViDt1xIYz7PpoVFk8tKXUiOg9ComQWNKNYxIdUiv+EzpVcPaJBw==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@langchain/langgraph-sdk': ^1.9.0
-
-  '@skein-js/express@0.23.0':
-    resolution: {integrity: sha512-40EAO5uwxJGiY8rsq0R50FFE6kyGqyGLOmMP+cuLRJQ4osFCj4rHHVqT/+k/uLX/OCxlWpX9SXnDHeT+qjXJfQ==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@langchain/langgraph': ^1.4.0
-      express: '>=4.18.0'
-
-  '@skein-js/langgraph@0.23.0':
-    resolution: {integrity: sha512-Vxz2qwN/LSdKnMCE5/eZVCyLhCB3txFUDUcsM0xYG9nQV09CnCmpBmglOczizMPX4d1JytUcPnVSysR+x+6jYg==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@langchain/langgraph': ^1.4.0
-
-  '@skein-js/local@0.23.0':
-    resolution: {integrity: sha512-2RI+3n2SxHCnbNzu7IDeNksyfEQPW3kPL9z3BgmTt7/5lIS9SNhfNY0kRbuFpemFzVgyxRlP6V4mHjXZmyx8Yg==}
-    engines: {node: ^22.0.0 || ^24.0.0 || ^26.0.0}
-    peerDependencies:
-      '@langchain/langgraph': ^1.4.0
-      '@langchain/langgraph-checkpoint-sqlite': ~1.0.4
-
-  '@skein-js/server-kit@0.23.0':
-    resolution: {integrity: sha512-Q7OBOfR2avAH5Q7Ywi3OnorEHPouNz6TmOeZVH9AhURmGxp1JTVc+lfIBxKIUAeUef8jJOcvacnXByaYW6I92A==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@langchain/langgraph': ^1.4.0
-      '@skein-js/channels': 0.23.0
-    peerDependenciesMeta:
-      '@skein-js/channels':
-        optional: true
-
-  '@skein-js/storage-memory@0.23.0':
-    resolution: {integrity: sha512-TIZ/eOAYMRRpkbL9tTckYA7jCk5/xxvB35sHTRbd4DH3vxfOvtCE//v+0nUIoNp/+WGs6kbVugTqpRURILWP3w==}
-    engines: {node: '>=20'}
-
-  '@skein-js/storage-sqlite@0.23.0':
-    resolution: {integrity: sha512-c1/cjin80SdkwkPQ+0e0Hg5OfdlhXMIxiPnOCHSQJkCVMXIYxmFFNOUCpC2aWRxbEhGk4Tna4vzPk7Bd2zvovw==}
-    engines: {node: ^22.0.0 || ^24.0.0 || ^26.0.0}
 
   '@smithy/core@3.36.2':
     resolution: {integrity: sha512-oRw0rB9QSUiCZfEs23G5F4Af+b2rQt1lItIICWu5IejFNd+uPM8SWqiKLMpQ6bX1Q7slsLbjuoE2niErFtkVPQ==}
@@ -1550,10 +1444,6 @@ packages:
   create-langgraph@1.1.5:
     resolution: {integrity: sha512-BKKkSLvzeyoZCq3rM0F/YsPlG+p3EWEg9ZV1OgQpZpf4Fc7QWsdlCf/n/USS97m9hdMJTVjLiv7DMaqfKs9JgA==}
     hasBin: true
-
-  croner@10.0.1:
-    resolution: {integrity: sha512-ixNtAJndqh173VQ4KodSdJEI6nuioBWI0V1ITNKhZZsO0pEMoDxz539T4FTTbSZ/xIOSuDnzxLVRqBVSvPNE2g==}
-    engines: {node: '>=18.0'}
 
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
@@ -3147,9 +3037,6 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
-
   zod@4.6.7:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
@@ -3169,14 +3056,6 @@ packages:
         optional: true
 
 snapshots:
-
-  '@a2a-js/sdk@1.3.0(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)':
-    dependencies:
-      jose: 6.2.14
-    optionalDependencies:
-      better-sqlite3: 12.11.1
-      express: 5.3.0(supports-color@7.2.0)
-      kysely: 0.29.7
 
   '@alloc/quick-lru@5.3.0': {}
 
@@ -3893,15 +3772,6 @@ snapshots:
       react: 19.2.0
       react-dom: 19.2.0(react@19.2.0)
 
-  '@langchain/langgraph-ui@1.4.2':
-    dependencies:
-      '@commander-js/extra-typings': 13.1.0(commander@13.1.0)
-      commander: 13.1.0
-      esbuild: 0.28.2
-      esbuild-plugin-tailwindcss: 2.2.0
-      zod: 4.6.7
-    optional: true
-
   '@langchain/langgraph-ui@1.5.5':
     dependencies:
       '@commander-js/extra-typings': 13.1.0(commander@13.1.0)
@@ -3934,30 +3804,6 @@ snapshots:
       - ws
 
   '@langchain/protocol@0.0.20': {}
-
-  '@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@3.25.76)':
-    dependencies:
-      '@hono/node-server': 2.1.5(hono@4.13.14)
-      ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
-      content-type: 1.0.5
-      cors: 2.8.6
-      cross-spawn: 7.0.6
-      eventsource: 3.0.7
-      eventsource-parser: 3.1.1
-      express: 5.3.0(supports-color@7.2.0)
-      express-rate-limit: 8.7.2(express@5.3.0(supports-color@7.2.0))(supports-color@7.2.0)
-      hono: 4.13.14
-      jose: 6.2.14
-      json-schema-typed: 8.0.2
-      pkce-challenge: 5.0.1
-      raw-body: 3.0.2
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.2(zod@3.25.76)
-    optionalDependencies:
-      '@cfworker/json-schema': 4.1.1
-    transitivePeerDependencies:
-      - supports-color
 
   '@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7)':
     dependencies:
@@ -4079,177 +3925,6 @@ snapshots:
   '@silvia-odwyer/photon-node@0.3.4': {}
 
   '@sindresorhus/merge-streams@4.0.0': {}
-
-  '@skein-js/agent-protocol@0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)':
-    dependencies:
-      '@a2a-js/sdk': 1.3.0(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)
-      '@langchain/langgraph-sdk': 1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      '@modelcontextprotocol/sdk': 1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@3.25.76)
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      croner: 10.0.1
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.2(zod@3.25.76)
-    optionalDependencies:
-      '@langchain/langgraph': 1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7)
-    transitivePeerDependencies:
-      - '@bufbuild/protobuf'
-      - '@cfworker/json-schema'
-      - '@grpc/grpc-js'
-      - better-sqlite3
-      - express
-      - kysely
-      - mysql2
-      - pg
-      - supports-color
-
-  '@skein-js/config@0.23.0(86aa21db481cc351997eb00bb3f3411b)':
-    dependencies:
-      '@langchain/langgraph': 1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7)
-      '@langchain/langgraph-api': 1.5.5(86aa21db481cc351997eb00bb3f3411b)
-      '@langchain/langgraph-sdk': 1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      zod: 3.25.76
-    transitivePeerDependencies:
-      - '@langchain/core'
-      - '@langchain/langgraph-checkpoint'
-      - '@opentelemetry/api'
-      - '@opentelemetry/exporter-trace-otlp-proto'
-      - '@opentelemetry/sdk-trace-base'
-      - babel-plugin-macros
-      - bufferutil
-      - openai
-      - supports-color
-      - ts-node
-      - typescript
-      - utf-8-validate
-      - ws
-
-  '@skein-js/core@0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))':
-    dependencies:
-      '@langchain/langgraph-sdk': 1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      '@langchain/protocol': 0.0.20
-
-  '@skein-js/express@0.23.0(b0d442448137b6b251896228d0c1257c)':
-    dependencies:
-      '@langchain/langgraph': 1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7)
-      '@skein-js/agent-protocol': 0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)
-      '@skein-js/config': 0.23.0(86aa21db481cc351997eb00bb3f3411b)
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      '@skein-js/server-kit': 0.23.0(b0d442448137b6b251896228d0c1257c)
-      cors: 2.8.6
-      express: 5.3.0(supports-color@7.2.0)
-    transitivePeerDependencies:
-      - '@bufbuild/protobuf'
-      - '@cfworker/json-schema'
-      - '@grpc/grpc-js'
-      - '@langchain/core'
-      - '@langchain/langgraph-checkpoint'
-      - '@langchain/langgraph-sdk'
-      - '@opentelemetry/api'
-      - '@opentelemetry/exporter-trace-otlp-proto'
-      - '@opentelemetry/sdk-trace-base'
-      - '@skein-js/channels'
-      - babel-plugin-macros
-      - better-sqlite3
-      - bufferutil
-      - kysely
-      - mysql2
-      - openai
-      - pg
-      - supports-color
-      - ts-node
-      - typescript
-      - utf-8-validate
-      - ws
-
-  '@skein-js/langgraph@0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)':
-    dependencies:
-      '@langchain/langgraph': 1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7)
-      '@skein-js/agent-protocol': 0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-    transitivePeerDependencies:
-      - '@bufbuild/protobuf'
-      - '@cfworker/json-schema'
-      - '@grpc/grpc-js'
-      - '@langchain/langgraph-sdk'
-      - better-sqlite3
-      - express
-      - kysely
-      - mysql2
-      - pg
-      - supports-color
-
-  '@skein-js/local@0.23.0(93efd988a737583bf29628425db67725)':
-    dependencies:
-      '@langchain/langgraph': 1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7)
-      '@langchain/langgraph-checkpoint-sqlite': 1.0.4(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(@langchain/langgraph-checkpoint@1.2.1(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0)))
-      '@skein-js/agent-protocol': 0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      '@skein-js/langgraph': 0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)
-      '@skein-js/storage-memory': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      '@skein-js/storage-sqlite': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-    transitivePeerDependencies:
-      - '@bufbuild/protobuf'
-      - '@cfworker/json-schema'
-      - '@grpc/grpc-js'
-      - '@langchain/langgraph-sdk'
-      - better-sqlite3
-      - express
-      - kysely
-      - mysql2
-      - pg
-      - supports-color
-
-  '@skein-js/server-kit@0.23.0(b0d442448137b6b251896228d0c1257c)':
-    dependencies:
-      '@langchain/langgraph': 1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7)
-      '@skein-js/agent-protocol': 0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)
-      '@skein-js/config': 0.23.0(86aa21db481cc351997eb00bb3f3411b)
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      '@skein-js/langgraph': 0.23.0(@cfworker/json-schema@4.1.1)(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(@langchain/langgraph@1.5.2(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(zod@4.6.7))(better-sqlite3@12.11.1)(express@5.3.0(supports-color@7.2.0))(kysely@0.29.7)(supports-color@7.2.0)
-      '@skein-js/storage-memory': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      cors: 2.8.6
-      superjson: 2.2.6
-      zod: 3.25.76
-    optionalDependencies:
-      '@langchain/langgraph-ui': 1.4.2
-    transitivePeerDependencies:
-      - '@bufbuild/protobuf'
-      - '@cfworker/json-schema'
-      - '@grpc/grpc-js'
-      - '@langchain/core'
-      - '@langchain/langgraph-checkpoint'
-      - '@langchain/langgraph-sdk'
-      - '@opentelemetry/api'
-      - '@opentelemetry/exporter-trace-otlp-proto'
-      - '@opentelemetry/sdk-trace-base'
-      - babel-plugin-macros
-      - better-sqlite3
-      - bufferutil
-      - express
-      - kysely
-      - mysql2
-      - openai
-      - pg
-      - supports-color
-      - ts-node
-      - typescript
-      - utf-8-validate
-      - ws
-
-  '@skein-js/storage-memory@0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))':
-    dependencies:
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-    transitivePeerDependencies:
-      - '@langchain/langgraph-sdk'
-
-  '@skein-js/storage-sqlite@0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))':
-    dependencies:
-      '@skein-js/core': 0.23.0(@langchain/langgraph-sdk@1.12.9(@langchain/core@1.3.0(openai@7.19.0(@aws-sdk/credential-provider-node@3.972.88)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)(zod@4.6.7))(ws@8.22.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))
-      '@types/better-sqlite3': 7.6.13
-      better-sqlite3: 12.11.1
-    transitivePeerDependencies:
-      - '@langchain/langgraph-sdk'
 
   '@smithy/core@3.36.2':
     dependencies:
@@ -4658,6 +4333,7 @@ snapshots:
     dependencies:
       mime-types: 3.0.2
       negotiator: 1.1.0
+    optional: true
 
   agent-base@7.1.4: {}
 
@@ -4666,6 +4342,7 @@ snapshots:
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:
       ajv: 8.20.0
+    optional: true
 
   ajv@8.20.0:
     dependencies:
@@ -4673,6 +4350,7 @@ snapshots:
       fast-uri: 3.1.9
       json-schema-traverse: 1.0.0
       require-from-string: 2.0.2
+    optional: true
 
   ansis@4.4.0: {}
 
@@ -4770,6 +4448,7 @@ snapshots:
       type-is: 2.1.0
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   bowser@2.14.1: {}
 
@@ -4798,17 +4477,20 @@ snapshots:
     dependencies:
       run-applescript: 7.1.0
 
-  bytes@3.1.2: {}
+  bytes@3.1.2:
+    optional: true
 
   call-bind-apply-helpers@1.0.2:
     dependencies:
       es-errors: 1.3.0
       function-bind: 1.1.2
+    optional: true
 
   call-bound@1.0.4:
     dependencies:
       call-bind-apply-helpers: 1.0.2
       get-intrinsic: 1.3.0
+    optional: true
 
   caniuse-lite@1.0.30001819: {}
 
@@ -4847,19 +4529,24 @@ snapshots:
 
   commander@13.1.0: {}
 
-  content-disposition@2.0.1: {}
+  content-disposition@2.0.1:
+    optional: true
 
-  content-type@1.0.5: {}
+  content-type@1.0.5:
+    optional: true
 
-  content-type@2.1.0: {}
+  content-type@2.1.0:
+    optional: true
 
   convert-source-map@2.0.0: {}
 
   cookie-es@3.1.1: {}
 
-  cookie-signature@1.2.2: {}
+  cookie-signature@1.2.2:
+    optional: true
 
-  cookie@0.7.2: {}
+  cookie@0.7.2:
+    optional: true
 
   copy-anything@4.1.5: {}
 
@@ -4867,6 +4554,7 @@ snapshots:
     dependencies:
       object-assign: 4.1.1
       vary: 1.1.2
+    optional: true
 
   create-langgraph@1.1.5(supports-color@7.2.0):
     dependencies:
@@ -4879,8 +4567,6 @@ snapshots:
     transitivePeerDependencies:
       - babel-plugin-macros
       - supports-color
-
-  croner@10.0.1: {}
 
   cross-spawn@7.0.6:
     dependencies:
@@ -4959,7 +4645,8 @@ snapshots:
 
   defu@6.1.7: {}
 
-  depd@2.0.0: {}
+  depd@2.0.0:
+    optional: true
 
   detect-libc@2.1.2: {}
 
@@ -4980,18 +4667,21 @@ snapshots:
       call-bind-apply-helpers: 1.0.2
       es-errors: 1.3.0
       gopd: 1.2.0
+    optional: true
 
   ecdsa-sig-formatter@1.0.11:
     dependencies:
       safe-buffer: 5.2.1
 
-  ee-first@1.1.1: {}
+  ee-first@1.1.1:
+    optional: true
 
   electron-to-chromium@1.5.464: {}
 
   enabled@2.0.0: {}
 
-  encodeurl@2.0.1: {}
+  encodeurl@2.0.1:
+    optional: true
 
   end-of-stream@1.4.5:
     dependencies:
@@ -5007,13 +4697,16 @@ snapshots:
       crossws: 0.4.17(srvx@1.0.8)
       srvx: 1.0.8
 
-  es-define-property@1.0.1: {}
+  es-define-property@1.0.1:
+    optional: true
 
-  es-errors@1.3.0: {}
+  es-errors@1.3.0:
+    optional: true
 
   es-object-atoms@1.1.2:
     dependencies:
       es-errors: 1.3.0
+    optional: true
 
   esbuild-plugin-tailwindcss@2.2.0:
     dependencies:
@@ -5053,19 +4746,23 @@ snapshots:
 
   escalade@3.2.0: {}
 
-  escape-html@1.0.3: {}
+  escape-html@1.0.3:
+    optional: true
 
-  etag@1.8.1: {}
+  etag@1.8.1:
+    optional: true
 
   eventemitter3@4.0.7: {}
 
   eventemitter3@5.0.4: {}
 
-  eventsource-parser@3.1.1: {}
+  eventsource-parser@3.1.1:
+    optional: true
 
   eventsource@3.0.7:
     dependencies:
       eventsource-parser: 3.1.1
+    optional: true
 
   execa@9.6.1:
     dependencies:
@@ -5093,6 +4790,7 @@ snapshots:
       ip-address: 10.7.5
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   express@5.3.0(supports-color@7.2.0):
     dependencies:
@@ -5126,6 +4824,7 @@ snapshots:
       vary: 1.1.2
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   exsolve@1.2.0: {}
 
@@ -5141,11 +4840,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  fast-deep-equal@3.1.3: {}
+  fast-deep-equal@3.1.3:
+    optional: true
 
   fast-sha256@1.3.0: {}
 
-  fast-uri@3.1.9: {}
+  fast-uri@3.1.9:
+    optional: true
 
   fd-slicer@1.1.0:
     dependencies:
@@ -5180,6 +4881,7 @@ snapshots:
       statuses: 2.0.2
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   fn.name@1.1.0: {}
 
@@ -5187,18 +4889,21 @@ snapshots:
     dependencies:
       fetch-blob: 3.2.0
 
-  forwarded@0.2.0: {}
+  forwarded@0.2.0:
+    optional: true
 
   fraction.js@5.3.4: {}
 
-  fresh@2.0.0: {}
+  fresh@2.0.0:
+    optional: true
 
   fs-constants@1.0.0: {}
 
   fsevents@2.3.3:
     optional: true
 
-  function-bind@1.1.2: {}
+  function-bind@1.1.2:
+    optional: true
 
   gaxios@7.3.1(supports-color@7.2.0):
     dependencies:
@@ -5236,11 +4941,13 @@ snapshots:
       has-symbols: 1.1.0
       hasown: 2.0.4
       math-intrinsics: 1.1.0
+    optional: true
 
   get-proto@1.0.1:
     dependencies:
       dunder-proto: 1.0.1
       es-object-atoms: 1.1.2
+    optional: true
 
   get-stream@5.2.0:
     dependencies:
@@ -5266,7 +4973,8 @@ snapshots:
 
   google-logging-utils@1.1.3: {}
 
-  gopd@1.2.0: {}
+  gopd@1.2.0:
+    optional: true
 
   graceful-fs@4.2.11: {}
 
@@ -5283,11 +4991,13 @@ snapshots:
   has-flag@4.0.0:
     optional: true
 
-  has-symbols@1.1.0: {}
+  has-symbols@1.1.0:
+    optional: true
 
   hasown@2.0.4:
     dependencies:
       function-bind: 1.1.2
+    optional: true
 
   highlight.js@10.7.3: {}
 
@@ -5304,6 +5014,7 @@ snapshots:
       setprototypeof: 1.2.0
       statuses: 2.0.2
       toidentifier: 1.0.1
+    optional: true
 
   http-proxy-agent@9.1.0(supports-color@7.2.0):
     dependencies:
@@ -5335,6 +5046,7 @@ snapshots:
   iconv-lite@0.7.3:
     dependencies:
       safer-buffer: 2.1.2
+    optional: true
 
   icss-utils@5.1.0(postcss@8.5.31):
     dependencies:
@@ -5348,9 +5060,11 @@ snapshots:
 
   ini@1.3.8: {}
 
-  ip-address@10.7.5: {}
+  ip-address@10.7.5:
+    optional: true
 
-  ipaddr.js@1.9.1: {}
+  ipaddr.js@1.9.1:
+    optional: true
 
   is-docker@3.0.0: {}
 
@@ -5362,7 +5076,8 @@ snapshots:
 
   is-plain-obj@4.1.0: {}
 
-  is-promise@4.0.0: {}
+  is-promise@4.0.0:
+    optional: true
 
   is-stream@2.0.1: {}
 
@@ -5403,9 +5118,11 @@ snapshots:
       '@babel/runtime': 7.29.10
       ts-algebra: 2.0.0
 
-  json-schema-traverse@1.0.0: {}
+  json-schema-traverse@1.0.0:
+    optional: true
 
-  json-schema-typed@8.0.2: {}
+  json-schema-typed@8.0.2:
+    optional: true
 
   json5@2.2.3: {}
 
@@ -5560,17 +5277,22 @@ snapshots:
 
   marked@18.0.11: {}
 
-  math-intrinsics@1.1.0: {}
+  math-intrinsics@1.1.0:
+    optional: true
 
-  media-typer@1.1.1: {}
+  media-typer@1.1.1:
+    optional: true
 
-  merge-descriptors@2.0.0: {}
+  merge-descriptors@2.0.0:
+    optional: true
 
-  mime-db@1.54.0: {}
+  mime-db@1.54.0:
+    optional: true
 
   mime-types@3.0.2:
     dependencies:
       mime-db: 1.54.0
+    optional: true
 
   mimic-response@3.1.0: {}
 
@@ -5601,6 +5323,7 @@ snapshots:
   negotiator@1.1.0:
     dependencies:
       content-type: 2.1.0
+    optional: true
 
   nitro@3.0.261029-rc:
     dependencies:
@@ -5630,15 +5353,18 @@ snapshots:
       path-key: 4.0.0
       unicorn-magic: 0.3.0
 
-  object-assign@4.1.1: {}
+  object-assign@4.1.1:
+    optional: true
 
-  object-inspect@1.13.4: {}
+  object-inspect@1.13.4:
+    optional: true
 
   ocache@0.3.1: {}
 
   on-finished@2.4.2:
     dependencies:
       ee-first: 1.1.1
+    optional: true
 
   once@1.4.0:
     dependencies:
@@ -5694,7 +5420,8 @@ snapshots:
 
   parse-ms@4.0.0: {}
 
-  parseurl@1.3.3: {}
+  parseurl@1.3.3:
+    optional: true
 
   partial-json@0.1.7: {}
 
@@ -5702,7 +5429,8 @@ snapshots:
 
   path-key@4.0.0: {}
 
-  path-to-regexp@8.4.2: {}
+  path-to-regexp@8.4.2:
+    optional: true
 
   pathe@2.0.3: {}
 
@@ -5712,7 +5440,8 @@ snapshots:
 
   picomatch@4.0.7: {}
 
-  pkce-challenge@5.0.1: {}
+  pkce-challenge@5.0.1:
+    optional: true
 
   postcss-modules-extract-imports@3.1.0(postcss@8.5.31):
     dependencies:
@@ -5805,6 +5534,7 @@ snapshots:
     dependencies:
       forwarded: 0.2.0
       ipaddr.js: 1.9.1
+    optional: true
 
   proxy-agent-negotiate@1.1.0: {}
 
@@ -5817,10 +5547,12 @@ snapshots:
     dependencies:
       es-define-property: 1.0.1
       side-channel: 1.1.1
+    optional: true
 
   quickjs-wasi@3.6.2: {}
 
-  range-parser@1.3.0: {}
+  range-parser@1.3.0:
+    optional: true
 
   raw-body@3.0.2:
     dependencies:
@@ -5828,6 +5560,7 @@ snapshots:
       http-errors: 2.0.1
       iconv-lite: 0.7.3
       unpipe: 1.0.0
+    optional: true
 
   rc@1.2.8:
     dependencies:
@@ -5853,7 +5586,8 @@ snapshots:
 
   readdirp@5.1.1: {}
 
-  require-from-string@2.0.2: {}
+  require-from-string@2.0.2:
+    optional: true
 
   retry@0.12.0: {}
 
@@ -5893,6 +5627,7 @@ snapshots:
       path-to-regexp: 8.4.2
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   run-applescript@7.1.0: {}
 
@@ -5900,7 +5635,8 @@ snapshots:
 
   safe-stable-stringify@2.5.0: {}
 
-  safer-buffer@2.1.2: {}
+  safer-buffer@2.1.2:
+    optional: true
 
   scheduler@0.27.0: {}
 
@@ -5923,6 +5659,7 @@ snapshots:
       statuses: 2.0.2
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   seroval-plugins@1.7.6(seroval@1.7.5):
     dependencies:
@@ -5938,10 +5675,12 @@ snapshots:
       send: 1.2.1(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   set-cookie-parser@3.2.2: {}
 
-  setprototypeof@1.2.0: {}
+  setprototypeof@1.2.0:
+    optional: true
 
   shebang-command@2.0.0:
     dependencies:
@@ -5953,6 +5692,7 @@ snapshots:
     dependencies:
       es-errors: 1.3.0
       object-inspect: 1.13.4
+    optional: true
 
   side-channel-map@1.0.1:
     dependencies:
@@ -5960,6 +5700,7 @@ snapshots:
       es-errors: 1.3.0
       get-intrinsic: 1.3.0
       object-inspect: 1.13.4
+    optional: true
 
   side-channel-weakmap@1.0.2:
     dependencies:
@@ -5968,6 +5709,7 @@ snapshots:
       get-intrinsic: 1.3.0
       object-inspect: 1.13.4
       side-channel-map: 1.0.1
+    optional: true
 
   side-channel@1.1.1:
     dependencies:
@@ -5976,6 +5718,7 @@ snapshots:
       side-channel-list: 1.0.1
       side-channel-map: 1.0.1
       side-channel-weakmap: 1.0.2
+    optional: true
 
   signal-exit@3.0.7: {}
 
@@ -6008,7 +5751,8 @@ snapshots:
       '@stablelib/base64': 1.0.1
       fast-sha256: 1.3.0
 
-  statuses@2.0.2: {}
+  statuses@2.0.2:
+    optional: true
 
   string-hash@1.1.3: {}
 
@@ -6063,7 +5807,8 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
 
-  toidentifier@1.0.1: {}
+  toidentifier@1.0.1:
+    optional: true
 
   triple-beam@1.4.1: {}
 
@@ -6088,6 +5833,7 @@ snapshots:
       content-type: 2.1.0
       media-typer: 1.1.1
       mime-types: 3.0.2
+    optional: true
 
   typebox@1.3.27: {}
 
@@ -6101,7 +5847,8 @@ snapshots:
 
   unicorn-magic@0.3.0: {}
 
-  unpipe@1.0.0: {}
+  unpipe@1.0.0:
+    optional: true
 
   unplugin@3.7.0(esbuild@0.28.2)(rolldown@1.2.16)(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)):
     dependencies:
@@ -6126,7 +5873,8 @@ snapshots:
 
   util-deprecate@1.0.2: {}
 
-  vary@1.1.2: {}
+  vary@1.1.2:
+    optional: true
 
   vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0):
     dependencies:
@@ -6209,16 +5957,10 @@ snapshots:
 
   yoctocolors@2.2.0: {}
 
-  zod-to-json-schema@3.25.2(zod@3.25.76):
-    dependencies:
-      zod: 3.25.76
-
   zod-to-json-schema@3.25.2(zod@4.6.7):
     dependencies:
       zod: 4.6.7
     optional: true
-
-  zod@3.25.76: {}
 
   zod@4.6.7: {}
 

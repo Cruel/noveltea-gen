@@ -91,15 +91,15 @@ test("hosted mode requires complete controller configuration and never falls bac
   assert.throws(() => blockUnroutedHostedPi("Event"), /refused unsafe host fallback/);
 });
 
-test("private graph server fails at startup rather than offering legacy host tools", () => {
-  const result = spawnSync(process.execPath, ["--import", "tsx", resolve("src/agent-host.ts")], {
+test("private agent worker fails at startup rather than offering legacy host tools", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", resolve("web/src/agent-worker.ts")], {
     encoding: "utf8", timeout: 10_000,
     env: { ...process.env, NT_REQUIRE_SANDBOX_TOOLS: "0",
       NT_SANDBOX_SOCKET: "", NT_SANDBOX_TOKEN_FILE: "",
-      NT_GRAPH_DB: join(base, "blocked-graph.sqlite") },
+      NT_AGENT_RPC_TOKEN: "test-agent-token-01234567890123456789" },
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Hosted agent requires the private sandbox/);
+  assert.match(result.stderr, /Agent requires its private rootless sandbox controller/);
 });
 
 test("all seven Pi file/search/shell names route through the verified sandbox", async () => {

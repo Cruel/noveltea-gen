@@ -1,4 +1,6 @@
-# Skein Agent Protocol qualification (#39)
+# Historical Skein Agent Protocol qualification (#39)
+
+**Retired in favor of the dedicated NovelTea LangGraph agent.** This document preserves the 2026-10-31 research results. The Skein host, dependencies and qualification tests have been removed; commands below are historical and no longer runnable. Production web jobs run on the dedicated NovelTea agent process.
 
 **2026-10-31.** The real NovelTea `story_generation` LangGraph.js graph works with Skein's single-process SQLite deployment on this Linux/Node 24 checkout. This is a **qualification spike**, not a production-ready, authenticated, publicly accessible server or an authorization to move old CLI checkpoints.
 

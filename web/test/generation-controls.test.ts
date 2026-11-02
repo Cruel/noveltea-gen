@@ -12,12 +12,13 @@ import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { generationControlRequest } from '../src/lib/generation-controls.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
+import { pumpAgentQueue, waitForAgentJob } from '../src/agent-service'
 import { queueGeneration, queueRecord } from '../src/lib/generation-queue.server'
 import { parseGenerationContract } from '../../src/generation'
 import { readJobControl } from '../../src/job-control'
 import { configurePiPolicy, inspectPiPolicy } from '../../src/job-pi-policy'
 
-const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../noveltea-skills')
+const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../../noveltea-skills')
 const config = { baseURL: 'http://localhost:3000',
   secret: 'studio-control-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
   github: { clientId: 'gh', clientSecret: 'secret' },
@@ -116,7 +117,9 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       new Request(config.baseURL + '/api/jobs/' + id, {
         headers: { cookie: authorCookie },
       }), id, config.baseURL)).status, 200)
-    assert.equal((await control('POST', authorCookie, { action: 'resume' })).status, 200)
+    assert.equal((await control('POST', authorCookie, { action: 'resume' })).status, 202)
+    pumpAgentQueue(store)
+    await waitForAgentJob(store, id)
     const deadline = Date.now() + 45_000
     let visible = ''
     while (Date.now() < deadline) {

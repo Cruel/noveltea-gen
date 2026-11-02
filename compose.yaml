@@ -17,6 +17,7 @@ services:
       NT_STUDIO_DB_PATH: /var/lib/noveltea/app/studio.sqlite
       NT_STATE_DIR: /var/lib/noveltea/state
       NT_GIT_CACHE_DIR: /var/lib/noveltea/cache
+      NT_AGENT_RPC_URL: http://agent:7001
       # Install/mount the native validator separately and configure NT_NATIVE_CLI
       # in web/.env before enabling GitLab Story initialization.
       HOST: 0.0.0.0
@@ -35,9 +36,12 @@ services:
 
   agent:
     image: noveltea-trusted:local
-    command: ["node", "dist/agent-host.js"]
+    command: ["pnpm", "--filter", "@noveltea/studio", "agent:worker"]
+    env_file: ./web/.env
     environment:
-      NT_GRAPH_DB: /var/lib/noveltea/graph/skein.sqlite
+      NT_STUDIO_DB_PATH: /var/lib/noveltea/app/studio.sqlite
+      NT_AGENT_PORT: "7001"
+      NT_REQUIRE_USER_PI_RUNTIME: "1"
       NT_STATE_DIR: /var/lib/noveltea/state
       NT_GIT_CACHE_DIR: /var/lib/noveltea/cache
       NT_SKILL_CACHE_DIR: /var/lib/noveltea/state/skill-snapshots
@@ -47,9 +51,9 @@ services:
       LANGSMITH_TRACING: "false"
       LANGCHAIN_TRACING_V2: "false"
     volumes:
+      - noveltea-app:/var/lib/noveltea/app
       - noveltea-state:/var/lib/noveltea/state
       - noveltea-cache:/var/lib/noveltea/cache
-      - noveltea-graph:/var/lib/noveltea/graph
       # Mount ONLY in the trusted agent process, never in sandboxes or web.
       - type: bind
         source: ${NT_CONTROLLER_SOCKET_DIR:?Provide trusted host socket directory}
@@ -76,8 +80,6 @@ volumes:
     name: noveltea-state
   noveltea-cache:
     name: noveltea-cache
-  noveltea-graph:
-    name: noveltea-graph
 
 secrets:
   noveltea-controller-token:

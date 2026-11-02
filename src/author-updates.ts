@@ -548,6 +548,15 @@ export async function processAuthorUpdatesAtBoundary(job: JobStartResult) {
     "Story job cannot advance: queued author update requires action: " + result.blockers.join(", "));
   return result;
 }
+/** Queues a typed author message without taking the writer lock, allowing
+ * ideas and proposed changes while a specialist is actively editing. */
+export async function sendAuthorUpdate(job: JobStartResult, input: unknown): Promise<Receipt> {
+  const state = await control(job)
+  if (state === 'cancelled' || state === 'completed')
+    throw new Error('Canceled/completed job cannot accept new narrative messages.')
+  return send(job, input)
+}
+
 /** Shared CLI/web inspection and typed LangGraph resume. The caller must
  * establish trusted job identity; no request path or principal is accepted here. */
 export async function inspectAuthorUpdates(job: JobStartResult): Promise<{

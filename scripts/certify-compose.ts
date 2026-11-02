@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const root = resolve('.')
-const volumeNames = ['noveltea-app', 'noveltea-state', 'noveltea-cache', 'noveltea-graph']
+const volumeNames = ['noveltea-app', 'noveltea-state', 'noveltea-cache']
 const env = { ...process.env }
 const probeId = randomUUID()
 function docker(...args: string[]): string {
@@ -76,6 +76,14 @@ const clientProbe = [
 ].join('')
 function checkAgent() {
   assert.match(docker('compose', 'exec', '-T', 'agent', 'node', '-e', clientProbe), /HTTP 404/)
+  const agentHealth = "const token=process.env.NT_AGENT_RPC_TOKEN;if(!token)process.exit(2);" +
+    "fetch('http://127.0.0.1:7001/health',{headers:{authorization:'Bearer '+token}})" +
+    ".then(r=>process.exit(r.status===200?0:1),()=>process.exit(3))"
+  const webHealth = "const token=process.env.NT_AGENT_RPC_TOKEN;if(!token)process.exit(2);" +
+    "fetch('http://agent:7001/health',{headers:{authorization:'Bearer '+token}})" +
+    ".then(r=>process.exit(r.status===200?0:1),()=>process.exit(3))"
+  docker('compose', 'exec', '-T', 'agent', 'node', '-e', agentHealth)
+  docker('compose', 'exec', '-T', 'web', 'node', '-e', webHealth)
   docker('compose', 'exec', '-T', 'web', 'test', '!', '-e', '/var/run/docker.sock')
   docker('compose', 'exec', '-T', 'agent', 'test', '!', '-e', '/var/run/docker.sock')
   docker('compose', 'exec', '-T', 'web', 'test', '!', '-e', '/run/secrets/noveltea-controller-token')
@@ -141,7 +149,7 @@ async function main() {
     await checkWeb()
     checkAgent()
     const appDb = '/var/lib/noveltea/app/studio.sqlite'
-    const graphDb = '/var/lib/noveltea/graph/certification-probe.sqlite'
+    const graphDb = '/var/lib/noveltea/state/agent-certification-probe.sqlite'
     seed('web', appDb)
     seed('agent', graphDb)
     // Restart each independently, not just a combined Compose restart.
@@ -162,7 +170,7 @@ async function main() {
     await checkWeb()
     checkSeed('web', appDb)
     checkSeed('agent', graphDb)
-    console.log('PASS rootless Compose, trusted mounts, private controller authentication, independent web/agent/controller restarts and persisted SQLite state')
+    console.log('PASS rootless Compose, private authenticated web-to-agent health, controller isolation, independent service restarts and persisted state')
   } finally {
     await stopController()
     let cleanupError: unknown

@@ -5,19 +5,22 @@ flow. #52–#54 route narrative Pi file/search/shell tools through the private
 sandbox client; reviewers receive read/search only. There is no implicit
 host-tool fallback. #55 certifies real rootless containment and recovery;
 see [sandbox certification](../docs/sandbox-certification.md). The combined release gates and real-provider evidence requirements are in [self-hosted certification](../docs/self-hosted-certification.md) (#71).
-#59 adds authenticated web execution/admission. Do not expose the raw Skein Agent
-Protocol listener or enable unsandboxed model-directed tool execution.
+The dedicated agent owns the durable queue, direct LangGraph execution and typed
+user-message resumes. Only the authenticated web service can call its private
+command endpoint; never expose port 7001 or enable unsandboxed Pi tools.
 
 ## Trust boundaries
 
 - **Web** (TanStack Start) serves authenticated OAuth and Story catalog APIs.
   It has its own durable app SQLite volume, shared durable job state and the
   evictable Git cache volume. It has no Docker socket or controller credentials.
-- **Agent** is the single private Skein/LangGraph process. It shares durable
-  job state and the job cache, but has its own persistent graph SQLite volume.
-  Only this trusted worker receives the private controller Unix socket and the
-  controller bearer-token file. Raw Agent Protocol is reachable only on the
-  Compose bridge; there is no published port.
+- **Agent** is a dedicated single-process LangGraph.js worker, independently
+  consuming Studio's durable FIFO queue. It shares the application SQLite
+  catalog for owner-scoped admissions, job state, worktree cache, and the
+  per-job graph checkpoints stored outside the application database. Only
+  this trusted worker receives the private controller Unix socket/token.
+  Its authenticated author-command endpoint stays on the unpublished Compose
+  backend bridge; neither Studio nor agent tools expose the controller token.
 - **Host controller** is a separate, trusted process outside Compose, operating
   with the same **host-level rootless Docker** daemon. It looks up the job in
   the Studio catalog and checks the pinned worktree manifest before computing
@@ -71,7 +74,13 @@ container the host's Docker socket.
    `NT_CONTROLLER_SOCKET_DIR` to that **absolute** directory and
    `NT_CONTROLLER_TOKEN_FILE` to the **absolute** token-file path for Compose.
    Avoid logging or committing their contents.
-3. Run `pnpm install --frozen-lockfile` and build:
+3. In `web/.env`, configure the existing OAuth and Pi credential values **and**
+   set `NT_AGENT_RPC_TOKEN` to a separate random secret of at least 32 characters
+   (e.g. `openssl rand -hex 32`). Studio and the agent load this same trusted
+   environment file; neither browser clients nor job sandboxes receive the
+   token. Studio reaches the private agent at `http://agent:7001` on the
+   Compose backend network, while the agent alone receives the sandbox socket.
+   Run `pnpm install --frozen-lockfile` and build:
    ```sh
    docker compose build web
    docker build -f deploy/sandbox.Dockerfile -t noveltea-sandbox:local .
@@ -79,7 +88,7 @@ container the host's Docker socket.
    ```
    `docker compose create` prepares the named volumes and nonrunning service
    containers. Keep these exact volume names: `noveltea-app`, `noveltea-state`,
-   `noveltea-cache`, `noveltea-graph`.
+   `noveltea-cache`.
 4. Start the *host* controller **as the same rootless Docker user**:
    ```sh
    export NT_SANDBOX_SOCKET="$NT_CONTROLLER_SOCKET_DIR/controller.sock"
@@ -99,10 +108,10 @@ container the host's Docker socket.
    ```
    Bind `127.0.0.1:3000` to a properly configured external HTTPS reverse proxy
    with request limits and rate limiting. The Compose bridge is not a public
-   Agent Protocol endpoint. Do not publish agent port 7001.
+   agent command endpoint. Do not publish port 7001.
 
-The agent token is injected as a file secret and is never mounted in the
-sandbox; its path inside the agent is
+The **sandbox controller** token is injected as a file secret and never
+mounted in Studio or a job sandbox; its path inside the agent is
 `/run/secrets/noveltea-controller-token`. The trusted worker's private client
 uses `NT_SANDBOX_SOCKET` and `NT_SANDBOX_TOKEN_FILE` to connect.
 
@@ -132,9 +141,9 @@ Never blindly replay an interrupted writer.
 
 ## State, restart and failure behavior
 
-Durable `noveltea-app` holds Studio OAuth/catalog data;
-`noveltea-state` holds Story job manifests/receipts/locks/sessions;
-`noveltea-graph` holds the Skein SQLite checkpoints.
+Durable `noveltea-app` holds Studio OAuth/catalog data and the job queue;
+`noveltea-state` holds Story manifests, receipts, locks, sessions and
+per-job LangGraph checkpoints. They are separate SQLite databases.
 `noveltea-cache` is evictable only according to future #50 policy and
 **must not be removed as a substitute for stopping a sandbox**.
 
@@ -161,8 +170,10 @@ Durable `noveltea-app` holds Studio OAuth/catalog data;
   on the durable job-state volume across agent restarts. Native `story_validate`
   remains bound to the trusted job identity and cannot accept model-provided
   paths or validator flags. There is no host-tool fallback for CLI jobs.
-- Authenticated web scheduling and admission are separate from the containment
-  tests. Passing #55 does not assert a full web-to-agent production workflow.
+- Authenticated Studio requests persist queue entries without invoking the
+  graph. The independent agent polls and claims work; interrupted writers
+  require manual reconciliation before retry. A missing agent does not cause
+  Studio to execute generation inline. Passing #55 does not certify this full flow.
 
 ## Verification
 
@@ -205,10 +216,9 @@ catalog entry, controller socket/token and worktree; it sets
 `NT_SANDBOX_TOKEN_FILE` automatically. It leaves existing Compose volumes and
 Studio data untouched. On a failed run it preserves the disposable directory
 for investigation; `NT_KEEP_FAILED_LIVE=1` also preserves a successful run.
-Unlike the future #59 web-to-Skein flow, this test calls the production
-Foundation and Architecture job functions directly. It proves the agent tool
-routing through the real controller and Docker, **not** web admission or
-Skein-to-controller deployment wiring.
+This test calls production Foundation and Architecture functions directly.
+It proves sandbox tool routing and containment, **not** web admission or
+web-to-agent command execution.
 It also checks denied host/hidden paths, pinned skill reads and missing-controller
 fail-closed behavior with deterministic fixtures. Run `pnpm check` for the full
 root and Studio suites. Set `NT_TEST_SANDBOX_IMAGE` if not using

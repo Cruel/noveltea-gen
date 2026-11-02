@@ -4,9 +4,11 @@ import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
-import { inspectAuthorUpdates, resumeAuthorUpdate } from '../../../src/author-updates'
-import { inspectTrustedApproval, requestTrustedApproval, recordTrustedControllerDecision } from '../../../src/trusted-approval'
+import { inspectAuthorUpdates } from '../../../src/author-updates'
+import { inspectTrustedApproval } from '../../../src/trusted-approval'
 import type { JobStartResult } from '../../../src/job'
+import { postAgentAuthorCommand } from './agent-rpc.server'
+import { validAuthorCommand } from './agent-author-validation'
 
 const json = (value: unknown, status = 200) => Response.json(value, {
   status, headers: { 'Cache-Control': 'private, no-store' },
@@ -42,22 +44,6 @@ async function readCommand(request: Request): Promise<string> {
   return text
 }
 
-type AuthorRecord = Awaited<ReturnType<typeof inspectAuthorUpdates>>['records'][number]
-function pendingApproval(record: AuthorRecord) {
-  if (record.message.kind !== 'approval' ||
-      !['awaiting-author', 'applied'].includes(record.acknowledgement.phase)) {
-    throw new Error('This message does not have a pending approval interrupt.')
-  }
-  const payload = record.message.payload as {
-    requestType?: unknown; proposalSha256?: unknown; workItemId?: unknown; changeId?: unknown
-  }
-  if (!['plan', 'decision'].includes(String(payload.requestType)) ||
-      typeof payload.proposalSha256 !== 'string' || !SHA.test(payload.proposalSha256)) {
-    throw new Error('Saved approval request is invalid.')
-  }
-  return payload as { requestType: 'plan' | 'decision'; proposalSha256: string;
-    workItemId?: string; changeId?: string }
-}
 async function getRecords(job: JobStartResult) {
   const updates = await inspectAuthorUpdates(job)
   return Promise.all(updates.records.map(async ({ message, acknowledgement }) => {
@@ -105,6 +91,10 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const raw = await readCommand(request)
     let input: Record<string, unknown>
     try { input = JSON.parse(raw) } catch { return json({ error: 'Invalid JSON' }, 400) }
+    if (input?.action === 'send') {
+      if (!validAuthorCommand(input)) return json({ error: 'Invalid typed author message' }, 400)
+      return postAgentAuthorCommand(user.id, jobId, input)
+    }
     if (!input || typeof input !== 'object' || Array.isArray(input) ||
         !['answer', 'prepare', 'decide'].includes(String(input.action)) ||
         typeof input.messageId !== 'string' || input.messageId.length > 64 || !ID.test(input.messageId)) {
@@ -123,41 +113,9 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
       return json({ error: 'Invalid typed author command' }, 400)
     }
 
-    const updates = await inspectAuthorUpdates(job)
-    const record = updates.records.find(r => r.message.id === input.messageId)
-    if (!record) return json({ error: 'Author message not found' }, 404)
-    const principal = 'user:' + user.id
-    if (input.action === 'answer') {
-      if (record.message.kind !== 'question') return json({ error: 'Not a question' }, 409)
-      const receipt = await resumeAuthorUpdate(job,
-        { type: 'answer', messageId: input.messageId, answer: input.answer }, principal)
-      return json({ acknowledgement: receipt })
-    }
-
-    const payload = pendingApproval(record)
-    const id = approvalId(job.jobId, record.message.id)
-    if (input.action === 'prepare') {
-      const approval = await requestTrustedApproval(job, {
-        id, kind: payload.requestType, workItemId: payload.workItemId, changeId: payload.changeId,
-      })
-      if (approval.proposalSha256 !== payload.proposalSha256) throw new Error('Proposal digest changed')
-      return json({ approval })
-    }
-    if (input.receiptId !== id || input.proposalSha256 !== payload.proposalSha256)
-      return json({ error: 'Approval does not match the saved author interrupt' }, 409)
-    const approval = await recordTrustedControllerDecision(job,
-      { id, nonce: input.nonce as string, proposalSha256: input.proposalSha256 as string },
-      input.decision as 'approved' | 'rejected', { source: 'trusted-web', principal })
-    if (approval.phase !== 'recorded') throw new Error('Controller decision was not persisted')
-    if (approval.decision === 'rejected') {
-      // A rejection cannot authorize the protected revision; preserve its
-      // unresolved author interrupt for explicit replanning/operator review.
-      return json({ approval, acknowledgement: record.acknowledgement })
-    }
-    const acknowledgement = await resumeAuthorUpdate(job,
-      { type: 'decision', messageId: record.message.id,
-        approval: { receiptId: approval.id, nonce: approval.nonce } }, principal)
-    return json({ approval, acknowledgement })
+    // Do not reopen an author-update graph in the web service. Only the
+    // dedicated agent may process the approved typed command.
+    return postAgentAuthorCommand(user.id, jobId, input)
   } catch (error) {
     const status = error instanceof Error && 'status' in error &&
       typeof error.status === 'number' ? error.status : 409

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { createHmac } from 'node:crypto'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { createHmac, randomBytes } from 'node:crypto'
+import { once } from 'node:events'
+import { createServer } from 'node:net'
 import { existsSync, mkdtempSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { removeTestTree } from '../../test/helpers'
 import { tmpdir } from 'node:os'
@@ -11,6 +13,7 @@ import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { fixtureJobRequest } from '../src/lib/fixture-jobs.server'
+import { queueRecord } from '../src/lib/generation-queue.server'
 import { generationEventsRequest, appendGenerationEvent, listGenerationEvents } from '../src/lib/generation-progress.server'
 import { jobChangesRequest } from '../src/lib/job-changes.server'
 import { claimServerGeneration } from '../../src/generation-owner'
@@ -22,7 +25,7 @@ const config = {
   github: { clientId: 'github', clientSecret: 'github-secret' },
   gitlab: { clientId: 'gitlab', clientSecret: 'gitlab-secret' },
 }
-const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../noveltea-skills')
+const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../../noveltea-skills')
 const available = existsSync(join(skills, 'src/cli.ts'))
 const storyId = '22222222-2222-4222-8222-222222222222'
 const jobId = '33333333-3333-4333-8333-333333333333'
@@ -58,6 +61,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
   delete process.env.NT_LIVE_GENERATION_IDEA
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))
   let store = openStudioDatabase(join(root, 'studio.sqlite'))
+  let worker: ChildProcess | undefined
   try {
     await migrateStudio(store, config)
     const auth = createStudioAuth(store, config)
@@ -185,12 +189,54 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       }), jobId)
     assert.equal(liveStream.status, 200)
     const liveReader = liveStream.body!.getReader()
-    const starting = api('POST', payload, aliceCookie)
+    const admitted = await api('POST', payload, aliceCookie)
+    assert.equal(admitted.status, 202)
+    assert.equal(admitted.body.job.status, 'queued')
+    // Start the genuine agent entrypoint in a separate OS process. Studio
+    // remains live with a separate SQLite connection and cannot pump the queue.
+    const portProbe = createServer()
+    await new Promise<void>((resolve, reject) => {
+      portProbe.once('error', reject)
+      portProbe.listen(0, '127.0.0.1', resolve)
+    })
+    const portAddress = portProbe.address()
+    assert.ok(portAddress && typeof portAddress !== 'string')
+    const port = portAddress.port
+    await new Promise<void>((resolve, reject) => portProbe.close(error => error ? reject(error) : resolve()))
+    const token = randomBytes(48).toString('hex')
+    worker = spawn(process.execPath, ['--import', 'tsx', resolve('src/agent-worker.ts')], {
+      cwd: resolve('.'), stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, NT_STUDIO_DB_PATH: join(root, 'studio.sqlite'), NT_AGENT_PORT: String(port),
+        NT_AGENT_RPC_TOKEN: token, NT_SANDBOX_SOCKET: join(root, 'fixture-controller.sock'),
+        NT_SANDBOX_TOKEN_FILE: join(root, 'fixture-controller-token'), NT_REQUIRE_SANDBOX_TOOLS: '1',
+      },
+    })
+    let ready = false
+    for (let i = 0; i < 100; i++) {
+      if (worker.exitCode !== null) break
+      try {
+        const check = await fetch('http://127.0.0.1:' + port + '/health', {
+          headers: { authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(350),
+        })
+        if (check.status === 200) { ready = true; break }
+      } catch { /* separate process still starting */ }
+      await new Promise(resolve => setTimeout(resolve, 75))
+    }
+    assert.equal(ready, true, 'independent agent process must start and drain queued work')
     const liveFirst = await liveReader.read()
     assert.match(new TextDecoder().decode(liveFirst.value), /event: progress\ndata: .*"kind":"started"/)
-    const started = await starting
+    const deadline = Date.now() + 30_000
+    while (queueRecord(store, jobId)?.phase !== 'finished' && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
+    assert.equal(queueRecord(store, jobId)?.phase, 'finished', 'agent must finish independently of web traffic')
+    worker.kill('SIGTERM')
+    const [workerCode] = await once(worker, 'exit')
+    assert.equal(workerCode, 0)
+    worker = undefined
+    const started = await api('GET', undefined, aliceCookie)
     await liveReader.cancel()
-    assert.equal(started.status, 201, JSON.stringify(started.body))
+    assert.equal(started.status, 200, JSON.stringify(started.body))
     assert.equal(started.body.job.status, 'paused', JSON.stringify(started.body))
     assert.equal(started.body.job.completedStages.length, 1)
     assert.equal(git(repo, 'rev-parse', 'HEAD'), pinned)
@@ -301,6 +347,10 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     }), jobId, config.baseURL)
     assert.equal(conflict.status, 409, 'tampered server thread must fail closed')
   } finally {
+    if (worker && worker.exitCode === null && worker.signalCode === null) {
+      worker.kill('SIGKILL')
+      await once(worker, 'exit')
+    }
     store.sqlite.close()
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key]

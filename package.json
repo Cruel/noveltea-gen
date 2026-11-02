@@ -20,7 +20,6 @@
     "studio": "LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false TRACE_TO_LANGSMITH=false langgraphjs dev --no-browser --n-jobs-per-worker 1",
     "studio:trace": "NT_STUDIO_TRACE=1 LANGSMITH_TRACING=true LANGCHAIN_TRACING_V2=true TRACE_TO_LANGSMITH=true langgraphjs dev --no-browser --n-jobs-per-worker 1",
     "studio:input": "tsx src/studio-input.ts",
-    "agent:host": "tsx src/agent-host.ts",
     "trace:show": "tsx src/trace-show.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm --filter @noveltea/studio check"
   },
@@ -34,10 +33,6 @@
     "@langchain/langgraph": "1.5.2",
     "@langchain/langgraph-checkpoint": "1.2.1",
     "@langchain/langgraph-checkpoint-sqlite": "1.0.4",
-    "@langchain/langgraph-sdk": "1.12.9",
-    "@skein-js/agent-protocol": "0.23.0",
-    "@skein-js/express": "0.23.0",
-    "@skein-js/local": "0.23.0",
     "@langchain/langsmith-pi-extension": "0.2.1",
     "esbuild": "0.28.2",
     "langsmith": "0.11.1",

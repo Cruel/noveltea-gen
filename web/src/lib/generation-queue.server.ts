@@ -101,10 +101,15 @@ export function fenceAbandonedRuns(store: StudioDatabase): number {
     if (pieces?.length !== 3 || pieces[0] !== hostname() ||
         !/^[1-9][0-9]*$/.test(pieces[1] ?? '')) continue
     const pid = Number(pieces[1])
-    if (!Number.isSafeInteger(pid) || pid === process.pid) continue
-    try { process.kill(pid, 0); continue }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue
+    if (!Number.isSafeInteger(pid)) continue
+    // Container restarts commonly reuse PID 1. The current process cannot be
+    // a different live instance with the same PID in its own PID namespace;
+    // the old random instance identity proves the previous owner exited.
+    if (pid !== process.pid) {
+      try { process.kill(pid, 0); continue }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue
+      }
     }
     count += store.sqlite.prepare(`UPDATE generation_run_queue
       SET phase='interrupted', updated_at=? WHERE job_id=? AND phase='running' AND worker_id=?`)

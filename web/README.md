@@ -7,7 +7,7 @@ admission (#59). All implemented narrative Pi specialists now use sandboxed
 file/search/shell tools; independent reviewers receive read/search tools only.
 
 The web application is a separate pnpm workspace package; the existing Story
-generator and Skein server stay unchanged. This slice implements an authenticated
+generator now runs in a dedicated LangGraph agent service instead of Skein. The Studio implements an authenticated
 TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
 cross-provider linking, an encrypted persisted OAuth account store, and tenant-
 scoped Story/repository/session catalog tables. #41 adds GitHub App installation-
@@ -437,9 +437,9 @@ and `NT_NATIVE_CLI` as usual. An optional
 `NT_STUDIO_SKILLS_SOURCE` specifies the trusted server's NovelTea skills
 checkout for fixture skill snapshots; never accept a skills path from an
 HTTP client. Run `pnpm --filter @noveltea/studio migrate` while Studio is
-stopped to apply migration 5. The server and generator checkpoint SQLite
-must be owned by one service process and preserved with the job receipts
-across restarts. A reconnect inspects the same state; a missing checkpoint,
+stopped to apply migration 5. The **agent** is the sole writer of the per-job LangGraph checkpoint SQLite;
+Studio only reads checkpoints at safe inspection boundaries. Application
+and checkpoint SQLite persist separately from the evictable Git cache. A reconnect inspects the same state; a missing checkpoint,
 interrupted writer, unverified Git HEAD, or mismatched request/owner
 fails closed for manual reconciliation rather than silently restarting.
 Server ownership is claimed durably before publishing the first running request,
@@ -452,11 +452,16 @@ configuration to reference the same checkout directory.
 An unpublished Story initialization draft with an unverified extra Git
 commit can be inspected but cannot be launched until its revision is trusted.
 
-This stage intentionally does not offer live Pi, worker sandbox tools,
-safe-boundary continuation or external Agent Protocol admission; those
-belong to subsequent deployment, sandbox and author-control work. Neither
-a fixture completion nor a successful structural validation establishes
-literary/editorial approval.
+The dedicated NovelTea agent runs LangGraph.js directly; Skein is no longer a
+runtime dependency. Start it independently with
+`pnpm --filter @noveltea/studio agent:worker` (or Compose's `agent` service)
+after running database migrations. Configure `NT_AGENT_RPC_TOKEN` (a shared
+private random token of at least 32 characters) and `NT_AGENT_RPC_URL` in the
+trusted Studio environment. The agent requires its own private sandbox socket
+and token, and holds the Pi credential decryption key. The web process never
+receives the sandbox controller token or executes a generation graph. Live Pi
+still requires a certified rootless controller and explicit per-user credentials;
+fixture success does not establish literary/editorial approval.
 
 Run the authenticated fixture integration test with an existing
 `noveltea-skills` checkout:
@@ -569,9 +574,11 @@ Apply migration **12** while Studio is stopped:
 `pnpm --filter @noveltea/studio migrate`. The durable SQLite
 `generation_run_queue` reserves at most **two** active generation runs by default.
 Set `NT_STUDIO_MAX_ACTIVE_JOBS=1..32` in the host environment to change that
-limit. Entries use FIFO admission. A queued run is reconstructed from the
-pinned Story/job/thread and user credential store, not its originating browser
-connection. Browser disconnect does not cancel execution.
+limit. The **agent** polls and drains FIFO entries on startup and every 250 ms
+without browser traffic. A queued run is reconstructed from its pinned
+Story/job/thread and encrypted owner-scoped Pi credential store, not its
+originating browser connection. Browser disconnect does not cancel execution.
+Studio never executes or pumps the queue inline.
 
 The job page exposes **Pause**, **Resume**, **Cancel**, **Retry after inspection**
 and **Inspect**. `GET /api/jobs/:id/control` returns owner-scoped execution

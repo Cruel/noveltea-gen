@@ -9,64 +9,25 @@ import { requireUser } from './access.server'
 import { startStoryJob, type JobStartResult } from '../../../src/job'
 import { parseGenerationContract, type GenerationRequest } from '../../../src/generation'
 import { claimServerGeneration, assertServerClaimPermitted } from '../../../src/generation-owner'
-import { withStoryJobLock } from '../../../src/job-lock'
 import { trustedHead } from '../../../src/revision'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
-import { appendGenerationEvent, committedStoryFiles } from './generation-progress.server'
-import type { GenerationEvidence } from '../../../src/generation'
-import { assertUserPiSelection, createUserPiRuntime, validPiSelection, type PiSelection } from './pi-credentials.server'
-import { configurePiPolicy, resolvePiModel, type PiPolicy } from '../../../src/job-pi-policy'
-import { withJobModelRuntime } from '../../../src/model-runtime'
-import { SandboxClient } from '../../../src/sandbox-client'
+import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
+import type { PiPolicy } from '../../../src/job-pi-policy'
 import { readJobControl } from '../../../src/job-control'
-import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
-import { queueGeneration, queueRecord, claimNext, finishAttempt, fenceAbandonedRuns, dequeueBeforeStart, type QueueRecord } from './generation-queue.server'
+import { queueGeneration, queueRecord } from './generation-queue.server'
 
 class JobError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const SHA = /^[a-f0-9]{40}$/i
-const active = new Set<string>()
-const inFlight = new Map<string, Promise<void>>()
-const initialized = new WeakSet<StudioDatabase>()
-
-/** The database owns capacity; disconnected HTTP requests do not own runs. */
-function pump(store: StudioDatabase) {
-  if (!initialized.has(store)) {
-    // Never re-enter an unfinished writer from a previous server lifetime.
-    fenceAbandonedRuns(store)
-    initialized.add(store)
-  }
-  for (;;) {
-    const record = claimNext(store)
-    if (!record) break
-    active.add(record.jobId)
-    const task = runPersistedGeneration(store, record)
-      .then(() => finishAttempt(store, record.jobId, true))
-      .catch(() => {
-        // Provider errors may include secrets. Only sanitized controller events
-        // and original receipts, not raw exceptions, leave this task.
-        finishAttempt(store, record.jobId, false)
-        appendGenerationEvent(store, record.ownerId, record.jobId, { kind: 'interrupted' })
-        throw new Error('Generation failed; preserve its original receipts for recovery.')
-      })
-      .finally(() => {
-        inFlight.delete(record.jobId)
-        active.delete(record.jobId)
-        pump(store)
-      })
-    inFlight.set(record.jobId, task)
-    void task.catch(() => {})
-  }
-}
 
 type SavedJob = {
   id: string; storyId: string; title: string; commitSha: string | null
   provider: string; providerId: string; directory: string
   requestJson: string | null; threadId: string | null; configJson: string | null; status: string
 }
-function selectedJob(store: StudioDatabase, owner: string, id: string): SavedJob {
+export function selectedJob(store: StudioDatabase, owner: string, id: string): SavedJob {
   if (!UUID.test(id)) throw new JobError(400, 'Invalid job ID.')
   const row = store.sqlite.prepare(`SELECT j.id, j.story_id AS storyId, j.title, j.status,
     j.source_commit_sha AS commitSha, j.generation_request_json AS requestJson,
@@ -84,7 +45,7 @@ function selectedJob(store: StudioDatabase, owner: string, id: string): SavedJob
 }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 
-async function restoreJob(row: SavedJob, owner: string): Promise<JobStartResult> {
+export async function restoreJob(row: SavedJob, owner: string): Promise<JobStartResult> {
   const cache = process.env.NT_GIT_CACHE_DIR
   if (!cache || !isAbsolute(cache)) throw new JobError(503, 'Configure an absolute NT_GIT_CACHE_DIR to reopen job worktrees.')
   const root = resolve(cache, digest(owner), digest(row.provider + ':' + row.providerId))
@@ -108,23 +69,24 @@ export async function authorizedStoryJob(store: StudioDatabase, owner: string, i
   return restoreJob(selectedJob(store, owner, id), owner)
 }
 
-async function verifyTrustedRevision(job: JobStartResult) {
+export async function verifyTrustedRevision(job: JobStartResult) {
   try { await trustedHead(job) }
   catch { throw new JobError(409, 'Job HEAD is not a verified narrative revision. Reconcile the preserved branch before generation.') }
 }
 
-function verifyWebExecution(fixture: boolean) {
+export function verifyWebExecution(fixture: boolean, agent = false) {
   // Fixture-only evaluation must not silently invoke real model placement.
   if (fixture && process.env.NT_LIVE_GENERATION_IDEA === '1') {
     throw new JobError(503, 'Fixture execution refuses live model-directed idea placement.')
   }
-  if (!fixture && (!process.env.NT_SANDBOX_SOCKET?.startsWith('/') ||
-      !process.env.NT_SANDBOX_TOKEN_FILE?.startsWith('/') ||
-      process.env.NT_REQUIRE_USER_PI_RUNTIME !== '1')) {
+  if (!fixture && (process.env.NT_REQUIRE_USER_PI_RUNTIME !== '1' ||
+      (agent ? (!process.env.NT_SANDBOX_SOCKET?.startsWith('/') ||
+        !process.env.NT_SANDBOX_TOKEN_FILE?.startsWith('/')) :
+        (!process.env.NT_AGENT_RPC_URL || !process.env.NT_AGENT_RPC_TOKEN)))) {
     throw new JobError(503, 'Real generation requires a rootless sandbox controller and an isolated per-user Pi runtime.')
   }
 }
-function pinnedRequest(row: SavedJob, job: JobStartResult): GenerationRequest | null {
+export function pinnedRequest(row: SavedJob, job: JobStartResult): GenerationRequest | null {
   if (!row.requestJson) return null
   let request: GenerationRequest
   try {
@@ -174,9 +136,9 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
         : row.status === 'cancelled' ? 'Job was cancelled; generation cannot be started.' : null,
       completedStages: [] }
   }
-  // The writer may be between its Git commit and trusted-head receipt.
-  // Never mistake that intentionally transient boundary for corrupt recovery.
-  if (queued?.phase === 'running' && active.has(row.id))
+  // An agent owns active graph state; never inspect partially committed
+  // checkpoints while it may be between a Git commit and its receipt.
+  if (queued?.phase === 'running')
     return { ...base, status: 'running', threadId: row.threadId,
       task: pinned.task, contract: pinned.contract, reason: null, completedStages: [] }
   // A failed writer may leave a dirty tree or Git HEAD beyond its verified
@@ -193,13 +155,12 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
     threadId: row.threadId, task: pinned.task, contract: pinned.contract,
     reason: 'Waiting for an available generation slot.', completedStages: [] }
   const checkpoint = join(job.stateDir, 'web-generation.sqlite')
-  const running = active.has(row.id)
   const initial = { ...base, threadId: row.threadId, task: pinned.task, contract: pinned.contract }
   if (!existsSync(checkpoint)) {
     if (row.status === 'paused' && await readJobControl(job) === 'paused')
       return { ...initial, status: 'paused', reason: 'Paused before its first work item.', completedStages: [] }
-    return { ...initial, status: running ? 'running' : 'interrupted',
-      reason: running ? null : 'No generation checkpoint was published. Inspect the preserved job before any retry.',
+    return { ...initial, status: 'interrupted',
+      reason: 'No generation checkpoint was published. Inspect the preserved job before any retry.',
       completedStages: [] }
   }
   const { saver, graph } = openWebGenerationGraph(checkpoint)
@@ -210,8 +171,8 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
       completedStages?: Array<{ stage: string; status: string }>
     }
     if (!state.request) {
-      return { ...initial, status: running ? 'running' : 'interrupted',
-        reason: running ? null : 'No saved generation request. Inspect the preserved checkpoint before recovery.',
+      return { ...initial, status: 'interrupted',
+        reason: 'No saved generation request. Inspect the preserved checkpoint before recovery.',
         completedStages: [] }
     }
     if (JSON.stringify(state.request) !== JSON.stringify(pinned) ||
@@ -220,7 +181,7 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
     }
     try { await claimServerGeneration(job, row.threadId!, pinned) }
     catch { throw new JobError(409, 'Generation owner receipt conflicts with this job. Inspect saved state before recovery.') }
-    const interrupted = state.status === 'running' && !running
+    const interrupted = state.status === 'running'
     return { ...initial, status: interrupted ? 'interrupted' : (state.status ?? 'interrupted'),
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
         : pinned.fixture ? (state.reason ?? null) : state.reason
@@ -273,118 +234,6 @@ function reply(body: unknown, status = 200) {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } })
 }
 
-/** Verify the queued identity and resume the pinned graph, never browser inputs. */
-async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
-  const row = selectedJob(store, item.ownerId, item.jobId)
-  const job = await restoreJob(row, item.ownerId)
-  const pinned = pinnedRequest(row, job)
-  if (!pinned || row.status !== 'paused' || queueRecord(store, row.id)?.phase !== 'running')
-    throw new Error('Queued generation state changed before execution.')
-  const config = row.configJson ? JSON.parse(row.configJson) as {
-    model?: PiSelection | null; limits?: PiPolicy['limits']
-  } : null
-  const selected = config?.model ?? null
-  if (selected && !validPiSelection(selected)) throw new Error('Saved Pi model is invalid.')
-  if (pinned.fixture === !!selected) throw new Error('Saved Pi model disagrees with pinned execution.')
-  verifyWebExecution(pinned.fixture)
-  await verifyTrustedRevision(job)
-  if (await readJobControl(job) !== 'running') throw new Error('Generation is not authorized to run.')
-  // Check again at dispatch, not only at enqueue: queued work can be mutated.
-  const env = { ...process.env }
-  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
-  if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
-    cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim()) throw new Error('Job has uncommitted work; manual reconciliation required.')
-  let runtime: ModelRuntime | undefined
-  if (selected) {
-    await assertUserPiSelection(store, item.ownerId, selected)
-    runtime = await createUserPiRuntime(store, item.ownerId)
-  }
-  const threadId = row.threadId!
-  const claim = () => withStoryJobLock(job, 'studio-generation-admission', async () => {
-    const current = store.sqlite.prepare(`SELECT status, generation_request_json AS request,
-      generation_thread_id AS thread FROM studio_sessions WHERE id=? AND owner_user_id=?`)
-      .get(row.id, item.ownerId) as { status: string; request: string; thread: string } | undefined
-    if (current?.status !== 'paused' || current.request !== JSON.stringify(pinned) ||
-        current.thread !== threadId || queueRecord(store, row.id)?.phase !== 'running')
-      throw new Error('Conflicting generation admission.')
-    let sandbox: SandboxClient | null = null
-    if (selected) {
-      sandbox = new SandboxClient()
-      await sandbox.acquire(job.jobId)
-    }
-    try {
-      if (selected && runtime) {
-        await configurePiPolicy(job, { version: 1, profile: {
-          provider: selected.provider, model: selected.id,
-          ...(selected.thinking ? { thinking: selected.thinking } : {}),
-        }, limits: config?.limits ?? {} })
-        await resolvePiModel(job, runtime, selected.provider, selected.id, selected.thinking)
-      }
-      await claimServerGeneration(job, threadId, pinned)
-      const updated = store.sqlite.prepare(`UPDATE studio_sessions SET status='running', updated_at=?
-        WHERE id=? AND owner_user_id=? AND status='paused' AND generation_thread_id=?`)
-        .run(new Date().toISOString(), row.id, item.ownerId, threadId)
-      if (updated.changes !== 1) throw new Error('Concurrent admission.')
-    } catch (error) {
-      if (sandbox) await sandbox.dispose(job.jobId).catch(() => {})
-      throw error
-    }
-  })
-  await claim()
-  const execute = async () => {
-    appendGenerationEvent(store, item.ownerId, row.id, { kind: 'started' })
-    const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
-    try {
-      const prior = await graph.getState({ configurable: { thread_id: threadId } })
-      const stages = (prior.values as { completedStages?: GenerationEvidence[] }).completedStages ?? []
-      let working = '', verified = stages.length
-      let previousHead = stages.at(-1)?.headSha ?? job.headSha
-      for await (const patch of await graph.stream({ request: pinned,
-        pauseAfter: item.intent === 'start' && pinned.fixture ? 'foundation' : null },
-        { configurable: { thread_id: threadId }, recursionLimit: 10000, streamMode: 'updates' })) {
-        const updates = patch as Record<string, unknown>
-        const intake = updates.author_update_intake as { active?: {
-          stage: GenerationEvidence['stage']; milestone?: string } } | undefined
-        if (intake?.active) {
-          const key = intake.active.stage + ':' + (intake.active.milestone ?? '')
-          if (working !== key) {
-            working = key
-            appendGenerationEvent(store, item.ownerId, row.id, { kind: 'working',
-              stage: intake.active.stage, milestone: intake.active.milestone })
-          }
-        }
-        const completed = (updates.verify_committed_work as {
-          completedStages?: GenerationEvidence[] } | undefined)?.completedStages
-        if (completed && completed.length > verified) {
-          for (const evidence of completed.slice(verified)) {
-            const files = committedStoryFiles(job, previousHead, evidence.headSha)
-            appendGenerationEvent(store, item.ownerId, row.id, { kind: 'verified',
-              stage: evidence.stage, milestone: evidence.milestone, files })
-            previousHead = evidence.headSha
-          }
-          verified = completed.length
-        }
-      }
-      const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
-      const outcome = snapshot.values as { status?: string }
-      const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
-        ? outcome.status! : 'blocked'
-      store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
-        WHERE id=? AND owner_user_id=? AND generation_thread_id=?`)
-        .run(state, new Date().toISOString(), row.id, item.ownerId, threadId)
-      if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
-      appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
-        status: state as 'paused' | 'blocked' | 'completed' | 'cancelled' })
-    } finally { saver.db.close() }
-  }
-  try {
-    if (runtime) await withJobModelRuntime(runtime, execute)
-    else await execute()
-  } finally {
-    if (selected) await new SandboxClient().dispose(job.jobId).catch(() => {})
-  }
-}
 
 /** The only owner-authenticated web generation entrypoint. */
 export async function generationJobRequest(auth: StudioAuth, store: StudioDatabase, request: Request,
@@ -398,7 +247,6 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     if (!user) throw new JobError(401, 'Sign in required.')
     const row = selectedJob(store, user.id, id)
     if (request.method === 'GET') {
-      pump(store)
       return reply({ job: await inspect(store, row, user.id) })
     }
     const input = await readInput(request)
@@ -408,7 +256,6 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       throw new JobError(409, 'Job already has a different pinned generation request.')
     const queued = queueRecord(store, id)
     if (existing) {
-      pump(store)
       return reply({ job: await inspect(store, row, user.id) })
     }
     if (row.status !== 'paused') throw new JobError(409, 'Only a prepared job can start generation.')
@@ -445,14 +292,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     catch { throw new JobError(409, 'CLI or conflicting server generation ownership prevents this queue admission.') }
     queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),
       job.threadId + ':generation:web')
-    pump(store)
-    // Fixture compatibility: an immediately admitted fixture returns its
-    // checkpointed outcome; queued and real Pi jobs detach from the HTTP call.
-    const task = pinned.fixture ? inFlight.get(id) : undefined
-    if (task) {
-      await task
-      return reply({ job: await inspect(store, selectedJob(store, user.id, id), user.id) }, 201)
-    }
+    // The agent process owns graph execution, including fixture runs.
     return reply({ job: await inspect(store, selectedJob(store, user.id, id), user.id) }, 202)
   } catch (error) {
     if (error instanceof JobError) return reply({ error: error.message }, error.status)
