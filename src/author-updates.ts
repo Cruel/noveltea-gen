@@ -25,6 +25,9 @@ interface Message {
 interface Receipt {
   version: 1; id: string; jobId: string; threadId: string; digest: string;
   phase: Phase; result?: unknown; pinned?: Pinned;
+  /** Authenticated web intent is bound before invoking the interrupt, so a
+   * crash/retry cannot change the actor or answer for the saved checkpoint. */
+  webController?: { principal: string; responseSha256: string; headSha: string };
 }
 interface Pinned {
   jobId: string; threadId: string; branch: string; baseSha: string;
@@ -45,7 +48,7 @@ function stable(v: unknown): string {
   if (Array.isArray(v)) return "[" + v.map(stable).join(",") + "]";
   if (v !== null && typeof v === "object") {
     const obj = v as Record<string, unknown>;
-    return "{" + Object.keys(obj).sort().map(k => JSON.stringify(k) + ":" + stable(obj[k])).join(",") + "}";
+    return "{" + Object.keys(obj).filter(k => obj[k] !== undefined).sort().map(k => JSON.stringify(k) + ":" + stable(obj[k])).join(",") + "}";
   }
   return JSON.stringify(v);
 }
@@ -373,8 +376,8 @@ async function openGraph(job: JobStartResult) {
       const result = typed.type === "answer"
         ? { answer: typed.answer, source: "explicit-author-response" }
         : await applyApproval(job, message, typed);
-      await saveReceipt(job, { version: 1, id: message.id, jobId: job.jobId,
-        threadId: job.threadId, digest: message.digest, phase: "applied", result, pinned: state.pinned });
+      const receipt = await loadReceipt(job, message);
+      await saveReceipt(job, { ...receipt, phase: "applied", result, pinned: state.pinned });
       return { phase: "applied" as const, result };
     })
     .addEdge(START, "process_author_updates")
@@ -545,6 +548,52 @@ export async function processAuthorUpdatesAtBoundary(job: JobStartResult) {
     "Story job cannot advance: queued author update requires action: " + result.blockers.join(", "));
   return result;
 }
+/** Shared CLI/web inspection and typed LangGraph resume. The caller must
+ * establish trusted job identity; no request path or principal is accepted here. */
+export async function inspectAuthorUpdates(job: JobStartResult): Promise<{
+  status: Control; records: Array<{ message: Message; acknowledgement: Receipt }>
+}> {
+  return { status: await control(job), records: await Promise.all(
+    (await messages(job)).map(async message => ({ message, acknowledgement: await loadReceipt(job, message) })),
+  ) };
+}
+
+export async function resumeAuthorUpdate(job: JobStartResult, value: unknown, principal?: string): Promise<Receipt> {
+  return withStoryJobLock(job, "process-author-updates", async () => {
+    const id = (value as { messageId?: unknown } | null)?.messageId;
+    if (typeof id !== "string" || !ID.test(id)) throw new Error("Typed response needs a valid messageId.");
+    const message = await loadMessage(job, id);
+    const typed = validateResume(message, value);
+    if (typed.type === "decision") verifyAuthorEvidence(job, typed.approval);
+    const previous = await loadReceipt(job, message);
+    if (principal !== undefined) {
+      if (!/^user:[A-Za-z0-9_-]{1,128}$/.test(principal)) throw new Error("Invalid authenticated web controller.");
+      const responseSha256 = sha(stable(typed));
+      if (previous.webController && (previous.webController.principal !== principal ||
+          previous.webController.responseSha256 !== responseSha256)) {
+        throw new Error("Author response already bound to another actor or answer.");
+      }
+      if (previous.phase === "applied") {
+        if (!previous.webController) throw new Error("Author response was already handled by another controller.");
+        return previous;
+      }
+      if (await control(job) !== "running") throw new Error("Paused/canceled/completed job cannot resume.");
+      const pinned = await readPinned(job);
+      if (previous.phase !== "awaiting-author" || !previous.pinned ||
+          !matchesPinned(pinned, previous.pinned)) throw new Error("No current matching author interrupt.");
+      if (previous.webController && previous.webController.headSha !== pinned.headSha) {
+        throw new Error("Controller response bound to a different Git HEAD.");
+      }
+      if (!previous.webController) await saveReceipt(job, { ...previous,
+        webController: { principal, responseSha256, headSha: pinned.headSha } });
+    } else {
+      if (previous.webController) throw new Error("A web controller already owns this response.");
+      if (await control(job) !== "running") throw new Error("Paused/canceled/completed job cannot resume.");
+    }
+    return processOne(job, message, typed);
+  });
+}
+
 export async function runAuthorAction(options: AuthorAction): Promise<unknown> {
   const job = await startStoryJob({ story: options.story, job: options.job }, false);
   if (options.action !== "plan" && options.carryForward !== undefined) {
@@ -568,6 +617,10 @@ export async function runAuthorAction(options: AuthorAction): Promise<unknown> {
     if (!options.state || options.file) throw new Error("Execution control requires --state running|paused|cancelled|completed.");
     await setControl(job, options.state);
     return { status: options.state, jobId: job.jobId, activeSpecialist: await inspectActiveStorySpecialist(job) };
+  }
+  if (options.action === "resume") {
+    if (!options.file) throw new Error("Resume requires --file <typed-response.json>.");
+    return resumeAuthorUpdate(job, await loadJson(options.file));
   }
   return withStoryJobLock(job, "process-author-updates", async () => {
     if (options.action === "plan") {
@@ -597,14 +650,6 @@ export async function runAuthorAction(options: AuthorAction): Promise<unknown> {
       if (options.file || options.state) throw new Error("Process takes no author payload.");
       return drain(job, options.limit);
     }
-    if (options.action !== "resume" || !options.file) throw new Error("Resume requires --file <typed-response.json>.");
-    if (await control(job) !== "running") throw new Error("Paused/canceled/completed job cannot resume its approval.");
-    const value: unknown = await loadJson(options.file);
-    const id = (value as { messageId?: unknown })?.messageId;
-    if (typeof id !== "string" || !ID.test(id)) throw new Error("Typed response needs a valid messageId.");
-    const message = await loadMessage(job, id);
-    const typed = validateResume(message, value);
-    if (typed.type === "decision") verifyAuthorEvidence(job, typed.approval);
-    return processOne(job, message, typed);
+    throw new Error("Unsupported author action.");
   });
 }

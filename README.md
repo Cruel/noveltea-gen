@@ -1498,6 +1498,29 @@ Use `approval request --file payload.json` for an exact reviewed payload,
 including an editorial review. The authenticated same-origin `POST /api/approvals`
 uses the same graph and ledger, with job ownership checked against the app store.
 
+### Web author questions and approval interrupts (#65)
+
+The job details page shows saved author-update questions and protected approval
+requests. `GET /api/jobs/<job-id>/author` retrieves owner-scoped, persisted
+question/approval summaries. Its same-origin `POST` accepts only typed actions:
+`answer` with an exact `messageId` and nonempty `answer`, `prepare` with an exact
+pending approval `messageId`, or `decide` with the staged receipt ID, nonce,
+proposal SHA-256 and explicit `approved`/`rejected` choice. The browser never
+supplies filesystem paths, principal identity, author evidence or a replacement
+proposal. `prepare` displays the exact trusted-ledger proposal, including its
+verified Git HEAD, before the UI enables a decision.
+
+The authenticated controller principal and a digest of each answer/resume are
+persisted in the author-update receipt before invoking the **existing** typed
+LangGraph interrupt. A repeated identical response from that controller is
+idempotent; changed responses, cross-account requests and stale pinned Story
+state fail closed. Approval uses the same trusted ledger, verified proposal
+and controller principal as standalone CLI. Recorded rejection leaves the
+protected author interrupt unresolved for explicit review; it never authorizes
+writing. These endpoints do not start/restart generation or automatically replay
+an interrupted writer. Only messages already captured in the durable author
+inbox can be answered through this surface.
+
 **Trust boundary:** every Git-backed Pi specialist now requires configured sandbox
 tools, including standalone CLI sessions. A terminal is not isolation against a
 same-user host shell. The trusted controller, ledger and checkpoints must never be

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity } from './-GenerationActivity'
+import { AuthorInteractions } from './-AuthorInteractions'
 import { GitChanges } from './-GitChanges'
 
 type Job = {
@@ -58,6 +59,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
         <button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Refresh saved state</button>
       </section>
       <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
+      <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
       <GitChanges jobId={jobId} revision={job.headSha} />
       <StoryExplorer jobId={jobId} revision={job.headSha} />
       {job.status === 'prepared'

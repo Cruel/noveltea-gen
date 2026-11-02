@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -10,6 +10,9 @@ import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { approvalRequest } from '../src/lib/approval.server'
+import { authorInteractionRequest } from '../src/lib/author-interactions.server'
+import { runAuthorAction } from '../../src/author-updates'
+import { runArchitectureJob } from '../../src/architecture'
 import { verifyAuthorEvidence } from '../../src/author-evidence'
 
 const config = { baseURL: 'http://localhost:3000', secret: 'approval-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
@@ -45,10 +48,16 @@ test('authenticated owner records an exact durable decision; foreign users, inli
       VALUES (?,?,?,'story','Story','2026-10-31',?)`).run(storyId, alice.id, repositoryId, commit)
     store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,status,source_commit_sha,created_at,updated_at)
       VALUES (?,?,?,'Job','paused',?,'2026-10-31','2026-10-31')`).run(jobId, alice.id, storyId, commit)
-    const plan = { version: 1, contract: { scope: 'fixture' }, items: [] }, contract = { scope: 'revised fixture' }
+    const firstContract = { scope: { kind: 'partial', depth: 'architecture', targets: [], branches: [] },
+      constraints: ['Preserve the original mystery'],
+      envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
+    const contract = { ...firstContract, constraints: [...firstContract.constraints, 'Reveal the witness'] }
+    const plan = { version: 1, contract: firstContract, items: [] }
     const digest = createHash('sha256').update(JSON.stringify({ plan, head: commit, contract })).digest('hex')
-    writeFileSync(join(job.stateDir, 'architecture.json'), JSON.stringify({ jobId, threadId: job.threadId,
-      baseSha: commit, expectedHead: commit, phase: 'ready', plan,
+    writeFileSync(join(job.stateDir, 'architecture.json'), JSON.stringify({ format: 1,
+      jobId, threadId: job.threadId, branch: job.branch, worktreeRoot: job.worktreeRoot,
+      baseSha: commit, expectedHead: commit, phase: 'ready', mode: 'autonomous',
+      worker: 'fixture', provider: 'openai', model: 'gpt-6-luna', history: [], plan,
       proposal: { version: 2, digest, baselineHead: commit, contract } }))
     const post = (body: unknown, session = aliceCookie, origin = config.baseURL) => approvalRequest(auth, store,
       new Request(config.baseURL + '/api/approvals', { method: 'POST', headers: {
@@ -72,6 +81,104 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     assert.equal((await post({ ...decide, decision: 'rejected' })).status, 409)
     assert.equal(verifyAuthorEvidence(job, { receiptId: pending.id, nonce: pending.nonce }).payload.proposalSha256, digest)
     assert.equal(git('rev-parse', 'HEAD'), commit)
+
+    const author = (body: unknown, session = aliceCookie, origin = config.baseURL) =>
+      authorInteractionRequest(auth, store, new Request(config.baseURL + '/api/jobs/' + jobId + '/author', {
+        method: 'POST', headers: { origin, cookie: session, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }), jobId, config.baseURL)
+    const inspectAuthor = (session = aliceCookie) => authorInteractionRequest(auth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId + '/author', {
+        method: 'GET', headers: { cookie: session },
+      }), jobId, config.baseURL)
+    const sendMessage = async (message: unknown) => {
+      const file = join(root, 'author-' + randomUUID() + '.json')
+      writeFileSync(file, JSON.stringify(message))
+      return runAuthorAction({ story: job.storyRoot, job: jobId, action: 'send', file })
+    }
+    const processUpdates = () => runAuthorAction({ story: job.storyRoot, job: jobId, action: 'process' })
+    await sendMessage({ id: 'question-review', kind: 'question', payload: { question: 'Who sees the reveal?' } })
+    assert.equal((await processUpdates() as any).status, 'blocked')
+    assert.equal((await inspectAuthor('')).status, 401)
+    assert.equal((await inspectAuthor(bobCookie)).status, 404)
+    assert.equal((await author({ action: 'answer', messageId: 'question-review', answer: 'Only the author' },
+      aliceCookie, 'https://evil.test')).status, 403)
+    assert.equal((await author({ action: 'answer', messageId: 'question-review', answer: 'Only the author',
+      principal: 'user:' + alice.id })).status, 400)
+    assert.equal((await author({ action: 'answer', messageId: 'question-review',
+      answer: 'x'.repeat(9000) })).status, 413, 'oversized payload is refused before buffering')
+    assert.equal((await author({ action: 'answer', messageId: 'question-review', answer: 'Only the author' },
+      bobCookie)).status, 404)
+    const answer = { action: 'answer', messageId: 'question-review', answer: 'Only the author' }
+    const answered = await author(answer)
+    assert.equal(answered.status, 200, await answered.clone().text())
+    const applied = (await answered.json() as any).acknowledgement
+    assert.equal(applied.phase, 'applied')
+    assert.equal(applied.webController.principal, 'user:' + alice.id)
+    assert.equal(applied.webController.headSha, commit)
+    assert.equal((await author(answer)).status, 200, 'exact replay is idempotent')
+    assert.equal((await author({ ...answer, answer: 'Someone else' })).status, 409)
+    const authorView = await (await inspectAuthor()).json() as any
+    assert.equal(authorView.items[0].answer, 'Only the author')
+
+    await sendMessage({ id: 'plan-message', kind: 'approval', payload: {
+      requestType: 'plan', proposalSha256: digest,
+    } })
+    assert.equal((await processUpdates() as any).status, 'blocked')
+    const stagedWeb = await author({ action: 'prepare', messageId: 'plan-message' })
+    assert.equal(stagedWeb.status, 200, await stagedWeb.clone().text())
+    const exact = (await stagedWeb.json() as any).approval
+    assert.equal(exact.phase, 'awaiting-controller')
+    assert.equal(exact.proposalSha256, digest)
+    assert.equal(exact.verifiedHead, commit)
+    assert.deepEqual(exact.review.proposed.contract, contract)
+    const decision = { action: 'decide', messageId: 'plan-message', receiptId: exact.id,
+      nonce: exact.nonce, proposalSha256: digest, decision: 'approved' }
+    assert.equal((await author({ ...decision, receiptId: 'plan-one' })).status, 409)
+    assert.equal((await author(decision, bobCookie)).status, 404)
+    assert.equal((await author({ ...decision, nonce: randomUUID() })).status, 409)
+    const accepted = await author(decision)
+    assert.equal(accepted.status, 200, await accepted.clone().text())
+    const resolved = await accepted.json() as any
+    assert.equal(resolved.approval.principal, 'user:' + alice.id)
+    assert.equal(resolved.acknowledgement.phase, 'applied')
+    assert.equal(resolved.acknowledgement.webController.principal, 'user:' + alice.id)
+    assert.equal((await author(decision)).status, 200, 'exact accepted approval replay is idempotent')
+    assert.equal((await author({ ...decision, decision: 'rejected' })).status, 409)
+    const inspected = await (await inspectAuthor()).json() as any
+    assert.equal(inspected.items[1].approval.decision, 'approved')
+    assert.equal(inspected.items[1].phase, 'applied')
+    const architectureFile = join(job.stateDir, 'architecture.json')
+    const approvedPlan = JSON.parse(readFileSync(architectureFile, 'utf8'))
+    assert.equal(approvedPlan.plan.version, 2)
+    assert.equal(approvedPlan.history[0].signed.receiptId, exact.id)
+    assert.equal(git('rev-parse', 'HEAD'), commit)
+
+    const revised = { ...contract, constraints: [...contract.constraints, 'A second proposed path'] }
+    const proposal = await runArchitectureJob({ story: job.storyRoot, job: jobId,
+      action: 'propose', contract: revised })
+    await sendMessage({ id: 'plan-denial', kind: 'approval', payload: {
+      requestType: 'plan', proposalSha256: proposal.proposal!.digest,
+    } })
+    assert.equal((await processUpdates() as any).status, 'blocked')
+    const pendingDenial = await (await author({ action: 'prepare', messageId: 'plan-denial' })).json() as any
+    const denial = { action: 'decide', messageId: 'plan-denial', receiptId: pendingDenial.approval.id,
+      nonce: pendingDenial.approval.nonce, proposalSha256: proposal.proposal!.digest, decision: 'rejected' }
+    const savedBeforeTampering = readFileSync(architectureFile, 'utf8')
+    const tampered = JSON.parse(savedBeforeTampering)
+    tampered.proposal.digest = 'f'.repeat(64)
+    writeFileSync(architectureFile, JSON.stringify(tampered))
+    assert.equal((await author(denial)).status, 409, 'stale proposal cannot consume consent')
+    writeFileSync(architectureFile, savedBeforeTampering)
+    const rejected = await author(denial)
+    assert.equal(rejected.status, 200, await rejected.clone().text())
+    assert.equal((await rejected.json() as any).approval.decision, 'rejected')
+    assert.equal((await author(denial)).status, 200, 'exact denial replay is idempotent')
+    assert.equal((await author({ ...denial, decision: 'approved' })).status, 409)
+    const pendingView = await (await inspectAuthor()).json() as any
+    assert.equal(pendingView.items[2].phase, 'awaiting-author', 'denial does not resume the protected writer')
+    assert.equal(pendingView.items[2].approval.decision, 'rejected')
+    assert.equal(JSON.parse(readFileSync(architectureFile, 'utf8')).plan.version, 2)
   } finally {
     store.sqlite.close()
     for (const [key, value] of [['NT_STATE_DIR', previous.state], ['NT_GIT_CACHE_DIR', previous.cache]] as const) {
