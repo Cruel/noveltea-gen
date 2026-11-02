@@ -75,8 +75,9 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
     </button>
     {catalog?.oauth?.status === 'pending' && <div role="status">
       <p>Open <a href={catalog.oauth.url} target="_blank" rel="noopener noreferrer">ChatGPT authorization</a> and sign in.
-      If the browser finishes authorization but cannot open the localhost callback, copy the final URL from its address bar and paste it here.</p>
-      <label>Final localhost redirect URL
+      On the same computer as Studio, the browser callback completes automatically and this page updates when connected.
+      If you access a remote Studio whose localhost callback cannot reach its server, use the manual fallback below.</p>
+      <label>Manual fallback: final localhost redirect URL
         <input type="text" autoComplete="off" value={redirect} disabled={busy}
           onChange={event => setRedirect(event.target.value)} placeholder="http://127.0.0.1:1455/auth/callback?..." />
       </label>

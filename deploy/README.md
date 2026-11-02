@@ -100,7 +100,15 @@ GitLab OAuth credentials, `NT_PI_CREDENTIAL_KEY`, and
 `NT_AGENT_RPC_TOKEN` (at least 32 characters). Reuse stable encryption and
 authentication secrets across restarts; changing them invalidates existing
 OAuth data or sessions. ChatGPT subscriptions connect through Studio's
-`openai` OAuth flow; no API key is required. Local `pnpm dev` and Compose
+`openai` OAuth flow; no API key is required. The SDK registers
+`http://127.0.0.1:1455/auth/callback` and handles its state check and code
+exchange internally. Compose publishes port 1455 to **host loopback only**
+(`127.0.0.1:1455:1455`), not the public interface. A browser on the Docker
+host follows the redirect automatically, and the original Studio tab reflects
+the connection. The callback is not a general Studio route and never needs a
+public reverse-proxy rule. On a remote browser, `127.0.0.1` is the browser's
+own machine; Studio retains a manual callback-URL fallback. Do not publish 1455
+on a public interface or proxy it to the Internet. Local `pnpm dev` and Compose
 use **separate** database locations. Starting Compose fresh does not migrate
 existing dev jobs or Pi logins.
 
@@ -130,7 +138,7 @@ docker compose down
 `noveltea-controller` volumes, including encrypted ChatGPT credentials,
 job checkpoints and unpublished work. Never use this to repair a failed job.
 
-Only the web port is published, bound to loopback by default. To expose Studio
+Only the Studio web port and the fixed ChatGPT OAuth callback port 1455 are published, both bound to loopback by default. To expose Studio
 remotely, configure a trusted HTTPS reverse proxy with request limits and
 align `BETTER_AUTH_URL` and OAuth redirect origins. Never publish the
 agent's port 7001 or the controller socket.

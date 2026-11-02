@@ -114,6 +114,9 @@ services:
       NT_STUDIO_SKILLS_SOURCE: /opt/noveltea-skills
       HOST: 0.0.0.0
       PORT: 3000
+      # Pi serves its registered OAuth callback on 1455. Docker publishes it
+      # on HOST loopback only; the redirect URI remains 127.0.0.1:1455.
+      PI_OAUTH_CALLBACK_HOST: 0.0.0.0
     volumes:
       - noveltea-app:/var/lib/noveltea/app
       - noveltea-state:/var/lib/noveltea/state
@@ -132,6 +135,7 @@ services:
     ports:
       # Never publish without TLS/reverse proxy. Localhost OAuth is for development.
       - "127.0.0.1:${NT_STUDIO_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:1455:1455"
     restart: unless-stopped
     init: true
     security_opt: [no-new-privileges:true]

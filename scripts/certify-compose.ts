@@ -35,13 +35,17 @@ function preflight() {
     '', 'Refusing to touch existing NovelTea containers')
 }
 async function freeWebPort() {
-  const server = createServer()
-  server.once('error', () => {})
-  try {
-    server.listen(webPort, '127.0.0.1')
-    await once(server, 'listening')
-  } catch { throw Error('Port ' + webPort + ' is occupied; refusing to disturb existing Studio') }
-  finally { if (server.listening) server.close() }
+  // The OAuth callback port also belongs to Studio in Compose. Refuse to
+  // displace another local Pi/Codex authorization or existing listener.
+  for (const port of new Set([webPort, 1455])) {
+    const server = createServer()
+    server.once('error', () => {})
+    try {
+      server.listen(port, '127.0.0.1')
+      await once(server, 'listening')
+    } catch { throw Error('Port ' + port + ' is occupied; refusing to disturb an existing service') }
+    finally { if (server.listening) server.close() }
+  }
 }
 async function delay(ms: number) { await new Promise(resolve => setTimeout(resolve, ms)) }
 async function checkWeb() {
@@ -122,6 +126,10 @@ async function main() {
     await checkWeb()
     await checkAgent()
     await checkController()
+    // Test the fixed browser loopback callback and SDK's code handling using
+    // a synthetic token response; no paid login or real credentials involved.
+    assert.match(execFileSync('node', ['scripts/check-compose-oauth-loopback.mjs'],
+      { cwd: root, env, encoding: 'utf8', timeout: 30_000 }), /PASS host 127\.0\.0\.1:1455/)
     docker('compose', 'exec', '-T', 'web', '/opt/noveltea/noveltea', '--version')
     docker('compose', 'exec', '-T', 'agent', 'test', '-f',
       '/opt/noveltea-skills/skills/nt-story-architecture/SKILL.md')
