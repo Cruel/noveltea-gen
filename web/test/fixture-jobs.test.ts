@@ -11,6 +11,8 @@ import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { fixtureJobRequest } from '../src/lib/fixture-jobs.server'
+import { generationEventsRequest, appendGenerationEvent, listGenerationEvents } from '../src/lib/generation-progress.server'
+import { jobChangesRequest } from '../src/lib/job-changes.server'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { parseGenerationContract } from '../../src/generation'
 
@@ -175,13 +177,67 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal((await api('POST', { ...payload, task: 'Different task' }, aliceCookie)).status, 409)
     assert.equal((store.sqlite.prepare(`SELECT generation_request_json AS request
       FROM studio_sessions WHERE id=?`).get(jobId) as { request: string | null }).request, null)
-    const started = await api('POST', payload, aliceCookie)
+    // Subscribe before generation begins: events must arrive on the live SSE
+    // connection rather than only being synthesized from a completed POST.
+    const liveStream = await generationEventsRequest(auth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId + '/events', {
+        headers: { cookie: aliceCookie },
+      }), jobId)
+    assert.equal(liveStream.status, 200)
+    const liveReader = liveStream.body!.getReader()
+    const starting = api('POST', payload, aliceCookie)
+    const liveFirst = await liveReader.read()
+    assert.match(new TextDecoder().decode(liveFirst.value), /event: progress\ndata: .*"kind":"started"/)
+    const started = await starting
+    await liveReader.cancel()
     assert.equal(started.status, 201, JSON.stringify(started.body))
     assert.equal(started.body.job.status, 'paused', JSON.stringify(started.body))
     assert.equal(started.body.job.completedStages.length, 1)
     assert.equal(git(repo, 'rev-parse', 'HEAD'), pinned)
     assert.equal(started.body.job.threadId, acquired.threadId + ':generation:web')
     assert.equal(started.body.job.fixture, true)
+    const events = listGenerationEvents(store, alice.id, jobId, 0)
+    assert.deepEqual(events.map(event => event.kind), ['started', 'working', 'verified', 'finished'])
+    assert.equal(events[1]?.stage, 'foundation')
+    assert.equal(events[2]?.stage, 'foundation')
+    assert.equal(events[3]?.status, 'paused')
+    assert.ok(events[2]?.files.includes('creative-direction/foundation.md'))
+    assert.equal(JSON.stringify(events).includes(root), false, 'no host paths or internal output in progress')
+    assert.equal(JSON.stringify(events).includes('tool_calls'), false)
+    assert.equal(events.every((event, index) => index === 0 || event.id > events[index - 1]!.id), true)
+
+    const eventApi = (cookie: string | undefined, cursor?: string) => generationEventsRequest(
+      auth, store, new Request(config.baseURL + '/api/jobs/' + jobId + '/events', {
+        headers: { ...(cookie ? { cookie } : {}), ...(cursor ? { 'Last-Event-ID': cursor } : {}) },
+      }), jobId)
+    assert.equal((await eventApi(undefined)).status, 401)
+    assert.equal((await eventApi(bobCookie)).status, 404)
+    assert.equal((await eventApi(aliceCookie, 'not-an-id')).status, 400)
+    const eventResponse = await eventApi(aliceCookie)
+    assert.equal(eventResponse.status, 200)
+    assert.match(eventResponse.headers.get('content-type') ?? '', /text\/event-stream/)
+    const firstReader = eventResponse.body!.getReader()
+    const firstChunk = await firstReader.read()
+    assert.match(new TextDecoder().decode(firstChunk.value), new RegExp('id: ' + events[0]!.id + '\\n'))
+    await firstReader.cancel()
+    const resumeResponse = await eventApi(aliceCookie, String(events[1]!.id))
+    const resumed = resumeResponse.body!.getReader()
+    const resumeChunk = await resumed.read()
+    assert.match(new TextDecoder().decode(resumeChunk.value), new RegExp('id: ' + events[2]!.id + '\\n'))
+    await resumed.cancel()
+
+    const changesApi = (cookie: string, file?: string) => jobChangesRequest(auth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId + '/changes' +
+        (file ? '?file=' + encodeURIComponent(file) : ''), { headers: { cookie } }), jobId)
+    assert.equal((await changesApi(bobCookie)).status, 404)
+    const changed = await changesApi(aliceCookie)
+    assert.equal(changed.status, 200)
+    const changedFiles = (await changed.json() as { files: string[] }).files
+    assert.ok(changedFiles.includes('creative-direction/foundation.md'))
+    assert.equal((await changesApi(aliceCookie, '../../.story-inbox/ideas/private.yaml')).status, 404)
+    const patch = await changesApi(aliceCookie, 'creative-direction/foundation.md')
+    assert.equal(patch.status, 200)
+    assert.match((await patch.json() as { diff: string }).diff, /foundation\.md/)
     assert.ok(existsSync(join(acquired.stateDir, 'web-generation.sqlite')))
     assert.ok(existsSync(join(acquired.stateDir, 'generation-server-owner.json')))
     assert.doesNotMatch(JSON.stringify(started.body), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -208,6 +264,29 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(saved.status, 'paused')
     assert.equal(saved.threadId, started.body.job.threadId)
     assert.deepEqual(saved.completedStages, started.body.job.completedStages)
+    const replayed = listGenerationEvents(store, alice.id, jobId, events[1]!.id)
+    assert.deepEqual(replayed.map(event => event.id), events.slice(2).map(event => event.id))
+    assert.deepEqual(listGenerationEvents(store, bob.id, jobId, 0), [])
+    const reconnected = await generationEventsRequest(restoredAuth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId + '/events', {
+        headers: { cookie: aliceCookie, 'Last-Event-ID': String(events[1]!.id) },
+      }), jobId)
+    assert.equal(reconnected.status, 200)
+    const afterRestart = reconnected.body!.getReader()
+    assert.match(new TextDecoder().decode((await afterRestart.read()).value),
+      new RegExp('id: ' + events[2]!.id + '\\n'))
+    await afterRestart.cancel()
+    assert.throws(() => appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'working', stage: 'foundation', milestone: '../../private',
+    }), /Invalid progress milestone/)
+    appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'verified', stage: 'foundation', files: [
+        '/etc/passwd', '../private.md', '.story-inbox/private.md',
+        'creative-direction/foundation.md', 'creative-direction/foundation.md',
+      ],
+    })
+    const sanitized = listGenerationEvents(store, alice.id, jobId, events.at(-1)!.id)
+    assert.deepEqual(sanitized[0]?.files, ['creative-direction/foundation.md'])
     const pinnedRequest = JSON.parse((store.sqlite.prepare(
       'SELECT generation_request_json AS request FROM studio_sessions WHERE id=?').get(jobId) as { request: string }).request)
     assert.equal(pinnedRequest.fixture, true)

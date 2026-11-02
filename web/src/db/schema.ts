@@ -38,6 +38,21 @@ export const stories = sqliteTable('stories', {
   index('stories_owner_idx').on(table.ownerUserId),
 ])
 
+export const generationEvents = sqliteTable('generation_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  jobId: text('job_id').notNull(),
+  ownerUserId: text('owner_user_id').notNull(),
+  kind: text('kind', { enum: ['started', 'working', 'verified', 'finished', 'interrupted'] }).notNull(),
+  stage: text('stage'),
+  milestone: text('milestone'),
+  filesJson: text('files_json').notNull().default('[]'),
+  status: text('status'),
+  createdAt: text('created_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.jobId, table.ownerUserId], foreignColumns: [sessions.id, sessions.ownerUserId] }),
+  index('generation_events_job_idx').on(table.ownerUserId, table.jobId, table.id),
+])
+
 export const sessions = sqliteTable('studio_sessions', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),
@@ -53,4 +68,5 @@ export const sessions = sqliteTable('studio_sessions', {
 }, (table) => [
   foreignKey({ columns: [table.storyId, table.ownerUserId], foreignColumns: [stories.id, stories.ownerUserId] }),
   index('studio_sessions_owner_idx').on(table.ownerUserId, table.updatedAt),
+  uniqueIndex('studio_sessions_owner_pair').on(table.id, table.ownerUserId),
 ])

@@ -11,6 +11,8 @@ import { parseGenerationContract, type GenerationRequest } from '../../../src/ge
 import { claimServerGeneration } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
 import { openWebFixtureGraph } from '../../../src/web-fixture-runtime'
+import { appendGenerationEvent, committedStoryFiles } from './generation-progress.server'
+import type { GenerationEvidence } from '../../../src/generation'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 
 class JobError extends Error {
@@ -275,18 +277,59 @@ export async function fixtureJobRequest(auth: StudioAuth, store: StudioDatabase,
     if (started.changes !== 1) throw new JobError(409, 'Generation was claimed concurrently. Reopen its saved status.')
     active.add(row.id)
     try {
+      appendGenerationEvent(store, user.id, row.id, { kind: 'started' })
       const checkpoint = join(job.stateDir, 'web-generation.sqlite')
       const { saver, graph } = openWebFixtureGraph(checkpoint)
       try {
-        const result = await graph.invoke({ request: requestValue, pauseAfter: 'foundation' },
-          { configurable: { thread_id: threadId }, recursionLimit: 10000 })
-        const outcome = result as { status?: string }
+        let working = ''
+        let verified = 0
+        let previousHead = job.headSha
+        // Stream the same checkpointed production graph; only derived, verified
+        // high-level transitions cross into Studio. Never persist node updates,
+        // prompts, Pi tools, draft content or uncommitted worktree paths.
+        for await (const patch of await graph.stream({ request: requestValue, pauseAfter: 'foundation' },
+          { configurable: { thread_id: threadId }, recursionLimit: 10000, streamMode: 'updates' })) {
+          const updates = patch as Record<string, unknown>
+          const intake = updates.author_update_intake as { active?: {
+            stage: GenerationEvidence['stage']; milestone?: string } } | undefined
+          if (intake?.active) {
+            const key = intake.active.stage + ':' + (intake.active.milestone ?? '')
+            if (working !== key) {
+              working = key
+              appendGenerationEvent(store, user.id, row.id, { kind: 'working',
+                stage: intake.active.stage, milestone: intake.active.milestone })
+            }
+          }
+          const completed = (updates.verify_committed_work as {
+            completedStages?: GenerationEvidence[] } | undefined)?.completedStages
+          if (completed && completed.length > verified) {
+            for (const evidence of completed.slice(verified)) {
+              const files = committedStoryFiles(job, previousHead, evidence.headSha)
+              appendGenerationEvent(store, user.id, row.id, { kind: 'verified',
+                stage: evidence.stage, milestone: evidence.milestone, files })
+              previousHead = evidence.headSha
+            }
+            verified = completed.length
+          }
+        }
+        const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
+        const outcome = snapshot.values as { status?: string }
         const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
           ? outcome.status! : 'blocked'
         store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
           WHERE id=? AND owner_user_id=? AND generation_thread_id=?`)
           .run(state, new Date().toISOString(), row.id, user.id, threadId)
+        if (state === 'running') {
+          // A returned stream with no safe terminal outcome is not completion.
+          appendGenerationEvent(store, user.id, row.id, { kind: 'interrupted' })
+        } else {
+          appendGenerationEvent(store, user.id, row.id, { kind: 'finished', status: state as
+            'paused' | 'blocked' | 'completed' | 'cancelled' })
+        }
       } finally { saver.db.close() }
+    } catch (error) {
+      appendGenerationEvent(store, user.id, row.id, { kind: 'interrupted' })
+      throw error
     } finally { active.delete(row.id) }
     return reply({ job: await inspect(selectedJob(store, user.id, id), user.id) }, 201)
   } catch (error) {

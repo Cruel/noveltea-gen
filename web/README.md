@@ -12,7 +12,7 @@ TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
 cross-provider linking, an encrypted persisted OAuth account store, and tenant-
 scoped Story/repository/session catalog tables. #41 adds GitHub App installation-
 aware repository discovery, Add by URL, and catalog connection without cloning.
-Story generation, SSE, and publication remain separate tickets. #43 adds GitHub Story discovery and bounded selection; #44 adds GitLab Story discovery and bounded selection.
+Fixture generation (#59) and reconnectable high-level status (#64) are now implemented; publication remains a separate ticket. #43 adds GitHub Story discovery and bounded selection; #44 adds GitLab Story discovery and bounded selection.
 
 ## Setup
 
@@ -469,6 +469,39 @@ It exercises a real local Git cache/worktree and production fixture graph,
 anonymous and cross-user rejection, same-origin writes, invalid/foreign
 contracts, run idempotency, owner/thread receipts, checkpoint reconnect,
 and fail-closed tampering.
+
+## Reconnectable generation activity and separate Git diffs (#64)
+
+The job page subscribes to owner-authenticated
+`GET /api/jobs/:jobId/events` using Server-Sent Events. Progress is written
+as an append-only, monotonically numbered log in Studio SQLite **before**
+being broadcast. `id` and `event: progress` let EventSource replay from its
+`Last-Event-ID` on reconnect; `?after=<numeric-id>` supports manual replay.
+Fresh page loads reconstruct the complete event history from the beginning.
+Only started/working/verified/finished/interrupted transitions, typed stage or
+Milestone identifiers, and a bounded list of committed Story Markdown paths
+are exposed. Raw LangGraph state, Pi tool calls, prompt data, transcripts,
+worktree drafts, host paths, and validator internals are never sent as
+progress events. An interrupted server or execution does **not** silently
+restart generation; the existing job inspection still requires safe manual
+reconciliation when needed.
+
+A separate **Verified Git changes** section uses read-only
+`GET /api/jobs/:jobId/changes` for committed Story filenames and an optional
+`?file=<Story-relative-Markdown-path>` for the selected Git patch. It compares
+the pinned job baseline against the verified current HEAD, never the dirty
+working tree, and does not treat a diff as proof of narrative validation.
+Ownership, job identity, trusted HEAD, file confinement and bounded output
+are enforced server-side. Refresh the job to see the latest validation and
+committed changes independently of activity messages.
+
+**Deploy:** stop Studio and run `pnpm --filter @noveltea/studio migrate` to
+apply schema migration **10** before restarting. Keep the Studio database on a
+durable volume alongside its existing checkpoint and job-state requirements.
+The `fixture-jobs.test.ts` integration covers real fixture graph transitions,
+ordered persisted events, owner isolation, SSE cursor replay, restart,
+path filtering, and independent verified Git diffs. The same endpoints will
+serve the later sandboxed Pi executor without exposing raw worker output.
 
 ## Generation scope editor and saved drafts (#62, #56)
 

@@ -2,6 +2,8 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
+import { GenerationActivity } from './-GenerationActivity'
+import { GitChanges } from './-GitChanges'
 
 type Job = {
   id: string; storyId: string; title: string; baseSha: string; headSha: string
@@ -55,6 +57,8 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
           <li key={index}>{stage.stage}: {stage.status}</li>)}</ul>}
         <button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Refresh saved state</button>
       </section>
+      <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
+      <GitChanges jobId={jobId} revision={job.headSha} />
       <StoryExplorer jobId={jobId} revision={job.headSha} />
       {job.status === 'prepared'
         ? <GenerationConfiguration jobId={jobId} onStarted={refresh} />

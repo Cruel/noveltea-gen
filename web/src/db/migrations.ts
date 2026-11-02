@@ -116,6 +116,25 @@ const appMigrations = [
        )`,
     ],
   },
+  {
+    version: 10,
+    statements: [
+      `CREATE UNIQUE INDEX studio_sessions_owner_pair ON studio_sessions (id, owner_user_id)`,
+      `CREATE TABLE generation_events (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         job_id TEXT NOT NULL,
+         owner_user_id TEXT NOT NULL,
+         kind TEXT NOT NULL CHECK(kind IN ('started','working','verified','finished','interrupted')),
+         stage TEXT,
+         milestone TEXT,
+         files_json TEXT NOT NULL DEFAULT '[]',
+         status TEXT,
+         created_at TEXT NOT NULL,
+         FOREIGN KEY (job_id, owner_user_id) REFERENCES studio_sessions (id, owner_user_id) ON DELETE CASCADE
+       )`,
+      `CREATE INDEX generation_events_job_idx ON generation_events (owner_user_id, job_id, id)`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -148,7 +167,9 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   const sessionColumns = store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>
   const hasPiCredentials = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='pi_credentials'`).get()
-  if (!hasOnboarding || !hasPiCredentials || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasEvents = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='generation_events'`).get()
+  if (!hasOnboarding || !hasPiCredentials || !hasEvents || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||
