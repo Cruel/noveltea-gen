@@ -14,6 +14,8 @@ import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { listGenerationEvents } from '../src/lib/generation-progress.server'
+import { queueRecord } from '../src/lib/generation-queue.server'
+import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
@@ -183,6 +185,38 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       await new Promise(resolve => setTimeout(resolve, 1000))
     }
     assert.ok(finished, 'real generation must produce a durable terminal/pause event')
+    if (!verified) {
+      const events = listGenerationEvents(store, user.id, jobId, 0).map(e =>
+        ({ kind: e.kind, stage: e.stage, status: e.status }))
+      let checkpoint: { status?: string; reason?: string; failures?: Record<string,string> } = {}
+      const checkpointFile = join(job.stateDir, 'web-generation.sqlite')
+      if (existsSync(checkpointFile)) {
+        const { saver, graph } = openWebGenerationGraph(checkpointFile)
+        try {
+          const entry = store.sqlite.prepare('SELECT generation_thread_id AS threadId FROM studio_sessions WHERE id=?')
+            .get(jobId) as { threadId: string }
+          const snapshot = await graph.getState({ configurable: { thread_id: entry.threadId } })
+          checkpoint = snapshot.values as typeof checkpoint
+        } finally { saver.db.close() }
+      }
+      const classify = (reason?: string) => {
+        const text = (reason ?? '').toLowerCase()
+        if (/budget|limit|step/.test(text)) return 'budget-limit'
+        if (/unauthori|forbidden|401|403|token|credential|oauth|login/.test(text)) return 'authentication'
+        if (/429|rate.limit|quota/.test(text)) return 'rate-limit'
+        if (/model|provider|response|api/.test(text)) return 'provider'
+        if (/sandbox|docker|container|socket|mount/.test(text)) return 'sandbox'
+        if (/validate|schema|story|yaml|revision/.test(text)) return 'validation'
+        return text ? 'other' : 'none'
+      }
+      console.error('Live generation stopped before foundation verification:', JSON.stringify({
+        events, queuePhase: queueRecord(store, jobId)?.phase,
+        checkpointStatus: checkpoint.status,
+        reasonCategory: classify(checkpoint.reason),
+        failures: Object.fromEntries(Object.entries(checkpoint.failures ?? {}).map(
+          ([key, reason]) => [key, classify(reason)])),
+      }))
+    }
     assert.ok(verified, 'real Pi foundation must validate and commit before later budget pause')
     assert.ok(existsSync(join(job.worktreeStoryRoot, 'creative-direction/foundation.md')))
     assert.notEqual(git(job.worktreeRoot, 'rev-parse', 'HEAD'), commit)
