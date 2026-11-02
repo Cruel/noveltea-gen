@@ -1,4 +1,10 @@
 import { createHmac } from 'node:crypto'
+import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth'
+
+// Nitro bundles Pi's main module but cannot trace its variable-specified
+// Node-only OAuth flow imports. Register the SDK's official static loaders
+// so production SSR includes the flows without copying generated files.
+registerBunOAuthFlows()
 import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
