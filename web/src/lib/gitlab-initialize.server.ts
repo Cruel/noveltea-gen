@@ -103,7 +103,10 @@ export async function gitlabInitializeRequest(
     if (project.path_with_namespace !== row.name) {
       throw new ProviderFailure(409, 'GitLab project was renamed or replaced. Reconnect it.')
     }
-    const empty = project.empty_repo === true && !project.default_branch
+    // GitLab may return empty_repo=true while still advertising its configured
+    // (unborn) default_branch, such as "main". The empty_repo flag is the
+    // authority: requesting a commit from that branch would incorrectly 404.
+    const empty = project.empty_repo === true
     if (request.method === 'GET') {
       const snapshot = empty ? null : project.default_branch
         ? (await gitlab<Commit>(current.token,
@@ -145,6 +148,10 @@ export async function gitlabInitializeRequest(
         throw new ProviderFailure(400, 'Enter a safe initial GitLab default branch name.')
       }
       branch = input.initialBranch
+      if (project.default_branch && branch !== project.default_branch) {
+        throw new ProviderFailure(409,
+          'The empty GitLab project already specifies a default branch; use that exact branch for the initial commit.')
+      }
     } else {
       if (!project.default_branch || project.empty_repo === true ||
           !SHA.test(input.expectedCommit || '')) {

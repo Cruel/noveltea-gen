@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 type InitState = { empty: boolean; defaultBranch: string | null; commit: string | null }
 type Created = { story: { id: string; directory: string; title: string; commitSha: string };
@@ -25,7 +25,8 @@ export function InitializeStory({ repositoryId, snapshot, onCreated }: {
   repositoryId: string; snapshot: InitState; onCreated: (created: Created) => void
 }) {
   const [directory, setDirectory] = useState('story')
-  const [initialBranch, setInitialBranch] = useState('main')
+  const [initialBranch, setInitialBranch] = useState(snapshot.defaultBranch ?? 'main')
+  useEffect(() => setInitialBranch(snapshot.defaultBranch ?? 'main'), [snapshot.defaultBranch])
   const [draft, setDraft] = useState<Record<Field, string>>(initial)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -59,7 +60,7 @@ export function InitializeStory({ repositoryId, snapshot, onCreated }: {
       <p><label>Workspace directory (blank for repository root; creates a story/ child) <input maxLength={240} value={directory}
         onChange={e => setDirectory(e.target.value)} placeholder="story" /></label></p>
       {snapshot.empty && <p><label>Initial default branch <input required maxLength={100}
-        value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label></p>}
+        readOnly={!!snapshot.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label></p>}
       {fields.map(([name, label]) => <p key={name}><label>{label}
         {name === 'body' ? <textarea required maxLength={12000} rows={5}
           value={draft[name]} onChange={e => setDraft(previous => ({ ...previous, [name]: e.target.value }))} /> :

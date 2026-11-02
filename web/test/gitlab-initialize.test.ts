@@ -62,7 +62,8 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
   chmodSync(native, 0o700)
   process.env.NT_NATIVE_CLI = native
   const store = openStudioDatabase(join(root, 'studio.sqlite'))
-  let empty = false, previousDefault = start, filesAlreadyExist = false, remoteRevision: string | null = null
+  let empty = false, emptyBranchConfigured = false, previousDefault = start,
+    filesAlreadyExist = false, remoteRevision: string | null = null
   const commits: Array<{ branch: string; start_sha?: string; actions: Array<{ action: string; file_path: string; content: string }> }> = []
   const contacted: string[] = []
   globalThis.fetch = async (input, init) => {
@@ -75,7 +76,8 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     }
     if (url.endsWith('/projects/11')) {
       return Response.json({ id: 11, path_with_namespace: 'Acme/Project', archived: false,
-        empty_repo: empty && !remoteRevision, default_branch: empty && !remoteRevision ? null : 'main' })
+        empty_repo: empty && !remoteRevision,
+        default_branch: empty && !remoteRevision && !emptyBranchConfigured ? null : 'main' })
     }
     if (url.includes('/repository/commits/') && method === 'GET') {
       return Response.json({ id: url.endsWith('/main') ? previousDefault : committed })
@@ -200,15 +202,27 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     // Only this case can create the initial default-branch commit.
     store.sqlite.prepare('DELETE FROM stories').run()
     empty = true
+    // Real GitLab returns empty_repo=true with an unborn default_branch=main.
+    // This must not trigger a fetch for a commit that does not exist.
+    emptyBranchConfigured = true
     remoteRevision = null
     commits.length = 0
     const snapshot = await get()
     assert.equal(snapshot.status, 200)
     assert.deepEqual(await snapshot.json(), {
+      empty: true, defaultBranch: 'main', commit: null, repositoryId,
+    })
+    emptyBranchConfigured = false
+    const withoutBranch = await get()
+    assert.equal(withoutBranch.status, 200)
+    assert.deepEqual(await withoutBranch.json(), {
       empty: true, defaultBranch: null, commit: null, repositoryId,
     })
+    emptyBranchConfigured = true
     const initialPayload = { ...payload(null), directory: '', initialBranch: 'main' }
     assert.equal((await post({ ...initialPayload, initialBranch: 'main/../bad' })).status, 400)
+    assert.equal((await post({ ...initialPayload, initialBranch: 'other' })).status, 409,
+      'a configured unborn default branch cannot be silently replaced')
     assert.equal((await post({ ...initialPayload, expectedCommit: start })).status, 409)
     assert.equal(commits.length, 0)
     const initialResponse = await post(initialPayload)

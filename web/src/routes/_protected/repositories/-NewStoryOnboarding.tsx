@@ -81,6 +81,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       if (provider === 'github') params.set('directory', result.workspace)
       const checked = await api<Snapshot>('/api/' + provider + '/initialize?' + params)
       setVerified(checked)
+      if (provider === 'gitlab') setInitialBranch(checked.defaultBranch ?? 'main')
       setWorkspace(result.workspace); setWorkspaceInput(result.workspace)
       setTarget(result.target); setRevision(result.revision); setDraft(result.draft); setStep(0)
       setCreated(null); setApproved(null); setPiApproved(null); setPiApproval(null); setPiModel(null); setUnconfirmedWrite(false)
@@ -220,7 +221,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
           }} />
         {piApproved && piApproval && <div className="actions">
           {provider === 'gitlab' && verified?.empty && <label>Initial default branch
-            <input disabled={busy} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} />
+            <input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} />
           </label>}
           <button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create(piApproved, piApproval)}>
             {busy ? 'Creating…' : 'Initialize approved Pi foundation'}
@@ -258,7 +259,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
           You can refine it in the prepared job's scope editor before execution.</p>
         <p>Commit target: <code>/{target}/creative-direction/foundation.md</code></p>
         {provider === 'gitlab' && verified?.empty && <label>Initial default branch
-          <input disabled={busy} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label>}
+          <input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label>}
         <div className="actions">
           <button type="button" disabled={busy} onClick={() => setStep(2)}>Revise answers</button>
           <button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create()}>
