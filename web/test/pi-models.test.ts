@@ -14,6 +14,50 @@ import { assertUserPiSelection, availableUserPiModels, createUserPiRuntime,
   userPiCredentials, validPiSelection } from '../src/lib/pi-credentials.server'
 
 const origin = 'http://localhost:3000'
+
+test('opt-in: server ChatGPT OAuth start exposes a pending browser URL without completing login', {
+  skip: process.env.NT_TEST_CHATGPT_OAUTH_START !== '1',
+  timeout: 30_000,
+}, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'nt-pi-oauth-start-'))
+  const previousKey = process.env.NT_PI_CREDENTIAL_KEY
+  process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
+  const store = openStudioDatabase(join(directory, 'studio.sqlite'))
+  try {
+    await migrateStudio(store, config)
+    const auth = createStudioAuth(store, config)
+    const ctx = await auth.$context
+    const alice = await ctx.internalAdapter.createUser({ name: 'OAuth Start', email: 'oauth-start@pi.test',
+      emailVerified: true }, { method: 'test' })
+    const session = await ctx.internalAdapter.createSession(alice.id)
+    const cookie = 'better-auth.session_token=' + session.token + '.' +
+      createHmac('sha256', config.secret).update(session.token).digest('base64')
+    const request = async (method: 'GET' | 'POST' | 'DELETE', body?: unknown) => {
+      const response = await piModelsRequest(auth, store, new Request(origin + '/api/pi/models', {
+        method, headers: { cookie, ...(method === 'GET' ? {} : { origin, 'Content-Type': 'application/json' }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }), origin)
+      return { status: response.status, body: await response.json() as any }
+    }
+    const start = await request('POST', { action: 'oauth', provider: 'openai' })
+    assert.equal(start.status, 202)
+    let flow = start.body.oauth
+    for (let i = 0; i < 30 && flow?.status === 'starting'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 150))
+      flow = (await request('GET')).body.oauth
+    }
+    assert.equal(flow?.status, 'pending', 'real Pi OAuth must reach browser authorization rather than silently fail')
+    assert.match(flow.url, /^https:\/\//)
+    assert.equal((await request('DELETE', { provider: 'openai' })).status, 200)
+    assert.deepEqual((await request('GET')).body.connected, [])
+  } finally {
+    store.sqlite.close()
+    if (previousKey === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
+    else process.env.NT_PI_CREDENTIAL_KEY = previousKey
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 const config = {
   baseURL: origin, secret: 'pi-credential-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
   github: { clientId: 'test', clientSecret: 'test-secret' },

@@ -135,9 +135,24 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
             getDeviceId: () => oauthHostDeviceId(actor.id, process.env.NT_PI_CREDENTIAL_KEY!) })
           flow.status = 'connected'
           delete flow.url
-        } catch {
+        } catch (error) {
+          // A deliberate disconnect/replacement is not a failed sign-in.
+          if (flow.abort.signal.aborted) return
+          // This is an operator-only diagnostic. Never log OAuth URLs, codes,
+          // refresh/access tokens, credentials, or arbitrary SDK error text.
+          const kind = error instanceof Error ? error.name.replace(/[^A-Za-z]/g, '').slice(0, 50) : 'Unknown'
+          const code = error && typeof error === 'object' && 'code' in error &&
+            typeof error.code === 'string' && /^[A-Z_]{2,40}$/.test(error.code)
+            ? error.code : 'unknown'
+          const detail = error instanceof Error ? error.message
+            .replace(/https?:\/\/\S+/g, '[url]')
+            .replace(/\b(?:access_token|refresh_token|client_secret|code|token|authorization)\s*[=:]\s*[^\s,;]+/gi, '[credential]')
+            .replace(/[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
+            .replace(/[A-Za-z0-9_+\/-]{32,}={0,2}/g, '[redacted]')
+            .slice(0, 180) : 'unknown'
+          console.error('[Studio ChatGPT OAuth] Authorization flow failed', { kind, code, detail })
           flow.status = 'failed'
-          flow.reason = 'ChatGPT authorization did not complete. Retry sign-in.'
+          flow.reason = 'ChatGPT authorization did not complete. Retry sign-in. (See Studio operator logs.)'
         } finally {
           delete flow.resolveManual
         }
