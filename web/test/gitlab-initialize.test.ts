@@ -160,6 +160,9 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.equal((await post({ ...payload(), directory: '../bad' })).status, 400)
     assert.equal((await post({ ...payload(), directory: '.story-inbox' })).status, 400)
     assert.equal((await post({ ...payload(), directory: '.hidden' })).status, 400)
+    assert.equal((await post({ ...payload(), discoveryApproval: {
+      revision: 1, digest: 'f'.repeat(64),
+    } })).status, 409, 'GitLab must reject an unbound model proposal before any commit')
     assert.equal((await post({ ...payload(), foundation: { ...foundation, id: 'BAD' } })).status, 400)
     assert.equal((await post(payload(sha('f')))).status, 409)
     filesAlreadyExist = true

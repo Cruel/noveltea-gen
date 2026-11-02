@@ -5,6 +5,7 @@ import { assertStudioSchemaCurrent } from '../db/migrations'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { directoryPath, inspectGithubStoryInitialization } from './github-stories.server'
 import { storyContentDirectory } from './story-discovery.shared'
+import { assertApprovedPiFoundation } from './onboarding-pi.server'
 import { candidate, validateNewStory, StoryBootstrapError } from './story-foundation.server'
 import { acquireCachedStory, bootstrapEmptyGithubRepository,
   GitCacheError, initializeStoryBranch, initialStoryDocument } from './git-cache.server'
@@ -54,6 +55,14 @@ export async function githubInitializationRequest(
     }
     if (typeof input.jobId !== 'string' || !UUID.test(input.jobId)) {
       throw new GithubError(400, 'A new initialization job UUID is required.')
+    }
+    if (input.discoveryApproval !== undefined) {
+      try {
+        assertApprovedPiFoundation(store, actor.id, repositoryId,
+          directory.slice(0, -5).replace(/\/$/, ''), input.discoveryApproval, input.foundation)
+      } catch {
+        throw new GithubError(409, 'Pi discovery approval is missing, stale, or does not match the exact proposed foundation.')
+      }
     }
     const foundation = input.foundation === undefined ? null : candidate(input.foundation)
     if (foundation) {

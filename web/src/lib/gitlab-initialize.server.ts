@@ -5,6 +5,7 @@ import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
 import { actor, eligible, failure, gitlab, page, ProviderFailure, reply } from './gitlab-repositories.server'
 import { verifyGitlabStorySelection } from './gitlab-stories.server'
 import { storyContentDirectory } from './story-discovery.shared'
+import { assertApprovedPiFoundation } from './onboarding-pi.server'
 import { candidate, validateNewStory, StoryBootstrapError } from './story-foundation.server'
 export { validateNewStory } from './story-foundation.server'
 
@@ -121,6 +122,15 @@ export async function gitlabInitializeRequest(
       .get(data.repositoryId, path)
     if (existing) {
       throw new ProviderFailure(409, 'This Story directory is already registered. Open it instead of initializing a new Story.')
+    }
+    if ('discoveryApproval' in input) {
+      try {
+        assertApprovedPiFoundation(store, current.id, input.repositoryId,
+          directory(input.directory), (input as Initialization & { discoveryApproval: unknown }).discoveryApproval,
+          input.foundation)
+      } catch {
+        throw new ProviderFailure(409, 'Pi discovery approval is stale or does not match this exact foundation.')
+      }
     }
     const { file, title } = candidate(input.foundation)
     // Validate *before* any GitLab mutation. If unavailable, reject safely.

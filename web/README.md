@@ -568,10 +568,11 @@ GitHub and GitLab repository pages share the **New Story discovery and
 onboarding** wizard. Select a workspace (blank means repository root), then
 review the resolved `<workspace>/story/creative-direction/foundation.md` before
 writing. The trusted author-only `.story-inbox/` is a sibling outside the Story
-content root, never an agent-mounted child. Three successive author-answer
-rounds cover premise/conflict, genre/tone/experience/scope, and a
-user-protected creative decision, Creative Direction prose, generation task and
-constraints. Saving each round persists an owner/repository/workspace-scoped
+content root, never an agent-mounted child. The author can choose either
+**Pi collaborative discovery** (default) or the original three-round
+structured author questionnaire. The latter covers premise/conflict,
+genre/tone/experience/scope, protected decisions, prose, task and constraints.
+Saving each structured round persists an owner/repository/workspace-scoped
 revision in SQLite. An outdated tab cannot silently overwrite newer answers.
 
 `GET/PUT /api/onboarding?repositoryId=<UUID>&workspace=<path>` loads and
@@ -583,6 +584,35 @@ explicit author action invokes the provider's initialization API; the native
 NovelTea validator must accept the canonical schema-0.1 Story document before
 any Git commit. The author decision is tagged `origin: user` and
 `authority: user-protected`, not falsely attributed to Pi.
+
+**Pi discovery:** choose a connected user Pi model and give a short or detailed
+creative brief. The authenticated `GET/POST /api/onboarding/pi` API creates a
+separate durable, owner/repository/workspace-scoped conversation. A trusted
+controller snapshots the configured `NT_STUDIO_SKILLS_SOURCE` checkout and
+supplies the immutable `nt-story-discovery` and `nt-catalog` instructions
+(including records, authority and vocabulary references) to a tool-less Pi
+AgentSession. It explicitly disables all filesystem, shell, extension,
+network-tool and host-Pi-config access: no Story job, branch, files or sandbox
+are needed during preliminary discussion. Only the chosen user's encrypted
+Pi credentials are available through #56's isolated runtime.
+
+Each model round returns either adaptive numbered questions with recommendations
+or a structured proposed Creative Direction and generation task. Partial answers,
+author delegation and proposal revision can take multiple rounds. Every
+conversation turn and skill digest is stored in SQLite before advancing;
+optimistic revisions stop stale/concurrent requests, and an uncertain model
+call is **never automatically replayed**. The author can explicitly mark a
+running turn interrupted after ten minutes if its worker died, then retry
+that interrupted turn, accepting the possibility of a duplicate provider charge.
+No incomplete proposal writes canonical Story files. Pi-generated selections
+retain agent provenance; the controller separately preserves each exact author
+brief/answer as protected provenance, and an explicit review records approval
+of the exact foundation digest and model-generated contract. Both GitHub and
+GitLab recheck the owner, repository, workspace, approval revision and exact
+foundation JSON before any Git write. The normal native Story validator still
+checks the canonical file at the provider boundary, including provenance.
+After initialization, the approved model is saved in the job's #62
+configuration; it may be changed there before generation starts.
 
 GitHub now accepts the same native-validated foundation fields as GitLab.
 Existing repositories receive a one-commit isolated job/review branch; GitHub
@@ -598,21 +628,23 @@ the remaining setup, never the Git commit. Do not blindly repeat a request
 after an ambiguous provider write.
 
 **Deploy:** stop Studio and run `pnpm --filter @noveltea/studio migrate` for
-migrations **7–8** (GitHub reviewed-content digest and durable onboarding
-drafts). The local Git cache, durable job state, and installed native CLI must
-be configured. Tests cover three-round durable answers, multi-user isolation,
+migrations **7–8 and 11** (GitHub reviewed-content digest, durable author
+drafts and separate Pi discovery sessions). Set `NT_STUDIO_SKILLS_SOURCE` to
+the pinned Narrative Skills Git checkout, and connect a per-user Pi provider
+with `NT_PI_CREDENTIAL_KEY` configured for collaborative mode. The local Git
+cache, durable job state, and installed native CLI must be configured. Tests cover three-round durable answers, multi-user isolation,
 stale revisions, native fail-closed bootstrap, existing-branch nonmutation,
 reopen-by-digest, and the empty-repository exception; run
 `pnpm --filter @noveltea/studio exec tsx --test test/onboarding.test.ts
 test/github-initialize.test.ts test/github-initialize-api.test.ts
-test/gitlab-initialize.test.ts`.
+test/gitlab-initialize.test.ts test/onboarding-pi.test.ts`.
 
-This stage is **author-guided discovery**, not live Pi conversational
-discovery. #56/#66 must supply user-scoped authenticated Pi execution,
-multiple model-generated question/answer exchanges, and independently reviewed
-model proposals before the full #38 onboarding UX is certifiable. Structural
-native validation does not establish editorial quality or grant agent
-authorization over protected decisions.
+The Pi discovery HTTP tests use scripted model replies to certify the durable,
+security and review boundaries without credentials or paid model calls.
+Provider initialization integration tests use simulated remote APIs; the
+actual hosted model and both real provider flows still need opt-in end-to-end
+certification under #71. Structural native validation does not establish
+editorial quality or grant agent authorization over protected decisions.
 
 ## Canonical Story record explorer (#60)
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { OnboardingDraft } from '../../../lib/onboarding.server'
+import { PiStoryDiscovery, type PiProposal, type PiApproval, type PiModel } from './-PiStoryDiscovery'
 
 const rounds = [
   { title: '1. Story concept', fields: [
@@ -23,7 +24,7 @@ const empty: OnboardingDraft = {
   tone: '', player_experience: '', scope: '', decision: '', body: '', task: '', constraints: '',
 }
 type Snapshot = { commit: string | null; defaultBranch?: string | null; mode?: 'branch' | 'bootstrap'; empty?: boolean }
-type Reviewed = { foundation: Omit<OnboardingDraft, 'task' | 'constraints'>; task: string;
+type Reviewed = { foundation: Omit<OnboardingDraft, 'task' | 'constraints'> | PiProposal['foundation']; task: string;
   contract: { scope: {kind: 'full-story'; depth: 'composition'; targets: string[]; branches: string[]};
     constraints: string[]; envelope: { presentation: string; hardLimits: string[]; preferences: string[] } } }
 type Created = { jobId: string; headSha: string; branch: string; commit: string;
@@ -41,6 +42,10 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   onCreated?: (value: Created) => void
 }) {
   const [workspaceInput, setWorkspaceInput] = useState(initialWorkspace)
+  const [discoveryMode, setDiscoveryMode] = useState<'pi' | 'structured'>('pi')
+  const [piApproved, setPiApproved] = useState<PiProposal | null>(null)
+  const [piApproval, setPiApproval] = useState<PiApproval | null>(null)
+  const [piModel, setPiModel] = useState<PiModel | null>(null)
   const [workspace, setWorkspace] = useState<string | null>(null)
   const [verified, setVerified] = useState<Snapshot | null>(null)
   const [target, setTarget] = useState('')
@@ -59,6 +64,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
     new URLSearchParams({ repositoryId, workspace: path })
   useEffect(() => {
     setWorkspaceInput(initialWorkspace)
+    setPiApproved(null); setPiApproval(null); setPiModel(null)
     setWorkspace(null)
     setVerified(null)
     setStep(0)
@@ -77,7 +83,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       setVerified(checked)
       setWorkspace(result.workspace); setWorkspaceInput(result.workspace)
       setTarget(result.target); setRevision(result.revision); setDraft(result.draft); setStep(0)
-      setCreated(null); setApproved(null); setUnconfirmedWrite(false)
+      setCreated(null); setApproved(null); setPiApproved(null); setPiApproval(null); setPiModel(null); setUnconfirmedWrite(false)
       setContractSaved(false); setJobReady(false)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to open discovery') }
     finally { setBusy(false) }
@@ -109,11 +115,11 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   const saveJobContract = async (record: Created, proposal: Reviewed) => {
     await api('/api/jobs/' + encodeURIComponent(record.jobId) + '/configuration', 'PUT', {
       version: 1, headSha: record.headSha, task: proposal.task,
-      contract: proposal.contract, limits: {}, model: null,
+      contract: proposal.contract, limits: {}, model: discoveryMode === 'pi' ? piModel : null,
     })
     setContractSaved(true)
   }
-  const create = async () => {
+  const create = async (piProposal?: PiProposal | null, piReference?: PiApproval | null) => {
     if (workspace === null || !verified || unconfirmedWrite) return
     setBusy(true); setError(null)
     let remoteAttempted = false
@@ -132,10 +138,17 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         } else await saveJobContract(created, approved)
         return
       }
-      const saved = await persist()
-      const proposal = await api<Reviewed>(query(workspace), 'POST', { revision: saved.revision })
+      let proposal: Reviewed
+      if (discoveryMode === 'pi') {
+        if (!piProposal || !piReference) throw new Error('Approve the Pi discovery proposal before initializing.')
+        proposal = piProposal
+      } else {
+        const saved = await persist()
+        proposal = await api<Reviewed>(query(workspace), 'POST', { revision: saved.revision })
+      }
       setApproved(proposal)
       const foundation = proposal.foundation
+      const discoveryApproval = discoveryMode === 'pi' ? { discoveryApproval: piReference } : {}
       const jobId = crypto.randomUUID()
       let record: Created
       if (provider === 'github') {
@@ -143,7 +156,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         const result = await api<{story: Created['story']; job: {id: string; headSha: string; branch: string};
           mode: string}>( '/api/github/initialize', 'POST', {
           repositoryId, directory: workspace, title: draft.title.trim(), jobId,
-          commit: verified.commit, foundation,
+          commit: verified.commit, foundation, ...discoveryApproval,
         })
         record = { story: result.story, jobId: result.job.id, headSha: result.job.headSha,
           branch: result.job.branch, commit: result.job.headSha, mode: result.mode }
@@ -153,7 +166,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         const result = await api<{story: Created['story']; commit: string; branch: string; mode: string}>(
           '/api/gitlab/initialize', 'POST', {
             repositoryId, directory: workspace, expectedCommit: verified.commit,
-            ...(verified.empty ? { initialBranch } : {}), foundation,
+            ...(verified.empty ? { initialBranch } : {}), foundation, ...discoveryApproval,
           })
         record = { story: result.story, jobId, headSha: result.commit,
           branch: result.branch, commit: result.commit, mode: result.mode }
@@ -180,9 +193,8 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   const existing = provider === 'github' ? verified?.mode === 'branch' : verified?.empty === false
   return <section aria-label="New Story onboarding" className="story-onboarding">
     <h2>New Story discovery and onboarding</h2>
-    <p>Answer three rounds of creative questions, review the proposed foundation and
-      generation scope, then explicitly initialize the selected workspace. Answers are saved
-      to your account; no model-generated decisions or approvals are implied.</p>
+    <p>Collaborate with the pinned NovelTea discovery specialist or supply a fully
+      structured author brief. In either mode, review the Creative Direction before Git initialization.</p>
     {verified && <p>{existing
       ? 'Existing repository: the initialization is isolated from the default branch.'
       : 'Genuinely empty repository: the first commit establishes the default branch.'}</p>}
@@ -195,7 +207,27 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
     </button> : <>
       <p>Resolved canonical Story root: <code>/{target}</code>.
         The private <code>.story-inbox/</code> remains outside this content root.</p>
-      {!created && step < rounds.length && <div>
+      {!created && <div className="actions">
+        <button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('pi')}>Collaborate with Pi</button>
+        <button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('structured')}>Structured questionnaire</button>
+      </div>}
+      {!created && discoveryMode === 'pi' && <>
+        <PiStoryDiscovery repositoryId={repositoryId} workspace={workspace}
+          initialBrief={Object.entries(draft).filter(([key, value]) => key !== 'id' && value.trim())
+            .map(([key, value]) => key + ': ' + value).join('\n').slice(0, 4000)}
+          onApproved={(proposal, reference, model) => {
+            setPiApproved(proposal); setPiApproval(reference); setPiModel(model)
+          }} />
+        {piApproved && piApproval && <div className="actions">
+          {provider === 'gitlab' && verified?.empty && <label>Initial default branch
+            <input disabled={busy} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} />
+          </label>}
+          <button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create(piApproved, piApproval)}>
+            {busy ? 'Creating…' : 'Initialize approved Pi foundation'}
+          </button>
+        </div>}
+      </>}
+      {!created && discoveryMode === 'structured' && step < rounds.length && <div>
         <h3>{rounds[step]!.title}</h3>
         {rounds[step]!.fields.map(([name, question]) => <label key={name}>{question}
           {name === 'body' || name === 'constraints' || name === 'premise' ||
@@ -214,7 +246,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
           </button>
         </div>
       </div>}
-      {!created && step === rounds.length && <div>
+      {!created && discoveryMode === 'structured' && step === rounds.length && <div>
         <h3>Review the author-supplied foundation and initial generation plan</h3>
         <p><strong>{draft.title}</strong> (<code>creative-direction.{draft.id}</code>)</p>
         <p>{draft.premise}</p><p>Conflict: {draft.central_conflict}</p>

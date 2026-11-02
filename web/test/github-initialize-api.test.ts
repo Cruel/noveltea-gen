@@ -111,6 +111,9 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
       player_experience: 'Investigate competing accounts', scope: 'One town',
       decision: 'Preserve the author-approved conflict', body: 'An original Story premise.',
     }
+    assert.equal((await post({ ...base, foundation, discoveryApproval: {
+      revision: 1, digest: 'f'.repeat(64),
+    } })).status, 409, 'unbound model foundation must be refused before validator or Git writes')
     assert.equal((await post({ ...base, foundation: { ...foundation, id: 'BAD' } })).status, 400)
     assert.equal((await post({ ...base, foundation: { ...foundation, title: 'Different title' } })).status, 400)
     const previousNative = process.env.NT_NATIVE_CLI

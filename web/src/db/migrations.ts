@@ -135,6 +135,21 @@ const appMigrations = [
       `CREATE INDEX generation_events_job_idx ON generation_events (owner_user_id, job_id, id)`,
     ],
   },
+  {
+    version: 11,
+    statements: [
+      `CREATE TABLE story_onboarding_conversations (
+        owner_user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        repository_id TEXT NOT NULL,
+        workspace TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (owner_user_id, repository_id, workspace),
+        FOREIGN KEY (repository_id, owner_user_id) REFERENCES repositories (id, owner_user_id) ON DELETE CASCADE
+      )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -169,7 +184,9 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     WHERE type='table' AND name='pi_credentials'`).get()
   const hasEvents = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='generation_events'`).get()
-  if (!hasOnboarding || !hasPiCredentials || !hasEvents || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasPiOnboarding = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='story_onboarding_conversations'`).get()
+  if (!hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

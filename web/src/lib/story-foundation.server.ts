@@ -20,8 +20,10 @@ export function candidate(value: unknown): { file: string; title: string } {
   }
   const input = value as Record<string, unknown>
   const fields = ['id', 'title', 'premise', 'central_conflict', 'genre', 'tone',
-    'player_experience', 'scope', 'decision', 'body']
-  if (Object.keys(input).length !== fields.length || fields.some(field => !Object.hasOwn(input, field))) {
+    'player_experience', 'scope', 'body']
+  const withDecisions = Object.hasOwn(input, 'decisions')
+  const expected = [...fields, withDecisions ? 'decisions' : 'decision']
+  if (Object.keys(input).length !== expected.length || expected.some(field => !Object.hasOwn(input, field))) {
     throw new StoryBootstrapError(400, 'Only the documented Creative Direction onboarding fields are accepted.')
   }
   const values = {
@@ -30,18 +32,33 @@ export function candidate(value: unknown): { file: string; title: string } {
     central_conflict: text(input.central_conflict, 'central_conflict'),
     genre: text(input.genre, 'genre'), tone: text(input.tone, 'tone'),
     player_experience: text(input.player_experience, 'player_experience'),
-    scope: text(input.scope, 'scope'), decision: text(input.decision, 'decision'),
-    body: text(input.body, 'body'),
+    scope: text(input.scope, 'scope'), body: text(input.body, 'body'),
   }
   if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(values.id) || values.id.length > 100) {
     throw new StoryBootstrapError(400, 'Creative Direction ID must be a lowercase slug.')
   }
   // The human supplied this opening decision; never misattribute it to an
   // autonomous agent or grant the agent authority over it.
-  const { decision, ...foundation } = values
-  const record: FoundationDraft = { ...foundation,
-    decisions: [{ id: 'initial-direction', statement: decision,
-      origin: 'user', authority: 'user-protected' }] }
+  let decisions: FoundationDraft['decisions']
+  if (withDecisions) {
+    if (!Array.isArray(input.decisions) || input.decisions.length < 1 || input.decisions.length > 20 ||
+        input.decisions.some(d => !d || typeof d !== 'object' || Array.isArray(d) ||
+          Object.keys(d).sort().join(',') !== 'authority,id,origin,statement' ||
+          typeof d.id !== 'string' || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(d.id) ||
+          typeof d.statement !== 'string' || !d.statement.trim() || d.statement.length > 4000 ||
+          !['user', 'agent'].includes(d.origin) ||
+          !['user-protected', 'delegated'].includes(d.authority) ||
+          (d.origin === 'user' && d.authority !== 'user-protected'))) {
+      throw new StoryBootstrapError(400, 'Invalid Creative Direction decision provenance.')
+    }
+    decisions = input.decisions as FoundationDraft['decisions']
+    if (new Set(decisions.map(d => d.id)).size !== decisions.length)
+      throw new StoryBootstrapError(400, 'Duplicate Creative Direction decision IDs.')
+  } else {
+    decisions = [{ id: 'initial-direction', statement: text(input.decision, 'decision'),
+      origin: 'user', authority: 'user-protected' }]
+  }
+  const record: FoundationDraft = { ...values, decisions }
   return { file: renderFoundation(record), title: record.title }
 }
 export async function validateNewStory(file: string) {
