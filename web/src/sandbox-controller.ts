@@ -29,6 +29,9 @@ export interface ControllerConfig {
   appVolume: string
   stateVolume: string
   cacheVolume: string
+  /** Rootless daemon host path for the cache volume, when the controller runs
+   * inside a trusted container with the volume mounted at cacheVolume. */
+  dockerCacheVolume?: string
   image: string
   /** The paths Studio/graph see for Compose-managed volumes, never HTTP inputs. */
   containerState: string
@@ -106,7 +109,7 @@ function checkRecordTree(root: string) {
   inspect(root)
 }
 
-type TrustedJob = { id: string; storyRoot: string; identity: string; imageId: string }
+type TrustedJob = { id: string; storyRoot: string; dockerStoryRoot: string; identity: string; imageId: string }
 type JobRow = {
   ownerId: string; provider: string; providerId: string; directory: string; pin: string
 }
@@ -198,7 +201,10 @@ export function resolveTrustedJob(config: ControllerConfig, jobId: string, image
     if (error instanceof SandboxError) throw error
     throw new SandboxError(409, 'Saved job worktree is missing or has an unsafe filesystem identity.')
   }
-  return { id: jobId, storyRoot: hostStory, identity: stateHash, imageId }
+  const daemonRoot = config.dockerCacheVolume ?? config.cacheVolume
+  return { id: jobId, storyRoot: hostStory,
+    dockerStoryRoot: join(daemonRoot, scoped, 'worktrees', stateHash, row.directory),
+    identity: stateHash, imageId }
 }
 
 function dockerRequired(run: CommandRunner, args: string[]): string {
@@ -207,12 +213,18 @@ function dockerRequired(run: CommandRunner, args: string[]): string {
   return result.stdout.trim()
 }
 
-function volumePath(run: CommandRunner, name: string): string {
+function volumePath(run: CommandRunner, name: string, hostVisible = true): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) throw new Error('Invalid configured Docker volume name.')
   const content = dockerRequired(run, ['volume', 'inspect', name, '--format', '{{.Mountpoint}}'])
   if (!isAbsolute(content)) throw new Error('Docker volume has no absolute host mountpoint.')
-  requirePlainDirectory(content)
-  return realpathSync(content)
+  // Docker reports daemon-host mountpoints, which are not visible inside
+  // the dedicated controller sidecar. Only the host controller may lstat
+  // those paths; the sidecar checks its own volume mounts independently.
+  if (hostVisible) {
+    requirePlainDirectory(content)
+    return realpathSync(content)
+  }
+  return content
 }
 
 export function loadControllerConfig(env: NodeJS.ProcessEnv = process.env, run: CommandRunner = shellFreeDocker): ControllerConfig {
@@ -236,11 +248,23 @@ export function loadControllerConfig(env: NodeJS.ProcessEnv = process.env, run: 
   }
   const token = readFileSync(tokenFile, 'utf8').trim()
   if (token.length < 48) throw new Error('Sandbox controller token must be at least 48 characters.')
+  const inCompose = env.NT_CONTROLLER_IN_COMPOSE === '1'
+  // The controller sidecar reads identical named volumes through its own
+  // read-only mounts, while the rootless daemon needs HOST mountpoints for
+  // sandbox creation. Never accept a host mountpoint from an HTTP request.
+  const hostApp = volumePath(run, env.NT_SANDBOX_APP_VOLUME || 'noveltea-app', !inCompose)
+  const hostState = volumePath(run, env.NT_SANDBOX_STATE_VOLUME || 'noveltea-state', !inCompose)
+  const hostCache = volumePath(run, env.NT_SANDBOX_CACHE_VOLUME || 'noveltea-cache', !inCompose)
+  if (inCompose) {
+    for (const mount of ['/var/lib/noveltea/app', '/var/lib/noveltea/state', '/var/lib/noveltea/cache'])
+      requirePlainDirectory(mount)
+  }
   return {
     socket, token,
-    appVolume: volumePath(run, env.NT_SANDBOX_APP_VOLUME || 'noveltea-app'),
-    stateVolume: volumePath(run, env.NT_SANDBOX_STATE_VOLUME || 'noveltea-state'),
-    cacheVolume: volumePath(run, env.NT_SANDBOX_CACHE_VOLUME || 'noveltea-cache'),
+    appVolume: inCompose ? '/var/lib/noveltea/app' : hostApp,
+    stateVolume: inCompose ? '/var/lib/noveltea/state' : hostState,
+    cacheVolume: inCompose ? '/var/lib/noveltea/cache' : hostCache,
+    ...(inCompose ? { dockerCacheVolume: hostCache } : {}),
     image: env.NT_SANDBOX_IMAGE || 'noveltea-sandbox:local',
     containerState: '/var/lib/noveltea/state',
     containerCache: '/var/lib/noveltea/cache',
@@ -301,7 +325,7 @@ export class SandboxController {
       checkAncestry(this.config.cacheVolume, job.storyRoot)
       checkRecordTree(job.storyRoot)
       const mounts = ['--mount',
-        `type=bind,source=${job.storyRoot},target=/story,bind-propagation=rprivate`]
+        `type=bind,source=${job.dockerStoryRoot},target=/story,bind-propagation=rprivate`]
       if (!exists) {
         dockerRequired(this.run, [
           'create', '--name', containerName(id),
@@ -456,6 +480,9 @@ export function createControllerServer(controller: SandboxController) {
     }
     try {
       const url = new URL(req.url || '', 'http://controller.local')
+      // Authenticated liveness is independent of any saved author job.
+      if (req.method === 'GET' && url.pathname === '/health')
+        return send(res, 200, { status: 'ok' })
       if (req.method === 'POST' && url.pathname === '/v1/sandboxes') {
         const payload = await body(req) as { jobId?: unknown } | null
         if (!payload || typeof payload.jobId !== 'string') throw new SandboxError(400, 'Job UUID required.')

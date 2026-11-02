@@ -1,15 +1,107 @@
-# Requires a single HOST-LEVEL ROOTLESS Docker context. The host controller
-# operates outside Compose; no service can access the daemon socket.
+# A single rootless Docker deployment: docker compose up -d
+# A rootless Docker daemon remains an external host prerequisite. Its Unix
+# socket is mounted ONLY into the trusted controller service, never into
+# Studio, the agent, the bootstrap process or model-executed job containers.
 name: noveltea
+
 x-trusted-volumes: &trusted-volumes
   - noveltea-app:/var/lib/noveltea/app
   - noveltea-state:/var/lib/noveltea/state
   - noveltea-cache:/var/lib/noveltea/cache
+
+x-native-cli: &native-cli
+  type: bind
+  source: ${NT_NATIVE_CLI_HOST:?Set NT_NATIVE_CLI_HOST to the host path of the native NovelTea CLI}
+  target: /opt/noveltea/noveltea
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-skills: &skills
+  type: bind
+  source: ${NT_SKILLS_HOST:?Set NT_SKILLS_HOST to the host path of the noveltea-skills checkout}
+  target: /opt/noveltea-skills
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
-  web:
+  # Build the intentionally minimal image without running a persistent
+  # sandbox. Real job sandboxes are created by the rootless controller only.
+  sandbox-image:
+    build:
+      context: .
+      dockerfile: deploy/sandbox.Dockerfile
+    image: noveltea-sandbox:local
+    command: ["true"]
+    restart: "no"
+    network_mode: none
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  init:
     build:
       context: .
       dockerfile: deploy/Dockerfile
+    image: noveltea-trusted:local
+    command: ["node", "deploy/compose-init.mjs"]
+    env_file: ./web/.env
+    environment:
+      NT_STUDIO_DB_PATH: /var/lib/noveltea/app/studio.sqlite
+    volumes:
+      - *native-cli
+      - *skills
+      - noveltea-app:/var/lib/noveltea/app
+      - noveltea-state:/var/lib/noveltea/state
+      - noveltea-cache:/var/lib/noveltea/cache
+      - noveltea-controller:/run/noveltea-controller
+    restart: "no"
+    init: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [backend]
+
+  # This is a trusted *rootless-daemon controller*, not a job sandbox.
+  # It has no network; it alone receives the host's ROOTLESS Docker socket.
+  # Read-only volume views verify jobs, and the rootless daemon receives
+  # independently inspected host mountpoints for the single /story bind.
+  controller:
+    image: noveltea-trusted:local
+    command: ["pnpm", "--filter", "@noveltea/studio", "host:controller"]
+    # No application OAuth, Pi or RPC secrets enter the daemon-facing service.
+    environment:
+      NT_CONTROLLER_IN_COMPOSE: "1"
+      DOCKER_HOST: unix:///run/rootless-docker/docker.sock
+      NT_SANDBOX_SOCKET: /run/noveltea-controller/controller.sock
+      NT_SANDBOX_TOKEN_FILE: /run/noveltea-controller/token
+    volumes:
+      # SQLite's readonly catalog connection still needs writable WAL/SHM
+      # coordination files when it is the first live reader.
+      - noveltea-app:/var/lib/noveltea/app
+      - noveltea-state:/var/lib/noveltea/state:ro
+      - noveltea-cache:/var/lib/noveltea/cache:ro
+      - noveltea-controller:/run/noveltea-controller
+      - type: bind
+        source: ${NT_ROOTLESS_DOCKER_SOCKET:-/run/user/1000/docker.sock}
+        target: /run/rootless-docker/docker.sock
+        bind:
+          create_host_path: false
+    depends_on:
+      init: { condition: service_completed_successfully }
+      sandbox-image: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "node", "deploy/controller-health.mjs"]
+      interval: 5s
+      timeout: 4s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    network_mode: none
+
+  web:
     image: noveltea-trusted:local
     command: ["pnpm", "--filter", "@noveltea/studio", "start"]
     env_file: ./web/.env
@@ -18,19 +110,31 @@ services:
       NT_STATE_DIR: /var/lib/noveltea/state
       NT_GIT_CACHE_DIR: /var/lib/noveltea/cache
       NT_AGENT_RPC_URL: http://agent:7001
-      # Install/mount the native validator separately and configure NT_NATIVE_CLI
-      # in web/.env before enabling GitLab Story initialization.
+      NT_NATIVE_CLI: /opt/noveltea/noveltea
+      NT_STUDIO_SKILLS_SOURCE: /opt/noveltea-skills
       HOST: 0.0.0.0
       PORT: 3000
-    volumes: *trusted-volumes
+    volumes:
+      - noveltea-app:/var/lib/noveltea/app
+      - noveltea-state:/var/lib/noveltea/state
+      - noveltea-cache:/var/lib/noveltea/cache
+      - *native-cli
+      - *skills
+    depends_on:
+      init: { condition: service_completed_successfully }
+      agent: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1),()=>process.exit(2))"]
+      interval: 5s
+      timeout: 4s
+      retries: 15
+      start_period: 10s
     ports:
-      # TLS, request limits and OAuth callbacks require an external reverse proxy.
-      # Never bind the application port publicly without that proxy.
+      # Never publish without TLS/reverse proxy. Localhost OAuth is for development.
       - "127.0.0.1:${NT_STUDIO_HOST_PORT:-3000}:3000"
     restart: unless-stopped
     init: true
-    security_opt:
-      - no-new-privileges:true
+    security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     networks: [frontend, backend]
 
@@ -44,9 +148,11 @@ services:
       NT_REQUIRE_USER_PI_RUNTIME: "1"
       NT_STATE_DIR: /var/lib/noveltea/state
       NT_GIT_CACHE_DIR: /var/lib/noveltea/cache
+      NT_NATIVE_CLI: /opt/noveltea/noveltea
+      NT_STUDIO_SKILLS_SOURCE: /opt/noveltea-skills
       NT_SKILL_CACHE_DIR: /var/lib/noveltea/state/skill-snapshots
       NT_SANDBOX_SOCKET: /run/noveltea-controller/controller.sock
-      NT_SANDBOX_TOKEN_FILE: /run/secrets/noveltea-controller-token
+      NT_SANDBOX_TOKEN_FILE: /run/noveltea-controller/token
       NT_REQUIRE_SANDBOX_TOOLS: "1"
       LANGSMITH_TRACING: "false"
       LANGCHAIN_TRACING_V2: "false"
@@ -54,33 +160,38 @@ services:
       - noveltea-app:/var/lib/noveltea/app
       - noveltea-state:/var/lib/noveltea/state
       - noveltea-cache:/var/lib/noveltea/cache
-      # Mount ONLY in the trusted agent process, never in sandboxes or web.
-      - type: bind
-        source: ${NT_CONTROLLER_SOCKET_DIR:?Provide trusted host socket directory}
-        target: /run/noveltea-controller
-        read_only: true
-    secrets: [noveltea-controller-token]
-    # No published ports; only web can reach it via the internal bridge.
+      - *native-cli
+      - *skills
+      - noveltea-controller:/run/noveltea-controller:ro
+    depends_on:
+      init: { condition: service_completed_successfully }
+      controller: { condition: service_healthy }
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:7001/health',
+          {headers:{authorization:'Bearer '+process.env.NT_AGENT_RPC_TOKEN}})
+          .then(r=>process.exit(r.status===200?0:1),()=>process.exit(2))
+      interval: 5s
+      timeout: 4s
+      retries: 15
+      start_period: 10s
     expose: ["7001"]
     restart: unless-stopped
     init: true
-    security_opt:
-      - no-new-privileges:true
+    security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     networks: [backend]
 
 networks:
   frontend: {}
-  backend: {} # private unpublished bridge; agent still needs model-provider egress
+  backend: {}
 
 volumes:
-  noveltea-app:
-    name: noveltea-app
-  noveltea-state:
-    name: noveltea-state
-  noveltea-cache:
-    name: noveltea-cache
-
-secrets:
-  noveltea-controller-token:
-    file: ${NT_CONTROLLER_TOKEN_FILE:?Provide private controller token file}
+  noveltea-app: { name: noveltea-app }
+  noveltea-state: { name: noveltea-state }
+  noveltea-cache: { name: noveltea-cache }
+  noveltea-controller: { name: noveltea-controller }

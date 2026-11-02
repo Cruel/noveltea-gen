@@ -1,4 +1,4 @@
-# Rootless Compose and host sandbox controller (#51)
+# One-command rootless Compose deployment
 
 This is the deployment *foundation*, not the completed multiuser agent execution
 flow. #52–#54 route narrative Pi file/search/shell tools through the private
@@ -21,11 +21,11 @@ command endpoint; never expose port 7001 or enable unsandboxed Pi tools.
   this trusted worker receives the private controller Unix socket/token.
   Its authenticated author-command endpoint stays on the unpublished Compose
   backend bridge; neither Studio nor agent tools expose the controller token.
-- **Host controller** is a separate, trusted process outside Compose, operating
+- **Controller** is a dedicated trusted Compose service operating
   with the same **host-level rootless Docker** daemon. It looks up the job in
   the Studio catalog and checks the pinned worktree manifest before computing
-  any host mount. HTTP callers provide ONLY a registered job UUID. The daemon
-  socket never enters Compose.
+  any host mount. HTTP callers provide ONLY a registered job UUID. Only the controller service mounts the rootless daemon socket. The web,
+  agent, init service, and job sandboxes never receive it.
 - **Job sandbox** is a disposable sibling container on the same daemon.
   `--network none`, read-only container filesystem, no capabilities, no new
   privileges, bounded CPU/memory/PIDs/tmpfs/output/execution time and no host
@@ -52,68 +52,86 @@ and record-tree filesystem type before acquisition. The controller is the
 **only** process allowed to execute Docker lifecycle commands. It never accepts
 a mount path, image, network mode or daemon argument from web or model input.
 
-## Provision (Linux rootless Docker + systemd user session)
+## Quick start (Linux, rootless Docker)
 
-The host needs Node.js 24, pnpm 11.15, a rootless Docker engine, and a Docker
-Compose plugin **using that engine**. Ensure `docker info` lists
-`name=rootless`, cgroup version `2` and driver `systemd`. Cgroup delegation
-must support enforced memory, CPU and PID limits. The controller refuses to
-start on a rootful or unbounded daemon; never work around this by giving a
-container the host's Docker socket.
+From the repository root, after configuring the **single** Git-ignored `web/.env` file:
 
-1. Populate `web/.env` from `web/.env.example`. Configure a valid production
-   HTTPS `BETTER_AUTH_URL`, GitHub App and GitLab credentials, and a separately
-   backed-up stable `BETTER_AUTH_SECRET`. This file is operator-private; no
-   secret values belong in Compose or Git. In this deployment, the app DB,
-   state and Git cache paths are supplied by Compose. The native validator must
-   be installed into the trusted web image or mounted separately before new
-   GitLab Story initialization; an absent validator fails closed.
-2. Provision a **private host** controller directory (0700) and token file
-   (0600), for example under `$XDG_RUNTIME_DIR/noveltea-controller/`. Generate
-   a random secret with `openssl rand -hex 48`. Set both
-   `NT_CONTROLLER_SOCKET_DIR` to that **absolute** directory and
-   `NT_CONTROLLER_TOKEN_FILE` to the **absolute** token-file path for Compose.
-   Avoid logging or committing their contents.
-3. In `web/.env`, configure the existing OAuth and Pi credential values **and**
-   set `NT_AGENT_RPC_TOKEN` to a separate random secret of at least 32 characters
-   (e.g. `openssl rand -hex 32`). Studio and the agent load this same trusted
-   environment file; neither browser clients nor job sandboxes receive the
-   token. Studio reaches the private agent at `http://agent:7001` on the
-   Compose backend network, while the agent alone receives the sandbox socket.
-   Run `pnpm install --frozen-lockfile` and build:
-   ```sh
-   docker compose build web
-   docker build -f deploy/sandbox.Dockerfile -t noveltea-sandbox:local .
-   docker compose create
-   ```
-   `docker compose create` prepares the named volumes and nonrunning service
-   containers. Keep these exact volume names: `noveltea-app`, `noveltea-state`,
-   `noveltea-cache`.
-4. Start the *host* controller **as the same rootless Docker user**:
-   ```sh
-   export NT_SANDBOX_SOCKET="$NT_CONTROLLER_SOCKET_DIR/controller.sock"
-   export NT_SANDBOX_TOKEN_FILE="$NT_CONTROLLER_TOKEN_FILE"
-   # From repository root, using the same Docker context:
-   pnpm --filter @noveltea/studio host:controller
-   ```
-   For production, supervise this command with a systemd user unit, with
-   `Restart=on-failure` and `Requires=docker.service` as appropriate for your
-   rootless Docker installation. The controller binds an authenticated local
-   Unix-domain socket, not a TCP listener. Configure no proxy for it.
-5. **Before** application startup, explicitly apply migrations while service
-   writers are stopped:
-   ```sh
-   docker compose run --rm --no-deps web pnpm --filter @noveltea/studio migrate
-   docker compose up -d web agent
-   ```
-   Bind `127.0.0.1:3000` to a properly configured external HTTPS reverse proxy
-   with request limits and rate limiting. The Compose bridge is not a public
-   agent command endpoint. Do not publish port 7001.
+```sh
+docker compose up -d
+docker compose ps
+```
 
-The **sandbox controller** token is injected as a file secret and never
-mounted in Studio or a job sandbox; its path inside the agent is
-`/run/secrets/noveltea-controller-token`. The trusted worker's private client
-uses `NT_SANDBOX_SOCKET` and `NT_SANDBOX_TOKEN_FILE` to connect.
+The first command builds the trusted application and minimal sandbox images,
+creates the four named persistent volumes, generates the private controller token,
+applies Studio SQLite migrations **before services start**, starts the trusted
+controller service, and waits for the agent's authenticated health check before
+starting the web server. Later invocations are idempotent. This is the supported
+deployment path; **no** manual host controller, `docker build`, `docker compose
+create`, token-file generation, or migration command is required.
+
+Prerequisites: a Linux **rootless Docker daemon** with cgroup v2/systemd and
+delegated CPU/memory/PID controls; the Docker Compose plugin; the native NovelTea
+CLI and `noveltea-skills` checkout. **Both `NT_NATIVE_CLI_HOST` and
+`NT_SKILLS_HOST` are required** and have no default values. Set them to
+existing host paths in the shell or a Git-ignored **root** `.env` before
+running Compose (copy `.env.example` to `.env`), for example:
+
+```dotenv
+NT_NATIVE_CLI_HOST=/absolute/path/to/nt/build/cli/linux/noveltea
+NT_SKILLS_HOST=/absolute/path/to/noveltea-skills
+```
+
+Compose rejects missing or empty values during configuration, before creating
+containers. The root `.env` is for Compose mount interpolation; `web/.env`
+remains the runtime-secrets file. The rootless daemon socket defaults to
+`/run/user/1000/docker.sock`; override it using `NT_ROOTLESS_DOCKER_SOCKET`
+when the host UID or socket path differs. Missing native CLI / skills / socket
+mount sources fail the deployment rather than silently creating empty paths.
+The native CLI is bind-mounted read-only into the trusted web and agent services;
+no native executable, skills repository, or Docker socket is mounted into
+an untrusted job sandbox.
+
+Populate `web/.env` from `web/.env.example`: configure `BETTER_AUTH_URL`
+(`http://localhost:3000` for local testing, HTTPS behind a reverse proxy
+for remotely reachable deployments), `BETTER_AUTH_SECRET`, GitHub App and
+GitLab OAuth credentials, `NT_PI_CREDENTIAL_KEY`, and
+`NT_AGENT_RPC_TOKEN` (at least 32 characters). Reuse stable encryption and
+authentication secrets across restarts; changing them invalidates existing
+OAuth data or sessions. ChatGPT subscriptions connect through Studio's
+`openai` OAuth flow; no API key is required. Local `pnpm dev` and Compose
+use **separate** database locations. Starting Compose fresh does not migrate
+existing dev jobs or Pi logins.
+
+The controller token is generated on first startup and stored in the
+`noveltea-controller` named volume. Its Unix socket and token are
+shared only with the trusted agent; the web service receives neither.
+The controller alone has the rootless daemon Unix socket, with
+`network_mode: none`, dropped capabilities and no new privileges.
+The job sandboxes remain isolated rootless sibling containers, with
+a single validated `/story` bind, no networking, and no Docker socket.
+
+Inspect health / failures:
+
+```sh
+docker compose ps
+docker compose logs --tail=100 init controller agent web
+```
+
+Stop without deleting user data:
+
+```sh
+docker compose down
+```
+
+**Destructive reset**: `docker compose down --volumes` deletes the
+`noveltea-app`, `noveltea-state`, `noveltea-cache`, and
+`noveltea-controller` volumes, including encrypted ChatGPT credentials,
+job checkpoints and unpublished work. Never use this to repair a failed job.
+
+Only the web port is published, bound to loopback by default. To expose Studio
+remotely, configure a trusted HTTPS reverse proxy with request limits and
+align `BETTER_AUTH_URL` and OAuth redirect origins. Never publish the
+agent's port 7001 or the controller socket.
 
 ## Controller API (trusted agent only)
 
@@ -158,8 +176,9 @@ per-job LangGraph checkpoints. They are separate SQLite databases.
   identity before reuse. Image replacement prevents reusing an old container
   for execution, but does not block authorized disposal. Disposal never
   deletes Git working files.
-- An existing controller socket is **not** automatically unlinked on start;
-  confirm the old process is stopped before manual stale-socket cleanup.
+- The Compose controller checks whether a previous Unix socket is still
+  live before reconciling a stale socket after restart. Host-only controller
+  mode remains fail-closed and requires explicit operator reconciliation.
   Ambiguous Git/worktree state still needs manual reconciliation.
 - The trusted graph worker acquires and verifies a registered sandbox before
   opening any narrative Pi specialist session, including CLI-launched jobs.

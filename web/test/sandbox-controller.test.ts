@@ -125,6 +125,20 @@ test('registered Story job derives one trusted worktree and never mounts git or 
   assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
 })
 
+test('Compose controller validates sidecar cache, but mounts the rootless daemon host path', async () => {
+  const { config, story } = fixture()
+  const hostCache = '/rootless-docker/volumes/noveltea-cache/_data'
+  config.dockerCacheVolume = hostCache
+  const { calls, run } = docker()
+  assert.equal(resolveTrustedJob(config, ID, IMAGE).storyRoot, story)
+  assert.equal(resolveTrustedJob(config, ID, IMAGE).dockerStoryRoot,
+    story.replace(config.cacheVolume, hostCache))
+  await new SandboxController(config, run).acquire(ID)
+  const create = calls.find(call => call[0] === 'create')!
+  assert.ok(create.includes(`type=bind,source=${story.replace(config.cacheVolume, hostCache)},target=/story,bind-propagation=rprivate`))
+  assert.ok(!create.includes(`type=bind,source=${story},target=/story,bind-propagation=rprivate`))
+})
+
 test('whole-root and nested author-inbox mounts fail closed instead of exposing trusted metadata', async () => {
   for (const directory of ['', 'legacy-story-root']) {
     const legacy = fixture(directory)
