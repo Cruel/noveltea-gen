@@ -91,7 +91,8 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       createHmac('sha256', config.secret).update(session.token).digest('base64')
     const repo = join(root, 'source')
     mkdirSync(join(repo, 'story'), { recursive: true })
-    writeFileSync(join(repo, 'story/README.md'), 'A new mystery visual-novel Story\n')
+    const baselineStory = 'A new mystery visual-novel Story\n'
+    writeFileSync(join(repo, 'story/README.md'), baselineStory)
     const git = (dir: string, ...args: string[]) => execFileSync('git', args, { cwd: dir,
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
     git(repo, 'init', '-q')
@@ -103,7 +104,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     const jobId = randomUUID(), storyId = randomUUID(), repositoryId = randomUUID()
     const job = await acquireCachedStory({ cacheDirectory: cache, ownerId: user.id,
       repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story',
-      commit, jobId, verifiedSizeBytes: 128, verifiedBlobCount: 1 })
+      commit, jobId, verifiedSizeBytes: Buffer.byteLength(baselineStory), verifiedBlobCount: 1 })
     store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
       VALUES (?,?,'github','123','Story/Live','2026-11-01')`).run(repositoryId, user.id)
     store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
