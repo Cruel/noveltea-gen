@@ -16,6 +16,11 @@ import { join, resolve } from 'node:path'
 const root = resolve('.')
 const volumeNames = ['noveltea-app', 'noveltea-state', 'noveltea-cache']
 const env = { ...process.env }
+const rawPort = process.env.NT_COMPOSE_CERT_PORT ?? '3000'
+const webPort = Number(rawPort)
+assert.ok(/^\d{1,5}$/.test(rawPort) && Number.isSafeInteger(webPort) &&
+  webPort >= 1024 && webPort <= 65535, 'Invalid disposable Compose test port')
+env.NT_STUDIO_HOST_PORT = String(webPort)
 const probeId = randomUUID()
 function docker(...args: string[]): string {
   return execFileSync('docker', args, { cwd: root, env, encoding: 'utf8',
@@ -37,9 +42,9 @@ async function freeWebPort() {
   const server = createServer()
   server.once('error', () => {})
   try {
-    server.listen(3000, '127.0.0.1')
+    server.listen(webPort, '127.0.0.1')
     await once(server, 'listening')
-  } catch { throw Error('Port 3000 is occupied; refusing to disturb the existing service') }
+  } catch { throw Error('Port ' + webPort + ' is occupied; refusing to disturb the existing service') }
   finally { if (server.listening) server.close() }
 }
 async function delay(ms: number) { await new Promise(resolve => setTimeout(resolve, ms)) }
@@ -56,7 +61,7 @@ async function httpSocket(path: string, bearer?: string): Promise<number> {
 async function checkWeb() {
   for (let i = 0; i < 50; i++) {
     try {
-      const response = await fetch('http://127.0.0.1:3000/login', {
+      const response = await fetch('http://127.0.0.1:' + webPort + '/login', {
         signal: AbortSignal.timeout(1500),
       })
       if (response.status === 200) return

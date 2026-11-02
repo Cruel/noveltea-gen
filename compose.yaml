@@ -26,7 +26,7 @@ services:
     ports:
       # TLS, request limits and OAuth callbacks require an external reverse proxy.
       # Never bind the application port publicly without that proxy.
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${NT_STUDIO_HOST_PORT:-3000}:3000"
     restart: unless-stopped
     init: true
     security_opt:
