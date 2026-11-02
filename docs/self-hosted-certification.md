@@ -26,7 +26,7 @@ The script saves `.local/certification/issue-71.json`, which is ignored by Git a
 | `--compose` | **Fresh disposable** named volumes, actual image builds, login HTTP route, private agent → controller Unix socket, no Docker socket or web controller token, separate web/agent/host-controller restarts, durable app and graph SQLite markers across restarts | Existing production-volume upgrades, ongoing writer interrupted by SIGKILL, OAuth callback across deployed worker replacement, real model or provider |
 | `--live-pi` | Paid model-driven, web-authenticated, controller-backed Pi Foundation writes, canonical native CLI validation and verified Git commit with Story confined to `/story` | Real provider publishing, independent literary judgment or a complete multi-Milestone production run |
 
-**Host requirements:** same rootless Docker context for Compose and host controller, cgroup v2/systemd, sufficient delegated resource controls, no alternate rootful context. Rootless host tests use local `noveltea-sandbox:local` (build first: `docker build -f deploy/sandbox.Dockerfile -t noveltea-sandbox:local .`). The host gate rebuilds the sandbox image and the Compose gate builds both trusted and sandbox images from the checked-out source. It **refuses** to run if the four fixed `noveltea-*` volumes, NovelTea Compose containers or port 3000 are already in use; it must never destroy a production deployment. It creates and removes only its own fresh volumes, private temporary controller secret and socket. Preserve the console output as evidence when running a release gate.
+**Host requirements:** same rootless Docker context for Compose and host controller, cgroup v2/systemd, sufficient delegated resource controls, no alternate rootful context. Rootless host tests use local `noveltea-sandbox:local` (build first: `docker build -f deploy/sandbox.Dockerfile -t noveltea-sandbox:local .`). The host gate rebuilds the sandbox image and the Compose gate builds both trusted and sandbox images from the checked-out source. It **refuses** to run if the three fixed `noveltea-*` volumes, NovelTea Compose containers or port 3000 are already in use; it must never destroy a production deployment. It creates and removes only its own fresh volumes, private temporary controller secret and socket. Preserve the console output as evidence when running a release gate.
 
 **Paid real-Pi opt-in:**
 
@@ -38,7 +38,7 @@ export NT_TEST_WEB_PI_PROVIDER=openai    # or configured compatible provider
 pnpm certify:self-hosted --live-pi
 ```
 
-This exercises `web/test/real-pi-generation.test.ts` with real sandbox, pinned native validator and web scheduling. Its success is evidence of a **real** model call and a canonical commit, not of published narrative quality. Use the actual test logs and private LangGraph traces to verify Pi tools, reasoning/provider selection, and that untrusted paths remain inaccessible; do not store private transcripts in the evidence JSON.
+This exercises `web/test/real-pi-generation.test.ts` with a separate dedicated agent process, real sandbox, pinned native validator and authenticated Studio queue admission. Its success is evidence of a **real** model call and a canonical commit, not of published narrative quality. Use the actual test logs and private LangGraph traces to verify Pi tools, reasoning/provider selection, and that untrusted paths remain inaccessible; do not store private transcripts in the evidence JSON.
 
 ## Release-gate evidence matrix
 

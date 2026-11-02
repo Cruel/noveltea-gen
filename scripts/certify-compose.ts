@@ -74,7 +74,7 @@ const clientProbe = [
   "res.on('end',()=>{console.log('HTTP',res.statusCode);process.exit(res.statusCode===404?0:1)})});",
   "req.on('error',e=>{console.error(e.message);process.exit(2)});req.end();",
 ].join('')
-function checkAgent() {
+async function checkAgent() {
   assert.match(docker('compose', 'exec', '-T', 'agent', 'node', '-e', clientProbe), /HTTP 404/)
   const agentHealth = "const token=process.env.NT_AGENT_RPC_TOKEN;if(!token)process.exit(2);" +
     "fetch('http://127.0.0.1:7001/health',{headers:{authorization:'Bearer '+token}})" +
@@ -82,8 +82,19 @@ function checkAgent() {
   const webHealth = "const token=process.env.NT_AGENT_RPC_TOKEN;if(!token)process.exit(2);" +
     "fetch('http://agent:7001/health',{headers:{authorization:'Bearer '+token}})" +
     ".then(r=>process.exit(r.status===200?0:1),()=>process.exit(3))"
-  docker('compose', 'exec', '-T', 'agent', 'node', '-e', agentHealth)
-  docker('compose', 'exec', '-T', 'web', 'node', '-e', webHealth)
+  // Docker marks a container as running before its Node entrypoint starts
+  // listening. Test both the local agent and private Studio-to-agent bridge
+  // with bounded retries, but fail certification if startup never succeeds.
+  for (let i = 0; i < 50; i++) {
+    try {
+      docker('compose', 'exec', '-T', 'agent', 'node', '-e', agentHealth)
+      docker('compose', 'exec', '-T', 'web', 'node', '-e', webHealth)
+      break
+    } catch (error) {
+      if (i === 49) throw Error('Private agent did not become healthy or reachable from Studio', { cause: error })
+      await delay(300)
+    }
+  }
   docker('compose', 'exec', '-T', 'web', 'test', '!', '-e', '/var/run/docker.sock')
   docker('compose', 'exec', '-T', 'agent', 'test', '!', '-e', '/var/run/docker.sock')
   docker('compose', 'exec', '-T', 'web', 'test', '!', '-e', '/run/secrets/noveltea-controller-token')
@@ -147,7 +158,7 @@ async function main() {
     assert.equal(await httpSocket(socket, token), 404, 'Authenticated unknown job must be rejected')
     docker('compose', 'up', '-d', 'web', 'agent')
     await checkWeb()
-    checkAgent()
+    await checkAgent()
     const appDb = '/var/lib/noveltea/app/studio.sqlite'
     const graphDb = '/var/lib/noveltea/state/agent-certification-probe.sqlite'
     seed('web', appDb)
@@ -156,9 +167,9 @@ async function main() {
     docker('compose', 'restart', 'web')
     await checkWeb()
     checkSeed('web', appDb)
-    checkAgent()
+    await checkAgent()
     docker('compose', 'restart', 'agent')
-    checkAgent()
+    await checkAgent()
     checkSeed('agent', graphDb)
     checkSeed('web', appDb)
     // Controller runs outside Compose, and must be independently replaceable.
@@ -166,7 +177,7 @@ async function main() {
     await launchController()
     assert.equal(await httpSocket(socket), 401)
     assert.equal(await httpSocket(socket, token), 404)
-    checkAgent()
+    await checkAgent()
     await checkWeb()
     checkSeed('web', appDb)
     checkSeed('agent', graphDb)

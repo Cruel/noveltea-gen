@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { createServer as createNetServer } from 'node:net'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from '../src/db/connection'
@@ -42,7 +43,8 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
 
   const root = mkdtempSync(join(tmpdir(), 'nt-web-real-pi-'))
   const envKeys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_PI_CREDENTIAL_KEY', 'NT_REQUIRE_USER_PI_RUNTIME',
-    'NT_SANDBOX_SOCKET', 'NT_SANDBOX_TOKEN_FILE', 'NT_SKILL_CACHE_DIR', 'NT_CONFIG_FILE'] as const
+    'NT_SANDBOX_SOCKET', 'NT_SANDBOX_TOKEN_FILE', 'NT_SKILL_CACHE_DIR', 'NT_CONFIG_FILE',
+    'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN'] as const
   const old = Object.fromEntries(envKeys.map(name => [name, process.env[name]]))
   const app = join(root, 'app'), state = join(root, 'state'), cache = join(root, 'cache')
   for (const dir of [app, state, cache]) mkdirSync(dir)
@@ -67,6 +69,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
   }
   let store = openStudioDatabase(join(app, 'studio.sqlite'))
   const server = createControllerServer(new SandboxController(sandbox))
+  let agent: ChildProcess | undefined
   try {
     await migrateStudio(store, config)
     const auth = createStudioAuth(store, config)
@@ -109,6 +112,20 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       .run(JSON.stringify({ version: 1, headSha: job.headSha, ...request, limits: { steps: 2 }, model: selected }), jobId)
     server.listen(socket)
     await once(server, 'listening')
+    // Web admission no longer executes LangGraph. It must dispatch through
+    // the same dedicated agent process used in the real Compose deployment.
+    const probe = createNetServer()
+    await new Promise<void>((done, fail) => {
+      probe.once('error', fail)
+      probe.listen(0, '127.0.0.1', done)
+    })
+    const address = probe.address()
+    assert.ok(address && typeof address !== 'string')
+    const agentPort = address.port
+    await new Promise<void>((done, fail) => probe.close(error => error ? fail(error) : done()))
+    const agentToken = randomBytes(48).toString('hex')
+    process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:' + agentPort
+    process.env.NT_AGENT_RPC_TOKEN = agentToken
     const started = await generationJobRequest(auth, store,
       new Request(config.baseURL + '/api/jobs/' + jobId, { method: 'POST',
         headers: { cookie, origin: config.baseURL, 'content-type': 'application/json' },
@@ -119,6 +136,24 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     assert.equal(pinned.fixture, false)
     assert.equal(pinned.provider, selected.provider)
     assert.equal(pinned.model, selected.id)
+    agent = spawn(process.execPath, ['--import', 'tsx', resolve('src/agent-worker.ts')], {
+      cwd: resolve('.'), stdio: 'ignore',
+      env: { ...process.env, NT_STUDIO_DB_PATH: join(app, 'studio.sqlite'),
+        NT_AGENT_RPC_TOKEN: agentToken, NT_AGENT_PORT: String(agentPort),
+        NT_REQUIRE_SANDBOX_TOOLS: '1' },
+    })
+    let ready = false
+    for (let i = 0; i < 120; i++) {
+      if (agent.exitCode !== null) break
+      try {
+        const response = await fetch(process.env.NT_AGENT_RPC_URL + '/health', {
+          headers: { authorization: 'Bearer ' + agentToken }, signal: AbortSignal.timeout(400),
+        })
+        if (response.status === 200) { ready = true; break }
+      } catch { /* dedicated agent initializing */ }
+      await new Promise(done => setTimeout(done, 100))
+    }
+    assert.equal(ready, true, 'independent trusted agent must accept and execute real Pi jobs')
     const deadline = Date.now() + 250_000
     let verified = false, finished = false
     while (Date.now() < deadline) {
@@ -140,6 +175,14 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     assert.ok(!JSON.stringify(listGenerationEvents(store, user.id, jobId, 0)).includes(root),
       'the public progress journal must not reveal local paths')
   } finally {
+    if (agent && agent.exitCode === null && agent.signalCode === null) {
+      agent.kill('SIGTERM')
+      await Promise.race([once(agent, 'exit'), new Promise(done => setTimeout(done, 5_000))])
+      if (agent.exitCode === null && agent.signalCode === null) {
+        agent.kill('SIGKILL')
+        await once(agent, 'exit')
+      }
+    }
     store.sqlite.close()
     if (server.listening) {
       server.close()
