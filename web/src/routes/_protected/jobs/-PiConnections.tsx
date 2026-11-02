@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
 
 type Connection = { providerId: string; type: 'api_key' | 'oauth' }
-type Flow = { status: 'starting' | 'pending' | 'connected' | 'failed'
-  code?: string; url?: string; reason?: string }
+type Flow = { status: 'starting' | 'pending' | 'completing' | 'connected' | 'failed'
+  url?: string; reason?: string }
 type Catalog = { connected: Connection[]; oauth: Flow | null; error?: string }
 const providerLabels: Record<string, string> = {
-  openai: 'OpenAI API', anthropic: 'Anthropic API', google: 'Google API',
+  openai: 'OpenAI (ChatGPT or API key)', anthropic: 'Anthropic API', google: 'Google API',
   openrouter: 'OpenRouter API', xai: 'xAI API', groq: 'Groq API', mistral: 'Mistral API',
-  'openai-codex': 'ChatGPT OAuth',
+  'openai-codex': 'Legacy Codex OAuth (reconnect with OpenAI)',
 }
 export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [provider, setProvider] = useState('openai')
   const [secret, setSecret] = useState('')
+  const [redirect, setRedirect] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const refresh = useCallback(async () => {
@@ -26,7 +27,7 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
     void refresh().catch(e => setError(e instanceof Error ? e.message : 'Pi unavailable'))
   }, [refresh])
   useEffect(() => {
-    if (!catalog?.oauth || !['pending', 'starting'].includes(catalog.oauth.status)) return
+    if (!catalog?.oauth || !['pending', 'starting', 'completing'].includes(catalog.oauth.status)) return
     const interval = setInterval(() => {
       void refresh().then(current => {
         if (current.oauth?.status === 'connected') void onUpdate()
@@ -68,14 +69,24 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
       <button type="button" disabled={busy || !secret.trim()}
         onClick={() => void mutate('POST', { action: 'api-key', provider, key: secret })}>Connect API key</button>
     </div>
-    <button type="button" disabled={busy || ['pending', 'starting'].includes(catalog?.oauth?.status ?? '')}
-      onClick={() => void mutate('POST', { action: 'oauth', provider: 'openai-codex' })}>
-      Connect ChatGPT (device code)
+    <button type="button" disabled={busy || ['pending', 'starting', 'completing'].includes(catalog?.oauth?.status ?? '')}
+      onClick={() => void mutate('POST', { action: 'oauth', provider: 'openai' })}>
+      Sign in with ChatGPT
     </button>
-    {catalog?.oauth?.status === 'pending' && <p role="status">Open <a href={catalog.oauth.url}
-      target="_blank" rel="noopener noreferrer">ChatGPT device authorization</a> and enter code <strong>{catalog.oauth.code}</strong>.
-      Return here after approving; the provider will connect automatically.</p>}
-    {catalog?.oauth?.status === 'starting' && <p role="status">Requesting ChatGPT device authorization…</p>}
+    {catalog?.oauth?.status === 'pending' && <div role="status">
+      <p>Open <a href={catalog.oauth.url} target="_blank" rel="noopener noreferrer">ChatGPT authorization</a> and sign in.
+      If the browser finishes authorization but cannot open the localhost callback, copy the final URL from its address bar and paste it here.</p>
+      <label>Final localhost redirect URL
+        <input type="text" autoComplete="off" value={redirect} disabled={busy}
+          onChange={event => setRedirect(event.target.value)} placeholder="http://127.0.0.1:1455/auth/callback?..." />
+      </label>
+      <button type="button" disabled={busy || !redirect.trim()}
+        onClick={() => void mutate('POST', { action: 'oauth-complete', redirectUrl: redirect.trim() }).then(() => setRedirect(''))}>
+        Complete ChatGPT sign-in
+      </button>
+    </div>}
+    {catalog?.oauth?.status === 'completing' && <p role="status">Completing ChatGPT sign-in…</p>}
+    {catalog?.oauth?.status === 'starting' && <p role="status">Preparing ChatGPT browser authorization…</p>}
     {catalog?.oauth?.status === 'failed' && <p role="alert">{catalog.oauth.reason}</p>}
     {error && <p role="alert" className="error">{error}</p>}
   </section>

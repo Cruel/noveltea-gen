@@ -28,17 +28,26 @@ The script saves `.local/certification/issue-71.json`, which is ignored by Git a
 
 **Host requirements:** same rootless Docker context for Compose and host controller, cgroup v2/systemd, sufficient delegated resource controls, no alternate rootful context. Rootless host tests use local `noveltea-sandbox:local` (build first: `docker build -f deploy/sandbox.Dockerfile -t noveltea-sandbox:local .`). The host gate rebuilds the sandbox image and the Compose gate builds both trusted and sandbox images from the checked-out source. It **refuses** to run if the three fixed `noveltea-*` volumes, NovelTea Compose containers or port 3000 are already in use; it must never destroy a production deployment. It creates and removes only its own fresh volumes, private temporary controller secret and socket. Preserve the console output as evidence when running a release gate.
 
-**Paid real-Pi opt-in:**
+**ChatGPT subscription certification (no API key):** Sign into Studio as a test author, open a job's **Pi model and budgets** section, and choose **Sign in with ChatGPT**. The Pi `openai` provider (not legacy `openai-codex`) opens a browser authorization URL. When Studio runs inside Docker, the browser's redirect to `127.0.0.1:1455` may fail: copy the complete URL from its address bar into Studio's *Final localhost redirect URL* field to finish the same OAuth flow. Studio encrypts the resulting connection in its durable database.
+
+Run the live gate with an **explicit, absolute path** to that *same* Studio database and its existing encryption key (`NT_PI_CREDENTIAL_KEY`, which can be loaded privately from `web/.env`). Do not paste tokens into the test configuration or logs:
 
 ```sh
-export NT_STUDIO_SKILLS_SOURCE="$NT_SKILLS_CHECKOUT"
-export NT_TEST_WEB_PI_API_KEY=...        # private test provider credential; never commit/log
-export NT_TEST_WEB_PI_MODEL=...          # exact available Pi model ID
-export NT_TEST_WEB_PI_PROVIDER=openai    # or configured compatible provider
+export NT_NATIVE_CLI=/absolute/path/to/noveltea
+export NT_STUDIO_SKILLS_SOURCE=/absolute/path/to/noveltea-skills
+export NT_TEST_WEB_PI_AUTH=studio-oauth
+export NT_TEST_WEB_PI_SOURCE_DB=/absolute/path/to/connected/studio.sqlite
+# Optional if more than one Studio user has OpenAI credentials:
+# export NT_TEST_WEB_PI_SOURCE_USER_ID=the-signed-in-user-id
+# Optional: pin an eligible subscription model rather than auto-select:
+# export NT_TEST_WEB_PI_MODEL=gpt-6.1-sol
+# Set NT_PI_CREDENTIAL_KEY in the trusted shell/environment, not in Git.
 pnpm certify:self-hosted --live-pi
 ```
 
-This exercises `web/test/real-pi-generation.test.ts` with a separate dedicated agent process, real sandbox, pinned native validator and authenticated Studio queue admission. Its success is evidence of a **real** model call and a canonical commit, not of published narrative quality. Use the actual test logs and private LangGraph traces to verify Pi tools, reasoning/provider selection, and that untrusted paths remain inaccessible; do not store private transcripts in the evidence JSON.
+The test opens the source database **read-only** and copies only the currently valid OAuth **access token** into a disposable encrypted test database, replacing its refresh token with an unusable sentinel. It refuses an expiring login; this preserves the real Studio connection even if the test crashes or tries to refresh credentials. It runs a separate dedicated agent process, real sandbox, pinned native validator and authenticated Studio queue admission. It never uses shared host `~/.pi` files. A new interactive Studio login may be required if the source token is too close to expiry.
+
+For the older API-key certification mode, set `NT_TEST_WEB_PI_AUTH=api-key`, `NT_TEST_WEB_PI_API_KEY` and `NT_TEST_WEB_PI_MODEL` instead. The OAuth mode is preferred for subscription testing. Its success is evidence of a **real** model call and a canonical commit, not of published narrative quality. Use the actual test logs and private LangGraph traces to verify Pi tools, reasoning/provider selection, and that untrusted paths remain inaccessible; do not store private transcripts in the evidence JSON.
 
 ## Release-gate evidence matrix
 

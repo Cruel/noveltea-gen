@@ -8,7 +8,8 @@ import { test } from 'node:test'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
-import { piModelsRequest } from '../src/lib/pi-models.server'
+import { oauthHostDeviceId, piModelsRequest, validChatGPTCallback } from '../src/lib/pi-models.server'
+import { readIsolatedStudioOAuth } from './studio-oauth-source'
 import { assertUserPiSelection, availableUserPiModels, createUserPiRuntime,
   userPiCredentials, validPiSelection } from '../src/lib/pi-credentials.server'
 
@@ -64,6 +65,19 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.deepEqual(await bobRuntime.getAvailable('openai'), [])
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: 'openai', key: '' })).status, 422)
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: '../other', key: 'x' })).status, 422)
+    assert.equal((await request('POST', aliceCookie, { action: 'oauth', provider: 'openai-codex' })).status, 422)
+    assert.match(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/)
+    assert.notEqual(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
+      oauthHostDeviceId(bob.id, process.env.NT_PI_CREDENTIAL_KEY!))
+    assert.equal(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
+      oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!))
+    const authorization = 'https://auth.openai.com/api/accounts/authorize?state=one-use-state'
+    const redirect = 'http://127.0.0.1:1455/auth/callback?state=one-use-state&code=abc&client_id=issued-client'
+    assert.equal(validChatGPTCallback(redirect, authorization), true)
+    assert.equal(validChatGPTCallback(redirect.replace('one-use-state', 'wrong'), authorization), false)
+    assert.equal(validChatGPTCallback(redirect.replace('127.0.0.1', 'evil.example'), authorization), false)
+    assert.equal(validChatGPTCallback(redirect.replace('&client_id=issued-client', ''), authorization), false)
     const key = 'ALICE-PRIVATE-MODEL-KEY'
     const added = await request('POST', aliceCookie, { action: 'api-key', provider: 'openai', key })
     assert.equal(added.status, 200, JSON.stringify(added.body))
@@ -113,14 +127,28 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     // Persist a canonical Pi OAuth credential and rehydrate it through a fresh runtime.
     const oauth = { type: 'oauth' as const, access: 'OAUTH-ACCESS-SECRET',
       refresh: 'OAUTH-REFRESH-SECRET', expires: Date.now() + 3600_000, accountId: 'alice' }
-    await userPiCredentials(store, alice.id).modify('openai-codex', async () => oauth)
+    await userPiCredentials(store, alice.id).modify('openai', async () => oauth)
+    const isolated = await readIsolatedStudioOAuth(join(directory, 'studio.sqlite'),
+      process.env.NT_PI_CREDENTIAL_KEY!, alice.id)
+    assert.equal(isolated.access, oauth.access)
+    assert.notEqual(isolated.refresh, oauth.refresh, 'test cannot rotate the normal Studio login')
+    assert.deepEqual(await userPiCredentials(store, alice.id).read('openai'), oauth,
+      'reading a test access-token copy does not alter the durable credential')
+    await userPiCredentials(store, alice.id).modify('openai', async () =>
+      ({ ...oauth, expires: Date.now() + 30_000 }))
+    await assert.rejects(readIsolatedStudioOAuth(join(directory, 'studio.sqlite'),
+      process.env.NT_PI_CREDENTIAL_KEY!, alice.id), /close to expiry/)
+    await userPiCredentials(store, alice.id).modify('openai', async () => oauth)
+    await assert.rejects(readIsolatedStudioOAuth(join(directory, 'studio.sqlite'),
+      randomBytes(32).toString('base64'), alice.id))
     const anotherStore = openStudioDatabase(join(directory, 'studio.sqlite'))
     try {
-      const restored = await userPiCredentials(anotherStore, alice.id).read('openai-codex')
+      const restored = await userPiCredentials(anotherStore, alice.id).read('openai')
       assert.deepEqual(restored, oauth)
       const restoredRuntime = await createUserPiRuntime(anotherStore, alice.id)
-      assert.equal(restoredRuntime.getProvider('openai-codex')?.id, 'openai-codex')
-      assert.equal((await restoredRuntime.getAuth('openai-codex'))?.auth.apiKey, oauth.access,
+      assert.equal(restoredRuntime.getProvider('openai')?.id, 'openai')
+      assert.ok(restoredRuntime.getProvider('openai')?.auth.oauth, 'openai provider supports subscription OAuth')
+      assert.equal((await restoredRuntime.getAuth('openai'))?.auth.apiKey, oauth.access,
         'OAuth connection is rehydrated from the user database, not the host Pi profile')
       await assert.rejects(async () => {
         const wrong = userPiCredentials(anotherStore, alice.id, { NT_PI_CREDENTIAL_KEY: randomBytes(32).toString('base64') })

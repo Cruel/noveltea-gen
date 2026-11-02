@@ -14,12 +14,15 @@ import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { listGenerationEvents } from '../src/lib/generation-progress.server'
-import { userPiCredentials, assertUserPiSelection } from '../src/lib/pi-credentials.server'
+import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../src/lib/pi-credentials.server'
+import { readIsolatedStudioOAuth } from './studio-oauth-source'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
 
 const enabled = process.env.NT_TEST_WEB_REAL_PI === '1'
-const required = ['NT_NATIVE_CLI', 'NT_TEST_WEB_PI_API_KEY', 'NT_TEST_WEB_PI_MODEL',
-  'NT_STUDIO_SKILLS_SOURCE'] as const
+const subscriptionTest = process.env.NT_TEST_WEB_PI_AUTH === 'studio-oauth'
+const required = subscriptionTest
+  ? ['NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE', 'NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY'] as const
+  : ['NT_NATIVE_CLI', 'NT_TEST_WEB_PI_API_KEY', 'NT_TEST_WEB_PI_MODEL', 'NT_STUDIO_SKILLS_SOURCE'] as const
 const config = { baseURL: 'http://localhost:3000',
   secret: 'web-live-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
   github: { clientId: 'test', clientSecret: 'secret' },
@@ -41,6 +44,13 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   }).trim(), '2/systemd')
 
+  // Read the durable Studio credential only in a readonly transaction, before
+  // switching to a disposable test encryption key. The test copy contains no
+  // usable refresh token and cannot invalidate the normal Studio login.
+  const oauth = subscriptionTest ? await readIsolatedStudioOAuth(
+    process.env.NT_TEST_WEB_PI_SOURCE_DB!, process.env.NT_PI_CREDENTIAL_KEY!,
+    process.env.NT_TEST_WEB_PI_SOURCE_USER_ID,
+  ) : null
   const root = mkdtempSync(join(tmpdir(), 'nt-web-real-pi-'))
   const envKeys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_PI_CREDENTIAL_KEY', 'NT_REQUIRE_USER_PI_RUNTIME',
     'NT_SANDBOX_SOCKET', 'NT_SANDBOX_TOKEN_FILE', 'NT_SKILL_CACHE_DIR', 'NT_CONFIG_FILE',
@@ -100,10 +110,18 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       VALUES (?,?,?,'story','Live','2026-11-01',?)`).run(storyId, user.id, repositoryId, commit)
     store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,status,source_commit_sha,created_at,updated_at)
       VALUES (?,?,?,'Live','paused',?,'2026-11-01','2026-11-01')`).run(jobId, user.id, storyId, commit)
-    const provider = process.env.NT_TEST_WEB_PI_PROVIDER || 'openai'
+    const provider = subscriptionTest ? 'openai' : process.env.NT_TEST_WEB_PI_PROVIDER || 'openai'
     await userPiCredentials(store, user.id).modify(provider, async () =>
-      ({ type: 'api_key', key: process.env.NT_TEST_WEB_PI_API_KEY! }))
-    const selected = { provider, id: process.env.NT_TEST_WEB_PI_MODEL! }
+      oauth ?? ({ type: 'api_key', key: process.env.NT_TEST_WEB_PI_API_KEY! }))
+    const eligible = (await availableUserPiModels(store, user.id)).filter(model => model.provider === provider)
+    const preferredModel = process.env.NT_TEST_WEB_PI_MODEL
+    const selectedModel = preferredModel
+      ? eligible.find(model => model.id === preferredModel)
+      : eligible.find(model => model.id === 'gpt-6.1-sol') ??
+        eligible.find(model => model.reasoning) ?? eligible[0]
+    assert.ok(selectedModel, 'No available model for the configured OpenAI connection')
+    const selected = { provider, id: selectedModel.id }
+    console.log('Live Pi certification model:', selected.provider + '/' + selected.id)
     await assertUserPiSelection(store, user.id, selected)
     const request = { task: 'Write a concise mystery visual-novel foundation about an archivist on a stranded train. You can decide unspecified details.',
       contract: { scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
