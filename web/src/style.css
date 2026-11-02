@@ -12,6 +12,12 @@
 .story-record-link { width: 100%; text-align: left; display: grid; gap: .1rem; background: transparent; border: 0; padding: .4rem .5rem; }
 .story-record-link:hover, .story-record-link.selected { background: #2c4558; }
 .story-record-link small { color: #9eafbd; word-break: break-word; }
+.story-change-labels { display: inline-flex; flex-wrap: wrap; gap: .35rem; font-size: .72rem; font-weight: 500; }
+.story-change-labels span { white-space: nowrap; }
+.story-change-verified { color: #9ad5b5; }
+.story-change-uncommitted { color: #f4c895; }
+.story-deleted-record { padding: .45rem .5rem !important; opacity: .85; }
+.story-deleted-record small { display: block; color: #9eafbd; overflow-wrap: anywhere; }
 .story-explorer-detail { min-width: 0; display: grid; align-content: start; gap: .85rem; }
 .story-explorer-detail .story-relationships { min-width: 0; padding: .8rem; }
 .story-relationships h3 { margin: .1rem 0 .35rem; font-size: .95rem; }

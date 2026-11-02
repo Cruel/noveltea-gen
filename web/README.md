@@ -721,6 +721,25 @@ including cross-user denial, diagnostics, future types, and inbox/symlink
 confinement. For end-to-end native schema certification, configure the actual
 `NT_NATIVE_CLI` and browse an imported Story with its normal job pin.
 
+### Git change overlays (#68)
+
+The hierarchy and bounded relationship graph show two separate Git states:
+**verified** additions/modifications/deletions between the job's pinned base
+and its trusted HEAD, and **uncommitted** changes between that HEAD and the
+index/working tree. All Story Markdown changes are considered (the activity
+feed's 24-file limit does not apply). The tree rolls up changed descendants,
+including historically identified arc members. Deletions remain non-clickable
+path/typed-ID placeholders, and files missing from the native typed index
+remain path-only, non-clickable entries. For deleted records, typed labels
+come only from bounded historical Git Markdown frontmatter; absent or invalid
+metadata is not guessed from directories. These overlays never grant edit
+access, alter structural/protection status, or create native relationships:
+Git-only graph placeholders are isolated nodes without inferred edges. A
+changed HEAD without a trusted verified-head receipt fails closed. Revalidate
+the explorer to refresh working-tree indicators without advancing HEAD.
+The explorer integration test exercises the verified/uncommitted split,
+restored trusted receipt, deletions, unindexed paths and more than 24 changes.
+
 ## Acceptance/testing limitations
 
 The isolated migration/restart and user-ownership tests do not invoke live

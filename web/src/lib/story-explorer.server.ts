@@ -10,6 +10,8 @@ import { authorizedStoryJob } from './fixture-jobs.server'
 import { validateStoryJob } from '../../../src/validator'
 import type { JobStartResult } from '../../../src/job'
 import type { ValidationResult } from '../../../src/validator'
+import { trustedHead } from '../../../src/revision'
+import { storyChangeOverlay, type DeletedStoryRecord, type StoryChange } from './story-changes.server'
 
 type RecordMetadata = { id?: unknown; type?: unknown; title?: unknown; status?: unknown;
   arcs?: unknown; fulfillment?: unknown }
@@ -26,6 +28,8 @@ export interface ExplorerRecord {
   arcs: string[]
   /** Canonical Event references from Milestone fulfillment alternatives. */
   events: string[]
+  /** Git provenance overlay; unrelated to native validation/protection. */
+  change?: StoryChange
 }
 export interface ExplorerDiagnostic {
   path?: string; line?: number; column?: number; code: string; message: string
@@ -38,6 +42,8 @@ export interface ExplorerIndex {
   readiness: unknown
   baseSha: string
   headSha: string
+  deletedRecords: DeletedStoryRecord[]
+  unindexedRecords: Array<{ path: string; change: StoryChange }>
 }
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
@@ -115,7 +121,7 @@ export function canonicalExplorerIndex(report: Record<string, unknown>, baseSha:
   const protection = report.protection as { status?: unknown }
   return { records, diagnostics, validation,
     protection: typeof protection.status === 'string' ? protection.status : 'unverified',
-    readiness: report.readiness ?? null, baseSha, headSha }
+    readiness: report.readiness ?? null, baseSha, headSha, deletedRecords: [], unindexedRecords: [] }
 }
 
 /** Check every path component without following symlinks, including the
@@ -261,11 +267,23 @@ export async function validatedExplorer(auth: StudioAuth, store: StudioDatabase,
     env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   if (currentHead !== job.headSha)
     throw new ExplorerError(409, 'Job revision changed during validation. Refresh the Story explorer.')
+  try {
+    if (await trustedHead(job) !== currentHead) throw new Error('Unverified head')
+  } catch {
+    throw new ExplorerError(409, 'Job HEAD is not a verified revision. Reconcile the Story job.')
+  }
   if (result.status === 'error' || !result.report) {
     throw new ExplorerError(409, 'Pinned canonical Story validator is unavailable or returned an invalid report. ' +
       'Restore the original validator and job state before browsing.')
   }
-  return { job, result, index: canonicalExplorerIndex(result.report, job.baseSha, job.headSha, result.status) }
+  const index = canonicalExplorerIndex(result.report, job.baseSha, job.headSha, result.status)
+  const changes = storyChangeOverlay(job, currentHead, index.records)
+  for (const record of index.records) {
+    if (changes.byPath[record.path]) record.change = changes.byPath[record.path]
+  }
+  index.deletedRecords = changes.deletedRecords
+  index.unindexedRecords = changes.unindexedRecords
+  return { job, result, index }
 }
 
 /** Owner-scoped read-only canonical explorer. id is a typed Story ID, NOT a

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHmac } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -73,8 +73,12 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
     for (const record of records) {
       const path = join(repo, 'story', record.path)
       mkdirSync(join(path, '..'), { recursive: true })
-      writeFileSync(path, '# ' + record.metadata.title + '\n\nCanonical source content.\n')
+      writeFileSync(path, record.metadata.type === 'character'
+        ? '---\nschema: "0.1"\ntype: character\nid: character.stranger\ntitle: "Stranger"\nstatus: draft\n---\n\nStranger.\n'
+        : '# ' + record.metadata.title + '\n\nCanonical source content.\n')
     }
+    writeFileSync(join(repo, 'story', 'events', 'retired.md'),
+      '---\nschema: "0.1"\ntype: event\nid: event.retired\ntitle: "Old Event"\nstatus: draft\n---\n\nRetired.\n')
     mkdirSync(join(repo, '.story-inbox', 'ideas'), { recursive: true })
     writeFileSync(join(repo, '.story-inbox', 'ideas', 'private.yaml'), 'top-secret-inbox-content')
     git(repo, 'init', '-q')
@@ -83,12 +87,13 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
     git(repo, 'add', '.')
     git(repo, 'commit', '-qm', 'Story and trusted inbox')
     const pinned = git(repo, 'rev-parse', 'HEAD')
-    const bytes = records.reduce((sum, r) => sum + Buffer.byteLength(readFileSync(join(repo, 'story', r.path))), 0)
+    const bytes = records.reduce((sum, r) => sum + Buffer.byteLength(readFileSync(join(repo, 'story', r.path))), 0) +
+      Buffer.byteLength(readFileSync(join(repo, 'story', 'events', 'retired.md')))
     const acquired = await acquireCachedStory({
       cacheDirectory: process.env.NT_GIT_CACHE_DIR, ownerId: alice.id,
       repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: 'unused',
       commit: pinned, directory: 'story', jobId,
-      verifiedSizeBytes: bytes, verifiedBlobCount: records.length,
+      verifiedSizeBytes: bytes, verifiedBlobCount: records.length + 1,
     })
     store.sqlite.prepare(`INSERT INTO repositories
       (id,owner_user_id,provider,provider_repository_id,name,created_at)
@@ -106,7 +111,15 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
     const cli = join(root, 'noveltea')
     writeFileSync(cli, `#!/usr/bin/env node
 const args = process.argv.slice(2);
-const records = ${JSON.stringify(records)};
+const fs = require('node:fs');
+const path = require('node:path');
+const root = args[3];
+const records = ${JSON.stringify(records)}.filter(r => fs.existsSync(path.join(root, r.path)));
+for (const [file, id] of [['new.md', 'event.new'], ['draft.md', 'event.draft']]) {
+  if (fs.existsSync(path.join(root, 'events', file))) records.push({
+    path: 'events/' + file, metadata: { type: 'event', id, title: id, status: 'draft' }
+  });
+}
 const diagnostics = ${JSON.stringify(diagnostics)};
 const base = args[args.indexOf('--base') + 1];
 const readiness = args.includes('readiness');
@@ -275,9 +288,56 @@ process.exit(exit);
     assert.deepEqual(readOnly.body.saved, stored.body.saved)
     store.sqlite.prepare('UPDATE studio_sessions SET generation_request_json=NULL, generation_thread_id=NULL WHERE id=?').run(jobId)
 
+    // Full Git overlay: baseline -> verified commit and verified HEAD -> dirty
+    // worktree are independent. Deleted records never become navigable IDs.
+    const working = acquired.worktreeRoot
+    writeFileSync(join(acquired.worktreeStoryRoot, 'events', 'bell.md'), '# Updated Bell\n')
+    writeFileSync(join(acquired.worktreeStoryRoot, 'events', 'new.md'),
+      '---\nschema: "0.1"\ntype: event\nid: event.new\ntitle: "New Event"\nstatus: draft\n---\n\nNew.\n')
+    unlinkSync(join(acquired.worktreeStoryRoot, 'events', 'retired.md'))
+    git(working, 'add', '--', 'story')
+    git(working, 'commit', '-qm', 'Verified Story edits')
+    const verifiedHead = git(working, 'rev-parse', 'HEAD')
+    assert.equal((await api('', aliceCookie)).response.status, 409,
+      'an unverified branch HEAD must not be displayed as a verified change')
+    mkdirSync(join(acquired.stateDir, 'revisions'), { recursive: true })
+    writeFileSync(join(acquired.stateDir, 'revisions', 'verified-head.json'),
+      JSON.stringify({ version: 1, jobId, headSha: verifiedHead, workItemId: 'test' }))
+    writeFileSync(join(acquired.worktreeStoryRoot, 'events', 'bell.md'), '# Dirty Bell\n')
+    writeFileSync(join(acquired.worktreeStoryRoot, 'events', 'draft.md'), '# Uncommitted Draft\n')
+    unlinkSync(join(acquired.worktreeStoryRoot, 'characters', 'stranger.md'))
+    mkdirSync(join(acquired.worktreeStoryRoot, 'notes'), { recursive: true })
+    for (let i = 0; i < 30; i++) writeFileSync(
+      join(acquired.worktreeStoryRoot, 'notes', 'unindexed-' + i + '.md'), '# Not in canonical catalog\n')
+    const changed = await api('', aliceCookie)
+    assert.equal(changed.response.status, 200, JSON.stringify(changed.body))
+    assert.equal(changed.body.index.headSha, verifiedHead)
+    const byId = (id: string) => changed.body.index.records.find((r: { id: string }) => r.id === id)
+    assert.deepEqual(byId('event.bell').change, { committed: 'modified', uncommitted: 'modified' })
+    assert.deepEqual(byId('event.new').change, { committed: 'added' })
+    assert.deepEqual(byId('event.draft').change, { uncommitted: 'added' })
+    assert.equal(byId('character.stranger'), undefined)
+    assert.deepEqual(changed.body.index.deletedRecords.map((r: { id: string; path: string; change: unknown }) =>
+      ({ id: r.id, path: r.path, change: r.change })), [
+      { id: 'character.stranger', path: 'characters/stranger.md', change: { uncommitted: 'deleted' } },
+      { id: 'event.retired', path: 'events/retired.md', change: { committed: 'deleted' } },
+    ])
+    assert.ok(changed.body.index.deletedRecords.every((r: { id: string }) =>
+      !changed.body.index.records.some((n: { id: string }) => n.id === r.id)))
+    assert.equal(changed.body.index.unindexedRecords.length, 30,
+      'the explorer must not reuse the 24-file progress-log limit')
+    assert.deepEqual(changed.body.index.unindexedRecords[0],
+      { path: 'notes/unindexed-0.md', change: { uncommitted: 'added' } })
+    const changedGraph = await relationships('?id=event.bell', aliceCookie)
+    assert.equal(changedGraph.response.status, 200, JSON.stringify(changedGraph.body))
+    assert.deepEqual(changedGraph.body.graph.records.find((r: { id: string }) => r.id === 'event.bell').change,
+      { committed: 'modified', uncommitted: 'modified' })
+    assert.equal(changedGraph.body.graph.relationships.length, 2,
+      'Git overlay must not invent deleted-record relationship edges')
+    assert.doesNotMatch(JSON.stringify(changed.body), /top-secret-inbox-content|private.yaml/)
+
     // A concurrent change to the worktree must not turn the indexed path
     // into a file read through a symlink, even if the validator fixture lists it.
-    const { unlinkSync } = await import('node:fs')
     unlinkSync(join(acquired.worktreeStoryRoot, 'events', 'bell.md'))
     symlinkSync(join(repo, '.story-inbox', 'ideas', 'private.yaml'), join(acquired.worktreeStoryRoot, 'events', 'bell.md'))
     assert.equal((await api('?id=event.bell', aliceCookie)).response.status, 409)
