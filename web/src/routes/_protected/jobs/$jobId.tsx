@@ -156,7 +156,8 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
       <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
       <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
       <GitChanges jobId={jobId} revision={job.headSha} />
-      {job.provider === 'github' && <PublishDraft jobId={jobId} />}
+      {(job.provider === 'github' || job.provider === 'gitlab') &&
+        <PublishDraft jobId={jobId} provider={job.provider} />}
       <StoryExplorer jobId={jobId} revision={job.headSha} />
       {job.status === 'prepared'
         ? <GenerationConfiguration jobId={jobId} onStarted={refresh} />

@@ -83,6 +83,21 @@ export const githubPublications = sqliteTable('github_publications', {
     foreignColumns: [sessions.id, sessions.ownerUserId] }),
 ])
 
+export const gitlabPublications = sqliteTable('gitlab_publications', {
+  jobId: text('job_id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  targetBranch: text('target_branch').notNull(),
+  remoteBranch: text('remote_branch').notNull(),
+  headSha: text('head_sha').notNull(),
+  phase: text('phase', { enum: ['pending', 'linked'] }).notNull(),
+  mrIid: integer('mr_iid'),
+  mrUrl: text('mr_url'),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.jobId, table.ownerUserId],
+    foreignColumns: [sessions.id, sessions.ownerUserId] }),
+])
+
 export const sessions = sqliteTable('studio_sessions', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),

@@ -1,22 +1,16 @@
-import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { StudioDatabase } from '../db/connection'
 import type { StudioAuth } from './auth'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser, getRepositoryToken } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
-import { queueRecord } from './generation-queue.server'
-import { gitEnvironment } from './git-cache.server'
 import { github, matchingRepository, GithubError, errorResponse, json } from './github-repositories.server'
 import { withStoryJobLock } from '../../../src/job-lock'
-import { trustedHead } from '../../../src/revision'
-import { validateStoryJob } from '../../../src/validator'
 import type { JobStartResult } from '../../../src/job'
+import {
+  PublicationFailure, reviewPublication, publicationDescription, pushVerifiedBranch,
+  remotePublicationHead, readPublicationRequest, type PublicationPreview,
+} from './publication-review.server'
 
-type Linked = { number: number; url: string; headSha: string; targetBranch: string }
 type Row = { id: string; title: string; repository: string; providerId: string; baseSha: string;
   directory: string; initialContentSha256: string | null }
 type Saved = { prNumber: number | null; prUrl: string | null; targetBranch: string; remoteBranch: string; headSha: string; phase: string }
@@ -26,47 +20,8 @@ type GithubPr = {
   base: { ref: string }
 }
 type Remote = { id: number; default_branch: string }
-type Preview = {
-  jobId: string; headSha: string; baseSha: string; branch: string
-  targetBranch: string; targetSha: string; validation: string
-  diagnostics: unknown[]; protection: string; merge: 'clean' | 'conflicts' | 'not-assessed'
-  blockers: string[]; canPublish: boolean; linked: Linked | null
-}
 const SHA = /^[a-f0-9]{40}$/i
-const forbiddenEnv = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']
 
-/** Never copy Git stderr: authentication headers can be printed by transport helpers. */
-function git(job: JobStartResult, token: string, args: string[], allowNonzero = false): { output: string; code: number } {
-  const url = `https://github.com/${jobRemote(job)}.git`
-  const env = gitEnvironment(url, token)
-  for (const key of forbiddenEnv) delete env[key]
-  const run = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd: job.worktreeRoot, env, encoding: 'utf8', timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  if (run.error || run.signal || (run.status !== 0 && !allowNonzero))
-    throw new GithubError(409, 'Git publication operation failed. Check upstream access and preserve the job branch for inspection.')
-  return { output: run.stdout.trim(), code: run.status ?? 1 }
-}
-
-// Remote is bound to the authorized catalog selection, never inferred from the Git config.
-const remoteByJob = new WeakMap<JobStartResult, string>()
-function jobRemote(job: JobStartResult) {
-  const name = remoteByJob.get(job)
-  if (!name) throw new GithubError(409, 'Publication repository identity is missing.')
-  return name
-}
-function remoteRef(job: JobStartResult, token: string, branch: string) {
-  const result = git(job, token, ['ls-remote', '--exit-code', '--heads', 'origin', 'refs/heads/' + branch], true)
-  if (result.code === 2) return null
-  if (result.code !== 0) throw new GithubError(409, 'Unable to inspect remote job branch.')
-  const match = /^([a-f0-9]{40})\s+refs\/heads\/(.+)$/.exec(result.output)
-  if (!match || match[2] !== branch) throw new GithubError(409, 'Unexpected remote branch identity.')
-  return match[1]!
-}
-function gitLocal(job: JobStartResult, token: string, args: string[]) {
-  return git(job, token, args).output
-}
 function savedPublication(store: StudioDatabase, id: string): Saved | undefined {
   return store.sqlite.prepare(`SELECT pr_number AS prNumber, pr_url AS prUrl,
     target_branch AS targetBranch, remote_branch AS remoteBranch, head_sha AS headSha, phase
@@ -115,111 +70,17 @@ function readRow(store: StudioDatabase, owner: string, id: string): Row {
   if (!SHA.test(row.baseSha)) throw new GithubError(409, 'Missing pinned Story baseline.')
   return row
 }
-function ensureNotRunning(store: StudioDatabase, id: string) {
-  const q = queueRecord(store, id)
-  if (q && ['queued', 'running', 'interrupted'].includes(q.phase))
-    throw new GithubError(409, 'Generation is queued, running, or interrupted. Inspect/reconcile the writer before publication.')
-}
-function assertRemoteIdentity(job: JobStartResult, token: string, row: Row) {
-  const actual = gitLocal(job, token, ['config', '--local', '--get', 'remote.origin.url'])
-  if (actual !== 'https://github.com/' + row.repository + '.git')
-    throw new GithubError(409, 'Cached Git origin differs from the authorized GitHub repository.')
-}
-function cleanWorktree(job: JobStartResult, token: string) {
-  return !gitLocal(job, token, ['status', '--porcelain=v1', '--untracked-files=all'])
-}
-async function publicationHead(job: JobStartResult, token: string, row: Row) {
-  try { return await trustedHead(job) } catch {
-    // A saved onboarding initialization commit predates generation receipts.
-    // Require its exact sole changed path and controller-pinned content digest.
-    if (!row.initialContentSha256 || !/^[a-f0-9]{64}$/.test(row.initialContentSha256) ||
-        existsSync(join(job.stateDir, 'revisions', 'verified-head.json')) ||
-        existsSync(join(job.stateDir, 'foundation.json')))
-      throw new GithubError(409, 'Job HEAD lacks trusted revision evidence.')
-    const head = gitLocal(job, token, ['rev-parse', 'HEAD'])
-    const path = [row.directory, 'creative-direction/foundation.md'].filter(Boolean).join('/')
-    const changed = gitLocal(job, token, ['diff', '--name-only', job.baseSha, head])
-    const baseFoundation = gitLocal(job, token, ['ls-tree', '--name-only', job.baseSha, '--', path])
-    if (baseFoundation || gitLocal(job, token, ['rev-list', '--count', job.baseSha + '..' + head]) !== '1' || changed !== path)
-      throw new GithubError(409, 'Initialization differs from its saved single-commit draft.')
-    const file = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', 'show', 'HEAD:' + path], {
-      cwd: job.worktreeRoot, env: gitEnvironment('https://github.com/' + row.repository + '.git', token),
-      maxBuffer: 2 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    if (file.status !== 0 || createHash('sha256').update(file.stdout).digest('hex') !== row.initialContentSha256)
-      throw new GithubError(409, 'Initialization content differs from the saved digest.')
-    return head
-  }
-}
-async function completedReview(job: JobStartResult, head: string) {
-  try {
-    const review = JSON.parse(await readFile(join(job.stateDir, 'narrative-review.json'), 'utf8')) as {
-      version?: number; jobId?: string; branch?: string; headSha?: string; phase?: string
-    }
-    return review.version === 1 && review.jobId === job.jobId &&
-      review.branch === job.branch && review.headSha === head && review.phase === 'completed'
-  } catch { return false }
-}
 async function preview(store: StudioDatabase, owner: string, row: Row, job: JobStartResult,
-  token: string, target: string, targetSha: string): Promise<Preview> {
-  ensureNotRunning(store, job.jobId)
+  token: string, target: string, targetSha: string): Promise<PublicationPreview> {
   const saved = savedPublication(store, job.jobId)
   if (saved && (saved.targetBranch !== target || saved.remoteBranch !== job.branch))
     throw new GithubError(409, 'Saved publication targets a different upstream branch. Operator reconciliation required.')
-  assertRemoteIdentity(job, token, row)
-  if (gitLocal(job, token, ['rev-parse', 'HEAD']) !== job.headSha)
-    throw new GithubError(409, 'Job HEAD changed during publication inspection. Refresh the job before retrying.')
-  const head = await publicationHead(job, token, row)
-  const blockers: string[] = []
-  if (!cleanWorktree(job, token)) blockers.push('Uncommitted changes remain in the job worktree.')
-  if (head === job.baseSha) blockers.push('No committed Story changes to publish.')
-  let validation = 'not-run'
-  let protection = 'unverified'
-  let diagnostics: unknown[] = []
-  if (!blockers.length) {
-    const result = await validateStoryJob(job, process.env.NT_STUDIO_SKILLS_SOURCE)
-    validation = result.status
-    protection = (result.report?.protection as { status?: string } | undefined)?.status ?? 'unverified'
-    diagnostics = Array.isArray(result.report?.diagnostics) ? result.report.diagnostics : []
-    const originalStory = gitLocal(job, token,
-      ['ls-tree', '-r', '--name-only', job.baseSha, '--', job.storyRelativePath || '.'])
-    const emptyBase = !originalStory.split('\n').some(path => path.endsWith('.md'))
-    const hasErrors = diagnostics.some(d => d && typeof d === 'object' &&
-      'severity' in d && (d as { severity: unknown }).severity === 'error')
-    if (result.status !== 'passed' &&
-        !(emptyBase && result.status === 'unverified' && !hasErrors && result.report)) {
-      blockers.push('Canonical Story validation did not pass; resolve diagnostics before publication.')
-    }
-    if (protection !== 'checked') {
-      if (emptyBase && result.status === 'unverified' && !hasErrors)
-        blockers.push('The pinned baseline has no Story Markdown; protected decisions cannot be compared.')
-      else blockers.push('Canonical protected-decision verification is not checked.')
-    }
-  }
-  if (!await completedReview(job, head)) blockers.push('Full scoped completion review is absent or stale; draft is partial.')
-  if (targetSha !== job.baseSha) {
-    blockers.push('Upstream changed since the pinned job baseline; no automatic merge or rebase.')
-    blockers.push('Merged Story semantics and canonical protection against the new upstream have not been certified.')
-  }
-  let merge: Preview['merge'] = 'clean'
-  if (targetSha !== job.baseSha) {
-    try {
-      gitLocal(job, token, ['fetch', '--no-tags', '--filter=blob:none', 'origin', 'refs/heads/' + target])
-      const fetched = gitLocal(job, token, ['rev-parse', 'FETCH_HEAD'])
-      if (fetched !== targetSha) throw new Error('Upstream changed during fetch')
-      const probe = git(job, token, ['merge-tree', '--write-tree', targetSha, head], true)
-      merge = probe.code === 0 ? 'clean' : probe.code === 1 ? 'conflicts' : 'not-assessed'
-    } catch { merge = 'not-assessed' }
-    if (merge !== 'clean') blockers.push(merge === 'conflicts'
-      ? 'Git merge conflicts need author reconciliation before merge.'
-      : 'Git merge compatibility could not be assessed.')
-  }
-  const hard = blockers.some(x => x.startsWith('Uncommitted') || x.startsWith('No committed') ||
-    x.startsWith('Canonical Story validation') || x.startsWith('Canonical protected-decision'))
-  return { jobId: job.jobId, headSha: head, baseSha: job.baseSha, branch: job.branch,
-    targetBranch: target, targetSha, validation, diagnostics, protection, merge,
-    blockers, canPublish: !hard, linked: saved?.phase === 'linked' && saved.prNumber && saved.prUrl
-      ? { number: saved.prNumber, url: saved.prUrl, headSha: saved.headSha, targetBranch: saved.targetBranch } : null }
+  return reviewPublication(store, job, {
+    repository: row.repository, directory: row.directory, initialContentSha256: row.initialContentSha256,
+    remoteUrl: `https://github.com/${row.repository}.git`,
+  }, token, target, targetSha, saved?.phase === 'linked' && saved.prNumber && saved.prUrl
+    ? { number: saved.prNumber, url: saved.prUrl, headSha: saved.headSha, targetBranch: saved.targetBranch }
+    : null)
 }
 async function writeGithub(token: string, path: string, method: 'POST' | 'PATCH', body: unknown): Promise<GithubPr> {
   let response: Response
@@ -271,17 +132,10 @@ async function publish(store: StudioDatabase, owner: string, row: Row, job: JobS
     // An intent receipt precedes both the push and PR creation. Crash recovery
     // always reconciles remote refs and PRs before performing any new write.
     if (!existing) savePublication(store, owner, job, remote.target, view.headSha)
-    const remoteHead = remoteRef(job, token, job.branch)
-    if (remoteHead && remoteHead !== view.headSha) {
-      const ancestor = git(job, token, ['merge-base', '--is-ancestor', remoteHead, view.headSha], true)
-      if (ancestor.code !== 0)
-        throw new GithubError(409, 'Remote job branch diverged. Never force-push or overwrite it.')
-    }
-    if (remoteHead !== view.headSha) {
-      gitLocal(job, token, ['push', 'origin', 'HEAD:refs/heads/' + job.branch])
-      if (remoteRef(job, token, job.branch) !== view.headSha)
-        throw new GithubError(409, 'Remote push result is uncertain; retry to reconcile without force.')
-    }
+    const source = { repository: row.repository, directory: row.directory,
+      initialContentSha256: row.initialContentSha256,
+      remoteUrl: 'https://github.com/' + row.repository + '.git' }
+    pushVerifiedBranch(job, source, token, view.headSha)
     savePublication(store, owner, job, remote.target, view.headSha)
     const targetAgain = await remoteContext(token, row)
     if (targetAgain.target !== remote.target || targetAgain.targetSha !== remote.targetSha)
@@ -293,15 +147,7 @@ async function publish(store: StudioDatabase, owner: string, row: Row, job: JobS
       pr = await github<GithubPr>(token, path + '/pulls/' + saved.prNumber)
       verifyPr(pr, row.providerId, job.branch, remote.target)
     } else pr = await findPr(token, path, row.repository, row.providerId, job, remote.target)
-    const body = [
-      'NovelTea Story draft generated from a pinned, verified job revision.',
-      '', 'Job: `' + job.jobId + '`', 'Base commit: `' + job.baseSha + '`',
-      'Verified head: `' + view.headSha + '`',
-      'Canonical validation: ' + view.validation + ' (protection: ' + view.protection + ')',
-      'Merge preview: ' + view.merge, '', 'Outstanding blockers / review obligations:',
-      ...(view.blockers.length ? view.blockers.map(s => '- ' + s) : ['- None reported; human review is still required.']),
-      '', 'Draft only. No automatic merge, rebase or protected-decision approval.',
-    ].join('\n')
+    const body = publicationDescription(job, view)
     if (!pr) {
       try {
         pr = await writeGithub(token, path + '/pulls', 'POST', {
@@ -317,7 +163,7 @@ async function publish(store: StudioDatabase, owner: string, row: Row, job: JobS
       pr = await writeGithub(token, path + '/pulls/' + pr.number, 'PATCH', { body })
     }
     verifyPr(pr, row.providerId, job.branch, remote.target)
-    if (pr.head.sha !== view.headSha || remoteRef(job, token, job.branch) !== view.headSha)
+    if (pr.head.sha !== view.headSha || remotePublicationHead(job, source, token, job.branch) !== view.headSha)
       throw new GithubError(409, 'GitHub PR or remote branch moved from the verified job HEAD. Reconcile before linking.')
     savePublication(store, owner, job, remote.target, view.headSha, pr)
     return { ...view, linked: { number: pr.number, url: pr.html_url,
@@ -340,32 +186,15 @@ export async function githubPublicationRequest(auth: StudioAuth, store: StudioDa
     if (!token) throw new GithubError(409, 'Reconnect your GitHub account before publishing.')
     const job = await authorizedStoryJob(store, actor.id, id)
     if (job.baseSha !== row.baseSha) throw new GithubError(409, 'Saved job baseline has changed.')
-    remoteByJob.set(job, row.repository)
     if (request.method === 'POST') {
-      const reader = request.body?.getReader()
-      if (!reader) throw new GithubError(400, 'Missing publication request.')
-      const chunks: Uint8Array[] = []
-      let bytes = 0
-      try {
-        for (;;) {
-          const { value, done } = await reader.read()
-          if (done) break
-          bytes += value.byteLength
-          if (bytes > 2048) throw new GithubError(413, 'Publication request is too large.')
-          chunks.push(value)
-        }
-      } finally { reader.releaseLock() }
-      const raw = Buffer.concat(chunks).toString('utf8')
-      let expected: { headSha?: string; targetSha?: string; allowPartial?: boolean }
-      try { expected = JSON.parse(raw) as typeof expected }
-      catch { throw new GithubError(400, 'Invalid publication request.') }
-      if (!SHA.test(expected?.headSha ?? '') || !SHA.test(expected?.targetSha ?? '') ||
-          (expected.allowPartial !== undefined && typeof expected.allowPartial !== 'boolean'))
-        throw new GithubError(400, 'Provide the exact preview HEADs and confirmation.')
+      const expected = await readPublicationRequest(request)
       return json({ publication: await publish(store, actor.id, row, job, token, expected) })
     }
     const remote = await remoteContext(token, row)
     return json({ publication: await withStoryJobLock(job, 'github-publication-preview',
       () => preview(store, actor.id, row, job, token, remote.target, remote.targetSha)) })
-  } catch (error) { return errorResponse(error) }
+  } catch (error) {
+    if (error instanceof PublicationFailure) return json({ error: error.message }, error.status)
+    return errorResponse(error)
+  }
 }

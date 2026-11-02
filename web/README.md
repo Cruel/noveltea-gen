@@ -777,7 +777,43 @@ pnpm --filter @noveltea/studio exec tsx --test test/github-publication.test.ts
 
 Real GitHub credentials and live push/PR publication remain part of #71's
 end-to-end certification; this test does not claim to certify provider access
-or hosted GitHub behavior. GitLab MR publication is a separate workflow.
+or hosted GitHub behavior.
+
+## Draft GitLab publication (#70)
+
+The same authenticated job publication page and `GET/POST /api/jobs/:jobId/publish`
+endpoints also support GitLab.com Stories. GitLab publication uses the **same
+pinned native Story validation, protected-decision, clean verified HEAD,
+read-only upstream merge assessment, partial-draft confirmation, and non-force
+push contract** as GitHub (#69). On every request, the provider adapter
+rechecks the current GitLab OAuth connection, writable project membership,
+immutable GitLab project ID/path and default branch commit. A lost grant or
+failed push leaves the job's original committed worktree untouched.
+
+GitLab drafts use the documented `Draft:` title prefix. The first successful
+publication creates an MR from the isolated job branch without deleting it;
+subsequent publication updates the **same draft MR description** with current
+validation status, unresolved obligations, and GitHub-independent GitLab links.
+If an existing MR is closed, merged, marked ready or points at a different
+project/branch, the controller rejects rather than creating a second MR or
+forcing it back to draft. An ambiguous create is reconciled by exhaustive
+source-branch lookup. Migration **14** stores the MR's IID, URL, target, last
+verified HEAD and pending/linked phase outside the Git cache in
+`gitlab_publications`. Run `pnpm --filter @noveltea/studio migrate` before
+starting a deployment built with #70.
+
+The offline integration test uses a real bare Git remote and simulated GitLab
+API: authentication/foreign-job rejection, upstream staleness, explicit partial
+authorization, failed push, durable restart, duplicate-MR reconciliation,
+remote divergence, lost permissions and a no-longer-draft MR.
+
+```sh
+pnpm --filter @noveltea/studio exec tsx --test test/gitlab-publication.test.ts
+```
+
+Live GitLab.com OAuth, push and MR behavior remain an explicit end-to-end
+certification obligation under #71. No workflow automatically merges, rebases
+or advances an existing default branch.
 
 ## Acceptance/testing limitations
 

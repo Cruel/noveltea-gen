@@ -6,7 +6,10 @@ type Preview = {
   canPublish: boolean; diagnostics: unknown[]
   linked: { number: number; url: string; headSha: string; targetBranch: string } | null
 }
-export function PublishDraft({ jobId }: { jobId: string }) {
+export function PublishDraft({ jobId, provider }: { jobId: string; provider: 'github' | 'gitlab' }) {
+  const isGitlab = provider === 'gitlab'
+  const service = isGitlab ? 'GitLab' : 'GitHub'
+  const review = isGitlab ? 'MR' : 'PR'
   const [preview, setPreview] = useState<Preview | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
@@ -31,7 +34,7 @@ export function PublishDraft({ jobId }: { jobId: string }) {
           allowPartial: confirmed }),
       })
       const result = await response.json() as { publication?: Preview; error?: string }
-      if (!response.ok || !result.publication) throw new Error(result.error || 'Draft PR publication failed')
+      if (!response.ok || !result.publication) throw new Error(result.error || 'Draft ' + review + ' publication failed')
       setPreview(result.publication)
       setConfirmed(false)
     } catch (err) {
@@ -40,11 +43,11 @@ export function PublishDraft({ jobId }: { jobId: string }) {
       setPreview(null)
       setConfirmed(false)
       setError((err instanceof Error ? err.message : 'Publication failed') +
-        ' Refresh the preview to reconcile any remotely published branch or PR.')
+        ' Refresh the preview to reconcile any remotely published branch or review request.')
     } finally { setBusy(false) }
   }
-  return <section aria-label="Draft GitHub PR">
-    <h2>Draft GitHub pull request</h2>
+  return <section aria-label={'Draft ' + service + ' ' + review}>
+    <h2>Draft {service} {isGitlab ? 'merge request' : 'pull request'}</h2>
     <p>Review the pinned job against current upstream before pushing. Publication never merges,
       rebases or writes the default branch; incomplete work may be published for review as a draft.</p>
     <button type="button" disabled={busy} onClick={() => void fetchPreview()}>
@@ -65,8 +68,8 @@ export function PublishDraft({ jobId }: { jobId: string }) {
       <h3>Review obligations and blockers</h3>
       {preview.blockers.length
         ? <ul>{preview.blockers.map(b => <li key={b}>{b}</li>)}</ul>
-        : <p>No reported blockers; a draft PR still requires human review.</p>}
-      {preview.linked && <p>Linked draft PR: <a href={preview.linked.url}
+        : <p>No reported blockers; a draft {review} still requires human review.</p>}
+      {preview.linked && <p>Linked draft {review}: <a href={preview.linked.url}
         target="_blank" rel="noopener noreferrer">#{preview.linked.number}</a>
         {' · '}Last published HEAD: <code>{preview.linked.headSha}</code></p>}
       {preview.canPublish && preview.blockers.length > 0 && <label>
@@ -78,7 +81,7 @@ export function PublishDraft({ jobId }: { jobId: string }) {
         <button type="button" disabled={busy || !preview.canPublish ||
           (preview.blockers.length > 0 && !confirmed)}
           onClick={() => void publish()}>
-          {preview.linked ? 'Update existing draft PR' : 'Push branch and create draft PR'}
+          {preview.linked ? 'Update existing draft ' + review : 'Push branch and create draft ' + review}
         </button>
       </div>
     </div>}
