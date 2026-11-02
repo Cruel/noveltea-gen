@@ -30,8 +30,9 @@ command endpoint; never expose port 7001 or enable unsandboxed Pi tools.
   `--network none`, read-only container filesystem, no capabilities, no new
   privileges, bounded CPU/memory/PIDs/tmpfs/output/execution time and no host
   controller/socket/credential/Git mounts. The verified canonical content
-  directory (`<workspace>/story`) is a **single** writable bind mount at
-  `/story`, including newly added record-type directories automatically.
+  directory (`<workspace>/story`) is the **only** writable mount at
+  `/story`: a validated named-volume subpath in Compose, or a bind mount
+  in host-only mode. New record-type directories are included automatically.
   Hidden, symlinked and special entries in the mounted tree are rejected.
   `.git` and the sibling `.story-inbox` remain outside the mount. Legacy
   repository-root Stories or Stories containing an inbox must migrate before
@@ -71,20 +72,21 @@ create`, token-file generation, or migration command is required.
 
 Prerequisites: a Linux **rootless Docker daemon** with cgroup v2/systemd and
 delegated CPU/memory/PID controls; the Docker Compose plugin; the native NovelTea
-CLI and `noveltea-skills` checkout. **Both `NT_NATIVE_CLI_HOST` and
-`NT_SKILLS_HOST` are required** and have no default values. Set them to
-existing host paths in the shell or a Git-ignored **root** `.env` before
-running Compose (copy `.env.example` to `.env`), for example:
+CLI and `noveltea-skills` checkout. The defaults are the sibling paths
+`../nt/build/cli/linux/noveltea` and `../noveltea-skills`. These work with
+the standard NovelTea checkout layout and require **no second env file**.
+For a different installation, override `NT_NATIVE_CLI_HOST` and `NT_SKILLS_HOST`
+from the shell or a Git-ignored root `.env`, for example:
 
 ```dotenv
 NT_NATIVE_CLI_HOST=/absolute/path/to/nt/build/cli/linux/noveltea
 NT_SKILLS_HOST=/absolute/path/to/noveltea-skills
 ```
 
-Compose rejects missing or empty values during configuration, before creating
-containers. The root `.env` is for Compose mount interpolation; `web/.env`
-remains the runtime-secrets file. The rootless daemon socket defaults to
-`/run/user/1000/docker.sock`; override it using `NT_ROOTLESS_DOCKER_SOCKET`
+Compose rejects nonexistent mount sources instead of creating placeholder
+host paths. The optional root `.env` is for Compose mount interpolation;
+`web/.env` remains the only required runtime-secrets file. The rootless
+Docker socket defaults to `/run/user/1000/docker.sock`; override it using `NT_ROOTLESS_DOCKER_SOCKET`
 when the host UID or socket path differs. Missing native CLI / skills / socket
 mount sources fail the deployment rather than silently creating empty paths.
 The native CLI is bind-mounted read-only into the trusted web and agent services;
@@ -108,7 +110,7 @@ shared only with the trusted agent; the web service receives neither.
 The controller alone has the rootless daemon Unix socket, with
 `network_mode: none`, dropped capabilities and no new privileges.
 The job sandboxes remain isolated rootless sibling containers, with
-a single validated `/story` bind, no networking, and no Docker socket.
+a single validated `/story` mount, no networking, and no Docker socket.
 
 Inspect health / failures:
 

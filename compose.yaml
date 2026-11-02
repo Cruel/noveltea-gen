@@ -11,7 +11,7 @@ x-trusted-volumes: &trusted-volumes
 
 x-native-cli: &native-cli
   type: bind
-  source: ${NT_NATIVE_CLI_HOST:?Set NT_NATIVE_CLI_HOST to the host path of the native NovelTea CLI}
+  source: ${NT_NATIVE_CLI_HOST:-../nt/build/cli/linux/noveltea}
   target: /opt/noveltea/noveltea
   read_only: true
   bind:
@@ -19,7 +19,7 @@ x-native-cli: &native-cli
 
 x-skills: &skills
   type: bind
-  source: ${NT_SKILLS_HOST:?Set NT_SKILLS_HOST to the host path of the noveltea-skills checkout}
+  source: ${NT_SKILLS_HOST:-../noveltea-skills}
   target: /opt/noveltea-skills
   read_only: true
   bind:

@@ -125,6 +125,10 @@ async function main() {
     docker('compose', 'exec', '-T', 'web', '/opt/noveltea/noveltea', '--version')
     docker('compose', 'exec', '-T', 'agent', 'test', '-f',
       '/opt/noveltea-skills/skills/nt-story-architecture/SKILL.md')
+    // Exercise the real rootless daemon's Story subtree mount, not just
+    // controller health: this catches sidecar/host-volume path mismatches.
+    assert.match(docker('compose', 'exec', '-T', 'agent', 'node', '--import', 'tsx',
+      'scripts/compose-sandbox-smoke.ts'), /PASS registered Compose job/)
     const app = '/var/lib/noveltea/app/studio.sqlite'
     const graph = '/var/lib/noveltea/state/compose-certification.sqlite'
     seed('web', app)

@@ -29,9 +29,9 @@ export interface ControllerConfig {
   appVolume: string
   stateVolume: string
   cacheVolume: string
-  /** Rootless daemon host path for the cache volume, when the controller runs
-   * inside a trusted container with the volume mounted at cacheVolume. */
-  dockerCacheVolume?: string
+  /** Compose-only trusted volume name; mount exactly the validated Story
+   * subpath rather than a bind beneath the rootless daemon's data directory. */
+  sandboxCacheVolume?: string
   image: string
   /** The paths Studio/graph see for Compose-managed volumes, never HTTP inputs. */
   containerState: string
@@ -109,7 +109,7 @@ function checkRecordTree(root: string) {
   inspect(root)
 }
 
-type TrustedJob = { id: string; storyRoot: string; dockerStoryRoot: string; identity: string; imageId: string }
+type TrustedJob = { id: string; storyRoot: string; volumeSubpath: string; identity: string; imageId: string }
 type JobRow = {
   ownerId: string; provider: string; providerId: string; directory: string; pin: string
 }
@@ -201,9 +201,8 @@ export function resolveTrustedJob(config: ControllerConfig, jobId: string, image
     if (error instanceof SandboxError) throw error
     throw new SandboxError(409, 'Saved job worktree is missing or has an unsafe filesystem identity.')
   }
-  const daemonRoot = config.dockerCacheVolume ?? config.cacheVolume
   return { id: jobId, storyRoot: hostStory,
-    dockerStoryRoot: join(daemonRoot, scoped, 'worktrees', stateHash, row.directory),
+    volumeSubpath: hostStory.slice(config.cacheVolume.length + 1).split(sep).join('/'),
     identity: stateHash, imageId }
 }
 
@@ -264,7 +263,7 @@ export function loadControllerConfig(env: NodeJS.ProcessEnv = process.env, run: 
     appVolume: inCompose ? '/var/lib/noveltea/app' : hostApp,
     stateVolume: inCompose ? '/var/lib/noveltea/state' : hostState,
     cacheVolume: inCompose ? '/var/lib/noveltea/cache' : hostCache,
-    ...(inCompose ? { dockerCacheVolume: hostCache } : {}),
+    ...(inCompose ? { sandboxCacheVolume: env.NT_SANDBOX_CACHE_VOLUME || 'noveltea-cache' } : {}),
     image: env.NT_SANDBOX_IMAGE || 'noveltea-sandbox:local',
     containerState: '/var/lib/noveltea/state',
     containerCache: '/var/lib/noveltea/cache',
@@ -324,8 +323,9 @@ export class SandboxController {
       // Validate the complete tree before every acquisition, including restarts.
       checkAncestry(this.config.cacheVolume, job.storyRoot)
       checkRecordTree(job.storyRoot)
-      const mounts = ['--mount',
-        `type=bind,source=${job.dockerStoryRoot},target=/story,bind-propagation=rprivate`]
+      const mounts = ['--mount', this.config.sandboxCacheVolume
+        ? `type=volume,source=${this.config.sandboxCacheVolume},target=/story,volume-subpath=${job.volumeSubpath}`
+        : `type=bind,source=${job.storyRoot},target=/story,bind-propagation=rprivate`]
       if (!exists) {
         dockerRequired(this.run, [
           'create', '--name', containerName(id),
