@@ -68,6 +68,21 @@ export const generationRunQueue = sqliteTable('generation_run_queue', {
   index('generation_run_queue_order').on(table.phase, table.sequence),
 ])
 
+export const githubPublications = sqliteTable('github_publications', {
+  jobId: text('job_id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  targetBranch: text('target_branch').notNull(),
+  remoteBranch: text('remote_branch').notNull(),
+  headSha: text('head_sha').notNull(),
+  phase: text('phase', { enum: ['pending', 'linked'] }).notNull(),
+  prNumber: integer('pr_number'),
+  prUrl: text('pr_url'),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.jobId, table.ownerUserId],
+    foreignColumns: [sessions.id, sessions.ownerUserId] }),
+])
+
 export const sessions = sqliteTable('studio_sessions', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),

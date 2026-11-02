@@ -5,9 +5,10 @@ import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity } from './-GenerationActivity'
 import { AuthorInteractions } from './-AuthorInteractions'
 import { GitChanges } from './-GitChanges'
+import { PublishDraft } from './-PublishDraft'
 
 type Job = {
-  id: string; storyId: string; title: string; baseSha: string; headSha: string
+  id: string; storyId: string; title: string; provider: string; baseSha: string; headSha: string
   status: string; threadId: string | null; fixture: boolean; task: string | null
   contract: unknown; reason: string | null; completedStages: Array<{ stage: string; status: string }>
 }
@@ -155,6 +156,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
       <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
       <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
       <GitChanges jobId={jobId} revision={job.headSha} />
+      {job.provider === 'github' && <PublishDraft jobId={jobId} />}
       <StoryExplorer jobId={jobId} revision={job.headSha} />
       {job.status === 'prepared'
         ? <GenerationConfiguration jobId={jobId} onStarted={refresh} />

@@ -152,7 +152,7 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
   const job = await restoreJob(row, owner)
   const pinned = pinnedRequest(row, job)
   const queued = queueRecord(store, row.id)
-  const base = { id: row.id, storyId: row.storyId, title: row.title,
+  const base = { id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
     baseSha: job.baseSha, headSha: job.headSha, fixture: pinned?.fixture ?? true }
   if (!pinned) {
     // A crash between the server-owner claim and the database publication

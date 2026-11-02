@@ -740,6 +740,45 @@ the explorer to refresh working-tree indicators without advancing HEAD.
 The explorer integration test exercises the verified/uncommitted split,
 restored trusted receipt, deletions, unindexed paths and more than 24 changes.
 
+## Draft GitHub publication (#69)
+
+On a GitHub generation job, choose **Preview validation and upstream** in the
+Draft GitHub pull request section. The read-only preview rechecks the connected
+GitHub App installation, repository identity and current default-branch SHA;
+verifies the trusted job revision and clean worktree; runs the pinned canonical
+Story validator and protected-decision checks; and assesses Git merge conflicts
+against upstream without merging or rebasing the worktree. Missing current-head
+scope review and any upstream divergence are reported as blockers. A saved
+single-commit onboarding draft is verified by its original content digest.
+Canonical rejection, unchecked protection on an established Story, dirty files,
+unsafe Git ancestry or incomplete revision receipts prohibit publication.
+
+Click **Push branch and create draft PR** only after reviewing the preview.
+Partial but structurally validated work requires explicit blocker confirmation
+and publishes a draft, never a final PR or merge. POST requires the exact
+previewed job HEAD and upstream SHA and rechecks both before writing. The
+server uses normal non-force Git pushes; remote divergence is rejected. The
+linked PR number, URL, target and last head live in durable migration 13's
+`github_publications` table, separate from the evictable Git cache. A pending
+publication intent is persisted before the push, and retries reconcile any
+remote branch and existing draft PR before creating one. Later publication
+updates the same draft PR; closed or non-draft PRs require manual reconciliation.
+A failed push or lost GitHub authorization preserves the local job branch.
+
+Routes: `GET/POST /api/jobs/:jobId/publish`, owner-authenticated and
+same-origin protected for writes. Migrate before starting Studio using
+`pnpm --filter @noveltea/studio migrate`. The local integration test uses a
+real bare Git remote with a GitHub API fixture (including restart, stale
+upstream, duplicate-PR prevention and divergent remote branch):
+
+```sh
+pnpm --filter @noveltea/studio exec tsx --test test/github-publication.test.ts
+```
+
+Real GitHub credentials and live push/PR publication remain part of #71's
+end-to-end certification; this test does not claim to certify provider access
+or hosted GitHub behavior. GitLab MR publication is a separate workflow.
+
 ## Acceptance/testing limitations
 
 The isolated migration/restart and user-ownership tests do not invoke live
