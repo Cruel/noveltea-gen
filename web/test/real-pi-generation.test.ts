@@ -191,7 +191,9 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     if (!verified) {
       const events = listGenerationEvents(store, user.id, jobId, 0).map(e =>
         ({ kind: e.kind, stage: e.stage, status: e.status }))
-      let checkpoint: { status?: string; reason?: string; failures?: Record<string,string> } = {}
+      let checkpoint: { status?: string; reason?: string; failures?: Record<string,string>;
+        cursor?: number; active?: {stage?: string; id?: string} | null;
+        inventory?: {items?: Array<{stage?: string; status?: string}>} } = {}
       const checkpointFile = join(job.stateDir, 'web-generation.sqlite')
       if (existsSync(checkpointFile)) {
         const { saver, graph } = openWebGenerationGraph(checkpointFile)
@@ -204,18 +206,31 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       }
       const classify = (reason?: string) => {
         const text = (reason ?? '').toLowerCase()
-        if (/budget|limit|step/.test(text)) return 'budget-limit'
+        if (/^pi budget exhausted at safe boundary:/.test(text)) return 'pi-budget-exhausted'
+        if (/(?:step|turn|model.call) (?:budget|limit)(?:s)? (?:exceeded|reached|exhausted)/.test(text)) return 'step-limit'
+        if (/resource (?:limit|exhaust)|oom|out of memory/.test(text)) return 'sandbox-resource-limit'
         if (/unauthori|forbidden|401|403|token|credential|oauth|login/.test(text)) return 'authentication'
         if (/429|rate.limit|quota/.test(text)) return 'rate-limit'
+        if (/context window|context length|token limit/.test(text)) return 'model-context-limit'
         if (/model|provider|response|api/.test(text)) return 'provider'
         if (/sandbox|docker|container|socket|mount/.test(text)) return 'sandbox'
         if (/validate|schema|story|yaml|revision/.test(text)) return 'validation'
+        if (/git|worktree|dirty|commit/.test(text)) return 'git-state'
+        if (/prompt|assistant|tool|specialist/.test(text)) return 'specialist'
         return text ? 'other' : 'none'
       }
       console.error('Live generation stopped before foundation verification:', JSON.stringify({
         events, queuePhase: queueRecord(store, jobId)?.phase,
         checkpointStatus: checkpoint.status,
         reasonCategory: classify(checkpoint.reason),
+        reasonIndicators: {
+          budget: /^Pi budget exhausted at safe boundary/.test(checkpoint.reason ?? ''),
+          containsLimit: /limit/i.test(checkpoint.reason ?? ''),
+          containsStep: /step/i.test(checkpoint.reason ?? ''),
+          containsError: /error|fail/i.test(checkpoint.reason ?? ''),
+        },
+        cursor: checkpoint.cursor, activeStage: checkpoint.active?.stage,
+        inventory: checkpoint.inventory?.items?.map(item => ({stage: item.stage, status: item.status})),
         failures: Object.fromEntries(Object.entries(checkpoint.failures ?? {}).map(
           ([key, reason]) => [key, classify(reason)])),
       }))
