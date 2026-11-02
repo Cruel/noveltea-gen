@@ -551,16 +551,55 @@ are durable across restarts. Reconnect if an in-flight device authorization
 is interrupted by a restart or if provider access is revoked. An API key being
 present does not prove the remote vendor will accept it until a real API call.
 
-Job-level specialist-step, model-call and reported-cost limits can be saved,
-but they are **draft values, not enforced execution limits** until the real Pi
-controller integrates them. Fixture runs do not consume Pi budgets. Real Pi
-generation, wall-clock and sandbox-resource enforcement remain work for the
-live execution controller. The existing fixture-only start route still refuses
-client-supplied model/provider settings and cannot run live Pi.
+Job-level specialist-step, model-call and reported-cost budgets are enforced by the
+real Pi controller at specialist boundaries, using persisted Pi session usage.
+A budget stop pauses generation without invalidating independently verified
+commits. Fixture runs do not make model requests. The rootless Docker controller
+separately enforces sandbox resource ceilings; wall-clock enforcement requires
+an additional deployment policy. The authenticated start endpoint refuses
+client-supplied provider/model/tool settings.
 
 The native catalog/owner-scoped integration cases are covered in
 `web/test/story-explorer.test.ts`, with fixture-start binding covered in
 `web/test/fixture-jobs.test.ts`.
+
+## Job queue, controls, and crash recovery (#67)
+
+Apply migration **12** while Studio is stopped:
+`pnpm --filter @noveltea/studio migrate`. The durable SQLite
+`generation_run_queue` reserves at most **two** active generation runs by default.
+Set `NT_STUDIO_MAX_ACTIVE_JOBS=1..32` in the host environment to change that
+limit. Entries use FIFO admission. A queued run is reconstructed from the
+pinned Story/job/thread and user credential store, not its originating browser
+connection. Browser disconnect does not cancel execution.
+
+The job page exposes **Pause**, **Resume**, **Cancel**, **Retry after inspection**
+and **Inspect**. `GET /api/jobs/:id/control` returns owner-scoped execution
+intent, queue status, and persisted Pi budget usage; the same-origin POST
+accepts a single typed action. Pause and Cancel are persistent intents handled
+at safe work boundaries rather than forcibly terminating a writer. Queued
+jobs can be paused or cancelled without starting. A terminal cancellation
+cannot be undone. Resume only admits an unchanged pinned job at a clean,
+trusted, idle graph checkpoint (or an unstarted, paused job). A budget-stopped
+specialist may also resume from its recorded preflight boundary, with no
+unverified Git edits or prior specialist result. Studio permits an increase
+to step, model-call, or reported-cost limits while paused, but never a decrease,
+usage reset, provider swap, or scope change.
+
+Interrupted execution is **never automatically replayed**. The queue retains
+failed or vanished-worker evidence; GET inspection remains available even
+with dirty partial files or an unverified Git HEAD. Retry checks the original
+checkpoint, owner receipt, clean Git worktree and trusted revision and rejects
+anything requiring manual reconciliation. In-flight work from other live
+processes cannot have its queue capacity stolen. An unrecognized or remote
+host owner remains reserved pending operator intervention. Do not clear
+worktree edits, specialist receipts, checkpoint files, or pinned validation
+state to force a retry.
+
+Integration tests: `web/test/generation-queue.test.ts`,
+`web/test/generation-controls.test.ts`, and
+`web/test/fixture-jobs.test.ts`. Real rootless Docker/Pi certification
+remains opt-in via `NT_TEST_WEB_REAL_PI=1` and its documented credentials.
 
 ## New Story onboarding and author discovery (#63)
 

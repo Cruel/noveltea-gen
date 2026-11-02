@@ -53,6 +53,21 @@ export const generationEvents = sqliteTable('generation_events', {
   index('generation_events_job_idx').on(table.ownerUserId, table.jobId, table.id),
 ])
 
+export const generationRunQueue = sqliteTable('generation_run_queue', {
+  sequence: integer('sequence').primaryKey({ autoIncrement: true }),
+  jobId: text('job_id').notNull().unique(),
+  ownerUserId: text('owner_user_id').notNull(),
+  intent: text('intent', { enum: ['start', 'resume'] }).notNull(),
+  phase: text('phase', { enum: ['queued', 'running', 'finished', 'interrupted'] }).notNull(),
+  workerId: text('worker_id'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.jobId, table.ownerUserId],
+    foreignColumns: [sessions.id, sessions.ownerUserId] }),
+  index('generation_run_queue_order').on(table.phase, table.sequence),
+])
+
 export const sessions = sqliteTable('studio_sessions', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),

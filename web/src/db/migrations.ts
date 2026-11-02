@@ -150,6 +150,23 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    version: 12,
+    statements: [
+      `CREATE TABLE generation_run_queue (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL UNIQUE,
+        owner_user_id TEXT NOT NULL,
+        intent TEXT NOT NULL CHECK(intent IN ('start','resume')),
+        phase TEXT NOT NULL CHECK(phase IN ('queued','running','finished','interrupted')),
+        worker_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (job_id, owner_user_id) REFERENCES studio_sessions (id, owner_user_id) ON DELETE CASCADE
+      )`,
+      `CREATE INDEX generation_run_queue_order ON generation_run_queue (phase, sequence)`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -186,7 +203,9 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     WHERE type='table' AND name='generation_events'`).get()
   const hasPiOnboarding = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='story_onboarding_conversations'`).get()
-  if (!hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasQueue = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='generation_run_queue'`).get()
+  if (!hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

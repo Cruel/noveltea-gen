@@ -52,6 +52,21 @@ export async function claimServerGeneration(job: JobStartResult, threadId: strin
     throw new Error("Story generation is already bound to another thread or pinned request; no second writer is allowed.");
   }
 }
+/** Read-only preflight for queue admission: an owner receipt may already
+ * exist after a crash, but a queued item must not create one until dispatched. */
+export async function assertServerClaimPermitted(job: JobStartResult,
+  threadId: string, request: GenerationRequest): Promise<void> {
+  if (existsSync(join(job.stateDir, "generation.sqlite")) ||
+      existsSync(join(job.stateDir, ".story-generation-running")))
+    throw new Error("CLI generation checkpoint exists; server takeover is forbidden.");
+  if (!existsSync(file(job))) return;
+  let saved: Owner;
+  try { saved = JSON.parse(await readFile(file(job), "utf8")) as Owner; }
+  catch { throw new Error("Server ownership receipt unreadable; manual inspection required."); }
+  if (saved.schema !== "noveltea-generation-owner/v1" || saved.jobId !== job.jobId ||
+      saved.threadId !== threadId || saved.requestSha256 !== sha(request))
+    throw new Error("Existing server owner receipt conflicts with the pinned queue request.");
+}
 export function ensureNotServerOwned(job: JobStartResult): void {
   if (existsSync(file(job)))
     throw new Error("This Story job belongs to a server-owned generation thread; CLI checkpoint takeover is forbidden.");
