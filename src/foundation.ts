@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { renderFoundation, type FoundationDraft } from "./demo.js";
 import { hasUserProtectedDecision } from "./foundation-record.js";
@@ -193,7 +194,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       throw new Error(`Missing pinned NovelTea skill: ${name}`);
     }
   }
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const sessionDir = join(job.stateDir, "foundation-sessions");
   const authoredFile = join(project.root, target);
   const context = await preparePiContext(job, project, {
@@ -341,7 +342,7 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
   for (const diag of loader.getSkills().diagnostics) {
     if (diag.type === "error") throw new Error(`Pi discovery skill error: ${diag.message}`);
   }
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const sessions = join(job.stateDir, "foundation-discovery-sessions");
   const context = await preparePiContext(job, project, {
     group: "foundation:discovery", step: "foundation:discovery",

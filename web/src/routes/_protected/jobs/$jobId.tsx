@@ -8,7 +8,7 @@ import { GitChanges } from './-GitChanges'
 
 type Job = {
   id: string; storyId: string; title: string; baseSha: string; headSha: string
-  status: string; threadId: string | null; fixture: true; task: string | null
+  status: string; threadId: string | null; fixture: boolean; task: string | null
   contract: unknown; reason: string | null; completedStages: Array<{ stage: string; status: string }>
 }
 export const Route = createFileRoute('/_protected/jobs/$jobId')({ component: JobDetails })
@@ -42,14 +42,15 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
   return <main className="page">
     <header><div><p className="eyebrow">NovelTea</p><h1>Generation job</h1></div>
       <nav><a href="/dashboard">Dashboard</a></nav></header>
-    <p>Job <code>{jobId}</code>. This phase only runs the real Story graph with deterministic fixtures;
-      no real Pi session or model-directed shell tools are permitted.</p>
+    <p>Job <code>{jobId}</code>. Generation runs through the same checkpointed Story graph,
+      using either deterministic fixtures or the selected, sandboxed Pi model.
+      Refresh or reconnect without restarting a writer.</p>
     {error && <p role="alert" className="error">{error}</p>}
     {!job && !error && <p>Loading job…</p>}
     {job && <>
       <section>
         <h2>{job.title}</h2>
-        <p><strong>Status:</strong> {job.status}</p>
+        <p><strong>Status:</strong> {job.status} · <strong>Execution:</strong> {job.status === 'prepared' ? 'not started' : job.fixture ? 'deterministic fixture' : 'sandboxed Pi'}</p>
         <p><strong>Pinned Git commit:</strong> <code>{job.baseSha}</code></p>
         <p><strong>Job HEAD:</strong> <code>{job.headSha}</code></p>
         {job.threadId && <p><strong>Durable graph thread:</strong> <code>{job.threadId}</code></p>}

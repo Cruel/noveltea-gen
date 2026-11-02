@@ -1498,6 +1498,40 @@ Use `approval request --file payload.json` for an exact reviewed payload,
 including an editorial review. The authenticated same-origin `POST /api/approvals`
 uses the same graph and ledger, with job ownership checked against the app store.
 
+### Real Pi Story generation in Studio (#66)
+
+A saved Studio generation draft with an explicitly connected Pi model now starts the
+production LangGraph Story graph in **real** mode, not in the former fixture-only
+web mode. With no model selected, deterministic fixture execution remains available
+for developer verification. The browser submits only its previously validated task
+and canonical scope; it cannot choose a model, sandbox, host path or execution mode
+in the start request. The server checks the saved model against that user's
+**encrypted Pi credentials**, pins provider/model/thinking and step/model-call/cost
+budgets in durable per-job policy, and verifies native Git HEAD and clean-worktree
+preconditions before claiming the only web generation thread.
+
+Real mode requires `NT_PI_CREDENTIAL_KEY`, the private rootless Docker
+`NT_SANDBOX_SOCKET` and `NT_SANDBOX_TOKEN_FILE`, the native NovelTea CLI, and
+pinned NovelTea skills. Studio startup enforces `NT_REQUIRE_USER_PI_RUNTIME=1`:
+all Pi specialists, including nested reviewers, get a request-scoped user runtime
+rather than environment credentials or local Pi auth. The controller independently
+validates the registered job and mounts only the canonical `story/` content root
+at `/story`; shell/file/search tools cannot see the Git checkout, author inbox,
+other users' data or host secrets. Reviewer roles retain read-only tools. All
+native validation, protected author decisions, source-linked Git comparison and
+commits remain owned by the existing trusted generation graph.
+
+The initial real start returns HTTP 202; the execution continues independently
+of the browser request. The existing authenticated job page, persistent graph
+checkpoint and ordered SSE progress journal support reconnection. Successful
+model-facing commands never enter the high-level activity stream; use the
+existing local LangGraph traces when diagnostics are needed. On error, jobs
+preserve their original checkpoint, Pi sessions and uncommitted worktree for
+explicit recovery; neither browser refresh nor a repeated start can replay an
+interrupted writer. Rootless sandboxes are disposed after the generation run,
+including waits for human review. Explicit retry/resume, scheduling and recovery
+controls belong to #67, and real provider-to-publication certification to #71.
+
 ### Web author questions and approval interrupts (#65)
 
 The job details page shows saved author-update questions and protected approval

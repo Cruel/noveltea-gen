@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHmac, randomBytes } from 'node:crypto'
+import { createJobModelRuntime, withJobModelRuntime } from '../../src/model-runtime'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -87,6 +88,27 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     await assert.rejects(assertUserPiSelection(store, bob.id, selection), /unavailable/)
     const runtime = await createUserPiRuntime(store, alice.id)
     assert.ok(runtime.getModel(selectable.provider, selectable.id))
+    const previousStrict = process.env.NT_REQUIRE_USER_PI_RUNTIME
+    process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+    try {
+      await assert.rejects(createJobModelRuntime(), /not bound to an authenticated user/)
+      const [owned, foreign] = await Promise.all([
+        withJobModelRuntime(runtime, async () => {
+          await new Promise(resolve => setImmediate(resolve))
+          return (await createJobModelRuntime()).getAuth('openai')
+        }),
+        withJobModelRuntime(bobRuntime, async () => {
+          await new Promise(resolve => setImmediate(resolve))
+          return (await createJobModelRuntime()).getAuth('openai')
+        }),
+      ])
+      assert.ok(owned?.auth.apiKey)
+      assert.equal(foreign, undefined, 'parallel job contexts must not see another user credential')
+      await assert.rejects(createJobModelRuntime(), /not bound to an authenticated user/)
+    } finally {
+      if (previousStrict === undefined) delete process.env.NT_REQUIRE_USER_PI_RUNTIME
+      else process.env.NT_REQUIRE_USER_PI_RUNTIME = previousStrict
+    }
     assert.equal((await runtime.listCredentials()).length, 1)
     // Persist a canonical Pi OAuth credential and rehydrate it through a fresh runtime.
     const oauth = { type: 'oauth' as const, access: 'OAUTH-ACCESS-SECRET',

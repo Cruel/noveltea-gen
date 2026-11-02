@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -291,7 +292,7 @@ export async function preflightPiAssignment(job: JobStartResult, step: string,
   profile?: { provider: string; model: string; thinking?: "low" | "medium" | "high" }): Promise<void> {
   await guardPiBudget(job, step);
   if (profile) {
-    const runtime = await ModelRuntime.create();
+    const runtime = await createJobModelRuntime();
     await resolvePiModel(job, runtime, profile.provider, profile.model, profile.thinking);
   }
 }

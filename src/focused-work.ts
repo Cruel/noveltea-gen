@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
-import { createAgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { withStoryJobLock } from "./job-lock.js";
@@ -75,7 +76,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) 
       [skill, "nt-catalog"].some(s => !loader.getSkills().skills.some(v =>
         v.name === s && v.filePath.startsWith(join(receipt.snapshot!.path, "skills") + sep))))
     throw new Error("Focused specialist lacks pinned, verifiable skill instructions.");
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("focused", receipt.context, receipt.target),
     step: receipt.workItemId + ":" + receipt.planVersion,

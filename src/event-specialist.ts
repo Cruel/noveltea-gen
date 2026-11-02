@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { join, relative, resolve, sep } from "node:path";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
@@ -72,7 +73,7 @@ export async function authorEventCluster(
       throw new Error("Missing pinned Event skill " + name);
     }
   }
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const sessionDir = join(job.stateDir, "event-sessions", assignment.workItemId);
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("event", assignment.sourcePaths, assignment.milestoneId),

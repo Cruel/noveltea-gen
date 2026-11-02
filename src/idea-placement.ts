@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
@@ -258,7 +259,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
   // An idea's original author intent is private. Never share its transcript with
   // another idea, even if the same specialist and target are selected.
   const identity = createHash("sha256").update(instruction).digest("hex");
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const dir = join(job.stateDir, "idea-placement-sessions", skill, writable ? "write" : "review");
   const context = await preparePiContext(job, project, {
     group: "idea:" + identity + ":" + (writable ? "write" : "review"),

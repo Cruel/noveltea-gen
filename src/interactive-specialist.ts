@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
@@ -82,7 +83,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       throw new Error("Missing pinned interactive specialist " + name);
     }
   }
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const dir = join(job.stateDir, "interactive-sessions", assignment.workItemId, domain);
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("interactive:" + domain, assignment.sourcePaths, assignment.milestoneId),

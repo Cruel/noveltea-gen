@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { join, resolve, sep } from "node:path";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -46,7 +47,7 @@ export async function authorArchitecture(
       throw new Error("Missing pinned architecture skill " + name);
     }
   }
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const sessionDir = join(job.stateDir, "architecture-sessions");
   const context = await preparePiContext(job, project, {
     group: "architecture", step: "architecture:" + plan.version,

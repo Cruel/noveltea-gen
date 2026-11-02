@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { createHash, createHmac, randomUUID } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -10,6 +10,8 @@ import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { approvalRequest } from '../src/lib/approval.server'
+import { fixtureJobRequest } from '../src/lib/fixture-jobs.server'
+import { availableUserPiModels, userPiCredentials } from '../src/lib/pi-credentials.server'
 import { authorInteractionRequest } from '../src/lib/author-interactions.server'
 import { runAuthorAction } from '../../src/author-updates'
 import { runArchitectureJob } from '../../src/architecture'
@@ -20,7 +22,9 @@ const config = { baseURL: 'http://localhost:3000', secret: 'approval-test-secret
 
 test('authenticated owner records an exact durable decision; foreign users, inline claims and nonce replay cannot approve', async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-web-approval-'))
-  const previous = { state: process.env.NT_STATE_DIR, cache: process.env.NT_GIT_CACHE_DIR }
+  const previous = { state: process.env.NT_STATE_DIR, cache: process.env.NT_GIT_CACHE_DIR,
+    key: process.env.NT_PI_CREDENTIAL_KEY, strict: process.env.NT_REQUIRE_USER_PI_RUNTIME,
+    socket: process.env.NT_SANDBOX_SOCKET, token: process.env.NT_SANDBOX_TOKEN_FILE }
   process.env.NT_STATE_DIR = join(root, 'state')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   const store = openStudioDatabase(join(root, 'studio.sqlite'))
@@ -52,6 +56,34 @@ test('authenticated owner records an exact durable decision; foreign users, inli
       constraints: ['Preserve the original mystery'],
       envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
     const contract = { ...firstContract, constraints: [...firstContract.constraints, 'Reveal the witness'] }
+    // Real model selection must not admit a host Pi fallback, missing rootless
+    // controller or unauthorized credentials before recording server ownership.
+    process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
+    process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+    delete process.env.NT_SANDBOX_SOCKET
+    delete process.env.NT_SANDBOX_TOKEN_FILE
+    await userPiCredentials(store, alice.id).modify('openai', async () =>
+      ({ type: 'api_key', key: 'ISOLATED-TEST-KEY-NOT-FOR-NETWORK' }))
+    const models = await availableUserPiModels(store, alice.id)
+    assert.ok(models.length > 0)
+    const realContract = { scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
+      constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
+    const requestBody = { task: 'Generate a mystery', contract: realContract }
+    store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=? WHERE id=?').run(
+      JSON.stringify({ version: 1, headSha: commit, ...requestBody, limits: { modelCalls: 1 },
+        model: { provider: models[0]!.provider, id: models[0]!.id } }), jobId)
+    const realStart = await fixtureJobRequest(auth, store, new Request(config.baseURL + '/api/jobs/' + jobId, {
+      method: 'POST', headers: { origin: config.baseURL, cookie: aliceCookie, 'content-type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    }), jobId, config.baseURL)
+    assert.equal(realStart.status, 503, await realStart.clone().text())
+    assert.equal((store.sqlite.prepare('SELECT generation_request_json AS request FROM studio_sessions WHERE id=?')
+      .get(jobId) as { request: string | null }).request, null)
+    assert.equal(existsSync(join(job.stateDir, 'generation-server-owner.json')), false)
+    assert.equal(existsSync(join(job.stateDir, 'pi-policy.json')), false,
+      'failed sandbox admission must not lock a draft to an unstarted model')
+    assert.equal(existsSync(join(job.stateDir, 'pi-resolution.json')), false)
+    store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=NULL WHERE id=?').run(jobId)
     const plan = { version: 1, contract: firstContract, items: [] }
     const digest = createHash('sha256').update(JSON.stringify({ plan, head: commit, contract })).digest('hex')
     writeFileSync(join(job.stateDir, 'architecture.json'), JSON.stringify({ format: 1,
@@ -181,7 +213,9 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     assert.equal(JSON.parse(readFileSync(architectureFile, 'utf8')).plan.version, 2)
   } finally {
     store.sqlite.close()
-    for (const [key, value] of [['NT_STATE_DIR', previous.state], ['NT_GIT_CACHE_DIR', previous.cache]] as const) {
+    for (const [key, value] of [['NT_STATE_DIR', previous.state], ['NT_GIT_CACHE_DIR', previous.cache],
+      ['NT_PI_CREDENTIAL_KEY', previous.key], ['NT_REQUIRE_USER_PI_RUNTIME', previous.strict],
+      ['NT_SANDBOX_SOCKET', previous.socket], ['NT_SANDBOX_TOKEN_FILE', previous.token]] as const) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value
     }
     rmSync(root, { recursive: true, force: true })

@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { join, relative, resolve, sep } from "node:path";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
@@ -93,7 +94,7 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
       throw new Error("Missing pinned composition specialist skill: " + name);
     }
   }
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const dir = join(job.stateDir, "composition-sessions", assignment.workItemId, phase);
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("composition:" + phase, assignment.sourcePaths, assignment.milestoneId),

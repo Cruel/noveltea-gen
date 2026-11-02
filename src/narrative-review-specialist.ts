@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
+import { createJobModelRuntime } from "./model-runtime.js";
 import { dirname, join, resolve, sep } from "node:path";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -97,7 +98,7 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
         s.filePath.startsWith(join(snapshot.path, "skills") + sep)))) {
     throw new Error("Missing or invalid pinned narrative review/repair skills.");
   }
-  const runtime = await ModelRuntime.create();
+  const runtime = await createJobModelRuntime();
   const dir = join(job.stateDir, "review-sessions", role);
   const context = role === "review" && assignment
     ? await preparePiContext(job, project, {

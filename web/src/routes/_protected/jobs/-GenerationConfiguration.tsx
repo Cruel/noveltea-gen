@@ -149,7 +149,7 @@ export function GenerationConfiguration({ jobId, onStarted }: {
           body: JSON.stringify({ task: body.saved.task, contract: body.saved.contract }),
         })
         const output = await started.json() as { error?: string }
-        if (!started.ok) throw new Error(output.error || 'Fixture execution could not start.')
+        if (!started.ok) throw new Error(output.error || 'Generation could not start.')
         await onStarted()
       }
     } catch (e) { setError(e instanceof Error ? e.message : 'Configuration failed.') }
@@ -257,13 +257,14 @@ export function GenerationConfiguration({ jobId, onStarted }: {
     </details>
     <h3>Pi model and budgets</h3>
     <PiConnections onUpdate={refreshModels} />
-    <p role="status">{data.modelAvailability} Real Pi execution is not enabled by the fixture-only launch route.</p>
+    <p role="status">{data.modelAvailability} Selected models run through the isolated Story sandbox.
+      Without a model, the job uses deterministic fixtures.</p>
     <div className="generation-controls">
       <label>Model
         <select disabled={busy} value={selectedModel} onChange={e => {
           setSelectedModel(e.target.value); setThinking(''); setSaved(false)
         }}>
-          <option value="">No model selected (fixture only)</option>
+          <option value="">No model (deterministic fixture)</option>
           {selectedModel && !data.models.some(m => m.provider + '/' + m.id === selectedModel) &&
             <option value={selectedModel}>{selectedModel} (disconnected — reconnect)</option>}
           {data.models.map(model => <option key={model.provider + '/' + model.id}
@@ -294,9 +295,9 @@ export function GenerationConfiguration({ jobId, onStarted }: {
           onChange={e => { setCostLimit(e.target.value); setSaved(false) }} />
       </label>
     </div>
-    <p className="muted">Budget values are saved for later real Pi integration; fixtures make no Pi calls,
-      so these limits are not enforced by fixture execution. Time and sandbox resource budgets require the
-      real execution controller.</p>
+    <p className="muted">Pi budget limits are enforced at safe work-item boundaries;
+      the rootless sandbox controller separately limits execution resources.
+      Fixture jobs never make model requests.</p>
     {error && <p role="alert" className="error">{error}</p>}
     {saved && <p role="status">Configuration saved and verified for this pinned Story revision.</p>}
     <div className="generation-actions">
@@ -304,7 +305,7 @@ export function GenerationConfiguration({ jobId, onStarted }: {
         {busy ? 'Validating…' : 'Validate and save'}
       </button>
       <button type="button" disabled={busy || !task.trim()} onClick={() => void persist(true)}>
-        {busy ? 'Running…' : 'Save and start fixture generation'}
+        {busy ? 'Starting…' : selectedModel ? 'Save and start Pi generation' : 'Save and start fixture generation'}
       </button>
     </div>
   </section>
