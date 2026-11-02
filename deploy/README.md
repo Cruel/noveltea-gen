@@ -4,7 +4,7 @@ This is the deployment *foundation*, not the completed multiuser agent execution
 flow. #52–#54 route narrative Pi file/search/shell tools through the private
 sandbox client; reviewers receive read/search only. There is no implicit
 host-tool fallback. #55 certifies real rootless containment and recovery;
-see [sandbox certification](../docs/sandbox-certification.md).
+see [sandbox certification](../docs/sandbox-certification.md). The combined release gates and real-provider evidence requirements are in [self-hosted certification](../docs/self-hosted-certification.md) (#71).
 #59 adds authenticated web execution/admission. Do not expose the raw Skein Agent
 Protocol listener or enable unsandboxed model-directed tool execution.
 

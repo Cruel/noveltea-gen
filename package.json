@@ -14,6 +14,8 @@
     "test": "tsx --test test/*.test.ts",
     "certify": "tsx --test test/certification.test.ts",
     "certify:story": "node scripts/certify-story.mjs",
+    "certify:self-hosted": "node scripts/certify-self-hosted.mjs",
+    "certify:compose": "tsx scripts/certify-compose.ts",
     "test:live": "NT_LIVE_TEST=1 tsx --test test/live.test.ts",
     "studio": "LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false TRACE_TO_LANGSMITH=false langgraphjs dev --no-browser --n-jobs-per-worker 1",
     "studio:trace": "NT_STUDIO_TRACE=1 LANGSMITH_TRACING=true LANGCHAIN_TRACING_V2=true TRACE_TO_LANGSMITH=true langgraphjs dev --no-browser --n-jobs-per-worker 1",

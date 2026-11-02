@@ -57,16 +57,23 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
   let auth: ReturnType<typeof createStudioAuth>
   const originalFetch = globalThis.fetch
   const calls: string[] = []
+  const refreshes: string[] = []
   globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     calls.push(url)
-    const data = url.includes('github.com/login/oauth/access_token') ? providerResponses.github.token
+    const refresh = String(init?.body).includes('refresh_token')
+    const data = url.includes('github.com/login/oauth/access_token') ? (refresh
+      ? { ...providerResponses.github.token, access_token: 'github-refreshed-sensitive' }
+      : providerResponses.github.token)
       : url.includes('api.github.com/user/emails') ? providerResponses.github.emails
       : url.includes('api.github.com/user') ? providerResponses.github.profile
-      : url.includes('gitlab.com/oauth/token') ? providerResponses.gitlab.token
+      : url.includes('gitlab.com/oauth/token') ? (refresh
+        ? { ...providerResponses.gitlab.token, access_token: 'gitlab-refreshed-sensitive' }
+        : providerResponses.gitlab.token)
       : url.includes('gitlab.com/api/v4/user') ? providerResponses.gitlab.profile
       : null
     if (!data) throw Error(`Unexpected OAuth fetch ${url} ${init?.method}`)
+    if (refresh) refreshes.push(url)
     return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
@@ -118,6 +125,20 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     assert.equal((await dashboardResponse(auth, store, new Request(`${origin}/api/dashboard`, { headers: ghCookies }))).status, 200)
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-access-sensitive')
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-access-sensitive')
+    // Force both encrypted accounts to expire in the persisted store, then
+    // exercise refresh through the same public server-side repository adapter.
+    store.sqlite.prepare('UPDATE account SET accessTokenExpiresAt = ? WHERE providerId IN (?, ?)')
+      .run(1, 'github', 'gitlab')
+    assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-refreshed-sensitive')
+    assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-refreshed-sensitive')
+    assert.equal(refreshes.length, 2)
+    // Refreshed tokens remain encrypted and are reused without another OAuth
+    // request when a second repository operation follows.
+    const refreshedRows = store.sqlite.prepare('SELECT accessToken FROM account').all() as Array<{ accessToken: string }>
+    assert.ok(refreshedRows.every(row => !row.accessToken.includes('refreshed-sensitive')))
+    assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-refreshed-sensitive')
+    assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-refreshed-sensitive')
+    assert.equal(refreshes.length, 2)
     assert.ok(calls.some(url => url.includes('github.com/login/oauth/access_token')))
     assert.ok(calls.some(url => url.includes('gitlab.com/oauth/token')))
   } finally {
