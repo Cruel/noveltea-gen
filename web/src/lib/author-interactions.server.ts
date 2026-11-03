@@ -6,6 +6,10 @@ import { requireUser } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { inspectAuthorUpdates } from '../../../src/author-updates'
 import { inspectTrustedApproval } from '../../../src/trusted-approval'
+import { inspectFoundationConflict } from '../../../src/foundation-conflict'
+import { inspectAuthorDecisions, decideAuthorDecision, isRecoveryDecisionKind, statusAfterAuthorDecision } from '../../../src/author-decisions'
+import { withStoryJobLock } from '../../../src/job-lock'
+import { queueRecord } from './generation-queue.server'
 import type { JobStartResult } from '../../../src/job'
 import { postAgentAuthorCommand } from './agent-rpc.server'
 import { validAuthorCommand } from './agent-author-validation'
@@ -44,8 +48,9 @@ async function readCommand(request: Request): Promise<string> {
   return text
 }
 
-async function getRecords(job: JobStartResult) {
+async function getRecords(job: JobStartResult, recoverable: boolean) {
   const updates = await inspectAuthorUpdates(job)
+  const decisions = recoverable ? await inspectAuthorDecisions(job) : []
   return Promise.all(updates.records.map(async ({ message, acknowledgement }) => {
     if (message.kind !== 'question' && message.kind !== 'approval') return null
     const payload = message.payload as Record<string, unknown>
@@ -67,7 +72,7 @@ async function getRecords(job: JobStartResult) {
         ? { answer: (acknowledgement.result as { answer?: string } | undefined)?.answer ?? null } : {}),
       approval,
     }
-  })).then(items => ({ status: updates.status, items: items.filter(item => item !== null) }))
+  })).then(items => ({ status: updates.status, items: items.filter(item => item !== null), decisions }))
 }
 
 /** Authenticated owner-only interaction with persisted author-update interrupts.
@@ -82,7 +87,13 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const user = await requireUser(auth, request.headers)
     if (!user) return json({ error: 'Sign in required' }, 401)
     const job = await authorizedStoryJob(store, user.id, jobId)
-    if (request.method === 'GET') return json(await getRecords(job))
+    const row = store.sqlite.prepare(`SELECT status, generation_request_json AS request
+      FROM studio_sessions WHERE id=? AND owner_user_id=?`).get(jobId, user.id) as
+      { status: string; request: string | null } | undefined
+    const queue = queueRecord(store, jobId)
+    const recoverable = !!row?.request && ['paused', 'blocked'].includes(row.status) &&
+      queue?.phase === 'finished'
+    if (request.method === 'GET') return json(await getRecords(job, recoverable))
 
     // Strict, bounded typed commands. Do not accept a caller-provided identity
     // or approval payload, and do not consume arbitrary controller references.
@@ -91,6 +102,36 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const raw = await readCommand(request)
     let input: Record<string, unknown>
     try { input = JSON.parse(raw) } catch { return json({ error: 'Invalid JSON' }, 400) }
+    if (input?.action === 'decision') {
+      const fields = Object.keys(input).sort().join(',')
+      if (!recoverable ||
+          !['action,decision,id,proposalSha256', 'action,decision,id,note,proposalSha256'].includes(fields) ||
+          !isRecoveryDecisionKind(input.id) ||
+          !SHA.test(String(input.proposalSha256)) ||
+          !['approved', 'rejected'].includes(String(input.decision)) ||
+          (input.note !== undefined && (typeof input.note !== 'string' || input.note.length > 1000)))
+        return json({ error: 'Expected a settled job and one exact, typed author decision.' }, 409)
+      const conflict = await inspectFoundationConflict(job)
+      if (!conflict || conflict.requestSha256 !== createHash('sha256').update(row!.request!).digest('hex'))
+        return json({ error: 'Pinned request differs from the saved author-decision evidence.' }, 409)
+      const decided = await withStoryJobLock(job, 'author-decision', () =>
+        decideAuthorDecision(job, {
+          id: input.id as 'foundation-conflict' | 'validator-upgrade',
+          proposalSha256: input.proposalSha256 as string,
+          decision: input.decision as 'approved' | 'rejected',
+          principal: 'user:' + user.id,
+          ...(input.note !== undefined ? { note: input.note as string } : {}),
+        }))
+      const nextStatus = statusAfterAuthorDecision(
+        input.id as 'foundation-conflict' | 'validator-upgrade',
+        input.decision as 'approved' | 'rejected')
+      if (nextStatus) {
+        store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
+          WHERE id=? AND owner_user_id=? AND status IN ('blocked','paused')`)
+          .run(nextStatus, new Date().toISOString(), jobId, user.id)
+      }
+      return json({ decision: decided })
+    }
     if (input?.action === 'send') {
       if (!validAuthorCommand(input)) return json({ error: 'Invalid typed author message' }, 400)
       return postAgentAuthorCommand(user.id, jobId, input)

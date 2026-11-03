@@ -1,13 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { auth, database } from '../../../../lib/runtime.server'
-import { readAuthConfig } from '../../../../lib/auth'
-import { foundationReviewRequest } from '../../../../lib/foundation-review.server'
-
+// Legacy route deliberately cannot approve anything. Use /author.
+const gone = () => Response.json(
+  { error: 'Legacy approval endpoint retired; use the shared author-decision workflow.' },
+  { status: 410, headers: { 'Cache-Control': 'private, no-store' } })
 export const Route = createFileRoute('/api/jobs/$jobId/foundation-review')({
-  server: { handlers: {
-    GET: ({ request, params }) =>
-      foundationReviewRequest(auth, database, request, params.jobId, readAuthConfig().baseURL),
-    POST: ({ request, params }) =>
-      foundationReviewRequest(auth, database, request, params.jobId, readAuthConfig().baseURL),
-  } },
+  server: { handlers: { GET: gone, POST: gone } },
 })

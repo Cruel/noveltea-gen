@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import { startStoryJob, type JobStartResult } from '../../src/job'
 import { validateStoryJob } from '../../src/validator'
 import { approveValidatorUpgrade, inspectValidatorUpgrade } from '../../src/validator-upgrade'
+import { inspectAuthorDecisions, decideAuthorDecision } from '../../src/author-decisions'
 import { recordFoundationConflict, decideFoundationConflict } from '../../src/foundation-conflict'
 import { removeTestTree } from '../../test/helpers'
 
@@ -101,11 +102,25 @@ test('validator upgrade requires exact author review, records history and handle
     await assert.rejects(() => approveValidatorUpgrade(job, 'f'.repeat(64),
       'I approve this specific replacement', 'user:author'), /changed|safe/)
     assert.equal(existsSync(join(job.stateDir, 'validator-upgrade.json')), false)
-    const actual = await approveValidatorUpgrade(job, p.proposalSha256,
-      'I reviewed and authorize the replacement for this test job.', 'user:author')
+    const listed = await inspectAuthorDecisions(job)
+    assert.equal(listed.length, 2)
+    assert.equal(listed[0]?.decision, 'approved', 'Legacy Foundation authorization remains readable')
+    assert.equal(listed[1]?.phase, 'awaiting-author')
+    const approved = await decideAuthorDecision(job, {
+      id: 'validator-upgrade', proposalSha256: p.proposalSha256,
+      decision: 'approved', principal: 'user:author',
+    })
+    assert.equal(approved.phase, 'recorded')
+    assert.equal(approved.note, '')
+    const actual = await inspectValidatorUpgrade(job)
     assert.equal(actual.phase, 'committed')
-    assert.equal(actual.previous.sha256, p.previous.sha256)
-    assert.equal(actual.replacement.sha256, p.replacement.sha256)
+    assert.equal(actual.proposal?.previous.sha256, p.previous.sha256)
+    assert.equal(actual.proposal?.replacement.sha256, p.replacement.sha256)
+    assert.equal((await inspectAuthorDecisions(job))[1]?.decision, 'approved')
+    assert.equal((await decideAuthorDecision(job, {
+      id: 'validator-upgrade', proposalSha256: p.proposalSha256,
+      decision: 'approved', principal: 'user:author',
+    })).phase, 'recorded')
     assert.equal(git(job.worktreeRoot, 'rev-parse', 'HEAD'), baseline)
     assert.equal(git(job.worktreeRoot, 'status', '--porcelain'), '')
     const repinned = await startStoryJob({ story, job: job.jobId }, false)
@@ -135,11 +150,32 @@ test('validator upgrade requires exact author review, records history and handle
       rationale, authorizedAt: new Date().toISOString(),
     }))
     writeFileSync(join(partial.stateDir, 'validator.json'), JSON.stringify(proposal.replacement))
-    const complete = await approveValidatorUpgrade(partial, proposal.proposalSha256,
-      rationale, 'user:author')
-    assert.equal(complete.phase, 'committed')
+    const pendingRecovery = (await inspectAuthorDecisions(partial))[1]
+    assert.equal(pendingRecovery?.phase, 'applying')
+    assert.equal(pendingRecovery?.note, rationale)
+    const complete = await decideAuthorDecision(partial, {
+      id: 'validator-upgrade', proposalSha256: proposal.proposalSha256,
+      decision: 'approved', principal: 'user:author', note: rationale,
+    })
+    assert.equal(complete.phase, 'recorded')
+    assert.equal((await inspectValidatorUpgrade(partial)).phase, 'committed')
     assert.equal((await startStoryJob({ story, job: partial.jobId }, false)).validatorSha256,
       proposal.replacement.sha256)
+
+    const declined = await makeJob()
+    const declinedProposal = (await inspectValidatorUpgrade(declined)).proposal!
+    assert.equal((await decideAuthorDecision(declined, {
+      id: 'validator-upgrade', proposalSha256: declinedProposal.proposalSha256,
+      decision: 'rejected', principal: 'user:author',
+    })).decision, 'rejected')
+    assert.equal((await inspectAuthorDecisions(declined))[1]?.phase, 'recorded')
+    assert.equal((await inspectAuthorDecisions(declined))[1]?.decision, 'rejected')
+    assert.equal((await startStoryJob({ story, job: declined.jobId }, false)).validatorSha256,
+      declinedProposal.previous.sha256)
+    await assert.rejects(() => decideAuthorDecision(declined, {
+      id: 'validator-upgrade', proposalSha256: declinedProposal.proposalSha256,
+      decision: 'approved', principal: 'user:author',
+    }), /another author/)
   } finally {
     for (const k of envKeys) {
       if (before[k] === undefined) delete process.env[k]

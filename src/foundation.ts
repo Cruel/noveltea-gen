@@ -231,7 +231,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       (granted?.retryUsed && granted.authorization
         ? "The authenticated author explicitly granted this exact job a one-time exception to the following existing protected discovery-only restriction. Preserve its existing statement verbatim; the exception authorizes continued composition for this pinned job only, NOT changing, deleting or weakening the decision. Original: " +
           "SHA-256 " + granted.fileSha256 +
-          ". Author rationale: " + granted.authorization.reason + "\n"
+          (granted.authorization.reason ? ". Additional author direction: " + granted.authorization.reason : "") + "\n"
         : "") +
       "Use ordinary Pi read/edit/write and inspection tools to AUTHOR MARKDOWN DIRECTLY, never a structured record authoring tool. " +
       "Before editing, actually READ these five pinned files with the read tool (absolute paths):\n" +

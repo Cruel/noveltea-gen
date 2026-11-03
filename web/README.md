@@ -549,23 +549,31 @@ Disconnecting or losing authorization removes availability and blocks any new
 selection or fixture start pinned to that model; the existing draft and worktree
 remain intact for recovery. The job cannot silently switch to a host model.
 
-**Foundation conflict recovery:** A completed, no-write Pi specialist that declines
-an existing user-protected constraint produces an inspectable Foundation author
-review. The page presents the original model explanation and the pinned Creative
-Direction source, and accepts an explicit owner decision to reject or authorize a
-**job-scoped exception**. Authorizing never changes protected Story bytes or
-waives exact-change approvals; it permits one manually requested, evidence-checked
-retry. An uncertain/dirty specialist cannot use this recovery path. If the
-original native validator is no longer available, a separate **Native validator
-upgrade review** appears after Foundation authorization. It presents both exact
-SHA-256 identities, validates the unchanged Story using the configured trusted
-replacement executable, and requests a second explicit author approval. The
-controller records the previous and replacement pins in durable job-local audit
-history, then atomically updates the validator receipt and job manifest (with
-idempotent recovery if interrupted). This is limited to a clean, authorized
-no-write Foundation boundary; jobs with committed revisions require a distinct
-history-aware migration. The job never resumes generation automatically and
-must still pass the native validation and safe checkpoint guards.
+**Shared author decisions:** The job's **Author questions and approvals** panel
+is the sole active browser interface for questions, exact protected proposals,
+Foundation no-write conflicts and validator replacement reviews. All browser
+interactions use the authenticated, same-origin `/api/jobs/:jobId/author`
+endpoint. Exact recovery approvals use one typed `action: "decision"` contract:
+`id`, `proposalSha256`, `decision: "approved" | "rejected"` and an **optional**
+`note` (at most 1,000 characters). No author-written reason is required;
+notes on narrative conflicts can guide later specialists, whereas validator
+notes are audit annotations. The common controller records principal, exact
+proposal, verdict, optional note and timestamps in bounded, durable
+`author-decisions/` receipts, with an idempotent in-progress recovery state.
+Earlier specialized approval receipts remain readable and enforce their
+original permissions. Retired browser endpoints `foundation-review` and
+`validator-upgrade` now respond HTTP 410; neither can authorize a job.
+
+A completed, no-write Foundation specialist may request a job-scoped exception;
+authorizing it preserves every original protected decision while permitting one
+explicitly requested retry. If the previously pinned native validator is no
+longer installed, the shared review panel offers a second exact validator
+replacement decision after validating the unchanged Story against the mounted
+replacement. The validator adapter retains old and new SHA-256 identities in
+its audit journal, and repairs only a matching partial update. Dirty or
+ambiguous writers, stale proposals and changed executable bytes fail closed.
+Neither approval automatically starts generation. Jobs with committed revisions
+still require a separate history-aware validator migration.
 
 **Operator prerequisite:** set `NT_PI_CREDENTIAL_KEY` to an independently stored,
 base64-encoded random 32-byte key (generate with

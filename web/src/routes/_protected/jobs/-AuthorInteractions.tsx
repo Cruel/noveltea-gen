@@ -13,11 +13,23 @@ type Item = {
   proposalSha256?: string; changeId?: string | null
   approval: Approval | null
 }
-type AuthorState = { status: string; items: Item[] }
+type RecoveryDecision = {
+  id: 'foundation-conflict' | 'validator-upgrade'
+  title: string; description: string; proposalSha256: string; verifiedHead: string
+  phase: 'awaiting-author' | 'applying' | 'recorded'
+  decision?: 'approved' | 'rejected'; note?: string
+  details: { sourceExcerpt: string; explanation: string } | {
+    original: { executable: string; sha256: string }
+    replacement: { executable: string; sha256: string }
+    validationDigest: string; diagnostics: number
+  }
+}
+type AuthorState = { status: string; items: Item[]; decisions: RecoveryDecision[] }
 
 export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChanged: () => void }) {
   const [state, setState] = useState<AuthorState | null>(null)
   const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({})
   const [idea, setIdea] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -53,6 +65,22 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
       await refresh()
       onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Author response failed') }
+    finally { setBusy(null) }
+  }
+  const decideRecovery = async (item: RecoveryDecision, decision: 'approved' | 'rejected') => {
+    const note = item.phase === 'applying' ? item.note ?? '' : decisionNotes[item.id] ?? ''
+    setBusy(item.id); setError(null)
+    try {
+      const response = await fetch(url, { method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'decision', id: item.id,
+          proposalSha256: item.proposalSha256, decision, ...(note.trim() ? { note } : {}) }),
+      })
+      const body = await response.json() as { error?: string }
+      if (!response.ok) throw new Error(body.error || 'Unable to record author decision')
+      await refresh()
+      onChanged()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to record author decision') }
     finally { setBusy(null) }
   }
   const sendIdea = async () => {
@@ -91,7 +119,63 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
     {error && <p className="error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {!state && !error && <p>Checking saved author interrupts…</p>}
-    {state && items.length === 0 && <p>No author responses are awaiting review.</p>}
+    {state && items.length === 0 && (state.decisions ?? []).length === 0 && <p>No author responses are awaiting review.</p>}
+    {(state?.decisions ?? []).map(item => <article key={'recovery-' + item.id}
+      aria-label={item.title}>
+      <h3>{item.title}</h3>
+      <p>{item.description}</p>
+      {'sourceExcerpt' in item.details ? <>
+        <p><strong>Specialist explanation:</strong> {item.details.explanation}</p>
+        <details><summary>Original protected Creative Direction</summary>
+          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+            {item.details.sourceExcerpt}
+          </pre>
+        </details>
+      </> : <>
+        <p><strong>Original validator:</strong> <code>{item.details.original.sha256}</code></p>
+        <p><strong>Installed replacement:</strong> <code>{item.details.replacement.sha256}</code></p>
+        <p><strong>Installed path:</strong> <code>{item.details.replacement.executable}</code></p>
+        <p><strong>Native preflight:</strong> {item.details.diagnostics} diagnostics,
+          protected-decision checks passed.</p>
+        <p><small>Validation digest: <code>{item.details.validationDigest}</code></small></p>
+      </>}
+      <p><small>Git HEAD: <code>{item.verifiedHead}</code> ·
+        Exact proposal: <code>{item.proposalSha256}</code></small></p>
+      {item.phase === 'recorded' ? <p role="status">
+        Decision recorded: {item.decision === 'approved' ? 'Approved' : 'Rejected'}.
+        {item.note && <> Additional note: {item.note}</>}
+        {item.id === 'foundation-conflict' && item.decision === 'approved' &&
+          ' If the validator changed, review its replacement here before resuming.'}
+        {item.id === 'validator-upgrade' && item.decision === 'approved' &&
+          ' The replacement is pinned; Resume remains a separate action.'}
+      </p> : <>
+        {item.phase === 'applying' ? <p role="status">A previous decision was
+          durably recorded but interrupted during application. You can finish only
+          the same exact decision.</p> : <>
+          <label htmlFor={'author-decision-note-' + item.id}>
+            {item.id === 'foundation-conflict'
+              ? 'Additional author direction (optional)'
+              : 'Additional explanation (optional)'}
+          </label>
+          <textarea id={'author-decision-note-' + item.id} rows={2} maxLength={1000}
+            disabled={busy !== null} value={decisionNotes[item.id] ?? ''}
+            placeholder={item.id === 'foundation-conflict'
+              ? 'Optional clarification for subsequent specialists'
+              : 'Optional note for the authorization record'}
+            onChange={e => setDecisionNotes(previous =>
+              ({ ...previous, [item.id]: e.target.value }))} />
+        </>}
+        {item.phase === 'applying' ? <button type="button" disabled={busy !== null}
+          onClick={() => void decideRecovery(item, item.decision!)}>
+          Finish saved {item.decision === 'approved' ? 'approval' : 'rejection'}
+        </button> : <>
+          <button type="button" disabled={busy !== null}
+            onClick={() => void decideRecovery(item, 'approved')}>Approve</button>{' '}
+          <button type="button" disabled={busy !== null}
+            onClick={() => void decideRecovery(item, 'rejected')}>Reject</button>
+        </>}
+      </>}
+    </article>)}
     {items.map(item => <article key={item.id}>
       <h3>{item.kind === 'question' ? 'Author question' : 'Protected approval'}: <code>{item.id}</code></h3>
       {item.kind === 'question' ? <>

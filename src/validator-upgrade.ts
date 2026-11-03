@@ -79,7 +79,7 @@ function validateReceipt(value: Record<string, unknown>, job: JobStartResult): R
       r.diagnostics !== 0 || r.proposalSha256 !== proposalDigest(immutable) ||
       !["approved", "committed"].includes(r.phase) ||
       !/^user:[A-Za-z0-9_-]{1,128}$/.test(r.principal) ||
-      typeof r.rationale !== "string" || r.rationale.trim().length < 12 ||
+      typeof r.rationale !== "string" || r.rationale.length > 1000 ||
       typeof r.authorizedAt !== "string")
     throw Error("Validator upgrade journal identity or authorization is corrupt.");
   return r;
@@ -135,8 +135,8 @@ export async function inspectValidatorUpgrade(job: JobStartResult) {
 export async function approveValidatorUpgrade(job: JobStartResult,
   digest: string, rationale: string, principal: string): Promise<Receipt> {
   if (!HASH.test(digest) || !/^user:[A-Za-z0-9_-]{1,128}$/.test(principal) ||
-      rationale.trim().length < 12 || rationale.length > 1000)
-    throw Error("Explicit authenticated validator upgrade rationale required.");
+      rationale.length > 1000)
+    throw Error("Explicit authenticated validator upgrade approval required.");
   let saved = await journal(job);
   if (saved) {
     if (saved.proposalSha256 !== digest || saved.principal !== principal ||

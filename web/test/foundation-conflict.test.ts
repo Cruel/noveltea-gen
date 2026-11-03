@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { startStoryJob, type JobStartResult } from '../../src/job'
 import { trustedHead } from '../../src/revision'
+import { inspectAuthorDecisions, decideAuthorDecision } from '../../src/author-decisions'
 import { inspectFoundationConflict, recordFoundationConflict, decideFoundationConflict,
   authorizedFoundationException, consumeFoundationRetry, foundationExceptionContext } from '../../src/foundation-conflict'
 import { removeTestTree } from '../../test/helpers'
@@ -81,10 +82,26 @@ test('completed no-write Foundation blocks safely and requires exact human autho
     assert.equal(await recordFoundationConflict(job)?.then(v => v?.digest), candidate?.digest)
     assert.equal((await recordFoundationConflict(job))?.digest, candidate?.digest)
     await assert.rejects(() => decideFoundationConflict(job, 'approve', sh('wrong'), 'Explicitly permit this test', 'user:author'), /Stale/)
-    const approved = await decideFoundationConflict(job, 'approve', candidate!.digest,
-      'I authorize this exact pinned job to generate a full Story without changing the protected decision.',
-      'user:author')
-    assert.equal(approved.status, 'authorized')
+    const pending = await inspectAuthorDecisions(job)
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0]?.phase, 'awaiting-author')
+    const approved = await decideAuthorDecision(job, {
+      id: 'foundation-conflict', proposalSha256: candidate!.digest, decision: 'approved',
+      principal: 'user:author',
+    })
+    assert.equal(approved.phase, 'recorded')
+    assert.equal(approved.note, '')
+    assert.equal((await inspectFoundationConflict(job))?.status, 'authorized')
+    assert.doesNotMatch(await foundationExceptionContext(job), /Additional author direction:/)
+    assert.equal((await inspectAuthorDecisions(job))[0]?.decision, 'approved')
+    assert.equal((await decideAuthorDecision(job, {
+      id: 'foundation-conflict', proposalSha256: candidate!.digest, decision: 'approved',
+      principal: 'user:author',
+    })).phase, 'recorded')
+    await assert.rejects(() => decideAuthorDecision(job, {
+      id: 'foundation-conflict', proposalSha256: candidate!.digest,
+      decision: 'approved', principal: 'user:different',
+    }), /another author/)
     assert.equal(await trustedHead(job), job.baseSha)
     assert.match(await foundationExceptionContext(job), /author expressly permitted full composition/)
     assert.equal((await authorizedFoundationException(job))?.digest, candidate?.digest)
@@ -107,8 +124,16 @@ test('completed no-write Foundation blocks safely and requires exact human autho
     fixtureState(denied)
     const deniedPreview = await recordFoundationConflict(denied)
     assert.ok(deniedPreview)
-    assert.equal((await decideFoundationConflict(denied, 'reject', deniedPreview!.digest,
-      'The Story remains a discovery and preflight fixture only.', 'user:author')).status, 'rejected')
+    assert.equal((await decideAuthorDecision(denied, {
+      id: 'foundation-conflict', proposalSha256: deniedPreview!.digest,
+      decision: 'rejected', principal: 'user:author',
+    })).decision, 'rejected')
+    assert.equal((await inspectFoundationConflict(denied))?.status, 'rejected')
+    assert.equal((await inspectAuthorDecisions(denied))[0]?.phase, 'recorded')
+    await assert.rejects(() => decideAuthorDecision(denied, {
+      id: 'foundation-conflict', proposalSha256: deniedPreview!.digest,
+      decision: 'approved', principal: 'user:author',
+    }), /another author/)
     await assert.rejects(() => trustedHead(denied), /unfinished/)
     assert.equal(await foundationExceptionContext(denied), '')
 

@@ -132,8 +132,7 @@ export async function recordFoundationConflict(job: JobStartResult) {
 }
 export async function decideFoundationConflict(job: JobStartResult, action: "approve" | "reject",
   digest: string, reason: string, principal: string) {
-  if (!/^user:[A-Za-z0-9_-]{1,128}$/.test(principal) || !reason.trim() ||
-      reason.trim().length < 12 || reason.length > 1000)
+  if (!/^user:[A-Za-z0-9_-]{1,128}$/.test(principal) || reason.length > 1000)
     throw new Error("An authenticated author and substantive rationale are required.");
   const evidence = await validateEvidence(job);
   const preview = await inspectFoundationConflict(job);
@@ -187,8 +186,8 @@ export async function foundationExceptionContext(job: JobStartResult): Promise<s
     "discovery/preflight-only restriction(s): " +
     "Creative Direction SHA-256 " + receipt.fileSha256 +
     ". The authenticated author exception is restricted to the original file hash and job." +
-    ". Author rationale: " + receipt.authorization.reason +
-    ". Keep all original user-protected decision statements verbatim. This exception does not " +
+    (receipt.authorization.reason ? " Additional author direction: " + receipt.authorization.reason + "." : "") +
+    " Keep all original user-protected decision statements verbatim. This exception does not " +
     "grant permission to modify, delete, or weaken those decisions; the separate exact-change " +
     "trusted approval process remains mandatory.\n\n";
 }
