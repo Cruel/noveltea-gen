@@ -553,7 +553,7 @@ remain intact for recovery. The job cannot silently switch to a host model.
 base64-encoded random 32-byte key (generate with
 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`)
 and run `pnpm --filter @noveltea/studio migrate` with Studio stopped to apply
-migration **16** (credentials were introduced in migration 9; the unused callback table is retired in 16). The app stores AES-256-GCM encrypted Pi provider credentials
+migration **14** (provider credentials were introduced in migration 9). The app stores AES-256-GCM encrypted Pi provider credentials
 in `pi_credentials` keyed by the Better Auth user ID, with revision-checked
 OAuth refresh writes. Keep the encryption key outside the Studio SQLite backup
 but back it up securely: **losing/changing the key makes existing connections
