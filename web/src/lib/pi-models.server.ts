@@ -12,9 +12,12 @@ import { requireUser } from './access.server'
 import { availableUserPiModels, createUserPiRuntime, userPiCredentials } from './pi-credentials.server'
 
 type Flow = { status: 'starting' | 'pending' | 'completing' | 'connected' | 'failed'
-  url?: string; expires: number; reason?: string; abort: AbortController;
+  url?: string; state?: string; expires: number; reason?: string; abort: AbortController;
   resolveManual?: (value: string) => void }
 const flows = new Map<string, Flow>()
+// Random provider-generated state is the one-use callback correlation key.
+// No Studio session cookie is expected on the provider's redirect.
+const flowsByState = new Map<string, Flow>()
 const allowedApiProviders = new Set(['openai', 'anthropic', 'google', 'openrouter', 'xai', 'groq', 'mistral'])
 const reply = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store' } })
@@ -40,6 +43,52 @@ export function validChatGPTCallback(redirectUrl: string, authorizationUrl: stri
       !!callback.searchParams.get('code') && !!callback.searchParams.get('client_id') &&
       !!requestUrl.searchParams.get('state')
   } catch { return false }
+}
+
+function releaseCallback(flow: Flow) {
+  if (flow.state && flowsByState.get(flow.state) === flow) flowsByState.delete(flow.state)
+}
+
+const callbackHeaders = {
+  'Content-Type': 'text/html; charset=utf-8',
+  'Cache-Control': 'no-store',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  'X-Content-Type-Options': 'nosniff',
+}
+const callbackPage = (message: string, status = 200) =>
+  new Response('<!doctype html><meta charset="utf-8"><title>NovelTea authorization</title><p>' +
+    message + '</p>', { status, headers: callbackHeaders })
+
+/** Handle a provider redirect without an authenticated browser cookie. The
+ * unguessable OAuth state identifies one pending account and is consumed once. */
+export function chatGPTCallbackRequest(request: Request): Response {
+  const requested = new URL(request.url)
+  if (requested.pathname !== '/auth/callback') return callbackPage('Unknown callback.', 404)
+  const state = requested.searchParams.get('state')
+  if (!state) return callbackPage('Authorization submitted. Return to NovelTea Studio to check the connection.')
+  const flow = flowsByState.get(state)
+  if (!flow || flow.status !== 'pending' || !flow.url || !flow.resolveManual ||
+      Date.now() > flow.expires) return callbackPage('No matching pending authorization.', 409)
+  if (requested.searchParams.has('error')) {
+    releaseCallback(flow)
+    flow.status = 'failed'
+    flow.reason = 'ChatGPT authorization was cancelled or denied.'
+    flow.abort.abort()
+    return callbackPage('ChatGPT authorization was not completed.', 400)
+  }
+  const callback = new URL('http://127.0.0.1:1455/auth/callback')
+  callback.search = requested.search
+  if (callback.toString().length > 4096 || !validChatGPTCallback(callback.toString(), flow.url))
+    return callbackPage('Invalid authorization callback.', 400)
+  releaseCallback(flow)
+  flow.status = 'completing'
+  flow.resolveManual(callback.toString())
+  // A redirect removes the one-use authorization code from browser history.
+  const clean = new URL(request.url)
+  clean.search = ''
+  return new Response(null, { status: 303, headers: { Location: clean.toString(),
+    'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } })
 }
 
 function publicFlow(flow?: Flow) {
@@ -88,7 +137,8 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       if (typeof input.provider !== 'string' || !['openai-codex', ...allowedApiProviders].includes(input.provider))
         return reply({ error: 'Invalid provider' }, 400)
       if (input.provider === 'openai' || input.provider === 'openai-codex') {
-        flows.get(actor.id)?.abort.abort()
+        const flow = flows.get(actor.id)
+        if (flow) { releaseCallback(flow); flow.abort.abort() }
         flows.delete(actor.id)
       }
       await credentials.delete(input.provider)
@@ -101,7 +151,8 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       const runtime = await createUserPiRuntime(store, actor.id)
       if (!runtime.getProvider(input.provider)) return reply({ error: 'Pi provider is not installed' }, 422)
       if (input.provider === 'openai') {
-        flows.get(actor.id)?.abort.abort()
+        const flow = flows.get(actor.id)
+        if (flow) { releaseCallback(flow); flow.abort.abort() }
         flows.delete(actor.id)
       }
       await credentials.modify(input.provider, async () => ({ type: 'api_key', key: input.key as string }))
@@ -112,9 +163,17 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       const existing = flows.get(actor.id)
       if (existing && ['starting', 'pending', 'completing'].includes(existing.status) && Date.now() < existing.expires)
         return reply({ oauth: publicFlow(existing) })
-      existing?.abort.abort()
+      if (existing) { releaseCallback(existing); existing.abort.abort() }
       const flow: Flow = { status: 'starting', expires: Date.now() + 15 * 60_000, abort: new AbortController() }
       flows.set(actor.id, flow)
+      // Even abandoned logins must release their state and pending Pi prompt.
+      const timeout = setTimeout(() => {
+        flow.status = 'failed'
+        flow.reason = 'ChatGPT authorization expired. Start sign-in again.'
+        releaseCallback(flow)
+        flow.abort.abort()
+      }, 15 * 60_000)
+      timeout.unref()
       // Pi owns the device-code exchange and the credential refresh contract.
       // Only user-code/URL/status (never OAuth tokens) crosses into the browser.
       void (async () => {
@@ -133,11 +192,16 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
             },
             notify: event => {
               if (event.type === 'auth_url') {
+                flow.abort.signal.throwIfAborted()
+                const state = new URL(event.url).searchParams.get('state')
+                if (!state || flowsByState.has(state)) throw new Error('Invalid OAuth authorization state')
                 flow.url = event.url
+                flow.state = state
                 flow.status = 'pending'
+                flowsByState.set(state, flow)
               }
             },
-          }, { agentName: 'NovelTea Studio',
+          }, { agentName: 'NovelTea Studio', callback: { mode: 'external' },
             getDeviceId: () => oauthHostDeviceId(actor.id, process.env.NT_PI_CREDENTIAL_KEY!) })
           flow.status = 'connected'
           delete flow.url
@@ -160,6 +224,8 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
           flow.status = 'failed'
           flow.reason = 'ChatGPT authorization did not complete. Retry sign-in. (See Studio operator logs.)'
         } finally {
+          clearTimeout(timeout)
+          releaseCallback(flow)
           delete flow.resolveManual
         }
       })()
@@ -175,6 +241,7 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
         return reply({ error: 'Redirect URL does not match the pending ChatGPT login' }, 422)
       // Only the original signed-in owner may complete this specific OAuth
       // flow. The SDK verifies state again before exchanging the code.
+      releaseCallback(flow)
       flow.status = 'completing'
       flow.resolveManual(input.redirectUrl)
       return reply({ oauth: publicFlow(flow) }, 202)

@@ -45,7 +45,8 @@ try {
       receivedAuthUrl = true
       abort.abort()
     },
-  }, { agentName: 'NovelTea Studio', getDeviceId: () => 'abcdef01-1234-4567-8abc-123456789abc' })
+  }, { agentName: 'NovelTea Studio', callback: { mode: 'external' },
+    getDeviceId: () => 'abcdef01-1234-4567-8abc-123456789abc' })
 } catch (error) {
   if (!receivedAuthUrl) throw error
 } finally {
