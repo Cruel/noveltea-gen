@@ -51,7 +51,7 @@ const DOMAINS = {
   character: {
     name: "nt-character-development",
     owns: ["characters/*.md", "relationships/*.md", "arcs/*.md (characters array only)"],
-    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. Use character records (type-specific fields motivation and optional initial_knowledge) for people, relationship records (characters exactly two distinct IDs and initial) for the bond. Every record MUST have readable narrative prose after its closing --- frontmatter line. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
+    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. FIRST inspect the listed existing Character records and typed IDs. If a Character ID already exists, REUSE and develop its exact existing file; never create a second filename for the same canonical ID. A draft status does not make an existing character disposable. Use character records (type-specific fields motivation and optional initial_knowledge) for people, relationship records (characters exactly two distinct IDs and initial) for the bond. Every record MUST have readable narrative prose after its closing --- frontmatter line. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
   },
 } as const;
 

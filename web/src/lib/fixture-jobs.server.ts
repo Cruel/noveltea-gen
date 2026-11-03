@@ -8,7 +8,7 @@ import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
 import { startStoryJob, type JobStartResult } from '../../../src/job'
 import { parseGenerationContract, type GenerationRequest } from '../../../src/generation'
-import { claimServerGeneration, assertServerClaimPermitted } from '../../../src/generation-owner'
+import { assertServerClaimPermitted } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
@@ -111,7 +111,8 @@ export function pinnedRequest(row: SavedJob, job: JobStartResult): GenerationReq
   return request
 }
 
-async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
+/** Owner-scoped, read-only diagnostic view; never authorizes a writer. */
+export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob, owner: string) {
   const job = await restoreJob(row, owner)
   const pinned = pinnedRequest(row, job)
   const queued = queueRecord(store, row.id)
@@ -152,18 +153,23 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
     reason: 'Previous worker stopped without clean completion. Inspect preserved files and receipts; no replay is permitted.',
     completedStages: [] }
   let revisionVerified = true
-  try { await verifyTrustedRevision(job) }
-  catch {
-    // Preserve a blocked checkpoint's inspectability without trusting it for
-    // writes. Only the clean, unchanged original revision is eligible here.
+  try {
+    await verifyTrustedRevision(job)
+    // A verified Git commit is not evidence that an unfinished specialist's
+    // working files were accepted. Keep the separate dirty-tree distinction.
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
-    const cleanBaseline = row.requestJson && ['blocked', 'paused', 'interrupted'].includes(row.status) &&
-      !['queued', 'running'].includes(queued?.phase ?? '') &&
-      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: job.worktreeRoot, env, encoding: 'utf8' }).trim() === job.baseSha &&
-      !execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'],
-        { cwd: job.worktreeRoot, env, encoding: 'utf8' }).trim()
-    if (!cleanBaseline) throw new JobError(409, 'Unverified job revision requires operator reconciliation.')
+    if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+      cwd: job.worktreeRoot, env, encoding: 'utf8',
+    }).trim()) throw new Error('Uncommitted specialist files remain')
+  }
+  catch {
+    // A failed specialist is expected to leave a dirty worktree on a
+    // previously verified HEAD. Owner-scoped, settled checkpoint INSPECTION
+    // must still work; this does not authorize a write or a retry.
+    if (!row.requestJson || !['blocked', 'paused', 'interrupted'].includes(row.status) ||
+        ['queued', 'running'].includes(queued?.phase ?? ''))
+      throw new JobError(409, 'Unverified job revision requires operator reconciliation.')
     revisionVerified = false
   }
   if (queued?.phase === 'queued') return { ...base, status: 'queued',
@@ -183,6 +189,7 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
     const snapshot = await graph.getState({ configurable: { thread_id: row.threadId! } })
     const state = snapshot.values as {
       request?: GenerationRequest; status?: string; reason?: string | null
+      active?: { stage?: string; id?: string } | null
       completedStages?: Array<{ stage: string; status: string }>
     }
     if (!state.request) {
@@ -194,23 +201,60 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
         !existsSync(join(job.stateDir, 'generation-server-owner.json'))) {
       throw new JobError(409, 'Generation checkpoint or execution owner differs from the pinned request.')
     }
-    try { await claimServerGeneration(job, row.threadId!, pinned) }
+    try { await assertServerClaimPermitted(job, row.threadId!, pinned) }
     catch { throw new JobError(409, 'Generation owner receipt conflicts with this job. Inspect saved state before recovery.') }
     const interrupted = state.status === 'running'
-    const handoff = ['paused', 'blocked'].includes(row.status) ? await inspectFoundationConflict(job) : null
+    const isFoundationHandoff = state.active?.stage === 'foundation' &&
+      state.reason === 'Foundation requires an explicit author decision before generation can proceed.'
+    const handoff = isFoundationHandoff ? await inspectFoundationConflict(job) : null
     const authorReady = handoff?.status === 'authorized' && !handoff.retryUsed && row.status === 'paused'
-    const authorBlocked = !!handoff && !authorReady && ['blocked', 'paused'].includes(state.status ?? '')
+    // A previously authorized Foundation is not a permanent status override:
+    // later specialist failures must show their OWN checkpoint reason.
+    const checkpointReason = typeof state.reason === 'string'
+      ? state.reason.slice(0, 2400).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '') : null
+    let recovery: { kind: 'manual-specialist' | 'operator-reconciliation'; stage: string;
+      workItem: string | null; files: string[]; candidateDigest: string | null;
+      guidance: string } | null = null
+    if (['blocked', 'paused'].includes(row.status) && !revisionVerified) {
+      if (state.active?.stage === 'foundations' && existsSync(join(job.stateDir, 'character-world.json'))) {
+        // The specialist owns the reconciliation contract. Inspect only; its
+        // dirty work and Pi session must never be replayed or discarded by GET.
+        try {
+          const { runCharacterWorldJob } = await import('../../../src/character-world')
+          const inspection = await runCharacterWorldJob({
+            story: job.storyRoot, job: job.jobId, action: 'inspect',
+          })
+          if (!('recovery' in inspection)) throw new Error('Missing read-only recovery inspection')
+          const candidate = inspection.recovery?.candidate
+          const files = candidate?.paths ?? (inspection.recovery?.changes ?? [])
+            .map((entry: string) => entry.slice(3).replace(/^story\//, ''))
+            .filter((p: string) => /^(arcs|characters|relationships|facts|world-entities)\/[a-z0-9-]+\.md$/.test(p))
+          recovery = {
+            kind: 'manual-specialist', stage: 'foundations',
+            workItem: candidate?.unit ?? state.active.id ?? null,
+            files: files.slice(0, 32), candidateDigest: candidate?.digest ?? null,
+            guidance: 'Review and repair the preserved, uncommitted specialist files. Reuse existing canonical character IDs rather than creating duplicates. Then inspect and explicitly reconcile the exact corrected files with the Character/World foundations workflow. This UI cannot safely replay or discard an unfinished writer; Resume stays disabled until the parent generation checkpoint is separately reconciled.',
+          }
+        } catch {
+          // Even if the specialist inspect path is unavailable, report the
+          // original checkpoint cause rather than hiding the blocked job.
+        }
+      }
+      if (!recovery) recovery = {
+        kind: 'operator-reconciliation', stage: state.active?.stage ?? 'unknown',
+        workItem: state.active?.id ?? null, files: [], candidateDigest: null,
+        guidance: 'An unfinished work item has unverified files or receipts. Inspect its saved session and Git changes, reconcile the original specialist, then verify the parent generation checkpoint before resuming. Automatic retry is disabled.',
+      }
+    }
     return { ...initial, status: interrupted ? 'interrupted' : authorReady ? 'paused' :
-        authorBlocked ? 'blocked' : (state.status ?? 'interrupted'),
+        (state.status ?? 'interrupted'),
+      revisionVerified, recovery,
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
-        : handoff ? authorReady ? 'Author exception recorded. The original no-write session is verified; select Resume to request the one authorized retry.' :
-          handoff.status === 'rejected' ? 'Author rejected the requested Foundation exception. The protected decision remains binding.' :
-          handoff.retryUsed ? 'The authorized no-write retry was consumed. Inspect the preserved specialist before further action.' :
-          'Foundation requires an author decision. Review the exact protected constraint below; the original no-write Pi session and Git revision are preserved.'
-        : !revisionVerified ? 'An unfinished writer has not established a verified revision. Inspect the original session before recovery.'
-        : pinned.fixture ? (state.reason ?? null) : state.reason
-          ? state.reason === 'Foundation requires an explicit author decision before generation can proceed.'
-            ? state.reason : 'Generation needs review. Inspect the saved specialist, validator and approval receipts before recovery.' : null,
+        : authorReady ? 'Foundation exception approved; use Resume to request its first verified retry.'
+        : handoff && handoff.status === 'rejected'
+          ? 'Author rejected the requested Foundation exception. The protected decision remains binding.'
+        : checkpointReason ?? (!revisionVerified
+          ? 'The worktree has unverified changes. Review the saved specialist before recovery.' : null),
       completedStages: (state.completedStages ?? []).map(item => ({ stage: item.stage, status: item.status })) }
   } finally {
     saver.db.close()
@@ -272,7 +316,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     if (!user) throw new JobError(401, 'Sign in required.')
     const row = selectedJob(store, user.id, id)
     if (request.method === 'GET') {
-      return reply({ job: await inspect(store, row, user.id) })
+      return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
     const input = await readInput(request)
     const job = await restoreJob(row, user.id)
@@ -281,7 +325,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       throw new JobError(409, 'Job already has a different pinned generation request.')
     const queued = queueRecord(store, id)
     if (existing) {
-      return reply({ job: await inspect(store, row, user.id) })
+      return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
     if (row.status !== 'paused') throw new JobError(409, 'Only a prepared job can start generation.')
     await verifyTrustedRevision(job)
@@ -318,7 +362,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),
       job.threadId + ':generation:web')
     // The agent process owns graph execution, including fixture runs.
-    return reply({ job: await inspect(store, selectedJob(store, user.id, id), user.id) }, 202)
+    return reply({ job: await inspectRegisteredJob(store, selectedJob(store, user.id, id), user.id) }, 202)
   } catch (error) {
     if (error instanceof JobError) return reply({ error: error.message }, error.status)
     // Do not include Pi/provider exceptions; they can contain credentials.

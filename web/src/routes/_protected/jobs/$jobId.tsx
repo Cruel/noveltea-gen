@@ -11,6 +11,12 @@ type Job = {
   id: string; storyId: string; title: string; provider: string; baseSha: string; headSha: string
   status: string; threadId: string | null; fixture: boolean; task: string | null
   contract: unknown; reason: string | null; completedStages: Array<{ stage: string; status: string }>
+  revisionVerified?: boolean
+  recovery?: {
+    kind: 'manual-specialist' | 'operator-reconciliation'
+    stage: string; workItem: string | null; files: string[]
+    candidateDigest: string | null; guidance: string
+  } | null
 }
 export const Route = createFileRoute('/_protected/jobs/$jobId')({ component: JobDetails })
 
@@ -125,7 +131,35 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
         <p><strong>Pinned Git commit:</strong> <code>{job.baseSha}</code></p>
         <p><strong>Job HEAD:</strong> <code>{job.headSha}</code></p>
         {job.threadId && <p><strong>Durable graph thread:</strong> <code>{job.threadId}</code></p>}
-        {job.reason && <p role="status">{job.reason}</p>}
+        {job.reason && <div role={job.status === 'blocked' ? 'alert' : 'status'}>
+          <strong>{job.status === 'blocked' ? 'Why generation stopped:' : 'Current status:'}</strong>
+          <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{job.reason}</p>
+        </div>}
+        {job.recovery && <div aria-label="Blocked generation recovery">
+          <h3>Recovery requires review</h3>
+          <p><strong>Stage:</strong> {job.recovery.stage}
+            {job.recovery.workItem && <> · <strong>Work item:</strong> <code>{job.recovery.workItem}</code></>}
+          </p>
+          <p><strong>Uncommitted specialist files are preserved.</strong> They are not
+            yet a verified Story revision. Automatic replay, publishing, and
+            unreviewed cleanup remain unavailable.</p>
+          {job.recovery.files.length > 0 && <>
+            <h4>Files requiring review</h4>
+            <ul>{job.recovery.files.map(file => <li key={file}><code>{file}</code></li>)}</ul>
+          </>}
+          {job.recovery.candidateDigest && <p>Inspected draft digest:
+            {' '}<code>{job.recovery.candidateDigest}</code>. This digest identifies
+            the current uncommitted bytes, not authorization to accept them.
+          </p>}
+          <p>{job.recovery.guidance}</p>
+          {job.recovery.kind === 'manual-specialist' && <p>
+            For this Story, compare the generated Character records with existing
+            canonical IDs; repair duplicate identities and references in the original
+            worktree. Use the foundations <code>inspect</code> and
+            {' '}<code>reconcile</code> commands with the digest of the
+            <em> corrected</em> files. The preserved draft is not safe to approve as-is.
+          </p>}
+        </div>}
         {job.completedStages.length > 0 && <ul>{job.completedStages.map((stage, index) =>
           <li key={index}>{stage.stage}: {stage.status}</li>)}</ul>}
         <button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Refresh saved state</button>
@@ -155,12 +189,21 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
       </section>
       <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
       <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
-      <GitChanges jobId={jobId} revision={job.headSha} />
-      {(job.provider === 'github' || job.provider === 'gitlab') &&
-        <PublishDraft jobId={jobId} provider={job.provider} />}
-      {job.reason && /Foundation requires|Author exception recorded|Author rejected|authorized no-write retry/.test(job.reason)
-        ? <section aria-label="Story explorer availability"><p>The canonical Story explorer is temporarily unavailable while Foundation authorization or recovery is pending. The original source is available in the review panel above.</p></section>
-        : <StoryExplorer jobId={jobId} revision={job.headSha} />}
+      {job.revisionVerified === false
+        ? <section aria-label="Verified Story views unavailable">
+          <h2>Verified Story views</h2>
+          <p>The Story explorer, committed diff inspection, and draft publication
+            are unavailable while an unfinished specialist has unverified changes.
+            This does not remove its already committed work or saved evidence.</p>
+        </section>
+        : <>
+          <GitChanges jobId={jobId} revision={job.headSha} />
+          {(job.provider === 'github' || job.provider === 'gitlab') &&
+            <PublishDraft jobId={jobId} provider={job.provider} />}
+          {job.reason && /Foundation requires|Author exception recorded|Author rejected|authorized no-write retry/.test(job.reason)
+            ? <section aria-label="Story explorer availability"><p>The canonical Story explorer is temporarily unavailable while Foundation authorization or recovery is pending. The original source is available in the review panel above.</p></section>
+            : <StoryExplorer jobId={jobId} revision={job.headSha} />}
+        </>}
       {job.status === 'prepared'
         ? <GenerationConfiguration jobId={jobId} onStarted={refresh} />
         : <section>

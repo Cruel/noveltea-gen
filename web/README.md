@@ -575,6 +575,25 @@ ambiguous writers, stale proposals and changed executable bytes fail closed.
 Neither approval automatically starts generation. Jobs with committed revisions
 still require a separate history-aware validator migration.
 
+**Blocked specialist inspection:** Once a queue finishes, the owner-scoped job
+page reads the saved generation checkpoint even when an incomplete specialist
+left uncommitted files. It shows the original bounded failure reason, active
+work item, and read-only Character/World reconciliation inventory and candidate
+digest. This is **inspection only**, not a verified revision or authorization
+to publish. Uncommitted Story files are preserved; the canonical explorer,
+committed diff view, and publication remain unavailable while the tree is dirty.
+For a duplicate-Character failure, correct the existing canonical Character
+file instead of introducing a second filename for the same typed ID, and repair
+referencing records. An operator can then use the original
+`job foundations inspect`, `job foundations reconcile --digest <corrected-digest>`
+and `job foundations run` workflow to validate and commit **the corrected
+bytes**, rather than trusting the original model's failed draft digest.
+The parent generation checkpoint also requires explicit reconciliation before
+Resume becomes available. Studio does not silently restore, replay, or commit a
+failed writer. Future Character specialists receive existing linked Character
+sources and can use bounded same-session repairs for reported architectural
+conflicts.
+
 **Operator prerequisite:** set `NT_PI_CREDENTIAL_KEY` to an independently stored,
 base64-encoded random 32-byte key (generate with
 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`)

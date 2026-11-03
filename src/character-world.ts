@@ -61,7 +61,7 @@ interface ArchitectureReceipt {
   plan?: Plan;
 }
 interface Obligation { id: string; path: string; field: string; requiredBy: string; code: string; message: string }
-interface CatalogRecord { path: string; metadata: { type: string; id: string; status: string; arcs?: string[] } }
+interface CatalogRecord { path: string; metadata: { type: string; id: string; status: string; arcs?: string[]; characters?: string[] } }
 interface CatalogReport {
   records: CatalogRecord[];
   diagnostics: unknown[];
@@ -131,11 +131,24 @@ function architectureTargets(plan: Plan, report: CatalogReport) {
   }
   return records;
 }
-function assignment(domain: FoundationDomain, plan: Plan, report: CatalogReport, authored: string[]): FoundationAssignment {
+export function deriveFoundationAssignment(domain: FoundationDomain, plan: Plan, report: CatalogReport, authored: string[]): FoundationAssignment {
   const selected = architectureTargets(plan, report);
   const sources = report.records.filter(r => r.metadata.type === "creative-direction" && r.metadata.status !== "superseded");
   if (sources.length !== 1) throw new Error("Expected exactly one current Creative Direction.");
-  const sourcePaths = [...new Set([...sources, ...selected].map(r => r.path).concat(authored))].sort();
+  // Source context must contain canonical Character records already attached
+  // to the planned Arc or targeted by the plan. Otherwise the specialist can
+  // accidentally create the same typed ID under a second filename.
+  const existingIds = new Set([
+    ...selected.flatMap(r => r.metadata.type === "arc" ? r.metadata.characters ?? [] : []),
+    ...plan.items.flatMap(item => item.targetIds.filter(id => id.startsWith("character."))),
+  ]);
+  const existingCharacters = domain === "character"
+    ? report.records.filter(r => r.metadata.type === "character" &&
+      r.metadata.status !== "superseded" && existingIds.has(r.metadata.id)) : [];
+  if (existingCharacters.length > 64)
+    throw new Error("Character context exceeds the bounded existing-record inventory.");
+  const sourcePaths = [...new Set([...sources, ...selected, ...existingCharacters]
+    .map(r => r.path).concat(authored))].sort();
   return { domain, arcIds: selected.filter(r => r.metadata.type === "arc").map(r => r.metadata.id),
     milestoneIds: selected.filter(r => r.metadata.type === "milestone").map(r => r.metadata.id),
     sourcePaths, scope: plan.contract,
@@ -534,7 +547,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       if (!before) throw new Error("Missing parent work-item commit.");
       assertHead(job, before);
       const preReport = reportOf(await validate(before), before);
-      const assign = assignment(unit.domain, plan, preReport,
+      const assign = deriveFoundationAssignment(unit.domain, plan, preReport,
         receipt.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
       const paths = await auditPaths(job, unit, assign, recovery.candidate.paths);
       const reviewed = await fileDigest(job, paths);
@@ -596,7 +609,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Specialist requires a clean work-item boundary.");
       }
       const preReport = reportOf(await validate(before), before);
-      const assign = assignment(unit.domain, plan, preReport,
+      const assign = deriveFoundationAssignment(unit.domain, plan, preReport,
         state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
       if (unit.phase === "pending") {
         await preflightPiAssignment(job, "foundations:" + unit.domain, state.worker === "pi"
@@ -614,7 +627,12 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
             const paths = await auditPaths(job, unit, assign, proposed.claimedPaths);
             assertHead(job, before);
             if (proposed.architecturalConflicts?.length) {
-              throw new Error("Specialist reported architectural conflicts: " + JSON.stringify(proposed.architecturalConflicts));
+              // A self-reported conflict is bounded repair feedback to the
+              // SAME Pi session, not permission to commit or begin a new
+              // writer. Unresolved conflicts still stop after the final pass.
+              return proposed.architecturalConflicts.slice(0, 8).map(message =>
+                "Unresolved architectural conflict; repair the existing files and references: " +
+                message.slice(0, 800));
             }
             const draft = await validate(before);
             const report = draft.report as unknown as CatalogReport | undefined;

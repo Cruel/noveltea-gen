@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { deriveFoundationAssignment } from "../src/character-world.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-character-world-"));
 after(() => removeTestTree(root));
@@ -16,6 +17,31 @@ function git(cwd: string, ...args: string[]) {
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 }
+test("character assignment includes existing canonical Character paths instead of inventing duplicate IDs", () => {
+  const record = (path: string, type: string, id: string, characters?: string[]) =>
+    ({ path, metadata: { type, id, status: "draft", ...(characters ? { characters } : {}) } });
+  const report = {
+    records: [
+      record("creative-direction/foundation.md", "creative-direction", "creative-direction.foundation"),
+      record("arcs/missing-page.md", "arc", "arc.missing-page", ["character.nia"]),
+      record("milestones/map-recovered.md", "milestone", "milestone.map-recovered"),
+      record("characters/nia.md", "character", "character.nia"),
+      record("characters/unrelated.md", "character", "character.unrelated"),
+    ], diagnostics: [], outstanding: [],
+    protection: { status: "checked", changes: [], warnings: [] },
+    readiness: { design: { stages: {} } },
+  };
+  const plan = { version: 1, contract: { scope: { kind: "full-story" } },
+    items: [{ id: "global-architecture", status: "verified",
+      verifiedSha: "a".repeat(40), targetIds: ["arc.missing-page", "milestone.map-recovered"] },
+    { id: "compose-scope", targetIds: ["character.nia"] }] };
+  const character = deriveFoundationAssignment("character", plan as any, report as any, []);
+  assert.ok(character.sourcePaths.includes("characters/nia.md"));
+  assert.ok(!character.sourcePaths.includes("characters/unrelated.md"));
+  const world = deriveFoundationAssignment("world", plan as any, report as any, []);
+  assert.ok(!world.sourcePaths.includes("characters/nia.md"));
+});
+
 function setup(name: string, protectedFoundation = false) {
   const repo = join(root, name);
   const story = join(repo, "story");

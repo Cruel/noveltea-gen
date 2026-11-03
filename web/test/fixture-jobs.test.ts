@@ -18,6 +18,7 @@ import { generationEventsRequest, appendGenerationEvent, listGenerationEvents } 
 import { jobChangesRequest } from '../src/lib/job-changes.server'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { parseGenerationContract } from '../../src/generation'
+import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -339,6 +340,39 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(pinnedRequest.story, acquired.storyRoot)
     assert.equal(pinnedRequest.model, undefined)
     assert.equal(pinnedRequest.provider, undefined)
+
+    // A later specialist can leave a dirty worktree on an otherwise verified
+    // HEAD. Inspection must show the original blocked reason, not the generic
+    // "unverified HEAD" error or stale Foundation authorization.
+    const blockedCause = 'Specialist reported architectural conflicts: Duplicate character.nia in a new file.'
+    const graphPath = join(acquired.stateDir, 'web-generation.sqlite')
+    const blockedGraph = openWebGenerationGraph(graphPath)
+    try {
+      await blockedGraph.graph.updateState(
+        { configurable: { thread_id: saved.threadId } },
+        { status: 'blocked', reason: blockedCause, active: { id: 'foundations', stage: 'foundations' } })
+    } finally { blockedGraph.saver.db.close() }
+    mkdirSync(join(acquired.worktreeStoryRoot, 'characters'), { recursive: true })
+    const dirtyFile = join(acquired.worktreeStoryRoot, 'characters', 'new-duplicate.md')
+    writeFileSync(dirtyFile, 'unfinished candidate must remain preserved')
+    store.sqlite.prepare("UPDATE studio_sessions SET status='blocked' WHERE id=?").run(jobId)
+    const failed = await fixtureJobRequest(restoredAuth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId, { headers: { cookie: aliceCookie } }),
+      jobId, config.baseURL)
+    assert.equal(failed.status, 200, await failed.clone().text())
+    const blocked = (await failed.json() as any).job
+    assert.equal(blocked.status, 'blocked')
+    assert.equal(blocked.revisionVerified, false)
+    assert.equal(blocked.reason, blockedCause)
+    assert.equal(blocked.recovery.kind, 'operator-reconciliation')
+    assert.equal(blocked.recovery.stage, 'foundations')
+    assert.match(blocked.recovery.guidance, /reconcile/)
+    assert.equal(existsSync(dirtyFile), true, 'read-only failure inspection cannot discard a draft')
+    assert.equal(git(acquired.worktreeRoot, 'rev-parse', 'HEAD'), currentHead)
+    const stillPending = await fixtureJobRequest(restoredAuth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId, { headers: { cookie: bobCookie } }),
+      jobId, config.baseURL)
+    assert.equal(stillPending.status, 404, 'foreign users never see failure details')
 
     store.sqlite.prepare('UPDATE studio_sessions SET generation_thread_id=? WHERE id=?')
       .run('unrelated-thread', jobId)
