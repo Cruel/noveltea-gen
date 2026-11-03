@@ -18,7 +18,7 @@ if (cli.error || cli.status !== 0)
 if (!process.env.NT_AGENT_RPC_TOKEN || process.env.NT_AGENT_RPC_TOKEN.length < 32)
   throw new Error('Set NT_AGENT_RPC_TOKEN in web/.env (at least 32 characters).')
 if (!process.env.NT_PI_CREDENTIAL_KEY)
-  throw new Error('Set NT_PI_CREDENTIAL_KEY in web/.env to enable encrypted ChatGPT OAuth.')
+  throw new Error('Set NT_PI_CREDENTIAL_KEY in web/.env to enable encrypted per-user provider credentials.')
 const token = '/run/noveltea-controller/token'
 mkdirSync(dirname(token), { recursive: true, mode: 0o700 })
 chmodSync(dirname(token), 0o700)

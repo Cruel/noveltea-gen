@@ -8,55 +8,12 @@ import { test } from 'node:test'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
-import { oauthHostDeviceId, piModelsRequest, validChatGPTCallback } from '../src/lib/pi-models.server'
+import { piModelsRequest } from '../src/lib/pi-models.server'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
 import { assertUserPiSelection, availableUserPiModels, createUserPiRuntime,
   userPiCredentials, validPiSelection } from '../src/lib/pi-credentials.server'
 
 const origin = 'http://localhost:3000'
-
-test('opt-in: server ChatGPT OAuth start exposes a pending browser URL without completing login', {
-  skip: process.env.NT_TEST_CHATGPT_OAUTH_START !== '1',
-  timeout: 30_000,
-}, async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'nt-pi-oauth-start-'))
-  const previousKey = process.env.NT_PI_CREDENTIAL_KEY
-  process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
-  const store = openStudioDatabase(join(directory, 'studio.sqlite'))
-  try {
-    await migrateStudio(store, config)
-    const auth = createStudioAuth(store, config)
-    const ctx = await auth.$context
-    const alice = await ctx.internalAdapter.createUser({ name: 'OAuth Start', email: 'oauth-start@pi.test',
-      emailVerified: true }, { method: 'test' })
-    const session = await ctx.internalAdapter.createSession(alice.id)
-    const cookie = 'better-auth.session_token=' + session.token + '.' +
-      createHmac('sha256', config.secret).update(session.token).digest('base64')
-    const request = async (method: 'GET' | 'POST' | 'DELETE', body?: unknown) => {
-      const response = await piModelsRequest(auth, store, new Request(origin + '/api/pi/models', {
-        method, headers: { cookie, ...(method === 'GET' ? {} : { origin, 'Content-Type': 'application/json' }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      }), origin)
-      return { status: response.status, body: await response.json() as any }
-    }
-    const start = await request('POST', { action: 'oauth', provider: 'openai' })
-    assert.equal(start.status, 202)
-    let flow = start.body.oauth
-    for (let i = 0; i < 30 && flow?.status === 'starting'; i++) {
-      await new Promise(resolve => setTimeout(resolve, 150))
-      flow = (await request('GET')).body.oauth
-    }
-    assert.equal(flow?.status, 'pending', 'real Pi OAuth must reach browser authorization rather than silently fail')
-    assert.match(flow.url, /^https:\/\//)
-    assert.equal((await request('DELETE', { provider: 'openai' })).status, 200)
-    assert.deepEqual((await request('GET')).body.connected, [])
-  } finally {
-    store.sqlite.close()
-    if (previousKey === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
-    else process.env.NT_PI_CREDENTIAL_KEY = previousKey
-    rmSync(directory, { recursive: true, force: true })
-  }
-})
 
 const config = {
   baseURL: origin, secret: 'pi-credential-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
@@ -109,19 +66,7 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.deepEqual(await bobRuntime.getAvailable('openai'), [])
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: 'openai', key: '' })).status, 422)
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: '../other', key: 'x' })).status, 422)
-    assert.equal((await request('POST', aliceCookie, { action: 'oauth', provider: 'openai-codex' })).status, 422)
-    assert.match(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/)
-    assert.notEqual(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
-      oauthHostDeviceId(bob.id, process.env.NT_PI_CREDENTIAL_KEY!))
-    assert.equal(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
-      oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!))
-    const authorization = 'https://auth.openai.com/api/accounts/authorize?state=one-use-state'
-    const redirect = 'http://127.0.0.1:1455/auth/callback?state=one-use-state&code=abc&client_id=issued-client'
-    assert.equal(validChatGPTCallback(redirect, authorization), true)
-    assert.equal(validChatGPTCallback(redirect.replace('one-use-state', 'wrong'), authorization), false)
-    assert.equal(validChatGPTCallback(redirect.replace('127.0.0.1', 'evil.example'), authorization), false)
-    assert.equal(validChatGPTCallback(redirect.replace('&client_id=issued-client', ''), authorization), false)
+    assert.equal((await request('POST', aliceCookie, { action: 'oauth', provider: 'openai' })).status, 422)
     const key = 'ALICE-PRIVATE-MODEL-KEY'
     const added = await request('POST', aliceCookie, { action: 'api-key', provider: 'openai', key })
     assert.equal(added.status, 200, JSON.stringify(added.body))

@@ -529,18 +529,22 @@ editable before generation. If a draft exists, fixture launch must match its
 pinned task and canonical contract; a direct POST cannot replace it. An
 invalid/stale/foreign draft fails closed.
 
-The job's **Pi model and budgets** section offers per-user API-key connections
-and **Sign in with ChatGPT browser OAuth** through the Pi SDK's `openai` provider.
-The separate `openai-codex` provider is legacy; reconnect under `openai` for
-subscription generation. On Docker or remote Studio deployments, the browser's
-localhost callback may be unreachable. Paste its final `127.0.0.1:1455` redirect
-URL into the authenticated Studio form to finish the same verified OAuth flow. The selected provider,
-model and optional reasoning level are verified against that signed-in user's
-available Pi catalog and persisted as part of the immutable job draft. The
-GET/POST/DELETE `/api/pi/models` connection endpoint is authenticated,
-origin-checked for writes, and returns only model and credential metadata;
-The trusted server accepts only the signed-in author's state-matched redirect;
-OAuth tokens are never returned to the browser.
+The job's **Pi model and budgets** section supports per-user API keys
+(OpenAI, Anthropic, OpenRouter, xAI, Google, Groq, Mistral) and device-code
+subscription login (legacy OpenAI Codex, GitHub Copilot, Kimi For Coding,
+Meta, Radius and xAI). Studio uses the official Pi 1.5.0 authentication API
+and **never starts local OAuth callback listeners**. Providers which also
+offer browser login are explicitly constrained to their device-code method.
+The newer Pi `openai` ChatGPT subscription browser flow and Anthropic's
+browser/copy-code subscription flow are not offered; use an API key instead.
+Device-code authorization still uses outbound HTTPS and verification in the
+user's browser, but no return callback is required.
+
+The selected provider, model and optional reasoning level are verified
+against that signed-in user's available Pi catalog and persisted as part
+of the immutable job draft. The GET/POST/DELETE `/api/pi/models` endpoint is
+authenticated, origin-checked for writes, and exposes only model metadata,
+device verification codes and temporary prompts—not stored OAuth tokens.
 Disconnecting or losing authorization removes availability and blocks any new
 selection or fixture start pinned to that model; the existing draft and worktree
 remain intact for recovery. The job cannot silently switch to a host model.
@@ -555,10 +559,10 @@ OAuth refresh writes. Keep the encryption key outside the Studio SQLite backup
 but back it up securely: **losing/changing the key makes existing connections
 unreadable**, and runtime requests fail closed. The Pi SDK's runtime is built
 with the per-user credential store and with filesystem model configuration
-disabled; it does not read shared host `~/.pi` auth/model files. OAuth flow
-state is transient during browser authorization; completed provider credentials
-are durable across restarts. Reconnect if an in-flight device authorization
-is interrupted by a restart or if provider access is revoked. An API key being
+disabled; it does not read shared host `~/.pi` auth/model files. In-progress
+device-code polling is process-local, while completed provider credentials
+survive restarts. Reconnect if the web worker restarts during authorization
+or if provider access is revoked. An API key being
 present does not prove the remote vendor will accept it until a real API call.
 
 Job-level specialist-step, model-call and reported-cost budgets are enforced by the

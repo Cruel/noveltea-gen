@@ -23,10 +23,12 @@ import { readIsolatedStudioOAuth } from './studio-oauth-source'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
 
 const enabled = process.env.NT_TEST_WEB_REAL_PI === '1'
-const subscriptionTest = process.env.NT_TEST_WEB_PI_AUTH === 'studio-oauth'
+const subscriptionTest = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
 const required = subscriptionTest
-  ? ['NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE', 'NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY'] as const
-  : ['NT_NATIVE_CLI', 'NT_TEST_WEB_PI_API_KEY', 'NT_TEST_WEB_PI_MODEL', 'NT_STUDIO_SKILLS_SOURCE'] as const
+  ? ['NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE', 'NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY',
+      'NT_TEST_WEB_PI_PROVIDER', 'NT_TEST_WEB_PI_MODEL'] as const
+  : ['NT_NATIVE_CLI', 'NT_TEST_WEB_PI_API_KEY', 'NT_TEST_WEB_PI_PROVIDER', 'NT_TEST_WEB_PI_MODEL',
+      'NT_STUDIO_SKILLS_SOURCE'] as const
 const config = { baseURL: 'http://localhost:3000',
   secret: 'web-live-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
   github: { clientId: 'test', clientSecret: 'secret' },
@@ -53,7 +55,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
   // usable refresh token and cannot invalidate the normal Studio login.
   const oauth = subscriptionTest ? await readIsolatedStudioOAuth(
     process.env.NT_TEST_WEB_PI_SOURCE_DB!, process.env.NT_PI_CREDENTIAL_KEY!,
-    process.env.NT_TEST_WEB_PI_SOURCE_USER_ID,
+    process.env.NT_TEST_WEB_PI_SOURCE_USER_ID, process.env.NT_TEST_WEB_PI_PROVIDER!,
   ) : null
   const root = mkdtempSync(join(tmpdir(), 'nt-web-real-pi-'))
   const envKeys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_PI_CREDENTIAL_KEY', 'NT_REQUIRE_USER_PI_RUNTIME',
@@ -123,16 +125,12 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       VALUES (?,?,?,'story','Live','2026-11-01',?)`).run(storyId, user.id, repositoryId, commit)
     store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,status,source_commit_sha,created_at,updated_at)
       VALUES (?,?,?,'Live','paused',?,'2026-11-01','2026-11-01')`).run(jobId, user.id, storyId, commit)
-    const provider = subscriptionTest ? 'openai' : process.env.NT_TEST_WEB_PI_PROVIDER || 'openai'
+    const provider = process.env.NT_TEST_WEB_PI_PROVIDER!
     await userPiCredentials(store, user.id).modify(provider, async () =>
       oauth ?? ({ type: 'api_key', key: process.env.NT_TEST_WEB_PI_API_KEY! }))
     const eligible = (await availableUserPiModels(store, user.id)).filter(model => model.provider === provider)
-    const preferredModel = process.env.NT_TEST_WEB_PI_MODEL
-    const selectedModel = preferredModel
-      ? eligible.find(model => model.id === preferredModel)
-      : eligible.find(model => model.id === 'gpt-6.1-sol') ??
-        eligible.find(model => model.reasoning) ?? eligible[0]
-    assert.ok(selectedModel, 'No available model for the configured OpenAI connection')
+    const selectedModel = eligible.find(model => model.id === process.env.NT_TEST_WEB_PI_MODEL!)
+    assert.ok(selectedModel, 'The requested model is not available for the selected user provider')
     const selected = { provider, id: selectedModel.id }
     console.log('Live Pi certification model:', selected.provider + '/' + selected.id)
     await assertUserPiSelection(store, user.id, selected)

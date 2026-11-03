@@ -117,11 +117,15 @@ const stages = {
   'live-pi'() {
     rootless()
     for (const key of ['NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']) need(key)
-    if (process.env.NT_TEST_WEB_PI_AUTH === 'studio-oauth') {
-      for (const key of ['NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY']) need(key)
+    if (process.env.NT_TEST_WEB_PI_AUTH === 'device-code') {
+      for (const key of ['NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY',
+        'NT_TEST_WEB_PI_PROVIDER', 'NT_TEST_WEB_PI_MODEL']) need(key)
+      if (!['openai-codex', 'github-copilot', 'kimi-coding', 'meta', 'radius', 'xai']
+        .includes(process.env.NT_TEST_WEB_PI_PROVIDER))
+        throw Error('NT_TEST_WEB_PI_PROVIDER must use an available device-code subscription provider')
     } else if (!process.env.NT_TEST_WEB_PI_AUTH || process.env.NT_TEST_WEB_PI_AUTH === 'api-key') {
-      for (const key of ['NT_TEST_WEB_PI_API_KEY', 'NT_TEST_WEB_PI_MODEL']) need(key)
-    } else throw Error('NT_TEST_WEB_PI_AUTH must be studio-oauth or api-key')
+      for (const key of ['NT_TEST_WEB_PI_API_KEY', 'NT_TEST_WEB_PI_PROVIDER', 'NT_TEST_WEB_PI_MODEL']) need(key)
+    } else throw Error('NT_TEST_WEB_PI_AUTH must be device-code or api-key')
     execute('Real Pi web job, canonical commit and sandbox', 'pnpm',
       ['--filter', '@noveltea/studio', 'exec', 'tsx', '--test', 'test/real-pi-generation.test.ts'],
       { NT_TEST_WEB_REAL_PI: '1' })

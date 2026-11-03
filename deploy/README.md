@@ -99,8 +99,9 @@ for remotely reachable deployments), `BETTER_AUTH_SECRET`, GitHub App and
 GitLab OAuth credentials, `NT_PI_CREDENTIAL_KEY`, and
 `NT_AGENT_RPC_TOKEN` (at least 32 characters). Reuse stable encryption and
 authentication secrets across restarts; changing them invalidates existing
-OAuth data or sessions. ChatGPT subscriptions connect through Studio's
-`openai` OAuth flow; no API key is required. Local `pnpm dev` and Compose
+OAuth data or sessions. Studio accepts provider API keys or upstream Pi's
+OAuth device-code login for supported subscription providers; it does not
+create localhost callback listeners. Local `pnpm dev` and Compose
 use **separate** database locations. Starting Compose fresh does not migrate
 existing dev jobs or Pi logins.
 
