@@ -16,6 +16,7 @@ const providerLabels: Record<string, string> = {
 }
 const oauthProviders = ['openai', 'anthropic', 'github-copilot', 'kimi-coding', 'meta',
   'openai-codex', 'openrouter', 'radius', 'xai'] as const
+const browserOAuthProviders = new Set(['openai', 'anthropic', 'openai-codex', 'openrouter', 'radius'])
 const providerName = (id: string) => providerLabels[id]?.replace(/ API$| \(ChatGPT or API key\)$/, '') ?? id
 const safeVerificationLink = (value?: string) => {
   if (!value) return undefined
@@ -93,19 +94,20 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
       return false
     } finally { setBusy(false) }
   }
-  const startOAuth = () => {
+  const startOAuth = (interactive = false) => {
     // Opening the window synchronously with the click avoids popup blockers.
     // Its URL is assigned once Pi emits the authorization link asynchronously.
-    const popup = oauthProvider === 'openai'
+    const popup = !interactive && browserOAuthProviders.has(oauthProvider)
       ? window.open('about:blank', '_blank', 'popup,width=560,height=720') : null
     if (popup) {
       popup.opener = null
-      popup.document.title = 'Sign in with ChatGPT'
-      popup.document.body.textContent = 'Preparing ChatGPT authorization…'
+      popup.document.title = 'Sign in with ' + providerName(oauthProvider)
+      popup.document.body.textContent = 'Preparing provider authorization…'
     }
     oauthPopup.current = popup
     openedAuthUrl.current = null
-    void mutate('POST', { action: 'oauth', provider: oauthProvider }).then(ok => {
+    void mutate('POST', { action: 'oauth', provider: oauthProvider,
+      ...(interactive ? { method: oauthProvider === 'anthropic' ? 'copy-code' : 'device-code' } : {}) }).then(ok => {
       if (!ok && popup && !popup.closed) popup.close()
     })
   }
@@ -136,26 +138,31 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
         </select>
       </label>
       <button type="button" disabled={busy || ['pending', 'starting', 'completing'].includes(catalog?.oauth?.status ?? '')}
-        onClick={startOAuth}>Sign in with {oauthProvider === 'openai' ? 'ChatGPT' : providerName(oauthProvider)}</button>
+        onClick={() => startOAuth()}>Sign in with {oauthProvider === 'openai' ? 'ChatGPT' : providerName(oauthProvider)}</button>
+      {['anthropic', 'openai-codex', 'radius'].includes(oauthProvider) &&
+        <button type="button" disabled={busy || ['pending', 'starting', 'completing'].includes(catalog?.oauth?.status ?? '')}
+          onClick={() => startOAuth(true)}>{oauthProvider === 'anthropic' ? 'Copy-code login' : 'Device-code login'}</button>}
     </div>
     {catalog?.oauth?.status === 'pending' && !catalog.oauth.interactive && <div role="status">
-      <p>Complete sign-in in the ChatGPT window. It will close automatically when authorization completes.
-        {' '}If it did not open, <a href={catalog.oauth.url} target="_blank" rel="noopener noreferrer">open ChatGPT authorization</a>.</p>
+      <p>Complete sign-in in the {providerName(catalog.oauth.provider)} window. If the callback reaches Studio, the window will close automatically.
+        {' '}If it did not open, <a href={catalog.oauth.url} target="_blank" rel="noopener noreferrer">open provider authorization</a>.</p>
       <details>
         <summary>Manual callback fallback (remote browsers)</summary>
-        <p>If your browser cannot reach the loopback callback address, paste its final redirect URL here.</p>
-        <label>Final localhost redirect URL
+        <p>If your browser cannot reach the callback address, copy its final redirect URL from the address bar and paste it here.</p>
+        <label>Final browser redirect URL
           <input type="text" autoComplete="off" value={redirect} disabled={busy}
             onChange={event => setRedirect(event.target.value)}
             placeholder={(catalog.oauth.url
-              ? new URL(catalog.oauth.url).searchParams.get('redirect_uri')
+              ? new URL(catalog.oauth.url).searchParams.get(catalog.oauth.provider === 'openrouter' ? 'callback_url' : 'redirect_uri')
               : null) ?? 'http://127.0.0.1:3000/auth/callback?code=...'} />
         </label>
         <button type="button" disabled={busy || !redirect.trim()}
           onClick={() => void mutate('POST', { action: 'oauth-complete', redirectUrl: redirect.trim() }).then(() => setRedirect(''))}>
-          Complete ChatGPT sign-in
+          Complete {providerName(catalog.oauth.provider)} sign-in
         </button>
       </details>
+      <button type="button" disabled={busy} onClick={() => void mutate('POST', { action: 'oauth-cancel' })
+        .then(ok => { if (ok) oauthPopup.current?.close() })}>Cancel sign-in</button>
     </div>}
     {catalog?.oauth?.interactive && ['starting', 'pending'].includes(catalog.oauth.status) && <div role="status">
       <p>{catalog.oauth.message || 'Preparing ' + providerName(catalog.oauth.provider) + ' authorization…'}</p>
@@ -197,9 +204,9 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
         Cancel sign-in
       </button>
     </div>}
-    {catalog?.oauth?.status === 'completing' && <p role="status">Completing ChatGPT sign-in…</p>}
+    {catalog?.oauth?.status === 'completing' && <p role="status">Completing provider sign-in…</p>}
     {catalog?.oauth?.status === 'starting' && !catalog.oauth.interactive &&
-      <p role="status">Preparing ChatGPT browser authorization…</p>}
+      <p role="status">Preparing browser authorization…</p>}
     {catalog?.oauth?.status === 'failed' && <p role="alert">{catalog.oauth.reason}</p>}
     {error && <p role="alert" className="error">{error}</p>}
   </section>

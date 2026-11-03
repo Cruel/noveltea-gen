@@ -70,7 +70,7 @@ test('Pi interactive OAuth prompts are one-use, user-scoped and persist encrypte
       return Response.json({ access_token: 'ALICE-ACCESS-SECRET',
         refresh_token: 'ALICE-REFRESH-SECRET', expires_in: 3600 })
     }
-    const start = await request(0, 'POST', { action: 'oauth', provider: 'anthropic' })
+    const start = await request(0, 'POST', { action: 'oauth', provider: 'anthropic', method: 'interactive' })
     assert.equal(start.status, 202)
     const select = await until(0, f => f.prompt?.type === 'select')
     assert.equal(select.provider, 'anthropic')

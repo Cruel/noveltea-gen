@@ -201,6 +201,20 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    version: 15,
+    statements: [
+      `CREATE TABLE pi_oauth_pending (
+        owner_user_id TEXT PRIMARY KEY NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        state TEXT NOT NULL UNIQUE,
+        ciphertext TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending','completing','connected','failed')),
+        expires_at INTEGER NOT NULL,
+        reason TEXT
+      )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
