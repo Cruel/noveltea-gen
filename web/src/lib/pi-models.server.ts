@@ -1,5 +1,5 @@
-import { createHmac } from 'node:crypto'
-import { createModels, type OAuthAuthorization } from '@earendil-works/pi-ai'
+import { createHmac, randomUUID } from 'node:crypto'
+import { createModels, type AuthEvent, type AuthPrompt, type OAuthAuthorization } from '@earendil-works/pi-ai'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth'
 
@@ -13,14 +13,27 @@ import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
 import { availableUserPiModels, createUserPiRuntime, userPiCredentials } from './pi-credentials.server'
 
+type PromptView = { id: string; type: AuthPrompt['type']; message: string; placeholder?: string;
+  options?: readonly { id: string; label: string; description?: string }[] }
 type Flow = { status: 'starting' | 'pending' | 'completing' | 'connected' | 'failed'
-  owner: string; url?: string; state?: string; authorization?: OAuthAuthorization;
+  owner: string; provider: string; interactive?: boolean; url?: string; state?: string;
+  authorization?: OAuthAuthorization; prompt?: PromptView; message?: string;
+  device?: { userCode: string; verificationUri: string }; answer?: {
+    id: string; respond: (value: string) => void; cancel: () => void
+  };
   expires: number; reason?: string; abort: AbortController; timeout?: ReturnType<typeof setTimeout> }
 const flows = new Map<string, Flow>()
 // Random provider-generated state is the one-use callback correlation key.
 // No Studio session cookie is expected on the provider's redirect.
 const flowsByState = new Map<string, Flow>()
-const allowedApiProviders = new Set(['openai', 'anthropic', 'google', 'openrouter', 'xai', 'groq', 'mistral'])
+const allowedApiProviders = new Set([
+  'openai', 'anthropic', 'google', 'openrouter', 'xai', 'groq', 'mistral',
+  'github-copilot', 'kimi-coding', 'meta', 'radius',
+])
+const oauthProviders = new Set([
+  'openai', 'anthropic', 'github-copilot', 'kimi-coding', 'meta',
+  'openai-codex', 'openrouter', 'radius', 'xai',
+])
 const reply = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store' } })
 
@@ -55,7 +68,10 @@ function releaseCallback(flow: Flow) {
 function finishFlow(flow: Flow) {
   releaseCallback(flow)
   if (flow.timeout) clearTimeout(flow.timeout)
+  flow.answer?.cancel()
   delete flow.authorization
+  delete flow.prompt
+  delete flow.device
 }
 function studioOAuth(store: StudioDatabase, owner: string) {
   const models = createModels({ credentials: userPiCredentials(store, owner) })
@@ -95,7 +111,7 @@ export async function chatGPTCallbackRequest(request: Request, store: StudioData
   const state = requested.searchParams.get('state')
   if (!state) return callbackPage('No authorization callback. Return to NovelTea Studio.', 400)
   const flow = flowsByState.get(state)
-  if (!flow || flow.status !== 'pending' || !flow.url || !flow.authorization ||
+  if (!flow || flow.interactive || flow.provider !== 'openai' || flow.status !== 'pending' || !flow.url || !flow.authorization ||
       Date.now() > flow.expires) return callbackPage('No matching pending authorization.', 409)
   if (requested.searchParams.has('error')) {
     finishFlow(flow)
@@ -130,7 +146,69 @@ export async function chatGPTCallbackRequest(request: Request, store: StudioData
 
 function publicFlow(flow?: Flow) {
   if (!flow || Date.now() > flow.expires) return null
-  return { status: flow.status, url: flow.url, reason: flow.reason }
+  return { status: flow.status, provider: flow.provider, interactive: !!flow.interactive,
+    url: flow.url, reason: flow.reason, message: flow.message, prompt: flow.prompt, device: flow.device }
+}
+
+/** Pi's interactive OAuth contract becomes owner-scoped one-shot HTTP prompts.
+ * Pi owns token exchange and device-code polling; no tokens reach the browser. */
+function runInteractiveLogin(store: StudioDatabase, flow: Flow) {
+  const notify = (event: AuthEvent) => {
+    if (flow.abort.signal.aborted) return
+    if (event.type === 'auth_url') {
+      flow.url = event.url
+      flow.message = event.instructions
+      flow.status = 'pending'
+    } else if (event.type === 'device_code') {
+      flow.device = { userCode: event.userCode, verificationUri: event.verificationUri }
+      flow.status = 'pending'
+    } else if (event.type === 'progress' || event.type === 'info') {
+      flow.message = event.message
+    }
+  }
+  const prompt = (request: AuthPrompt): Promise<string> => {
+    if (flow.abort.signal.aborted || request.signal?.aborted)
+      return Promise.reject(new Error('Login cancelled'))
+    if (flow.answer) return Promise.reject(new Error('Overlapping Pi OAuth prompts'))
+    const view: PromptView = { id: randomUUID(), type: request.type, message: request.message,
+      ...('placeholder' in request ? { placeholder: request.placeholder } : {}),
+      ...(request.type === 'select' ? { options: request.options } : {}) }
+    flow.prompt = view
+    flow.status = 'pending'
+    return new Promise((resolve, reject) => {
+      const clear = () => {
+        flow.abort.signal.removeEventListener('abort', cancel)
+        request.signal?.removeEventListener('abort', cancel)
+        if (flow.prompt === view) delete flow.prompt
+        if (flow.answer?.id === view.id) delete flow.answer
+      }
+      const cancel = () => { clear(); reject(new Error('Login cancelled')) }
+      const respond = (value: string) => { clear(); resolve(value) }
+      flow.answer = { id: view.id, respond, cancel }
+      flow.abort.signal.addEventListener('abort', cancel, { once: true })
+      request.signal?.addEventListener('abort', cancel, { once: true })
+      if (flow.abort.signal.aborted || request.signal?.aborted) cancel()
+    })
+  }
+  void (async () => {
+    try {
+      const runtime = await createUserPiRuntime(store, flow.owner)
+      flow.abort.signal.throwIfAborted()
+      if (!runtime.getProvider(flow.provider)?.auth.oauth) throw new Error('Provider does not support Pi OAuth')
+      await runtime.login(flow.provider, 'oauth',
+        { prompt, notify, signal: flow.abort.signal }, { agentName: 'NovelTea Studio' })
+      if (flow.abort.signal.aborted) return
+      flow.status = 'connected'
+      delete flow.url
+    } catch (error) {
+      if (flow.abort.signal.aborted) return
+      flow.status = 'failed'
+      console.error('[Studio Pi OAuth] Authorization failed', flow.provider, error instanceof Error ? error.name : 'Unknown')
+      flow.reason = 'Provider authorization failed. Retry or choose another login method.'
+    } finally {
+      finishFlow(flow)
+    }
+  })()
 }
 async function inputBody(request: Request) {
   const reader = request.body?.getReader()
@@ -171,11 +249,12 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       return reply({ error: 'Invalid credential request' }, 400)
     const input = value as Record<string, unknown>
     if (request.method === 'DELETE') {
-      if (typeof input.provider !== 'string' || !['openai-codex', ...allowedApiProviders].includes(input.provider))
+      if (typeof input.provider !== 'string' || !(allowedApiProviders.has(input.provider) || oauthProviders.has(input.provider)))
         return reply({ error: 'Invalid provider' }, 400)
-      if (input.provider === 'openai' || input.provider === 'openai-codex') {
-        const flow = flows.get(actor.id)
-        if (flow) { finishFlow(flow); flow.abort.abort() }
+      const flow = flows.get(actor.id)
+      if (flow?.provider === input.provider) {
+        flow.abort.abort()
+        finishFlow(flow)
         flows.delete(actor.id)
       }
       await credentials.delete(input.provider)
@@ -187,30 +266,37 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
         return reply({ error: 'Choose a supported API provider and supply a key' }, 422)
       const runtime = await createUserPiRuntime(store, actor.id)
       if (!runtime.getProvider(input.provider)) return reply({ error: 'Pi provider is not installed' }, 422)
-      if (input.provider === 'openai') {
-        const flow = flows.get(actor.id)
-        if (flow) { finishFlow(flow); flow.abort.abort() }
+      const flow = flows.get(actor.id)
+      if (flow?.provider === input.provider) {
+        flow.abort.abort()
+        finishFlow(flow)
         flows.delete(actor.id)
       }
       await credentials.modify(input.provider, async () => ({ type: 'api_key', key: input.key as string }))
       return reply({ connected: await credentials.list(), models: await availableUserPiModels(store, actor.id) })
     }
     if (input.action === 'oauth') {
-      if (input.provider !== 'openai') return reply({ error: 'Use the OpenAI provider for ChatGPT subscription login' }, 422)
+      if (typeof input.provider !== 'string' || !oauthProviders.has(input.provider))
+        return reply({ error: 'Choose a Pi provider with OAuth login' }, 422)
       const existing = flows.get(actor.id)
       if (existing && ['starting', 'pending', 'completing'].includes(existing.status) && Date.now() < existing.expires)
         return reply({ oauth: publicFlow(existing) })
-      if (existing) { finishFlow(existing); existing.abort.abort() }
-      const flow: Flow = { owner: actor.id, status: 'starting', expires: Date.now() + 15 * 60_000, abort: new AbortController() }
+      if (existing) { existing.abort.abort(); finishFlow(existing) }
+      const flow: Flow = { owner: actor.id, provider: input.provider, interactive: input.provider !== 'openai',
+        status: 'starting', expires: Date.now() + 15 * 60_000, abort: new AbortController() }
       flows.set(actor.id, flow)
       // Even abandoned authorizations must release their state and PKCE context.
       flow.timeout = setTimeout(() => {
         flow.status = 'failed'
-        flow.reason = 'ChatGPT authorization expired. Start sign-in again.'
+        flow.reason = 'Provider authorization expired. Start sign-in again.'
         finishFlow(flow)
         flow.abort.abort()
       }, 15 * 60_000)
       flow.timeout.unref()
+      if (flow.interactive) {
+        runInteractiveLogin(store, flow)
+        return reply({ oauth: publicFlow(flow) }, 202)
+      }
       // Only the authorization URL reaches the browser. The opaque PKCE
       // context remains with this owner on the trusted Studio server.
       try {
@@ -237,9 +323,31 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       }
       return reply({ oauth: publicFlow(flow) }, flow.status === 'failed' ? 503 : 202)
     }
+    if (input.action === 'oauth-answer') {
+      const flow = flows.get(actor.id)
+      if (!flow?.interactive || flow.status !== 'pending' || Date.now() > flow.expires || !flow.prompt || !flow.answer ||
+          typeof input.promptId !== 'string' || input.promptId !== flow.answer.id ||
+          typeof input.value !== 'string' || input.value.length > 4096)
+        return reply({ error: 'No matching pending provider prompt' }, 409)
+      if (flow.prompt.type === 'select' &&
+          !flow.prompt.options?.some(option => option.id === input.value))
+        return reply({ error: 'Choose one of the offered login methods' }, 422)
+      flow.answer.respond(input.value)
+      flow.status = 'starting'
+      return reply({ oauth: publicFlow(flow) })
+    }
+    if (input.action === 'oauth-cancel') {
+      const flow = flows.get(actor.id)
+      if (flow) {
+        flow.abort.abort()
+        finishFlow(flow)
+        flows.delete(actor.id)
+      }
+      return reply({ oauth: null })
+    }
     if (input.action === 'oauth-complete') {
       const flow = flows.get(actor.id)
-      if (!flow || flow.status !== 'pending' || !flow.url || !flow.authorization ||
+      if (!flow || flow.interactive || flow.provider !== 'openai' || flow.status !== 'pending' || !flow.url || !flow.authorization ||
           Date.now() > flow.expires) return reply({ error: 'No pending ChatGPT browser authorization' }, 409)
       if (typeof input.redirectUrl !== 'string' || input.redirectUrl.length > 4096)
         return reply({ error: 'Paste the final localhost redirect URL' }, 422)

@@ -530,21 +530,29 @@ pinned task and canonical contract; a direct POST cannot replace it. An
 invalid/stale/foreign draft fails closed.
 
 The job's **Pi model and budgets** section offers per-user API-key connections
-and **Sign in with ChatGPT browser OAuth** through the Pi SDK's `openai` provider.
-The separate `openai-codex` provider is legacy; reconnect under `openai` for
-subscription generation. On Docker or remote Studio deployments, the browser's
+and the Pi SDK's OAuth login for Anthropic, GitHub Copilot, Kimi For Coding,
+Meta, OpenAI (ChatGPT), legacy OpenAI Codex, OpenRouter, Radius and xAI.
+ChatGPT's `openai` provider is recommended over legacy `openai-codex`
+for subscription generation. The other providers use Pi's interactive
+`login()` interface: Studio presents its browser authorization URLs,
+device verification codes, or prompts, while Pi handles the token exchange. On Docker or remote Studio deployments, the browser's
 loopback callback may be unreachable. The two-phase Pi OAuth interface runs
 without a listener; Studio routes callbacks on its existing port (normally
 `127.0.0.1:3000/auth/callback`). The host must still be reachable from the
 author's browser. For a remote browser, the final loopback redirect URL may
 be pasted into the authenticated Studio form as a fallback; a fully hosted
-redirect requires support from the authorization provider. The selected provider,
+redirect requires support from the authorization provider. Other Pi OAuth
+browser flows may also bind loopback listeners on the Studio host; when a
+remote browser cannot reach them, paste the requested authorization code or
+redirect URL. Radius browser login has no manual callback fallback; choose
+its device-code method for remote Studio. The selected provider,
 model and optional reasoning level are verified against that signed-in user's
 available Pi catalog and persisted as part of the immutable job draft. The
 GET/POST/DELETE `/api/pi/models` connection endpoint is authenticated,
 origin-checked for writes, and returns only model and credential metadata;
-The trusted server accepts only the signed-in author's state-matched redirect;
-OAuth tokens are never returned to the browser.
+ChatGPT redirects require the original owner's one-use state; interactive
+Pi prompts are similarly bound to their owner and can be cancelled. OAuth
+tokens are never returned to the browser.
 Disconnecting or losing authorization removes availability and blocks any new
 selection or fixture start pinned to that model; the existing draft and worktree
 remain intact for recovery. The job cannot silently switch to a host model.

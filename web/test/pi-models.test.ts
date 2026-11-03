@@ -109,7 +109,12 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.deepEqual(await bobRuntime.getAvailable('openai'), [])
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: 'openai', key: '' })).status, 422)
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: '../other', key: 'x' })).status, 422)
-    assert.equal((await request('POST', aliceCookie, { action: 'oauth', provider: 'openai-codex' })).status, 422)
+    for (const oauthProvider of ['anthropic', 'github-copilot', 'kimi-coding', 'meta',
+      'openai', 'openai-codex', 'openrouter', 'radius', 'xai']) {
+      assert.ok(bobRuntime.getProvider(oauthProvider)?.auth.oauth,
+        `Pi built-in provider ${oauthProvider} supports OAuth login`)
+    }
+    assert.equal((await request('POST', aliceCookie, { action: 'oauth', provider: 'unknown' })).status, 422)
     assert.match(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/)
     assert.notEqual(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
