@@ -1,6 +1,8 @@
 import { mkdir } from "node:fs/promises";
+import { parseSpecialistChoice, extractSpecialistChoice, type SpecialistChoiceQuestion,
+  type SpecialistChoiceReceipt } from "./specialist-choice.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
@@ -26,6 +28,12 @@ export interface FoundationAssignment {
     newSpecialistChoices: "agent-delegated";
     editorialApproval: "not-granted";
   };
+}
+export interface SpecialistChoiceProposal {
+  authorQuestion: SpecialistChoiceQuestion;
+  claimedPaths: string[];
+  piSessionId: string;
+  piSessionFile: string;
 }
 export interface SpecialistEvidence {
   claimedPaths: string[];
@@ -59,7 +67,8 @@ const DOMAINS = {
 export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: FoundationAssignment, provider: string, modelId: string,
   onSession: (id: string, path: string) => Promise<void>,
-  verifyDraft: (evidence: SpecialistEvidence) => Promise<string[]>): Promise<SpecialistEvidence> {
+  verifyDraft: (evidence: SpecialistEvidence) => Promise<string[]>,
+  resume?: SpecialistChoiceReceipt): Promise<SpecialistEvidence | SpecialistChoiceProposal> {
   const selected = DOMAINS[assignment.domain];
   const required = [selected.name + "/SKILL.md", ...CATALOG];
   const project = await openStoryProject(job.worktreeStoryRoot);
@@ -84,7 +93,9 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager,
+    sessionManager: resume
+      ? SessionManager.open(resume.sessionFile, dirname(resume.sessionFile), project.root)
+      : context.manager,
     customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
     noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
@@ -112,7 +123,9 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
         "Do not run git add, commit, reset or checkout. Inspections with grep/rg/git diff/status are permitted. ") +
       selected.guidance + "\nAUTHORIZED WRITABLE PATHS: " + selected.owns.join(", ") +
       "\nBOUND ASSIGNMENT: " + JSON.stringify(assignment, null, 2) +
-      "\nAt the END of your response, provide a JSON object on its own line with the exact Story-relative paths you changed: " +
+      "\nWhen canonical authority does not resolve a consequential creative ambiguity and 2–4 genuinely viable solutions remain, ASK THE AUTHOR before deciding. Do not ask about routine validation mistakes, duplicate IDs, syntax, or missing references: repair those autonomously. " +
+      "To request a decision, end with ONE SINGLE-LINE JSON object with authorDecisionRequest containing question, options (2–4 objects each with id/title/approach/benefits/tradeoffs), recommendedId (one of the option IDs) and recommendationReason, plus modifiedRecords listing all already modified files or []. The author may also give a custom answer. Do not modify protected decisions. " +
+      "\nAt the END of a completed task, provide a JSON object on its own line with the exact Story-relative paths you changed: " +
       '`{"modifiedRecords":["characters/example.md"],"architecturalConflicts":[],"laterObligations":["Bind the disclosure to an Event"]}` (replace example with reality). ' +
       "Report any blocked architectural conflict in architecturalConflicts and all deferred Event/branch dependencies in laterObligations. " +
       "List ALL paths changed since the beginning of this work item, not just the latest edits. " +
@@ -122,7 +135,13 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     // receive bounded, source-located validator feedback before commit.
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
+      const direction = resume?.answer ? resume.answer.kind === "option"
+        ? "AUTHENTICATED AUTHOR ANSWER: " + JSON.stringify(resume.question.options.find(o => o.id === (resume.answer as { optionId: string }).optionId)) +
+          (resume.answer.note ? "\nAdditional guidance: " + resume.answer.note : "")
+        : "AUTHENTICATED CUSTOM AUTHOR ANSWER: " + resume.answer.text +
+          (resume.answer.note ? "\nAdditional guidance: " + resume.answer.note : "") : null;
+      await promptStorySpecialist(session, attempt === 0 ? context.contextNote +
+        (direction ? direction + "\nContinue this same Pi session, inspect the current files, and carry out this choice without modifying protected decisions.\n" : "") + prompt : prompt);
       const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!assistant || assistant.role !== "assistant" || ["error", "aborted"].includes(assistant.stopReason)) {
         const detail = assistant?.role === "assistant"
@@ -138,10 +157,23 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
         m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
       const calls = session.messages.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "toolCall") : []);
 
+      const text = finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+      const choice = extractSpecialistChoice(text);
+      if (choice) {
+        const question = parseSpecialistChoice(choice.authorDecisionRequest);
+        const files = choice.modifiedRecords ?? [];
+        if (!Array.isArray(files) || !files.every(p => typeof p === "string"))
+          throw Error("Author question must enumerate the existing changed Story paths.");
+        // A question is a completed Pi turn. Record its usage BEFORE pausing,
+        // so a budget increase can be requested without consuming the
+        // subsequent one-time writer retry.
+        await context.completed(sessionFile, session.sessionId);
+        return { authorQuestion: question, claimedPaths: files as string[],
+          piSessionId: session.sessionId, piSessionFile: sessionFile };
+      }
       const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
         typeof c.arguments?.path === "string").map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
       if (!edits.length) throw new Error("Foundation specialist did not edit canonical Markdown.");
-      const text = finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
       const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
       let declared: unknown;
       try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }

@@ -9,15 +9,18 @@ import { withStoryJobLock } from "./job-lock.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
+import { recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
+  completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { trustedHead } from "./revision.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { CompletionContract, Plan } from "./architecture.js";
-import { authorCharacterWorld, type FoundationAssignment, type FoundationDomain, type SpecialistEvidence } from "./character-world-specialist.js";
+import { authorCharacterWorld, type FoundationAssignment, type FoundationDomain, type SpecialistEvidence,
+  type SpecialistChoiceProposal } from "./character-world-specialist.js";
 
-type Phase = "pending" | "writing" | "authored" | "committed";
+type Phase = "pending" | "writing" | "awaiting-author" | "authored" | "committed";
 interface Unit {
   id: string;
   domain: FoundationDomain;
@@ -28,6 +31,8 @@ interface Unit {
   claimedPaths?: string[];
   piSessionFile?: string;
   piSessionId?: string;
+  authorChoiceId?: string;
+  assignment?: FoundationAssignment;
   reviewedRecoveryDigest?: string;
   skillReads?: string[];
   commitSha?: string;
@@ -186,7 +191,7 @@ function normalizeArcCharacterLinks(text: string): { text: string; ids: string[]
     ids,
   };
 }
-async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAssignment, declared: string[]) {
+async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAssignment, declared: string[], partial = false) {
   const paths: string[] = [];
   for (const entry of dirty(job)) {
     if (!["??", " M"].includes(entry.slice(0, 2))) {
@@ -224,16 +229,16 @@ async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAss
     paths.push(local);
   }
   paths.sort();
-  if (!paths.length || !Array.isArray(declared) || declared.some(p => typeof p !== "string") ||
+  if ((!partial && !paths.length) || !Array.isArray(declared) || declared.some(p => typeof p !== "string") ||
       JSON.stringify([...new Set(declared)].sort()) !== JSON.stringify(paths)) {
     throw new Error("Specialist claimed modifiedRecords differ from actual Git diff: declared " +
       JSON.stringify(declared) + ", actual " + JSON.stringify(paths));
   }
-  if (unit.domain === "world" && (!paths.some(p => p.startsWith("facts/")) ||
+  if (!partial && unit.domain === "world" && (!paths.some(p => p.startsWith("facts/")) ||
       !paths.some(p => p.startsWith("world-entities/")))) {
     throw new Error("Worldbuilding must deliver meaningful objective Facts and World Entities.");
   }
-  if (unit.domain === "character" && (!paths.some(p => p.startsWith("characters/")) ||
+  if (!partial && unit.domain === "character" && (!paths.some(p => p.startsWith("characters/")) ||
       !paths.some(p => p.startsWith("relationships/")))) {
     throw new Error("Character specialist must deliver Characters and a consequential Relationship.");
   }
@@ -408,6 +413,17 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
     const before = index ? receipt.units[index - 1]!.commitSha : (receipt.startHead ?? receipt.architectureHead);
     if (!before || unit.beforeHead && unit.beforeHead !== before) return blocked("Saved work-item parent differs from the verified chain.");
     if (index && receipt.units[0]!.commitSha) verifyCommit(job, receipt.units[0]!, receipt.startHead ?? receipt.architectureHead, before);
+    if (unit.phase === "awaiting-author") {
+      if (!unit.authorChoiceId) return blocked("Author question receipt missing from the saved work item.");
+      try {
+        const choice = await inspectSpecialistChoice(job, unit.authorChoiceId);
+        if (choice.phase !== "answered")
+          return blocked("Character/World is waiting for an author choice; answer in Author questions and approvals.");
+        await verifySpecialistChoice(job, unit.authorChoiceId, "answered");
+        if (choice.headSha !== before) return blocked("Author-choice Git HEAD no longer matches the work item.");
+        return { status: "ready", actualHead, changes };
+      } catch (error) { return blocked("Author choice cannot safely resume: " + String(error)); }
+    }
     if (unit.phase === "writing") {
       if (receipt.worker === "pi") await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
       const result = blocked("Interrupted specialist writing (" + unit.id + "): review preserved files and use foundations reconcile with the exact candidate digest; no replay.");
@@ -593,11 +609,19 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           }
         }
         if (current === unit.commitSha) await publishHead(job, before, unit.commitSha, unit.id);
+        if (unit.authorChoiceId) {
+          const record = await inspectSpecialistChoice(job, unit.authorChoiceId);
+          if (record.phase === "resuming")
+            await completeSpecialistChoice(job, unit.authorChoiceId);
+        }
         return;
       }
       if (unit.phase === "writing") {
         throw new Error("Interrupted specialist writing; inspect preserved files and Pi session, then reconcile exact bytes. Never replay the writer.");
       }
+      const resumingChoice = unit.phase === "awaiting-author";
+      const choice = resumingChoice && unit.authorChoiceId
+        ? await verifySpecialistChoice(job, unit.authorChoiceId, "answered") : null;
       const currentHead = git(job, "rev-parse", "HEAD");
       const recovering = unit.phase === "authored" && currentHead !== before;
       if (recovering) {
@@ -608,16 +632,29 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         assertHead(job, before);
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Specialist requires a clean work-item boundary.");
       }
-      const preReport = reportOf(await validate(before), before);
-      const assign = deriveFoundationAssignment(unit.domain, plan, preReport,
-        state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
-      if (unit.phase === "pending") {
-        await preflightPiAssignment(job, "foundations:" + unit.domain, state.worker === "pi"
-          ? { provider: state.provider, model: state.model } : undefined);
-        unit.beforeHead = before;
+      const assign = resumingChoice
+        ? unit.assignment
+        : deriveFoundationAssignment(unit.domain, plan,
+          reportOf(await validate(before), before),
+          state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
+      if (!assign || assign.domain !== unit.domain) throw Error("Saved specialist assignment missing or mismatched.");
+      if (unit.phase === "pending" || resumingChoice) {
+        if (!resumingChoice) {
+          await preflightPiAssignment(job, "foundations:" + unit.domain, state.worker === "pi"
+            ? { provider: state.provider, model: state.model } : undefined);
+          unit.beforeHead = before;
+          unit.assignment = assign;
+        } else {
+          // Model availability and budget checks happen BEFORE consuming the
+          // one-time continuation. A missing provider is not a failed writer.
+          await preflightPiAssignment(job, "foundations:" + unit.domain,
+            { provider: state.provider, model: state.model });
+          // Fence the exact answered turn BEFORE another external writer begins.
+          await claimSpecialistChoice(job, unit.authorChoiceId!);
+        }
         unit.phase = "writing";
         await persist(file, state);
-        let evidence: SpecialistEvidence;
+        let evidence: SpecialistEvidence | SpecialistChoiceProposal;
         if (state.worker === "fixture") evidence = await fixtureAuthor(job, unit, assign);
         else evidence = await authorCharacterWorld(job, state.snapshot!, assign, state.provider, state.model,
           async (id, session) => { unit.piSessionId = id; unit.piSessionFile = session; await persist(file, state); },
@@ -649,7 +686,26 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
               return [];
             }
             throw new Error("Canonical validator rejected the draft without actionable structural diagnostics.");
-          });
+          }, choice ?? undefined);
+        if ("authorQuestion" in evidence) {
+          // Only an independently audited safe draft can be suspended.
+          await auditPaths(job, unit, assign, evidence.claimedPaths, true);
+          assertHead(job, before);
+          const draft = await validate(before);
+          const protection = (draft.report as CatalogReport | undefined)?.protection;
+          if (!protection || protection.status !== "checked" ||
+              protection.changes?.length || protection.warnings?.length)
+            throw Error("Specialist question includes unverified/protected changes; no author-choice shortcut.");
+          if (resumingChoice) await completeSpecialistChoice(job, unit.authorChoiceId!);
+          const pending = await recordSpecialistChoice(job, unit.id, evidence.authorQuestion,
+            evidence.piSessionId, evidence.piSessionFile);
+          unit.authorChoiceId = pending.id;
+          unit.piSessionId = evidence.piSessionId;
+          unit.piSessionFile = evidence.piSessionFile;
+          unit.phase = "awaiting-author";
+          await persist(file, state);
+          throw new SpecialistChoiceRequiredError();
+        }
         unit.claimedPaths = evidence.claimedPaths;
         unit.architecturalConflicts = evidence.architecturalConflicts;
         unit.laterObligations = evidence.laterObligations;
@@ -693,6 +749,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       unit.commitSha = sha; unit.phase = "committed";
       await persist(file, state);
       await publishHead(job, before, sha, unit.id);
+      if (resumingChoice && unit.authorChoiceId)
+        await completeSpecialistChoice(job, unit.authorChoiceId);
     }
     const result = await graph.invoke({ receipt });
     const authorUpdates = await processAuthorUpdatesAfterWork(job);

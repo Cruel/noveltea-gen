@@ -10,6 +10,7 @@ import { inspectFoundationConflict } from '../../../src/foundation-conflict'
 import { inspectAuthorDecisions, decideAuthorDecision, isRecoveryDecisionKind, statusAfterAuthorDecision } from '../../../src/author-decisions'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { queueRecord } from './generation-queue.server'
+import { activeSpecialistChoice, answerSpecialistChoice } from '../../../src/specialist-choice'
 import type { JobStartResult } from '../../../src/job'
 import { postAgentAuthorCommand } from './agent-rpc.server'
 import { validAuthorCommand } from './agent-author-validation'
@@ -51,6 +52,7 @@ async function readCommand(request: Request): Promise<string> {
 async function getRecords(job: JobStartResult, recoverable: boolean) {
   const updates = await inspectAuthorUpdates(job)
   const decisions = recoverable ? await inspectAuthorDecisions(job) : []
+  const choice = recoverable ? await activeSpecialistChoice(job) : null
   return Promise.all(updates.records.map(async ({ message, acknowledgement }) => {
     if (message.kind !== 'question' && message.kind !== 'approval') return null
     const payload = message.payload as Record<string, unknown>
@@ -72,7 +74,10 @@ async function getRecords(job: JobStartResult, recoverable: boolean) {
         ? { answer: (acknowledgement.result as { answer?: string } | undefined)?.answer ?? null } : {}),
       approval,
     }
-  })).then(items => ({ status: updates.status, items: items.filter(item => item !== null), decisions }))
+  })).then(items => ({ status: updates.status, items: items.filter(item => item !== null), decisions,
+    choice: choice ? { id: choice.id, workItem: choice.workItem, phase: choice.phase,
+      proposalSha256: choice.proposalSha256, question: choice.question,
+      ...(choice.answer ? { answer: choice.answer } : {}) } : null }))
 }
 
 /** Authenticated owner-only interaction with persisted author-update interrupts.
@@ -102,6 +107,34 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const raw = await readCommand(request)
     let input: Record<string, unknown>
     try { input = JSON.parse(raw) } catch { return json({ error: 'Invalid JSON' }, 400) }
+    if (input?.action === 'choice') {
+      const keys = Object.keys(input).sort().join(',')
+      if (!recoverable || row?.status !== 'paused' ||
+          !['action,id,kind,optionId,proposalSha256', 'action,id,kind,optionId,proposalSha256,note',
+            'action,id,kind,proposalSha256,text', 'action,id,kind,note,proposalSha256,text']
+            .includes(keys) ||
+          typeof input.id !== 'string' || !/^[a-f0-9-]{36}$/.test(input.id) ||
+          typeof input.proposalSha256 !== 'string' || !SHA.test(input.proposalSha256) ||
+          !['option', 'custom'].includes(String(input.kind)) ||
+          (input.note !== undefined && (typeof input.note !== 'string' || input.note.length > 1000)) ||
+          (input.kind === 'option' && (typeof input.optionId !== 'string' ||
+            input.optionId.length > 40 || 'text' in input)) ||
+          (input.kind === 'custom' && (typeof input.text !== 'string' ||
+            !input.text.trim() || input.text.length > 4000 || 'optionId' in input)))
+        return json({ error: 'Expected one exact pending author choice and an optional note.' }, 409)
+      const completed = await withStoryJobLock(job, 'specialist-author-choice', async () => {
+        const active = await activeSpecialistChoice(job)
+        if (!active || active.id !== input.id || active.phase !== 'awaiting-author')
+          throw new Error('Author choice has changed or was already answered.')
+        const answer = input.kind === 'option'
+          ? { kind: 'option' as const, optionId: input.optionId as string, note: input.note as string ?? '' }
+          : { kind: 'custom' as const, text: input.text as string, note: input.note as string ?? '' }
+        return answerSpecialistChoice(job, active.id, input.proposalSha256 as string,
+          answer, 'user:' + user.id)
+      })
+      return json({ choice: { id: completed.id, phase: completed.phase,
+        proposalSha256: completed.proposalSha256 } })
+    }
     if (input?.action === 'decision') {
       const fields = Object.keys(input).sort().join(',')
       if (!recoverable ||

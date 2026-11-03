@@ -24,12 +24,24 @@ type RecoveryDecision = {
     validationDigest: string; diagnostics: number
   }
 }
-type AuthorState = { status: string; items: Item[]; decisions: RecoveryDecision[] }
+type SpecialistChoice = {
+  id: string; workItem: string; phase: 'awaiting-author' | 'answered'
+  proposalSha256: string
+  question: { question: string; recommendedId: string; recommendationReason: string;
+    options: Array<{ id: string; title: string; approach: string;
+      benefits: string; tradeoffs: string }> }
+  answer?: { kind: 'option' | 'custom'; optionId?: string; text?: string; note: string }
+}
+type AuthorState = { status: string; items: Item[]; decisions: RecoveryDecision[];
+  choice: SpecialistChoice | null }
 
 export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChanged: () => void }) {
   const [state, setState] = useState<AuthorState | null>(null)
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({})
+  const [choiceSelections, setChoiceSelections] = useState<Record<string, string>>({})
+  const [choiceNotes, setChoiceNotes] = useState<Record<string, string>>({})
+  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
   const [idea, setIdea] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -65,6 +77,27 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
       await refresh()
       onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Author response failed') }
+    finally { setBusy(null) }
+  }
+  const submitChoice = async (item: SpecialistChoice) => {
+    const selected = choiceSelections[item.id] ?? item.question.recommendedId
+    const custom = selected === '__custom__'
+    const text = (customAnswers[item.id] ?? '').trim()
+    if (custom && !text) return
+    setBusy(item.id); setError(null)
+    try {
+      const response = await fetch(url, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'choice', id: item.id,
+          proposalSha256: item.proposalSha256, kind: custom ? 'custom' : 'option',
+          ...(custom ? { text } : { optionId: selected }),
+          ...(choiceNotes[item.id]?.trim() ? { note: choiceNotes[item.id]?.trim() ?? '' } : {}) }),
+      })
+      const value = await response.json() as { error?: string }
+      if (!response.ok) throw new Error(value.error || 'Author choice was not accepted')
+      await refresh()
+      onChanged()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Author choice was not accepted') }
     finally { setBusy(null) }
   }
   const decideRecovery = async (item: RecoveryDecision, decision: 'approved' | 'rejected') => {
@@ -119,7 +152,53 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
     {error && <p className="error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {!state && !error && <p>Checking saved author interrupts…</p>}
-    {state && items.length === 0 && (state.decisions ?? []).length === 0 && <p>No author responses are awaiting review.</p>}
+    {state && items.length === 0 && (state.decisions ?? []).length === 0 && !state.choice && <p>No author responses are awaiting review.</p>}
+    {state?.choice && <article aria-label="Specialist creative choice" key={state.choice.id}>
+      <h3>Creative decision needed · <code>{state.choice.workItem}</code></h3>
+      <p>{state.choice.question.question}</p>
+      {state.choice.phase === 'answered' ? <p role="status">Your choice is saved.
+        Select Resume in Execution controls to continue the original specialist.
+        The answer does not itself authorize changing protected creative decisions.</p> : <>
+        <fieldset disabled={busy !== null}>
+          <legend>Choose an approach or provide your own</legend>
+          {state.choice.question.options.map(option => <label key={option.id}
+            style={{ display: 'block', marginBottom: '1rem' }}>
+            <input type="radio" name={'specialist-choice-' + state.choice!.id}
+              value={option.id}
+              checked={(choiceSelections[state.choice!.id] ?? state.choice!.question.recommendedId) === option.id}
+              onChange={() => setChoiceSelections(old => ({ ...old, [state.choice!.id]: option.id }))}/>
+            {' '}<strong>{option.title}</strong>
+            {option.id === state.choice!.question.recommendedId &&
+              <strong> · Recommended by specialist</strong>}
+            <p>{option.approach}</p>
+            <p><strong>Benefits:</strong> {option.benefits}</p>
+            <p><strong>Trade-offs:</strong> {option.tradeoffs}</p>
+            {option.id === state.choice!.question.recommendedId &&
+              <p><strong>Why recommended:</strong> {state.choice!.question.recommendationReason}</p>}
+          </label>)}
+          <label style={{ display: 'block' }}>
+            <input type="radio" name={'specialist-choice-' + state.choice.id}
+              value="__custom__"
+              checked={choiceSelections[state.choice.id] === '__custom__'}
+              onChange={() => setChoiceSelections(old => ({ ...old, [state.choice!.id]: '__custom__' }))}/>
+            {' '}<strong>Something else — my own direction</strong>
+          </label>
+          {choiceSelections[state.choice.id] === '__custom__' && <textarea
+            aria-label="Custom creative direction" rows={4} maxLength={4000}
+            value={customAnswers[state.choice.id] ?? ''}
+            placeholder="Describe the solution you'd prefer, independently of the suggested options."
+            onChange={e => setCustomAnswers(old => ({ ...old, [state.choice!.id]: e.target.value }))}/>}
+        </fieldset>
+        <label htmlFor={'choice-note-' + state.choice.id}>Additional instructions (optional)</label>
+        <textarea id={'choice-note-' + state.choice.id} rows={2} maxLength={1000}
+          disabled={busy !== null} value={choiceNotes[state.choice.id] ?? ''}
+          onChange={e => setChoiceNotes(old => ({ ...old, [state.choice!.id]: e.target.value }))}/>
+        <button type="button" disabled={busy !== null ||
+          (choiceSelections[state.choice.id] === '__custom__' &&
+            !(customAnswers[state.choice.id] ?? '').trim())}
+          onClick={() => void submitChoice(state.choice!)}>Submit decision</button>
+      </>}
+    </article>}
     {(state?.decisions ?? []).map(item => <article key={'recovery-' + item.id}
       aria-label={item.title}>
       <h3>{item.title}</h3>

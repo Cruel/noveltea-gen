@@ -564,6 +564,32 @@ Earlier specialized approval receipts remain readable and enforce their
 original permissions. Retired browser endpoints `foundation-review` and
 `validator-upgrade` now respond HTTP 410; neither can authorize a job.
 
+**Specialist creative questions:** The Character/World specialists may pause
+when 2–4 substantively different, canon-consistent creative alternatives
+remain and the choice affects the Story. The specialist must provide a
+question, an approach with benefits and trade-offs for each option, and exactly
+one grounded recommendation with reasoning. Ordinary syntax errors, duplicate
+typed IDs and broken references should instead be repaired and revalidated
+automatically; the agent must not manufacture an author question for routine
+implementation failures. The existing **Author questions and approvals**
+panel presents the alternatives, flags the recommendation, and **always**
+provides a free-text `Something else` answer. Extra instructions are optional.
+The owner-only, same-origin `/author` endpoint accepts a typed `choice`
+action bound to the exact proposal digest; the selected option or custom text
+is stored with authenticated user identity and a saved Pi session/file snapshot.
+
+A question is a deliberate safe boundary, not a failed writer. The original
+session JSONL, pinned Git HEAD and (if present) all independently audited,
+unchanged draft bytes are preserved. The user must first answer, then explicitly
+click **Resume**; no author response automatically launches a model call. The
+same Pi session is reopened and receives the saved answer. Changed or unsafe
+draft files, stale proposals, altered transcripts, unexpected file operations,
+and uncertain process termination all fail closed. Once claimed for
+continuation, the resumed writer is never automatically replayed after a crash.
+Native validation and exact protected-change authorization remain mandatory.
+The shared question/answer receipt and UI are reusable by other specialists;
+the running specialist integration is currently Character/World only.
+
 A completed, no-write Foundation specialist may request a job-scoped exception;
 authorizing it preserves every original protected decision while permitting one
 explicitly requested retry. If the previously pinned native validator is no

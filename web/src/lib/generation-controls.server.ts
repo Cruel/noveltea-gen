@@ -10,6 +10,7 @@ import { queueGeneration, queueRecord, dequeueBeforeStart } from './generation-q
 import { readJobControl, setJobControl } from '../../../src/job-control'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { trustedHead } from '../../../src/revision'
+import { activeSpecialistChoice, verifySpecialistChoice } from '../../../src/specialist-choice'
 import { validateStoryJob } from '../../../src/validator'
 import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
@@ -37,12 +38,16 @@ const reply = (value: unknown, status = 200) => Response.json(value, {
 })
 type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget'
 
-async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
+/** Read-only, evidence-checked admission. Exported for crash/restart regression tests. */
+export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
   threadId: string, pinned: string, retry: boolean): Promise<'start' | 'resume'> {
   return withStoryJobLock(job, 'studio-control-recovery', async () => {
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
-    if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+    const choice = await activeSpecialistChoice(job)
+    const choiceAnswer = choice?.phase === 'answered'
+      ? await verifySpecialistChoice(job, choice.id, 'answered') : null
+    if (!choiceAnswer && execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
       cwd: job.worktreeRoot, env, encoding: 'utf8',
     }).trim()) throw new Error('Uncommitted files require manual reconciliation; the writer will not be replayed.')
     await trustedHead(job)
@@ -65,6 +70,11 @@ async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
         ['paused', 'blocked'].includes(saved.status ?? '') && !saved.result &&
         ['Foundation requires an explicit author decision before generation can proceed.',
           'Pi did not author the canonical Markdown through a standard write/edit tool.'].includes(saved.reason ?? '')
+      const choiceBoundary = !!choiceAnswer && choiceAnswer.workItem.endsWith('-foundations') &&
+        saved.active !== null && typeof saved.active === 'object' &&
+        (saved.active as { stage?: string }).stage === 'foundations' &&
+        saved.status === 'paused' && !saved.result &&
+        saved.reason === 'Specialist paused for an author choice. Review 2–4 options or supply your own direction in Author questions and approvals.'
       const budgetBoundary = !!policy.budget.pause && !!saved.active && !saved.result &&
         saved.reason?.startsWith('Pi budget exhausted at safe boundary:') === true
       if (authorBoundary) {
@@ -75,7 +85,8 @@ async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
         if (validation.status !== 'passed')
           throw new Error('Pinned native validator did not pass the unchanged Story. Restore the exact original validator before resuming.')
       }
-      if ((!authorBoundary && saved.status !== 'paused') || (saved.active && !budgetBoundary && !authorBoundary) ||
+      if ((!authorBoundary && !choiceBoundary && saved.status !== 'paused') ||
+          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary) ||
           saved.result || saved.ideaTask || saved.ideaResult ||
           JSON.stringify(saved.request) !== pinned || state.next.length !== 0)
         throw new Error('Checkpoint is not at a verified, idle safe boundary. Inspect the original specialist receipts.')

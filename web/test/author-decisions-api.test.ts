@@ -10,6 +10,7 @@ import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { authorInteractionRequest } from '../src/lib/author-interactions.server'
+import { recordSpecialistChoice, inspectSpecialistChoice } from '../../src/specialist-choice'
 import { removeTestTree } from '../../test/helpers'
 
 const config = {
@@ -115,7 +116,9 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       const response = await authorInteractionRequest(auth, store, request, jobId, config.baseURL)
       return { status: response.status, data: await response.json() as {
         decisions?: Array<{ id: string; proposalSha256: string; phase: string; decision?: string }>;
-        decision?: { phase: string; decision: string }; error?: string;
+        decision?: { phase: string; decision: string };
+        choice?: { id: string; phase: string; proposalSha256: string } | null;
+        error?: string;
       } }
     }
     assert.equal((await api('GET', undefined, owners[1]!.cookie)).status, 404)
@@ -145,6 +148,72 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal(reread.data.decisions?.[0]?.phase, 'recorded')
     assert.equal(reread.data.decisions?.[0]?.decision, 'approved')
     assert.equal(existsSync(join(job.stateDir, 'validator-upgrade.json')), false)
+
+    // A specialist-initiated creative decision uses the same owner-scoped
+    // /author endpoint, but never serves as a protected-edit approval.
+    const options = [
+      { id: 'known-canon', title: 'Follow established characterization',
+        approach: 'Expand the existing arc without changing its protagonist.',
+        benefits: 'Preserves narrative continuity', tradeoffs: 'Fewer dramatic changes' },
+      { id: 'new-conflict', title: 'Propose additional conflict',
+        approach: 'Introduce a conflict that needs separate canonical review.',
+        benefits: 'Adds dramatic potential', tradeoffs: 'Requires more editorial review' },
+    ]
+    const question = {
+      question: 'Should the character follow established canon or introduce a consequential new conflict?',
+      options, recommendedId: 'known-canon',
+      recommendationReason: 'The existing Creative Direction strongly favors continuity for this short test Story.',
+    }
+    const choiceDir = join(job.stateDir, 'character-world-sessions', 'character')
+    mkdirSync(choiceDir, { recursive: true })
+    const choiceSessionId = randomUUID(), choiceFile = join(choiceDir, 'choice.jsonl')
+    writeFileSync(choiceFile, [
+      JSON.stringify({ type: 'session', id: choiceSessionId, cwd: job.worktreeStoryRoot }),
+      JSON.stringify({ type: 'message', message: { role: 'user', content: 'Ask author.' } }),
+      JSON.stringify({ type: 'message', message: { role: 'assistant', stopReason: 'stop',
+        content: [{ type: 'text', text: JSON.stringify({ authorDecisionRequest: question,
+          modifiedRecords: [] }) }] } }),
+    ].join('\n') + '\n')
+    let choice = await recordSpecialistChoice(job, 'character-foundations', question,
+      choiceSessionId, choiceFile)
+    writeFileSync(join(job.stateDir, 'character-world.json'), JSON.stringify({
+      jobId, threadId: job.threadId, units: [
+        { id: 'world-foundations', phase: 'committed' },
+        { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
+      ],
+    }))
+    const list = await api('GET')
+    assert.equal(list.status, 200)
+    assert.equal(list.data.choice?.id, choice.id)
+    const payload = { action: 'choice', id: choice.id, proposalSha256: choice.proposalSha256,
+      kind: 'option', optionId: 'known-canon' }
+    assert.equal((await api('POST', payload, owners[1]!.cookie)).status, 404)
+    assert.equal((await api('POST', payload, owner.cookie, 'https://evil.example')).status, 403)
+    assert.equal((await api('POST', { ...payload, optionId: 'invalid' })).status, 409)
+    assert.equal((await api('POST', { ...payload, principal: 'user:forged' })).status, 409)
+    assert.equal((await api('POST', { ...payload, proposalSha256: 'f'.repeat(64) })).status, 409)
+    const answered = await api('POST', payload)
+    assert.equal(answered.status, 200, answered.data.error)
+    assert.equal(answered.data.choice?.phase, 'answered')
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'option')
+    assert.equal((await api('POST', payload)).status, 409, 'A submitted choice cannot be rewritten')
+    assert.equal((await api('GET')).data.choice?.phase, 'answered')
+    assert.equal((store.sqlite.prepare('SELECT status FROM studio_sessions WHERE id=?').get(jobId) as
+      { status: string }).status, 'paused', 'Author answer does not automatically resume Pi')
+
+    choice = await recordSpecialistChoice(job, 'character-foundations', question,
+      choiceSessionId, choiceFile)
+    writeFileSync(join(job.stateDir, 'character-world.json'), JSON.stringify({
+      jobId, threadId: job.threadId, units: [
+        { id: 'world-foundations', phase: 'committed' },
+        { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
+      ],
+    }))
+    const custom = await api('POST', { action: 'choice', id: choice.id,
+      proposalSha256: choice.proposalSha256, kind: 'custom',
+      text: 'Follow existing canon but include a distinct consequence for both investigation paths.' })
+    assert.equal(custom.status, 200, custom.data.error)
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'custom')
   } finally {
     store.sqlite.close()
     if (previous.state === undefined) delete process.env.NT_STATE_DIR

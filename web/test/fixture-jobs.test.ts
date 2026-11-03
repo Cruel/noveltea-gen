@@ -19,6 +19,9 @@ import { jobChangesRequest } from '../src/lib/job-changes.server'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { parseGenerationContract } from '../../src/generation'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
+import { recordSpecialistChoice, answerSpecialistChoice } from '../../src/specialist-choice'
+import { safeToResume } from '../src/lib/generation-controls.server'
+import { randomUUID } from 'node:crypto'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -340,6 +343,69 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(pinnedRequest.story, acquired.storyRoot)
     assert.equal(pinnedRequest.model, undefined)
     assert.equal(pinnedRequest.provider, undefined)
+
+    // A deliberate, answered specialist question can resume with preserved
+    // draft bytes. The very same dirty tree without an answer cannot.
+    const choiceGraph = openWebGenerationGraph(join(acquired.stateDir, 'web-generation.sqlite'))
+    try {
+      await choiceGraph.graph.updateState(
+        { configurable: { thread_id: saved.threadId } },
+        { status: 'paused',
+          reason: 'Specialist paused for an author choice. Review 2–4 options or supply your own direction in Author questions and approvals.',
+          active: { id: 'foundations', stage: 'foundations' }, result: null })
+    } finally { choiceGraph.saver.db.close() }
+    mkdirSync(join(acquired.worktreeStoryRoot, 'characters'), { recursive: true })
+    const pendingDraft = join(acquired.worktreeStoryRoot, 'characters', 'awaiting-choice.md')
+    writeFileSync(pendingDraft, 'A protected, incomplete character draft for the same specialist.')
+    const choiceSessionDir = join(acquired.stateDir, 'character-world-sessions', 'character')
+    mkdirSync(choiceSessionDir, { recursive: true })
+    const choiceSessionId = randomUUID(), choiceSession = join(choiceSessionDir, 'choice.jsonl')
+    writeFileSync(choiceSession, [
+      JSON.stringify({ type: 'session', id: choiceSessionId, cwd: acquired.worktreeStoryRoot }),
+      JSON.stringify({ type: 'message', message: { role: 'user', content: 'Which creative path?' } }),
+      JSON.stringify({ type: 'message', message: { role: 'assistant', stopReason: 'stop',
+        content: [{ type: 'text', text: 'I need the author to choose a consequential arc.' }] } }),
+    ].join('\n') + '\n')
+    const question = {
+      question: 'Which established narrative interpretation should this character develop under this story contract?',
+      recommendedId: 'existing-canon',
+      recommendationReason: 'The existing Character record provides a coherent, approved foundation to extend.',
+      options: [
+        { id: 'existing-canon', title: 'Preserve canon', approach: 'Expand existing characterization.',
+          benefits: 'Fewer contradictions.', tradeoffs: 'Narrower creative variation.' },
+        { id: 'new-direction', title: 'Explore a new conflict',
+          approach: 'Propose a new relationship change.', benefits: 'More dramatic stakes.',
+          tradeoffs: 'Requires additional protected review.' },
+      ],
+    }
+    const pendingChoice = await recordSpecialistChoice(acquired, 'character-foundations',
+      question, choiceSessionId, choiceSession)
+    writeFileSync(join(acquired.stateDir, 'character-world.json'), JSON.stringify({
+      jobId: acquired.jobId, threadId: acquired.threadId,
+      units: [{ id: 'world-foundations', phase: 'committed' },
+        { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: pendingChoice.id }],
+    }))
+    await assert.rejects(
+      () => safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),
+      /Uncommitted files/)
+    const deliberate = await fixtureJobRequest(restoredAuth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId, { headers: { cookie: aliceCookie } }),
+      jobId, config.baseURL)
+    assert.equal(deliberate.status, 200)
+    const pause = (await deliberate.json() as any).job
+    assert.equal(pause.status, 'paused')
+    assert.equal(pause.revisionVerified, false)
+    assert.equal(pause.recovery, null, 'Answered question is not an unsafe-writer repair prompt')
+    assert.match(pause.reason, /creative decision/)
+    await answerSpecialistChoice(acquired, pendingChoice.id, pendingChoice.proposalSha256,
+      { kind: 'option', optionId: 'existing-canon', note: '' }, 'user:author')
+    assert.equal(await safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),
+      'resume', 'Only an exact settled, answered specialist may continue on preserved draft bytes')
+    writeFileSync(pendingDraft, 'tampered while the author was answering')
+    await assert.rejects(
+      () => safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),
+      /changed/)
+    unlinkSync(pendingDraft)
 
     // A later specialist can leave a dirty worktree on an otherwise verified
     // HEAD. Inspection must show the original blocked reason, not the generic
