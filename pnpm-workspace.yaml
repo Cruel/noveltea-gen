@@ -1,6 +1,19 @@
 packages:
   - web
 
+# Pi 1.5.0 was deliberately pinned shortly after release. Keep pnpm 11's
+# 24-hour release-age protection for every other package, including future
+# Pi releases; exempt only the reviewed versions in the frozen lockfile.
+minimumReleaseAgeExclude:
+  - '@earendil-works/pi-agent-core@1.5.0'
+  - '@earendil-works/pi-ai@1.5.0'
+  - '@earendil-works/pi-codemode@1.5.0'
+  - '@earendil-works/pi-coding-agent@1.5.0'
+  - '@earendil-works/pi-mcp@1.5.0'
+  - '@earendil-works/pi-schema@1.5.0'
+  - '@earendil-works/pi-telemetry@1.5.0'
+  - '@earendil-works/pi-tui@1.5.0'
+
 overrides:
   langsmith: 0.11.1
   # Stable release: the lockfile's 1.7.6 was too new for fresh secure builds.
