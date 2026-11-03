@@ -1,26 +1,7 @@
 packages:
   - web
 
-# Temporary forked Pi dependency is deliberately applied transitively to
-# pi-coding-agent. pnpm has no per-source exception for this security guard;
-# reenable it when the upstream registry release supports two-phase OAuth.
-# Pi 1.5.0 was released today. All other newly published dependencies
-# remain subject to pnpm's minimum-release-age verification.
-minimumReleaseAgeExclude:
-  - '@earendil-works/pi-agent-core@1.5.0'
-  - '@earendil-works/pi-codemode@1.5.0'
-  - '@earendil-works/pi-coding-agent@1.5.0'
-  - '@earendil-works/pi-mcp@1.5.0'
-  - '@earendil-works/pi-schema@1.5.0'
-  - '@earendil-works/pi-telemetry@1.5.0'
-  - '@earendil-works/pi-tui@1.5.0'
-
-blockExoticSubdeps: false
-
 overrides:
-  # Compiled distribution of feat/oauth-authorization-lifecycle (based on v1.5.0).
-  # pnpm records the exact Git commit in its lockfile; refresh deliberately.
-  '@earendil-works/pi-ai': 'github:Cruel/pi#dist/oauth-authorization-lifecycle&path:/packages/ai'
   langsmith: 0.11.1
   # Stable release: the lockfile's 1.7.6 was too new for fresh secure builds.
   seroval: 1.7.5

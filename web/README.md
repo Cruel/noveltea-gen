@@ -530,29 +530,17 @@ pinned task and canonical contract; a direct POST cannot replace it. An
 invalid/stale/foreign draft fails closed.
 
 The job's **Pi model and budgets** section offers per-user API-key connections
-and the Pi SDK's OAuth login for Anthropic, GitHub Copilot, Kimi For Coding,
-Meta, OpenAI (ChatGPT), legacy OpenAI Codex, OpenRouter, Radius and xAI.
-ChatGPT's `openai` provider is recommended over legacy `openai-codex`
-for subscription generation. Browser-based OAuth for ChatGPT, Anthropic,
-legacy Codex, OpenRouter and Radius uses Pi's listener-free two-phase API.
-Studio handles the callbacks through `/auth/callback`, `/callback` or
-`/oauth/callback`, without creating per-user HTTP listeners. Device-code
-providers retain Pi's interactive `login()` interface; Anthropic, Codex
-and Radius also offer their existing alternative login methods.
-
-For a remote browser, loopback redirects may not reach Studio. The final
-redirect URL can be pasted into the authenticated Studio form. Provider
-redirect restrictions still apply: legacy Codex uses port 1455, and
-some providers may reject hosted callback URLs. OpenRouter supports HTTPS
-Studio callbacks directly. Completion and credential storage remain
-server-side and do not expose OAuth credentials to the browser. The selected provider,
+and **Sign in with ChatGPT browser OAuth** through the Pi SDK's `openai` provider.
+The separate `openai-codex` provider is legacy; reconnect under `openai` for
+subscription generation. On Docker or remote Studio deployments, the browser's
+localhost callback may be unreachable. Paste its final `127.0.0.1:1455` redirect
+URL into the authenticated Studio form to finish the same verified OAuth flow. The selected provider,
 model and optional reasoning level are verified against that signed-in user's
 available Pi catalog and persisted as part of the immutable job draft. The
 GET/POST/DELETE `/api/pi/models` connection endpoint is authenticated,
 origin-checked for writes, and returns only model and credential metadata;
-Browser redirects require the original owner's one-use state; interactive
-Pi prompts are similarly bound to their owner and can be cancelled. OAuth
-tokens are never returned to the browser.
+The trusted server accepts only the signed-in author's state-matched redirect;
+OAuth tokens are never returned to the browser.
 Disconnecting or losing authorization removes availability and blocks any new
 selection or fixture start pinned to that model; the existing draft and worktree
 remain intact for recovery. The job cannot silently switch to a host model.
@@ -561,17 +549,16 @@ remain intact for recovery. The job cannot silently switch to a host model.
 base64-encoded random 32-byte key (generate with
 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`)
 and run `pnpm --filter @noveltea/studio migrate` with Studio stopped to apply
-migration **15** (Pi credential storage was introduced in migration 9). The app stores AES-256-GCM encrypted Pi provider credentials
+migration **9**. The app stores AES-256-GCM encrypted Pi provider credentials
 in `pi_credentials` keyed by the Better Auth user ID, with revision-checked
 OAuth refresh writes. Keep the encryption key outside the Studio SQLite backup
 but back it up securely: **losing/changing the key makes existing connections
 unreadable**, and runtime requests fail closed. The Pi SDK's runtime is built
 with the per-user credential store and with filesystem model configuration
-disabled; it does not read shared host `~/.pi` auth/model files. Pending browser
-OAuth authorization context is encrypted in `pi_oauth_pending` and can be
-completed after a web-worker restart; callbacks are atomically claimed once.
-Interactive device-code polling is process-local and must be restarted if
-the worker restarts. Reconnect if provider access is revoked. An API key being
+disabled; it does not read shared host `~/.pi` auth/model files. OAuth flow
+state is transient during browser authorization; completed provider credentials
+are durable across restarts. Reconnect if an in-flight device authorization
+is interrupted by a restart or if provider access is revoked. An API key being
 present does not prove the remote vendor will accept it until a real API call.
 
 Job-level specialist-step, model-call and reported-cost budgets are enforced by the

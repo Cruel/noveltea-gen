@@ -100,28 +100,9 @@ GitLab OAuth credentials, `NT_PI_CREDENTIAL_KEY`, and
 `NT_AGENT_RPC_TOKEN` (at least 32 characters). Reuse stable encryption and
 authentication secrets across restarts; changing them invalidates existing
 OAuth data or sessions. ChatGPT subscriptions connect through Studio's
-`openai` OAuth flow; no API key is required. Pi's external-callback mode does
-not bind a local OAuth server. The TanStack Start `GET /auth/callback` route
-receives the HTTP loopback redirect directly on the existing Studio web port,
-by default `http://127.0.0.1:3000/auth/callback`, and forwards it to the
-correct pending Pi login using one-time OAuth `state`. OpenAI permits changing
-the loopback port as long as the host stays `127.0.0.1`, the path remains
-`/auth/callback`, and authorization/token exchange use the same URI.
-Compose sets `NT_PI_OAUTH_REDIRECT_URI` from `NT_STUDIO_HOST_PORT` so it
-matches the published Studio port. Pi still checks state, exchanges the code
-using PKCE and saves the encrypted credential. No other host port is required. Several Studio
-users can authorize ChatGPT concurrently without port conflicts. The Sign in
-button opens a script-created popup; once the code has been consumed, the
-callback redirects to Studio's configured origin on a code-free URL, notifies
-the original tab, and closes the popup where browser policy permits. The
-original tab updates automatically, with a fallback link for blocked popups or
-manual tabs. Pending OAuth
-attempts are process-local and must be restarted after a web server restart.
-The callback route is also served through the normal Studio web port; protect
-that port with the same HTTPS and reverse-proxy policies as all Studio routes.
-On a remote browser, `127.0.0.1` is the **browser's own machine**; Studio
-retains a manual callback-URL fallback. Local `pnpm dev` and Compose use **separate** database locations. Starting
-Compose fresh does not migrate existing dev jobs or Pi logins.
+`openai` OAuth flow; no API key is required. Local `pnpm dev` and Compose
+use **separate** database locations. Starting Compose fresh does not migrate
+existing dev jobs or Pi logins.
 
 The controller token is generated on first startup and stored in the
 `noveltea-controller` named volume. Its Unix socket and token are
@@ -149,35 +130,10 @@ docker compose down
 `noveltea-controller` volumes, including encrypted ChatGPT credentials,
 job checkpoints and unpublished work. Never use this to repair a failed job.
 
-Only the Studio web port is published, bound to loopback by default. To expose Studio
+Only the web port is published, bound to loopback by default. To expose Studio
 remotely, configure a trusted HTTPS reverse proxy with request limits and
 align `BETTER_AUTH_URL` and OAuth redirect origins. Never publish the
 agent's port 7001 or the controller socket.
-
-### Temporary Pi 1.5.0 fork
-
-Studio uses Pi 1.5.0 plus the external OAuth callback changes on
-`Cruel/pi`'s `feat/external-oauth-callback` branch (source changes intended
-for a future upstream PR). Since Pi's git checkout ignores generated
-`packages/ai/dist` files, the separate
-`dist/external-oauth-callback` branch commits the compiled `pi-ai`
-distribution needed by pnpm's Git subdirectory installer. Only
-`@earendil-works/pi-ai` is replaced; all other Pi packages are registry
-release 1.5.0. The `pnpm-workspace.yaml` override refers to the distribution
-**branch name** and `pnpm-lock.yaml` pins its resolved **commit SHA**. Normal
-`pnpm install --frozen-lockfile` and Docker builds are deterministic.
-
-For an intentional update: update the source branch, run `npm ci
---ignore-scripts` and `npm run build` in the fork root, update the
-distribution branch from that source revision with its regenerated
-`packages/ai/dist`, push both, then `pnpm install --lockfile-only` in
-NovelTea to review the new exact commit and `pnpm install --frozen-lockfile`
-to verify it. The temporary `blockExoticSubdeps: false` policy permits the
-Git override inside the registry-published `pi-coding-agent`. The explicit
-Pi 1.5.0 minimum-release-age exceptions permit this newly released, reviewed
-package family without disabling the age policy for other dependencies.
-Remove both exceptions and the override when an upstream release ships the
-API. Do not submit an upstream PR from the distribution branch.
 
 ## Controller API (trusted agent only)
 

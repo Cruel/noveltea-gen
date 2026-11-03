@@ -109,21 +109,15 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.deepEqual(await bobRuntime.getAvailable('openai'), [])
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: 'openai', key: '' })).status, 422)
     assert.equal((await request('POST', aliceCookie, { action: 'api-key', provider: '../other', key: 'x' })).status, 422)
-    for (const oauthProvider of ['anthropic', 'github-copilot', 'kimi-coding', 'meta',
-      'openai', 'openai-codex', 'openrouter', 'radius', 'xai']) {
-      assert.ok(bobRuntime.getProvider(oauthProvider)?.auth.oauth,
-        `Pi built-in provider ${oauthProvider} supports OAuth login`)
-    }
-    assert.equal((await request('POST', aliceCookie, { action: 'oauth', provider: 'unknown' })).status, 422)
+    assert.equal((await request('POST', aliceCookie, { action: 'oauth', provider: 'openai-codex' })).status, 422)
     assert.match(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/)
     assert.notEqual(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
       oauthHostDeviceId(bob.id, process.env.NT_PI_CREDENTIAL_KEY!))
     assert.equal(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
       oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!))
-    const authorization = 'https://auth.openai.com/api/accounts/authorize?state=one-use-state&redirect_uri=' +
-      encodeURIComponent('http://127.0.0.1:3000/auth/callback')
-    const redirect = 'http://127.0.0.1:3000/auth/callback?state=one-use-state&code=abc&client_id=issued-client'
+    const authorization = 'https://auth.openai.com/api/accounts/authorize?state=one-use-state'
+    const redirect = 'http://127.0.0.1:1455/auth/callback?state=one-use-state&code=abc&client_id=issued-client'
     assert.equal(validChatGPTCallback(redirect, authorization), true)
     assert.equal(validChatGPTCallback(redirect.replace('one-use-state', 'wrong'), authorization), false)
     assert.equal(validChatGPTCallback(redirect.replace('127.0.0.1', 'evil.example'), authorization), false)
