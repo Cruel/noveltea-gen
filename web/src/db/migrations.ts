@@ -201,6 +201,30 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    // Historical browser OAuth callback migration. Preserve immutable history
+    // for existing Studio databases that already applied this version.
+    version: 15,
+    statements: [
+      `CREATE TABLE pi_oauth_pending (
+        owner_user_id TEXT PRIMARY KEY NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        state TEXT NOT NULL UNIQUE,
+        ciphertext TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending','completing','connected','failed')),
+        expires_at INTEGER NOT NULL,
+        reason TEXT
+      )`,
+    ],
+  },
+  {
+    // Model providers now use device-code login, with no callback contexts.
+    // Retire the obsolete table in both upgraded and fresh databases.
+    version: 16,
+    statements: [
+      `DROP TABLE IF EXISTS pi_oauth_pending`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version

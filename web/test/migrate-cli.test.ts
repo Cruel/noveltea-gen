@@ -31,6 +31,10 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
         try {
           oldStore.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
           oldStore.sqlite.prepare('DELETE FROM studio_schema_migrations WHERE version=3').run()
+          // A previously deployed OAuth-callback build applied migration 15.
+          // Re-create its now-obsolete table and verify migration 16 removes it.
+          oldStore.sqlite.exec('CREATE TABLE pi_oauth_pending (state TEXT PRIMARY KEY)')
+          oldStore.sqlite.prepare('DELETE FROM studio_schema_migrations WHERE version=16').run()
         } finally { oldStore.sqlite.close() }
       }
       const result = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate-cli.ts'], {
@@ -47,8 +51,9 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
       assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(), [
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
       ])
+      assert.ok(!tables.includes('pi_oauth_pending'), 'Obsolete callback authorization table must be retired')
       assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'source_commit_sha'))
       assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'initial_content_sha256'))
       const sessionColumns = (store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>).map(column => column.name)
@@ -103,7 +108,7 @@ test('migration CLI loads the Vite development environment including local overr
     const store = openStudioDatabase(databasePath)
     try {
       assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(),
-        [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }])
+        [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }])
     } finally { store.sqlite.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
