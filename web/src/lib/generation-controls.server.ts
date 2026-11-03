@@ -10,6 +10,8 @@ import { queueGeneration, queueRecord, dequeueBeforeStart } from './generation-q
 import { readJobControl, setJobControl } from '../../../src/job-control'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { trustedHead } from '../../../src/revision'
+import { validateStoryJob } from '../../../src/validator'
+import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { inspectPiPolicy, configurePiPolicy, type PiPolicy } from '../../../src/job-pi-policy'
 
@@ -56,9 +58,24 @@ async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
       const saved = state.values as { request?: unknown; status?: string; reason?: string | null;
         active?: unknown; result?: unknown; ideaTask?: unknown; ideaResult?: unknown }
       const policy = await inspectPiPolicy(job)
+      const conflict = await authorizedFoundationException(job)
+      const authorBoundary = !!conflict && !conflict.retryUsed &&
+        saved.active !== null && typeof saved.active === 'object' &&
+        (saved.active as { stage?: string }).stage === 'foundation' &&
+        ['paused', 'blocked'].includes(saved.status ?? '') && !saved.result &&
+        ['Foundation requires an explicit author decision before generation can proceed.',
+          'Pi did not author the canonical Markdown through a standard write/edit tool.'].includes(saved.reason ?? '')
       const budgetBoundary = !!policy.budget.pause && !!saved.active && !saved.result &&
         saved.reason?.startsWith('Pi budget exhausted at safe boundary:') === true
-      if (saved.status !== 'paused' || (saved.active && !budgetBoundary) ||
+      if (authorBoundary) {
+        // Check the exact pinned native executable before consuming the
+        // single no-write retry; a rotated bind mount must not let Pi edit
+        // and then strand a partially written Foundation on validation.
+        const validation = await validateStoryJob(job)
+        if (validation.status !== 'passed')
+          throw new Error('Pinned native validator did not pass the unchanged Story. Restore the exact original validator before resuming.')
+      }
+      if ((!authorBoundary && saved.status !== 'paused') || (saved.active && !budgetBoundary && !authorBoundary) ||
           saved.result || saved.ideaTask || saved.ideaResult ||
           JSON.stringify(saved.request) !== pinned || state.next.length !== 0)
         throw new Error('Checkpoint is not at a verified, idle safe boundary. Inspect the original specialist receipts.')

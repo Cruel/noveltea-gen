@@ -240,7 +240,8 @@ const accepted: Record<Stage, readonly string[]> = {
 };
 function blocked(error: unknown): Partial<State> {
   const e = error as { message?: string; name?: string };
-  return { status: e.name === "PiBudgetPause" ? "paused" : e.name === "StoryCancelledError" ? "cancelled" : "blocked",
+  return { status: ["PiBudgetPause", "FoundationAuthorRequiredError"].includes(e.name ?? "") ? "paused" :
+    e.name === "StoryCancelledError" ? "cancelled" : "blocked",
     reason: e.message ?? String(error), result: null };
 }
 async function authorBoundary(job: JobStartResult): Promise<Partial<State> | null> {

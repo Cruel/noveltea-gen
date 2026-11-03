@@ -14,6 +14,7 @@ import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { PiPolicy } from '../../../src/job-pi-policy'
 import { readJobControl } from '../../../src/job-control'
+import { inspectFoundationConflict } from '../../../src/foundation-conflict'
 import { queueGeneration, queueRecord } from './generation-queue.server'
 
 class JobError extends Error {
@@ -150,7 +151,21 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
     threadId: row.threadId, task: pinned.task, contract: pinned.contract,
     reason: 'Previous worker stopped without clean completion. Inspect preserved files and receipts; no replay is permitted.',
     completedStages: [] }
-  await verifyTrustedRevision(job)
+  let revisionVerified = true
+  try { await verifyTrustedRevision(job) }
+  catch {
+    // Preserve a blocked checkpoint's inspectability without trusting it for
+    // writes. Only the clean, unchanged original revision is eligible here.
+    const env = { ...process.env }
+    for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
+    const cleanBaseline = row.requestJson && ['blocked', 'paused', 'interrupted'].includes(row.status) &&
+      !['queued', 'running'].includes(queued?.phase ?? '') &&
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: job.worktreeRoot, env, encoding: 'utf8' }).trim() === job.baseSha &&
+      !execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'],
+        { cwd: job.worktreeRoot, env, encoding: 'utf8' }).trim()
+    if (!cleanBaseline) throw new JobError(409, 'Unverified job revision requires operator reconciliation.')
+    revisionVerified = false
+  }
   if (queued?.phase === 'queued') return { ...base, status: 'queued',
     threadId: row.threadId, task: pinned.task, contract: pinned.contract,
     reason: 'Waiting for an available generation slot.', completedStages: [] }
@@ -182,10 +197,20 @@ async function inspect(store: StudioDatabase, row: SavedJob, owner: string) {
     try { await claimServerGeneration(job, row.threadId!, pinned) }
     catch { throw new JobError(409, 'Generation owner receipt conflicts with this job. Inspect saved state before recovery.') }
     const interrupted = state.status === 'running'
-    return { ...initial, status: interrupted ? 'interrupted' : (state.status ?? 'interrupted'),
+    const handoff = ['paused', 'blocked'].includes(row.status) ? await inspectFoundationConflict(job) : null
+    const authorReady = handoff?.status === 'authorized' && !handoff.retryUsed && row.status === 'paused'
+    const authorBlocked = !!handoff && !authorReady && ['blocked', 'paused'].includes(state.status ?? '')
+    return { ...initial, status: interrupted ? 'interrupted' : authorReady ? 'paused' :
+        authorBlocked ? 'blocked' : (state.status ?? 'interrupted'),
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
+        : handoff ? authorReady ? 'Author exception recorded. The original no-write session is verified; select Resume to request the one authorized retry.' :
+          handoff.status === 'rejected' ? 'Author rejected the requested Foundation exception. The protected decision remains binding.' :
+          handoff.retryUsed ? 'The authorized no-write retry was consumed. Inspect the preserved specialist before further action.' :
+          'Foundation requires an author decision. Review the exact protected constraint below; the original no-write Pi session and Git revision are preserved.'
+        : !revisionVerified ? 'An unfinished writer has not established a verified revision. Inspect the original session before recovery.'
         : pinned.fixture ? (state.reason ?? null) : state.reason
-          ? 'Generation needs review. Inspect the saved specialist, validator and approval receipts before recovery.' : null,
+          ? state.reason === 'Foundation requires an explicit author decision before generation can proceed.'
+            ? state.reason : 'Generation needs review. Inspect the saved specialist, validator and approval receipts before recovery.' : null,
       completedStages: (state.completedStages ?? []).map(item => ({ stage: item.stage, status: item.status })) }
   } finally {
     saver.db.close()

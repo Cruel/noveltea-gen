@@ -4,6 +4,7 @@ import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity } from './-GenerationActivity'
 import { AuthorInteractions } from './-AuthorInteractions'
+import { FoundationReview } from './-FoundationReview'
 import { GitChanges } from './-GitChanges'
 import { PublishDraft } from './-PublishDraft'
 
@@ -154,11 +155,14 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
         </div>
       </section>
       <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
+      <FoundationReview jobId={jobId} onChanged={() => void refresh()} />
       <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
       <GitChanges jobId={jobId} revision={job.headSha} />
       {(job.provider === 'github' || job.provider === 'gitlab') &&
         <PublishDraft jobId={jobId} provider={job.provider} />}
-      <StoryExplorer jobId={jobId} revision={job.headSha} />
+      {job.reason && /Foundation requires|Author exception recorded|Author rejected|authorized no-write retry/.test(job.reason)
+        ? <section aria-label="Story explorer availability"><p>The canonical Story explorer is temporarily unavailable while Foundation authorization or recovery is pending. The original source is available in the review panel above.</p></section>
+        : <StoryExplorer jobId={jobId} revision={job.headSha} />}
       {job.status === 'prepared'
         ? <GenerationConfiguration jobId={jobId} onStarted={refresh} />
         : <section>

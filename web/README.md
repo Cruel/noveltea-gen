@@ -549,6 +549,15 @@ Disconnecting or losing authorization removes availability and blocks any new
 selection or fixture start pinned to that model; the existing draft and worktree
 remain intact for recovery. The job cannot silently switch to a host model.
 
+**Foundation conflict recovery:** A completed, no-write Pi specialist that declines
+an existing user-protected constraint produces an inspectable Foundation author
+review. The page presents the original model explanation and the pinned Creative
+Direction source, and accepts an explicit owner decision to reject or authorize a
+**job-scoped exception**. Authorizing never changes protected Story bytes or
+waives exact-change approvals; it permits one manually requested, evidence-checked
+retry. An uncertain/dirty specialist cannot use this recovery path. The exact
+original native validator must also remain available before the retry can start.
+
 **Operator prerequisite:** set `NT_PI_CREDENTIAL_KEY` to an independently stored,
 base64-encoded random 32-byte key (generate with
 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`)

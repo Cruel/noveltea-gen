@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { authorizedFoundationException } from "./foundation-conflict.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
@@ -194,6 +195,11 @@ export async function trustedHead(job: JobStartResult) {
   if (existsSync(initial)) {
     const data = JSON.parse(await readFile(initial, "utf8")) as { stage?: string; commitSha?: string };
     if (data.stage !== "committed" || !data.commitSha || !SHA.test(data.commitSha)) {
+      // Only permit the unchanged baseline to be read and retried when a
+      // completed no-write Foundation handoff has an authenticated, exact
+      // job-scoped authorization. This is NOT permission to commit edits.
+      const exception = await authorizedFoundationException(job);
+      if (exception && exception.headSha === job.baseSha) return job.baseSha;
       throw new Error("Foundation work item is unfinished; finish or reconcile it before revision.");
     }
     if (git(job, "rev-parse", "HEAD") !== data.commitSha) {

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createJobModelRuntime } from "./model-runtime.js";
+import { foundationExceptionContext } from "./foundation-conflict.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -386,7 +387,8 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
     readContent: sandboxToolsRequired() ? path => readSandboxContextFile(job, path) : undefined });
   const contextTool = createStoryContextTool(storyReader);
   // Stable instructions precede this delta. Prior source text is explicitly nonauthoritative.
-  const contextNote = "CONTEXT VERSION POLICY: Canonical Story files currently on disk supersede " +
+  const contextNote = (await foundationExceptionContext(job)) +
+    "CONTEXT VERSION POLICY: Canonical Story files currently on disk supersede " +
     "any older Pi conversation content. Never rely on remembered file contents for edits. " +
     (options.paths.length || options.task ?
       "Use story_context with {} before writing to batch-read the public native Context Manifest " +

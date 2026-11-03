@@ -13,6 +13,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
+import { FoundationAuthorRequiredError, authorizedFoundationException, consumeFoundationRetry, recordFoundationConflict } from "./foundation-conflict.js";
 import { trustedHead } from "./revision.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { preparePiContext, preflightPiAssignment } from "./job-pi-policy.js";
@@ -224,8 +225,14 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     if (!sessionFile) throw new Error("Foundation Pi transcript cannot be persisted; writer will not start.");
     await onSession(session.sessionId, sessionFile);
     await context.beforeTurn(sessionFile);
+    const granted = await authorizedFoundationException(job);
     await promptStorySpecialist(session,
       context.contextNote + "You are the NovelTea foundation writing specialist in an isolated Git Story worktree. " +
+      (granted?.retryUsed && granted.authorization
+        ? "The authenticated author explicitly granted this exact job a one-time exception to the following existing protected discovery-only restriction. Preserve its existing statement verbatim; the exception authorizes continued composition for this pinned job only, NOT changing, deleting or weakening the decision. Original: " +
+          "SHA-256 " + granted.fileSha256 +
+          ". Author rationale: " + granted.authorization.reason + "\n"
+        : "") +
       "Use ordinary Pi read/edit/write and inspection tools to AUTHOR MARKDOWN DIRECTLY, never a structured record authoring tool. " +
       "Before editing, actually READ these five pinned files with the read tool (absolute paths):\n" +
       REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
@@ -306,14 +313,17 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       typeof call.arguments?.path === "string")
       .map(call => resolve(project.root, call.arguments.path as string));
     const requiredPaths = REQUIRED.map(name => join(state.snapshot.path, "skills", name));
-    if (requiredPaths.some(path => !reads.includes(path))) {
-      throw new Error("Pi did not actually read every required pinned NovelTea skill reference.");
-    }
     wrote = calls.some(call => completedCalls.has(call.id) &&
       (call.name === "write" || call.name === "edit") &&
       typeof call.arguments?.path === "string" &&
       resolve(project.root, call.arguments.path as string) === join(project.root, target));
-    if (!wrote) throw new Error("Pi did not author the canonical Markdown through a standard write/edit tool.");
+    if (!wrote) {
+      if (await recordFoundationConflict(job)) throw new FoundationAuthorRequiredError();
+      throw new Error("Pi did not author the canonical Markdown through a standard write/edit tool.");
+    }
+    if (requiredPaths.some(path => !reads.includes(path))) {
+      throw new Error("Pi did not actually read every required pinned NovelTea skill reference.");
+    }
     await context.completed(sessionFile, session.sessionId);
     return { skillReads: reads.filter(path => requiredPaths.includes(path)),
       piSessionId: session.sessionId,
@@ -501,6 +511,17 @@ export async function runFoundationJob(input: FoundationJobOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "foundation", async () => {
     let state = await existingState(job);
+    if (state?.stage === "writing" && state.writerStarted && !state.authoredSha256) {
+      // A completed, clean no-write specialist is not a partially authored
+      // file. Only an exact authenticated job-scoped author decision can permit
+      // one new writer, and the prior session remains archived in its receipt.
+      const approved = await consumeFoundationRetry(job);
+      if (approved) {
+        state = { ...state, writerStarted: false, piSessionFile: undefined,
+          piSessionId: undefined };
+        await saveState(stateFile(job), state);
+      }
+    }
     if (!input.inspect && !input.recoveryDigest && (!state || state.stage === "committed" ||
         state.stage === "awaiting-author" && !state.writerStarted)) {
       await processAuthorUpdatesAtBoundary(job);
