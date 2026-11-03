@@ -4,6 +4,7 @@ import type { JobStartResult } from '../../../src/job'
 import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { actor, eligible, failure, gitlab, page, ProviderFailure, reply } from './gitlab-repositories.server'
+import { requireUser } from './access.server'
 import { withStoryJobLock } from '../../../src/job-lock'
 import {
   PublicationFailure, reviewPublication, readPublicationRequest, publicationDescription,
@@ -11,7 +12,7 @@ import {
   type PublicationPreview, type PublicationSource, type PublicationLink,
 } from './publication-review.server'
 
-type Row = { id: string; title: string; repository: string; projectId: string; baseSha: string; directory: string }
+type Row = { id: string; title: string; repository: string; repositoryId: string; projectId: string; baseSha: string; directory: string }
 type Saved = { mrIid: number | null; mrUrl: string | null; targetBranch: string; remoteBranch: string; headSha: string; phase: string }
 type Project = { id: number; path_with_namespace: string; default_branch: string | null; archived: boolean }
 type Branch = { commit: { id: string } }
@@ -23,7 +24,7 @@ type MergeRequest = {
 const SHA = /^[a-f0-9]{40}$/i
 
 function catalogRow(store: StudioDatabase, owner: string, id: string): Row {
-  const row = store.sqlite.prepare(`SELECT j.id,j.title,r.name AS repository,
+  const row = store.sqlite.prepare(`SELECT j.id,j.title,r.name AS repository,r.id AS repositoryId,
     r.provider_repository_id AS projectId,j.source_commit_sha AS baseSha,s.directory
     FROM studio_sessions j JOIN stories s ON j.story_id=s.id AND j.owner_user_id=s.owner_user_id
     JOIN repositories r ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
@@ -197,8 +198,10 @@ export async function gitlabPublicationRequest(auth: StudioAuth, store: StudioDa
     return reply({ error: 'Cross-origin write refused' }, 403)
   try {
     assertStudioSchemaCurrent(store)
-    const current = await actor(auth, store, request.headers)
-    const row = catalogRow(store, current.id, id)
+    const user = await requireUser(auth, request.headers)
+    if (!user) return reply({ error: 'Sign in required.' }, 401)
+    const row = catalogRow(store, user.id, id)
+    const current = await actor(auth, store, request.headers, row.repositoryId)
     const job = await authorizedStoryJob(store, current.id, id)
     if (job.baseSha !== row.baseSha)
       throw new ProviderFailure(409, 'Saved job baseline has changed.')

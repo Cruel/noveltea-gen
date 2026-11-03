@@ -320,7 +320,10 @@ export async function gitlabStoryRequest(auth: StudioAuth, store: StudioDatabase
     return reply({ error: 'Cross-origin write refused' }, 403)
   }
   try {
-    const current = await actor(auth, store, request.headers)
+    const candidate = request.method === 'GET' ? new URL(request.url).searchParams.get('repositoryId') :
+      (await request.clone().json().catch(() => null))?.repositoryId
+    const current = await actor(auth, store, request.headers,
+      typeof candidate === 'string' ? candidate : undefined)
     const params = request.method === 'GET' ? new URL(request.url).searchParams : null
     const body = request.method === 'POST' ? await request.json().catch(() => null) : null
     const repositoryId = params?.get('repositoryId') ?? body?.repositoryId

@@ -2,7 +2,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
 import { StudioSchemaError } from '../db/migrations'
-import { getRepositoryToken, requireUser } from './access.server'
+import { getRepositoryToken, requireUser, selectGitConnection } from './access.server'
+import { GitConnectionError } from './git-connections.server'
 
 type Options = { appSlug: string; baseURL: string }
 type Actor = { id: string; token: string }
@@ -30,6 +31,7 @@ export function json(body: unknown, status = 200): Response {
 }
 export function errorResponse(error: unknown) {
   if (error instanceof GithubError) return json({ error: error.message }, error.status)
+  if (error instanceof GitConnectionError) return json({ error: error.message }, error.statusCode)
   if (error instanceof StudioSchemaError) return json({ error: error.message }, 503)
   // Unexpected local errors must not be attributed to GitHub. Log a usable
   // incident reference without reflecting internal traces or secrets to users.
@@ -71,10 +73,11 @@ function normalizeFullName(raw: unknown): string {
   return name
 }
 
-export async function actorFor(auth: StudioAuth, store: StudioDatabase, headers: Headers): Promise<Actor | Response> {
+export async function actorFor(auth: StudioAuth, store: StudioDatabase, headers: Headers,
+  repositoryId?: string, connectionId?: string): Promise<Actor | Response> {
   const user = await requireUser(auth, headers)
   if (!user) return json({ error: 'Sign in required' }, 401)
-  const token = await getRepositoryToken(auth, store, headers, 'github')
+  const token = await getRepositoryToken(auth, store, headers, 'github', repositoryId, connectionId)
   if (!token) return json({ error: 'Connect your GitHub identity before adding repositories' }, 409)
   return { id: user.id, token }
 }
@@ -151,15 +154,18 @@ export async function matchingRepository(token: string, fullName: string, onlyIn
   throw new GithubError(404, 'Repository not available through your GitHub App installations. Install or update the App to grant access.')
 }
 
-async function importRepository(store: StudioDatabase, actor: Actor, fullName: string, installationId?: number) {
+async function importRepository(store: StudioDatabase, actor: Actor, fullName: string,
+  connectionId?: string, installationId?: number) {
   const repo = await matchingRepository(actor.token, fullName, installationId)
   const now = new Date().toISOString()
   const id = randomUUID()
   store.sqlite.prepare(`
-    INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-    VALUES (?,?,'github',?,?,?)
+    INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at,connection_id)
+    VALUES (?,?,'github',?,?,?,?)
     ON CONFLICT(owner_user_id,provider,provider_repository_id) DO UPDATE SET name=excluded.name
-  `).run(id, actor.id, String(repo.id), repo.full_name, now)
+    -- Never silently switch an existing repository's authorization identity.
+    -- Explicit Settings rebinding verifies the remote repository first.
+  `).run(id, actor.id, String(repo.id), repo.full_name, now, connectionId ?? null)
   const row = store.sqlite.prepare(`
     SELECT id, name, provider FROM repositories WHERE owner_user_id=? AND provider='github' AND provider_repository_id=?
   `).get(actor.id, String(repo.id)) as { id: string; name: string; provider: string }
@@ -176,12 +182,19 @@ export async function githubRepositoryRequest(auth: StudioAuth, store: StudioDat
   if (request.method !== 'GET' && request.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
   if (request.method === 'POST' && !sameOrigin(request, options)) return json({ error: 'Cross-origin write refused' }, 403)
   try {
-    const actor = await actorFor(auth, store, request.headers)
+    const query = new URL(request.url).searchParams
+    const submitted = request.method === 'POST' ? await request.clone().json().catch(() => null) : null
+    const connectionId = (request.method === 'POST' ? submitted?.connectionId : query.get('connectionId'))
+    const requestedConnection = typeof connectionId === 'string' && connectionId ? connectionId : undefined
+    const viewer = await requireUser(auth, request.headers)
+    if (!viewer) return json({ error: 'Sign in required' }, 401)
+    const selectedConnection = selectGitConnection(store, viewer.id, 'github', requestedConnection)
+    const actor = await actorFor(auth, store, request.headers, undefined, selectedConnection)
     if (actor instanceof Response) return actor
     if (request.method === 'POST') {
       const body = await request.json().catch(() => null)
       const fullName = normalizeFullName(body?.fullName)
-      return json({ repository: await importRepository(store, actor, fullName) })
+      return json({ repository: await importRepository(store, actor, fullName, selectedConnection) })
     }
     const params = new URL(request.url).searchParams
     const all = await installations(actor.token)
@@ -217,16 +230,20 @@ export async function githubInstallStart(auth: StudioAuth, store: StudioDatabase
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
   if (!sameOrigin(request, options)) return json({ error: 'Cross-origin write refused' }, 403)
   try {
-    const actor = await actorFor(auth, store, request.headers)
-    if (actor instanceof Response) return actor
     const body = await request.json().catch(() => null)
+    const requested = typeof body?.connectionId === 'string' ? body.connectionId : undefined
+    const viewer = await requireUser(auth, request.headers)
+    if (!viewer) return json({ error: 'Sign in required' }, 401)
+    const connectionId = selectGitConnection(store, viewer.id, 'github', requested)
+    const actor = await actorFor(auth, store, request.headers, undefined, connectionId)
+    if (actor instanceof Response) return actor
     const desired = body?.fullName ? normalizeFullName(body.fullName) : null
     store.sqlite.prepare('DELETE FROM github_install_flows WHERE expires_at < ?').run(Date.now())
     const state = randomBytes(32).toString('base64url')
     store.sqlite.prepare(`INSERT INTO github_install_flows
-      (state_hash, owner_user_id, desired_repository, created_at, expires_at, status)
-      VALUES (?, ?, ?, ?, ?, 'started')`)
-      .run(createHash('sha256').update(state).digest('hex'), actor.id, desired, Date.now(), Date.now() + 20 * 60_000)
+      (state_hash, owner_user_id, desired_repository, created_at, expires_at, status, connection_id)
+      VALUES (?, ?, ?, ?, ?, 'started', ?)`)
+      .run(createHash('sha256').update(state).digest('hex'), actor.id, desired, Date.now(), Date.now() + 20 * 60_000, connectionId ?? null)
     const url = new URL(`https://github.com/apps/${options.appSlug}/installations/new`)
     url.searchParams.set('state', state)
     const response = json({ url: url.toString() })
@@ -245,8 +262,8 @@ export async function githubInstallCallback(auth: StudioAuth, store: StudioDatab
   }
   if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405)
   try {
-    const actor = await actorFor(auth, store, request.headers)
-    if (actor instanceof Response) return redirect('invalid')
+    const user = await requireUser(auth, request.headers)
+    if (!user) return redirect('invalid')
     const params = new URL(request.url).searchParams
     const cookieState = request.headers.get('cookie')?.split(';').map(part => part.trim())
       .find(part => part.startsWith('nt-gh-install-state='))?.slice('nt-gh-install-state='.length)
@@ -258,8 +275,11 @@ export async function githubInstallCallback(auth: StudioAuth, store: StudioDatab
     // Consume atomically, bound to this authenticated actor and single use.
     const row = store.sqlite.prepare(`UPDATE github_install_flows SET status='used'
       WHERE state_hash=? AND owner_user_id=? AND status='started' AND expires_at>?
-      RETURNING desired_repository`).get(digest, actor.id, Date.now()) as { desired_repository: string | null } | undefined
+      RETURNING desired_repository,connection_id`).get(digest, user.id, Date.now()) as
+      { desired_repository: string | null; connection_id: string | null } | undefined
     if (!row) return redirect('invalid')
+    const actor = await actorFor(auth, store, request.headers, undefined, row.connection_id ?? undefined)
+    if (actor instanceof Response) return redirect('invalid')
     const installId = params.get('installation_id')
     if (!installId || !/^[1-9]\d*$/.test(installId)) {
       store.sqlite.prepare("UPDATE github_install_flows SET status='pending', expires_at=? WHERE state_hash=?")
@@ -274,7 +294,7 @@ export async function githubInstallCallback(auth: StudioAuth, store: StudioDatab
     }
     if (!row.desired_repository) return redirect('installed')
     try {
-      await importRepository(store, actor, row.desired_repository, Number(installId))
+      await importRepository(store, actor, row.desired_repository, row.connection_id ?? undefined, Number(installId))
       return redirect('added')
     } catch (error) {
       if (error instanceof GithubError && [403, 404, 503].includes(error.status)) {

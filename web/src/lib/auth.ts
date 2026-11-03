@@ -1,5 +1,6 @@
 import { betterAuth, type BetterAuthOptions } from 'better-auth'
 import { tanstackStartCookies } from 'better-auth/tanstack-start'
+import { lastLoginMethod } from 'better-auth/plugins'
 import type { StudioDatabase } from '../db/connection'
 
 type OAuthCredentials = { clientId: string; clientSecret: string }
@@ -62,7 +63,7 @@ export function studioAuthOptions(store: StudioDatabase, config: StudioAuthConfi
       },
     },
     rateLimit: { enabled: true, storage: 'database' },
-    plugins: [tanstackStartCookies()],
+    plugins: [lastLoginMethod(), tanstackStartCookies()],
   } satisfies BetterAuthOptions
 }
 

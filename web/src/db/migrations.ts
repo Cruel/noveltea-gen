@@ -201,6 +201,44 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    version: 15,
+    statements: [
+      `CREATE TABLE user_preferences (
+         owner_user_id TEXT PRIMARY KEY NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+         default_model_json TEXT,
+         updated_at TEXT NOT NULL
+       )`,
+      `CREATE TABLE git_connections (
+         id TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+         provider TEXT NOT NULL CHECK (provider IN ('github','gitlab')),
+         provider_account_id TEXT NOT NULL,
+         login TEXT NOT NULL,
+         credentials TEXT NOT NULL,
+         revision INTEGER NOT NULL DEFAULT 1,
+         refresh_lease_id TEXT,
+         refresh_lease_until INTEGER,
+         access_expires_at INTEGER,
+         refresh_expires_at INTEGER,
+         status TEXT NOT NULL DEFAULT 'connected' CHECK(status IN ('connected','reauthorize','disconnected')),
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         UNIQUE (owner_user_id, provider, provider_account_id),
+         UNIQUE (id, owner_user_id)
+       )`,
+      `CREATE INDEX git_connections_owner_idx ON git_connections(owner_user_id, provider)`,
+      `CREATE TABLE git_connection_flows (
+         state_hash TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+         provider TEXT NOT NULL CHECK (provider IN ('github','gitlab')),
+         verifier TEXT NOT NULL,
+         expires_at INTEGER NOT NULL
+       )`,
+      `ALTER TABLE repositories ADD COLUMN connection_id TEXT REFERENCES git_connections(id) ON DELETE SET NULL`,
+      `ALTER TABLE github_install_flows ADD COLUMN connection_id TEXT REFERENCES git_connections(id) ON DELETE SET NULL`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -243,7 +281,14 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     WHERE type='table' AND name='github_publications'`).get()
   const hasQueue = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='generation_run_queue'`).get()
-  if (!hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasGitConnections = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='git_connections'`).get()
+  const hasPrefs = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='user_preferences'`).get()
+  const hasGitFlows = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='git_connection_flows'`).get()
+  const repoColumns = store.sqlite.pragma('table_info(repositories)') as Array<{ name: string }>
+  if (!hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

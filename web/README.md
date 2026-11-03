@@ -9,8 +9,9 @@ file/search/shell tools; independent reviewers receive read/search tools only.
 The web application is a separate pnpm workspace package; the existing Story
 generator now runs in a dedicated LangGraph agent service instead of Skein. The Studio implements an authenticated
 TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
-cross-provider linking, an encrypted persisted OAuth account store, and tenant-
-scoped Story/repository/session catalog tables. #41 adds GitHub App installation-
+login-method linking, independent multi-account Git repository connections under
+Settings, encrypted OAuth credentials, and tenant-scoped Story/repository/session
+catalog tables. #41 adds GitHub App installation-
 aware repository discovery, Add by URL, and catalog connection without cloning.
 Fixture generation (#59) and reconnectable high-level status (#64) are now implemented; publication remains a separate ticket. #43 adds GitHub Story discovery and bounded selection; #44 adds GitLab Story discovery and bounded selection.
 
@@ -29,10 +30,14 @@ Studio before running migrations. Do not commit OAuth secrets. `BETTER_AUTH_SECR
 provider tokens; back it up separately from SQLite. For rotations, see Better
 Auth's versioned `BETTER_AUTH_SECRETS` guidance.
 
-Configure callbacks in both provider applications:
+Configure **both** login and integration callbacks in each provider application:
 
-- **GitHub App** (not a GitHub OAuth App): `<BETTER_AUTH_URL>/api/auth/callback/github`
-- GitLab.com OAuth application: `<BETTER_AUTH_URL>/api/auth/callback/gitlab`
+- **GitHub App** (not a GitHub OAuth App): `<BETTER_AUTH_URL>/api/auth/callback/github` and `<BETTER_AUTH_URL>/api/integrations/git/callback/github`
+- **GitLab.com OAuth application**: `<BETTER_AUTH_URL>/api/auth/callback/gitlab` and `<BETTER_AUTH_URL>/api/integrations/git/callback/gitlab`
+
+The same provider client ID/secret is used for its two separate authorization flows. Each callback URL must be explicitly registered with that provider (or OAuth returns to an invalid redirect). The integration flow uses a single-use server-side state, PKCE and an authenticated Studio session; it creates **only** a repository connection, never a Better Auth login account. Existing linked login accounts remain valid sign-in methods until explicitly unlinked. Git identity connections can be shared across distinct Studio users without linking their Studio accounts.
+
+**Upgrade to Settings connections (schema v15):** With Studio stopped, run `pnpm --filter @noveltea/studio migrate` before restarting. New repository imports persist the exact authorized Git connection. Older repository records retain their historical login-backed access until explicitly rebound in **Settings → Git integrations → Repository access bindings**. Rebinder verifies remote repository identity and current push permissions before saving, and a normal repository reimport never changes an existing binding. A login identity cannot be unlinked while repositories still depend on its legacy credentials. Disconnecting a Git connection erases its stored tokens and suspends remote access without deleting repositories, Stories or jobs; reauthorizing the same provider identity restores the existing binding. Do not rotate `BETTER_AUTH_SECRET` without a credential-rotation plan, since the encrypted repository tokens derive their key from that secret. Live OAuth callback/refresh/push testing against configured provider applications is still required for deployment certification.
 
 For development the base URL is `http://localhost:3000`; deploy with HTTPS.
 Create a GitHub App under Developer settings > GitHub Apps and copy its **Client ID**
@@ -43,7 +48,7 @@ email. For future repository operations, configure repository permissions
 is added automatically. Configure repository installation access for selected
 repositories. Keep **Request user authorization (OAuth) during installation**
 off: login and Add Repository are intentionally separate flows. Configure the
-GitHub App setup URL to `<BETTER_AUTH_URL>/api/github/install/callback` and enable **Redirect on update** to return after changes to selected repositories. Set `GITHUB_APP_SLUG` (the slug in `github.com/apps/<slug>`) in addition to the App client credentials. Keep the OAuth callback separately set to `/api/auth/callback/github`. GitHub App installation selection uses a short-lived, one-use state bound to the existing signed-in user, with an HttpOnly SameSite=Lax installation cookie to survive GitHub setup redirects that omit the state parameter; it never asks for OAuth login again.
+GitHub App setup URL to `<BETTER_AUTH_URL>/api/github/install/callback` and enable **Redirect on update** to return after changes to selected repositories. Set `GITHUB_APP_SLUG` (the slug in `github.com/apps/<slug>`) in addition to the App client credentials. Keep both OAuth callbacks configured; the login endpoint is `/api/auth/callback/github`, while Settings uses `/api/integrations/git/callback/github`. GitHub App installation selection uses a short-lived, one-use state bound to the existing signed-in user, with an HttpOnly SameSite=Lax installation cookie to survive GitHub setup redirects that omit the state parameter; it never asks for OAuth login again.
 GitHub App user tokens derive permissions from the app installation and user,
 not OAuth App scopes; `offline_access` is the only requested GitHub OAuth
 scope (for refreshable user tokens). An authorized GitHub identity does not
@@ -53,7 +58,7 @@ GitLab receives `api` and `write_repository` (its default `read_user` is also
 included). GitLab requires the `api` scope for merge-request APIs;
 `write_repository` alone covers Git-over-HTTP but not those API calls.
 GitLab.com repositories can be connected from **Dashboard → Add GitLab project**.
-Discovery uses the existing signed-in or explicitly linked GitLab token, lists
+Discovery uses the selected independent GitLab integration connection, or for repositories created before the Settings migration, the historical login-linked credential, lists
 personal and group projects with Developer (access level 30) or higher access,
 and checks the authenticated membership list again before connecting a stable
 numeric GitLab project ID to the user's catalog. An archived project is excluded.
@@ -61,7 +66,7 @@ No filesystem clone occurs. Per-branch protection and later Git push authorizati
 are independently enforced when publishing. Expired or revoked provider access
 blocks new discovery and connections with a reconnect diagnostic; stored catalog
 entries remain until explicitly removed. GitLab.com is the only supported host.
-GitHub repository connection is available from **Dashboard → Add GitHub repository**. Browse installations and their push-access repositories, or enter `owner/repository` or a `https://github.com/owner/repository` URL. If an App installation is missing or a selected repository is not covered, choose **Install / update access**. The GitHub setup callback verifies installation access using the existing GitHub user token, and can complete the requested repository connection automatically. Organizations may require an administrator to approve an installation or selection update: the pending import remains visible for 24 hours, with a retry action. If you prefer to adjust an existing installation, use **Configure access on GitHub** and return to the Add Repository screen after approval. Only repositories with actual push permission are accepted; suspended installations and installations without Contents: write are unavailable. Catalog connection creates a lightweight record, **not** a Git clone or Story. Repository permissions are checked again when connecting, not trusted from browser selection. GitHub installations are scoped to the authenticated App user; signing in with GitLab does not grant GitHub access until the user explicitly links their GitHub identity.
+GitHub repository connection is available from **Dashboard → Add GitHub repository**. Browse installations and their push-access repositories, or enter `owner/repository` or a `https://github.com/owner/repository` URL. If an App installation is missing or a selected repository is not covered, choose **Install / update access**. The GitHub setup callback verifies installation access using the existing GitHub user token, and can complete the requested repository connection automatically. Organizations may require an administrator to approve an installation or selection update: the pending import remains visible for 24 hours, with a retry action. If you prefer to adjust an existing installation, use **Configure access on GitHub** and return to the Add Repository screen after approval. Only repositories with actual push permission are accepted; suspended installations and installations without Contents: write are unavailable. Catalog connection creates a lightweight record, **not** a Git clone or Story. Repository permissions are checked again when connecting, not trusted from browser selection. GitHub installations are scoped to the selected authorized GitHub account; GitLab login does not grant GitHub repository access. Connect GitHub separately in Settings → Git integrations.
 
 ## GitHub Story discovery and size preflight (#43)
 

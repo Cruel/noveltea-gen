@@ -32,11 +32,15 @@ function AddRepository() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [connectedId, setConnectedId] = useState<string | null>(null)
+  const [connections, setConnections] = useState<Array<{ id: string; login: string; provider: string; status: string }>>([])
+  const [connectionId, setConnectionId] = useState('')
 
-  const refresh = async (id: number | null = installation, nextPage = page) => {
+  const refresh = async (id: number | null = installation, nextPage = page, account = connectionId) => {
     try {
-      const params = id === null ? '' : `?installationId=${id}&page=${nextPage}`
-      const listing = await api<Listing>('/api/github/repositories' + params)
+      const params = new URLSearchParams()
+      if (id !== null) { params.set('installationId', String(id)); params.set('page', String(nextPage)) }
+      if (account) params.set('connectionId', account)
+      const listing = await api<Listing>('/api/github/repositories?' + params)
       setData(listing)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load repositories') }
   }
@@ -47,7 +51,15 @@ function AddRepository() {
     if (result === 'installed') setNotice('Installation verified. Select a repository below to connect it.')
     if (result === 'pending') setNotice('The installation or repository selection is awaiting access or organization approval. Try again after GitHub grants access.')
     if (result === 'invalid') setError('Installation return could not be verified. Try installing the App again.')
-    void refresh(null, 1)
+    void fetch('/api/integrations/git', { cache: 'no-store' })
+      .then(r => r.json() as Promise<{ connections: typeof connections }>)
+      .then(data => {
+        const entries = (data.connections ?? []).filter(item => item.provider === 'github' && item.status === 'connected')
+        setConnections(entries)
+        const initial = entries.length === 1 ? entries[0]!.id : ''
+        setConnectionId(initial)
+        void refresh(null, 1, initial)
+      }).catch(() => void refresh(null, 1))
     // Only load once; subsequent selection changes explicitly refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -59,7 +71,8 @@ function AddRepository() {
   const add = async (name: string) => {
     setBusy(true); setError(null); setNotice(null); setConnectedId(null)
     try {
-      const result = await api<{ repository: { id: string; name: string } }>('/api/github/repositories', { fullName: name })
+      const result = await api<{ repository: { id: string; name: string } }>('/api/github/repositories', { fullName: name,
+        ...(connectionId ? { connectionId } : {}) })
       setConnectedId(result.repository.id)
       setNotice(`${result.repository.name} connected.`)
       await refresh()
@@ -70,7 +83,8 @@ function AddRepository() {
   const install = async (name?: string) => {
     setBusy(true); setError(null)
     try {
-      const result = await api<{ url: string }>('/api/github/install', { fullName: name || null })
+      const result = await api<{ url: string }>('/api/github/install', { fullName: name || null,
+        ...(connectionId ? { connectionId } : {}) })
       window.location.assign(result.url)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not start GitHub installation')
@@ -80,8 +94,19 @@ function AddRepository() {
 
   return <main className="page">
     <header><div><p className="eyebrow">NovelTea</p><h1>Add GitHub repository</h1></div>
-      <nav><a href="/dashboard">Dashboard</a></nav></header>
-    <p>Connect a repository you can push to. GitHub App installations determine which repositories NovelTea can access; signing in alone does not grant repository access.</p>
+      <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
+    <p>Connect a repository you can push to. GitHub App installations determine which repositories NovelTea can access.</p>
+    <label>Repository account
+      <select value={connectionId} onChange={e => {
+        setConnectionId(e.target.value); setInstallation(null); setPage(1)
+        void refresh(null, 1, e.target.value)
+      }}>
+        <option value="">{connections.length ? 'Choose a connected GitHub account' : 'Historical login-linked identity'}</option>
+        {connections.map(entry => <option key={entry.id} value={entry.id}>{entry.login}</option>)}
+      </select>
+    </label>
+    {connections.length > 1 && !connectionId && <p>Select an account before browsing or importing repositories.</p>}
+    <p className="muted">Manage accounts in <a href="/settings#integrations">Settings → Git integrations</a>.</p>
     {notice && <p role="status">{notice} {connectedId && <a href={'/repositories/github/' + connectedId}>Browse Stories</a>}</p>}
     {error && <p role="alert" className="error">{error}</p>}
     <section>

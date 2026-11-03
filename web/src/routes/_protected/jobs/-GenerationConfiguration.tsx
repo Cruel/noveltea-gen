@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { PiConnections } from './-PiConnections'
+import { useEffect, useMemo, useState } from 'react'
 import type { ExplorerRecord, ExplorerIndex } from '../../../lib/story-explorer.server'
 import type { GenerationDraft } from '../../../lib/generation-config.server'
 type CompletionContract = GenerationDraft['contract']
@@ -20,6 +19,7 @@ type Load = {
   index: ExplorerIndex; saved: GenerationDraft | null; editable: boolean
   models: Array<{ provider: string; id: string; reasoning: boolean }>
   modelAvailability: string
+  defaultModel?: { provider: string; id: string; thinking?: string } | null
 }
 export function GenerationConfiguration({ jobId, onStarted }: {
   jobId: string; onStarted: () => Promise<void>
@@ -53,6 +53,10 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       .then(result => {
         if (controller.signal.aborted) return
         setData(result)
+        if (!result.saved && result.defaultModel) {
+          setSelectedModel(result.defaultModel.provider + '/' + result.defaultModel.id)
+          setThinking(result.defaultModel.thinking ?? '')
+        }
         if (result.saved) {
           setTask(result.saved.task)
           setContract(result.saved.contract)
@@ -71,13 +75,6 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       .catch(e => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Unavailable') })
     return () => controller.abort()
   }, [endpoint])
-  const refreshModels = useCallback(async () => {
-    const response = await fetch('/api/pi/models', { cache: 'no-store' })
-    const next = await response.json() as { models?: Load['models']; error?: string }
-    if (!response.ok) throw new Error(next.error || 'Unable to load Pi models')
-    setData(previous => previous ? { ...previous, models: next.models ?? [],
-      modelAvailability: next.models?.length ? 'Connected user models available.' : 'No Pi models connected.' } : previous)
-  }, [])
   const change = (next: CompletionContract) => {
     setContract(next); setSaved(false)
     if (rawEditor) setRawContract(JSON.stringify(next, null, 2))
@@ -256,7 +253,7 @@ export function GenerationConfiguration({ jobId, onStarted }: {
         value={rawContract} onChange={e => { setRawContract(e.target.value); setSaved(false) }} />
     </details>
     <h3>Pi model and budgets</h3>
-    <PiConnections onUpdate={refreshModels} />
+    <p>Manage <a href="/settings#ai-models">model credentials and defaults</a> in Settings.</p>
     <p role="status">{data.modelAvailability} Selected models run through the isolated Story sandbox.
       Without a model, the job uses deterministic fixtures.</p>
     <div className="generation-controls">

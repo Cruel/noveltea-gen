@@ -118,7 +118,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
 
   return <main className="page">
     <header><div><p className="eyebrow">NovelTea</p><h1>Generation job</h1></div>
-      <nav><a href="/dashboard">Dashboard</a></nav></header>
+      <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
     <p>Job <code>{jobId}</code>. Generation runs through the same checkpointed Story graph,
       using either deterministic fixtures or the selected, sandboxed Pi model.
       Refresh or reconnect without restarting a writer.</p>

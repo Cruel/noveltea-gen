@@ -86,7 +86,11 @@ export async function gitlabInitializeRequest(
     return reply({ error: 'Cross-origin write refused' }, 403)
   }
   try {
-    const current = await actor(auth, store, request.headers)
+    const candidateRepositoryId = request.method === 'GET' ? new URL(request.url).searchParams.get('repositoryId') :
+      (await request.clone().json().catch(() => null))?.repositoryId
+    if (typeof candidateRepositoryId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9-]{27}$/i.test(candidateRepositoryId))
+      throw new ProviderFailure(400, 'Select a connected GitLab project.')
+    const current = await actor(auth, store, request.headers, candidateRepositoryId)
     const data = request.method === 'GET' ? Object.fromEntries(new URL(request.url).searchParams)
       : await request.json().catch(() => null) as Initialization | null
     if (!data || typeof data.repositoryId !== 'string' ||

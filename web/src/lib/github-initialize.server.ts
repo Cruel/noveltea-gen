@@ -22,7 +22,11 @@ export async function githubInitializationRequest(
     return json({ error: 'Cross-origin write refused' }, 403)
   }
   try {
-    const actor = await actorFor(auth, store, request.headers)
+    const candidateRepositoryId = request.method === 'GET' ? new URL(request.url).searchParams.get('repositoryId') :
+      (await request.clone().json().catch(() => null))?.repositoryId
+    if (typeof candidateRepositoryId !== 'string' || !UUID.test(candidateRepositoryId))
+      throw new GithubError(400, 'Select a connected GitHub repository.')
+    const actor = await actorFor(auth, store, request.headers, candidateRepositoryId)
     if (actor instanceof Response) return actor
     const params = request.method === 'GET' ? new URL(request.url).searchParams : null
     const input = request.method === 'POST' ? await request.json().catch(() => null) : null

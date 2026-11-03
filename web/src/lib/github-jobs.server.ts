@@ -4,6 +4,7 @@ import { actorFor, errorResponse, GithubError, json, matchingRepository } from '
 import { verifyGithubStorySelection } from './github-stories.server'
 import { prepareCachedJob } from './cached-jobs.server'
 import { GitCacheError } from './git-cache.server'
+import { repositoryForStory, requireUser } from './access.server'
 
 // GitHub authorization and pinned preflight feed the shared GitHub/GitLab job
 // registration boundary. Only an already saved, unpublished initialization
@@ -14,7 +15,10 @@ export async function githubJobRequest(
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
   if (request.headers.get('origin') !== baseURL) return json({ error: 'Cross-origin write refused' }, 403)
   try {
-    const actor = await actorFor(auth, store, request.headers)
+    const user = await requireUser(auth, request.headers)
+    const input = await request.clone().json().catch(() => null)
+    const repositoryId = user ? repositoryForStory(store, user.id, input?.storyId, 'github') : undefined
+    const actor = await actorFor(auth, store, request.headers, repositoryId)
     if (actor instanceof Response) return actor
     const job = await prepareCachedJob(store, actor.id, actor.token, 'github', request,
       async (row, commit, existingJob) => {

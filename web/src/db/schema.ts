@@ -9,11 +9,47 @@ export const piCredentials = sqliteTable('pi_credentials', {
   primaryKey({ columns: [table.ownerUserId, table.provider] }),
 ])
 
+export const userPreferences = sqliteTable('user_preferences', {
+  ownerUserId: text('owner_user_id').primaryKey(),
+  defaultModelJson: text('default_model_json'),
+  updatedAt: text('updated_at').notNull(),
+})
+
+export const gitConnections = sqliteTable('git_connections', {
+  id: text('id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  provider: text('provider', { enum: ['github', 'gitlab'] }).notNull(),
+  providerAccountId: text('provider_account_id').notNull(),
+  login: text('login').notNull(),
+  credentials: text('credentials').notNull(),
+  revision: integer('revision').notNull().default(1),
+  refreshLeaseId: text('refresh_lease_id'),
+  refreshLeaseUntil: integer('refresh_lease_until'),
+  accessExpiresAt: integer('access_expires_at'),
+  refreshExpiresAt: integer('refresh_expires_at'),
+  status: text('status', { enum: ['connected', 'reauthorize', 'disconnected'] }).notNull().default('connected'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  uniqueIndex('git_connections_owner_identity').on(table.ownerUserId, table.provider, table.providerAccountId),
+  uniqueIndex('git_connections_owner_pair').on(table.id, table.ownerUserId),
+  index('git_connections_owner_idx').on(table.ownerUserId, table.provider),
+])
+
+export const gitConnectionFlows = sqliteTable('git_connection_flows', {
+  stateHash: text('state_hash').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  provider: text('provider', { enum: ['github', 'gitlab'] }).notNull(),
+  verifier: text('verifier').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+})
+
 export const repositories = sqliteTable('repositories', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),
   provider: text('provider', { enum: ['github', 'gitlab'] }).notNull(),
   providerRepositoryId: text('provider_repository_id').notNull(),
+  connectionId: text('connection_id').references(() => gitConnections.id, { onDelete: 'set null' }),
   name: text('name').notNull(),
   createdAt: text('created_at').notNull(),
 }, (table) => [

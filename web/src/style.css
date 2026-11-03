@@ -62,3 +62,12 @@
 .story-onboarding textarea { resize: vertical; }
 .story-onboarding .actions { justify-content: flex-start; margin: .9rem 0; }
 .story-onboarding code { overflow-wrap: anywhere; }
+.settings-page section { margin-top: 1.2rem; }
+.settings-page .generation-controls { gap: 1rem; margin: 1rem 0; }
+.settings-page label { display: grid; gap: .35rem; color: #c1cdd7; }
+.settings-page select { width: 100%; padding: .55rem; border: 1px solid #60788b; border-radius: 5px; background: #101820; color: inherit; font: inherit; }
+.settings-page input { padding: .55rem; border: 1px solid #60788b; border-radius: 5px; background: #101820; color: inherit; }
+.settings-page .settings-actions { justify-content: flex-start; margin-top: 1rem; }
+.settings-connection { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.settings-connection small { display: block; color: #9eafbd; margin-top: .2rem; overflow-wrap: anywhere; }
+@media (max-width: 580px) { .settings-connection { align-items: flex-start; flex-direction: column; } }

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioDatabase } from '../db/connection'
-import { requireUser, getRepositoryToken } from './access.server'
+import { requireUser, getRepositoryToken, selectGitConnection } from './access.server'
+import { GitConnectionError } from './git-connections.server'
 
 type Project = {
   id: number; path_with_namespace: string; name_with_namespace: string
@@ -15,6 +16,7 @@ export class ProviderFailure extends Error {
 export const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } })
 export function failure(err: unknown) {
   if (err instanceof ProviderFailure) return reply({ error: err.message }, err.status)
+  if (err instanceof GitConnectionError) return reply({ error: err.message }, err.statusCode)
   const incident = randomUUID().slice(0, 8)
   console.error(`[Studio GitLab ${incident}] Unexpected server failure`, {
     name: err instanceof Error ? err.name : typeof err,
@@ -42,12 +44,16 @@ export async function gitlab<T>(token: string, path: string): Promise<{ data: T;
   const next = nextRaw && /^[1-9]\d*$/.test(nextRaw) ? Number(nextRaw) : null
   return { data, next }
 }
-export async function actor(auth: StudioAuth, store: StudioDatabase, headers: Headers) {
+export async function actor(auth: StudioAuth, store: StudioDatabase, headers: Headers,
+  repositoryId?: string, connectionId?: string) {
   const user = await requireUser(auth, headers)
   if (!user) throw new ProviderFailure(401, 'Sign in required')
   let token: string | null
-  try { token = await getRepositoryToken(auth, store, headers, 'gitlab') }
-  catch { throw new ProviderFailure(409, 'GitLab authorization expired or was revoked. Reconnect GitLab.') }
+  try { token = await getRepositoryToken(auth, store, headers, 'gitlab', repositoryId, connectionId) }
+  catch (error) {
+    if (error instanceof GitConnectionError) throw error
+    throw new ProviderFailure(409, 'GitLab authorization expired or was revoked. Reconnect GitLab.')
+  }
   if (!token) throw new ProviderFailure(409, 'Link your GitLab account to connect projects')
   return { id: user.id, token }
 }
@@ -68,7 +74,13 @@ export async function gitlabRepositoryRequest(auth: StudioAuth, store: StudioDat
     if (request.headers.get('origin') !== origin) return reply({ error: 'Cross-origin write refused' }, 403)
   }
   try {
-    const user = await actor(auth, store, request.headers)
+    const submitted = request.method === 'POST' ? await request.clone().json().catch(() => null) : null
+    const selected = request.method === 'GET' ? new URL(request.url).searchParams.get('connectionId') : submitted?.connectionId
+    const requestedConnection = typeof selected === 'string' && selected ? selected : undefined
+    const viewer = await requireUser(auth, request.headers)
+    if (!viewer) return reply({ error: 'Sign in required.' }, 401)
+    const connectionId = selectGitConnection(store, viewer.id, 'gitlab', requestedConnection)
+    const user = await actor(auth, store, request.headers, undefined, connectionId)
     if (request.method === 'GET') {
       const raw = new URL(request.url).searchParams.get('page') || '1'
       if (!/^[1-9]\d*$/.test(raw) || Number(raw) > 100) return reply({ error: 'Invalid page' }, 400)
@@ -91,10 +103,11 @@ export async function gitlabRepositoryRequest(auth: StudioAuth, store: StudioDat
       if (i === 100) throw new ProviderFailure(503, 'Too many projects to verify safely')
     }
     if (!matched) return reply({ error: 'Project not found among your push-access GitLab projects' }, 403)
-    store.sqlite.prepare(`INSERT INTO repositories (id, owner_user_id, provider, provider_repository_id, name, created_at)
-      VALUES (?, ?, 'gitlab', ?, ?, ?)
-      ON CONFLICT(owner_user_id, provider, provider_repository_id) DO UPDATE SET name=excluded.name`)
-      .run(randomUUID(), user.id, String(matched.id), matched.path_with_namespace, new Date().toISOString())
+    store.sqlite.prepare(`INSERT INTO repositories (id, owner_user_id, provider, provider_repository_id, name, created_at, connection_id)
+      VALUES (?, ?, 'gitlab', ?, ?, ?, ?)
+      ON CONFLICT(owner_user_id, provider, provider_repository_id) DO UPDATE SET name=excluded.name
+      -- Existing binding changes require explicit Settings rebinding after verification.`)
+      .run(randomUUID(), user.id, String(matched.id), matched.path_with_namespace, new Date().toISOString(), connectionId ?? null)
     const repository = store.sqlite.prepare(`SELECT id, name, provider FROM repositories
       WHERE owner_user_id=? AND provider='gitlab' AND provider_repository_id=?`).get(user.id, String(matched.id))
     return reply({ repository })

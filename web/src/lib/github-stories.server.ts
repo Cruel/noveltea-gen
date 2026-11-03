@@ -399,7 +399,10 @@ export async function githubStoryRequest(
     return json({ error: 'Cross-origin write refused' }, 403)
   }
   try {
-    const actor = await actorFor(auth, store, request.headers)
+    const candidate = request.method === 'GET' ? new URL(request.url).searchParams.get('repositoryId') :
+      (await request.clone().json().catch(() => null))?.repositoryId
+    const actor = await actorFor(auth, store, request.headers,
+      typeof candidate === 'string' ? candidate : undefined)
     if (actor instanceof Response) return actor
     const params = request.method === 'GET' ? new URL(request.url).searchParams : null
     const body = request.method === 'POST' ? await request.json().catch(() => null) : null

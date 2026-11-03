@@ -11,7 +11,7 @@ import {
   remotePublicationHead, readPublicationRequest, type PublicationPreview,
 } from './publication-review.server'
 
-type Row = { id: string; title: string; repository: string; providerId: string; baseSha: string;
+type Row = { id: string; title: string; repository: string; repositoryId: string; providerId: string; baseSha: string;
   directory: string; initialContentSha256: string | null }
 type Saved = { prNumber: number | null; prUrl: string | null; targetBranch: string; remoteBranch: string; headSha: string; phase: string }
 type GithubPr = {
@@ -60,7 +60,7 @@ async function remoteContext(token: string, row: Row) {
   return { path, target: repo.default_branch, targetSha: branch.commit.sha }
 }
 function readRow(store: StudioDatabase, owner: string, id: string): Row {
-  const row = store.sqlite.prepare(`SELECT j.id, j.title, r.name AS repository,
+  const row = store.sqlite.prepare(`SELECT j.id, j.title, r.name AS repository, r.id AS repositoryId,
     r.provider_repository_id AS providerId, j.source_commit_sha AS baseSha,
     s.directory, s.initial_content_sha256 AS initialContentSha256
     FROM studio_sessions j JOIN stories s ON j.story_id=s.id AND j.owner_user_id=s.owner_user_id
@@ -182,7 +182,7 @@ export async function githubPublicationRequest(auth: StudioAuth, store: StudioDa
     const actor = await requireUser(auth, request.headers)
     if (!actor) return json({ error: 'Sign in required' }, 401)
     const row = readRow(store, actor.id, id)
-    const token = await getRepositoryToken(auth, store, request.headers, 'github')
+    const token = await getRepositoryToken(auth, store, request.headers, 'github', row.repositoryId)
     if (!token) throw new GithubError(409, 'Reconnect your GitHub account before publishing.')
     const job = await authorizedStoryJob(store, actor.id, id)
     if (job.baseSha !== row.baseSha) throw new GithubError(409, 'Saved job baseline has changed.')

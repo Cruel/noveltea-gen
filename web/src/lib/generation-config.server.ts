@@ -7,6 +7,7 @@ import { parseGenerationContract } from '../../../src/generation'
 import { isFocusedScope, resolveFocusedScope } from '../../../src/focused-scope'
 import type { CompletionContract } from '../../../src/architecture'
 import { availableUserPiModels, assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
+import { readDefaultModel } from './settings.server'
 
 type Limits = { steps?: number; modelCalls?: number; costUsd?: number }
 export type GenerationDraft = {
@@ -154,6 +155,7 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
       }
       const models = await availableUserPiModels(store, user.id)
       return reply({ index, saved, editable: row.status === 'paused' && !row.requestJson,
+        defaultModel: readDefaultModel(store, user.id),
         models, modelAvailability: models.length ? 'Connected user models available.' :
           'Connect your Pi API key or ChatGPT account to select a model.' })
     }

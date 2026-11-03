@@ -58,6 +58,7 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
   const originalFetch = globalThis.fetch
   const calls: string[] = []
   const refreshes: string[] = []
+  let gitlabCallbackEmail = providerResponses.gitlab.profile.email
   globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     calls.push(url)
@@ -70,7 +71,7 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
       : url.includes('gitlab.com/oauth/token') ? (refresh
         ? { ...providerResponses.gitlab.token, access_token: 'gitlab-refreshed-sensitive' }
         : providerResponses.gitlab.token)
-      : url.includes('gitlab.com/api/v4/user') ? providerResponses.gitlab.profile
+      : url.includes('gitlab.com/api/v4/user') ? { ...providerResponses.gitlab.profile, email: gitlabCallbackEmail }
       : null
     if (!data) throw Error(`Unexpected OAuth fetch ${url} ${init?.method}`)
     if (refresh) refreshes.push(url)
@@ -91,9 +92,29 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     }))
     if (callback.status !== 302) assert.fail(`GitHub callback: ${callback.status} ${await callback.text()}`)
     assert.doesNotMatch(callback.headers.get('location') || '', /error=/)
+    assert.match(callback.headers.getSetCookie().join(';'), /better-auth\.last_used_login_method=github/,
+      'successful GitHub login records a browser-local last-used provider')
     const ghCookies = headersForCookies([sign.response, callback])
     const dashboard = await dashboardResponse(auth, store, new Request(`${origin}/api/dashboard`, { headers: ghCookies }))
     if (dashboard.status !== 200) assert.fail(`Dashboard: ${dashboard.status} ${await dashboard.text()}`)
+
+    // A matching-email GitLab sign-in must not silently attach itself to the
+    // GitHub-created Studio user. It should redirect back with a visible error.
+    gitlabCallbackEmail = providerResponses.github.profile.email
+    const independent = await auth.handler(new Request(`${origin}/api/auth/sign-in/social`, {
+      method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'gitlab', callbackURL: '/dashboard', errorCallbackURL: '/login' }),
+    }))
+    assert.equal(independent.status, 200)
+    const independentUrl = new URL((await independent.json() as { url: string }).url)
+    const independentState = independentUrl.searchParams.get('state')!
+    const independentCallback = await auth.handler(new Request(
+      `${origin}/api/auth/callback/gitlab?code=good&state=${encodeURIComponent(independentState)}`, {
+        headers: headersForCookies([independent]),
+      }))
+    assert.equal(independentCallback.status, 302)
+    assert.match(independentCallback.headers.get('location') || '', /account_not_linked/i)
+    gitlabCallbackEmail = providerResponses.gitlab.profile.email
 
     const link = await begin(auth, 'link-social', ghCookies)
     assert.match(link.data.url, /^https:\/\/gitlab.com\/oauth\/authorize/)
@@ -139,6 +160,19 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-refreshed-sensitive')
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-refreshed-sensitive')
     assert.equal(refreshes.length, 2)
+    // After an explicit link, either provider must sign into the same Studio user.
+    const gitlabSignIn = await auth.handler(new Request(`${origin}/api/auth/sign-in/social`, {
+      method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'gitlab', callbackURL: '/dashboard', errorCallbackURL: '/login' }),
+    }))
+    const gitlabUrl = new URL((await gitlabSignIn.json() as { url: string }).url)
+    const gitlabCallback = await auth.handler(new Request(`${origin}/api/auth/callback/gitlab?code=good&state=${encodeURIComponent(gitlabUrl.searchParams.get('state')!)}`, {
+      headers: headersForCookies([gitlabSignIn]),
+    }))
+    assert.equal(gitlabCallback.status, 302)
+    const identity = await auth.api.getSession({ headers: headersForCookies([gitlabSignIn, gitlabCallback]) })
+    const original = await auth.api.getSession({ headers: ghCookies })
+    assert.equal(identity?.user.id, original?.user.id)
     assert.ok(calls.some(url => url.includes('github.com/login/oauth/access_token')))
     assert.ok(calls.some(url => url.includes('gitlab.com/oauth/token')))
   } finally {
