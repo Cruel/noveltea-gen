@@ -37,8 +37,10 @@ export function validChatGPTCallback(redirectUrl: string, authorizationUrl: stri
   try {
     const callback = new URL(redirectUrl)
     const requestUrl = new URL(authorizationUrl)
-    return callback.origin === 'http://127.0.0.1:1455' &&
-      callback.pathname === '/auth/callback' &&
+    const expected = new URL(requestUrl.searchParams.get('redirect_uri') ?? '')
+    return expected.protocol === 'http:' && expected.hostname === '127.0.0.1' &&
+      expected.pathname === '/auth/callback' &&
+      callback.origin === expected.origin && callback.pathname === expected.pathname &&
       callback.searchParams.get('state') === requestUrl.searchParams.get('state') &&
       !!callback.searchParams.get('code') && !!callback.searchParams.get('client_id') &&
       !!requestUrl.searchParams.get('state')
@@ -65,8 +67,21 @@ const callbackPage = (message: string, status = 200) =>
 export function chatGPTCallbackRequest(request: Request): Response {
   const requested = new URL(request.url)
   if (requested.pathname !== '/auth/callback') return callbackPage('Unknown callback.', 404)
+  const studioOrigin = new URL(process.env.BETTER_AUTH_URL ?? 'http://localhost:3000').origin
+  // After consuming the authorization code, move to the regular Studio origin.
+  // Only this clean URL loads the popup-closing script; the code never reaches it.
+  if (requested.searchParams.get('complete') === '1' && !requested.searchParams.has('state')) {
+    return new Response(
+      '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>ChatGPT connected</title></head>' +
+      '<body><p>Authorization received. You can close this window.</p><p><a href="' +
+      studioOrigin + '/">Return to NovelTea Studio</a></p>' +
+      '<script src="/oauth-popup-complete.js" defer></script></body></html>',
+      { headers: { ...callbackHeaders,
+        'Content-Security-Policy': "default-src 'none'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'" } },
+    )
+  }
   const state = requested.searchParams.get('state')
-  if (!state) return callbackPage('Authorization submitted. Return to NovelTea Studio to check the connection.')
+  if (!state) return callbackPage('No authorization callback. Return to NovelTea Studio.', 400)
   const flow = flowsByState.get(state)
   if (!flow || flow.status !== 'pending' || !flow.url || !flow.resolveManual ||
       Date.now() > flow.expires) return callbackPage('No matching pending authorization.', 409)
@@ -77,16 +92,16 @@ export function chatGPTCallbackRequest(request: Request): Response {
     flow.abort.abort()
     return callbackPage('ChatGPT authorization was not completed.', 400)
   }
-  const callback = new URL('http://127.0.0.1:1455/auth/callback')
+  const callback = new URL(new URL(flow.url).searchParams.get('redirect_uri') ?? '')
   callback.search = requested.search
   if (callback.toString().length > 4096 || !validChatGPTCallback(callback.toString(), flow.url))
     return callbackPage('Invalid authorization callback.', 400)
   releaseCallback(flow)
   flow.status = 'completing'
   flow.resolveManual(callback.toString())
-  // A redirect removes the one-use authorization code from browser history.
-  const clean = new URL(request.url)
-  clean.search = ''
+  // Never send an OAuth code, client ID, or state to Studio's main origin.
+  // The browser can close a script-opened popup on the clean completion page.
+  const clean = new URL('/auth/callback?complete=1', studioOrigin)
   return new Response(null, { status: 303, headers: { Location: clean.toString(),
     'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } })
 }
@@ -201,8 +216,10 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
                 flowsByState.set(state, flow)
               }
             },
-          }, { agentName: 'NovelTea Studio', callback: { mode: 'external' },
-            getDeviceId: () => oauthHostDeviceId(actor.id, process.env.NT_PI_CREDENTIAL_KEY!) })
+          }, { agentName: 'NovelTea Studio', callback: {
+            mode: 'external', redirectUri: process.env.NT_PI_OAUTH_REDIRECT_URI ??
+              'http://127.0.0.1:3000/auth/callback',
+          }, getDeviceId: () => oauthHostDeviceId(actor.id, process.env.NT_PI_CREDENTIAL_KEY!) })
           flow.status = 'connected'
           delete flow.url
         } catch (error) {

@@ -116,8 +116,9 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
       oauthHostDeviceId(bob.id, process.env.NT_PI_CREDENTIAL_KEY!))
     assert.equal(oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!),
       oauthHostDeviceId(alice.id, process.env.NT_PI_CREDENTIAL_KEY!))
-    const authorization = 'https://auth.openai.com/api/accounts/authorize?state=one-use-state'
-    const redirect = 'http://127.0.0.1:1455/auth/callback?state=one-use-state&code=abc&client_id=issued-client'
+    const authorization = 'https://auth.openai.com/api/accounts/authorize?state=one-use-state&redirect_uri=' +
+      encodeURIComponent('http://127.0.0.1:3000/auth/callback')
+    const redirect = 'http://127.0.0.1:3000/auth/callback?state=one-use-state&code=abc&client_id=issued-client'
     assert.equal(validChatGPTCallback(redirect, authorization), true)
     assert.equal(validChatGPTCallback(redirect.replace('one-use-state', 'wrong'), authorization), false)
     assert.equal(validChatGPTCallback(redirect.replace('127.0.0.1', 'evil.example'), authorization), false)

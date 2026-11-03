@@ -102,18 +102,25 @@ authentication secrets across restarts; changing them invalidates existing
 OAuth data or sessions. ChatGPT subscriptions connect through Studio's
 `openai` OAuth flow; no API key is required. Pi's external-callback mode does
 not bind a local OAuth server. The TanStack Start `GET /auth/callback` route
-receives the registered `http://127.0.0.1:1455/auth/callback` redirect and
-forwards it to the correct pending Pi login using the one-time OAuth `state`.
-Pi still checks `state`, exchanges the code with PKCE, and saves the encrypted
-credential. Compose publishes host loopback `127.0.0.1:1455:3000` (the same
-Studio server as port 3000), never an additional Pi listener. Several Studio
-users can authorize ChatGPT concurrently without port conflicts. Pending OAuth
+receives the HTTP loopback redirect directly on the existing Studio web port,
+by default `http://127.0.0.1:3000/auth/callback`, and forwards it to the
+correct pending Pi login using one-time OAuth `state`. OpenAI permits changing
+the loopback port as long as the host stays `127.0.0.1`, the path remains
+`/auth/callback`, and authorization/token exchange use the same URI.
+Compose sets `NT_PI_OAUTH_REDIRECT_URI` from `NT_STUDIO_HOST_PORT` so it
+matches the published Studio port. Pi still checks state, exchanges the code
+using PKCE and saves the encrypted credential. No other host port is required. Several Studio
+users can authorize ChatGPT concurrently without port conflicts. The Sign in
+button opens a script-created popup; once the code has been consumed, the
+callback redirects to Studio's configured origin on a code-free URL, notifies
+the original tab, and closes the popup where browser policy permits. The
+original tab updates automatically, with a fallback link for blocked popups or
+manual tabs. Pending OAuth
 attempts are process-local and must be restarted after a web server restart.
 The callback route is also served through the normal Studio web port; protect
 that port with the same HTTPS and reverse-proxy policies as all Studio routes.
 On a remote browser, `127.0.0.1` is the **browser's own machine**; Studio
-retains a manual callback-URL fallback. Do not publish port 1455 publicly.
-Local `pnpm dev` and Compose use **separate** database locations. Starting
+retains a manual callback-URL fallback. Local `pnpm dev` and Compose use **separate** database locations. Starting
 Compose fresh does not migrate existing dev jobs or Pi logins.
 
 The controller token is generated on first startup and stored in the
@@ -142,7 +149,7 @@ docker compose down
 `noveltea-controller` volumes, including encrypted ChatGPT credentials,
 job checkpoints and unpublished work. Never use this to repair a failed job.
 
-Only the Studio web port and ChatGPT's fixed loopback callback alias port 1455 are published, both bound to loopback by default. To expose Studio
+Only the Studio web port is published, bound to loopback by default. To expose Studio
 remotely, configure a trusted HTTPS reverse proxy with request limits and
 align `BETTER_AUTH_URL` and OAuth redirect origins. Never publish the
 agent's port 7001 or the controller socket.

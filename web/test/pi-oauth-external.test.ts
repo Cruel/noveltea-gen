@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHmac, randomBytes } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -11,6 +12,29 @@ import { chatGPTCallbackRequest, piModelsRequest } from '../src/lib/pi-models.se
 import { userPiCredentials } from '../src/lib/pi-credentials.server'
 
 const origin = 'http://localhost:3000'
+
+test('code-free OAuth completion signals the original tab and closes scripted popup', () => {
+  const script = readFileSync(new URL('../public/oauth-popup-complete.js', import.meta.url), 'utf8')
+  const sent: unknown[] = []
+  let closed = false
+  let disconnected = false
+  class FakeBroadcastChannel {
+    constructor(readonly name: string) { assert.equal(name, 'noveltea-pi-oauth') }
+    postMessage(message: unknown) { sent.push(message) }
+    close() { disconnected = true }
+  }
+  runInNewContext(script, {
+    BroadcastChannel: FakeBroadcastChannel,
+    window: { close: () => { closed = true } },
+  })
+  assert.deepEqual(sent, ['callback-received'])
+  assert.equal(disconnected, true)
+  assert.equal(closed, true)
+  // Browser implementations without BroadcastChannel still close the popup.
+  closed = false
+  runInNewContext(script, { window: { close: () => { closed = true } } })
+  assert.equal(closed, true)
+})
 const config = {
   baseURL: origin, secret: 'multiuser-external-oauth-authorization-secret-123456',
   github: { clientId: 'test', clientSecret: 'test-secret' },
@@ -22,7 +46,11 @@ test('external Pi OAuth handles two concurrent owners by state without a per-log
 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'nt-pi-external-oauth-'))
   const oldKey = process.env.NT_PI_CREDENTIAL_KEY
+  const oldBase = process.env.BETTER_AUTH_URL
+  const oldRedirect = process.env.NT_PI_OAUTH_REDIRECT_URI
   const oldFetch = globalThis.fetch
+  process.env.NT_PI_OAUTH_REDIRECT_URI = 'http://127.0.0.1:3000/auth/callback'
+  process.env.BETTER_AUTH_URL = origin
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
   const store = openStudioDatabase(join(dir, 'studio.sqlite'))
   const exchanged: string[] = []
@@ -33,7 +61,7 @@ test('external Pi OAuth handles two concurrent owners by state without a per-log
     const code = params.get('code')
     assert.ok(code)
     assert.ok(params.get('code_verifier'))
-    assert.equal(params.get('redirect_uri'), 'http://127.0.0.1:1455/auth/callback')
+    assert.equal(params.get('redirect_uri'), 'http://127.0.0.1:3000/auth/callback')
     exchanged.push(code)
     return Response.json({
       access_token: 'synthetic-access-' + code,
@@ -81,7 +109,7 @@ test('external Pi OAuth handles two concurrent owners by state without a per-log
     }
     assert.notEqual(pending[0]!.searchParams.get('state'), pending[1]!.searchParams.get('state'))
     const callback = (index: number) => {
-      const uri = new URL('http://127.0.0.1:1455/auth/callback')
+      const uri = new URL('http://127.0.0.1:3000/auth/callback')
       uri.searchParams.set('state', pending[index]!.searchParams.get('state')!)
       uri.searchParams.set('code', 'user-' + index)
       uri.searchParams.set('client_id', 'issued-client-' + index)
@@ -97,9 +125,14 @@ test('external Pi OAuth handles two concurrent owners by state without a per-log
       chatGPTCallbackRequest(new Request(uri))))
     assert.deepEqual(completions.map(response => response.status), [303, 303])
     for (const result of completions) {
-      assert.ok(!result.headers.get('location')?.includes('code='))
+      assert.equal(result.headers.get('location'), origin + '/auth/callback?complete=1',
+        'completion must return to Studio origin without exposing OAuth credentials')
       assert.match(result.headers.get('referrer-policy') ?? '', /no-referrer/)
     }
+    const finished = chatGPTCallbackRequest(new Request(origin + '/auth/callback?complete=1'))
+    assert.equal(finished.status, 200)
+    assert.match(await finished.text(), /oauth-popup-complete\.js/)
+    assert.match(finished.headers.get('content-security-policy') ?? '', /script-src 'self'/)
     assert.equal(chatGPTCallbackRequest(new Request(callback(0))).status, 409, 'state must be one-use')
     for (let i = 0; i < cookies.length; i++) {
       let flow = (await req(cookies[i]!, 'GET')).value.oauth
@@ -117,12 +150,16 @@ test('external Pi OAuth handles two concurrent owners by state without a per-log
       }
     }
     assert.deepEqual(exchanged.sort(), ['user-0', 'user-1'])
-    assert.equal(chatGPTCallbackRequest(new Request('http://127.0.0.1:1455/auth/callback')).status, 200)
+    assert.equal(chatGPTCallbackRequest(new Request('http://127.0.0.1:3000/auth/callback')).status, 400)
   } finally {
     globalThis.fetch = oldFetch
     store.sqlite.close()
     if (oldKey === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
     else process.env.NT_PI_CREDENTIAL_KEY = oldKey
+    if (oldBase === undefined) delete process.env.BETTER_AUTH_URL
+    else process.env.BETTER_AUTH_URL = oldBase
+    if (oldRedirect === undefined) delete process.env.NT_PI_OAUTH_REDIRECT_URI
+    else process.env.NT_PI_OAUTH_REDIRECT_URI = oldRedirect
     rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 type Connection = { providerId: string; type: 'api_key' | 'oauth' }
 type Flow = { status: 'starting' | 'pending' | 'completing' | 'connected' | 'failed'
@@ -16,6 +16,8 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
   const [redirect, setRedirect] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const oauthPopup = useRef<Window | null>(null)
+  const openedAuthUrl = useRef<string | null>(null)
   const refresh = useCallback(async () => {
     const response = await fetch('/api/pi/models', { cache: 'no-store' })
     const body = await response.json() as Catalog
@@ -32,10 +34,32 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
       void refresh().then(current => {
         if (current.oauth?.status === 'connected') void onUpdate()
       }).catch(e => setError(e instanceof Error ? e.message : 'Pi unavailable'))
-    }, 3000)
+    }, catalog.oauth.status === 'starting' ? 500 : 1000)
     return () => clearInterval(interval)
   }, [catalog?.oauth?.status, refresh, onUpdate])
-  const mutate = async (method: 'POST' | 'DELETE', value: unknown) => {
+  useEffect(() => {
+    // The popup returns to Studio's origin after consuming the callback.
+    // BroadcastChannel works even when the OAuth provider severs window.opener.
+    const channel = new BroadcastChannel('noveltea-pi-oauth')
+    channel.onmessage = event => {
+      if (event.data !== 'callback-received') return
+      void refresh().then(current => {
+        if (current.oauth?.status === 'connected') void onUpdate()
+      }).catch(e => setError(e instanceof Error ? e.message : 'Pi unavailable'))
+    }
+    return () => channel.close()
+  }, [refresh, onUpdate])
+  useEffect(() => {
+    if (catalog?.oauth?.status === 'pending' && catalog.oauth.url &&
+        oauthPopup.current && !oauthPopup.current.closed &&
+        openedAuthUrl.current !== catalog.oauth.url) {
+      openedAuthUrl.current = catalog.oauth.url
+      oauthPopup.current.location.replace(catalog.oauth.url)
+    }
+    if (catalog?.oauth?.status === 'connected' && oauthPopup.current && !oauthPopup.current.closed)
+      oauthPopup.current.close()
+  }, [catalog?.oauth?.status, catalog?.oauth?.url])
+  const mutate = async (method: 'POST' | 'DELETE', value: unknown): Promise<boolean> => {
     setBusy(true); setError(null)
     try {
       const response = await fetch('/api/pi/models', {
@@ -46,8 +70,26 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
       if (method === 'POST' && (value as { action?: string }).action === 'api-key') setSecret('')
       await refresh()
       await onUpdate()
-    } catch (e) { setError(e instanceof Error ? e.message : 'Connection failed') }
-    finally { setBusy(false) }
+      return true
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Connection failed')
+      return false
+    } finally { setBusy(false) }
+  }
+  const startChatGPT = () => {
+    // Opening the window synchronously with the click avoids popup blockers.
+    // Its URL is assigned once Pi emits the authorization link asynchronously.
+    const popup = window.open('about:blank', '_blank', 'popup,width=560,height=720')
+    if (popup) {
+      popup.opener = null
+      popup.document.title = 'Sign in with ChatGPT'
+      popup.document.body.textContent = 'Preparing ChatGPT authorization…'
+    }
+    oauthPopup.current = popup
+    openedAuthUrl.current = null
+    void mutate('POST', { action: 'oauth', provider: 'openai' }).then(ok => {
+      if (!ok && popup && !popup.closed) popup.close()
+    })
   }
   return <section aria-label="Pi model provider connections">
     <p className="muted">Connect a personal provider. Credentials are encrypted on the server and never shared with sandbox tools.</p>
@@ -70,21 +112,27 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
         onClick={() => void mutate('POST', { action: 'api-key', provider, key: secret })}>Connect API key</button>
     </div>
     <button type="button" disabled={busy || ['pending', 'starting', 'completing'].includes(catalog?.oauth?.status ?? '')}
-      onClick={() => void mutate('POST', { action: 'oauth', provider: 'openai' })}>
+      onClick={startChatGPT}>
       Sign in with ChatGPT
     </button>
     {catalog?.oauth?.status === 'pending' && <div role="status">
-      <p>Open <a href={catalog.oauth.url} target="_blank" rel="noopener noreferrer">ChatGPT authorization</a> and sign in.
-      Studio handles the browser callback automatically on this computer and updates the connection when Pi finishes.
-      If you access a remote Studio whose localhost callback cannot reach its server, use the manual fallback below.</p>
-      <label>Manual fallback: final localhost redirect URL
-        <input type="text" autoComplete="off" value={redirect} disabled={busy}
-          onChange={event => setRedirect(event.target.value)} placeholder="http://127.0.0.1:1455/auth/callback?..." />
-      </label>
-      <button type="button" disabled={busy || !redirect.trim()}
-        onClick={() => void mutate('POST', { action: 'oauth-complete', redirectUrl: redirect.trim() }).then(() => setRedirect(''))}>
-        Complete ChatGPT sign-in
-      </button>
+      <p>Complete sign-in in the ChatGPT window. It will close automatically when authorization completes.
+        {' '}If it did not open, <a href={catalog.oauth.url} target="_blank" rel="noopener noreferrer">open ChatGPT authorization</a>.</p>
+      <details>
+        <summary>Manual callback fallback (remote browsers)</summary>
+        <p>If your browser cannot reach the loopback callback address, paste its final redirect URL here.</p>
+        <label>Final localhost redirect URL
+          <input type="text" autoComplete="off" value={redirect} disabled={busy}
+            onChange={event => setRedirect(event.target.value)}
+            placeholder={(catalog.oauth.url
+              ? new URL(catalog.oauth.url).searchParams.get('redirect_uri')
+              : null) ?? 'http://127.0.0.1:3000/auth/callback?code=...'} />
+        </label>
+        <button type="button" disabled={busy || !redirect.trim()}
+          onClick={() => void mutate('POST', { action: 'oauth-complete', redirectUrl: redirect.trim() }).then(() => setRedirect(''))}>
+          Complete ChatGPT sign-in
+        </button>
+      </details>
     </div>}
     {catalog?.oauth?.status === 'completing' && <p role="status">Completing ChatGPT sign-in…</p>}
     {catalog?.oauth?.status === 'starting' && <p role="status">Preparing ChatGPT browser authorization…</p>}

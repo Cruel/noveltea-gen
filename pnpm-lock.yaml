@@ -15,7 +15,7 @@ importers:
     dependencies:
       '@earendil-works/pi-ai':
         specifier: github:Cruel/pi#dist/external-oauth-callback&path:/packages/ai
-        version: https://codeload.github.com/Cruel/pi/tar.gz/c19e01624c10e975eac51c03edb981da43f914eb#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
+        version: https://codeload.github.com/Cruel/pi/tar.gz/a9ac95ecbd1d3bc3a4383c23532a4b78c99e6f32#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
       '@earendil-works/pi-coding-agent':
         specifier: 1.5.0
         version: 1.5.0(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.7)
@@ -383,8 +383,8 @@ packages:
     resolution: {integrity: sha512-FOj+jXj48DbzMycR/ghNa2KcsqWmvOln24e0FnQOVgnd8vn5H79g335WdHaZUVdRo+zCeogb40/qPPlCWFuvmA==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-ai@https://codeload.github.com/Cruel/pi/tar.gz/c19e01624c10e975eac51c03edb981da43f914eb#path:/packages/ai':
-    resolution: {gitHosted: true, integrity: sha512-McSJA45JTwBr0wfL1X0CbSej0Mw00mC82CArYqc35rJ6Yze8hD4OrIVY0+glKPuG13kzUH3kFySNGF8DWmL4Gw==, path: /packages/ai, tarball: https://codeload.github.com/Cruel/pi/tar.gz/c19e01624c10e975eac51c03edb981da43f914eb}
+  '@earendil-works/pi-ai@https://codeload.github.com/Cruel/pi/tar.gz/a9ac95ecbd1d3bc3a4383c23532a4b78c99e6f32#path:/packages/ai':
+    resolution: {gitHosted: true, integrity: sha512-LvgOjTX9teOozpn8W9olfASxpn0r7E7I5H970Gw4FviAbcCDDKJUZD866SvALoQPoDgtPnIzjFK1c+8V+eEmmQ==, path: /packages/ai, tarball: https://codeload.github.com/Cruel/pi/tar.gz/a9ac95ecbd1d3bc3a4383c23532a4b78c99e6f32}
     version: 1.5.0
     engines: {node: '>=22.19.0'}
     hasBin: true
@@ -3444,7 +3444,7 @@ snapshots:
 
   '@earendil-works/pi-agent-core@1.5.0(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)':
     dependencies:
-      '@earendil-works/pi-ai': https://codeload.github.com/Cruel/pi/tar.gz/c19e01624c10e975eac51c03edb981da43f914eb#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
+      '@earendil-works/pi-ai': https://codeload.github.com/Cruel/pi/tar.gz/a9ac95ecbd1d3bc3a4383c23532a4b78c99e6f32#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
       '@earendil-works/pi-schema': 1.5.0
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -3459,7 +3459,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@https://codeload.github.com/Cruel/pi/tar.gz/c19e01624c10e975eac51c03edb981da43f914eb#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)':
+  '@earendil-works/pi-ai@https://codeload.github.com/Cruel/pi/tar.gz/a9ac95ecbd1d3bc3a4383c23532a4b78c99e6f32#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)':
     dependencies:
       '@anthropic-ai/sdk': 0.129.0(zod@4.6.7)
       '@aws-sdk/client-bedrock-runtime': 3.1127.0
@@ -3491,7 +3491,7 @@ snapshots:
   '@earendil-works/pi-coding-agent@1.5.0(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.7)':
     dependencies:
       '@earendil-works/pi-agent-core': 1.5.0(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
-      '@earendil-works/pi-ai': https://codeload.github.com/Cruel/pi/tar.gz/c19e01624c10e975eac51c03edb981da43f914eb#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
+      '@earendil-works/pi-ai': https://codeload.github.com/Cruel/pi/tar.gz/a9ac95ecbd1d3bc3a4383c23532a4b78c99e6f32#path:/packages/ai(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
       '@earendil-works/pi-codemode': 1.5.0
       '@earendil-works/pi-mcp': 1.5.0
       '@earendil-works/pi-tui': 1.5.0

@@ -114,6 +114,9 @@ services:
       NT_STUDIO_SKILLS_SOURCE: /opt/noveltea-skills
       HOST: 0.0.0.0
       PORT: 3000
+      # OpenAI permits any HTTP loopback port with the same host/path.
+      # Route callbacks through Studio's existing published web port.
+      NT_PI_OAUTH_REDIRECT_URI: http://127.0.0.1:${NT_STUDIO_HOST_PORT:-3000}/auth/callback
     volumes:
       - noveltea-app:/var/lib/noveltea/app
       - noveltea-state:/var/lib/noveltea/state
@@ -132,8 +135,6 @@ services:
     ports:
       # Never publish without TLS/reverse proxy. Localhost OAuth is for development.
       - "127.0.0.1:${NT_STUDIO_HOST_PORT:-3000}:3000"
-      # Pi external-callback mode: Studio receives the fixed provider redirect.
-      - "127.0.0.1:1455:3000"
     restart: unless-stopped
     init: true
     security_opt: [no-new-privileges:true]

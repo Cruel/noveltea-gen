@@ -42,10 +42,13 @@ try {
     notify: event => {
       if (event.type !== 'auth_url') return
       assert.match(event.url, /^https:\/\//)
+      assert.equal(new URL(event.url).searchParams.get('redirect_uri'),
+        'http://127.0.0.1:3000/auth/callback')
       receivedAuthUrl = true
       abort.abort()
     },
-  }, { agentName: 'NovelTea Studio', callback: { mode: 'external' },
+  }, { agentName: 'NovelTea Studio',
+    callback: { mode: 'external', redirectUri: 'http://127.0.0.1:3000/auth/callback' },
     getDeviceId: () => 'abcdef01-1234-4567-8abc-123456789abc' })
 } catch (error) {
   if (!receivedAuthUrl) throw error
