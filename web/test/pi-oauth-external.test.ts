@@ -41,7 +41,7 @@ const config = {
   gitlab: { clientId: 'test', clientSecret: 'test-secret' },
 }
 
-test('external Pi OAuth handles two concurrent owners by state without a per-login listener', {
+test('two-phase Pi OAuth handles two concurrent owners by state without a per-login listener', {
   timeout: 30_000,
 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'nt-pi-external-oauth-'))
@@ -117,23 +117,23 @@ test('external Pi OAuth handles two concurrent owners by state without a per-log
     }
     const forged = callback(0)
     forged.searchParams.set('state', randomBytes(32).toString('base64url'))
-    assert.equal(chatGPTCallbackRequest(new Request(forged)).status, 409)
+    assert.equal((await chatGPTCallbackRequest(new Request(forged), store)).status, 409)
     const missingClientId = callback(0)
     missingClientId.searchParams.delete('client_id')
-    assert.equal(chatGPTCallbackRequest(new Request(missingClientId)).status, 400)
+    assert.equal((await chatGPTCallbackRequest(new Request(missingClientId), store)).status, 400)
     const completions = await Promise.all([callback(1), callback(0)].map(uri =>
-      chatGPTCallbackRequest(new Request(uri))))
+      chatGPTCallbackRequest(new Request(uri), store)))
     assert.deepEqual(completions.map(response => response.status), [303, 303])
     for (const result of completions) {
       assert.equal(result.headers.get('location'), origin + '/auth/callback?complete=1',
         'completion must return to Studio origin without exposing OAuth credentials')
       assert.match(result.headers.get('referrer-policy') ?? '', /no-referrer/)
     }
-    const finished = chatGPTCallbackRequest(new Request(origin + '/auth/callback?complete=1'))
+    const finished = await chatGPTCallbackRequest(new Request(origin + '/auth/callback?complete=1'), store)
     assert.equal(finished.status, 200)
     assert.match(await finished.text(), /oauth-popup-complete\.js/)
     assert.match(finished.headers.get('content-security-policy') ?? '', /script-src 'self'/)
-    assert.equal(chatGPTCallbackRequest(new Request(callback(0))).status, 409, 'state must be one-use')
+    assert.equal((await chatGPTCallbackRequest(new Request(callback(0)), store)).status, 409, 'state must be one-use')
     for (let i = 0; i < cookies.length; i++) {
       let flow = (await req(cookies[i]!, 'GET')).value.oauth
       for (let attempt = 0; attempt < 60 && flow?.status !== 'connected'; attempt++) {
@@ -150,7 +150,20 @@ test('external Pi OAuth handles two concurrent owners by state without a per-log
       }
     }
     assert.deepEqual(exchanged.sort(), ['user-0', 'user-1'])
-    assert.equal(chatGPTCallbackRequest(new Request('http://127.0.0.1:3000/auth/callback')).status, 400)
+    // Manual callback fallback uses the same two-phase SDK completion.
+    const manualStart = await req(cookies[0]!, 'POST', { action: 'oauth', provider: 'openai' })
+    assert.equal(manualStart.status, 202)
+    assert.equal(manualStart.value.oauth?.status, 'pending')
+    const manualURL = new URL('http://127.0.0.1:3000/auth/callback')
+    manualURL.searchParams.set('state', new URL(manualStart.value.oauth!.url!).searchParams.get('state')!)
+    manualURL.searchParams.set('code', 'manual-user-0')
+    manualURL.searchParams.set('client_id', 'manual-client')
+    const manualResult = await req(cookies[0]!, 'POST', { action: 'oauth-complete', redirectUrl: manualURL.toString() })
+    assert.equal(manualResult.status, 200)
+    assert.equal(manualResult.value.oauth?.status, 'connected')
+    const manualCredential = await userPiCredentials(store, users[0]!.id).read('openai')
+    assert.equal(manualCredential?.type === 'oauth' && manualCredential.access, 'synthetic-access-manual-user-0')
+    assert.equal((await chatGPTCallbackRequest(new Request('http://127.0.0.1:3000/auth/callback'), store)).status, 400)
   } finally {
     globalThis.fetch = oldFetch
     store.sqlite.close()

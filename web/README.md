@@ -533,8 +533,12 @@ The job's **Pi model and budgets** section offers per-user API-key connections
 and **Sign in with ChatGPT browser OAuth** through the Pi SDK's `openai` provider.
 The separate `openai-codex` provider is legacy; reconnect under `openai` for
 subscription generation. On Docker or remote Studio deployments, the browser's
-localhost callback may be unreachable. Paste its final `127.0.0.1:1455` redirect
-URL into the authenticated Studio form to finish the same verified OAuth flow. The selected provider,
+loopback callback may be unreachable. The two-phase Pi OAuth interface runs
+without a listener; Studio routes callbacks on its existing port (normally
+`127.0.0.1:3000/auth/callback`). The host must still be reachable from the
+author's browser. For a remote browser, the final loopback redirect URL may
+be pasted into the authenticated Studio form as a fallback; a fully hosted
+redirect requires support from the authorization provider. The selected provider,
 model and optional reasoning level are verified against that signed-in user's
 available Pi catalog and persisted as part of the immutable job draft. The
 GET/POST/DELETE `/api/pi/models` connection endpoint is authenticated,
@@ -556,8 +560,8 @@ but back it up securely: **losing/changing the key makes existing connections
 unreadable**, and runtime requests fail closed. The Pi SDK's runtime is built
 with the per-user credential store and with filesystem model configuration
 disabled; it does not read shared host `~/.pi` auth/model files. OAuth flow
-state is transient during browser authorization; completed provider credentials
-are durable across restarts. Reconnect if an in-flight device authorization
+state, including the PKCE context, is transient and held server-side during
+browser authorization; completed provider credentials are durable across restarts. Reconnect if an in-flight OAuth authorization
 is interrupted by a restart or if provider access is revoked. An API key being
 present does not prove the remote vendor will accept it until a real API call.
 

@@ -1,4 +1,6 @@
 import { createHmac } from 'node:crypto'
+import { createModels, type OAuthAuthorization } from '@earendil-works/pi-ai'
+import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth'
 
 // Nitro bundles Pi's main module but cannot trace its variable-specified
@@ -12,8 +14,8 @@ import { requireUser } from './access.server'
 import { availableUserPiModels, createUserPiRuntime, userPiCredentials } from './pi-credentials.server'
 
 type Flow = { status: 'starting' | 'pending' | 'completing' | 'connected' | 'failed'
-  url?: string; state?: string; expires: number; reason?: string; abort: AbortController;
-  resolveManual?: (value: string) => void }
+  owner: string; url?: string; state?: string; authorization?: OAuthAuthorization;
+  expires: number; reason?: string; abort: AbortController; timeout?: ReturnType<typeof setTimeout> }
 const flows = new Map<string, Flow>()
 // Random provider-generated state is the one-use callback correlation key.
 // No Studio session cookie is expected on the provider's redirect.
@@ -50,6 +52,16 @@ export function validChatGPTCallback(redirectUrl: string, authorizationUrl: stri
 function releaseCallback(flow: Flow) {
   if (flow.state && flowsByState.get(flow.state) === flow) flowsByState.delete(flow.state)
 }
+function finishFlow(flow: Flow) {
+  releaseCallback(flow)
+  if (flow.timeout) clearTimeout(flow.timeout)
+  delete flow.authorization
+}
+function studioOAuth(store: StudioDatabase, owner: string) {
+  const models = createModels({ credentials: userPiCredentials(store, owner) })
+  models.setProvider(openaiProvider())
+  return models
+}
 
 const callbackHeaders = {
   'Content-Type': 'text/html; charset=utf-8',
@@ -64,7 +76,7 @@ const callbackPage = (message: string, status = 200) =>
 
 /** Handle a provider redirect without an authenticated browser cookie. The
  * unguessable OAuth state identifies one pending account and is consumed once. */
-export function chatGPTCallbackRequest(request: Request): Response {
+export async function chatGPTCallbackRequest(request: Request, store: StudioDatabase): Promise<Response> {
   const requested = new URL(request.url)
   if (requested.pathname !== '/auth/callback') return callbackPage('Unknown callback.', 404)
   const studioOrigin = new URL(process.env.BETTER_AUTH_URL ?? 'http://localhost:3000').origin
@@ -83,10 +95,10 @@ export function chatGPTCallbackRequest(request: Request): Response {
   const state = requested.searchParams.get('state')
   if (!state) return callbackPage('No authorization callback. Return to NovelTea Studio.', 400)
   const flow = flowsByState.get(state)
-  if (!flow || flow.status !== 'pending' || !flow.url || !flow.resolveManual ||
+  if (!flow || flow.status !== 'pending' || !flow.url || !flow.authorization ||
       Date.now() > flow.expires) return callbackPage('No matching pending authorization.', 409)
   if (requested.searchParams.has('error')) {
-    releaseCallback(flow)
+    finishFlow(flow)
     flow.status = 'failed'
     flow.reason = 'ChatGPT authorization was cancelled or denied.'
     flow.abort.abort()
@@ -98,7 +110,17 @@ export function chatGPTCallbackRequest(request: Request): Response {
     return callbackPage('Invalid authorization callback.', 400)
   releaseCallback(flow)
   flow.status = 'completing'
-  flow.resolveManual(callback.toString())
+  try {
+    await studioOAuth(store, flow.owner).completeOAuth('openai', flow.authorization, callback.toString(), { signal: flow.abort.signal })
+    flow.status = 'connected'
+    delete flow.url
+    finishFlow(flow)
+  } catch {
+    flow.status = 'failed'
+    flow.reason = 'ChatGPT authorization could not be completed.'
+    finishFlow(flow)
+    return callbackPage('ChatGPT authorization could not be completed.', 400)
+  }
   // Never send an OAuth code, client ID, or state to Studio's main origin.
   // The browser can close a script-opened popup on the clean completion page.
   const clean = new URL('/auth/callback?complete=1', studioOrigin)
@@ -153,7 +175,7 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
         return reply({ error: 'Invalid provider' }, 400)
       if (input.provider === 'openai' || input.provider === 'openai-codex') {
         const flow = flows.get(actor.id)
-        if (flow) { releaseCallback(flow); flow.abort.abort() }
+        if (flow) { finishFlow(flow); flow.abort.abort() }
         flows.delete(actor.id)
       }
       await credentials.delete(input.provider)
@@ -167,7 +189,7 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       if (!runtime.getProvider(input.provider)) return reply({ error: 'Pi provider is not installed' }, 422)
       if (input.provider === 'openai') {
         const flow = flows.get(actor.id)
-        if (flow) { releaseCallback(flow); flow.abort.abort() }
+        if (flow) { finishFlow(flow); flow.abort.abort() }
         flows.delete(actor.id)
       }
       await credentials.modify(input.provider, async () => ({ type: 'api_key', key: input.key as string }))
@@ -178,79 +200,46 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       const existing = flows.get(actor.id)
       if (existing && ['starting', 'pending', 'completing'].includes(existing.status) && Date.now() < existing.expires)
         return reply({ oauth: publicFlow(existing) })
-      if (existing) { releaseCallback(existing); existing.abort.abort() }
-      const flow: Flow = { status: 'starting', expires: Date.now() + 15 * 60_000, abort: new AbortController() }
+      if (existing) { finishFlow(existing); existing.abort.abort() }
+      const flow: Flow = { owner: actor.id, status: 'starting', expires: Date.now() + 15 * 60_000, abort: new AbortController() }
       flows.set(actor.id, flow)
-      // Even abandoned logins must release their state and pending Pi prompt.
-      const timeout = setTimeout(() => {
+      // Even abandoned authorizations must release their state and PKCE context.
+      flow.timeout = setTimeout(() => {
         flow.status = 'failed'
         flow.reason = 'ChatGPT authorization expired. Start sign-in again.'
-        releaseCallback(flow)
+        finishFlow(flow)
         flow.abort.abort()
       }, 15 * 60_000)
-      timeout.unref()
-      // Pi owns the device-code exchange and the credential refresh contract.
-      // Only user-code/URL/status (never OAuth tokens) crosses into the browser.
-      void (async () => {
-        try {
-          const runtime = await createUserPiRuntime(store, actor.id)
-          await runtime.login('openai', 'oauth', {
-            signal: flow.abort.signal,
-            prompt: async prompt => {
-              if (prompt.type !== 'manual_code') throw new Error('Unsupported OpenAI OAuth prompt')
-              return new Promise<string>((resolve, reject) => {
-                flow.resolveManual = resolve
-                const signal = prompt.signal ?? flow.abort.signal
-                if (signal.aborted) reject(new Error('Authorization cancelled'))
-                else signal.addEventListener('abort', () => reject(new Error('Authorization cancelled')), { once: true })
-              })
-            },
-            notify: event => {
-              if (event.type === 'auth_url') {
-                flow.abort.signal.throwIfAborted()
-                const state = new URL(event.url).searchParams.get('state')
-                if (!state || flowsByState.has(state)) throw new Error('Invalid OAuth authorization state')
-                flow.url = event.url
-                flow.state = state
-                flow.status = 'pending'
-                flowsByState.set(state, flow)
-              }
-            },
-          }, { agentName: 'NovelTea Studio', callback: {
-            mode: 'external', redirectUri: process.env.NT_PI_OAUTH_REDIRECT_URI ??
-              'http://127.0.0.1:3000/auth/callback',
-          }, getDeviceId: () => oauthHostDeviceId(actor.id, process.env.NT_PI_CREDENTIAL_KEY!) })
-          flow.status = 'connected'
-          delete flow.url
-        } catch (error) {
-          // A deliberate disconnect/replacement is not a failed sign-in.
-          if (flow.abort.signal.aborted) return
-          // This is an operator-only diagnostic. Never log OAuth URLs, codes,
-          // refresh/access tokens, credentials, or arbitrary SDK error text.
-          const kind = error instanceof Error ? error.name.replace(/[^A-Za-z]/g, '').slice(0, 50) : 'Unknown'
-          const code = error && typeof error === 'object' && 'code' in error &&
-            typeof error.code === 'string' && /^[A-Z_]{2,40}$/.test(error.code)
-            ? error.code : 'unknown'
-          const detail = error instanceof Error ? error.message
-            .replace(/https?:\/\/\S+/g, '[url]')
-            .replace(/\b(?:access_token|refresh_token|client_secret|code|token|authorization)\s*[=:]\s*[^\s,;]+/gi, '[credential]')
-            .replace(/[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
-            .replace(/[A-Za-z0-9_+\/-]{32,}={0,2}/g, '[redacted]')
-            .slice(0, 180) : 'unknown'
-          console.error('[Studio ChatGPT OAuth] Authorization flow failed', { kind, code, detail })
-          flow.status = 'failed'
-          flow.reason = 'ChatGPT authorization did not complete. Retry sign-in. (See Studio operator logs.)'
-        } finally {
-          clearTimeout(timeout)
-          releaseCallback(flow)
-          delete flow.resolveManual
-        }
-      })()
-      return reply({ oauth: publicFlow(flow) }, 202)
+      flow.timeout.unref()
+      // Only the authorization URL reaches the browser. The opaque PKCE
+      // context remains with this owner on the trusted Studio server.
+      try {
+        const authorization = await studioOAuth(store, actor.id).beginOAuth('openai', {
+          signal: flow.abort.signal,
+          agentName: 'NovelTea Studio',
+          redirectUri: process.env.NT_PI_OAUTH_REDIRECT_URI ?? 'http://127.0.0.1:3000/auth/callback',
+          getDeviceId: () => oauthHostDeviceId(actor.id, process.env.NT_PI_CREDENTIAL_KEY!),
+        })
+        flow.abort.signal.throwIfAborted()
+        if (flowsByState.has(authorization.state)) throw new Error('OAuth authorization state collision')
+        flow.authorization = authorization
+        flow.url = authorization.url
+        flow.state = authorization.state
+        flow.status = 'pending'
+        flowsByState.set(authorization.state, flow)
+      } catch (error) {
+        if (flow.abort.signal.aborted) return reply({ error: 'ChatGPT authorization expired' }, 409)
+        // Avoid exposing authorization details in responses or logs.
+        console.error('[Studio ChatGPT OAuth] Authorization start failed', error instanceof Error ? error.name : 'Unknown')
+        flow.status = 'failed'
+        flow.reason = 'ChatGPT authorization did not start. Check Studio operator logs.'
+        finishFlow(flow)
+      }
+      return reply({ oauth: publicFlow(flow) }, flow.status === 'failed' ? 503 : 202)
     }
     if (input.action === 'oauth-complete') {
       const flow = flows.get(actor.id)
-      if (!flow || flow.status !== 'pending' || !flow.url || !flow.resolveManual ||
+      if (!flow || flow.status !== 'pending' || !flow.url || !flow.authorization ||
           Date.now() > flow.expires) return reply({ error: 'No pending ChatGPT browser authorization' }, 409)
       if (typeof input.redirectUrl !== 'string' || input.redirectUrl.length > 4096)
         return reply({ error: 'Paste the final localhost redirect URL' }, 422)
@@ -260,8 +249,19 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
       // flow. The SDK verifies state again before exchanging the code.
       releaseCallback(flow)
       flow.status = 'completing'
-      flow.resolveManual(input.redirectUrl)
-      return reply({ oauth: publicFlow(flow) }, 202)
+      try {
+        await studioOAuth(store, actor.id).completeOAuth('openai', flow.authorization,
+          input.redirectUrl, { signal: flow.abort.signal })
+        flow.status = 'connected'
+        delete flow.url
+        finishFlow(flow)
+        return reply({ oauth: publicFlow(flow) })
+      } catch {
+        flow.status = 'failed'
+        flow.reason = 'ChatGPT authorization could not be completed.'
+        finishFlow(flow)
+        return reply({ oauth: publicFlow(flow) }, 409)
+      }
     }
     return reply({ error: 'Unknown credential action' }, 400)
   } catch (error) {
