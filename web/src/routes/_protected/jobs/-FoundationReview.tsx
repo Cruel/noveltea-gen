@@ -81,7 +81,7 @@ export function FoundationReview({ jobId, onChanged }: { jobId: string; onChange
       </> : <p role="status">{conflict.status === 'authorized'
         ? conflict.retryUsed
           ? 'The one-time authorized retry has been used. Inspect the resulting job state.'
-          : 'Authorization recorded. Use Resume in Execution controls to request one verified retry.'
+          : 'Authorization recorded. If the native validator changed, approve its replacement below before using Resume.'
         : 'Request rejected. The Story remains unchanged and this job cannot resume through this exception.'}</p>}
     </>}
   </section>

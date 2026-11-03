@@ -555,8 +555,17 @@ review. The page presents the original model explanation and the pinned Creative
 Direction source, and accepts an explicit owner decision to reject or authorize a
 **job-scoped exception**. Authorizing never changes protected Story bytes or
 waives exact-change approvals; it permits one manually requested, evidence-checked
-retry. An uncertain/dirty specialist cannot use this recovery path. The exact
-original native validator must also remain available before the retry can start.
+retry. An uncertain/dirty specialist cannot use this recovery path. If the
+original native validator is no longer available, a separate **Native validator
+upgrade review** appears after Foundation authorization. It presents both exact
+SHA-256 identities, validates the unchanged Story using the configured trusted
+replacement executable, and requests a second explicit author approval. The
+controller records the previous and replacement pins in durable job-local audit
+history, then atomically updates the validator receipt and job manifest (with
+idempotent recovery if interrupted). This is limited to a clean, authorized
+no-write Foundation boundary; jobs with committed revisions require a distinct
+history-aware migration. The job never resumes generation automatically and
+must still pass the native validation and safe checkpoint guards.
 
 **Operator prerequisite:** set `NT_PI_CREDENTIAL_KEY` to an independently stored,
 base64-encoded random 32-byte key (generate with

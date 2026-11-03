@@ -5,6 +5,7 @@ import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity } from './-GenerationActivity'
 import { AuthorInteractions } from './-AuthorInteractions'
 import { FoundationReview } from './-FoundationReview'
+import { ValidatorUpgrade } from './-ValidatorUpgrade'
 import { GitChanges } from './-GitChanges'
 import { PublishDraft } from './-PublishDraft'
 
@@ -156,6 +157,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
       </section>
       <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
       <FoundationReview jobId={jobId} onChanged={() => void refresh()} />
+      {job.status === 'paused' && <ValidatorUpgrade jobId={jobId} onChanged={() => void refresh()} />}
       <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
       <GitChanges jobId={jobId} revision={job.headSha} />
       {(job.provider === 'github' || job.provider === 'gitlab') &&

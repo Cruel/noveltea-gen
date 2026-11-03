@@ -341,7 +341,7 @@ export function createStoryValidateTool(job: JobStartResult): ToolDefinition {
   };
 }
 
-function nativeExecutable(): string {
+export function nativeExecutable(): string {
   const selected = process.env.NT_NATIVE_CLI;
   const name = process.platform === "win32" ? "noveltea.exe" : "noveltea";
   if (selected) {
