@@ -23,6 +23,7 @@ import { claimServerGeneration, ensureNotServerOwned } from "./generation-owner.
 import { readJobControl } from "./job-control.js";
 import { inspectJobReport, type JobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
+import { inspectRecoveryCheckpoints, reconcileRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
 import { generationStages, reconcileInventory, nextExecutionItem, type GenerationStage as Stage,
@@ -176,6 +177,63 @@ async function checkPlan(job: JobStartResult, request: GenerationRequest, versio
   }
   return receipt;
 }
+/**
+ * The parent graph can checkpoint a failure after a child has committed and
+ * published its trusted receipt. Clear only that failure when the *current*
+ * Git HEAD is independently branchable and the next specialist has never
+ * started. This does not repair, discard, or repeat an interrupted writer.
+ */
+async function reconciledFailures(job: JobStartResult, failures: Record<string, string>) {
+  if (!Object.keys(failures).length) return failures;
+  const currentHead = await trustedHead(job);
+  const point = (await inspectRecoveryCheckpoints(job))
+    .find(record => record.eligible && record.commitSha === currentHead);
+  if (!point) return failures;
+  const retryable = (key: string) => {
+    if (key === "foundation" && point.workItem === "foundation" ||
+        key === "architecture" && point.workItem === "global-architecture") return true;
+    if (key.startsWith("event:milestone.") &&
+        point.workItem === "event-" + key.slice("event:milestone.".length)) return true;
+    if (key.startsWith("composition:milestone.") &&
+        point.workItem === "composition-" + key.slice("composition:milestone.".length)) return true;
+    if (key.startsWith("focus:") && key === point.workItem) return true;
+    if (key === "foundations" && ["world-foundations", "character-foundations"].includes(point.workItem)) {
+      const path = join(job.stateDir, "character-world.json");
+      if (!existsSync(path)) return false;
+      return readFile(path, "utf8").then(raw => {
+        const receipt = JSON.parse(raw) as { jobId?: string; units?: Array<{
+          id: string; phase: string; commitSha?: string; beforeHead?: string }> };
+        if (receipt.jobId !== job.jobId || receipt.units?.[0]?.id !== "world-foundations" ||
+            receipt.units[1]?.id !== "character-foundations" ||
+            receipt.units[0].phase !== "committed") return false;
+        if (point.workItem === "world-foundations") return receipt.units[0].commitSha === currentHead &&
+          receipt.units[1].phase === "pending" && !receipt.units[1].beforeHead;
+        return receipt.units[1].phase === "committed" && receipt.units[1].commitSha === currentHead;
+      }).catch(() => false);
+    }
+    if (key.startsWith("interactive:milestone.") &&
+        point.workItem.startsWith("interactive-")) {
+      const slug = key.slice("interactive:milestone.".length);
+      if (!["interactive-choice-" + slug, "interactive-puzzle-" + slug].includes(point.workItem)) return false;
+      const path = join(job.stateDir, "interactive-items", slug + ".json");
+      if (!existsSync(path)) return false;
+      return readFile(path, "utf8").then(raw => {
+        const receipt = JSON.parse(raw) as { jobId?: string; units?: Array<{
+          id: string; phase: string; commitSha?: string; beforeHead?: string }> };
+        if (receipt.jobId !== job.jobId || receipt.units?.[0]?.phase !== "committed") return false;
+        if (point.workItem === "interactive-choice-" + slug)
+          return receipt.units[0].commitSha === currentHead &&
+            receipt.units[1]?.phase === "pending" && !receipt.units[1].beforeHead;
+        return receipt.units[1]?.phase === "committed" &&
+          receipt.units[1].commitSha === currentHead;
+      }).catch(() => false);
+    }
+    return false;
+  };
+  const next = { ...failures };
+  for (const key of Object.keys(next)) if (await retryable(key)) delete next[key];
+  return next;
+}
 async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>> {
   const receipt = await checkPlan(job, s.request, s.planVersion);
   const plan = receipt?.plan;
@@ -184,7 +242,8 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
   // Failed specialists own persistent recovery receipts. Later commits from
   // independent clusters do not permit replay against a changed HEAD.
   // A new authorized plan is the boundary for reconsidering local failures.
-  const failures = s.inventory?.planVersion === (plan?.version ?? null) ? s.failures ?? {} : {};
+  const failures = await reconciledFailures(job,
+    s.inventory?.planVersion === (plan?.version ?? null) ? s.failures ?? {} : {});
   let completedStages = s.completedStages.filter(e => {
     if (e.stage === "foundation" || !plan) return true;
     if (e.stage === "architecture") return receipt.phase === "committed";
@@ -490,6 +549,12 @@ export async function runStoryGeneration(options: GenerationOptions) {
       if (options.action === "start" && cancelled) {
         throw new Error("Cannot start generation for a terminally cancelled Story job.");
       }
+      if (options.action === "resume" && !cancelled) {
+        // Reconcile independently committed work items without ever replaying
+        // their external Pi writer. The parent graph may still be mid-node.
+        await withStoryJobLock(job, "generation-checkpoint-reconciliation", () =>
+          reconcileRecoveryCheckpoints(job));
+      }
       if (options.action !== "inspect") {
         // A terminal cancellation never re-enters a checkpointed dispatch:
         // an unfinished writer's original session and dirty worktree must
@@ -519,6 +584,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           (visible.inventory ? nextExecutionItem(visible.inventory)?.stage : undefined) ?? null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
+        recoveryCheckpoints: await inspectRecoveryCheckpoints(await startStoryJob({ story: job.storyRoot, job: job.jobId }, false)),
         escalation: visible.escalation ?? (state.status === "completed" ? null : reviewEscalation(report, visible.inventory ?? null)),
         pendingNodes: (await graph.getState(config)).next, request: visible.request, report };
     } finally { saver.db.close(); }

@@ -13,6 +13,7 @@ import { recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice
   completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { trustedHead } from "./revision.js";
+import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -303,9 +304,13 @@ async function publishHead(job: JobStartResult, previous: string, commit: string
         (saved.headSha !== previous && saved.headSha !== commit)) {
       throw new Error("Verified-head marker differs from the committed specialist chain.");
     }
-    if (saved.headSha === commit) return;
+    if (saved.headSha === commit) {
+      await finalizeRecoveryCheckpoint(job, workItemId, previous, commit);
+      return;
+    }
   }
   await persist(file, { version: 1, jobId: job.jobId, headSha: commit, workItemId });
+  await finalizeRecoveryCheckpoint(job, workItemId, previous, commit);
 }
 async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: FoundationAssignment): Promise<SpecialistEvidence> {
   const write = async (folder: string, slug: string, type: string, fields: string, body: string) => {

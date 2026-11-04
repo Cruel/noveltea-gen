@@ -8,6 +8,7 @@ import { authorComposition, reviewComposition, type CompositionAssignment,
   type CompositionEvidence, type SemanticReview } from "./composition-specialist.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
+import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { verifiedNarrativeSuccessor, verifiedNarrativeChain } from "./job-successor.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { fixtureCluster } from "./fixture-cluster.js";
@@ -346,9 +347,13 @@ async function publishHead(job: JobStartResult, before: string, after: string, i
     if (saved.version !== 1 || saved.jobId !== job.jobId ||
         (saved.headSha !== before && saved.headSha !== after))
       throw new Error("Last verified Story head changed outside composition.");
-    if (saved.headSha === after) return;
+    if (saved.headSha === after) {
+      await finalizeRecoveryCheckpoint(job, id, before, after);
+      return;
+    }
   }
   await save(file, { version: 1, jobId: job.jobId, headSha: after, workItemId: id });
+  await finalizeRecoveryCheckpoint(job, id, before, after);
 }
 function verifyCommit(job: JobStartResult, state: Receipt, sha: string) {
   if (!state.paths || !state.digest || git(job, "rev-parse", sha + "^") !== (state.beforeHead ?? state.interactiveHead))

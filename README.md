@@ -164,6 +164,26 @@ approved plan transitions retain their original immutable authority. A separate 
 lease serializes CLI continuations; every writer still uses the existing shared
 Story writer lock. No checkpoint is assumed to atomically commit Git or Pi effects.
 
+**Verified work-item recovery checkpoints (#74):** Each independent specialist
+Git commit now has a durable, job-private
+`recovery-checkpoints/<commit>.intent.json` and finalized `<commit>.json`
+under the job state directory. A point records the exact commit and parent,
+work-item/stage, verified receipt and validator/skills identities, approved
+plan snapshot, completed/remaining work and next runnable dependency. This
+includes separate World and Character points even though both belong to one
+parent `foundations` graph node. `job generate inspect` and Studio's Job
+metadata show finalized points as branchable, and incomplete or mismatched
+points as not branchable. Studio returns only safe public metadata—not internal
+job paths, session files or protected approval payloads. The underlying
+receipts remain controller-owned and source-linked; inspection never creates a
+new point. A generation resume reconciles lost finalization from Git and the
+original specialist receipt, and may clear a parent's crash failure only if the
+next specialist is still pending and its prior point is verified. Neither a
+dirty/partially written specialist nor a missing validator proof is retried.
+These are **logical recovery sources** for future branching; no live SQLite
+graph thread, Pi session, author message or approval is copied or implicitly
+authorized in a second thread.
+
 To exercise cross-process resume, use `--pause-after foundation` (or
 `architecture`, `foundations`, `event`, `interactive`, `composition`, `review`) on
 start or resume. Every continuation re-enters the safe-boundary intake and uses

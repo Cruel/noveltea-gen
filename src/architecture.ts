@@ -14,6 +14,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { trustedHead } from "./revision.js";
+import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 
@@ -672,7 +673,10 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         if (!didWriteArchitecture) receipt.expectedHead = previousArchitectureHead;
         delete receipt.executionHead;
         await persist(file, receipt);
-        if (didWriteArchitecture && commit !== previousHead) await publishVerifiedHead(job, previousHead, commit);
+        if (didWriteArchitecture && commit !== previousHead) {
+          await publishVerifiedHead(job, previousHead, commit);
+          await finalizeRecoveryCheckpoint(job, "global-architecture", previousHead, commit);
+        }
         return { receipt };
       })
       .addEdge(START, "architecture_specialist").addEdge("architecture_specialist", "validate_and_commit_architecture")

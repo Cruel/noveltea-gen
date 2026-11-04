@@ -10,6 +10,7 @@ import type { CompletionContract } from "./architecture.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { startStoryJob } from "./job.js";
 import { trustedHead } from "./revision.js";
+import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -251,6 +252,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     await writeFile(headTemp, JSON.stringify({ version: 1, jobId: job.jobId, headSha: receipt.commitSha,
       workItemId: receipt.workItemId }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
     await rename(headTemp, headFile);
+    await finalizeRecoveryCheckpoint(job, receipt.workItemId, current, receipt.commitSha!);
     return { status: "focused-committed", headSha: receipt.commitSha, paths };
   });
 }

@@ -246,6 +246,16 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(git(repo, 'rev-parse', 'HEAD'), pinned)
     assert.equal(started.body.job.threadId, acquired.threadId + ':generation:web')
     assert.equal(started.body.job.fixture, true)
+    const points = started.body.job.recoveryCheckpoints as Array<{
+      workItem: string; commitSha: string; eligible: boolean; proofDigest: string; source: string
+    }>
+    assert.equal(points.length, 1)
+    assert.equal(points[0]?.workItem, 'foundation')
+    assert.equal(points[0]?.commitSha, started.body.job.headSha)
+    assert.equal(points[0]?.eligible, true)
+    assert.match(points[0]?.proofDigest ?? '', /^[a-f0-9]{64}$/)
+    assert.equal(points[0]?.source, 'foundation.json')
+    assert.ok(!('repository' in points[0]!) && !('story' in points[0]!))
     const events = listGenerationEvents(store, alice.id, jobId, 0)
     assert.deepEqual(events.map(event => event.kind), ['started', 'working', 'verified', 'finished'])
     assert.equal(events[1]?.stage, 'foundation')

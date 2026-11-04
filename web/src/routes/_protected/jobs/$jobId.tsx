@@ -302,6 +302,30 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
         <div><span>Revision verified</span><strong>{job.revisionVerified === false ? 'No' : 'Not marked unverified'}</strong></div>
       </CardContent>
     </Card>
+    {job.recoveryCheckpoints.length > 0 && <Card>
+      <CardHeader><CardTitle className="text-sm">Verified recovery checkpoints ({job.recoveryCheckpoints.filter(point => point.eligible).length} eligible)</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        {job.recoveryCheckpoints.map(point => <details key={point.commitSha} className="border-b border-border/50 pb-2 last:border-0">
+          <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+            <code className="text-xs">{point.commitSha.slice(0, 12)}</code>
+            <span className="font-medium">{point.workItem}</span>
+            <span className="text-xs text-muted-foreground">{point.eligible ? "Branchable" : "Not branchable"}</span>
+          </summary>
+          <div className="mt-2 space-y-1 break-words text-xs text-muted-foreground">
+            <div>Stage: {point.stage} · Plan: {point.planVersion ?? "not yet established"}</div>
+            <div>Verified work: {point.completedWorkItems.join(", ") || "none"}</div>
+            <div>Next: {point.nextWorkItem ?? "No ready work item"} · Remaining: {point.remainingWorkItems.join(", ") || "none"}</div>
+            <div>Validator: {point.validation.status} ({point.validation.validatorSha256.slice(0, 12)})</div>
+            {point.eligible && <>
+              <div>Parent commit: <code>{point.parentSha.slice(0, 12)}</code> · Receipt: {point.source}</div>
+              <div>Receipt proof: <code>{point.proofDigest.slice(0, 20)}</code></div>
+              <div>Plan digest: <code>{point.planDigest?.slice(0, 20) ?? "not established"}</code> · Skills: <code>{point.snapshotId?.slice(0, 20) ?? "not pinned"}</code></div>
+            </>}
+            {point.reason && <div>{point.reason}</div>}
+          </div>
+        </details>)}
+      </CardContent>
+    </Card>}
     {job.status !== 'prepared' && <Card>
       <CardHeader><CardTitle className="text-sm">Saved generation request</CardTitle></CardHeader>
       <CardContent>

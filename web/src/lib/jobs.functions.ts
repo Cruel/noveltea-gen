@@ -10,6 +10,12 @@ export type JobOverview = {
   status: string; threadId: string | null; fixture: boolean; task: string | null
   contract: object | null; reason: string | null; completedStages: Array<{ stage: string; status: string }>
   revisionVerified?: boolean
+  recoveryCheckpoints: Array<{
+    commitSha: string; parentSha: string; workItem: string; stage: string; eligible: boolean; reason: string | null
+    planVersion: number | null; planDigest: string | null; proofDigest: string; source: string; snapshotId: string | null
+    completedWorkItems: string[]; remainingWorkItems: string[]
+    nextWorkItem: string | null; validation: { status: string; validatorSha256: string }
+  }>
   recovery?: {
     kind: 'manual-specialist' | 'operator-reconciliation'
     stage: string; workItem: string | null; files: string[]

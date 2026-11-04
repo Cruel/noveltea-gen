@@ -7,6 +7,7 @@ import { readJobControl } from '../../src/job-control'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { withStoryJobLock } from '../../src/job-lock'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
+import { reconcileRecoveryCheckpoints } from '../../src/recovery-checkpoints'
 import { configurePiPolicy, resolvePiModel, type PiPolicy } from '../../src/job-pi-policy'
 import { withJobModelRuntime } from '../../src/model-runtime'
 import { SandboxClient } from '../../src/sandbox-client'
@@ -80,6 +81,12 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     appendGenerationEvent(store, item.ownerId, row.id, { kind: 'started' })
     const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
     try {
+      if (item.intent !== 'start') {
+        // A committed specialist can precede its parent LangGraph snapshot.
+        // Reconcile only the original trusted receipt, never repeat the writer.
+        await withStoryJobLock(job, 'studio-recovery-finalization', () =>
+          reconcileRecoveryCheckpoints(job))
+      }
       const prior = await graph.getState({ configurable: { thread_id: threadId } })
       const stages = (prior.values as { completedStages?: GenerationEvidence[] }).completedStages ?? []
       let working = '', verified = stages.length

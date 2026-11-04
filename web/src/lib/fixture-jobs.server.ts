@@ -10,6 +10,7 @@ import { startStoryJob, type JobStartResult } from '../../../src/job'
 import { parseGenerationContract, type GenerationRequest } from '../../../src/generation'
 import { assertServerClaimPermitted } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
+import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { PiPolicy } from '../../../src/job-pi-policy'
@@ -117,7 +118,20 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
   const job = await restoreJob(row, owner)
   const pinned = pinnedRequest(row, job)
   const queued = queueRecord(store, row.id)
-  const base = { id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
+  // Finalized per-work-item points are safe to inspect even while a later
+  // specialist is editing: the uncommitted draft is never part of the point.
+  const recoveryCheckpoints = (await inspectRecoveryCheckpoints(job)).map(point => ({
+    commitSha: point.commitSha, parentSha: point.parentSha, workItem: point.workItem, stage: point.stage,
+    eligible: point.eligible, planVersion: point.planVersion,
+    planDigest: point.planDigest, proofDigest: point.proofDigest,
+    source: point.source, snapshotId: point.snapshotId,
+    completedWorkItems: point.completedWorkItems, remainingWorkItems: point.remainingWorkItems,
+    nextWorkItem: point.nextWorkItem, validation: point.validation,
+    reason: point.eligible ? null : point.reason?.includes("finalization is incomplete")
+      ? "Checkpoint finalization is incomplete; reconcile the original receipt."
+      : "Checkpoint failed verification; operator reconciliation required.",
+  }))
+  const base = { recoveryCheckpoints, id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
     baseSha: job.baseSha, headSha: job.headSha, fixture: pinned?.fixture ?? true }
   if (!pinned) {
     // A crash between the server-owner claim and the database publication

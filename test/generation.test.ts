@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -184,6 +184,93 @@ test("single-Milestone generation checkpoints foundation then resumes all specia
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
   assert.equal(git(f.repo, "status", "--porcelain"), "");
+});
+
+test("independent World and Character checkpoints survive restart and reconcile a lost finalization without writer replay", { skip: !available }, () => {
+  const f = setup("threads-checkpoints");
+  const paused = f.cli([...f.start, "--pause-after", "foundations"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  const points = paused.recoveryCheckpoints as Array<{
+    workItem: string; commitSha: string; eligible: boolean; nextWorkItem: string | null;
+    completedWorkItems: string[]; remainingWorkItems: string[];
+  }>;
+  const world = points.find(point => point.workItem === "world-foundations");
+  const character = points.find(point => point.workItem === "character-foundations");
+  assert.ok(world?.eligible, JSON.stringify(points));
+  assert.ok(character?.eligible, JSON.stringify(points));
+  assert.notEqual(world.commitSha, character.commitSha);
+  assert.equal(world.nextWorkItem, "character-foundations");
+  assert.ok(world.completedWorkItems.includes("world-foundations"));
+  assert.ok(!world.completedWorkItems.includes("character-foundations"));
+  assert.ok(world.remainingWorkItems.includes("character-foundations"));
+  assert.ok(character.completedWorkItems.includes("character-foundations"));
+  assert.equal(character.nextWorkItem, "event-disclosure");
+  const headBefore = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const worldFile = join(f.job.stateDir, "recovery-checkpoints", world.commitSha + ".json");
+  assert.ok(existsSync(worldFile));
+  // Simulate a SIGKILL after specialist/verified-head receipt publication but
+  // before recovery-point finalization. A read must not synthesize a point.
+  unlinkSync(worldFile);
+  const incomplete = f.cli(["generate", "inspect"]).recoveryCheckpoints as Array<{
+    workItem: string; commitSha: string; eligible: boolean; reason: string | null;
+  }>;
+  assert.ok(incomplete.some(point => point.commitSha === world.commitSha &&
+    !point.eligible && /incomplete/.test(point.reason ?? "")));
+  const resumed = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.ok(existsSync(worldFile), "resume reconciles from the original specialist receipt");
+  const repaired = (resumed.recoveryCheckpoints as typeof points).find(point => point.commitSha === world.commitSha);
+  assert.ok(repaired?.eligible, JSON.stringify(resumed.recoveryCheckpoints));
+  assert.equal(repaired.nextWorkItem, "character-foundations");
+  const commits = git(f.job.worktreeRoot, "log", "--format=%B", headBefore)
+    .split("NovelTea-Work-Item: world-foundations").length - 1;
+  assert.equal(commits, 1, "recovery never invokes World writer or duplicates its commit");
+  const restarted = f.cli(["generate", "inspect"]);
+  assert.ok((restarted.recoveryCheckpoints as typeof points).some(point =>
+    point.commitSha === world.commitSha && point.eligible));
+  const savedPoint = readFileSync(worldFile, "utf8");
+  // Altered continuation must not become a branchable checkpoint.
+  const forged = JSON.parse(savedPoint);
+  forged.nextWorkItem = "event-invented";
+  writeFileSync(worldFile, JSON.stringify(forged));
+  const tampered = f.cli(["generate", "inspect"]).recoveryCheckpoints as typeof points;
+  assert.ok(tampered.some(point => point.commitSha === world.commitSha && !point.eligible));
+  writeFileSync(worldFile, savedPoint);
+  // Validator evidence in the original specialist receipt is authoritative.
+  const receiptPath = join(f.job.stateDir, "character-world.json");
+  const savedReceipt = readFileSync(receiptPath, "utf8");
+  const invalid = JSON.parse(savedReceipt);
+  invalid.units[0].validation.status = "failed";
+  writeFileSync(receiptPath, JSON.stringify(invalid));
+  const invalidReceipt = f.cli(["generate", "inspect"]).recoveryCheckpoints as typeof points;
+  assert.ok(invalidReceipt.some(point => point.commitSha === world.commitSha && !point.eligible));
+  writeFileSync(receiptPath, savedReceipt);
+  // A later uncommitted draft never adds an eligible checkpoint. Earlier
+  // immutable points remain valid and independently inspectable.
+  const draft = join(f.job.worktreeStoryRoot, "characters", "unfinished-draft.md");
+  writeFileSync(draft, "unfinished draft");
+  const dirty = f.cli(["generate", "inspect"]).recoveryCheckpoints as typeof points;
+  assert.ok(dirty.find(point => point.commitSha === world.commitSha)?.eligible);
+  assert.ok(dirty.find(point => point.commitSha === character.commitSha)?.eligible);
+  assert.ok(!dirty.some(point => point.commitSha === headBefore &&
+    ![world.commitSha, character.commitSha].includes(point.commitSha)));
+  unlinkSync(draft);
+});
+
+test("crash after World commit before finalization never replays writer or grants an incomplete point", { skip: !available }, () => {
+  const f = setup("threads-crash");
+  f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT = "world-foundations";
+  const crashed = f.cli([...f.start, "--pause-after", "foundations"]);
+  assert.equal(crashed.status, "blocked", JSON.stringify(crashed));
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.match(git(f.job.worktreeRoot, "log", "-1", "--format=%B"), /NovelTea-Work-Item: world-foundations/);
+  assert.ok(crashed.recoveryCheckpoints.some((p: any) => p.commitSha === head && !p.eligible));
+  delete f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT;
+  const reconciled = f.cli(["generate", "resume", "--pause-after", "foundations"]);
+  assert.ok(reconciled.recoveryCheckpoints.some((p: any) =>
+    p.commitSha === head && p.workItem === "world-foundations" && p.eligible));
+  assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD").trim(),
+    String(reconciled.recoveryCheckpoints.filter((p: any) => p.eligible).length));
+  assert.equal(reconciled.status, "paused", JSON.stringify({ reason: reconciled.reason, nextStage: reconciled.nextStage }));
 });
 
 test("multi-Milestone generation develops every selected cluster across process restarts", { skip: !available }, () => {

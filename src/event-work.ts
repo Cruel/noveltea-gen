@@ -8,6 +8,7 @@ import type { Plan } from "./architecture.js";
 import { authorEventCluster, type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
+import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
@@ -267,9 +268,13 @@ async function publishHead(job: JobStartResult, prior: string, commit: string, w
         (previous.headSha !== prior && previous.headSha !== commit)) {
       throw new Error("Different verified-head receipt exists; manual reconciliation required.");
     }
-    if (previous.headSha === commit) return;
+    if (previous.headSha === commit) {
+      await finalizeRecoveryCheckpoint(job, workItem, prior, commit);
+      return;
+    }
   }
   await persist(file, { version: 1, jobId: job.jobId, headSha: commit, workItemId: workItem });
+  await finalizeRecoveryCheckpoint(job, workItem, prior, commit);
 }
 function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string) {
   if (!receipt.contentDigest || !receipt.paths ||

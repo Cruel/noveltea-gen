@@ -15,6 +15,7 @@ import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from ".
 import { verifyJobPiSession } from "./job-session.js";
 import { FoundationAuthorRequiredError, authorizedFoundationException, consumeFoundationRetry, recordFoundationConflict } from "./foundation-conflict.js";
 import { trustedHead } from "./revision.js";
+import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { preparePiContext, preflightPiAssignment } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
@@ -660,6 +661,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
     if (state.stage === "committed") {
       if (recovered !== state.commitSha) throw new Error("Saved foundation commit differs from job HEAD.");
       await advanceInboxVerifiedHead(job, state, state.commitSha!);
+      await finalizeRecoveryCheckpoint(job, WORK_ITEM, workHead(state), state.commitSha!);
       return output(job, state);
     }
     state = await executeFoundationGraph(job, state, input, recovered);
@@ -750,6 +752,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       };
       await saveState(stateFile(job), next);
       await advanceInboxVerifiedHead(job, next, next.commitSha!);
+      await finalizeRecoveryCheckpoint(job, WORK_ITEM, workHead(next), next.commitSha!);
       return { foundation: next };
     })
     .addEdge(START, "write_foundation")
