@@ -36,6 +36,15 @@ function start(story: string, job: string, state: string, extra: string[] = [], 
   );
 }
 
+function startPinned(story: string, job: string, state: string, pinnedBaseSha: string) {
+  const input = { story, job, pinnedBaseSha };
+  return spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval",
+    `import { startStoryJob } from "./src/job.ts"; console.log(JSON.stringify(await startStoryJob(${JSON.stringify(input)})));`], {
+    cwd: resolve("."), encoding: "utf8", timeout: 30_000,
+    env: { ...process.env, NT_STATE_DIR: state, NT_GIT_CACHE_DIR: undefined },
+  });
+}
+
 test("public CLI creates a persistent isolated job without changing author checkout", () => {
   const author = repo("standalone");
   const story = join(author, "story");
@@ -129,6 +138,87 @@ test("trusted callers can choose a per-repository cache root independently of th
   assert.ok(job.worktreeRoot.startsWith(join(cache, "worktrees")));
   assert.ok(job.stateDir.startsWith(join(state, "jobs")));
   assert.equal(existsSync(join(fixtures, "other-global-cache")), false);
+});
+
+test("trusted controller prepares an exact pinned revision without moving or copying a running parent's draft", () => {
+  const author = repo("pinned-revision");
+  const story = join(author, "story");
+  mkdirSync(story);
+  writeFileSync(join(story, "canon.md"), "selected verified content\n");
+  git(author, "add", "story");
+  git(author, "commit", "-qm", "Selected revision");
+  const selected = git(author, "rev-parse", "HEAD");
+  const state = join(fixtures, "pinned-revision-state");
+  const parentStart = start(story, "parent", state);
+  assert.equal(parentStart.status, 0, parentStart.stderr);
+  const parent = JSON.parse(parentStart.stdout);
+  writeFileSync(join(parent.worktreeStoryRoot, "canon.md"), "later verified content\n");
+  git(parent.worktreeRoot, "add", "story");
+  git(parent.worktreeRoot, "commit", "-qm", "Later parent work");
+  writeFileSync(join(parent.worktreeStoryRoot, "unfinished.md"), "private unfinished draft\n");
+  writeFileSync(join(parent.stateDir, "active-session.json"), "parent session\n");
+  mkdirSync(join(parent.stateDir, ".story-job-running"));
+  writeFileSync(join(parent.stateDir, ".story-job-running", "owner.json"), "parent lock\n");
+  const parentHead = git(parent.worktreeRoot, "rev-parse", "HEAD");
+  const parentStatus = git(parent.worktreeRoot, "status", "--porcelain");
+
+  // The reusable author/cache checkout need not still be at the selected SHA.
+  writeFileSync(join(story, "canon.md"), "new author revision\n");
+  git(author, "add", "story");
+  git(author, "commit", "-qm", "Author advances independently");
+  writeFileSync(join(story, "canon.md"), "uncommitted author draft\n");
+  const authorHead = git(author, "rev-parse", "HEAD");
+  const authorStatus = git(author, "status", "--porcelain");
+  const prepared = startPinned(story, "child", state, selected);
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const child = JSON.parse(prepared.stdout);
+  assert.equal(child.baseSha, selected);
+  assert.equal(child.headSha, selected);
+  assert.notEqual(child.branch, parent.branch);
+  assert.notEqual(child.threadId, parent.threadId);
+  assert.notEqual(child.worktreeRoot, parent.worktreeRoot);
+  assert.equal(git(child.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(readFileSync(join(child.worktreeStoryRoot, "canon.md"), "utf8"), "selected verified content\n");
+  assert.equal(existsSync(join(child.worktreeStoryRoot, "unfinished.md")), false);
+  assert.equal(existsSync(join(child.stateDir, "active-session.json")), false);
+  assert.equal(existsSync(join(child.stateDir, ".story-job-running")), false);
+  assert.equal(git(parent.worktreeRoot, "rev-parse", "HEAD"), parentHead);
+  assert.equal(git(parent.worktreeRoot, "status", "--porcelain"), parentStatus);
+  assert.equal(readFileSync(join(parent.stateDir, ".story-job-running", "owner.json"), "utf8"), "parent lock\n");
+  assert.equal(readFileSync(join(parent.stateDir, "active-session.json"), "utf8"), "parent session\n");
+  assert.equal(git(author, "rev-parse", "HEAD"), authorHead);
+  assert.equal(git(author, "status", "--porcelain"), authorStatus);
+  const retried = startPinned(story, "child", state, selected);
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.deepEqual(JSON.parse(retried.stdout), child);
+});
+
+test("pinned job admission rejects refs, missing objects, non-commits and conflicting retries without mutations", () => {
+  const author = repo("pinned-admission");
+  const baseline = git(author, "rev-parse", "HEAD");
+  const tree = git(author, "rev-parse", "HEAD^{tree}");
+  const blob = git(author, "rev-parse", "HEAD:README.md");
+  const state = join(fixtures, "pinned-admission-state");
+  const branches = git(author, "for-each-ref", "--format=%(refname)", "refs/heads");
+  const worktrees = git(author, "worktree", "list", "--porcelain");
+  for (const invalid of ["HEAD", baseline.slice(0, 12), "f".repeat(40), tree, blob, baseline + "^{commit}"]) {
+    const refused = startPinned(author, "child", state, invalid);
+    assert.notEqual(refused.status, 0, invalid);
+    assert.equal(existsSync(join(state, "jobs")), false);
+    assert.equal(git(author, "for-each-ref", "--format=%(refname)", "refs/heads"), branches);
+    assert.equal(git(author, "worktree", "list", "--porcelain"), worktrees);
+  }
+  const prepared = startPinned(author, "child", state, baseline);
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const child = JSON.parse(prepared.stdout);
+  const manifest = readFileSync(join(child.stateDir, "job.json"), "utf8");
+  git(author, "commit", "--allow-empty", "-qm", "Another revision");
+  const changed = startPinned(author, "child", state, git(author, "rev-parse", "HEAD"));
+  assert.notEqual(changed.status, 0);
+  assert.match(changed.stderr, /identity does not match/);
+  assert.equal(readFileSync(join(child.stateDir, "job.json"), "utf8"), manifest);
+  assert.equal(git(child.worktreeRoot, "rev-parse", "HEAD"), baseline);
+  assert.equal(git(child.worktreeRoot, "status", "--porcelain"), "");
 });
 
 test("legacy job manifests reopen without migration when a Git cache is configured", () => {

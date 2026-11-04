@@ -402,6 +402,16 @@ worktrees and thread IDs. A resumed job may have unfinished files or later
 commits in **its own** worktree. The original author branch is never modified
 or automatically merged.
 
+The internal `startStoryJob` API also accepts a trusted-controller-only
+`pinnedBaseSha` to materialize an exact, already-local commit without moving the
+author/cache checkout or copying another job's drafts. It rejects symbolic refs,
+non-commit objects and attempts to reopen the same job at a different pin.
+This is only the Git allocation primitive for #75: it does **not** verify recovery
+checkpoint eligibility, inherit specialist evidence, or seed graph continuation.
+It is not exposed through the CLI or Studio. A future fork controller must perform
+owner/source/checkpoint/compatibility checks and cache admission before calling it;
+ordinary `job start` retains its clean-current-HEAD requirement.
+
 The command prints machine-readable JSON with `jobId`, `storyRoot`,
 `storyRelativePath`, `gitRoot`, `baseSha`, `branch`, `stateDir`, `worktreeRoot`,
 `worktreeStoryRoot`, `headSha`, and the durable `threadId`. The job

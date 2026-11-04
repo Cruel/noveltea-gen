@@ -38,6 +38,10 @@ export interface JobStartOptions {
   novelteaProject?: string;
   /** Trusted controller-selected per-repository cache root; overrides NT_GIT_CACHE_DIR. */
   worktreeCacheRoot?: string;
+  /** Trusted controller only: exact local commit selected after source/checkpoint
+   * authorization. This primitive does NOT certify a checkpoint or initialize
+   * generation continuation. Never accept a browser-provided SHA directly. */
+  pinnedBaseSha?: string;
   /** Trusted server only: populate just the selected Story in each new linked worktree. */
   sparseStoryOnly?: boolean;
   /** Ephemeral authenticated Git transport configuration; never written to a job receipt. */
@@ -169,6 +173,15 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
     throw new Error(`Story root "${storyRoot}" must be inside an existing Git worktree with a committed HEAD. No Git repository was initialized or baseline committed.`);
   }
 
+  if (options.pinnedBaseSha !== undefined) {
+    const selected = options.pinnedBaseSha;
+    if (!/^[a-f0-9]{40,64}$/.test(selected) ||
+        git(gitRoot, "rev-parse", "--verify", selected + "^{commit}") !== selected) {
+      throw new Error("Pinned job baseline must be an exact local Git commit SHA.");
+    }
+    baseSha = selected;
+  }
+
   const storyRelativePath = relative(gitRoot, storyRoot).split(sep).join("/");
   if (!inside(gitRoot, storyRoot)) throw new Error("Story path resolves outside the Git repository.");
   const novelteaProjectRoot = options.novelteaProject
@@ -203,6 +216,7 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
     if (!saved || saved.version !== 1 || saved.jobId !== options.job || saved.gitRoot !== gitRoot ||
         saved.gitCommonDir !== common || saved.storyRoot !== storyRoot ||
         saved.storyRelativePath !== storyRelativePath ||
+        (options.pinnedBaseSha !== undefined && saved.baseSha !== options.pinnedBaseSha) ||
         (options.novelteaProject !== undefined && saved.novelteaProjectRoot !== novelteaProjectRoot) ||
         saved.branch !== branch || (saved.stateDir !== undefined && saved.stateDir !== jobRoot) ||
         (saved.cacheRoot !== undefined && (typeof saved.cacheRoot !== "string" || !saved.cacheRoot)) ||
@@ -223,17 +237,21 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
   if (!create) {
     throw new Error("No existing Story job matches this Story root and job ID. Run 'job start' first.");
   }
-  // Only a new job depends on the author's current Story baseline being clean.
-  // Reopen must tolerate later author work and preserves uncommitted job edits.
-  const pathspec = storyRelativePath || ".";
-  const inboxPath = siblingInboxPath(storyRelativePath);
-  const dirty = git(gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "--",
-    pathspec, ...(inboxPath ? [inboxPath] : []));
-  if (dirty) {
-    throw new Error(`Story baseline "${storyRelativePath || "."}" contains uncommitted or untracked files. Commit or resolve relevant Story changes first; unrelated monorepo changes are allowed.`);
-  }
-  if (git(gitRoot, "rev-parse", "--verify", "HEAD^{commit}") !== baseSha) {
-    throw new Error("Author HEAD moved while resolving the Story baseline. Retry job creation.");
+  // Ordinary new jobs depend on the author's current clean Story baseline.
+  // An explicitly pinned local commit is immutable: neither moving HEAD nor
+  // working-tree drafts participate in materializing that selected tree.
+  // Reopen likewise preserves later author work and unfinished job edits.
+  if (options.pinnedBaseSha === undefined) {
+    const pathspec = storyRelativePath || ".";
+    const inboxPath = siblingInboxPath(storyRelativePath);
+    const dirty = git(gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "--",
+      pathspec, ...(inboxPath ? [inboxPath] : []));
+    if (dirty) {
+      throw new Error(`Story baseline "${storyRelativePath || "."}" contains uncommitted or untracked files. Commit or resolve relevant Story changes first; unrelated monorepo changes are allowed.`);
+    }
+    if (git(gitRoot, "rev-parse", "--verify", "HEAD^{commit}") !== baseSha) {
+      throw new Error("Author HEAD moved while resolving the Story baseline. Retry job creation.");
+    }
   }
   const manifest: JobManifest = {
     version: 1, jobId: options.job, gitRoot, gitCommonDir: common,
