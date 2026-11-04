@@ -239,7 +239,10 @@ export function AddRepositoryDialog() {
                 className="flex min-w-0 items-center gap-2 border-b border-border/60 py-2 last:border-0">
                 <span className="inline-flex size-7 shrink-0 items-center justify-center rounded bg-muted text-foreground">
                   <svg role="img" aria-label={icon.title} viewBox="0 0 24 24"
-                    className="size-[18px] fill-current"><path d={icon.path} /></svg>
+                    className="size-[18px] fill-current"
+                    style={repo.provider === "gitlab" ? { color: "#FC6D26" } : undefined}>
+                    <path d={icon.path} />
+                  </svg>
                 </span>
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                   <span className="min-w-0 truncate text-sm font-medium" title={repo.name}>{repo.name}</span>
