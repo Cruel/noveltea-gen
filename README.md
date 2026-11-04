@@ -174,9 +174,14 @@ includes separate World and Character points even though both belong to one
 parent `foundations` graph node. `job generate inspect` and Studio's Job
 metadata show finalized points as branchable, and incomplete or mismatched
 points as not branchable. Studio returns only safe public metadata—not internal
-job paths, session files or protected approval payloads. The underlying
-receipts remain controller-owned and source-linked; inspection never creates a
-new point. A generation resume reconciles lost finalization from Git and the
+job paths, session files or protected approval payloads. Each versioned
+intent independently binds the original plan digest and, for Architecture,
+its commit-specific verified evidence. Inspection checks that plan against
+the controller-owned current plan or signed historical approval chain; a later
+replan cannot overwrite the proof for an earlier Architecture commit. Unknown
+or obsolete intent formats fail closed instead of silently granting eligibility.
+The underlying receipts remain controller-owned and source-linked; inspection
+never creates a new point. A generation resume reconciles lost finalization from Git and the
 original specialist receipt, and may clear a parent's crash failure only if the
 next specialist is still pending and its prior point is verified. Neither a
 dirty/partially written specialist nor a missing validator proof is retried.

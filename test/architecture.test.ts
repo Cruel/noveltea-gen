@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
+import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-architecture-"));
 after(() => removeTestTree(root));
@@ -163,11 +164,15 @@ test("partial target and branch scope is durable and unauthorized scope shrinkag
   assert.deepEqual(JSON.parse(inspect.stdout).plan, result.plan);
 });
 
-test("exact explicit author approval versions the completion contract without rewriting verified canon", { skip: !available }, () => {
+test("exact explicit author approval versions the completion contract without rewriting verified canon", { skip: !available }, async () => {
   const { cli, job, signEvidence } = setup("replan");
   const first = cli("architecture", "run", "--fixture", "--contract", contract("replan"), "--skills-source", source);
   assert.equal(first.status, 0, first.stderr);
   const sha = JSON.parse(first.stdout).headSha;
+  const currentJob = JSON.parse(cli("start").stdout);
+  const beforeReplan = await inspectRecoveryCheckpoints(currentJob);
+  assert.ok(beforeReplan.some(point => point.workItem === "global-architecture" &&
+    point.commitSha === sha && point.eligible), JSON.stringify(beforeReplan));
   const revised = scopedContract("replan-v2", {
     kind: "partial", depth: "architecture", targets: ["arc.truth", "milestone.disclosure"], branches: [],
   });
@@ -190,6 +195,11 @@ test("exact explicit author approval versions the completion contract without re
   const approval = cli("architecture", "approve", "--proposal", digest, "--approval", signedFile);
   assert.equal(approval.status, 0, approval.stderr);
   assert.equal(JSON.parse(approval.stdout).plan.version, 2);
+  const afterReplan = await inspectRecoveryCheckpoints(currentJob);
+  const original = afterReplan.find(point => point.workItem === "global-architecture" && point.commitSha === sha);
+  assert.ok(original?.eligible, JSON.stringify(afterReplan));
+  assert.equal(original.planVersion, 1);
+  assert.equal((original.plan as { version: number }).version, 1);
   const replay = cli("architecture", "run", "--fixture");
   assert.equal(replay.status, 0, replay.stderr);
   const data = JSON.parse(replay.stdout);
@@ -207,6 +217,9 @@ test("exact explicit author approval versions the completion contract without re
   const rejected = cli("architecture", "inspect");
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /differs from the approved plan revision/i);
+  const rejectedPoint = await inspectRecoveryCheckpoints(currentJob);
+  assert.ok(rejectedPoint.some(point => point.commitSha === sha && !point.eligible),
+    "invalid controller plan-history evidence must fail closed");
 });
 
 

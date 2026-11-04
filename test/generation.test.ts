@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +8,7 @@ import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { createGenerationGraph } from "../src/generation.js";
+import { reconcileInventory, nextExecutionItem } from "../src/generation-plan.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
@@ -235,6 +237,16 @@ test("independent World and Character checkpoints survive restart and reconcile 
   const tampered = f.cli(["generate", "inspect"]).recoveryCheckpoints as typeof points;
   assert.ok(tampered.some(point => point.commitSha === world.commitSha && !point.eligible));
   writeFileSync(worldFile, savedPoint);
+  // A self-consistent hash inside an edited checkpoint is not authorization:
+  // the independently saved intent and controller plan must match exactly.
+  const rewritten = JSON.parse(savedPoint);
+  rewritten.plan.contract.constraints = ["Unauthorised substitute author constraint"];
+  rewritten.planDigest = createHash("sha256").update(JSON.stringify(rewritten.plan)).digest("hex");
+  writeFileSync(worldFile, JSON.stringify(rewritten));
+  const untrustedPlan = f.cli(["generate", "inspect"]).recoveryCheckpoints as typeof points;
+  assert.ok(untrustedPlan.some(point => point.commitSha === world.commitSha && !point.eligible),
+    "rehashing a modified plan must never authenticate it");
+  writeFileSync(worldFile, savedPoint);
   // Validator evidence in the original specialist receipt is authoritative.
   const receiptPath = join(f.job.stateDir, "character-world.json");
   const savedReceipt = readFileSync(receiptPath, "utf8");
@@ -278,7 +290,16 @@ test("multi-Milestone generation develops every selected cluster across process 
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   contract.scope.targets = ["arc.truth", "milestone.disclosure", "milestone.reckoning"];
   writeFileSync(f.contract, JSON.stringify(contract));
-  const paused = f.cli([...f.start, "--pause-after", "composition"]);
+  const foundations = f.cli([...f.start, "--pause-after", "foundations"]);
+  assert.equal(foundations.status, "paused", JSON.stringify(foundations));
+  const character = foundations.recoveryCheckpoints.find((p: any) =>
+    p.workItem === "character-foundations" && p.eligible);
+  assert.ok(character, JSON.stringify(foundations.recoveryCheckpoints));
+  assert.deepEqual(character.dependencies["event-disclosure"], ["character-foundations"]);
+  assert.deepEqual(character.dependencies["event-reckoning"], ["character-foundations"]);
+  assert.equal(character.nextWorkItem, "event-disclosure",
+    "aggregate composition/review plans must not create cyclic Event prerequisites");
+  const paused = f.cli(["generate", "resume", "--pause-after", "composition"]);
   assert.equal(paused.status, "paused", JSON.stringify(paused));
   assert.equal(paused.nextStage, "event");
   const firstHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
@@ -342,6 +363,26 @@ test("alternative Milestone routes retain separately owned Event-design prose ob
   assert.ok(existsSync(join(f.job.worktreeStoryRoot, "authored-content/inspect-ledger-scene.md")));
 });
 
+function plannedDependencyInventory(f: ReturnType<typeof setup>, edit: (items: any[]) => void) {
+  const file = join(dirname(f.job.worktreeRoot), "architecture.json");
+  const architecture = JSON.parse(readFileSync(file, "utf8"));
+  // Model typed dependencies in memory. Editing the already-committed
+  // controller receipt in place would be an unauthorized replan and must not
+  // be used as a fixture for a production recovery checkpoint.
+  edit(architecture.plan.items);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const validated = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
+    "job", "validate", "--story", f.story, "--job", "single"], {
+    encoding: "utf8", env: f.env, timeout: 90000, maxBuffer: 32 * 1024 * 1024,
+  });
+  assert.ok(validated.status === 0 || validated.status === 2, validated.stderr);
+  return reconcileInventory(architecture.plan, JSON.parse(validated.stdout), head, [
+    { stage: "foundation", headSha: head, status: "committed" },
+    { stage: "architecture", headSha: head, status: "architecture-committed", planVersion: 1 },
+    { stage: "foundations", headSha: head, status: "foundations-committed", planVersion: 1 },
+  ], {});
+}
+
 test("a new typed cross-Milestone dependency changes the next runnable work item", { skip: !available }, () => {
   const f = setup("dependency");
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
@@ -349,25 +390,15 @@ test("a new typed cross-Milestone dependency changes the next runnable work item
   writeFileSync(f.contract, JSON.stringify(contract));
   const paused = f.cli([...f.start, "--pause-after", "architecture"]);
   assert.equal(paused.status, "paused");
-  const file = join(dirname(f.job.worktreeRoot), "architecture.json");
-  const architecture = JSON.parse(readFileSync(file, "utf8"));
-  const disclosure = architecture.plan.items.find((i: any) => i.targetIds.includes("milestone.disclosure") && i.kind === "realization");
-  const reckoning = architecture.plan.items.find((i: any) => i.targetIds.includes("milestone.reckoning") && i.kind === "realization");
-  assert.ok(disclosure && reckoning, "typed plan contains both realization obligations");
-  disclosure.dependencies.push(reckoning.id);
-  writeFileSync(file, JSON.stringify(architecture));
-  const afterFirstEvent = f.cli(["generate", "resume", "--pause-after", "event"]);
-  assert.equal(afterFirstEvent.status, "paused", JSON.stringify(afterFirstEvent));
-  assert.equal(afterFirstEvent.inventory.items.find((i: any) => i.id === "event:milestone.reckoning").status, "verified");
-  assert.equal(afterFirstEvent.inventory.items.find((i: any) => i.id === "event:milestone.disclosure").status, "pending");
-  assert.ok(afterFirstEvent.inventory.items.find((i: any) => i.id === "event:milestone.disclosure")
-    .dependencies.includes("event:milestone.reckoning"));
-  const result = f.cli(["generate", "resume"]);
-  // Later changes to the shared Arc can legitimately require explicit impact
-  // review; the graph must preserve this safety boundary, not force completion.
-  assert.equal(result.status, "blocked");
-  assert.match(result.reason, /impact review/);
-  assert.equal(result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure").status, "verified");
+  const inventory = plannedDependencyInventory(f, items => {
+    const disclosure = items.find(i => i.targetIds.includes("milestone.disclosure") && i.kind === "realization");
+    const reckoning = items.find(i => i.targetIds.includes("milestone.reckoning") && i.kind === "realization");
+    assert.ok(disclosure && reckoning, "typed plan contains both realization obligations");
+    disclosure.dependencies.push(reckoning.id);
+  });
+  assert.deepEqual(inventory.items.find(i => i.id === "event:milestone.disclosure")?.dependencies,
+    ["foundations", "architecture", "event:milestone.reckoning"]);
+  assert.equal(nextExecutionItem(inventory)?.id, "event:milestone.reckoning");
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
@@ -377,19 +408,15 @@ test("an unknown typed dependency blocks its cluster without silently dropping i
   contract.scope.targets = ["arc.truth", "milestone.disclosure", "milestone.reckoning"];
   writeFileSync(f.contract, JSON.stringify(contract));
   f.cli([...f.start, "--pause-after", "architecture"]);
-  const file = join(dirname(f.job.worktreeRoot), "architecture.json");
-  const architecture = JSON.parse(readFileSync(file, "utf8"));
-  const disclosure = architecture.plan.items.find((i: any) => i.targetIds.includes("milestone.disclosure") && i.kind === "realization");
-  assert.ok(disclosure);
-  disclosure.dependencies.push("nonexistent-dependency");
-  writeFileSync(file, JSON.stringify(architecture));
-  const result = f.cli(["generate", "resume"]);
-  assert.equal(result.status, "blocked");
-  assert.match(result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure").blockingReason, /nonexistent-dependency/);
-  assert.equal(result.escalation?.kind, "dependency-replan");
-  assert.equal(result.escalation?.requiresTrustedApproval, true);
-  assert.ok(result.escalation.sources.some((s: any) => s.source === "event:milestone.disclosure"));
-  assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.reckoning").status, "verified");
+  const inventory = plannedDependencyInventory(f, items => {
+    const disclosure = items.find(i => i.targetIds.includes("milestone.disclosure") && i.kind === "realization");
+    assert.ok(disclosure);
+    disclosure.dependencies.push("nonexistent-dependency");
+  });
+  assert.match(inventory.items.find(i => i.id === "event:milestone.disclosure")?.blockingReason ?? "",
+    /nonexistent-dependency/);
+  assert.equal(inventory.items.find(i => i.id === "event:milestone.reckoning")?.status, "pending");
+  assert.equal(nextExecutionItem(inventory)?.id, "event:milestone.reckoning");
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
@@ -399,21 +426,16 @@ test("cyclic typed dependencies block their work without dispatch", { skip: !ava
   contract.scope.targets = ["arc.truth", "milestone.disclosure", "milestone.reckoning"];
   writeFileSync(f.contract, JSON.stringify(contract));
   f.cli([...f.start, "--pause-after", "architecture"]);
-  const file = join(dirname(f.job.worktreeRoot), "architecture.json");
-  const architecture = JSON.parse(readFileSync(file, "utf8"));
-  const disclosure = architecture.plan.items.find((i: any) => i.targetIds.includes("milestone.disclosure") && i.kind === "realization");
-  const reckoning = architecture.plan.items.find((i: any) => i.targetIds.includes("milestone.reckoning") && i.kind === "realization");
-  assert.ok(disclosure && reckoning);
-  disclosure.dependencies.push(reckoning.id);
-  reckoning.dependencies.push(disclosure.id);
-  writeFileSync(file, JSON.stringify(architecture));
-  const result = f.cli(["generate", "resume"]);
-  assert.equal(result.status, "blocked");
-  assert.match(result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure").blockingReason, /Cyclic/);
-  assert.match(result.inventory.items.find((i: any) => i.id === "event:milestone.reckoning").blockingReason, /Cyclic/);
-  assert.equal(result.escalation?.kind, "dependency-replan");
-  assert.ok(result.escalation?.sources.some((s: any) => /Cyclic/.test(s.message)));
-  assert.equal(result.inventory.items.filter((i: any) => i.stage === "event" && i.status === "verified").length, 0);
+  const inventory = plannedDependencyInventory(f, items => {
+    const disclosure = items.find(i => i.targetIds.includes("milestone.disclosure") && i.kind === "realization");
+    const reckoning = items.find(i => i.targetIds.includes("milestone.reckoning") && i.kind === "realization");
+    assert.ok(disclosure && reckoning);
+    disclosure.dependencies.push(reckoning.id);
+    reckoning.dependencies.push(disclosure.id);
+  });
+  assert.match(inventory.items.find(i => i.id === "event:milestone.disclosure")?.blockingReason ?? "", /Cyclic/);
+  assert.match(inventory.items.find(i => i.id === "event:milestone.reckoning")?.blockingReason ?? "", /Cyclic/);
+  assert.equal(inventory.items.filter(i => i.stage === "event" && i.status === "verified").length, 0);
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 

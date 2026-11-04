@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
+import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { trustedHead } from "./revision.js";
 
 /**
@@ -93,7 +94,7 @@ function proofOf(id: string, receipt: Receipt, sha: string) {
   }
   return item;
 }
-async function receiptProof(job: JobStartResult, id: string, sha: string) {
+async function receiptProof(job: JobStartResult, id: string, sha: string, archivedArchitecture?: Receipt) {
   const source = sourceFor(id);
   const full = join(job.stateDir, source.path);
   const stat = await lstat(full);
@@ -105,9 +106,15 @@ async function receiptProof(job: JobStartResult, id: string, sha: string) {
       (receipt.threadId && receipt.threadId !== job.threadId)) {
     throw new Error("Specialist receipt is not bound to this job/branch.");
   }
-  const proof = proofOf(id, receipt, sha);
-  const expectedPaths = (id === "foundation" ? [receipt.target] :
-    id === "global-architecture" ? receipt.paths : proof.paths) as unknown;
+  // Architecture is a mutable planning receipt. Once a signed replan supersedes
+  // it, the per-commit proof captured before that replan remains authoritative.
+  const proof = id === "global-architecture" && archivedArchitecture
+    ? archivedArchitecture : proofOf(id, receipt, sha);
+  if (id === "global-architecture" && archivedArchitecture &&
+      (proof.phase !== "committed" || proof.plan?.architecture?.status !== "verified" ||
+        proof.plan.architecture.verifiedSha !== sha))
+    throw new Error("Archived architecture proof does not certify the original commit.");
+  const expectedPaths = (id === "foundation" ? [receipt.target] : proof.paths) as unknown;
   if (!Array.isArray(expectedPaths) || !expectedPaths.length ||
       expectedPaths.some(path => typeof path !== "string" ||
         !/^[a-z][a-z0-9-]*(?:\/[a-z0-9._-]+)+\.md$/.test(path))) {
@@ -121,7 +128,7 @@ async function receiptProof(job: JobStartResult, id: string, sha: string) {
     throw new Error("Specialist commit changed paths outside its verified receipt.");
   const commitMessage = git(job, "log", "-1", "--format=%B", sha).split("\n");
   const trailer = id === "foundation" ? ["NovelTea-Foundation", receipt.authoredSha256] :
-    id === "global-architecture" ? ["NovelTea-Architecture", receipt.contentDigest] :
+    id === "global-architecture" ? ["NovelTea-Architecture", proof.contentDigest] :
     id.endsWith("-foundations") ? ["NovelTea-Foundations", proof.digest] :
     id.startsWith("event-") ? ["NovelTea-Event-Design", receipt.contentDigest] :
     id.startsWith("interactive-") ? ["NovelTea-Interactive", proof.digest] :
@@ -134,8 +141,9 @@ async function receiptProof(job: JobStartResult, id: string, sha: string) {
     throw new Error("Foundation validation trailer differs from the verified receipt.");
   return { source: source.path, proofDigest: digest(proof), proof,
     fixture: receipt.worker === "fixture" || receipt.workerMode === "fixture",
-    snapshotId: receipt.snapshot?.id as string | undefined,
-    planVersion: (receipt.planVersion ?? receipt.plan?.version ?? null) as number | null };
+    snapshotId: (id === "global-architecture" ? proof.snapshot : receipt.snapshot?.id) as string | undefined,
+    planVersion: (id === "global-architecture" ? proof.plan?.version :
+      receipt.planVersion ?? receipt.plan?.version ?? null) as number | null };
 }
 export interface RecoveryCheckpoint {
   version: 1;
@@ -146,13 +154,30 @@ export interface RecoveryCheckpoint {
   planDigest: string | null; plan: unknown;
   completedWorkItems: string[]; remainingWorkItems: string[];
   nextWorkItem: string | null; dependencies: Record<string, string[]>;
-  validation: { status: "passed" | "unverified-empty-baseline"; validatorSha256: string };
+  validation: { status: "passed" | "unverified-empty-baseline" | "not-verified"; validatorSha256: string };
   source: string; proofDigest: string; snapshotId: string | null;
   compatibility: { logicalSchema: "noveltea-recovery/v1"; graphSchema: "noveltea-generation/v1" };
   /** Context references, never transferable approval grants. */
   provenance: { authorApprovals: "source-bound-not-reusable"; authorMessages: "source-bound-not-reusable" };
 }
 export type RecoveryInspection = RecoveryCheckpoint & { eligible: boolean; reason: string | null };
+interface RecoveryIntent {
+  version: 2; jobId: string; commitSha: string; parentSha: string; workItem: string;
+  proofDigest: string; planDigest: string | null; architectureProof: Receipt | null;
+}
+async function readIntent(job: JobStartResult, sha: string): Promise<RecoveryIntent> {
+  const path = intentFile(job, sha);
+  const stat = await lstat(path);
+  if (!stat.isFile() || stat.isSymbolicLink())
+    throw new Error("Recovery checkpoint intent is not a trusted file.");
+  const intent = JSON.parse(await readFile(path, "utf8")) as RecoveryIntent;
+  if (intent.version !== 2 || intent.jobId !== job.jobId || intent.commitSha !== sha ||
+      !HASH.test(intent.proofDigest) ||
+      (intent.planDigest !== null && !HASH.test(intent.planDigest)) ||
+      (intent.workItem === "global-architecture" ? !intent.architectureProof : intent.architectureProof !== null))
+    throw new Error("Recovery intent lacks its original commit and plan evidence.");
+  return intent;
+}
 async function graphThread(job: JobStartResult) {
   const path = join(job.stateDir, "generation-server-owner.json");
   if (!existsSync(path)) return job.threadId + ":generation";
@@ -175,15 +200,25 @@ function stageOf(id: string) {
   if (id.startsWith("focus:")) return "focus";
   throw new Error("Unsupported recovery stage.");
 }
-async function planFor(job: JobStartResult) {
+async function planFor(job: JobStartResult, requiredDigest?: string | null) {
   const path = join(job.stateDir, "architecture.json");
   if (!existsSync(path)) return null;
   const receipt = JSON.parse(await readFile(path, "utf8")) as Receipt;
-  if (receipt.jobId !== job.jobId || !receipt.plan || !Number.isInteger(receipt.plan.version))
-    throw new Error("No verified architecture plan is available for continuation.");
-  return receipt.plan as { version: number; contract: { scope: {
-    depth?: string; kind: string; targets: string[] } }; items: Array<{ id: string; dependencies: string[]; targetIds: string[];
-      status?: string; verifiedSha?: string }> };
+  if (receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
+      (receipt.branch && receipt.branch !== job.branch) ||
+      (receipt.threadId && receipt.threadId !== job.threadId) ||
+      !receipt.plan || !Number.isInteger(receipt.plan.version))
+    throw new Error("No job-bound architecture plan is available for continuation.");
+  verifyPlanHistory(job, receipt as Parameters<typeof verifyPlanHistory>[1]);
+  // Approved transitions archive the *prior* plan with signed controller
+  // evidence. Checkpoint reads must match the original plan version, never a
+  // newly authorized (and potentially broader) replacement plan.
+  const candidates = [receipt.plan, ...receipt.history.map((entry: Receipt) => entry.plan)];
+  const selected = requiredDigest === undefined ? receipt.plan :
+    candidates.find((candidate: Receipt) => digest(candidate) === requiredDigest);
+  if (!selected || !Number.isInteger(selected.version))
+    throw new Error("Checkpoint plan differs from controller-authorized plan history.");
+  return selected as Plan;
 }
 function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: string): { order: string[]; dependencies: Record<string,string[]> } {
   const order = ["foundation", "global-architecture"];
@@ -222,9 +257,13 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
   for (const milestone of milestones) {
     const slug = milestone.slice("milestone.".length);
     const event = "event-" + slug, choice = "interactive-choice-" + slug, puzzle = "interactive-puzzle-" + slug;
-    const planItems = plan.items.filter(i => i.targetIds.includes(milestone));
+    // Only realization work items have executable Event prerequisites. Aggregate
+    // composition/review placeholders depend on *all* Milestones and must not
+    // become invented Event-to-Event barriers (or cycles).
+    const planItems = plan.items.filter(i => i.kind === "realization" && i.targetIds.includes(milestone));
     const otherMilestoneDeps = planItems.flatMap(i => i.dependencies ?? [])
-      .flatMap(dep => plan.items.find(i => i.id === dep)?.targetIds ?? [])
+      .flatMap(dep => { const item = plan.items.find(i => i.id === dep);
+        return item?.kind === "realization" ? item.targetIds : []; })
       .filter(id => id.startsWith("milestone.") && id !== milestone)
       .map(id => "event-" + id.slice("milestone.".length));
     add(event, ["character-foundations", ...new Set(otherMilestoneDeps)]);
@@ -291,7 +330,8 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
   }
   const planned = workPlan(point.plan as Awaited<ReturnType<typeof planFor>>, point.workItem);
   const completed = point.completedWorkItems;
-  if (point.planDigest !== (point.plan ? digest(point.plan) : null) ||
+  if (!["passed", "unverified-empty-baseline"].includes(point.validation.status) ||
+      point.planDigest !== (point.plan ? digest(point.plan) : null) ||
       !Array.isArray(completed) || new Set(completed).size !== completed.length ||
       completed.some(id => !planned.order.includes(id)) ||
       JSON.stringify(point.dependencies) !== JSON.stringify(planned.dependencies) ||
@@ -301,18 +341,25 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
         .find(id => (planned.dependencies[id] ?? []).every(dep => completed.includes(dep))) ?? null)) {
     throw new Error("Recovery continuation inventory or plan has been modified.");
   }
-  if (point.workItem === "foundation" ? point.plan !== null : point.plan === null)
-    throw new Error("Recovery checkpoint has an invalid stage-specific plan snapshot.");
-  const intentPath = intentFile(job, point.commitSha);
-  const intentStat = await lstat(intentPath);
-  if (!intentStat.isFile() || intentStat.isSymbolicLink())
-    throw new Error("Recovery checkpoint intent is not a trusted file.");
-  const intent = JSON.parse(await readFile(intentPath, "utf8"));
-  const expectedIntent = { version: 1, jobId: job.jobId, commitSha: point.commitSha,
-    parentSha: point.parentSha, workItem: point.workItem, proofDigest: point.proofDigest };
-  if (JSON.stringify(intent) !== JSON.stringify(expectedIntent))
+  if (point.workItem === "foundation" ? point.plan !== null :
+      point.plan === null || (point.plan as Plan).version !== point.planVersion)
+    throw new Error("Recovery checkpoint plan version differs from its committed specialist.");
+  const intent = await readIntent(job, point.commitSha);
+  if (intent.parentSha !== point.parentSha || intent.workItem !== point.workItem ||
+      intent.proofDigest !== point.proofDigest || intent.planDigest !== point.planDigest)
     throw new Error("Recovery checkpoint was not finalized from its original durable intent.");
+  // Both the immutable commit intent and the controller-owned Architecture
+  // receipt/history must authorize these *exact* plan bytes. Rehashing a
+  // tampered checkpoint cannot change either independent source of evidence.
+  if (point.plan !== null) {
+    const authorized = await planFor(job, point.planDigest);
+    if (digest(authorized) !== point.planDigest || digest(point.plan) !== digest(authorized))
+      throw new Error("Checkpoint plan does not match original controller authorization.");
+  }
   verifyGit(job, point.commitSha, point.parentSha, point.workItem);
+  const verified = await trustedHead(job);
+  if (!isAncestor(job, point.commitSha, verified))
+    throw new Error("Checkpoint is outside the published verified-head boundary.");
   // The completed inventory must reflect real prior commits, never a future
   // specialist invented in the checkpoint JSON. Unknown revision/inbox commits
   // do not become completed narrative work items.
@@ -329,7 +376,17 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
   if (synthetic.some(id => !completed.includes(id)) ||
       JSON.stringify([...historical].sort()) !== JSON.stringify([...recorded].sort()))
     throw new Error("Completed recovery work items differ from the actual Git commit chain.");
-  const source = await receiptProof(job, point.workItem, point.commitSha);
+  const source = await receiptProof(job, point.workItem, point.commitSha,
+    intent.architectureProof ?? undefined);
+  if (point.workItem === "global-architecture") {
+    const plan = point.plan as Plan;
+    const architecture = plan.items.find(item => item.id === "global-architecture");
+    if (intent.architectureProof?.plan?.version !== plan.version ||
+        !architecture ||
+        digest(intent.architectureProof?.plan?.architecture) !== digest(architecture) ||
+        architecture.verifiedSha !== point.commitSha)
+      throw new Error("Historical Architecture proof differs from the authorized plan commit.");
+  }
   if (point.planVersion !== (source.planVersion ?? (point.plan as { version?: number } | null)?.version ?? null) ||
       point.validation.status !== (source.proof.validation === "unverified-empty-baseline"
         ? "unverified-empty-baseline" : "passed") ||
@@ -339,6 +396,18 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
       source.snapshotId !== (point.snapshotId ?? undefined)) {
     throw new Error("Recovery checkpoint no longer matches its exact trusted specialist receipt.");
   }
+}
+function nonBranchable(job: JobStartResult, sha: string, reason: string): RecoveryInspection {
+  return { version: 1, status: "finalized", jobId: job.jobId,
+    repository: job.gitRoot, story: job.storyRoot, storyRelativePath: job.storyRelativePath,
+    branch: job.branch, graphThread: job.threadId + ":generation", baseSha: job.baseSha,
+    commitSha: sha, parentSha: "", workItem: "unknown", stage: "unknown",
+    planVersion: null, planDigest: null, plan: null, completedWorkItems: [], remainingWorkItems: [],
+    nextWorkItem: null, dependencies: {}, validation: { status: "not-verified", validatorSha256: "" },
+    source: "", proofDigest: "", snapshotId: null,
+    compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
+    provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
+    eligible: false, reason };
 }
 export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<RecoveryInspection[]> {
   if (!existsSync(dir(job))) return [];
@@ -352,31 +421,13 @@ export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<R
     } catch (error) {
       // Inspectable, never branchable. Do not repair or trust a corrupt record
       // during an owner-scoped read, including a currently dirty specialist.
-      results.push({ version: 1, status: "finalized", jobId: job.jobId,
-        repository: job.gitRoot, story: job.storyRoot, storyRelativePath: job.storyRelativePath,
-        branch: job.branch, graphThread: job.threadId + ":generation", baseSha: job.baseSha,
-        commitSha: file.slice(0, 40), parentSha: "", workItem: "unknown", stage: "unknown",
-        planVersion: null, planDigest: null, plan: null, completedWorkItems: [], remainingWorkItems: [],
-        nextWorkItem: null, dependencies: {}, validation: { status: "passed", validatorSha256: "" },
-        source: "", proofDigest: "", snapshotId: null,
-        compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
-        provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
-        eligible: false, reason: error instanceof Error ? error.message : String(error) });
+      results.push(nonBranchable(job, file.slice(0, 40), error instanceof Error ? error.message : String(error)));
     }
   }
   for (const name of (await readdir(dir(job))).filter(n => /^[a-f0-9]{40}\.intent\.json$/.test(n))) {
     const sha = name.slice(0, 40);
     if (!files.includes(sha + ".json")) {
-      results.push({ version: 1, status: "finalized", jobId: job.jobId,
-        repository: job.gitRoot, story: job.storyRoot, storyRelativePath: job.storyRelativePath,
-        branch: job.branch, graphThread: job.threadId + ":generation", baseSha: job.baseSha,
-        commitSha: sha, parentSha: "", workItem: "unknown", stage: "unknown",
-        planVersion: null, planDigest: null, plan: null, completedWorkItems: [], remainingWorkItems: [],
-        nextWorkItem: null, dependencies: {}, validation: { status: "passed", validatorSha256: "" },
-        source: "", proofDigest: "", snapshotId: null,
-        compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
-        provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
-        eligible: false, reason: "Commit finalization is incomplete; reconcile the original receipt." });
+      results.push(nonBranchable(job, sha, "Commit finalization is incomplete; reconcile the original receipt."));
     }
   }
   return results.sort((a, b) => a.completedWorkItems.length - b.completedWorkItems.length);
@@ -394,18 +445,26 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   if (!isAncestor(job, commitSha, verified))
     throw new Error("Specialist commit is not within the published verified-head chain.");
   verifyGit(job, commitSha, parentSha, workItem);
-  const receipt = await receiptProof(job, workItem, commitSha);
+  const pending = intentFile(job, commitSha);
+  // After a crash an approved replan may have replaced Architecture\x27s mutable
+  // receipt. Recover only the original intent\x27s plan and commit evidence.
+  const previousIntent = existsSync(pending) ? await readIntent(job, commitSha) : null;
+  if (previousIntent && (previousIntent.parentSha !== parentSha || previousIntent.workItem !== workItem))
+    throw new Error("Recovery intent conflicts with the original Git work item.");
+  const plan = workItem === "foundation" ? null : await planFor(job, previousIntent?.planDigest);
+  const receipt = await receiptProof(job, workItem, commitSha,
+    previousIntent?.architectureProof ?? undefined);
   if (receipt.planVersion !== null && (!Number.isInteger(receipt.planVersion) || receipt.planVersion < 1))
     throw new Error("Recovery checkpoint has an invalid plan version.");
   const sourceProof = receipt.proof as Receipt;
   if (sourceProof.validation?.validatorSha256 &&
       sourceProof.validation.validatorSha256 !== job.validatorSha256)
     throw new Error("Specialist validation uses a different pinned validator.");
-  const intent = { version: 1, jobId: job.jobId, commitSha, parentSha, workItem, proofDigest: receipt.proofDigest };
-  const pending = intentFile(job, commitSha);
-  if (existsSync(pending)) {
-    const old = JSON.parse(await readFile(pending, "utf8"));
-    if (JSON.stringify(old) !== JSON.stringify(intent)) throw new Error("Recovery intent conflict.");
+  const intent: RecoveryIntent = { version: 2, jobId: job.jobId, commitSha, parentSha, workItem,
+    proofDigest: receipt.proofDigest, planDigest: plan ? digest(plan) : null,
+    architectureProof: workItem === "global-architecture" ? sourceProof : null };
+  if (previousIntent) {
+    if (JSON.stringify(previousIntent) !== JSON.stringify(intent)) throw new Error("Recovery intent conflict.");
   } else await atomic(pending, intent);
   // Deterministic crash-boundary certification. Fixture receipts only; a live
   // Pi worker must never be interrupted by test fault injection.
@@ -416,7 +475,6 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     await verifyFinal(job, point);
     return point;
   }
-  const plan = workItem === "foundation" ? null : await planFor(job);
   const work = workPlan(plan, workItem);
   if (!work.order.includes(workItem))
     throw new Error("Work item does not belong to the authorized continuation plan.");
