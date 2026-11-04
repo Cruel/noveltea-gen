@@ -4,8 +4,8 @@ import { auth, database } from './runtime.server'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
 import {
-  createConversation, listStoryConversations, renameConversation, renameThread,
-  saveThreadPreferences,
+  archiveThread, createConversation, listStoryConversations, renameConversation, renameThread,
+  restoreThread, saveThreadPreferences,
 } from './threads.server'
 
 const isId = (id: unknown): id is string =>
@@ -49,6 +49,20 @@ export const setThreadTitle = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => {
     renameThread(database, await ownerId(), data.id, data.title)
+    return { success: true }
+  })
+
+/** This is a reversible catalog flag, never a job execution or cleanup control. */
+export const changeThreadArchive = createServerFn({ method: 'POST' })
+  .validator((data: { id: string; archived: boolean }) => {
+    if (!data || !isId(data.id) || typeof data.archived !== 'boolean')
+      throw new Error('Invalid Thread archive request.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    const owner = await ownerId()
+    if (data.archived) archiveThread(database, owner, data.id)
+    else restoreThread(database, owner, data.id)
     return { success: true }
   })
 

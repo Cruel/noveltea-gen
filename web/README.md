@@ -29,6 +29,8 @@ After applying Studio schema migration **16** with the web services stopped, cho
 
 The navigation reads the existing owner-scoped catalog, durable generation events and execution queue. Meaningful work and status transitions affect activity ordering; HTTP polling and SSE heartbeats do not. Running work shows the most recent specialist work item. Status distinguishes queued, running, paused, blocked, author attention, completed and archived where applicable. No existing LangGraph execution identity or job worktree is changed, and the legacy root mapping **does not** reconstruct historical forkable recovery checkpoints. Creating child Threads, branching and continuing runs are separate follow-up milestones of spec #73.
 
+**Archive/restore (#89):** In a Story's Conversations page, use the Archive control on an active Thread. Archived Threads disappear from the default Active navigation but remain available under **Archived**, where any active ancestor nodes are shown as lineage context and the entire path is expanded. Use Restore to return the Thread to the Active view. Both operations are authenticated, owner-scoped and idempotent. They update only `story_threads.archived_at`; they do **not** stop running jobs, alter status/activity/title, remove worktrees or sessions, change message history, or invalidate verified recovery checkpoints. Active descendants of an archived parent stay visible and executable. Archived entries retain links to their original job's detail and recovery evidence. Permanent deletion and cleanup are not implemented by Archive.
+
 Run `pnpm --filter @noveltea/studio migrate` while Studio is stopped **before** deploying this code; the running server refuses a missing migration.
 
 ## Setup

@@ -8,6 +8,26 @@ export function latestActivity(values: readonly string[]): string {
   return [...values].sort(compareActivity).at(-1)!
 }
 
+/** The active view hides only the archived record, not its descendants.
+ * The archive view retains every archived record's complete parent chain
+ * (including active ancestors for context) without altering the stored tree. */
+export function selectNavigationThreads<T extends {
+  id: string; parentThreadId: string | null; archivedAt: string | null
+}>(threads: readonly T[], view: 'active' | 'archived'): T[] {
+  if (view === 'active') return threads.filter(thread => !thread.archivedAt)
+  const byId = new Map(threads.map(thread => [thread.id, thread]))
+  const visible = new Set<string>()
+  for (const thread of threads) {
+    if (!thread.archivedAt) continue
+    let current: T | undefined = thread
+    while (current && !visible.has(current.id)) {
+      visible.add(current.id)
+      current = current.parentThreadId ? byId.get(current.parentThreadId) : undefined
+    }
+  }
+  return threads.filter(thread => visible.has(thread.id))
+}
+
 /** Shared presentation ordering: group roots by their most recently active descendant. */
 export function orderThreads<T extends { id: string; parentThreadId: string | null; activityAt: string }>(
   threads: readonly T[], mode: 'tree' | 'flat',

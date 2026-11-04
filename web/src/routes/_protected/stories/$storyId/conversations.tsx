@@ -1,18 +1,21 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { ArrowLeft, List, LoaderCircle, Pencil, Plus, Network } from 'lucide-react'
+import { Archive, ArrowLeft, List, LoaderCircle, Pencil, Plus, Network } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ThreadList } from '@/components/thread-list'
 import { storyNavigationQuery, storyNavigationKey } from '@/lib/threads.queries'
-import { addConversation, setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
+import { addConversation, changeThreadArchive, setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
+import { selectNavigationThreads } from '@/lib/thread-navigation'
 import type { StoryThread } from '@/lib/threads.server'
 import { useJobEventStream } from '@/hooks/use-job-event-stream'
 
 export const Route = createFileRoute('/_protected/stories/$storyId/conversations')({
-  validateSearch: (search: Record<string, unknown>): { conversation?: string } =>
-    typeof search.conversation === 'string' ? { conversation: search.conversation } : {},
+  validateSearch: (search: Record<string, unknown>): { conversation?: string; archived?: boolean } => ({
+    ...(typeof search.conversation === 'string' ? { conversation: search.conversation } : {}),
+    ...(search.archived === true || search.archived === 'true' ? { archived: true } : {}),
+  }),
   loader: ({ context, params }) =>
     context.queryClient.ensureQueryData(storyNavigationQuery(params.storyId)),
   component: StoryConversations,
@@ -47,7 +50,8 @@ function TitleEditor({ title, label, onSubmit, onCancel }: {
 }
 function StoryConversations() {
   const { storyId } = Route.useParams()
-  const { conversation: selectedId } = Route.useSearch()
+  const { conversation: selectedId, archived } = Route.useSearch()
+  const archivedView = archived === true
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { data, error, isFetching } = useQuery({
@@ -57,6 +61,7 @@ function StoryConversations() {
       ? 8000 : 30000,
   })
   const [creating, setCreating] = useState(false)
+  const [changingArchive, setChangingArchive] = useState<string | null>(null)
   const [editing, setEditing] = useState<{ kind: 'conversation' | 'thread'; id: string } | null>(null)
   const [issue, setIssue] = useState<string | null>(null)
   const refresh = async () => {
@@ -65,12 +70,23 @@ function StoryConversations() {
   const conversation = data?.conversations.find(item => item.id === selectedId) ?? data?.conversations[0]
   const view = data?.preferences.view ?? 'tree'
   const expandedIds = data?.preferences.expandedIds ?? []
+  const visibleThreads = conversation ? selectNavigationThreads(conversation.threads,
+    archivedView ? 'archived' : 'active') : []
+  const archivedCount = conversation?.threads.filter(thread => !!thread.archivedAt).length ?? 0
   const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds) => {
     setIssue(null)
     try {
       await setThreadPreferences({ data: { storyId, view: nextView, expandedIds: nextExpanded } })
       await refresh()
     } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Unable to save preferences') }
+  }
+  const changeArchive = async (thread: StoryThread, archive: boolean) => {
+    setChangingArchive(thread.id); setIssue(null)
+    try {
+      await changeThreadArchive({ data: { id: thread.id, archived: archive } })
+      await refresh()
+    } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Unable to change Thread archive') }
+    finally { setChangingArchive(null) }
   }
   const rename = async (value: string) => {
     if (!editing) return
@@ -85,13 +101,13 @@ function StoryConversations() {
       const made = await addConversation({ data: storyId })
       await refresh()
       await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
-        search: { conversation: made.id } })
+        search: { conversation: made.id, ...(archivedView ? { archived: true } : {}) } })
     } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Unable to create Conversation') }
     finally { setCreating(false) }
   }
   // Watching the most recently active current job keeps this view responsive
   // between polling cycles. Job pages retain their own SSE subscription.
-  const liveJob = conversation?.threads.find(thread =>
+  const liveJob = visibleThreads.find(thread =>
     (thread.status === 'running' || thread.status === 'queued') && thread.jobId)?.jobId
 
   return <main className="page">
@@ -116,7 +132,7 @@ function StoryConversations() {
         <nav aria-label="Story Conversations" className="grid gap-1">
           {data?.conversations.map(item =>
             <Link key={item.id} to="/stories/$storyId/conversations" params={{ storyId }}
-              search={{ conversation: item.id }}
+              search={{ conversation: item.id, ...(archivedView ? { archived: true } : {}) }}
               aria-current={item.id === conversation?.id ? 'page' : undefined}
               className={'block min-w-0 rounded-md px-3 py-2 text-sm no-underline hover:bg-muted/70 ' +
                 (item.id === conversation?.id ? 'bg-muted text-foreground font-medium' : 'text-muted-foreground')}>
@@ -149,15 +165,41 @@ function StoryConversations() {
                 <List className="size-4" /> Flat</Button>
             </div>
           </div>
+          <nav className="mb-3 flex flex-wrap items-center gap-2 text-sm" aria-label="Thread visibility">
+            <Link to="/stories/$storyId/conversations" params={{ storyId }}
+              search={{ conversation: conversation.id }}
+              aria-current={!archivedView ? 'page' : undefined}
+              className={'rounded-md px-3 py-1.5 no-underline hover:bg-muted ' +
+                (!archivedView ? 'bg-secondary text-foreground font-medium' : 'text-muted-foreground')}>
+              Active ({conversation.threads.length - archivedCount})
+            </Link>
+            <Link to="/stories/$storyId/conversations" params={{ storyId }}
+              search={{ conversation: conversation.id, archived: true }}
+              aria-current={archivedView ? 'page' : undefined}
+              className={'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 no-underline hover:bg-muted ' +
+                (archivedView ? 'bg-secondary text-foreground font-medium' : 'text-muted-foreground')}>
+              <Archive className="size-3.5" /> Archived ({archivedCount})
+            </Link>
+          </nav>
+          {archivedView && <p className="mb-3 text-xs text-muted-foreground">
+            Archived Threads retain their job history and verified checkpoints. Archiving never pauses execution.
+            Active ancestors are displayed for context.
+          </p>}
           {editing?.kind === 'thread' ? <TitleEditor key={editing.id}
             title={conversation.threads.find(thread => thread.id === editing.id)?.title ?? ''}
             label="Thread title" onSubmit={rename} onCancel={() => setEditing(null)} /> : null}
-          {conversation.threads.length ?
-            <ThreadList threads={conversation.threads} view={view} expandedIds={expandedIds}
+          {visibleThreads.length ?
+            <ThreadList threads={visibleThreads} view={view} expandedIds={expandedIds}
+              archivedView={archivedView} busyThreadId={changingArchive}
+              onArchiveChange={(thread, archive) => void changeArchive(thread, archive)}
               onExpand={id => void savePreferences(view,
                 expandedIds.includes(id) ? expandedIds.filter(item => item !== id) : [...expandedIds, id])}
               onRename={(thread: StoryThread) => setEditing({ kind: 'thread', id: thread.id })} />
-            : <p className="text-sm text-muted-foreground">No Threads yet. The first generation run will create a root Thread in this Story.</p>}
+            : <p className="text-sm text-muted-foreground">{archivedView
+              ? 'No archived Threads in this Conversation.'
+              : conversation.threads.length
+                ? 'No active Threads. Open Archived to inspect or restore a Thread.'
+                : 'No Threads yet. The first generation run will create a root Thread in this Story.'}</p>}
         </> : <p className="text-sm text-muted-foreground">
           {data ? 'Create a Conversation to get started.' : 'Loading Conversations…'}
         </p>}

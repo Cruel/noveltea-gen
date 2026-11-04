@@ -169,6 +169,36 @@ export function renameThread(store: StudioDatabase, owner: string, threadId: str
     WHERE id=? AND owner_user_id=?`).run(valid, threadId, owner).changes !== 1)
     throw new Error('Thread not found.')
 }
+/** Archive is metadata only. Never stop a writer, mutate run status, touch
+ * persisted receipts or remove a worktree: an archived Thread stays inspectable
+ * and branchable via the same durable lineage and verified checkpoints.
+ * Checking membership before mutation also distinguishes idempotent retries
+ * from foreign or nonexistent Thread IDs without leaking tenant data. */
+function setThreadArchive(store: StudioDatabase, owner: string, id: string, archived: boolean): void {
+  store.sqlite.transaction(() => {
+    const row = store.sqlite.prepare(`SELECT 1 FROM story_threads
+      WHERE id=? AND owner_user_id=?`).get(id, owner)
+    if (!row) throw new Error('Thread not found.')
+    if (archived) {
+      store.sqlite.prepare(`UPDATE story_threads SET archived_at=?
+        WHERE id=? AND owner_user_id=? AND archived_at IS NULL`)
+        .run(new Date().toISOString(), id, owner)
+    } else {
+      store.sqlite.prepare(`UPDATE story_threads SET archived_at=NULL
+        WHERE id=? AND owner_user_id=? AND archived_at IS NOT NULL`)
+        .run(id, owner)
+    }
+  })()
+}
+
+export function archiveThread(store: StudioDatabase, owner: string, id: string): void {
+  setThreadArchive(store, owner, id, true)
+}
+
+export function restoreThread(store: StudioDatabase, owner: string, id: string): void {
+  setThreadArchive(store, owner, id, false)
+}
+
 export function saveThreadPreferences(store: StudioDatabase, owner: string, storyId: string,
   view: 'tree' | 'flat', expandedIds: string[]) {
   selectedStory(store, owner, storyId)
