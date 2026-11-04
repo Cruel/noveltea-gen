@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { createHmac, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash, createHmac, randomUUID } from 'node:crypto'
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -119,6 +119,42 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         assert.equal((await fork({ ...input, childId: randomUUID() })).status, 409)
         assert.equal(forkCount(), 0)
       } finally { writeFileSync(checkpointPath, authentic) }
+      try {
+        const obsolete = JSON.parse(authentic)
+        obsolete.compatibility.graphSchema = 'noveltea-generation/v0'
+        writeFileSync(checkpointPath, JSON.stringify(obsolete))
+        const inspected = (await inspectRecoveryCheckpoints(parent)).find(p => p.commitSha === world.commitSha)
+        assert.ok(inspected, 'unsupported layouts remain inspectable')
+        assert.equal(inspected.eligible, false)
+        assert.equal((await fork({ ...input, childId: randomUUID() })).status, 409)
+      } finally { writeFileSync(checkpointPath, authentic) }
+      const worldReceiptPath = join(parent.stateDir, 'character-world.json')
+      const originalWorldReceipt = readFileSync(worldReceiptPath, 'utf8')
+      try {
+        const obsolete = JSON.parse(originalWorldReceipt)
+        obsolete.version = 0
+        writeFileSync(worldReceiptPath, JSON.stringify(obsolete))
+        const failed = await fork({ ...input, childId: randomUUID() })
+        assert.equal(failed.status, 409)
+        assert.equal(failed.body.code, 'obsolete-checkpoint')
+        assert.equal(forkCount(), 0)
+      } finally { writeFileSync(worldReceiptPath, originalWorldReceipt) }
+      const originalValidator = join(parent.stateDir, 'validator.json')
+      renameSync(originalValidator, originalValidator + '.missing')
+      try {
+        const failure = await fork({ ...input, childId: randomUUID() })
+        assert.equal(failure.status, 409)
+        assert.equal(failure.body.code, 'missing-tooling')
+        assert.ok(failure.body.nextSteps.some((s: string) => s.includes('Install')))
+        assert.equal(forkCount(), 0)
+      } finally { renameSync(originalValidator + '.missing', originalValidator) }
+      process.env.NT_STUDIO_SKILLS_SOURCE = join(root, 'missing-skills')
+      try {
+        const failure = await fork({ ...input, childId: randomUUID() })
+        assert.equal(failure.status, 409)
+        assert.equal(failure.body.code, 'missing-tooling')
+        assert.equal(forkCount(), 0)
+      } finally { process.env.NT_STUDIO_SKILLS_SOURCE = skills }
       process.env.NT_NATIVE_CLI = join(root, 'missing-native-validator')
       try {
         assert.equal((await fork({ ...input, childId: randomUUID() })).status, 409)
@@ -132,10 +168,32 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       }), parentId, config.baseURL)
       assert.equal(foreign.status, 404)
       assert.equal(forkCount(), 0)
+      // A newly installed, byte-different but protocol-compatible executable
+      // must be re-pinned for the child. The source's original pin stays intact.
+      const upgraded = join(root, 'compatible-current-noveltea')
+      copyFileSync(native, upgraded); appendFileSync(upgraded, Buffer.from([0]))
+      chmodSync(upgraded, 0o755)
+      const sourceValidator = JSON.parse(readFileSync(originalValidator, 'utf8'))
+      const currentSha = createHash('sha256').update(readFileSync(upgraded)).digest('hex')
+      assert.notEqual(currentSha, sourceValidator.sha256)
+      process.env.NT_NATIVE_CLI = upgraded
+      // Old authored skill files are source evidence, not the child's runtime.
+      // A current skill snapshot is freshly verified even if its historical
+      // cached directory was removed after the source checkpoint finalized.
+      const historicalSkillId = JSON.parse(originalWorldReceipt).snapshot.id as string
+      const historicalSkillCache = join(process.env.NT_SKILL_CACHE_DIR!, historicalSkillId)
+      assert.equal(existsSync(historicalSkillCache), true)
+      renameSync(historicalSkillCache, historicalSkillCache + '.historical-unavailable')
+      assert.equal(existsSync(historicalSkillCache), false)
       const made = await fork(input)
+      assert.equal(existsSync(historicalSkillCache), true, 'current skills re-pin independently')
       assert.equal(made.status, 200, JSON.stringify(made.body))
       const child = await authorizedStoryJob(store, user.id, childId)
       assert.equal(child.headSha, world.commitSha)
+      assert.equal(child.validatorSha256, currentSha)
+      assert.equal(JSON.parse(readFileSync(join(child.stateDir, 'validator.json'), 'utf8')).executable, upgraded)
+      assert.equal(readFileSync(originalValidator, 'utf8').includes(sourceValidator.sha256), true)
+      assert.equal(readRecoveryFork(child)?.toolchain.validator.sha256, currentSha)
       assert.notEqual(child.threadId, parent.threadId); assert.notEqual(child.branch, parent.branch)
       assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
       assert.equal(existsSync(join(child.worktreeStoryRoot, 'characters', 'ada.md')), false,
@@ -180,6 +238,15 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       }), childId, config.baseURL)
       assert.equal(invalid.status, 409)
       const updated = { ...saved, task: 'Pursue the witness with a different tone', limits: { steps: 28 }, model: null }
+      const childValidatorFile = join(child.stateDir, 'validator.json')
+      const childValidatorBytes = readFileSync(childValidatorFile, 'utf8')
+      try {
+        writeFileSync(childValidatorFile, JSON.stringify({ ...JSON.parse(childValidatorBytes), sha256: '0'.repeat(64) }))
+        const refused = await generationJobRequest(auth, store, browser('POST', {
+          task: saved.task, contract: saved.contract,
+        }), childId, config.baseURL)
+        assert.equal(refused.status, 409, 'changed child tool identity blocks queue admission')
+      } finally { writeFileSync(childValidatorFile, childValidatorBytes) }
       const update = await generationConfigurationRequest(auth, store, browser('PUT', updated), childId, config.baseURL)
       assert.equal(update.status, 200, JSON.stringify(await update.clone().json()))
       const started = await generationJobRequest(auth, store, browser('POST', {
@@ -239,7 +306,10 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(character.parentSha, world.commitSha)
       assert.equal(character.commitSha, advancedChild.headSha)
       assert.ok(character.completedWorkItems.includes('character-foundations'))
-      assert.equal(character.validation.validatorSha256, world.validation.validatorSha256)
+      assert.equal(character.validation.validatorSha256, child.validatorSha256,
+        'a resumed child specialist must use the child’s independently pinned current validator')
+      assert.notEqual(character.validation.validatorSha256, world.validation.validatorSha256,
+        'historical parent validator identity is preserved, not copied into child execution')
       assert.match(git(child.worktreeRoot, 'log', '-1', '--format=%B'), new RegExp('NovelTea-Job: ' + childId))
       const validated = await validateStoryJob(advancedChild)
       assert.equal(validated.status, 'passed', JSON.stringify(validated.report?.diagnostics))

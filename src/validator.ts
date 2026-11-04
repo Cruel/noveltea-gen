@@ -363,15 +363,27 @@ async function verifyNativePin(pin: NativeValidatorPin): Promise<void> {
     throw new Error("Pinned native NovelTea validator is missing or changed; restore the exact executable, never silently switch validators.");
   }
 }
-/** Read-only compatibility gate for checkpoint forks, including the selected
- * current toolchain. Never validate or repin an actively edited parent tree. */
-export async function verifyForkValidator(job: JobStartResult): Promise<void> {
-  const pin = JSON.parse(await readFile(pinPath(job), "utf8")) as NativeValidatorPin;
-  await verifyNativePin(pin);
-  if (pin.sha256 !== job.validatorSha256 || sha(await readFile(nativeExecutable())) !== pin.sha256)
-    throw new Error("Checkpoint validator is incompatible with the current native executable.");
+/** Verify the historical pin as evidence, then select the installed native
+ * executable for a NEW child. The historical executable may no longer exist;
+ * its SHA remains bound to the original checkpoint and job manifest. */
+export async function verifyForkValidator(job: JobStartResult, checkpointSha256: string): Promise<NativeValidatorPin> {
+  const file = pinPath(job);
+  const info = await lstat(file);
+  if (!info.isFile() || info.isSymbolicLink())
+    throw new Error("Checkpoint validator receipt is not a regular file.");
+  const original = JSON.parse(await readFile(file, "utf8")) as NativeValidatorPin;
+  if (original.contract !== CONTRACT || original.implementation !== "native-cli" ||
+      !/^[a-f0-9]{64}$/.test(original.sha256) ||
+      !isAbsolute(original.executable) ||
+      original.sha256 !== job.validatorSha256 || original.sha256 !== checkpointSha256)
+    throw new Error("Historical checkpoint validator identity is missing or incompatible.");
   if (process.env.NT_VALIDATOR_TEST_LEGACY === "1")
     throw new Error("Checkpoint forks require native validation, not the legacy test adapter.");
+  const executable = await realpath(nativeExecutable());
+  const selected: NativeValidatorPin = { contract: CONTRACT, implementation: "native-cli",
+    executable, sha256: sha(await readFile(executable)) };
+  await verifyNativePin(selected);
+  return selected;
 }
 async function nativePin(job: JobStartResult): Promise<NativeValidatorPin> {
   const jobRoot = job.stateDir;

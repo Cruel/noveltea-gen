@@ -382,7 +382,7 @@ function ForkCheckpoint({ job, commitSha }: { job: JobOverview; commitSha: strin
       {busy ? 'Preparing fork…' : 'Fork checkpoint'}
     </Button>
     <p className="mt-1">Creates a separate prepared job. The source may keep running.</p>
-    {error && <p role="alert" className="text-destructive">{error}</p>}
+    {error && <p role="alert" className="whitespace-pre-line text-destructive">{error}</p>}
   </div>
 }
 

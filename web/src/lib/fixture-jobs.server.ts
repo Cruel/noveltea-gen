@@ -11,7 +11,7 @@ import { parseGenerationContract, type GenerationRequest } from '../../../src/ge
 import { assertServerClaimPermitted } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
 import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
-import { forkSourceSummary } from '../../../src/recovery-fork-state'
+import { forkSourceSummary, verifyReadyRecoveryFork } from '../../../src/recovery-fork-state'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { PiPolicy } from '../../../src/job-pi-policy'
@@ -356,6 +356,8 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
     if (row.status !== 'paused') throw new JobError(409, 'Only a prepared job can start generation.')
+    try { await verifyReadyRecoveryFork(job) }
+    catch { throw new JobError(409, 'The prepared Thread has incompatible pinned tools or continuation evidence. Restore its pins or fork again from the original checkpoint.') }
     await verifyTrustedRevision(job)
     if (await readJobControl(job) !== 'running') throw new JobError(409, 'Job is paused or cancelled.')
     let selected: PiSelection | null = null

@@ -6,6 +6,7 @@ import { selectedJob, restoreJob, pinnedRequest } from './fixture-jobs.server'
 import { readJsonInput, JsonInputError } from './json-input.server'
 import { forkCachedStory, GitCacheError } from './git-cache.server'
 import { collectRecoveryFork } from '../../../src/recovery-fork'
+import { RecoveryCompatibilityError } from '../../../src/recovery-compatibility'
 import { forkSourceSummary, type RecoveryForkBundle } from '../../../src/recovery-fork-state'
 import type { GenerationDraft } from './generation-config.server'
 import { ensureRootThreads } from './threads.server'
@@ -54,7 +55,8 @@ export async function checkpointForkRequest(auth: StudioAuth, store: StudioDatab
     if (!intent) {
       const original = pinnedRequest(row, parent)
       if (!original) throw new GitCacheError(409, 'Source has no pinned generation request.')
-      const bundle = await collectRecoveryFork(parent, input.childId, input.commitSha, original.contract)
+      const bundle = await collectRecoveryFork(parent, input.childId, input.commitSha,
+        original.contract, original.skillsSource)
       const prior = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
       const draft: GenerationDraft = { version: 1, headSha: input.commitSha, task: original.task,
         contract: bundle.contract, model: prior?.model ?? null, limits: prior?.limits ?? {} }
@@ -95,6 +97,8 @@ export async function checkpointForkRequest(auth: StudioAuth, store: StudioDatab
     return reply({ id: child.jobId, storyId: row.storyId, forkSource: forkSourceSummary(child) })
   } catch (error) {
     console.error('[Studio checkpoint fork]', error instanceof Error ? error.message : 'Unknown preparation failure')
+    if (error instanceof RecoveryCompatibilityError)
+      return reply({ error: error.message, code: error.code, nextSteps: error.nextSteps }, 409)
     const status = error instanceof JsonInputError ? error.statusCode :
       error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : 409
     // Internal receipt/path details never cross the authenticated browser boundary.

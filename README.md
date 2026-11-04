@@ -233,6 +233,22 @@ Character is committed only under the child's own job identity after pinned
 native validation. A rejected duplicate ID or dangling reference leaves the
 child dirty/blocked for explicit reconciliation, never silently completed.
 
+**Historical fork compatibility (#77):** Before allocating a new Thread, Studio
+verifies the checkpoint's supported recovery/graph schemas, approved contract,
+committed specialist receipts, nontransferable author-approval provenance and
+original validator/skill identities. A child then independently pins the
+**current** native CLI, skills snapshot and runtime/continuation schema, and
+validates the selected committed Story against that CLI's canonical contract,
+readiness and protected-decision rules. Historical tool binaries and skill
+snapshot directories need not still be installed when their original identities
+remain authenticated by the finalized source receipts and controller-owned pins.
+The selected Story must pass current validation; no automated schema migration
+or replay of obsolete receipts or prior approvals is permitted. Ready children
+recheck their own immutable toolchain before generation admission; changed
+pins block with recovery guidance. An incompatible checkpoint remains
+inspectable without mutating the source. Restore missing pins/skills, manually
+migrate canonical Story content, or start a fresh Thread before continuing.
+
 To exercise cross-process resume, use `--pause-after foundation` (or
 `architecture`, `foundations`, `event`, `interactive`, `composition`, `review`) on
 start or resume. Every continuation re-enters the safe-boundary intake and uses

@@ -35,8 +35,14 @@ export type JobControls = {
 export type JobControlAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget'
 
 async function result<T>(response: Response) {
-  const body = await response.json() as T & { error?: string }
-  if (!response.ok) throw new Error(body.error || 'Job request failed.')
+  const body = await response.json() as T
+  if (!response.ok) {
+    const failure = body as { error?: string; nextSteps?: unknown }
+    const nextSteps = Array.isArray(failure.nextSteps)
+      ? failure.nextSteps.filter((step): step is string => typeof step === 'string').slice(0, 3)
+      : []
+    throw new Error([failure.error || 'Job request failed.', ...nextSteps].join('\n'))
+  }
   return body
 }
 function request(jobId: string, suffix: string, payload?: object) {

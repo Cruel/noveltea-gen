@@ -5,12 +5,15 @@ import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import type { GenerationEvidence } from "./generation-plan.js";
 import type { CompletionContract } from "./architecture.js";
+import { openSkillSnapshot } from "./snapshot.js";
+import { RecoveryCompatibilityError, type RecoveryToolchain } from "./recovery-compatibility.js";
 
 // Heterogeneous specialist receipts are retained as evidence, not executable
 // sessions or approval grants. Their existing stage adapters remain authoritative.
 export type SpecialistReceipt = Record<string, any>;
 export interface RecoveryForkBundle {
-  version: 1;
+  version: 2;
+  toolchain: RecoveryToolchain;
   sourceJobId: string;
   sourceBaseSha: string;
   storyRoot: string;
@@ -31,7 +34,13 @@ export function readRecoveryFork(job: JobStartResult, requireReady = true): Reco
   if (!job.recoveryFork) return null;
   const bundle = JSON.parse(regular(join(job.stateDir, "recovery-fork.json"))) as RecoveryForkBundle;
   const pin = job.recoveryFork;
-  if (bundle.version !== 1 || bundle.childId !== job.jobId || bundle.storyRoot !== job.storyRoot ||
+  if (bundle.version !== 2 || bundle.toolchain?.graphSchema !== "noveltea-generation/v1" ||
+      bundle.toolchain?.runtime?.continuationSchema !== "noveltea-fork/v2" ||
+      typeof bundle.toolchain?.runtime?.nodeVersion !== "string" ||
+      bundle.toolchain?.validator?.implementation !== "native-cli" ||
+      !/^[a-f0-9]{64}$/.test(bundle.toolchain?.validator?.sha256 ?? "") ||
+      !/^[a-f0-9]{64}$/.test(bundle.toolchain?.skills?.id ?? "") ||
+      bundle.childId !== job.jobId || bundle.storyRoot !== job.storyRoot ||
       bundle.sourceJobId !== pin.sourceJobId || bundle.sourceBaseSha !== pin.sourceBaseSha ||
       bundle.checkpoint.commitSha !== job.baseSha || pin.commitSha !== job.baseSha ||
       forkDigest(bundle) !== pin.bundleSha256 ||
@@ -39,6 +48,29 @@ export function readRecoveryFork(job: JobStartResult, requireReady = true): Reco
     throw new Error("Fork continuation is incomplete or differs from its immutable job pin.");
   }
   return bundle;
+}
+
+/** A prepared fork cannot start under altered pins, obsolete graph state or
+ * a disappearing skill snapshot. No source parent resources are modified. */
+export async function verifyReadyRecoveryFork(job: JobStartResult): Promise<void> {
+  if (!job.recoveryFork) return;
+  let bundle: RecoveryForkBundle;
+  try {
+    bundle = readRecoveryFork(job)!;
+    const file = join(job.stateDir, "validator.json");
+    const pin = JSON.parse(regular(file)) as RecoveryToolchain["validator"];
+    if (bundle.toolchain.runtime.nodeVersion !== process.version ||
+        job.validatorSha256 !== bundle.toolchain.validator.sha256 ||
+        pin.sha256 !== bundle.toolchain.validator.sha256 ||
+        pin.executable !== bundle.toolchain.validator.executable ||
+        pin.contract !== bundle.toolchain.validator.contract ||
+        createHash("sha256").update(readFileSync(pin.executable)).digest("hex") !== pin.sha256 ||
+        await openSkillSnapshot(bundle.toolchain.skills.id) !== bundle.toolchain.skills.path)
+      throw new Error("pinned tool identities changed");
+  } catch {
+    throw new RecoveryCompatibilityError("changed-tooling",
+      "The prepared Thread's validator, skills, or continuation bundle are missing or changed.");
+  }
 }
 /** Only original inherited commits can use their source identity. New commits
  * must always use this job's own trailers and its own author permissions. */

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readRecoveryFork } from "./recovery-fork-state.js";
+import { readRecoveryFork, verifyReadyRecoveryFork } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -324,6 +324,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         const contract = parseGenerationContract(input.data.contract);
         const request = { ...input.data, fixture: input.data.fixture ?? false, contract };
         const job = await openJob({ ...s, request } as State);
+        await verifyReadyRecoveryFork(job);
         const fork = readRecoveryFork(job);
         if (fork && JSON.stringify(request.contract) !== JSON.stringify(fork.contract))
           throw new Error("Fork continuation must retain its approved completion contract; use an explicit plan revision after starting.");

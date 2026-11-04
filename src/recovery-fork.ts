@@ -5,9 +5,10 @@ import { dirname, join } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { inspectRecoveryCheckpoints, type RecoveryCheckpoint } from "./recovery-checkpoints.js";
-import { openSkillSnapshot } from "./snapshot.js";
-import { validateStoryJob, verifyForkValidator } from "./validator.js";
+import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
+import { assertRecoveryCompatibility, assertRecoveryReceiptCompatibility,
+  selectCurrentRecoveryToolchain, RecoveryCompatibilityError } from "./recovery-compatibility.js";
 import type { Plan, CompletionContract } from "./architecture.js";
 import type { GenerationEvidence } from "./generation-plan.js";
 import { forkDigest, readRecoveryFork, type RecoveryForkBundle, type SpecialistReceipt } from "./recovery-fork-state.js";
@@ -42,13 +43,14 @@ const receiptStage = (path: string) => path === "character-world.json" ? "founda
 /** Read-only preflight. Call before acquiring/allocating any child resources.
  * Mutable parent SQLite, unfinished receipts, sessions and grants are excluded. */
 export async function collectRecoveryFork(parent: JobStartResult, childId: string,
-  commitSha: string, contract: CompletionContract): Promise<RecoveryForkBundle> {
+  commitSha: string, contract: CompletionContract, skillsSource?: string): Promise<RecoveryForkBundle> {
   if (!/^[a-f0-9]{40}$/.test(commitSha) || childId === parent.jobId)
     throw new Error("Select a finalized checkpoint and a different child job identity.");
   const points = await inspectRecoveryCheckpoints(parent);
   const selected = points.find(p => p.commitSha === commitSha && p.eligible);
-  if (!selected) throw new Error("Checkpoint is not finalized and independently verified.");
-  await verifyForkValidator(parent);
+  if (!selected) throw new RecoveryCompatibilityError("invalid-evidence",
+    "Checkpoint is not finalized and independently verified.");
+  assertRecoveryCompatibility(selected);
   const { eligible: _eligible, reason: _reason, ...checkpoint } = selected;
   const inherited = readRecoveryFork(parent);
   const plan = checkpoint.plan as Plan | null;
@@ -64,17 +66,28 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
       // A focused/adopted architecture baseline has no generated commit.
       if (["foundation", "global-architecture"].includes(id) && plan?.items.some(i =>
         i.id === "global-architecture" && i.status === "verified" && i.verifiedSha === parent.baseSha)) continue;
-      throw new Error("Completed work lacks finalized evidence: " + id);
+      throw new RecoveryCompatibilityError("invalid-evidence",
+        "A completed work item has no independently finalized historical proof.");
     }
     const source = point?.source ?? Object.keys(inherited!.receipts).find(path => {
       const receipt = inherited!.receipts[path]!;
       return receipt.units?.some((unit: SpecialistReceipt) => unit.id === id) || receipt.workItemId === id ||
         path === "foundation.json" && id === "foundation" || path === "architecture.json" && id === "global-architecture";
     });
-    if (!source) throw new Error("Inherited work has no exact specialist receipt.");
-    const receipt = JSON.parse(await readFile(join(parent.stateDir, source), "utf8")) as SpecialistReceipt;
-    if (receipt.jobId !== parent.jobId) throw new Error("Specialist evidence belongs to another job.");
-    if (receipt.snapshot?.id) await openSkillSnapshot(receipt.snapshot.id);
+    if (!source) throw new RecoveryCompatibilityError("invalid-evidence",
+      "Inherited work has no matching historical specialist receipt.");
+    let receipt: SpecialistReceipt;
+    try { receipt = JSON.parse(await readFile(join(parent.stateDir, source), "utf8")) as SpecialistReceipt; }
+    catch { throw new RecoveryCompatibilityError("invalid-evidence",
+      "The historical specialist receipt is missing or cannot be read."); }
+    if (receipt.jobId !== parent.jobId) throw new RecoveryCompatibilityError("invalid-evidence",
+      "The historical specialist receipt belongs to a different job.");
+    // The finalized source checkpoint binds the old skill digest to the
+    // authenticated receipt. Reopening the historical skill *files* is not
+    // necessary: only the child must have a verified current snapshot.
+    if (point && receipt.snapshot?.id !== point.snapshotId)
+      throw new RecoveryCompatibilityError("invalid-evidence",
+        "Historical specialist skill identity differs from the finalized checkpoint.");
     receipts[source] = cleanEvidence(receipt);
     commits[id] = prior && !point ? prior : { sha: point!.commitSha,
       jobId: parent.jobId, planVersion: point!.planVersion };
@@ -88,10 +101,12 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
       const key = receiptStage(path);
       if (key && !hasPlanContinuity(parent, historical as any, key, receipt.planVersion,
         receipt.contractDigest ?? receipt.planDigest, !!receipt.contractDigest))
-        throw new Error("Checkpoint contains work not carried by its approved plan: " + key);
+        throw new RecoveryCompatibilityError("obsolete-checkpoint",
+          "Historical work is not authorized by the approved continuation plan.");
     }
     const architecture = plan.items.find(i => i.id === "global-architecture");
-    if (!architecture?.verifiedSha) throw new Error("Fork plan lacks verified architecture.");
+    if (!architecture?.verifiedSha) throw new RecoveryCompatibilityError("invalid-evidence",
+      "The historical plan lacks verified architecture evidence.");
     receipts["architecture.json"] = { ...cleanEvidence(original), plan, history: [], phase: "committed",
       expectedHead: architecture.verifiedSha, executionHead: commitSha };
     delete receipts["architecture.json"]!.manuallyReconciled;
@@ -100,13 +115,16 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
     if (receipt.units) receipt.units = receipt.units.map((unit: SpecialistReceipt) =>
       completed.has(unit.id) ? unit : { id: unit.id, domain: unit.domain, phase: "pending" });
   }
+  for (const [source, receipt] of Object.entries(receipts))
+    assertRecoveryReceiptCompatibility(source, receipt, completed);
   const completedStages: GenerationEvidence[] = [];
   for (const id of completed) {
     const item = stage(id);
     if (item) completedStages.push({ ...item, headSha: commits[id]?.sha ?? parent.baseSha,
       status: "committed", planVersion: plan?.version });
   }
-  return { version: 1, sourceJobId: parent.jobId, sourceBaseSha: parent.baseSha,
+  const toolchain = await selectCurrentRecoveryToolchain(parent, checkpoint, skillsSource);
+  return { version: 2, toolchain, sourceJobId: parent.jobId, sourceBaseSha: parent.baseSha,
     storyRoot: parent.storyRoot, childId, checkpoint: checkpoint as RecoveryCheckpoint,
     contract: plan?.contract ?? contract, receipts, commits, completedStages };
 }
@@ -132,16 +150,30 @@ export async function prepareRecoveryFork(parent: JobStartResult, bundle: Recove
       throw new Error("Incomplete fork worktree changed; preserve it for reconciliation.");
     await writeOnce(join(child.stateDir, "recovery-fork.json"), JSON.stringify(bundle, null, 2) + "\n");
     for (const [path, original] of Object.entries(bundle.receipts)) {
+      // The sealed source bundle retains historical proofs. A child uses its
+      // freshly pinned skills for future work; old writer sessions are not reused.
       const receipt = { ...original, jobId: child.jobId, baseSha: child.baseSha,
-        branch: child.branch, worktreeRoot: child.worktreeRoot, threadId: child.threadId };
+        branch: child.branch, worktreeRoot: child.worktreeRoot, threadId: child.threadId,
+        ...(original.snapshot ? { snapshot: bundle.toolchain.skills } : {}) };
       await writeOnce(join(child.stateDir, path), JSON.stringify(receipt, null, 2) + "\n");
     }
     await writeOnce(join(child.stateDir, "revisions/verified-head.json"), JSON.stringify({
       version: 1, jobId: child.jobId, headSha: child.baseSha, workItemId: "inherited-checkpoint",
     }, null, 2) + "\n");
     const validation = await validateStoryJob(child);
-    if (validation.status !== "passed" || validation.validator.sha256 !== bundle.checkpoint.validation.validatorSha256)
-      throw new Error("Fork baseline failed the selected native validator; child remains unprepared.");
+    const report = validation.report as { protection?: { status?: string; changes?: unknown[]; warnings?: unknown[] };
+      contractRevision?: unknown; readiness?: { contractRevision?: unknown } } | undefined;
+    if (validation.validator.sha256 !== bundle.toolchain.validator.sha256 ||
+        validation.validator.implementation !== "native-cli" ||
+        validation.validator.executable !== bundle.toolchain.validator.executable)
+      throw new RecoveryCompatibilityError("changed-tooling",
+        "The installed native CLI changed during fork preparation.");
+    if (validation.status !== "passed" || !report || !report.contractRevision ||
+        report.readiness?.contractRevision !== report.contractRevision ||
+        report.protection?.status !== "checked" ||
+        report.protection.changes?.length || report.protection.warnings?.length)
+      throw new RecoveryCompatibilityError("incompatible-story",
+        "The selected historical Story is not compatible with current native validation and protection.");
     await writeOnce(join(child.stateDir, "recovery-fork-ready"), pin.bundleSha256 + "\n");
     return startStoryJob({ story: child.storyRoot, job: child.jobId }, false);
   });
