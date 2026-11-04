@@ -1,10 +1,15 @@
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Badge } from '@/components/ui/badge'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { AlertTriangle, ArrowLeft, CheckCircle2, Circle, Clock3, RefreshCw, Settings2 } from 'lucide-react'
 import { jobQuery, jobControlsQuery } from '../../../lib/jobs.queries'
-import { updateJobControl } from '../../../lib/jobs.functions'
+import { updateJobControl, type JobOverview, type JobControls, type BudgetLimits } from '../../../lib/jobs.functions'
 import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity } from './-GenerationActivity'
@@ -12,27 +17,298 @@ import { AuthorInteractions } from './-AuthorInteractions'
 import { GitChanges } from './-GitChanges'
 import { PublishDraft } from './-PublishDraft'
 
-type Job = {
-  id: string; storyId: string; title: string; provider: string; baseSha: string; headSha: string
-  status: string; threadId: string | null; fixture: boolean; task: string | null
-  contract: unknown; reason: string | null; completedStages: Array<{ stage: string; status: string }>
-  revisionVerified?: boolean
-  recovery?: {
-    kind: 'manual-specialist' | 'operator-reconciliation'
-    stage: string; workItem: string | null; files: string[]
-    candidateDigest: string | null; guidance: string
-  } | null
-}
 export const Route = createFileRoute('/_protected/jobs/$jobId')({
   loader: ({ context, params }) => context.queryClient.ensureQueryData(jobQuery(params.jobId)),
   component: JobDetails,
 })
+
+type JobTab = 'overview' | 'activity' | 'review' | 'story' | 'details'
+const activeStatuses = new Set(['queued', 'running'])
+const stopStatuses = new Set(['queued', 'running', 'paused', 'prepared', 'blocked'])
+
+function statusLabel(status: string) {
+  return status.replaceAll('-', ' ').replace(/\b\w/g, character => character.toUpperCase())
+}
+
+function readableReason(reason: string) {
+  const marker = reason.indexOf(': [')
+  if (marker < 0) return reason
+  try {
+    const details = JSON.parse(reason.slice(marker + 2)) as unknown
+    if (Array.isArray(details) && details.every(item => typeof item === 'string')) {
+      return reason.slice(0, marker + 1) + '\n' + details.join('\n')
+    }
+  } catch { /* Preserve unrecognized diagnostic text without rewriting it. */ }
+  return reason
+}
+
+function statusTone(status: string) {
+  if (status === 'blocked' || status === 'interrupted' || status === 'failed') return 'text-amber-300 border-amber-500/30 bg-amber-500/10'
+  if (status === 'completed') return 'text-emerald-300 border-emerald-500/30 bg-emerald-500/10'
+  if (activeStatuses.has(status)) return 'text-sky-300 border-sky-500/30 bg-sky-500/10'
+  return 'text-muted-foreground'
+}
+
 function JobDetails() {
   const { jobId } = Route.useParams()
   return <JobDetailsForId key={jobId} jobId={jobId} />
 }
 
-type BudgetLimits = { steps?: number; modelCalls?: number; costUsd?: number }
+function JobDetailsForId({ jobId }: { jobId: string }) {
+  const queryClient = useQueryClient()
+  const { data: job, error: jobError, isFetching } = useQuery({
+    ...jobQuery(jobId),
+    refetchInterval: query => activeStatuses.has(query.state.data?.status ?? '') ? 8000 : false,
+  })
+  const { data: controls, error: controlsError } = useQuery(jobControlsQuery(jobId))
+  const [tab, setTab] = useState<JobTab>('overview')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['job', jobId] }),
+      queryClient.invalidateQueries({ queryKey: ['job-controls', jobId] }),
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    ])
+  }
+  const act = async (action: 'pause' | 'resume' | 'cancel' | 'retry') => {
+    setError(null)
+    setBusy(true)
+    try {
+      await updateJobControl({ data: { jobId, action } })
+      await refresh()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Control transition unavailable') }
+    finally { setBusy(false) }
+  }
+
+  return <main className="page job-page">
+    <div className="mb-4 flex items-center justify-between gap-3">
+      <a className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground" href="/dashboard">
+        <ArrowLeft className="size-4" /> Back to dashboard
+      </a>
+      <a className="text-sm text-muted-foreground hover:text-foreground" href="/settings">Settings</a>
+    </div>
+    {(error || jobError) && <Alert variant="destructive" className="mb-4">
+      <AlertTitle>Job request failed</AlertTitle>
+      <AlertDescription>{error || jobError?.message}</AlertDescription>
+    </Alert>}
+    {!job && <Card><CardContent className="py-8 text-sm text-muted-foreground">
+      {jobError ? 'Unable to load this job.' : 'Loading job…'}
+    </CardContent></Card>}
+    {job && <>
+      <div className="job-page-header">
+        <div className="min-w-0">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className={statusTone(job.status)}>{statusLabel(job.status)}</Badge>
+            <span className="text-xs text-muted-foreground">{job.fixture ? 'Fixture' : 'Pi generation'}</span>
+            <span className="text-xs text-muted-foreground">· {job.provider === 'gitlab' ? 'GitLab' : job.provider === 'github' ? 'GitHub' : job.provider}</span>
+          </div>
+          <h1 className="m-0 text-xl font-semibold tracking-tight md:text-2xl">{job.title}</h1>
+          <p className="m-0 mt-1 text-xs text-muted-foreground">Generation job <code>{jobId.slice(0, 8)}</code></p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {job.status === 'paused' && job.threadId &&
+            <Button size="sm" disabled={busy} onClick={() => void act('resume')}>Resume</Button>}
+          {activeStatuses.has(job.status) &&
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void act('pause')}>Pause</Button>}
+          {job.status === 'interrupted' &&
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void act('retry')}>Retry after inspection</Button>}
+          {stopStatuses.has(job.status) &&
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void act('cancel')}>Cancel</Button>}
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => {
+            setBusy(true)
+            void refresh().catch(e => setError(e instanceof Error ? e.message : 'Refresh failed'))
+              .finally(() => setBusy(false))
+          }}><RefreshCw className={isFetching ? 'size-4 animate-spin' : 'size-4'} /> Refresh</Button>
+        </div>
+      </div>
+
+      <Tabs value={tab} onValueChange={value => setTab(value as JobTab)} className="mt-5 min-w-0">
+        <div className="job-tab-scroll">
+          <TabsList variant="line" aria-label="Job sections" className="min-w-max">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
+            <TabsTrigger value="review">Author review</TabsTrigger>
+            <TabsTrigger value="story">Story & changes</TabsTrigger>
+            <TabsTrigger value="details"><Settings2 className="size-3.5" /> Details</TabsTrigger>
+          </TabsList>
+        </div>
+        <TabsContent value="overview" className="job-tab-body">
+          <JobOverviewPanel job={job} controls={controls} jobId={jobId} onReview={() => setTab('review')} onRefresh={refresh} />
+          {controlsError && <p role="alert" className="mt-3 text-sm text-destructive">{controlsError.message}</p>}
+          {job.status === 'prepared' && <Card className="mt-4"><CardHeader><CardTitle>Configure generation</CardTitle></CardHeader>
+            <CardContent><GenerationConfiguration jobId={jobId} onStarted={refresh} /></CardContent>
+          </Card>}
+        </TabsContent>
+        <TabsContent value="activity" className="job-tab-body">
+          <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
+        </TabsContent>
+        <TabsContent value="review" className="job-tab-body">
+          <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
+        </TabsContent>
+        <TabsContent value="story" className="job-tab-body">
+          {job.revisionVerified === false
+            ? <Card><CardContent className="py-5">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-300" />
+                <div><h2 className="font-medium">Story inspection temporarily unavailable</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">An unfinished specialist has unverified changes. The canonical explorer, committed diffs, and publication remain unavailable until the original worktree is reconciled. Existing committed work is preserved.</p>
+                </div>
+              </div>
+            </CardContent></Card>
+            : <div className="grid min-w-0 gap-4">
+              <GitChanges jobId={jobId} revision={job.headSha} />
+              {(job.provider === 'github' || job.provider === 'gitlab') &&
+                <PublishDraft jobId={jobId} provider={job.provider} />}
+              {job.reason && /Foundation requires|Author exception recorded|Author rejected|authorized no-write retry/.test(job.reason)
+                ? <Card><CardContent className="py-4 text-sm text-muted-foreground">
+                  Story explorer is unavailable while Foundation authorization or recovery is pending. Review the original evidence in Author review.
+                </CardContent></Card>
+                : <StoryExplorer jobId={jobId} revision={job.headSha} />}
+            </div>}
+        </TabsContent>
+        <TabsContent value="details" className="job-tab-body">
+          <JobTechnicalDetails job={job} controls={controls} jobId={jobId} onRefresh={refresh} />
+        </TabsContent>
+      </Tabs>
+    </>}
+  </main>
+}
+
+function JobOverviewPanel({ job, controls, jobId, onReview, onRefresh }: {
+  job: JobOverview; controls?: JobControls; jobId: string; onReview: () => void
+  onRefresh: () => Promise<void>
+}) {
+  const hasRecovery = !!job.recovery
+  const isBlocked = job.status === 'blocked' || job.status === 'interrupted' || job.status === 'failed'
+  const completed = job.completedStages.filter(stage =>
+    /committed|verified|completed|finished|success/.test(stage.status)).length
+  return <div className="grid min-w-0 gap-4">
+    {(job.reason || hasRecovery) && <Card className="border-amber-500/30">
+      <CardContent className="py-4">
+        <div className="flex items-start gap-3">
+          {isBlocked ? <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-300" /> :
+            <Clock3 className="mt-0.5 size-5 shrink-0 text-muted-foreground" />}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-semibold text-foreground">{hasRecovery ? 'Manual recovery required' :
+                isBlocked ? 'Generation stopped' : 'Current status'}</h2>
+              {hasRecovery && <Badge variant="outline">Specialist files preserved</Badge>}
+            </div>
+            {job.reason && <p className="mt-2 whitespace-pre-wrap break-words text-sm text-foreground/85">{readableReason(job.reason)}</p>}
+            {hasRecovery && <>
+              <p className="mt-2 text-sm text-muted-foreground">
+                The uncommitted files have been preserved. Automated retry and publication are unavailable until they are inspected and explicitly reconciled.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Badge variant="secondary">{statusLabel(job.recovery!.stage)}</Badge>
+                <Badge variant="outline">{job.recovery!.files.length} files to review</Badge>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={onReview}>Open author review</Button>
+                <details className="job-disclosure w-full">
+                  <summary>Recovery instructions and preserved files</summary>
+                  <div className="mt-3 space-y-3 text-sm">
+                    <p className="whitespace-pre-wrap break-words">{job.recovery!.guidance}</p>
+                    {job.recovery!.kind === 'manual-specialist' &&
+                      <p>Compare Character records with existing canonical IDs, then inspect and reconcile the corrected files in the original worktree. The unverified draft must not be approved as-is.</p>}
+                    {job.recovery!.files.length > 0 && <ul className="job-file-list">
+                      {job.recovery!.files.map(file => <li key={file}><code>{file}</code></li>)}
+                    </ul>}
+                    {job.recovery!.workItem && <p>Work item: <code>{job.recovery!.workItem}</code></p>}
+                    {job.recovery!.candidateDigest && <p>Draft digest: <code className="break-all">{job.recovery!.candidateDigest}</code></p>}
+                  </div>
+                </details>
+              </div>
+            </>}
+          </div>
+        </div>
+      </CardContent>
+    </Card>}
+
+    <Card>
+      <CardHeader className="pb-2"><div className="flex flex-wrap items-center justify-between gap-3">
+        <CardTitle className="text-sm">Progress</CardTitle>
+        <span className="text-xs text-muted-foreground">{completed} of {job.completedStages.length} recorded stages verified</span>
+      </div></CardHeader>
+      <CardContent>
+        {job.completedStages.length ? <ol className="job-stage-list">
+          {job.completedStages.map((stage, index) => {
+            const verified = /committed|verified|completed|finished|success/.test(stage.status)
+            return <li key={index} className="job-stage">
+              {verified ? <CheckCircle2 className="size-4 shrink-0 text-emerald-400" /> :
+                <Circle className="size-4 shrink-0 text-muted-foreground" />}
+              <span className="truncate font-medium">{statusLabel(stage.stage)}</span>
+              <span className="ml-auto truncate text-xs text-muted-foreground">{statusLabel(stage.status)}</span>
+            </li>
+          })}
+        </ol> : <p className="text-sm text-muted-foreground">
+          {job.status === 'prepared' ? 'Ready to configure and start generation.' : 'No verified stages recorded yet.'}
+        </p>}
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader className="pb-2"><CardTitle className="text-sm">Execution summary</CardTitle></CardHeader>
+      <CardContent className="job-metric-grid">
+        <div><span>Execution</span><strong>{job.status === 'prepared' ? 'Not started' : job.fixture ? 'Fixture' : 'Sandboxed Pi'}</strong></div>
+        <div><span>Control</span><strong>{controls ? statusLabel(controls.control) : 'Unavailable'}</strong></div>
+        <div><span>Model calls</span><strong>{controls?.budget.modelCalls ?? '—'}</strong></div>
+        <div><span>Steps</span><strong>{controls?.budget.steps ?? '—'}</strong></div>
+        <div><span>Reported cost</span><strong>{controls ? '$' + controls.budget.costUsd.toFixed(3) : '—'}</strong></div>
+        <div><span>Queue</span><strong>{controls?.queue ? statusLabel(controls.queue) : '—'}</strong></div>
+      </CardContent>
+      {controls?.budget.pause && <CardContent className="pt-0 text-sm text-amber-300">
+        Budget stopped: {controls.budget.pause.reason}
+      </CardContent>}
+      {job.status === 'paused' && !job.fixture && controls && <CardContent className="pt-0">
+        <BudgetEditor key={JSON.stringify(controls.limits)} jobId={jobId}
+          limits={controls.limits} onChanged={onRefresh} />
+      </CardContent>}
+    </Card>
+  </div>
+}
+
+function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
+  job: JobOverview; controls?: JobControls; jobId: string; onRefresh: () => Promise<void>
+}) {
+  return <div className="grid gap-4">
+    <Card>
+      <CardHeader><CardTitle className="text-sm">Job metadata</CardTitle></CardHeader>
+      <CardContent className="job-detail-table">
+        <div><span>Job ID</span><code>{job.id}</code></div>
+        <div><span>Story ID</span><code>{job.storyId}</code></div>
+        <div><span>Provider</span><strong>{job.provider}</strong></div>
+        <div><span>Base commit</span><code>{job.baseSha}</code></div>
+        <div><span>Verified HEAD</span><code>{job.headSha}</code></div>
+        <div><span>Graph thread</span><code>{job.threadId ?? 'Not assigned'}</code></div>
+        <div><span>Revision verified</span><strong>{job.revisionVerified === false ? 'No' : 'Not marked unverified'}</strong></div>
+      </CardContent>
+    </Card>
+    {job.status !== 'prepared' && <Card>
+      <CardHeader><CardTitle className="text-sm">Saved generation request</CardTitle></CardHeader>
+      <CardContent>
+        <p className="whitespace-pre-wrap break-words text-sm text-foreground/80">{job.task || 'No task supplied.'}</p>
+        {job.contract !== null && <details className="job-disclosure mt-4">
+          <summary>Generation contract (JSON)</summary>
+          <pre className="job-json mt-3">{JSON.stringify(job.contract, null, 2)}</pre>
+        </details>}
+      </CardContent>
+    </Card>}
+    <Card>
+      <CardHeader><CardTitle className="text-sm">Execution safety</CardTitle></CardHeader>
+      <CardContent className="space-y-3 text-sm text-muted-foreground">
+        <p>Pause and cancel apply at safe work boundaries. An interrupted writer is not automatically replayed.</p>
+        <p>Generated work is only available for publication after verification. Protected author approvals remain bound to their original proposal.</p>
+        {controls && <p>Current control: <strong className="text-foreground">{controls.control}</strong>.</p>}
+        {job.status === 'interrupted' && <p className="text-amber-300">An interrupted job requires explicit operator reconciliation before retry.</p>}
+        <Button size="sm" variant="outline" onClick={() => void onRefresh()}>Inspect latest saved state</Button>
+      </CardContent>
+    </Card>
+  </div>
+}
+
 function BudgetEditor({ jobId, limits, onChanged }: {
   jobId: string; limits: BudgetLimits; onChanged: () => Promise<void>
 }) {
@@ -56,141 +332,20 @@ function BudgetEditor({ jobId, limits, onChanged }: {
     } catch (e) { setError(e instanceof Error ? e.message : 'Budget increase unavailable') }
     finally { setSaving(false) }
   }
-  return <div>
-    <h3>Increase Pi budgets</h3>
-    <p>Limits can only increase. Existing usage is retained. Save before resuming a budget-stopped job.</p>
-    <div className="generation-controls">
-      <label>Steps <Input type="number" min={0} max={1000000} disabled={saving}
+  return <div className="border-t border-border pt-4">
+    <h3 className="text-sm font-medium">Increase Pi budgets</h3>
+    <p className="mt-1 text-xs text-muted-foreground">Limits can only increase. Existing usage is retained.</p>
+    <div className="mt-3 grid gap-3 sm:grid-cols-3">
+      <label className="grid gap-1 text-xs">Steps <Input type="number" min={0} max={1000000} disabled={saving}
         value={steps} onChange={e => setSteps(e.target.value)} /></label>
-      <label>Model calls <Input type="number" min={0} max={1000000} disabled={saving}
+      <label className="grid gap-1 text-xs">Model calls <Input type="number" min={0} max={1000000} disabled={saving}
         value={calls} onChange={e => setCalls(e.target.value)} /></label>
-      <label>Reported cost (USD) <Input type="number" min={0} max={1000000} step="0.01"
+      <label className="grid gap-1 text-xs">Cost limit (USD) <Input type="number" min={0} max={1000000} step="0.01"
         disabled={saving} value={cost} onChange={e => setCost(e.target.value)} /></label>
     </div>
-    {error && <p role="alert">{error}</p>}
-    <Button type="button" disabled={saving} onClick={() => void save()}>
+    {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
+    <Button size="sm" className="mt-3" disabled={saving} onClick={() => void save()}>
       {saving ? 'Saving…' : 'Increase budgets'}
     </Button>
   </div>
-}
-function JobDetailsForId({ jobId }: { jobId: string }) {
-  const queryClient = useQueryClient()
-  const { data: job, error: jobError } = useQuery(jobQuery(jobId))
-  const { data: controls } = useQuery(jobControlsQuery(jobId))
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const refresh = async () => {
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['job', jobId] }),
-      queryClient.invalidateQueries({ queryKey: ['job-controls', jobId] }),
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
-    ])
-  }
-  const act = async (action: 'pause' | 'resume' | 'cancel' | 'retry') => {
-    setBusy(true)
-    try {
-      await updateJobControl({ data: { jobId, action } })
-      await refresh()
-    } catch (e) { setError(e instanceof Error ? e.message : 'Control transition unavailable') }
-    finally { setBusy(false) }
-  }
-  return <main className="page">
-    <header><div><p className="eyebrow">NovelTea</p><h1>Generation job</h1></div>
-      <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
-    <p>Job <code>{jobId}</code>. Generation runs through the same checkpointed Story graph,
-      using either deterministic fixtures or the selected, sandboxed Pi model.
-      Refresh or reconnect without restarting a writer.</p>
-    {(error || jobError) && <p role="alert" className="error">{error || jobError?.message}</p>}
-    {!job && !error && !jobError && <p>Loading job…</p>}
-    {job && <>
-      <section>
-        <h2>{job.title}</h2>
-        <p><strong>Status:</strong> {job.status} · <strong>Execution:</strong> {job.status === 'prepared' ? 'not started' : job.fixture ? 'deterministic fixture' : 'sandboxed Pi'}</p>
-        <p><strong>Pinned Git commit:</strong> <code>{job.baseSha}</code></p>
-        <p><strong>Job HEAD:</strong> <code>{job.headSha}</code></p>
-        {job.threadId && <p><strong>Durable graph thread:</strong> <code>{job.threadId}</code></p>}
-        {job.reason && <div role={job.status === 'blocked' ? 'alert' : 'status'}>
-          <strong>{job.status === 'blocked' ? 'Why generation stopped:' : 'Current status:'}</strong>
-          <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{job.reason}</p>
-        </div>}
-        {job.recovery && <div aria-label="Blocked generation recovery">
-          <h3>Recovery requires review</h3>
-          <p><strong>Stage:</strong> {job.recovery.stage}
-            {job.recovery.workItem && <> · <strong>Work item:</strong> <code>{job.recovery.workItem}</code></>}
-          </p>
-          <p><strong>Uncommitted specialist files are preserved.</strong> They are not
-            yet a verified Story revision. Automatic replay, publishing, and
-            unreviewed cleanup remain unavailable.</p>
-          {job.recovery.files.length > 0 && <>
-            <h4>Files requiring review</h4>
-            <ul>{job.recovery.files.map(file => <li key={file}><code>{file}</code></li>)}</ul>
-          </>}
-          {job.recovery.candidateDigest && <p>Inspected draft digest:
-            {' '}<code>{job.recovery.candidateDigest}</code>. This digest identifies
-            the current uncommitted bytes, not authorization to accept them.
-          </p>}
-          <p>{job.recovery.guidance}</p>
-          {job.recovery.kind === 'manual-specialist' && <p>
-            For this Story, compare the generated Character records with existing
-            canonical IDs; repair duplicate identities and references in the original
-            worktree. Use the foundations <code>inspect</code> and
-            {' '}<code>reconcile</code> commands with the digest of the
-            <em> corrected</em> files. The preserved draft is not safe to approve as-is.
-          </p>}
-        </div>}
-        {job.completedStages.length > 0 && <ul>{job.completedStages.map((stage, index) =>
-          <li key={index}>{stage.stage}: {stage.status}</li>)}</ul>}
-        <Button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Refresh saved state</Button>
-      </section>
-      <section aria-label="Job controls">
-        <h2>Execution controls</h2>
-        <p>Pause and cancel take effect at a safe work boundary. An interrupted writer is never automatically replayed.</p>
-        {controls && <p><strong>Control:</strong> {controls.control}
-          {controls.queue && <> · <strong>Queue:</strong> {controls.queue}</>}
-          {' · '}<strong>Pi usage:</strong> {controls.budget.steps} steps, {controls.budget.modelCalls} model calls,
-          ${controls.budget.costUsd.toFixed(3)} reported
-          {controls.budget.pause && <> · Budget stop: {controls.budget.pause.reason}</>}</p>}
-        {job.status === 'paused' && !job.fixture && controls &&
-          <BudgetEditor key={JSON.stringify(controls.limits)} jobId={jobId}
-            limits={controls.limits} onChanged={refresh} />}
-        <div className="generation-actions">
-          <Button type="button" disabled={busy || !['queued', 'running'].includes(job.status)}
-            onClick={() => void act('pause')}>Pause</Button>
-          <Button type="button" disabled={busy || job.status !== 'paused' || !job.threadId}
-            onClick={() => void act('resume')}>Resume</Button>
-          <Button type="button" disabled={busy || !['queued', 'running', 'paused', 'prepared', 'blocked'].includes(job.status)}
-            onClick={() => void act('cancel')}>Cancel</Button>
-          <Button type="button" disabled={busy || job.status !== 'interrupted'}
-            onClick={() => void act('retry')}>Retry after inspection</Button>
-          <Button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Inspect</Button>
-        </div>
-      </section>
-      <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
-      <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
-      {job.revisionVerified === false
-        ? <section aria-label="Verified Story views unavailable">
-          <h2>Verified Story views</h2>
-          <p>The Story explorer, committed diff inspection, and draft publication
-            are unavailable while an unfinished specialist has unverified changes.
-            This does not remove its already committed work or saved evidence.</p>
-        </section>
-        : <>
-          <GitChanges jobId={jobId} revision={job.headSha} />
-          {(job.provider === 'github' || job.provider === 'gitlab') &&
-            <PublishDraft jobId={jobId} provider={job.provider} />}
-          {job.reason && /Foundation requires|Author exception recorded|Author rejected|authorized no-write retry/.test(job.reason)
-            ? <section aria-label="Story explorer availability"><p>The canonical Story explorer is temporarily unavailable while Foundation authorization or recovery is pending. The original source is available in the review panel above.</p></section>
-            : <StoryExplorer jobId={jobId} revision={job.headSha} />}
-        </>}
-      {job.status === 'prepared'
-        ? <GenerationConfiguration jobId={jobId} onStarted={refresh} />
-        : <section>
-          <h2>Saved generation request</h2>
-          <p>{job.task}</p>
-          {job.contract !== null && <pre>{JSON.stringify(job.contract, null, 2)}</pre>}
-          {job.status === 'interrupted' && <p>Recovery requires explicit operator reconciliation.
-            This page will never automatically rerun a possibly interrupted writer.</p>}
-        </section>}
-    </>}
-  </main>
 }

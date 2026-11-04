@@ -120,17 +120,15 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
     finally { setBusy(null) }
   }
   const items = state?.items.filter(item => item.phase === 'awaiting-author' || item.approval?.phase === 'recorded') ?? []
-  return <section aria-label="Author questions and approvals">
-    <h2>Author questions and approvals</h2>
-    <label htmlFor="author-new-idea">Send an idea to this job</label>
-    <Textarea id="author-new-idea" rows={3} maxLength={2500} value={idea}
-      onChange={e => setIdea(e.target.value)} disabled={busy !== null}
-      placeholder="New narrative idea or constraint for the next safe work boundary" />
-    <Button type="button" onClick={() => void sendIdea()} disabled={busy !== null || !idea.trim()}>
-      Save idea for next safe boundary
-    </Button>
-    <p className="muted">Responses are bound to this job's saved graph interrupt.
-      Protected changes require reviewing the exact proposal and confirming the trusted approval.</p>
+  const pendingCount = (state?.decisions ?? []).filter(item => item.phase !== 'recorded').length +
+    items.filter(item => item.phase === 'awaiting-author' || (item.approval && item.approval.phase !== 'recorded')).length +
+    (state?.choice?.phase === 'awaiting-author' ? 1 : 0)
+  return <section aria-label="Author questions and approvals" className="job-author-review">
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <div><h2>Author review</h2>
+        <p className="mt-1 text-xs text-muted-foreground">Approvals stay bound to the exact saved proposal and Git revision.</p></div>
+      <span className="text-xs text-muted-foreground">{pendingCount ? pendingCount + ' awaiting review' : 'No pending decisions'}</span>
+    </div>
     {(error || authorQuery.error) && <p className="error" role="alert">{error || authorQuery.error?.message}</p>}
     {notice && <p role="status">{notice}</p>}
     {!state && !error && <p>Checking saved author interrupts…</p>}
@@ -180,9 +178,12 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
       </>}
     </article>}
     {(state?.decisions ?? []).map(item => <article key={'recovery-' + item.id}
-      aria-label={item.title}>
-      <h3>{item.title}</h3>
-      <p>{item.description}</p>
+      aria-label={item.title} className="job-review-item">
+      <details open={item.phase !== 'recorded' ? true : undefined}>
+        <summary className="font-medium">{item.title}
+          <span className="ml-2 text-xs text-muted-foreground">{item.phase === 'recorded' ? 'Recorded' : 'Review required'}</span>
+        </summary>
+      <div className="mt-3"><p>{item.description}</p>
       {'sourceExcerpt' in item.details ? <>
         <p><strong>Specialist explanation:</strong> {item.details.explanation}</p>
         <details><summary>Original protected Creative Direction</summary>
@@ -234,8 +235,9 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
             onClick={() => void decideRecovery(item, 'rejected')}>Reject</Button>
         </>}
       </>}
+      </div></details>
     </article>)}
-    {items.map(item => <article key={item.id}>
+    {items.map(item => <article key={item.id} className="job-review-item">
       <h3>{item.kind === 'question' ? 'Author question' : 'Protected approval'}: <code>{item.id}</code></h3>
       {item.kind === 'question' ? <>
         <p>{item.prompt}</p>
@@ -276,5 +278,16 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
         </>}
       </>}
     </article>)}
+    <details className="job-disclosure mt-4">
+      <summary>Send a new idea or constraint</summary>
+      <div className="mt-3 grid gap-3">
+        <label htmlFor="author-new-idea" className="text-xs text-muted-foreground">The idea will be queued for the next safe work boundary.</label>
+        <Textarea id="author-new-idea" rows={3} maxLength={2500} value={idea}
+          onChange={e => setIdea(e.target.value)} disabled={busy !== null}
+          placeholder="Narrative idea or constraint" />
+        <Button className="w-fit" size="sm" type="button" onClick={() => void sendIdea()}
+          disabled={busy !== null || !idea.trim()}>Save idea</Button>
+      </div>
+    </details>
   </section>
 }
