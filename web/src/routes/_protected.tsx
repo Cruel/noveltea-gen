@@ -1,5 +1,6 @@
 import { Outlet, createFileRoute, redirect } from '@tanstack/react-router'
 import { getViewer } from '../lib/dashboard.functions'
+import { StudioHeader } from '@/components/studio-header'
 
 export const Route = createFileRoute('/_protected')({
   beforeLoad: async ({ location }) => {
@@ -7,5 +8,13 @@ export const Route = createFileRoute('/_protected')({
     if (!user) throw redirect({ to: '/login', search: { from: location.href } })
     return { user }
   },
-  component: () => <Outlet />,
+  component: ProtectedLayout,
 })
+
+function ProtectedLayout() {
+  const { user } = Route.useRouteContext()
+  return <>
+    <StudioHeader user={user} />
+    <Outlet />
+  </>
+}

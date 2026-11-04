@@ -76,8 +76,7 @@ function AddRepository() {
   }
 
   return <main className="page">
-    <header><div><p className="eyebrow">NovelTea</p><h1>Add GitHub repository</h1></div>
-      <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
+    <h1>Add GitHub repository</h1>
     <p>Connect a repository you can push to. GitHub App installations determine which repositories NovelTea can access.</p>
     <Card>
       <CardHeader><CardTitle>Repository identity</CardTitle></CardHeader>

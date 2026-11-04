@@ -79,8 +79,7 @@ function GithubStories() {
     setError(null); setSelection(null); setJob(null); setPendingJobId(null); setDirectory(path)
   }
   return <main className="page">
-    <header><div><p className="eyebrow">NovelTea</p><h1>GitHub Story discovery</h1></div>
-      <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
+    <h1>GitHub Story discovery</h1>
     <p>Browse the repository at a pinned Git commit. Only the selected Story's Git blobs are counted; unrelated game assets are not downloaded.</p>
     {commit && <p><strong>Commit:</strong> <code>{commit}</code>{' '}
       <Button type="button" disabled={busy} onClick={() => { setCommit(''); setDiscovered(null); setDiscoveryError(null); setDirectory('') }}>Refresh HEAD</Button></p>}

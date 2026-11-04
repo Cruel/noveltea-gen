@@ -109,10 +109,7 @@ function SettingsPage() {
     setNotice('Repository connection disconnected. Stories and jobs were preserved.')
   })
   return <main className="page settings-page">
-    <header>
-      <div><p className="eyebrow">NovelTea</p><h1>Settings</h1></div>
-      <nav aria-label="Main navigation"><a href="/dashboard">Dashboard</a><a href="/settings" aria-current="page">Settings</a></nav>
-    </header>
+    <h1>Settings</h1>
     <p>Preferences and connections are scoped to your Studio user, not shared with other users.</p>
     {error && <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>}
     {(notice || oauthNotice) && <Alert role="status"><AlertDescription>{notice || oauthNotice}</AlertDescription></Alert>}

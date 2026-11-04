@@ -51,7 +51,7 @@ function GitLabRepositories() {
     finally { setBusy(false) }
   }
   return <main className="page">
-    <header><div><p className="eyebrow">NovelTea</p><h1>Connect GitLab project</h1></div><nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
+    <h1>Connect GitLab project</h1>
     <p>Personal and group projects where the chosen GitLab.com identity has Developer access or higher. Protected branches may impose additional push restrictions when publishing.</p>
     <Card>
       <CardHeader><CardTitle>GitLab identity</CardTitle></CardHeader>

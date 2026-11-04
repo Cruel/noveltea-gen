@@ -89,8 +89,7 @@ function GitlabStories() {
     setError(null); setSelection(null); setJob(null); setPendingJobId(null); setDirectory(path)
   }
   return <main className="page">
-    <header><div><p className="eyebrow">NovelTea</p><h1>GitLab Story discovery</h1></div>
-      <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
+    <h1>GitLab Story discovery</h1>
     <p>Browse a connected GitLab project at one pinned commit. Only the selected Story is size-verified; no project assets are cloned.</p>
     {commit && <p><strong>Commit:</strong> <code>{commit}</code>{' '}
       <Button type="button" disabled={busy} onClick={() => { setCommit(''); setDirectory(''); setDiscovered(null); setDiscoveryError(null) }}>Refresh HEAD</Button></p>}
