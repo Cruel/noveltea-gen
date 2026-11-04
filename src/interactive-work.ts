@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { commitOrigin, readRecoveryFork } from "./recovery-fork-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
@@ -487,6 +488,7 @@ async function checkOutput(job: JobStartResult, previous: Report, report: Report
   return { choices: [], puzzles: verifyPuzzle(report, unit.paths) };
 }
 async function publishHead(job: JobStartResult, before: string, after: string, id: string) {
+  if (commitOrigin(job, id, after).jobId !== job.jobId) return;
   const file = join(job.stateDir, "revisions", "verified-head.json");
   await mkdir(dirname(file), { recursive: true });
   if (existsSync(file)) {
@@ -508,7 +510,8 @@ function verifyCommit(job: JobStartResult, receipt: Receipt, unit: Unit, parent:
     throw new Error("Interactive commit parent or receipt is unverified.");
   }
   const message = git(job, "log", "-1", "--format=%B", sha);
-  if (!message.includes("NovelTea-Interactive: " + unit.digest) ||
+  if (!message.split("\n").includes("NovelTea-Job: " + commitOrigin(job, unit.id, sha).jobId) ||
+      !message.includes("NovelTea-Interactive: " + unit.digest) ||
       !message.includes("NovelTea-Work-Item: " + unit.id + "\n") ||
       !message.includes("NovelTea-Plan-Version: " + receipt.planVersion + "\n")) {
     throw new Error("Interactive commit lacks correct work-item provenance.");
@@ -724,6 +727,14 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       await persist(file, receipt);
     }
     if (input.action === "inspect") return output(job, receipt);
+    if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
+        receipt.units.every(unit => unit.phase === "pending" && !unit.beforeHead ||
+          unit.phase === "committed" && commitOrigin(job, unit.id, unit.commitSha!).jobId !== job.jobId)) {
+      receipt.worker = input.fixture ? "fixture" : "pi";
+      receipt.provider = input.provider ?? "openai";
+      receipt.model = input.model ?? "gpt-6-luna";
+      await persist(file, receipt);
+    }
     if (Boolean(input.fixture) !== (receipt.worker === "fixture") ||
         input.provider && input.provider !== receipt.provider ||
         input.model && input.model !== receipt.model || input.thinking && input.thinking !== receipt.thinking) {

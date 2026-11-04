@@ -29,8 +29,8 @@ type Load = {
   modelAvailability: string
   defaultModel?: { provider: string; id: string; thinking?: string } | null
 }
-export function GenerationConfiguration({ jobId, onStarted }: {
-  jobId: string; onStarted: () => Promise<void>
+export function GenerationConfiguration({ jobId, onStarted, immutableContract = false }: {
+  jobId: string; onStarted: () => Promise<void>; immutableContract?: boolean
 }) {
   const configuration = useQuery({
     queryKey: ['generation-configuration', jobId] as const,
@@ -165,6 +165,8 @@ export function GenerationConfiguration({ jobId, onStarted }: {
         placeholder="Describe the Story outcome you want"
         onChange={e => { setTask(e.target.value); setSaved(false) }} />
     </label>
+    {immutableContract && <p className="muted">This fork inherits an approved completion contract. You can adjust the task, model and budget here; scope revisions require separate approval after starting.</p>}
+    <fieldset disabled={immutableContract || busy} className="space-y-3">
     <div className="generation-controls">
       <label>Scope
         <StudioSelect aria-label="Generation scope" value={scope.kind} disabled={busy}
@@ -248,6 +250,7 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       <Textarea aria-label="Advanced generation contract JSON" rows={12} disabled={busy}
         value={rawContract} onChange={e => { setRawContract(e.target.value); setSaved(false) }} />
     </details>
+    </fieldset>
     <h3>Pi model and budgets</h3>
     <p>Manage <a href="/settings#ai-models">model credentials and defaults</a> in Settings.</p>
     <p role="status">{data.modelAvailability} Selected models run through the isolated Story sandbox.

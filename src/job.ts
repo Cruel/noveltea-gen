@@ -5,6 +5,13 @@ import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+export interface RecoveryForkPin {
+  sourceJobId: string;
+  sourceBaseSha: string;
+  commitSha: string;
+  bundleSha256: string;
+}
+
 interface JobManifest {
   version: 1;
   jobId: string;
@@ -24,6 +31,7 @@ interface JobManifest {
   threadId: string;
   /** Set on first validation; missing validator receipt after this is fatal. */
   validatorSha256?: string;
+  recoveryFork?: RecoveryForkPin;
 }
 
 export interface JobStartResult extends Omit<JobManifest, "version" | "gitCommonDir" | "stateDir"> {
@@ -42,6 +50,8 @@ export interface JobStartOptions {
    * authorization. This primitive does NOT certify a checkpoint or initialize
    * generation continuation. Never accept a browser-provided SHA directly. */
   pinnedBaseSha?: string;
+  /** Controller-owned immutable continuation bundle; never client input. */
+  recoveryFork?: RecoveryForkPin;
   /** Trusted server only: populate just the selected Story in each new linked worktree. */
   sparseStoryOnly?: boolean;
   /** Ephemeral authenticated Git transport configuration; never written to a job receipt. */
@@ -173,6 +183,10 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
     throw new Error(`Story root "${storyRoot}" must be inside an existing Git worktree with a committed HEAD. No Git repository was initialized or baseline committed.`);
   }
 
+  if (options.recoveryFork && (options.recoveryFork.commitSha !== options.pinnedBaseSha ||
+      !/^[a-f0-9]{64}$/.test(options.recoveryFork.bundleSha256))) {
+    throw new Error("Recovery fork requires an exact pinned continuation bundle.");
+  }
   if (options.pinnedBaseSha !== undefined) {
     const selected = options.pinnedBaseSha;
     if (!/^[a-f0-9]{40,64}$/.test(selected) ||
@@ -217,6 +231,9 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
         saved.gitCommonDir !== common || saved.storyRoot !== storyRoot ||
         saved.storyRelativePath !== storyRelativePath ||
         (options.pinnedBaseSha !== undefined && saved.baseSha !== options.pinnedBaseSha) ||
+        (options.recoveryFork !== undefined && JSON.stringify(saved.recoveryFork) !== JSON.stringify(options.recoveryFork)) ||
+        (saved.recoveryFork !== undefined && (!/^[a-f0-9]{64}$/.test(saved.recoveryFork.bundleSha256) ||
+          saved.recoveryFork.commitSha !== saved.baseSha)) ||
         (options.novelteaProject !== undefined && saved.novelteaProjectRoot !== novelteaProjectRoot) ||
         saved.branch !== branch || (saved.stateDir !== undefined && saved.stateDir !== jobRoot) ||
         (saved.cacheRoot !== undefined && (typeof saved.cacheRoot !== "string" || !saved.cacheRoot)) ||
@@ -257,6 +274,7 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
     version: 1, jobId: options.job, gitRoot, gitCommonDir: common,
     storyRoot, storyRelativePath, ...(novelteaProjectRoot ? { novelteaProjectRoot } : {}),
     baseSha, branch, stateDir: jobRoot, ...(cacheRoot ? { cacheRoot } : {}),
+    ...(options.recoveryFork ? { recoveryFork: options.recoveryFork } : {}),
     worktreeRoot, worktreeStoryRoot, threadId: randomUUID(),
   };
   await mkdir(join(stateRoot, "jobs"), { recursive: true });

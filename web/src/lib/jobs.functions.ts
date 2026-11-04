@@ -4,12 +4,15 @@ import { auth, database } from './runtime.server'
 import { readAuthConfig } from './auth'
 import { generationJobRequest } from './fixture-jobs.server'
 import { generationControlRequest } from './generation-controls.server'
+import { checkpointForkRequest } from './checkpoint-fork.server'
 
 export type JobOverview = {
   id: string; storyId: string; title: string; provider: string; baseSha: string; headSha: string
   status: string; threadId: string | null; fixture: boolean; task: string | null
   contract: object | null; reason: string | null; completedStages: Array<{ stage: string; status: string }>
   revisionVerified?: boolean
+  forkSource: { jobId: string; commitSha: string; completedWorkItems: string[];
+    remainingWorkItems: string[]; nextWorkItem: string | null } | null
   recoveryCheckpoints: Array<{
     commitSha: string; parentSha: string; workItem: string; stage: string; eligible: boolean; reason: string | null
     planVersion: number | null; planDigest: string | null; proofDigest: string; source: string; snapshotId: string | null
@@ -52,6 +55,12 @@ export const getJob = createServerFn({ method: 'GET' })
       await generationJobRequest(auth, database, request(data, ''), data, readAuthConfig().baseURL))
     return body.job
   })
+
+export const forkJobCheckpoint = createServerFn({ method: 'POST' })
+  .validator((data: { jobId: string; childId: string; commitSha: string; sourceBaseSha: string }) => data)
+  .handler(async ({ data }) => result<{ id: string }>(await checkpointForkRequest(auth, database,
+    request(data.jobId, '/fork', { childId: data.childId, commitSha: data.commitSha, sourceBaseSha: data.sourceBaseSha }),
+    data.jobId, readAuthConfig().baseURL)))
 
 export const getJobControls = createServerFn({ method: 'GET' })
   .validator((jobId: string) => jobId)

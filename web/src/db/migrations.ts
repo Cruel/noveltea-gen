@@ -300,6 +300,21 @@ const appMigrations = [
          SELECT id,owner_user_id,'root:' || id,0 FROM studio_sessions`,
     ],
   },
+  {
+    version: 17,
+    statements: [
+      `CREATE TABLE checkpoint_forks (
+         child_id TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL REFERENCES user(id),
+         source_job_id TEXT NOT NULL,
+         source_base_sha TEXT NOT NULL,
+         commit_sha TEXT NOT NULL,
+         bundle_json TEXT NOT NULL,
+         draft_json TEXT NOT NULL,
+         created_at TEXT NOT NULL
+       )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -352,7 +367,8 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   const hasGitFlows = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='git_connection_flows'`).get()
   const repoColumns = store.sqlite.pragma('table_info(repositories)') as Array<{ name: string }>
-  if (!hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasForks = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_forks'`).get()
+  if (!hasForks || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

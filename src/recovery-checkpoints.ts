@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { trustedHead } from "./revision.js";
+import { readRecoveryFork } from "./recovery-fork-state.js";
 
 /**
  * Recovery checkpoints are *logical* continuation records, not copies of a live
@@ -276,6 +277,8 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
 }
 function verifiedBaselineStages(job: JobStartResult,
   plan: Awaited<ReturnType<typeof planFor>>, item: string) {
+  const fork = readRecoveryFork(job);
+  if (fork) return fork.checkpoint.completedWorkItems;
   if (!plan || item === "foundation") return [];
   const arch = plan.items.find(entry => entry.id === "global-architecture");
   if (arch?.status !== "verified" || arch.verifiedSha !== job.baseSha) return [];

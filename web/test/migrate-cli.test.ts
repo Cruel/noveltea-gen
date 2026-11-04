@@ -43,11 +43,11 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
     const store = openStudioDatabase(filename)
     try {
       const tables = (store.sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name: string}>).map(row => row.name)
-      for (const name of ['user', 'session', 'account', 'verification', 'rateLimit', 'repositories', 'stories', 'studio_sessions', 'github_install_flows', 'story_onboarding_drafts', 'story_onboarding_conversations', 'pi_credentials', 'generation_events', 'generation_run_queue', 'github_publications', 'gitlab_publications', 'user_preferences', 'git_connections', 'git_connection_flows', 'story_conversations', 'story_threads', 'story_thread_runs', 'story_thread_preferences']) {
+      for (const name of ['user', 'session', 'account', 'verification', 'rateLimit', 'repositories', 'stories', 'studio_sessions', 'github_install_flows', 'story_onboarding_drafts', 'story_onboarding_conversations', 'pi_credentials', 'generation_events', 'generation_run_queue', 'github_publications', 'gitlab_publications', 'user_preferences', 'git_connections', 'git_connection_flows', 'story_conversations', 'story_threads', 'story_thread_runs', 'story_thread_preferences', 'checkpoint_forks']) {
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
       assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(), [
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 },
       ])
       assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'source_commit_sha'))
       assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'initial_content_sha256'))
@@ -103,7 +103,7 @@ test('migration CLI loads the Vite development environment including local overr
     const store = openStudioDatabase(databasePath)
     try {
       assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(),
-        [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }])
+        [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }])
     } finally { store.sqlite.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

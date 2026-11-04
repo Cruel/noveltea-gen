@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
-import { startStoryJob } from '../../../src/job'
+import { startStoryJob, type JobStartResult } from '../../../src/job'
+import { prepareRecoveryFork } from '../../../src/recovery-fork'
+import type { RecoveryForkBundle } from '../../../src/recovery-fork-state'
 import { STORY_LIMIT_BYTES } from './story-discovery.shared'
 import { CacheCapacityError, diskFull, withGitCacheQuota } from './git-cache-quota.server'
 
@@ -304,6 +306,17 @@ export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequ
     }
     return { commit, directory: input.directory, defaultBranch: input.defaultBranch }
   }))
+}
+
+/** Reuse quota admission and the repository lease without moving the shared
+ * base, fetching a new revision, or acquiring the active parent's writer lock. */
+export async function forkCachedStory(parent: JobStartResult, bundle: RecoveryForkBundle) {
+  const cache = process.env.NT_GIT_CACHE_DIR
+  if (!cache || !isAbsolute(cache) || !parent.cacheRoot)
+    throw new GitCacheError(503, 'Checkpoint forks require the registered Git cache.')
+  const sizes = treeSizes(parent.worktreeRoot, gitEnvironment('', ''), bundle.checkpoint.commitSha, parent.storyRelativePath)
+  return withAdmission(resolve(cache), parent.cacheRoot, GIT_OPERATION_OVERHEAD + sizes.bytes,
+    () => withRepositoryLock(parent.cacheRoot!, () => prepareRecoveryFork(parent, bundle)))
 }
 
 export async function acquireCachedStory(input: CachedStoryRequest) {

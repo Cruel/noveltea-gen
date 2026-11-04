@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readRecoveryFork } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -244,7 +245,10 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
   // A new authorized plan is the boundary for reconsidering local failures.
   const failures = await reconciledFailures(job,
     s.inventory?.planVersion === (plan?.version ?? null) ? s.failures ?? {} : {});
-  let completedStages = s.completedStages.filter(e => {
+  const inherited = readRecoveryFork(job)?.completedStages ?? [];
+  const evidence = [...inherited.filter(old => !s.completedStages.some(current =>
+    current.stage === old.stage && current.milestone === old.milestone)), ...s.completedStages];
+  let completedStages = evidence.filter(e => {
     if (e.stage === "foundation" || !plan) return true;
     if (e.stage === "architecture") return receipt.phase === "committed";
     const version = e.planVersion ?? s.planVersion ?? 1;
@@ -320,6 +324,9 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         const contract = parseGenerationContract(input.data.contract);
         const request = { ...input.data, fixture: input.data.fixture ?? false, contract };
         const job = await openJob({ ...s, request } as State);
+        const fork = readRecoveryFork(job);
+        if (fork && JSON.stringify(request.contract) !== JSON.stringify(fork.contract))
+          throw new Error("Fork continuation must retain its approved completion contract; use an explicit plan revision after starting.");
         if (executionOwner === "cli") ensureNotServerOwned(job);
         else await claimServerGeneration(job, config.configurable?.thread_id as string | undefined, request);
         return { request,

@@ -11,6 +11,7 @@ import { parseGenerationContract, type GenerationRequest } from '../../../src/ge
 import { assertServerClaimPermitted } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
 import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
+import { forkSourceSummary } from '../../../src/recovery-fork-state'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { PiPolicy } from '../../../src/job-pi-policy'
@@ -131,7 +132,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
       ? "Checkpoint finalization is incomplete; reconcile the original receipt."
       : "Checkpoint failed verification; operator reconciliation required.",
   }))
-  const base = { recoveryCheckpoints, id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
+  const base = { recoveryCheckpoints, forkSource: forkSourceSummary(job), id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
     baseSha: job.baseSha, headSha: job.headSha, fixture: pinned?.fixture ?? true }
   if (!pinned) {
     // A crash between the server-owner claim and the database publication

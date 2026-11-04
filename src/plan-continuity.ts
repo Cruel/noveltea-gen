@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { readRecoveryFork } from "./recovery-fork-state.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract, Plan } from "./architecture.js";
 import { verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
@@ -116,6 +117,13 @@ export function hasPlanContinuity(
 ) {
   const latest = architecture.plan;
   if (!latest || architecture.jobId !== job.jobId || architecture.phase !== "committed") return false;
+  const fork = readRecoveryFork(job);
+  if (fork && (stage === "foundations" || /^(event|interactive|composition):/.test(stage)) &&
+      digest(latest) === fork.checkpoint.planDigest) {
+    const original = fork.receipts[relative(job.stateDir, receiptFile(job, stage))];
+    if (original?.planVersion === receiptVersion &&
+        (fingerprint === undefined || fingerprint === (contractOnly ? original.contractDigest : original.planDigest))) return true;
+  }
   if (receiptVersion === latest.version) {
     return fingerprint === undefined || fingerprint === digest(contractOnly ? latest.contract : latest);
   }

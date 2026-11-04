@@ -4,6 +4,8 @@ import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
 import { validatedExplorer, type ExplorerIndex } from './story-explorer.server'
 import { parseGenerationContract } from '../../../src/generation'
+import { readRecoveryFork } from '../../../src/recovery-fork-state'
+import { authorizedStoryJob } from './fixture-jobs.server'
 import { isFocusedScope, resolveFocusedScope } from '../../../src/focused-scope'
 import type { CompletionContract } from '../../../src/architecture'
 import { availableUserPiModels, assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
@@ -162,6 +164,10 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
     if (row.status !== 'paused' || row.requestJson)
       throw new ConfigurationError(409, 'Generation configuration cannot change after the job has started.')
     const draft = validateGenerationDraft(await boundedBody(request), index, records)
+    const fork = readRecoveryFork(await authorizedStoryJob(store, user.id, id))
+    if (fork && JSON.stringify(draft.contract) !== JSON.stringify(fork.contract)) {
+      throw new ConfigurationError(409, 'Forks retain the selected approved completion contract. Change the task, model or budget, or authorize a separate plan revision after starting.')
+    }
     if (draft.model) {
       try { await assertUserPiSelection(store, user.id, draft.model) }
       catch { throw new ConfigurationError(422, 'The selected user Pi model is unavailable. Reconnect the provider.') }

@@ -363,6 +363,16 @@ async function verifyNativePin(pin: NativeValidatorPin): Promise<void> {
     throw new Error("Pinned native NovelTea validator is missing or changed; restore the exact executable, never silently switch validators.");
   }
 }
+/** Read-only compatibility gate for checkpoint forks, including the selected
+ * current toolchain. Never validate or repin an actively edited parent tree. */
+export async function verifyForkValidator(job: JobStartResult): Promise<void> {
+  const pin = JSON.parse(await readFile(pinPath(job), "utf8")) as NativeValidatorPin;
+  await verifyNativePin(pin);
+  if (pin.sha256 !== job.validatorSha256 || sha(await readFile(nativeExecutable())) !== pin.sha256)
+    throw new Error("Checkpoint validator is incompatible with the current native executable.");
+  if (process.env.NT_VALIDATOR_TEST_LEGACY === "1")
+    throw new Error("Checkpoint forks require native validation, not the legacy test adapter.");
+}
 async function nativePin(job: JobStartResult): Promise<NativeValidatorPin> {
   const jobRoot = job.stateDir;
   const jobFile = join(jobRoot, "job.json");

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { commitOrigin, readRecoveryFork } from "./recovery-fork-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
@@ -250,7 +251,7 @@ function verifyCommit(job: JobStartResult, unit: Unit, before: string, commit: s
     throw new Error("Foundation commit has an unexpected parent or missing audit inventory.");
   }
   const message = git(job, "log", "-1", "--format=%B", commit);
-  if (!message.split("\n").includes("NovelTea-Job: " + job.jobId) ||
+  if (!message.split("\n").includes("NovelTea-Job: " + commitOrigin(job, unit.id, commit).jobId) ||
       !message.split("\n").includes("NovelTea-Work-Item: " + unit.id) ||
       !message.split("\n").includes("NovelTea-Foundations: " + unit.digest) ||
       (unit.reviewedRecoveryDigest && !message.split("\n").includes("NovelTea-Reviewed-Recovery: " + unit.reviewedRecoveryDigest))) {
@@ -296,6 +297,7 @@ async function checkOutput(job: JobStartResult, report: CatalogReport, unit: Uni
   }
 }
 async function publishHead(job: JobStartResult, previous: string, commit: string, workItemId: string) {
+  if (commitOrigin(job, workItemId, commit).jobId !== job.jobId) return;
   const file = join(job.stateDir, "revisions", "verified-head.json");
   await mkdir(dirname(file), { recursive: true });
   if (existsSync(file)) {
@@ -520,6 +522,14 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     if (input.action === "run" && recovery.status === "blocked") {
       throw new Error(recovery.reason ?? "Foundations recovery blocked.");
     }
+    if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
+        receipt.units.every(unit => unit.phase === "pending" && !unit.beforeHead ||
+          unit.phase === "committed" && commitOrigin(job, unit.id, unit.commitSha!).jobId !== job.jobId)) {
+      receipt.worker = input.fixture ? "fixture" : "pi";
+      receipt.provider = input.provider ?? "openai";
+      receipt.model = input.model ?? "gpt-6-luna";
+      await persist(file, receipt);
+    }
     if (Boolean(input.fixture) !== (receipt.worker === "fixture") ||
         (input.provider && input.provider !== receipt.provider) ||
         (input.model && input.model !== receipt.model)) {
@@ -613,7 +623,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
             throw new Error("Foundation Git chain changed unexpectedly.");
           }
         }
-        if (current === unit.commitSha) await publishHead(job, before, unit.commitSha, unit.id);
+        if (current === unit.commitSha && commitOrigin(job, unit.id, unit.commitSha).jobId === job.jobId)
+          await publishHead(job, before, unit.commitSha, unit.id);
         if (unit.authorChoiceId) {
           const record = await inspectSpecialistChoice(job, unit.authorChoiceId);
           if (record.phase === "resuming")

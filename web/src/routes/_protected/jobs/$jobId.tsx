@@ -4,14 +4,14 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ArrowLeft, CheckCircle2, Circle, Clock3, RefreshCw, Settings2 } from 'lucide-react'
 import { jobQuery, jobControlsQuery } from '../../../lib/jobs.queries'
 import { jobEventsQuery } from '../../../lib/job-events.queries'
 import { useJobEventStream } from '@/hooks/use-job-event-stream'
-import { updateJobControl, type JobOverview, type JobControls, type BudgetLimits } from '../../../lib/jobs.functions'
+import { forkJobCheckpoint, updateJobControl, type JobOverview, type JobControls, type BudgetLimits } from '../../../lib/jobs.functions'
 import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity, progressDescription } from './-GenerationActivity'
@@ -155,7 +155,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
           <JobOverviewPanel job={job} controls={controls} jobId={jobId} onReview={() => setTab('review')} onRefresh={refresh} />
           {controlsError && <p role="alert" className="mt-3 text-sm text-destructive">{controlsError.message}</p>}
           {job.status === 'prepared' && <Card className="mt-4"><CardHeader><CardTitle>Configure generation</CardTitle></CardHeader>
-            <CardContent><GenerationConfiguration jobId={jobId} onStarted={refresh} /></CardContent>
+            <CardContent><GenerationConfiguration jobId={jobId} onStarted={refresh} immutableContract={!!job.forkSource} /></CardContent>
           </Card>}
         </TabsContent>
         <TabsContent value="activity" className="job-tab-body">
@@ -303,6 +303,15 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
         <div><span>Revision verified</span><strong>{job.revisionVerified === false ? 'No' : 'Not marked unverified'}</strong></div>
       </CardContent>
     </Card>
+    {job.forkSource && <Card>
+      <CardHeader><CardTitle className="text-sm">Inherited checkpoint</CardTitle></CardHeader>
+      <CardContent className="space-y-2 text-sm">
+        <p>Forked from <a className="underline" href={'/jobs/' + encodeURIComponent(job.forkSource.jobId)}>source job</a> at <code>{job.forkSource.commitSha.slice(0, 12)}</code>.</p>
+        <p>Inherited verified work: {job.forkSource.completedWorkItems.join(', ')}.</p>
+        <p>Continuation starts with: <strong>{job.forkSource.nextWorkItem ?? 'scope review'}</strong>.</p>
+        <p className="text-muted-foreground">Review generation settings, then Run. This job has its own budget and sessions; source drafts and approval grants were not copied.</p>
+      </CardContent>
+    </Card>}
     {job.recoveryCheckpoints.length > 0 && <Card>
       <CardHeader><CardTitle className="text-sm">Verified recovery checkpoints ({job.recoveryCheckpoints.filter(point => point.eligible).length} eligible)</CardTitle></CardHeader>
       <CardContent className="space-y-3">
@@ -318,6 +327,7 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
             <div>Next: {point.nextWorkItem ?? "No ready work item"} · Remaining: {point.remainingWorkItems.join(", ") || "none"}</div>
             <div>Validator: {point.validation.status} ({point.validation.validatorSha256.slice(0, 12)})</div>
             {point.eligible && <>
+              <ForkCheckpoint job={job} commitSha={point.commitSha} />
               <div>Parent commit: <code>{point.parentSha.slice(0, 12)}</code> · Receipt: {point.source}</div>
               <div>Receipt proof: <code>{point.proofDigest.slice(0, 20)}</code></div>
               <div>Plan digest: <code>{point.planDigest?.slice(0, 20) ?? "not established"}</code> · Skills: <code>{point.snapshotId?.slice(0, 20) ?? "not pinned"}</code></div>
@@ -347,6 +357,30 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
         <Button size="sm" variant="outline" onClick={() => void onRefresh()}>Inspect latest saved state</Button>
       </CardContent>
     </Card>
+  </div>
+}
+
+function ForkCheckpoint({ job, commitSha }: { job: JobOverview; commitSha: string }) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [childId] = useState(() => crypto.randomUUID())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const fork = async () => {
+    setBusy(true); setError(null)
+    try {
+      const child = await forkJobCheckpoint({ data: { jobId: job.id, childId, commitSha, sourceBaseSha: job.baseSha } })
+      await queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      await navigate({ to: '/jobs/$jobId', params: { jobId: child.id } })
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Fork preparation failed') }
+    finally { setBusy(false) }
+  }
+  return <div className="py-2">
+    <Button size="sm" variant="outline" disabled={busy} onClick={() => void fork()}>
+      {busy ? 'Preparing fork…' : 'Fork checkpoint'}
+    </Button>
+    <p className="mt-1">Creates a separate prepared job. The source may keep running.</p>
+    {error && <p role="alert" className="text-destructive">{error}</p>}
   </div>
 }
 

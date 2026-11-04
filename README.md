@@ -185,9 +185,19 @@ never creates a new point. A generation resume reconciles lost finalization from
 original specialist receipt, and may clear a parent's crash failure only if the
 next specialist is still pending and its prior point is verified. Neither a
 dirty/partially written specialist nor a missing validator proof is retried.
-These are **logical recovery sources** for future branching; no live SQLite
+These are **logical recovery sources** for Studio checkpoint forks; no live SQLite
 graph thread, Pi session, author message or approval is copied or implicitly
-authorized in a second thread.
+authorized in a second thread. The authenticated **Fork checkpoint** action
+allocates a new Thread and clean Git job at the selected SHA, after verifying
+the finalized point, source ownership, toolchain and Git-cache quota. Its
+immutable, digest-pinned continuation bundle carries only approved plan and
+completed specialist evidence. Inherited commits retain their source identity;
+new writers use the child's identity, sessions and budget. An interrupted
+preparation remains unready and cannot start generation. Repeated requests
+with the same child ID and source are idempotent; conflicting IDs or sources
+are rejected. From the prepared child's Job view, review the inherited work,
+edit corrective task guidance, choose a model/budget and start. The inherited
+contract cannot be broadened without an explicit new plan approval.
 
 To exercise cross-process resume, use `--pause-after foundation` (or
 `architecture`, `foundations`, `event`, `interactive`, `composition`, `review`) on
@@ -406,11 +416,12 @@ The internal `startStoryJob` API also accepts a trusted-controller-only
 `pinnedBaseSha` to materialize an exact, already-local commit without moving the
 author/cache checkout or copying another job's drafts. It rejects symbolic refs,
 non-commit objects and attempts to reopen the same job at a different pin.
-This is only the Git allocation primitive for #75: it does **not** verify recovery
-checkpoint eligibility, inherit specialist evidence, or seed graph continuation.
-It is not exposed through the CLI or Studio. A future fork controller must perform
-owner/source/checkpoint/compatibility checks and cache admission before calling it;
-ordinary `job start` retains its clean-current-HEAD requirement.
+The allocator alone never certifies checkpoint eligibility or grants a writer.
+Studio's authenticated checkpoint-fork controller performs source ownership,
+finalized-checkpoint, validator and cache-admission checks before invoking this
+primitive with a controller-owned digest-pinned continuation bundle. Direct CLI
+`job start` does not expose the fork authorization path; its normal clean-current-HEAD
+requirement remains unchanged.
 
 The command prints machine-readable JSON with `jobId`, `storyRoot`,
 `storyRelativePath`, `gitRoot`, `baseSha`, `branch`, `stateDir`, `worktreeRoot`,

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { commitOrigin } from "./recovery-fork-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
@@ -278,6 +279,8 @@ async function publishHead(job: JobStartResult, prior: string, commit: string, w
 }
 function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string) {
   if (!receipt.contentDigest || !receipt.paths ||
+      !git(job, "log", "-1", "--format=%B", commit).split("\n").includes(
+        "NovelTea-Job: " + commitOrigin(job, receipt.workItemId, commit).jobId) ||
       git(job, "rev-parse", commit + "^") !== receipt.expectedHead ||
       !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Event-Design: " + receipt.contentDigest) ||
       !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Work-Item: " + receipt.workItemId + "\n") ||

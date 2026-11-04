@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { commitOrigin } from "./recovery-fork-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
@@ -359,7 +360,8 @@ function verifyCommit(job: JobStartResult, state: Receipt, sha: string) {
   if (!state.paths || !state.digest || git(job, "rev-parse", sha + "^") !== (state.beforeHead ?? state.interactiveHead))
     throw new Error("Composition commit parent is unverified.");
   const message = git(job, "log", "-1", "--format=%B", sha);
-  if (!message.includes("NovelTea-Composition: " + state.digest) ||
+  if (!message.split("\n").includes("NovelTea-Job: " + commitOrigin(job, state.workItemId, sha).jobId) ||
+      !message.includes("NovelTea-Composition: " + state.digest) ||
       !message.includes("NovelTea-Work-Item: " + state.workItemId + "\n") ||
       !message.includes("NovelTea-Plan-Version: " + state.planVersion + "\n"))
     throw new Error("Composition commit provenance mismatch.");
@@ -472,7 +474,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         throw new Error("Interactive commit chain/provenance differs from work item.");
       }
       const lines = git(job, "log", "-1", "--format=%B", sha).split("\n");
-      if (!["NovelTea-Job: " + job.jobId, "NovelTea-Work-Item: " + unit.id,
+      if (!["NovelTea-Job: " + commitOrigin(job, unit.id, unit.commitSha!).jobId, "NovelTea-Work-Item: " + unit.id,
         "NovelTea-Plan-Version: " + source.planVersion, "NovelTea-Interactive: " + unit.digest]
         .every(line => lines.includes(line))) {
         throw new Error("Interactive commit lacks exact historical specialist provenance.");
