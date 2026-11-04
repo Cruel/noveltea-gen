@@ -48,6 +48,22 @@ export function listGenerationEvents(store: StudioDatabase, owner: string, jobId
   return rows.map(({ filesJson, ...row }) => ({ ...row, files: JSON.parse(filesJson) as string[] }))
 }
 
+/** Read the newest bounded page in chronological order. Older events are
+ * addressable by cursor without requiring an unbounded initial response. */
+export function recentGenerationEvents(store: StudioDatabase, owner: string, jobId: string,
+  before?: number): { events: ProgressEvent[]; hasMore: boolean } {
+  if (before !== undefined && (!Number.isSafeInteger(before) || before <= 0))
+    throw new Error('Invalid history cursor')
+  const rows = store.sqlite.prepare(`SELECT id,kind,stage,milestone,files_json AS filesJson,
+    status,created_at AS createdAt FROM generation_events
+    WHERE owner_user_id=? AND job_id=? AND id<? ORDER BY id DESC LIMIT 101`)
+    .all(owner, jobId, before ?? Number.MAX_SAFE_INTEGER) as EventRow[]
+  const hasMore = rows.length > 100
+  return { events: rows.slice(0, 100).reverse().map(({ filesJson, ...row }) => ({
+    ...row, files: JSON.parse(filesJson) as string[],
+  })), hasMore }
+}
+
 /** Filenames are canonical Story-relative paths between committed revisions,
  * not untrusted working-tree output or arbitrary host paths. This does not
  * expose diff contents, validation internals, or private Pi tool transcripts. */

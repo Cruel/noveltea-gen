@@ -14,7 +14,7 @@ import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { fixtureJobRequest } from '../src/lib/fixture-jobs.server'
 import { queueRecord } from '../src/lib/generation-queue.server'
-import { generationEventsRequest, appendGenerationEvent, listGenerationEvents } from '../src/lib/generation-progress.server'
+import { generationEventsRequest, appendGenerationEvent, listGenerationEvents, recentGenerationEvents } from '../src/lib/generation-progress.server'
 import { jobChangesRequest } from '../src/lib/job-changes.server'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { parseGenerationContract } from '../../src/generation'
@@ -255,6 +255,14 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(JSON.stringify(events).includes(root), false, 'no host paths or internal output in progress')
     assert.equal(JSON.stringify(events).includes('tool_calls'), false)
     assert.equal(events.every((event, index) => index === 0 || event.id > events[index - 1]!.id), true)
+    const recent = recentGenerationEvents(store, alice.id, jobId)
+    assert.deepEqual(recent.events.map(event => event.id), events.map(event => event.id))
+    assert.equal(recent.hasMore, false)
+    assert.deepEqual(recentGenerationEvents(store, alice.id, jobId, events.at(-1)!.id).events
+      .map(event => event.id), events.slice(0, -1).map(event => event.id))
+    assert.deepEqual(recentGenerationEvents(store, bob.id, jobId).events, [],
+      'durable history is owner-scoped just like the stream')
+    assert.throws(() => recentGenerationEvents(store, alice.id, jobId, 0), /Invalid history cursor/)
 
     const eventApi = (cookie: string | undefined, cursor?: string) => generationEventsRequest(
       auth, store, new Request(config.baseURL + '/api/jobs/' + jobId + '/events', {
@@ -446,6 +454,19 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       headers: { cookie: aliceCookie },
     }), jobId, config.baseURL)
     assert.equal(conflict.status, 409, 'tampered server thread must fail closed')
+    // Initial history is bounded; older pages do not require replaying every
+    // event over SSE and never include a different user's event records.
+    for (let index = 0; index < 105; index++) appendGenerationEvent(store, alice.id, jobId,
+      { kind: 'working', stage: 'foundation' })
+    const newest = recentGenerationEvents(store, alice.id, jobId)
+    assert.equal(newest.events.length, 100)
+    assert.equal(newest.hasMore, true)
+    assert.deepEqual(newest.events.map(event => event.id),
+      [...new Set(newest.events.map(event => event.id))].sort((left, right) => left - right))
+    const older = recentGenerationEvents(store, alice.id, jobId, newest.events[0]!.id)
+    assert.equal(older.hasMore, false)
+    assert.equal(older.events.length, 10)
+    assert.ok(older.events.at(-1)!.id < newest.events[0]!.id)
   } finally {
     if (worker && worker.exitCode === null && worker.signalCode === null) {
       worker.kill('SIGKILL')

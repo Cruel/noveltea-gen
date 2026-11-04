@@ -9,16 +9,21 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ArrowLeft, CheckCircle2, Circle, Clock3, RefreshCw, Settings2 } from 'lucide-react'
 import { jobQuery, jobControlsQuery } from '../../../lib/jobs.queries'
+import { jobEventsQuery } from '../../../lib/job-events.queries'
+import { useJobEventStream } from '@/hooks/use-job-event-stream'
 import { updateJobControl, type JobOverview, type JobControls, type BudgetLimits } from '../../../lib/jobs.functions'
 import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
-import { GenerationActivity } from './-GenerationActivity'
+import { GenerationActivity, progressDescription } from './-GenerationActivity'
 import { AuthorInteractions } from './-AuthorInteractions'
 import { GitChanges } from './-GitChanges'
 import { PublishDraft } from './-PublishDraft'
 
 export const Route = createFileRoute('/_protected/jobs/$jobId')({
-  loader: ({ context, params }) => context.queryClient.ensureQueryData(jobQuery(params.jobId)),
+  loader: ({ context, params }) => Promise.all([
+    context.queryClient.ensureQueryData(jobQuery(params.jobId)),
+    context.queryClient.ensureQueryData(jobEventsQuery(params.jobId)),
+  ]),
   component: JobDetails,
 })
 
@@ -62,6 +67,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
   })
   const { data: controls, error: controlsError } = useQuery(jobControlsQuery(jobId))
   const [tab, setTab] = useState<JobTab>('overview')
+  const activity = useJobEventStream(jobId, tab === 'activity')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -123,11 +129,22 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
         </div>
       </div>
 
+      {activity.unread > 0 && tab !== 'activity' && activity.latestUpdate &&
+        <div role="status" className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+          <span className="min-w-0 flex-1 break-words">
+            <strong>New activity:</strong> {progressDescription(activity.latestUpdate)}
+            {activity.unread > 1 && <span className="ml-1 text-muted-foreground">(+{activity.unread - 1} more)</span>}
+          </span>
+          <Button variant="outline" size="sm" onClick={() => setTab('activity')}>View activity</Button>
+        </div>}
       <Tabs value={tab} onValueChange={value => setTab(value as JobTab)} className="mt-5 min-w-0">
         <div className="job-tab-scroll">
           <TabsList variant="line" aria-label="Job sections" className="min-w-max">
             <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="activity">Activity</TabsTrigger>
+            <TabsTrigger value="activity">Activity{activity.unread > 0 &&
+              <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground" aria-label={activity.unread + ' new events'}>
+                {activity.unread > 99 ? '99+' : activity.unread}
+              </span>}</TabsTrigger>
             <TabsTrigger value="review">Author review</TabsTrigger>
             <TabsTrigger value="story">Story & changes</TabsTrigger>
             <TabsTrigger value="details"><Settings2 className="size-3.5" /> Details</TabsTrigger>
@@ -141,7 +158,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
           </Card>}
         </TabsContent>
         <TabsContent value="activity" className="job-tab-body">
-          <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />
+          <GenerationActivity jobId={jobId} connection={activity.connection} />
         </TabsContent>
         <TabsContent value="review" className="job-tab-body">
           <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />

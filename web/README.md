@@ -495,7 +495,15 @@ The job page subscribes to owner-authenticated
 as an append-only, monotonically numbered log in Studio SQLite **before**
 being broadcast. `id` and `event: progress` let EventSource replay from its
 `Last-Event-ID` on reconnect; `?after=<numeric-id>` supports manual replay.
-Fresh page loads reconstruct the complete event history from the beginning.
+On a fresh page load, the authenticated Start server function hydrates the
+latest 100 recorded events into TanStack Query; older events can be loaded in
+100-event pages without an unbounded response. The job page owns one SSE
+subscription across all its tabs, resuming after the newest hydrated event ID
+and merging replay or live additions into the same Query cache. Tab changes
+never reset this history or reconnect the stream. Activity shows the cached
+timeline immediately; while another tab is selected, new events appear as an
+unread count and a brief status notification. Relevant transitions invalidate
+job status, execution controls, dashboard data, and pending author decisions.
 Only started/working/verified/finished/interrupted transitions, typed stage or
 Milestone identifiers, and a bounded list of committed Story Markdown paths
 are exposed. Raw LangGraph state, Pi tool calls, prompt data, transcripts,
