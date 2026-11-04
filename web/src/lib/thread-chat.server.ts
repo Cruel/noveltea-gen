@@ -322,6 +322,10 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
   store.sqlite.transaction(() => {
     const phase = queueRecord(store, jobId)?.phase
     if (!['finished', 'interrupted'].includes(phase ?? '')) return
+    // Publish the initial user request before its assistant settlement. Agent
+    // workers can settle before anyone opens chat; an untouched Thread must
+    // never present the assistant response ahead of the author's first prompt.
+    seedExistingMessages(store, owner, record.threadId)
     store.sqlite.prepare(`UPDATE story_thread_messages SET phase=?,
       status=CASE WHEN ?='finished' THEN 'delivered' ELSE status END,
       verified_commit_sha=CASE WHEN ? IS NOT NULL THEN ? ELSE verified_commit_sha END

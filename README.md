@@ -1628,6 +1628,38 @@ interrupted writer. Rootless sandboxes are disposed after the generation run,
 including waits for human review. Explicit retry/resume, scheduling and recovery
 controls belong to #67, and real provider-to-publication certification to #71.
 
+### Full-Story generation from a Thread prompt (#83)
+
+Open a connected Story's **Conversations** page, choose a Conversation and
+**New Thread**, and describe the Story in ordinary language. Studio interprets
+the prompt into a canonical, inspectable full-Story **composition** contract:
+the complete author brief is retained as constraints, the production envelope
+has an explicit visual-novel presentation, and the planned stages are Creative
+Direction, architecture, Character/World foundations, Events, interactive work,
+composition and review. Milestone-specific work is discovered from verified
+architecture later; the preview is not evidence that any stage has been completed.
+The same validator, generation owner and queued LangGraph execution remain in
+control of all writes and protected decisions.
+
+A clear request with a connected default Pi model starts directly. Outline-only,
+question-like or materially undecided prompts display their interpretation and
+require the author to approve the full-Story plan; partial/focused scopes instead
+use the existing explicit configuration path. **Review interpreted plan** shows
+the canonical contract and pinned Story revision. Advanced settings optionally
+adjust the production envelope, constraints, model and per-run budgets. With no
+connected model, execution does not silently fall back to a fixture: authors
+must explicitly select a **fixture-only test run**, whose output is not editorial
+completion. The first run is placed in the selected Conversation as a root
+Thread and its immutable prompt, subsequent statuses, and verified evidence
+remain visible on reconnect. Initial requests are idempotently pinned to their
+job UUID; edited payloads cannot repurpose a saved generation run.
+
+The credential-free Story prompt, Studio/agent fixture, owner-isolation and
+chat-ordering tests run through `pnpm --filter @noveltea/studio test`. The opt-in
+real Pi rootless sandbox smoke test (`NT_TEST_WEB_REAL_PI=1`) also exercises a
+natural prompt-derived contract; it requires the explicit credentials, native
+CLI and controller prerequisites documented by that test.
+
 ### Web author questions and approval interrupts (#65)
 
 The job details page shows saved author-update questions and protected approval

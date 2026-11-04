@@ -17,6 +17,7 @@ import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { listGenerationEvents } from '../src/lib/generation-progress.server'
 import { queueRecord } from '../src/lib/generation-queue.server'
+import { interpretNaturalStoryPrompt } from '../src/lib/natural-story-plan'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
@@ -134,9 +135,9 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     const selected = { provider, id: selectedModel.id }
     console.log('Live Pi certification model:', selected.provider + '/' + selected.id)
     await assertUserPiSelection(store, user.id, selected)
-    const request = { task: 'Write a concise mystery visual-novel foundation about an archivist on a stranded train. You can decide unspecified details.',
-      contract: { scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
-        constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } } }
+    const { task, contract } = interpretNaturalStoryPrompt(
+      'Write a concise mystery visual novel about an archivist on a stranded train. You can decide unspecified details.')
+    const request = { task, contract }
     store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=? WHERE id=?')
       // Two specialist steps cannot complete the skill-read + authoring +
       // native-validation sequence with a real model. Keep a bounded budget

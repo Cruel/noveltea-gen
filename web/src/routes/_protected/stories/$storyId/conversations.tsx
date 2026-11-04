@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ThreadList } from '@/components/thread-list'
 import { ThreadChat } from '@/components/thread-chat'
+import { NaturalStoryComposer } from '@/components/natural-story-composer'
 import { storyNavigationQuery, storyNavigationKey } from '@/lib/threads.queries'
 import { addConversation, changeThreadArchive, setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
 import { selectNavigationThreads } from '@/lib/thread-navigation'
@@ -63,6 +64,7 @@ function StoryConversations() {
       ? 8000 : 30000,
   })
   const [creating, setCreating] = useState(false)
+  const [creatingThread, setCreatingThread] = useState(false)
   const [changingArchive, setChangingArchive] = useState<string | null>(null)
   const [editing, setEditing] = useState<{ kind: 'conversation' | 'thread'; id: string } | null>(null)
   const [issue, setIssue] = useState<string | null>(null)
@@ -188,6 +190,20 @@ function StoryConversations() {
             Archived Threads retain their job history and verified checkpoints. Archiving never pauses execution.
             Active ancestors are displayed for context.
           </p>}
+          {!archivedView && <div className="mb-3 flex items-center justify-end">
+            <Button type="button" variant="outline" size="sm" aria-expanded={creatingThread}
+              onClick={() => setCreatingThread(value => !value)}>
+              <Plus className="size-4" /> New Thread
+            </Button>
+          </div>}
+          {!archivedView && (creatingThread || !conversation.threads.length) &&
+            <NaturalStoryComposer key={conversation.id} conversationId={conversation.id}
+              onStarted={async (threadId) => {
+                setCreatingThread(false)
+                await refresh()
+                await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
+                  search: { conversation: conversation.id, thread: threadId } })
+              }} />}
           {editing?.kind === 'thread' ? <TitleEditor key={editing.id}
             title={conversation.threads.find(thread => thread.id === editing.id)?.title ?? ''}
             label="Thread title" onSubmit={rename} onCancel={() => setEditing(null)} /> : null}
@@ -207,7 +223,7 @@ function StoryConversations() {
               ? 'No archived Threads in this Conversation.'
               : conversation.threads.length
                 ? 'No active Threads. Open Archived to inspect or restore a Thread.'
-                : 'No Threads yet. The first generation run will create a root Thread in this Story.'}</p>}
+                : 'Describe your Story above to start its first Thread.'}</p>}
           {selectedThread && <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />}
         </> : <p className="text-sm text-muted-foreground">
           {data ? 'Create a Conversation to get started.' : 'Loading Conversations…'}
