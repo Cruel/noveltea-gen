@@ -1,7 +1,16 @@
+import { Button } from '@/components/ui/button'
+import { NativeSelect } from '@/components/ui/native-select'
 import { createFileRoute } from '@tanstack/react-router'
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { settingsQuery } from '../../lib/settings.queries'
+import { beginGitConnection, disconnectGitConnection, rebindGitRepository,
+  setDefaultModel, unlinkLogin as unlinkLoginFn } from '../../lib/settings.functions'
 import { authClient } from '../../lib/auth-client'
 import { PiConnections } from './jobs/-PiConnections'
+import { getPiCatalog } from '../../lib/pi.functions'
 
 type Model = { provider: string; id: string; reasoning: boolean }
 type Selection = { provider: string; id: string; thinking?: 'low' | 'medium' | 'high' } | null
@@ -13,17 +22,12 @@ type Settings = {
   gitConnections: Connection[]
   repositories: Array<{ id: string; provider: 'github' | 'gitlab'; name: string; connectionId: string | null }>
 }
-export const Route = createFileRoute('/_protected/settings')({ component: SettingsPage })
+export const Route = createFileRoute('/_protected/settings')({
+  loader: ({ context }) => context.queryClient.ensureQueryData(settingsQuery()),
+  component: SettingsPage,
+})
 
 const names = { github: 'GitHub', gitlab: 'GitLab.com' }
-async function request<T>(path: string, method?: 'POST' | 'DELETE' | 'PUT', body?: object): Promise<T> {
-  const result = await fetch(path, method ? {
-    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  } : { cache: 'no-store' })
-  const data = await result.json() as T & { error?: string }
-  if (!result.ok) throw new Error(data.error || 'Request failed')
-  return data
-}
 function noticeFor(query: URLSearchParams) {
   if (query.has('integration_connected')) return 'Repository identity connected successfully.'
   const errors: Record<string, string> = {
@@ -40,9 +44,13 @@ function noticeFor(query: URLSearchParams) {
   return null
 }
 function SettingsPage() {
-  const [settings, setSettings] = useState<Settings | null>(null)
-  const [models, setModels] = useState<Model[]>([])
-  const [modelsError, setModelsError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+  const { data: settings } = useSuspenseQuery(settingsQuery())
+  const modelsQuery = useQuery({
+    queryKey: ['pi-models'] as const,
+    queryFn: async () => JSON.parse(await getPiCatalog()) as { models: Model[] },
+  })
+  const models = modelsQuery.data?.models ?? []
   const [selected, setSelected] = useState('')
   const [thinking, setThinking] = useState('')
   const [busy, setBusy] = useState(false)
@@ -51,23 +59,13 @@ function SettingsPage() {
   const [oauthNotice, setOauthNotice] = useState<string | null>(null)
   const [bindings, setBindings] = useState<Record<string, string>>({})
   useEffect(() => { setOauthNotice(noticeFor(new URLSearchParams(window.location.search))) }, [])
-  const refresh = useCallback(async () => {
-    const [saved, catalog] = await Promise.all([
-      request<Settings>('/api/settings'),
-      request<{ models: Model[] }>('/api/pi/models').then(result => {
-        setModelsError(null)
-        return result
-      }).catch((error: unknown) => {
-        setModelsError(error instanceof Error ? error.message : 'Could not load the Pi model catalog.')
-        return { models: [] as Model[] }
-      }),
-    ])
-    setSettings(saved)
-    setModels(catalog.models)
-    setSelected(saved.defaultModel ? saved.defaultModel.provider + '/' + saved.defaultModel.id : '')
-    setThinking(saved.defaultModel?.thinking ?? '')
-  }, [])
-  useEffect(() => { void refresh().catch(e => setError(String(e))) }, [refresh])
+  useEffect(() => {
+    setSelected(settings.defaultModel ? settings.defaultModel.provider + '/' + settings.defaultModel.id : '')
+    setThinking(settings.defaultModel?.thinking ?? '')
+  }, [settings.defaultModel])
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['settings'] })
+  }
   const run = async (operation: () => Promise<void>) => {
     setBusy(true); setError(null); setNotice(null)
     try { await operation() } catch (e) {
@@ -77,8 +75,8 @@ function SettingsPage() {
   const save = () => run(async () => {
     const model = models.find(item => item.provider + '/' + item.id === selected)
     if (selected && !model) throw new Error('The default model is not available.')
-    await request('/api/settings', 'PUT', { defaultModel: model
-      ? { provider: model.provider, id: model.id, ...(thinking ? { thinking } : {}) } : null })
+    await setDefaultModel({ data: model
+      ? { provider: model.provider, id: model.id, ...(thinking ? { thinking: thinking as 'low' | 'medium' | 'high' } : {}) } : null })
     await refresh()
     setNotice('Default model saved. Existing job settings are unchanged.')
   })
@@ -90,23 +88,23 @@ function SettingsPage() {
   })
   const unlinkLogin = (provider: 'github' | 'gitlab', accountRecordId: string) => run(async () => {
     if (!window.confirm('Remove this Studio login method? Other repository connections are unaffected.')) return
-    await request('/api/settings', 'DELETE', { provider, accountRecordId })
+    await unlinkLoginFn({ data: { provider, accountRecordId } })
     await refresh()
     setNotice('Login method removed.')
   })
   const connectGit = (provider: 'github' | 'gitlab') => run(async () => {
-    const result = await request<{ authorizationUrl: string }>('/api/integrations/git', 'POST', { provider })
+    const result = await beginGitConnection({ data: provider })
     window.location.assign(result.authorizationUrl)
   })
   const rebindRepository = (repositoryId: string, connectionId: string) => run(async () => {
-    await request('/api/integrations/git', 'PUT', { repositoryId, connectionId })
+    await rebindGitRepository({ data: { repositoryId, connectionId } })
     await refresh()
     setNotice('Repository access verified and bound to the selected Git identity.')
   })
   const disconnectGit = (entry: Connection) => run(async () => {
     if (!window.confirm('Disconnect ' + entry.provider + '/' + entry.login +
       '? Repositories and jobs are kept, but remote operations using this identity will stop until it is reconnected.')) return
-    await request('/api/integrations/git', 'DELETE', { connectionId: entry.id })
+    await disconnectGitConnection({ data: entry.id })
     await refresh()
     setNotice('Repository connection disconnected. Stories and jobs were preserved.')
   })
@@ -116,41 +114,40 @@ function SettingsPage() {
       <nav aria-label="Main navigation"><a href="/dashboard">Dashboard</a><a href="/settings" aria-current="page">Settings</a></nav>
     </header>
     <p>Preferences and connections are scoped to your Studio user, not shared with other users.</p>
-    {error && <p role="alert" className="error">{error}</p>}
-    {(notice || oauthNotice) && <p role="status">{notice || oauthNotice}</p>}
-    {!settings && !error && <p>Loading settings…</p>}
-    {settings && <>
-      <section id="ai-models">
-        <h2>AI &amp; models</h2>
+    {error && <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>}
+    {(notice || oauthNotice) && <Alert role="status"><AlertDescription>{notice || oauthNotice}</AlertDescription></Alert>}
+    <>
+      <Card id="ai-models" className="mt-6">
+        <CardHeader><CardTitle>AI &amp; models</CardTitle></CardHeader><CardContent>
         <p>Connect personal model credentials and choose the defaults for new generation jobs.</p>
-        {modelsError && <p role="alert" className="error">Could not load models: {modelsError}</p>}
+        {modelsQuery.error && <p role="alert" className="error">Could not load models: {modelsQuery.error.message}</p>}
         <PiConnections onUpdate={async () => {
-          const catalog = await request<{ models: Model[] }>('/api/pi/models')
-          setModels(catalog.models)
+          await queryClient.invalidateQueries({ queryKey: ['pi-models'] })
         }} />
         <div className="generation-controls">
           <label>Default model
-            <select value={selected} disabled={busy} onChange={e => { setSelected(e.target.value); setThinking('') }}>
+            <NativeSelect value={selected} disabled={busy} onChange={e => { setSelected(e.target.value); setThinking('') }}>
               <option value="">No default (choose for each job)</option>
               {selected && !models.some(model => model.provider + '/' + model.id === selected) &&
                 <option value={selected}>{selected} (disconnected)</option>}
               {models.map(model => <option key={model.provider + '/' + model.id} value={model.provider + '/' + model.id}>
                 {model.provider} / {model.id}
               </option>)}
-            </select>
+            </NativeSelect>
           </label>
           <label>Default reasoning
-            <select value={thinking} disabled={busy || !models.some(m => m.provider + '/' + m.id === selected && m.reasoning)}
+            <NativeSelect value={thinking} disabled={busy || !models.some(m => m.provider + '/' + m.id === selected && m.reasoning)}
               onChange={e => setThinking(e.target.value)}>
               <option value="">Provider default</option>
               <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
-            </select>
+            </NativeSelect>
           </label>
         </div>
-        <button type="button" disabled={busy} onClick={() => void save()}>Save model defaults</button>
-      </section>
-      <section id="integrations">
-        <h2>Git integrations</h2>
+        <Button type="button" disabled={busy} onClick={() => void save()}>Save model defaults</Button>
+        </CardContent>
+      </Card>
+      <Card id="integrations" className="mt-6">
+        <CardHeader><CardTitle>Git integrations</CardTitle></CardHeader><CardContent>
         <p>Repository authorization is independent of login. You can connect multiple accounts from either provider,
           even an identity used to sign into another Studio user.</p>
         <ul>{settings.gitConnections.map(entry => <li key={entry.id} className="settings-connection">
@@ -158,14 +155,14 @@ function SettingsPage() {
             <small>{entry.status === 'connected' ? 'Connected' : entry.status === 'reauthorize'
               ? 'Reauthorization required' : 'Disconnected'}</small></div>
           {entry.status === 'connected'
-            ? <button type="button" disabled={busy} onClick={() => void disconnectGit(entry)}>Disconnect</button>
-            : <button type="button" disabled={busy} onClick={() => void connectGit(entry.provider)}>Reconnect</button>}
+            ? <Button type="button" disabled={busy} onClick={() => void disconnectGit(entry)}>Disconnect</Button>
+            : <Button type="button" disabled={busy} onClick={() => void connectGit(entry.provider)}>Reconnect</Button>}
         </li>)}</ul>
         {!settings.gitConnections.length && <p>No independent Git repository connections yet.
           Existing repositories may still use their historical login-linked access until rebound.</p>}
         <div className="actions settings-actions">
-          <button type="button" disabled={busy} onClick={() => void connectGit('github')}>Connect GitHub account</button>
-          <button type="button" disabled={busy} onClick={() => void connectGit('gitlab')}>Connect GitLab account</button>
+          <Button type="button" disabled={busy} onClick={() => void connectGit('github')}>Connect GitHub account</Button>
+          <Button type="button" disabled={busy} onClick={() => void connectGit('gitlab')}>Connect GitLab account</Button>
         </div>
         {settings.repositories.length > 0 && <>
           <h3>Repository access bindings</h3>
@@ -176,37 +173,39 @@ function SettingsPage() {
             return <li className="settings-connection" key={repo.id}>
               <div><strong>{repo.name}</strong><small>{names[repo.provider]}{repo.connectionId ? '' : ' · Historical login-linked access'}</small></div>
               <div className="actions settings-actions">
-                <select aria-label={'Git identity for ' + repo.name} value={selected} disabled={busy}
+                <NativeSelect aria-label={'Git identity for ' + repo.name} value={selected} disabled={busy}
                   onChange={event => setBindings(previous => ({ ...previous, [repo.id]: event.target.value }))}>
                   <option value="" disabled>Choose a connection</option>
                   {settings.gitConnections.filter(connection => connection.provider === repo.provider)
                     .map(connection => <option key={connection.id} value={connection.id} disabled={connection.status !== 'connected'}>
                       {connection.login}{connection.status === 'connected' ? '' : ' (reconnect first)'}
                     </option>)}
-                </select>
-                <button type="button" disabled={busy || !selected || selected === repo.connectionId ||
+                </NativeSelect>
+                <Button type="button" disabled={busy || !selected || selected === repo.connectionId ||
                   !available.some(connection => connection.id === selected)}
-                  onClick={() => void rebindRepository(repo.id, selected)}>Save binding</button>
+                  onClick={() => void rebindRepository(repo.id, selected)}>Save binding</Button>
               </div>
             </li>
           })}</ul>
         </>}
-      </section>
-      <section id="account">
-        <h2>Account · login methods</h2>
+        </CardContent>
+      </Card>
+      <Card id="account" className="mt-6">
+        <CardHeader><CardTitle>Account · login methods</CardTitle></CardHeader><CardContent>
         <p>These identities can sign into this Studio user. Linking an identity already used by another Studio
           user is not permitted. Adding a repository connection does not add a login method.</p>
         <ul>{settings.loginMethods.map(login => <li key={login.provider + login.accountId} className="settings-connection">
           <div><strong>{names[login.provider]}</strong><small>Account ID: {login.accountId}</small></div>
-          <button type="button" disabled={busy || settings.loginMethods.length < 2}
+          <Button type="button" disabled={busy || settings.loginMethods.length < 2}
             title={settings.loginMethods.length < 2 ? 'Keep at least one login method' : undefined}
-            onClick={() => void unlinkLogin(login.provider, login.id)}>Remove login</button>
+            onClick={() => void unlinkLogin(login.provider, login.id)}>Remove login</Button>
         </li>)}</ul>
         <div className="actions settings-actions">
-          {(['github', 'gitlab'] as const).map(provider => <button key={provider} type="button"
-            disabled={busy} onClick={() => void linkLogin(provider)}>Link {names[provider]} login</button>)}
+          {(['github', 'gitlab'] as const).map(provider => <Button key={provider} type="button"
+            disabled={busy} onClick={() => void linkLogin(provider)}>Link {names[provider]} login</Button>)}
         </div>
-      </section>
-    </>}
+        </CardContent>
+      </Card>
+    </>
   </main>
 }

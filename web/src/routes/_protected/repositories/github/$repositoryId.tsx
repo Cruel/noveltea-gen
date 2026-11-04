@@ -1,6 +1,8 @@
+import { Button } from '@/components/ui/button'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { NewStoryOnboarding } from '../-NewStoryOnboarding'
+import { readRepositoryStories, selectRepositoryStory, prepareRepositoryJob } from '../../../../lib/story-workflows.functions'
 
 type Listing = { commit: string; directory: string; isStory: boolean; directories: Array<{ name: string; path: string }> }
 type Discovery = { commit: string; stories: string[] }
@@ -9,15 +11,6 @@ type Selection = { story: { id: string; title: string; directory: string; commit
 export const Route = createFileRoute('/_protected/repositories/github/$repositoryId')({
   component: GithubStories,
 })
-
-async function api<T>(path: string, body?: object): Promise<T> {
-  const response = await fetch(path, body ? {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  } : { cache: 'no-store' })
-  const result = await response.json() as T & { error?: string }
-  if (!response.ok) throw new Error(result.error || 'GitHub Story request failed')
-  return result
-}
 
 function GithubStories() {
   const { repositoryId } = Route.useParams()
@@ -36,9 +29,9 @@ function GithubStories() {
   useEffect(() => {
     let cancelled = false
     setListing(null); setError(null); setSelection(null); setJob(null); setPendingJobId(null)
-    const params = new URLSearchParams({ repositoryId, directory })
-    if (commit) params.set('commit', commit)
-    void api<Listing>('/api/github/stories?' + params).then(result => {
+    void readRepositoryStories({ data: { provider: 'github', repositoryId, directory,
+      ...(commit ? { commit } : {}) } }).then(text => {
+      const result = JSON.parse(text) as Listing
       if (cancelled) return
       setCommit(result.commit); setListing(result)
     }).catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Unable to browse directory') })
@@ -48,8 +41,8 @@ function GithubStories() {
   useEffect(() => {
     if (!commit) return
     let cancelled = false
-    void api<Discovery>('/api/github/stories?' + new URLSearchParams({ repositoryId, commit, mode: 'discover' }))
-      .then(result => { if (!cancelled) setDiscovered(result.stories) })
+    void readRepositoryStories({ data: { provider: 'github', repositoryId, commit, mode: 'discover' } })
+      .then(text => { if (!cancelled) setDiscovered((JSON.parse(text) as Discovery).stories) })
       .catch(e => { if (!cancelled) setDiscoveryError(e instanceof Error ? e.message : 'Discovery incomplete') })
     return () => { cancelled = true }
   }, [repositoryId, commit])
@@ -60,7 +53,9 @@ function GithubStories() {
     if (!commit || !listing?.isStory) return
     setBusy(true); setError(null); setSelection(null); setJob(null); setPendingJobId(null)
     try {
-      const result = await api<Selection>('/api/github/stories', { repositoryId, directory, commit })
+      const result = JSON.parse(await selectRepositoryStory({ data: {
+        provider: 'github', json: JSON.stringify({ repositoryId, directory, commit }),
+      } })) as Selection
       setSelection(result)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Story preflight failed')
@@ -72,9 +67,9 @@ function GithubStories() {
     const jobId = pendingJobId ?? crypto.randomUUID()
     setPendingJobId(jobId); setBusy(true); setError(null)
     try {
-      const result = await api<{ job: { id: string; baseSha: string } }>('/api/github/jobs', {
-        storyId: selection.story.id, jobId, commit: selection.story.commit,
-      })
+      const result = JSON.parse(await prepareRepositoryJob({ data: { provider: 'github',
+        json: JSON.stringify({ storyId: selection.story.id, jobId, commit: selection.story.commit }),
+      } })) as { job: { id: string; baseSha: string } }
       setJob(result.job)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to acquire the selected Story') }
     finally { setBusy(false) }
@@ -88,27 +83,27 @@ function GithubStories() {
       <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
     <p>Browse the repository at a pinned Git commit. Only the selected Story's Git blobs are counted; unrelated game assets are not downloaded.</p>
     {commit && <p><strong>Commit:</strong> <code>{commit}</code>{' '}
-      <button type="button" disabled={busy} onClick={() => { setCommit(''); setDiscovered(null); setDiscoveryError(null); setDirectory('') }}>Refresh HEAD</button></p>}
+      <Button type="button" disabled={busy} onClick={() => { setCommit(''); setDiscovered(null); setDiscoveryError(null); setDirectory('') }}>Refresh HEAD</Button></p>}
     {error && <p role="alert" className="error">{error}</p>}
     <section>
       <h2>Directory browser</h2>
       <p>Current path: <code>/{directory}</code></p>
-      {directory && <button type="button" onClick={() => open(directory.split('/').slice(0, -1).join('/'))}>Up one directory</button>}
+      {directory && <Button type="button" onClick={() => open(directory.split('/').slice(0, -1).join('/'))}>Up one directory</Button>}
       {!listing && !error && <p>Loading directory…</p>}
       {listing && <ul>{listing.directories.map(entry =>
-        <li key={entry.path}><button type="button" onClick={() => open(entry.path)}>{entry.name}/</button></li>
+        <li key={entry.path}><Button type="button" onClick={() => open(entry.path)}>{entry.name}/</Button></li>
       )}</ul>}
       {listing && !listing.directories.length && <p>No child directories.</p>}
       {listing?.isStory && <div>
         <p>Canonical Story Markdown detected here. The 100 MB check must pass before the Story is registered.</p>
-        <button type="button" disabled={busy} onClick={() => void select()}>{busy ? 'Verifying…' : 'Verify size and add Story'}</button>
+        <Button type="button" disabled={busy} onClick={() => void select()}>{busy ? 'Verifying…' : 'Verify size and add Story'}</Button>
       </div>}
       {selection && <div><p role="status">Added <strong>{selection.story.title}</strong> at commit <code>{selection.story.commit}</code>.
         {' '}{selection.sizeBytes.toLocaleString()} / {selection.limitBytes.toLocaleString()} bytes ({selection.blobCount} Git blobs).
       </p>
-        <button type="button" disabled={busy || !!job} onClick={() => void createJob()}>
+        <Button type="button" disabled={busy || !!job} onClick={() => void createJob()}>
           {busy ? 'Preparing sparse checkout…' : 'Create isolated job worktree'}
-        </button>
+        </Button>
         {job && <p role="status">Job <code>{job.id}</code> is prepared at base <code>{job.baseSha}</code>.
           {' '}<a href={'/jobs/' + job.id}>Open job and start fixture generation</a>.</p>}
       </div>}
@@ -122,7 +117,7 @@ function GithubStories() {
       {discoveryError && <p role="status">{discoveryError} You can still browse directories manually.</p>}
       {discovered === null && !discoveryError && <p>Scanning Git tree metadata…</p>}
       {discovered && (discovered.length
-        ? <ul>{discovered.map(path => <li key={path || '/'}><button type="button" onClick={() => open(path)}>{'/' + path}</button></li>)}</ul>
+        ? <ul>{discovered.map(path => <li key={path || '/'}><Button type="button" onClick={() => open(path)}>{'/' + path}</Button></li>)}</ul>
         : <p>No Story records detected at this commit. Browse manually if you expect a Story in a large monorepo.</p>)}
     </section>
   </main>

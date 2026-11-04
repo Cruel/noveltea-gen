@@ -1,5 +1,10 @@
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { jobQuery, jobControlsQuery } from '../../../lib/jobs.queries'
+import { updateJobControl } from '../../../lib/jobs.functions'
 import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity } from './-GenerationActivity'
@@ -18,14 +23,10 @@ type Job = {
     candidateDigest: string | null; guidance: string
   } | null
 }
-export const Route = createFileRoute('/_protected/jobs/$jobId')({ component: JobDetails })
-
-async function load(jobId: string): Promise<Job> {
-  const response = await fetch('/api/jobs/' + encodeURIComponent(jobId), { cache: 'no-store' })
-  const data = await response.json() as { job?: Job; error?: string }
-  if (!response.ok || !data.job) throw new Error(data.error || 'Could not inspect job')
-  return data.job
-}
+export const Route = createFileRoute('/_protected/jobs/$jobId')({
+  loader: ({ context, params }) => context.queryClient.ensureQueryData(jobQuery(params.jobId)),
+  component: JobDetails,
+})
 function JobDetails() {
   const { jobId } = Route.useParams()
   return <JobDetailsForId key={jobId} jobId={jobId} />
@@ -50,12 +51,7 @@ function BudgetEditor({ jobId, limits, onChanged }: {
       }
       if (!Object.keys(next).length || Object.values(next).some(v => !Number.isFinite(v) || v! < 0))
         throw new Error('Supply an increased budget limit.')
-      const response = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/control', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'budget', limits: next }),
-      })
-      const result = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(result.error || 'Budget increase failed')
+      await updateJobControl({ data: { jobId, action: 'budget', limits: next } })
       await onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Budget increase unavailable') }
     finally { setSaving(false) }
@@ -64,66 +60,48 @@ function BudgetEditor({ jobId, limits, onChanged }: {
     <h3>Increase Pi budgets</h3>
     <p>Limits can only increase. Existing usage is retained. Save before resuming a budget-stopped job.</p>
     <div className="generation-controls">
-      <label>Steps <input type="number" min={0} max={1000000} disabled={saving}
+      <label>Steps <Input type="number" min={0} max={1000000} disabled={saving}
         value={steps} onChange={e => setSteps(e.target.value)} /></label>
-      <label>Model calls <input type="number" min={0} max={1000000} disabled={saving}
+      <label>Model calls <Input type="number" min={0} max={1000000} disabled={saving}
         value={calls} onChange={e => setCalls(e.target.value)} /></label>
-      <label>Reported cost (USD) <input type="number" min={0} max={1000000} step="0.01"
+      <label>Reported cost (USD) <Input type="number" min={0} max={1000000} step="0.01"
         disabled={saving} value={cost} onChange={e => setCost(e.target.value)} /></label>
     </div>
     {error && <p role="alert">{error}</p>}
-    <button type="button" disabled={saving} onClick={() => void save()}>
+    <Button type="button" disabled={saving} onClick={() => void save()}>
       {saving ? 'Saving…' : 'Increase budgets'}
-    </button>
+    </Button>
   </div>
 }
 function JobDetailsForId({ jobId }: { jobId: string }) {
-  const [job, setJob] = useState<Job | null>(null)
-  const [controls, setControls] = useState<{ control: string; queue: string | null;
-    limits: BudgetLimits; budget: { steps: number; modelCalls: number; costUsd: number; pause?: { reason: string } } } | null>(null)
+  const queryClient = useQueryClient()
+  const { data: job, error: jobError } = useQuery(jobQuery(jobId))
+  const { data: controls } = useQuery(jobControlsQuery(jobId))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const refresh = async () => {
-    try {
-      const [saved, controlResponse] = await Promise.all([
-        load(jobId), fetch('/api/jobs/' + encodeURIComponent(jobId) + '/control', { cache: 'no-store' }),
-      ])
-      setJob(saved)
-      if (controlResponse.ok) setControls(await controlResponse.json())
-      setError(null)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to inspect job') }
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['job', jobId] }),
+      queryClient.invalidateQueries({ queryKey: ['job-controls', jobId] }),
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    ])
   }
   const act = async (action: 'pause' | 'resume' | 'cancel' | 'retry') => {
     setBusy(true)
     try {
-      const response = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/control', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action }),
-      })
-      const result = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(result.error || 'Control transition failed')
+      await updateJobControl({ data: { jobId, action } })
       await refresh()
     } catch (e) { setError(e instanceof Error ? e.message : 'Control transition unavailable') }
     finally { setBusy(false) }
   }
-  useEffect(() => {
-    let cancelled = false
-    void Promise.all([load(jobId), fetch('/api/jobs/' + encodeURIComponent(jobId) + '/control', { cache: 'no-store' })])
-      .then(async ([data, response]) => {
-        const control = response.ok ? await response.json() as typeof controls : null
-        if (!cancelled) { setJob(data); setControls(control); setError(null) }
-      }).catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Unable to inspect job') })
-    return () => { cancelled = true }
-  }, [jobId])
-
   return <main className="page">
     <header><div><p className="eyebrow">NovelTea</p><h1>Generation job</h1></div>
       <nav><a href="/dashboard">Dashboard</a><a href="/settings">Settings</a></nav></header>
     <p>Job <code>{jobId}</code>. Generation runs through the same checkpointed Story graph,
       using either deterministic fixtures or the selected, sandboxed Pi model.
       Refresh or reconnect without restarting a writer.</p>
-    {error && <p role="alert" className="error">{error}</p>}
-    {!job && !error && <p>Loading job…</p>}
+    {(error || jobError) && <p role="alert" className="error">{error || jobError?.message}</p>}
+    {!job && !error && !jobError && <p>Loading job…</p>}
     {job && <>
       <section>
         <h2>{job.title}</h2>
@@ -162,7 +140,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
         </div>}
         {job.completedStages.length > 0 && <ul>{job.completedStages.map((stage, index) =>
           <li key={index}>{stage.stage}: {stage.status}</li>)}</ul>}
-        <button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Refresh saved state</button>
+        <Button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Refresh saved state</Button>
       </section>
       <section aria-label="Job controls">
         <h2>Execution controls</h2>
@@ -176,15 +154,15 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
           <BudgetEditor key={JSON.stringify(controls.limits)} jobId={jobId}
             limits={controls.limits} onChanged={refresh} />}
         <div className="generation-actions">
-          <button type="button" disabled={busy || !['queued', 'running'].includes(job.status)}
-            onClick={() => void act('pause')}>Pause</button>
-          <button type="button" disabled={busy || job.status !== 'paused' || !job.threadId}
-            onClick={() => void act('resume')}>Resume</button>
-          <button type="button" disabled={busy || !['queued', 'running', 'paused', 'prepared', 'blocked'].includes(job.status)}
-            onClick={() => void act('cancel')}>Cancel</button>
-          <button type="button" disabled={busy || job.status !== 'interrupted'}
-            onClick={() => void act('retry')}>Retry after inspection</button>
-          <button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Inspect</button>
+          <Button type="button" disabled={busy || !['queued', 'running'].includes(job.status)}
+            onClick={() => void act('pause')}>Pause</Button>
+          <Button type="button" disabled={busy || job.status !== 'paused' || !job.threadId}
+            onClick={() => void act('resume')}>Resume</Button>
+          <Button type="button" disabled={busy || !['queued', 'running', 'paused', 'prepared', 'blocked'].includes(job.status)}
+            onClick={() => void act('cancel')}>Cancel</Button>
+          <Button type="button" disabled={busy || job.status !== 'interrupted'}
+            onClick={() => void act('retry')}>Retry after inspection</Button>
+          <Button type="button" disabled={busy} onClick={() => { setBusy(true); void refresh().finally(() => setBusy(false)) }}>Inspect</Button>
         </div>
       </section>
       <GenerationActivity jobId={jobId} onChanged={() => void refresh()} />

@@ -1,4 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { NativeSelect } from '@/components/ui/native-select'
+import { Input } from '@/components/ui/input'
+import { useEffect, useRef, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { getPiCatalog, mutatePiCredentials } from '../../../lib/pi.functions'
 
 type Connection = { providerId: string; type: 'api_key' | 'oauth' }
 type Prompt = { id: string; type: 'text' | 'secret' | 'select' | 'manual_code';
@@ -27,7 +32,15 @@ function safeVerificationLink(value: string): string | undefined {
 }
 
 export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
-  const [catalog, setCatalog] = useState<Catalog | null>(null)
+  const queryClient = useQueryClient()
+  const catalogQuery = useQuery({
+    queryKey: ['pi-models'] as const,
+    queryFn: async () => JSON.parse(await getPiCatalog()) as Catalog,
+    refetchInterval: query => ['starting', 'pending'].includes((query.state.data as Catalog | undefined)?.oauth?.status ?? '')
+      ? 1000 : false,
+  })
+  const catalog = catalogQuery.data ?? null
+  const previousOauthStatus = useRef<string | null>(null)
   const [provider, setProvider] = useState('openai')
   const [oauthProvider, setOauthProvider] = useState('github-copilot')
   const [secret, setSecret] = useState('')
@@ -35,36 +48,18 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const refresh = useCallback(async () => {
-    const response = await fetch('/api/pi/models', { cache: 'no-store' })
-    const body = await response.json() as Catalog
-    if (!response.ok) throw new Error(body.error || 'Pi providers are unavailable')
-    setCatalog(body)
-    return body
-  }, [])
   useEffect(() => {
-    void refresh().catch(e => setError(e instanceof Error ? e.message : 'Pi unavailable'))
-  }, [refresh])
-  useEffect(() => {
-    if (!catalog?.oauth || !['starting', 'pending'].includes(catalog.oauth.status)) return
-    const interval = setInterval(() => {
-      void refresh().then(current => {
-        if (current.oauth?.status === 'connected') void onUpdate()
-      }).catch(e => setError(e instanceof Error ? e.message : 'Pi unavailable'))
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [catalog?.oauth?.status, refresh, onUpdate])
+    const status = catalog?.oauth?.status ?? null
+    if (status === 'connected' && previousOauthStatus.current !== 'connected') void onUpdate()
+    previousOauthStatus.current = status
+  }, [catalog?.oauth?.status, onUpdate])
 
   const mutate = async (method: 'POST' | 'DELETE', value: unknown) => {
     setBusy(true); setError(null)
     try {
-      const response = await fetch('/api/pi/models', {
-        method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value),
-      })
-      const result = await response.json() as Catalog
-      if (!response.ok) throw new Error(result.error || 'Unable to update Pi connection')
+      await mutatePiCredentials({ data: { method, payloadJson: JSON.stringify(value) } })
       if (method === 'POST' && (value as { action?: string }).action === 'api-key') setSecret('')
-      await refresh()
+      await queryClient.invalidateQueries({ queryKey: ['pi-models'] })
       await onUpdate()
       return true
     } catch (e) {
@@ -76,37 +71,38 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
 
   return <section aria-label="Pi model provider connections">
     <p className="muted">Connect a personal provider. Credentials are encrypted on the server and never shared with sandbox tools. No local OAuth callback servers are used.</p>
+    {(error || catalogQuery.error) && <p role="alert" className="error">{error || catalogQuery.error?.message}</p>}
     {catalog?.connected.length ? <ul>{catalog.connected.map(item =>
       <li key={item.providerId}>{providerName(item.providerId)} ({item.type})
-        {' '}<button type="button" disabled={busy}
-          onClick={() => void mutate('DELETE', { provider: item.providerId })}>Disconnect</button>
+        {' '}<Button type="button" disabled={busy}
+          onClick={() => void mutate('DELETE', { provider: item.providerId })}>Disconnect</Button>
       </li>)}</ul> : <p>No connected model providers.</p>}
     <div className="generation-controls">
       <label>API key provider
-        <select disabled={busy} value={provider} onChange={e => setProvider(e.target.value)}>
+        <NativeSelect disabled={busy} value={provider} onChange={e => setProvider(e.target.value)}>
           {Object.entries(apiProviders).map(([id, name]) =>
             <option key={id} value={id}>{name}</option>)}
-        </select>
+        </NativeSelect>
       </label>
       <label>Personal API key
-        <input type="password" autoComplete="off" value={secret} disabled={busy}
+        <Input type="password" autoComplete="off" value={secret} disabled={busy}
           onChange={e => setSecret(e.target.value)} placeholder="API key (not saved in browser)" />
       </label>
-      <button type="button" disabled={busy || !secret.trim()}
-        onClick={() => void mutate('POST', { action: 'api-key', provider, key: secret })}>Connect API key</button>
+      <Button type="button" disabled={busy || !secret.trim()}
+        onClick={() => void mutate('POST', { action: 'api-key', provider, key: secret })}>Connect API key</Button>
     </div>
     <div className="generation-controls">
       <label>Device-code subscription provider
-        <select disabled={busy || active} value={oauthProvider}
+        <NativeSelect disabled={busy || active} value={oauthProvider}
           onChange={e => setOauthProvider(e.target.value)}>
           {Object.entries(deviceProviders).map(([id, name]) =>
             <option key={id} value={id}>{name}</option>)}
-        </select>
+        </NativeSelect>
       </label>
-      <button type="button" disabled={busy || active}
+      <Button type="button" disabled={busy || active}
         onClick={() => void mutate('POST', { action: 'oauth', provider: oauthProvider })}>
         Connect with device code
-      </button>
+      </Button>
     </div>
     {catalog?.oauth && ['starting', 'pending'].includes(catalog.oauth.status) && <div role="status">
       <p>{providerName(catalog.oauth.provider)}: {catalog.oauth.message || 'Preparing device authorization…'}</p>
@@ -127,22 +123,22 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
       }}>
         <label>{catalog.oauth.prompt.message}
           {catalog.oauth.prompt.type === 'select' ?
-            <select value={answer} disabled={busy} onChange={e => setAnswer(e.target.value)}>
+            <NativeSelect value={answer} disabled={busy} onChange={e => setAnswer(e.target.value)}>
               {catalog.oauth.prompt.options?.map(option =>
                 <option key={option.id} value={option.id}>{option.label}</option>)}
-            </select> :
-            <input type={catalog.oauth.prompt.type === 'secret' ? 'password' : 'text'}
+            </NativeSelect> :
+            <Input type={catalog.oauth.prompt.type === 'secret' ? 'password' : 'text'}
               autoComplete="off" disabled={busy} value={answer}
               placeholder={catalog.oauth.prompt.placeholder}
               onChange={e => setAnswer(e.target.value)} />}
         </label>
-        <button type="submit" disabled={busy || (catalog.oauth.prompt.type !== 'select' && !answer.trim())}>
+        <Button type="submit" disabled={busy || (catalog.oauth.prompt.type !== 'select' && !answer.trim())}>
           Continue
-        </button>
+        </Button>
       </form>}
-      <button type="button" disabled={busy} onClick={() => void mutate('POST', { action: 'oauth-cancel' })}>
+      <Button type="button" disabled={busy} onClick={() => void mutate('POST', { action: 'oauth-cancel' })}>
         Cancel sign-in
-      </button>
+      </Button>
     </div>}
     {catalog?.oauth?.status === 'failed' && <p role="alert">{catalog.oauth.reason}</p>}
     {error && <p role="alert" className="error">{error}</p>}

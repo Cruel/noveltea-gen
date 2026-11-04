@@ -1,4 +1,9 @@
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { NativeSelect } from '@/components/ui/native-select'
 import { useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { readStoryGraph } from '../../../lib/story-data.functions'
 import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { ExplorerGraph, ExplorerIndex } from '../../../lib/story-explorer.server'
@@ -16,8 +21,6 @@ const limits = [16, 40, 80] as const
 /** Render only the native Context Manifest neighborhood; no client link discovery. */
 export function StoryRelationshipGraph({ jobId, index, selectedId, onSelect }: Props) {
   const [scope, setScope] = useState<'focused' | 'related'>('focused')
-  const [graph, setGraph] = useState<ExplorerGraph | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [kind, setKind] = useState('all')
   const [limit, setLimit] = useState<number>(16)
   const [connectedOnly, setConnectedOnly] = useState(false)
@@ -27,23 +30,13 @@ export function StoryRelationshipGraph({ jobId, index, selectedId, onSelect }: P
 
   useEffect(() => { setKind('all') }, [selectedId])
 
-  useEffect(() => {
-    setGraph(null); setError(null)
-    if (!selectedId) return
-    const controller = new AbortController()
-    const url = '/api/jobs/' + encodeURIComponent(jobId) + '/relationships?' +
-      new URLSearchParams({ id: selectedId, scope })
-    void fetch(url, { cache: 'no-store', signal: controller.signal }).then(async response => {
-      const payload = await response.json() as { graph?: ExplorerGraph; error?: string }
-      if (!response.ok || !payload.graph) throw new Error(payload.error || 'Unable to load native relationships.')
-      if (payload.graph.headSha !== index.headSha || payload.graph.selectedId !== selectedId)
-        throw new Error('Story revision changed. Revalidate the explorer.')
-      return payload.graph
-    }).then(setGraph).catch(e => {
-      if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Unable to load relationships.')
-    })
-    return () => controller.abort()
-  }, [jobId, index.headSha, selectedId, scope, refreshToken])
+  const graphQuery = useQuery({
+    queryKey: ['story-graph', jobId, index.headSha, selectedId, scope, refreshToken] as const,
+    queryFn: () => readStoryGraph({ data: { jobId, selectedId: selectedId!, scope } }),
+    enabled: !!selectedId,
+  })
+  const graph = graphQuery.data?.graph ?? null
+  const error = graphQuery.error?.message ?? null
 
   const currentGraph = graph?.selectedId === selectedId && graph.headSha === index.headSha &&
     graph.scope === scope ? graph : null
@@ -153,27 +146,27 @@ export function StoryRelationshipGraph({ jobId, index, selectedId, onSelect }: P
       <div><h3>Canonical relationships</h3>
         <p className="muted">Read-only native Context Manifest links, with separate Git change overlays. Deleted nodes have no inferred links.</p>
       </div>
-      <button type="button" disabled={!selectedId} onClick={() => setRefreshToken(n => n + 1)}>
+      <Button type="button" disabled={!selectedId} onClick={() => setRefreshToken(n => n + 1)}>
         Refresh links
-      </button>
+      </Button>
     </div>
     <div className="story-graph-filters">
-      <label>Neighborhood <select value={scope} onChange={e => setScope(e.target.value as typeof scope)}>
+      <label>Neighborhood <NativeSelect value={scope} onChange={e => setScope(e.target.value as typeof scope)}>
         <option value="focused">Focused</option><option value="related">Related</option>
-      </select></label>
-      <label>Record type <select value={kind} onChange={e => setKind(e.target.value)}>
+      </NativeSelect></label>
+      <label>Record type <NativeSelect value={kind} onChange={e => setKind(e.target.value)}>
         <option value="all">All types</option>
         {kinds.map(type => <option key={type} value={type}>{type}</option>)}
-      </select></label>
-      <label>Visible records <select value={limit} onChange={e => setLimit(Number(e.target.value))}>
+      </NativeSelect></label>
+      <label>Visible records <NativeSelect value={limit} onChange={e => setLimit(Number(e.target.value))}>
         {limits.map(n => <option key={n} value={n}>{n}</option>)}
-      </select></label>
-      <label className="story-graph-checkbox"><input type="checkbox" checked={connectedOnly}
-        onChange={e => setConnectedOnly(e.target.checked)} /> Only connected</label>
-      <label className="story-graph-checkbox"><input type="checkbox" checked={collapseOuter}
-        onChange={e => setCollapseOuter(e.target.checked)} /> Collapse outer layers</label>
-      <label className="story-graph-checkbox"><input type="checkbox" checked={showDeleted}
-        onChange={e => setShowDeleted(e.target.checked)} /> Git placeholders</label>
+      </NativeSelect></label>
+      <label className="story-graph-checkbox"><Checkbox checked={connectedOnly}
+        onCheckedChange={checked => setConnectedOnly(checked)} /> Only connected</label>
+      <label className="story-graph-checkbox"><Checkbox checked={collapseOuter}
+        onCheckedChange={checked => setCollapseOuter(checked)} /> Collapse outer layers</label>
+      <label className="story-graph-checkbox"><Checkbox checked={showDeleted}
+        onCheckedChange={checked => setShowDeleted(checked)} /> Git placeholders</label>
     </div>
     {!selectedId ? (view.nodes.length > 0 ? <>
       <p role="status" className="muted">No current typed records. {view.nodes.length} Git-only placeholders
@@ -211,9 +204,9 @@ export function StoryRelationshipGraph({ jobId, index, selectedId, onSelect }: P
           <details className="story-graph-link-list">
             <summary>Native link details ({view.edges.length})</summary>
             <ul>{view.edges.map(edge => <li key={edge.id}>
-              <button type="button" onClick={() => onSelect(edge.source)}>{edge.source}</button>
+              <Button type="button" onClick={() => onSelect(edge.source)}>{edge.source}</Button>
               {' — '}{String(edge.data?.relationCode ?? 'native link')}{' → '}
-              <button type="button" onClick={() => onSelect(edge.target)}>{edge.target}</button>
+              <Button type="button" onClick={() => onSelect(edge.target)}>{edge.target}</Button>
             </li>)}</ul>
           </details>
         </>}

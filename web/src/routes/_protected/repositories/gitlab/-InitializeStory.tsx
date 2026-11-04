@@ -1,4 +1,8 @@
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { Input } from '@/components/ui/input'
 import { useEffect, useState } from 'react'
+import { initializeRepositoryStory } from '../../../../lib/story-workflows.functions'
 
 type InitState = { empty: boolean; defaultBranch: string | null; commit: string | null }
 type Created = { story: { id: string; directory: string; title: string; commitSha: string };
@@ -33,16 +37,12 @@ export function InitializeStory({ repositoryId, snapshot, onCreated }: {
   const create = async () => {
     setBusy(true); setError(null)
     try {
-      const response = await fetch('/api/gitlab/initialize', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const result = JSON.parse(await initializeRepositoryStory({ data: {
+        provider: 'gitlab', json: JSON.stringify({
           repositoryId, directory, expectedCommit: snapshot.commit,
-          ...(snapshot.empty ? { initialBranch } : {}),
-          foundation: draft,
+          ...(snapshot.empty ? { initialBranch } : {}), foundation: draft,
         }),
-      })
-      const result = await response.json() as Created & { error?: string }
-      if (!response.ok) throw new Error(result.error || 'GitLab Story initialization failed')
+      } })) as Created
       onCreated(result)
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not initialize Story') }
     finally { setBusy(false) }
@@ -57,18 +57,18 @@ export function InitializeStory({ repositoryId, snapshot, onCreated }: {
       The server validates the Story with the installed native NovelTea CLI before committing anything.</p>
     {error && <p role="alert" className="error">{error}</p>}
     <form onSubmit={event => { event.preventDefault(); void create() }}>
-      <p><label>Workspace directory (blank for repository root; creates a story/ child) <input maxLength={240} value={directory}
+      <p><label>Workspace directory (blank for repository root; creates a story/ child) <Input maxLength={240} value={directory}
         onChange={e => setDirectory(e.target.value)} placeholder="story" /></label></p>
-      {snapshot.empty && <p><label>Initial default branch <input required maxLength={100}
+      {snapshot.empty && <p><label>Initial default branch <Input required maxLength={100}
         readOnly={!!snapshot.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label></p>}
       {fields.map(([name, label]) => <p key={name}><label>{label}
-        {name === 'body' ? <textarea required maxLength={12000} rows={5}
+        {name === 'body' ? <Textarea required maxLength={12000} rows={5}
           value={draft[name]} onChange={e => setDraft(previous => ({ ...previous, [name]: e.target.value }))} /> :
-          <input required maxLength={12000} value={draft[name]}
+          <Input required maxLength={12000} value={draft[name]}
             onChange={e => setDraft(previous => ({ ...previous, [name]: e.target.value }))} />}
       </label></p>)}
-      <button disabled={busy} type="submit">{busy ? 'Validating and preparing Story…' :
-        snapshot.empty ? 'Create initial Story commit' : 'Create Story review branch'}</button>
+      <Button disabled={busy} type="submit">{busy ? 'Validating and preparing Story…' :
+        snapshot.empty ? 'Create initial Story commit' : 'Create Story review branch'}</Button>
     </form>
   </section>
 }

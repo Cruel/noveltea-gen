@@ -1,4 +1,9 @@
-import { useEffect, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { getAuthorInteractions, sendAuthorCommand } from '../../../lib/author.functions'
 
 type Approval = {
   id: string; nonce: string; proposalSha256: string; verifiedHead: string
@@ -36,7 +41,13 @@ type AuthorState = { status: string; items: Item[]; decisions: RecoveryDecision[
   choice: SpecialistChoice | null }
 
 export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChanged: () => void }) {
-  const [state, setState] = useState<AuthorState | null>(null)
+  const queryClient = useQueryClient()
+  const authorQuery = useQuery({
+    queryKey: ['author-interactions', jobId] as const,
+    queryFn: async () => JSON.parse(await getAuthorInteractions({ data: jobId })) as AuthorState,
+    refetchInterval: 8000,
+  })
+  const state = authorQuery.data ?? null
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({})
   const [choiceSelections, setChoiceSelections] = useState<Record<string, string>>({})
@@ -46,34 +57,15 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const url = '/api/jobs/' + encodeURIComponent(jobId) + '/author'
   const refresh = async () => {
-    const response = await fetch(url, { cache: 'no-store' })
-    const data = await response.json() as AuthorState & { error?: string }
-    if (!response.ok) throw new Error(data.error || 'Author prompts unavailable')
-    setState(data)
+    await queryClient.invalidateQueries({ queryKey: ['author-interactions', jobId] })
   }
-  useEffect(() => {
-    let active = true
-    const poll = async () => {
-      try {
-        const response = await fetch(url, { cache: 'no-store' })
-        const data = await response.json() as AuthorState
-        if (active && response.ok) { setState(data); setError(null) }
-        else if (active) setError('Unable to inspect saved author questions.')
-      } catch { if (active) setError('Unable to inspect saved author questions.') }
-    }
-    void poll()
-    const timer = setInterval(() => void poll(), 8000)
-    return () => { active = false; clearInterval(timer) }
-  }, [url])
   const send = async (id: string, payload: Record<string, unknown>) => {
     setBusy(id); setError(null)
     try {
-      const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...payload, messageId: id }) })
-      const result = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(result.error || 'The saved response could not be recorded')
+      await sendAuthorCommand({ data: {
+        jobId, commandJson: JSON.stringify({ ...payload, messageId: id }),
+      } })
       await refresh()
       onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Author response failed') }
@@ -86,15 +78,12 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
     if (custom && !text) return
     setBusy(item.id); setError(null)
     try {
-      const response = await fetch(url, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'choice', id: item.id,
-          proposalSha256: item.proposalSha256, kind: custom ? 'custom' : 'option',
-          ...(custom ? { text } : { optionId: selected }),
-          ...(choiceNotes[item.id]?.trim() ? { note: choiceNotes[item.id]?.trim() ?? '' } : {}) }),
-      })
-      const value = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(value.error || 'Author choice was not accepted')
+      await sendAuthorCommand({ data: { jobId, commandJson: JSON.stringify({
+        action: 'choice', id: item.id,
+        proposalSha256: item.proposalSha256, kind: custom ? 'custom' : 'option',
+        ...(custom ? { text } : { optionId: selected }),
+        ...(choiceNotes[item.id]?.trim() ? { note: choiceNotes[item.id]?.trim() ?? '' } : {}),
+      }) } })
       await refresh()
       onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Author choice was not accepted') }
@@ -104,13 +93,10 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
     const note = item.phase === 'applying' ? item.note ?? '' : decisionNotes[item.id] ?? ''
     setBusy(item.id); setError(null)
     try {
-      const response = await fetch(url, { method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'decision', id: item.id,
-          proposalSha256: item.proposalSha256, decision, ...(note.trim() ? { note } : {}) }),
-      })
-      const body = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(body.error || 'Unable to record author decision')
+      await sendAuthorCommand({ data: { jobId, commandJson: JSON.stringify({
+        action: 'decision', id: item.id, proposalSha256: item.proposalSha256,
+        decision, ...(note.trim() ? { note } : {}),
+      }) } })
       await refresh()
       onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to record author decision') }
@@ -121,18 +107,14 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
     if (!original) return
     setBusy('new-idea'); setError(null)
     try {
-      const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'send', message: {
+      await sendAuthorCommand({ data: { jobId, commandJson: JSON.stringify({ action: 'send', message: {
           kind: 'idea', payload: { kind: 'event-concept',
             source: { kind: 'author-continuation', reference: 'Studio author message' },
             original, requirements: { meaning: [{ text: original, binding: false }], wording: [], participants: [] },
             identities: { known: [], unresolved: [] }, prerequisites: [],
             placement: { scopeIds: [], flexible: true, earliest: 'event' }, upstreamConstraints: [],
           },
-        } }),
-      })
-      const result = await response.json() as { error?: string }
-      if (!response.ok) throw new Error(result.error || 'Unable to queue author idea')
+        } }) } })
       setIdea(''); setNotice('Idea queued for the next safe work boundary.'); onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to queue author idea') }
     finally { setBusy(null) }
@@ -141,15 +123,15 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
   return <section aria-label="Author questions and approvals">
     <h2>Author questions and approvals</h2>
     <label htmlFor="author-new-idea">Send an idea to this job</label>
-    <textarea id="author-new-idea" rows={3} maxLength={2500} value={idea}
+    <Textarea id="author-new-idea" rows={3} maxLength={2500} value={idea}
       onChange={e => setIdea(e.target.value)} disabled={busy !== null}
       placeholder="New narrative idea or constraint for the next safe work boundary" />
-    <button type="button" onClick={() => void sendIdea()} disabled={busy !== null || !idea.trim()}>
+    <Button type="button" onClick={() => void sendIdea()} disabled={busy !== null || !idea.trim()}>
       Save idea for next safe boundary
-    </button>
+    </Button>
     <p className="muted">Responses are bound to this job's saved graph interrupt.
       Protected changes require reviewing the exact proposal and confirming the trusted approval.</p>
-    {error && <p className="error" role="alert">{error}</p>}
+    {(error || authorQuery.error) && <p className="error" role="alert">{error || authorQuery.error?.message}</p>}
     {notice && <p role="status">{notice}</p>}
     {!state && !error && <p>Checking saved author interrupts…</p>}
     {state && items.length === 0 && (state.decisions ?? []).length === 0 && !state.choice && <p>No author responses are awaiting review.</p>}
@@ -161,12 +143,12 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
         The answer does not itself authorize changing protected creative decisions.</p> : <>
         <fieldset disabled={busy !== null}>
           <legend>Choose an approach or provide your own</legend>
+          <RadioGroup disabled={busy !== null}
+            value={choiceSelections[state.choice.id] ?? state.choice.question.recommendedId}
+            onValueChange={value => setChoiceSelections(old => ({ ...old, [state.choice!.id]: value }))}>
           {state.choice.question.options.map(option => <label key={option.id}
             style={{ display: 'block', marginBottom: '1rem' }}>
-            <input type="radio" name={'specialist-choice-' + state.choice!.id}
-              value={option.id}
-              checked={(choiceSelections[state.choice!.id] ?? state.choice!.question.recommendedId) === option.id}
-              onChange={() => setChoiceSelections(old => ({ ...old, [state.choice!.id]: option.id }))}/>
+            <RadioGroupItem value={option.id} aria-label={option.title} />
             {' '}<strong>{option.title}</strong>
             {option.id === state.choice!.question.recommendedId &&
               <strong> · Recommended by specialist</strong>}
@@ -177,26 +159,24 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
               <p><strong>Why recommended:</strong> {state.choice!.question.recommendationReason}</p>}
           </label>)}
           <label style={{ display: 'block' }}>
-            <input type="radio" name={'specialist-choice-' + state.choice.id}
-              value="__custom__"
-              checked={choiceSelections[state.choice.id] === '__custom__'}
-              onChange={() => setChoiceSelections(old => ({ ...old, [state.choice!.id]: '__custom__' }))}/>
+            <RadioGroupItem value="__custom__" aria-label="My own direction" />
             {' '}<strong>Something else — my own direction</strong>
           </label>
-          {choiceSelections[state.choice.id] === '__custom__' && <textarea
+          </RadioGroup>
+          {choiceSelections[state.choice.id] === '__custom__' && <Textarea
             aria-label="Custom creative direction" rows={4} maxLength={4000}
             value={customAnswers[state.choice.id] ?? ''}
             placeholder="Describe the solution you'd prefer, independently of the suggested options."
             onChange={e => setCustomAnswers(old => ({ ...old, [state.choice!.id]: e.target.value }))}/>}
         </fieldset>
         <label htmlFor={'choice-note-' + state.choice.id}>Additional instructions (optional)</label>
-        <textarea id={'choice-note-' + state.choice.id} rows={2} maxLength={1000}
+        <Textarea id={'choice-note-' + state.choice.id} rows={2} maxLength={1000}
           disabled={busy !== null} value={choiceNotes[state.choice.id] ?? ''}
           onChange={e => setChoiceNotes(old => ({ ...old, [state.choice!.id]: e.target.value }))}/>
-        <button type="button" disabled={busy !== null ||
+        <Button type="button" disabled={busy !== null ||
           (choiceSelections[state.choice.id] === '__custom__' &&
             !(customAnswers[state.choice.id] ?? '').trim())}
-          onClick={() => void submitChoice(state.choice!)}>Submit decision</button>
+          onClick={() => void submitChoice(state.choice!)}>Submit decision</Button>
       </>}
     </article>}
     {(state?.decisions ?? []).map(item => <article key={'recovery-' + item.id}
@@ -236,7 +216,7 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
               ? 'Additional author direction (optional)'
               : 'Additional explanation (optional)'}
           </label>
-          <textarea id={'author-decision-note-' + item.id} rows={2} maxLength={1000}
+          <Textarea id={'author-decision-note-' + item.id} rows={2} maxLength={1000}
             disabled={busy !== null} value={decisionNotes[item.id] ?? ''}
             placeholder={item.id === 'foundation-conflict'
               ? 'Optional clarification for subsequent specialists'
@@ -244,14 +224,14 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
             onChange={e => setDecisionNotes(previous =>
               ({ ...previous, [item.id]: e.target.value }))} />
         </>}
-        {item.phase === 'applying' ? <button type="button" disabled={busy !== null}
+        {item.phase === 'applying' ? <Button type="button" disabled={busy !== null}
           onClick={() => void decideRecovery(item, item.decision!)}>
           Finish saved {item.decision === 'approved' ? 'approval' : 'rejection'}
-        </button> : <>
-          <button type="button" disabled={busy !== null}
-            onClick={() => void decideRecovery(item, 'approved')}>Approve</button>{' '}
-          <button type="button" disabled={busy !== null}
-            onClick={() => void decideRecovery(item, 'rejected')}>Reject</button>
+        </Button> : <>
+          <Button type="button" disabled={busy !== null}
+            onClick={() => void decideRecovery(item, 'approved')}>Approve</Button>{' '}
+          <Button type="button" disabled={busy !== null}
+            onClick={() => void decideRecovery(item, 'rejected')}>Reject</Button>
         </>}
       </>}
     </article>)}
@@ -261,18 +241,18 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
         <p>{item.prompt}</p>
         {item.phase === 'applied' ? <p>Answered: {item.answer}</p> : <>
           <label htmlFor={'author-answer-' + item.id}>Your answer</label>
-          <textarea id={'author-answer-' + item.id} value={answers[item.id] ?? ''}
+          <Textarea id={'author-answer-' + item.id} value={answers[item.id] ?? ''}
             maxLength={4000} rows={3} disabled={busy !== null}
             onChange={e => setAnswers(previous => ({ ...previous, [item.id]: e.target.value }))} />
-          <button type="button" disabled={busy !== null || !(answers[item.id] ?? '').trim()}
-            onClick={() => void send(item.id, { action: 'answer', answer: answers[item.id] })}>Submit answer</button>
+          <Button type="button" disabled={busy !== null || !(answers[item.id] ?? '').trim()}
+            onClick={() => void send(item.id, { action: 'answer', answer: answers[item.id] })}>Submit answer</Button>
         </>}
       </> : <>
         <p>Proposal type: {item.requestType}. {item.workItemId && <>Work item: <code>{item.workItemId}</code>. </>}</p>
         <p>Proposal digest: <code>{item.proposalSha256}</code></p>
         {item.changeId && <p>Change digest: <code>{item.changeId}</code></p>}
-        {!item.approval ? <button type="button" disabled={busy !== null}
-          onClick={() => void send(item.id, { action: 'prepare' })}>Inspect exact proposal</button> : <>
+        {!item.approval ? <Button type="button" disabled={busy !== null}
+          onClick={() => void send(item.id, { action: 'prepare' })}>Inspect exact proposal</Button> : <>
           <p>Verified Git HEAD: <code>{item.approval.verifiedHead}</code></p>
           <details open={item.approval.phase === 'awaiting-controller'}>
             <summary>Exact proposed change and review</summary>
@@ -284,14 +264,14 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
             : <>
               <p>Confirm only after reviewing this exact proposed content and Git baseline.
                 This decision cannot be transferred to another proposal.</p>
-              <button type="button" disabled={busy !== null} onClick={() => void send(item.id, {
+              <Button type="button" disabled={busy !== null} onClick={() => void send(item.id, {
                 action: 'decide', receiptId: item.approval!.id, nonce: item.approval!.nonce,
                 proposalSha256: item.approval!.proposalSha256, decision: 'approved',
-              })}>Approve and resume</button>{' '}
-              <button type="button" disabled={busy !== null} onClick={() => void send(item.id, {
+              })}>Approve and resume</Button>{' '}
+              <Button type="button" disabled={busy !== null} onClick={() => void send(item.id, {
                 action: 'decide', receiptId: item.approval!.id, nonce: item.approval!.nonce,
                 proposalSha256: item.approval!.proposalSha256, decision: 'rejected',
-              })}>Reject proposal</button>
+              })}>Reject proposal</Button>
             </>}
         </>}
       </>}

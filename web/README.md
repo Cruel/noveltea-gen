@@ -15,6 +15,14 @@ catalog tables. #41 adds GitHub App installation-
 aware repository discovery, Add by URL, and catalog connection without cloning.
 Fixture generation (#59) and reconnectable high-level status (#64) are now implemented; publication remains a separate ticket. #43 adds GitHub Story discovery and bounded selection; #44 adds GitLab Story discovery and bounded selection.
 
+## Frontend architecture (#38)
+
+Studio uses TanStack Start/Router, React, **Tailwind CSS v4** and **shadcn with Base UI**. The registry configuration is `web/components.json`; use the official shadcn CLI (`cd web && pnpm dlx shadcn@latest add <component> -y`) to install or update UI primitives under `src/components/ui/`. Do not duplicate those components as handcrafted HTML/CSS wrappers. The Story graph continues using React Flow; its specialized visualizations and editor layout use targeted application styles in `src/style.css`.
+
+**TanStack Query is the server-state layer.** The root router creates one `QueryClient` per SSR request; `@tanstack/react-router-ssr-query` dehydrates/hydrates server-fetched data. Route loaders prefetch important data (`dashboard`, `settings`, and `job`), and feature query keys cover repository listings, Story records/relationships, model catalogs, author prompts, Git changes and publication previews. Mutations invalidate affected keys, and sign-out clears the Query cache before navigation to prevent stale user data. Queries do not replace durable database, Git or LangGraph state.
+
+**Internal application operations use TanStack Start `createServerFn`** (see `src/lib/*.functions.ts`) instead of browser `fetch()` to Studio JSON routes. They preserve the owner checks, bounded payloads, revision preflight and authorization enforced by the existing server-side handlers. Keep explicit HTTP endpoints for Better Auth/OAuth/provider callbacks, GitHub App installation return, SSE job-progress streaming, and compatibility with existing tools/tests; do not add new browser-facing JSON endpoints without a specific protocol or external-consumer requirement. The legacy internal HTTP handlers remain available during this migration and are not required by the new UI; their removal should be a separately audited compatibility change. Use ordinary React local state for short-lived form/interaction state and Router search parameters for shareable selections. **Zustand is intentionally deferred**, not installed.
+
 ## Setup
 
 Use Node.js 24 (Node >=22.12 supported by Better Auth, 24 recommended for

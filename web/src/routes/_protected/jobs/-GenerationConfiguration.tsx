@@ -1,4 +1,12 @@
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Textarea } from '@/components/ui/textarea'
+import { NativeSelect } from '@/components/ui/native-select'
+import { Input } from '@/components/ui/input'
 import { useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { readGenerationConfiguration, saveGenerationConfiguration,
+  startConfiguredGeneration } from '../../../lib/generation.functions'
 import type { ExplorerRecord, ExplorerIndex } from '../../../lib/story-explorer.server'
 import type { GenerationDraft } from '../../../lib/generation-config.server'
 type CompletionContract = GenerationDraft['contract']
@@ -24,8 +32,12 @@ type Load = {
 export function GenerationConfiguration({ jobId, onStarted }: {
   jobId: string; onStarted: () => Promise<void>
 }) {
-  const endpoint = '/api/jobs/' + encodeURIComponent(jobId)
-  const [data, setData] = useState<Load | null>(null)
+  const configuration = useQuery({
+    queryKey: ['generation-configuration', jobId] as const,
+    queryFn: async () => JSON.parse(await readGenerationConfiguration({ data: jobId })) as Load,
+    staleTime: 10_000,
+  })
+  const data = configuration.data ?? null
   const [task, setTask] = useState('')
   const [contract, setContract] = useState<CompletionContract>(defaultContract)
   const [branchesText, setBranchesText] = useState('')
@@ -43,21 +55,13 @@ export function GenerationConfiguration({ jobId, onStarted }: {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
-    const controller = new AbortController()
-    void fetch(endpoint + '/configuration', { cache: 'no-store', signal: controller.signal })
-      .then(async response => {
-        const body = await response.json() as Load & { error?: string }
-        if (!response.ok || !body.index) throw new Error(body.error || 'Unable to verify Story scope.')
-        return body
-      })
-      .then(result => {
-        if (controller.signal.aborted) return
-        setData(result)
-        if (!result.saved && result.defaultModel) {
-          setSelectedModel(result.defaultModel.provider + '/' + result.defaultModel.id)
-          setThinking(result.defaultModel.thinking ?? '')
-        }
-        if (result.saved) {
+    if (!data) return
+    const result = data
+    if (!result.saved && result.defaultModel) {
+      setSelectedModel(result.defaultModel.provider + '/' + result.defaultModel.id)
+      setThinking(result.defaultModel.thinking ?? '')
+    }
+    if (result.saved) {
           setTask(result.saved.task)
           setContract(result.saved.contract)
           setBranchesText(lineText(result.saved.contract.scope.branches))
@@ -70,11 +74,8 @@ export function GenerationConfiguration({ jobId, onStarted }: {
           setSelectedModel(result.saved.model ? result.saved.model.provider + '/' + result.saved.model.id : '')
           setThinking(result.saved.model?.thinking ?? '')
           setSaved(true)
-        }
-      })
-      .catch(e => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Unavailable') })
-    return () => controller.abort()
-  }, [endpoint])
+    }
+  }, [data])
   const change = (next: CompletionContract) => {
     setContract(next); setSaved(false)
     if (rawEditor) setRawContract(JSON.stringify(next, null, 2))
@@ -129,11 +130,10 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       const input = readInput()
       if (!input.task.trim()) throw new Error('Describe the generation task.')
       setBusy(true); setError(null)
-      const response = await fetch(endpoint + '/configuration', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
-      })
-      const body = await response.json() as { saved?: GenerationDraft; error?: string }
-      if (!response.ok || !body.saved) throw new Error(body.error || 'Unable to save scope.')
+      const body = JSON.parse(await saveGenerationConfiguration({ data: {
+        jobId, draftJson: JSON.stringify(input),
+      } })) as { saved?: GenerationDraft; error?: string }
+      if (!body.saved) throw new Error(body.error || 'Unable to save scope.')
       setContract(body.saved.contract)
       setBranchesText(lineText(body.saved.contract.scope.branches))
       setConstraintsText(lineText(body.saved.contract.constraints))
@@ -141,12 +141,9 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       setPreferencesText(lineText(body.saved.contract.envelope.preferences))
       setSaved(true)
       if (start) {
-        const started = await fetch(endpoint, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ task: body.saved.task, contract: body.saved.contract }),
-        })
-        const output = await started.json() as { error?: string }
-        if (!started.ok) throw new Error(output.error || 'Generation could not start.')
+        await startConfiguredGeneration({ data: { jobId, requestJson: JSON.stringify({
+          task: body.saved.task, contract: body.saved.contract,
+        }) } })
         await onStarted()
       }
     } catch (e) { setError(e instanceof Error ? e.message : 'Configuration failed.') }
@@ -154,7 +151,7 @@ export function GenerationConfiguration({ jobId, onStarted }: {
   }
   if (!data) return <section aria-label="Generation configuration">
     <h2>Generation scope and model configuration</h2>
-    {error ? <p role="alert" className="error">{error}</p> : <p>Verifying canonical Story records…</p>}
+    {error || configuration.error ? <p role="alert" className="error">{error || configuration.error?.message}</p> : <p>Verifying canonical Story records…</p>}
   </section>
   if (!data.editable) return <section><p>Configuration is locked by the saved job state.</p></section>
   return <section aria-label="Generation configuration" className="generation-config">
@@ -164,13 +161,13 @@ export function GenerationConfiguration({ jobId, onStarted }: {
     <p className="muted">Canonical validation: {data.index.validation} · Protection: {data.index.protection} ·
       Revision: <code>{data.index.headSha.slice(0, 12)}</code></p>
     <label>Generation task
-      <textarea rows={3} maxLength={4000} value={task} disabled={busy}
+      <Textarea rows={3} maxLength={4000} value={task} disabled={busy}
         placeholder="Describe the Story outcome you want"
         onChange={e => { setTask(e.target.value); setSaved(false) }} />
     </label>
     <div className="generation-controls">
       <label>Scope
-        <select value={scope.kind} disabled={busy} onChange={e => {
+        <NativeSelect value={scope.kind} disabled={busy} onChange={e => {
           const kind = e.target.value as 'full-story' | 'partial'
           if (kind === 'full-story') setBranchesText('')
           updateScope(kind === 'full-story'
@@ -179,55 +176,55 @@ export function GenerationConfiguration({ jobId, onStarted }: {
         }}>
           <option value="full-story">Entire Story</option>
           <option value="partial">Bounded selection</option>
-        </select>
+        </NativeSelect>
       </label>
       {scope.kind === 'partial' && <label>Generation depth
-        <select value={scope.depth} disabled={busy}
+        <NativeSelect value={scope.depth} disabled={busy}
           onChange={e => updateScope({ depth: e.target.value as CompletionContract['scope']['depth'] })}>
           <option value="architecture">Architecture outline</option>
           <option value="interactive">Interactive development</option>
           <option value="composition">Full composition</option>
-        </select>
+        </NativeSelect>
       </label>}
     </div>
     {scope.kind === 'partial' && <>
       <fieldset disabled={busy}>
         <legend>Writable targets (explicit authorization)</legend>
         <div className="scope-records">{activeRecords.map(record => <label key={record.id}>
-          <input type="checkbox" checked={scope.targets.includes(record.id)}
+          <Checkbox checked={scope.targets.includes(record.id)}
             disabled={(scope.supportingTargets ?? []).includes(record.id)}
-            onChange={() => toggle(record, false)} />
+            onCheckedChange={() => toggle(record, false)} />
           <span>{record.title} <small>{record.id} · {label(record.type)}</small></span>
         </label>)}</div>
       </fieldset>
       <fieldset disabled={busy}>
         <legend>Supporting writable records (separately authorized)</legend>
         <div className="scope-records">{activeRecords.map(record => <label key={record.id}>
-          <input type="checkbox" checked={(scope.supportingTargets ?? []).includes(record.id)}
+          <Checkbox checked={(scope.supportingTargets ?? []).includes(record.id)}
             disabled={scope.targets.includes(record.id)}
-            onChange={() => toggle(record, true)} />
+            onCheckedChange={() => toggle(record, true)} />
           <span>{record.title} <small>{record.id}</small></span>
         </label>)}</div>
       </fieldset>
       <label>Required branches (one per line, never inferred)
-        <textarea rows={2} disabled={busy} value={branchesText}
+        <Textarea rows={2} disabled={busy} value={branchesText}
           onChange={e => { setBranchesText(e.target.value); setSaved(false) }} />
       </label>
     </>}
     <label>Constraints (one per line)
-      <textarea rows={2} disabled={busy} value={constraintsText}
+      <Textarea rows={2} disabled={busy} value={constraintsText}
         onChange={e => { setConstraintsText(e.target.value); setSaved(false) }} />
     </label>
     <label>Presentation
-      <input disabled={busy} value={contract.envelope.presentation}
+      <Input disabled={busy} value={contract.envelope.presentation}
         onChange={e => change({ ...contract, envelope: { ...contract.envelope, presentation: e.target.value } })} />
     </label>
     <label>Hard limits (one per line)
-      <textarea rows={2} disabled={busy} value={hardLimitsText}
+      <Textarea rows={2} disabled={busy} value={hardLimitsText}
         onChange={e => { setHardLimitsText(e.target.value); setSaved(false) }} />
     </label>
     <label>Preferences (one per line)
-      <textarea rows={2} disabled={busy} value={preferencesText}
+      <Textarea rows={2} disabled={busy} value={preferencesText}
         onChange={e => { setPreferencesText(e.target.value); setSaved(false) }} />
     </label>
     <details onToggle={e => {
@@ -249,7 +246,7 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       <summary>Advanced contract JSON editor</summary>
       <p>Editing raw JSON overrides the structured fields until you close this editor.
         The server will still verify all selected IDs and reject widening.</p>
-      <textarea aria-label="Advanced generation contract JSON" rows={12} disabled={busy}
+      <Textarea aria-label="Advanced generation contract JSON" rows={12} disabled={busy}
         value={rawContract} onChange={e => { setRawContract(e.target.value); setSaved(false) }} />
     </details>
     <h3>Pi model and budgets</h3>
@@ -258,7 +255,7 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       Without a model, the job uses deterministic fixtures.</p>
     <div className="generation-controls">
       <label>Model
-        <select disabled={busy} value={selectedModel} onChange={e => {
+        <NativeSelect disabled={busy} value={selectedModel} onChange={e => {
           setSelectedModel(e.target.value); setThinking(''); setSaved(false)
         }}>
           <option value="">No model (deterministic fixture)</option>
@@ -266,29 +263,29 @@ export function GenerationConfiguration({ jobId, onStarted }: {
             <option value={selectedModel}>{selectedModel} (disconnected — reconnect)</option>}
           {data.models.map(model => <option key={model.provider + '/' + model.id}
             value={model.provider + '/' + model.id}>{model.provider} / {model.id}</option>)}
-        </select>
+        </NativeSelect>
       </label>
       <label>Reasoning
-        <select disabled={busy || !data.models.some(m => m.provider + '/' + m.id === selectedModel && m.reasoning)}
+        <NativeSelect disabled={busy || !data.models.some(m => m.provider + '/' + m.id === selectedModel && m.reasoning)}
           value={thinking} onChange={e => { setThinking(e.target.value); setSaved(false) }}>
           <option value="">Provider default</option>
           <option value="low">Low</option>
           <option value="medium">Medium</option>
           <option value="high">High</option>
-        </select>
+        </NativeSelect>
       </label>
     </div>
     <div className="generation-controls">
       <label>Maximum specialist steps
-        <input type="number" min={0} max={1000000} value={stepLimit} disabled={busy}
+        <Input type="number" min={0} max={1000000} value={stepLimit} disabled={busy}
           onChange={e => { setStepLimit(e.target.value); setSaved(false) }} />
       </label>
       <label>Maximum model calls
-        <input type="number" min={0} max={1000000} value={callLimit} disabled={busy}
+        <Input type="number" min={0} max={1000000} value={callLimit} disabled={busy}
           onChange={e => { setCallLimit(e.target.value); setSaved(false) }} />
       </label>
       <label>Maximum reported cost (USD)
-        <input type="number" min={0} max={1000000} step="0.01" value={costLimit} disabled={busy}
+        <Input type="number" min={0} max={1000000} step="0.01" value={costLimit} disabled={busy}
           onChange={e => { setCostLimit(e.target.value); setSaved(false) }} />
       </label>
     </div>
@@ -298,12 +295,12 @@ export function GenerationConfiguration({ jobId, onStarted }: {
     {error && <p role="alert" className="error">{error}</p>}
     {saved && <p role="status">Configuration saved and verified for this pinned Story revision.</p>}
     <div className="generation-actions">
-      <button type="button" disabled={busy || !task.trim()} onClick={() => void persist(false)}>
+      <Button type="button" disabled={busy || !task.trim()} onClick={() => void persist(false)}>
         {busy ? 'Validating…' : 'Validate and save'}
-      </button>
-      <button type="button" disabled={busy || !task.trim()} onClick={() => void persist(true)}>
+      </Button>
+      <Button type="button" disabled={busy || !task.trim()} onClick={() => void persist(true)}>
         {busy ? 'Starting…' : selectedModel ? 'Save and start Pi generation' : 'Save and start fixture generation'}
-      </button>
+      </Button>
     </div>
   </section>
 }

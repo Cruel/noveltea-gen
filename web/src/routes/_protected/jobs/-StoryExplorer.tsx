@@ -1,4 +1,7 @@
+import { Button } from '@/components/ui/button'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { readStoryIndex, readStoryRecord } from '../../../lib/story-data.functions'
 import type { ExplorerDiagnostic, ExplorerIndex, ExplorerRecord } from '../../../lib/story-explorer.server'
 import { StoryRelationshipGraph } from './-StoryRelationshipGraph'
 import { StoryChangeLabels } from './-StoryChangeLabels'
@@ -14,44 +17,28 @@ function heading(type: string) {
 }
 
 export function StoryExplorer({ jobId, revision }: { jobId: string; revision: string }) {
-  const [index, setIndex] = useState<ExplorerIndex | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
-  const [loaded, setLoaded] = useState<LoadedRecord | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [recordError, setRecordError] = useState<string | null>(null)
   const [refreshToken, setRefreshToken] = useState(0)
   const treeRef = useRef<HTMLElement>(null)
-  const url = '/api/jobs/' + encodeURIComponent(jobId) + '/records'
-
+  const indexQuery = useQuery({
+    queryKey: ['story-index', jobId, revision, refreshToken] as const,
+    queryFn: () => readStoryIndex({ data: jobId }),
+  })
+  const index = indexQuery.data ?? null
+  const error = indexQuery.error?.message ?? null
   useEffect(() => {
-    const controller = new AbortController()
-    setIndex(null); setSelected(null); setLoaded(null); setError(null)
-    void fetch(url, { cache: 'no-store', signal: controller.signal })
-      .then(async response => {
-        const body = await response.json() as { index?: ExplorerIndex; error?: string }
-        if (!response.ok || !body.index) throw new Error(body.error || 'Could not load canonical Story index.')
-        return body.index
-      }).then(value => { setIndex(value); setSelected(
-        value.records.find(record => record.type === 'creative-direction')?.id ?? value.records[0]?.id ?? null) })
-      .catch(e => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Unable to load Story') })
-    return () => controller.abort()
-  }, [url, revision, refreshToken])
-
-  useEffect(() => {
-    if (!selected || !index) return
-    const controller = new AbortController()
-    setLoaded(null); setRecordError(null)
-    void fetch(url + '?id=' + encodeURIComponent(selected), { cache: 'no-store', signal: controller.signal })
-      .then(async response => {
-        const body = await response.json() as { record?: ExplorerRecord; markdown?: string; headSha?: string; error?: string }
-        if (!response.ok || !body.record || typeof body.markdown !== 'string' || !body.headSha)
-          throw new Error(body.error || 'Could not read canonical record.')
-        if (body.headSha !== index.headSha) throw new Error('Story revision changed. Refresh the record index.')
-        return body as LoadedRecord
-      }).then(value => setLoaded(value))
-      .catch(e => { if (!controller.signal.aborted) setRecordError(e instanceof Error ? e.message : 'Unable to read record') })
-    return () => controller.abort()
-  }, [url, selected, index])
+    if (index && (!selected || !index.records.some(record => record.id === selected))) {
+      setSelected(index.records.find(record => record.type === 'creative-direction')?.id ??
+        index.records[0]?.id ?? null)
+    }
+  }, [index, selected])
+  const recordQuery = useQuery({
+    queryKey: ['story-record', jobId, index?.headSha, selected] as const,
+    queryFn: () => readStoryRecord({ data: { jobId, recordId: selected! } }),
+    enabled: !!index && !!selected,
+  })
+  const loaded = recordQuery.data?.headSha === index?.headSha ? recordQuery.data : null
+  const recordError = recordQuery.error?.message ?? null
 
   useEffect(() => {
     if (!selected) return
@@ -80,7 +67,7 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
   if (error) return <section aria-label="Story explorer">
     <h2>Canonical Story explorer</h2>
     <p role="alert" className="error">{error}</p>
-    <button type="button" onClick={() => setRefreshToken(n => n + 1)}>Retry validation</button>
+    <Button type="button" onClick={() => setRefreshToken(n => n + 1)}>Retry validation</Button>
   </section>
 
   const diagnostics = index?.diagnostics ?? []
@@ -89,14 +76,14 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
   const groupChanges = (items: ExplorerRecord[], type: string) =>
     changedCount(items) + (index?.deletedRecords.filter(r => r.type === type).length ?? 0)
   const issueCount = (record: ExplorerRecord) => diagnostics.filter(d => d.path === record.path).length
-  const item = (record: ExplorerRecord) => <button type="button" key={record.id}
+  const item = (record: ExplorerRecord) => <Button type="button" key={record.id}
     className={'story-record-link' + (selected === record.id ? ' selected' : '')}
     data-record-id={record.id}
     aria-current={selected === record.id ? 'true' : undefined}
     onClick={() => setSelected(record.id)}>
     <span>{record.title} <StoryChangeLabels change={record.change} /></span>
     <small>{record.id}{issueCount(record) ? ' · ' + issueCount(record) + ' diagnostics' : ''}</small>
-  </button>
+  </Button>
   const arcs = index?.records.filter(r => r.type === 'arc') ?? []
   const milestones = index?.records.filter(r => r.type === 'milestone') ?? []
   const events = index?.records.filter(r => r.type === 'event') ?? []
@@ -118,7 +105,7 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
   return <section aria-label="Story explorer">
     <div className="story-explorer-heading">
       <div><h2>Canonical Story explorer</h2><p className="muted">Read-only records from the pinned native Story catalog.</p></div>
-      <button type="button" onClick={() => setRefreshToken(n => n + 1)}>Revalidate</button>
+      <Button type="button" onClick={() => setRefreshToken(n => n + 1)}>Revalidate</Button>
     </div>
     {!index ? <p role="status">Loading canonical records and diagnostics…</p> : <>
       <p role="status" className="story-validation">
@@ -190,9 +177,9 @@ export function StoryExplorer({ jobId, revision }: { jobId: string; revision: st
           <ul className="story-issues">{diagnostics.map((d: ExplorerDiagnostic, i) => {
             const record = index.records.find(r => r.path === d.path)
             return <li key={i}>
-              {record ? <button type="button" onClick={() => setSelected(record.id)}>
+              {record ? <Button type="button" onClick={() => setSelected(record.id)}>
                 {d.path}:{d.line ?? '?'}
-              </button> : <span>{d.path ?? 'Story'}{d.line ? ':' + d.line : ''}</span>}
+              </Button> : <span>{d.path ?? 'Story'}{d.line ? ':' + d.line : ''}</span>}
               {' '}<strong>{d.code}</strong> — {d.message}
             </li>
           })}</ul>}

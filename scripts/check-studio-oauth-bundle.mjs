@@ -6,10 +6,13 @@ import { pathToFileURL } from 'node:url'
 import { Server } from 'node:net'
 
 const root = resolve(import.meta.dirname, '../web/.output/server')
-const router = readdirSync(resolve(root, '_ssr')).find(name => /^router-.*\.mjs$/.test(name))
-assert.ok(router, 'Built Studio router is missing')
-const source = readFileSync(resolve(root, '_ssr', router), 'utf8')
-assert.match(source, /registerBunOAuthFlows\(\)/,
+const ssr = resolve(root, '_ssr')
+const chunks = readdirSync(ssr).filter(name => name.endsWith('.mjs'))
+assert.ok(chunks.some(name => /^router-.*\.mjs$/.test(name)), 'Built Studio router is missing')
+// Vite may split Pi handlers into separate SSR chunks when using Start server
+// functions. Verify the *actual call* in an SSR module, not the exported
+// function definition in the external Pi library.
+assert.ok(chunks.some(name => /registerBunOAuthFlows\(\)/.test(readFileSync(resolve(ssr, name), 'utf8'))),
   'Compiled Studio must register the official static Pi OAuth providers')
 
 const ai = await import(pathToFileURL(resolve(root, '_libs/@earendil-works/pi-ai.mjs')).href)

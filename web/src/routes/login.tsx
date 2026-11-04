@@ -1,3 +1,4 @@
+import { Button } from '@/components/ui/button'
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { authClient } from '../lib/auth-client'
@@ -30,8 +31,8 @@ function Login() {
     <h1>Story Studio</h1>
     <p>Sign in with a linked GitHub or GitLab login identity. Repository integrations are managed separately from login methods.</p>
     <div className="actions">
-      <button type="button" disabled={pending !== null} onClick={() => void signIn('github')}>Sign in with GitHub{lastUsed === 'github' ? ' · Last used' : ''}</button>
-      <button type="button" disabled={pending !== null} onClick={() => void signIn('gitlab')}>Sign in with GitLab.com{lastUsed === 'gitlab' ? ' · Last used' : ''}</button>
+      <Button type="button" disabled={pending !== null} onClick={() => void signIn('github')}>Sign in with GitHub{lastUsed === 'github' ? ' · Last used' : ''}</Button>
+      <Button type="button" disabled={pending !== null} onClick={() => void signIn('gitlab')}>Sign in with GitLab.com{lastUsed === 'gitlab' ? ' · Last used' : ''}</Button>
     </div>
     {(error || callbackError) && <p role="alert" className="error">{error || callbackError}</p>}
   </main>

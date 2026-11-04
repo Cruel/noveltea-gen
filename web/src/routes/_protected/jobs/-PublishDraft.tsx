@@ -1,4 +1,8 @@
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { previewPublication, submitPublication } from '../../../lib/publication.functions'
 
 type Preview = {
   headSha: string; baseSha: string; branch: string; targetBranch: string; targetSha: string
@@ -10,37 +14,44 @@ export function PublishDraft({ jobId, provider }: { jobId: string; provider: 'gi
   const isGitlab = provider === 'gitlab'
   const service = isGitlab ? 'GitLab' : 'GitHub'
   const review = isGitlab ? 'MR' : 'PR'
-  const [preview, setPreview] = useState<Preview | null>(null)
+  const queryClient = useQueryClient()
+  const publication = useQuery({
+    queryKey: ['publication-preview', jobId] as const,
+    queryFn: async () => {
+      const value = JSON.parse(await previewPublication({ data: jobId })) as { publication?: Preview }
+      if (!value.publication) throw new Error('Publication preview unavailable')
+      return value.publication
+    },
+    enabled: false,
+    retry: false,
+  })
+  const preview = publication.data ?? null
   const [busy, setBusy] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fetchPreview = async () => {
     setBusy(true); setError(null); setConfirmed(false)
     try {
-      const response = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/publish', { cache: 'no-store' })
-      const result = await response.json() as { publication?: Preview; error?: string }
-      if (!response.ok || !result.publication) throw new Error(result.error || 'Publication preview unavailable')
-      setPreview(result.publication)
-    } catch (err) { setPreview(null); setError(err instanceof Error ? err.message : 'Preview failed') }
+      const result = await publication.refetch()
+      if (result.error) throw result.error
+    } catch (err) { queryClient.removeQueries({ queryKey: ['publication-preview', jobId] }); setError(err instanceof Error ? err.message : 'Preview failed') }
     finally { setBusy(false) }
   }
   const publish = async () => {
     if (!preview) return
     setBusy(true); setError(null)
     try {
-      const response = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/publish', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ headSha: preview.headSha, targetSha: preview.targetSha,
-          allowPartial: confirmed }),
-      })
-      const result = await response.json() as { publication?: Preview; error?: string }
-      if (!response.ok || !result.publication) throw new Error(result.error || 'Draft ' + review + ' publication failed')
-      setPreview(result.publication)
+      const result = JSON.parse(await submitPublication({ data: {
+        jobId, approvalJson: JSON.stringify({ headSha: preview.headSha,
+          targetSha: preview.targetSha, allowPartial: confirmed }),
+      } })) as { publication?: Preview }
+      if (!result.publication) throw new Error('Draft ' + review + ' publication failed')
+      queryClient.setQueryData(['publication-preview', jobId], result.publication)
       setConfirmed(false)
     } catch (err) {
       // A push or PR creation may have completed before a transport failure.
       // Require a fresh server-side preview instead of blind replay.
-      setPreview(null)
+      queryClient.removeQueries({ queryKey: ['publication-preview', jobId] })
       setConfirmed(false)
       setError((err instanceof Error ? err.message : 'Publication failed') +
         ' Refresh the preview to reconcile any remotely published branch or review request.')
@@ -50,9 +61,9 @@ export function PublishDraft({ jobId, provider }: { jobId: string; provider: 'gi
     <h2>Draft {service} {isGitlab ? 'merge request' : 'pull request'}</h2>
     <p>Review the pinned job against current upstream before pushing. Publication never merges,
       rebases or writes the default branch; incomplete work may be published for review as a draft.</p>
-    <button type="button" disabled={busy} onClick={() => void fetchPreview()}>
+    <Button type="button" disabled={busy} onClick={() => void fetchPreview()}>
       {busy ? 'Checking…' : 'Preview validation and upstream'}
-    </button>
+    </Button>
     {error && <p role="alert" className="error">{error}</p>}
     {preview && <div>
       <p><strong>Job branch:</strong> <code>{preview.branch}</code></p>
@@ -73,16 +84,16 @@ export function PublishDraft({ jobId, provider }: { jobId: string; provider: 'gi
         target="_blank" rel="noopener noreferrer">#{preview.linked.number}</a>
         {' · '}Last published HEAD: <code>{preview.linked.headSha}</code></p>}
       {preview.canPublish && preview.blockers.length > 0 && <label>
-        <input type="checkbox" checked={confirmed} disabled={busy}
-          onChange={event => setConfirmed(event.target.checked)} />
+        <Checkbox checked={confirmed} disabled={busy}
+          onCheckedChange={checked => setConfirmed(checked)} />
         I reviewed these blockers and want to publish an incomplete draft for human review.
       </label>}
       <div className="generation-actions">
-        <button type="button" disabled={busy || !preview.canPublish ||
+        <Button type="button" disabled={busy || !preview.canPublish ||
           (preview.blockers.length > 0 && !confirmed)}
           onClick={() => void publish()}>
           {preview.linked ? 'Update existing draft ' + review : 'Push branch and create draft ' + review}
-        </button>
+        </Button>
       </div>
     </div>}
   </section>

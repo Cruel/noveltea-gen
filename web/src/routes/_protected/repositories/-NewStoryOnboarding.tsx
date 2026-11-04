@@ -1,6 +1,13 @@
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { Input } from '@/components/ui/input'
 import { useEffect, useState } from 'react'
 import type { OnboardingDraft } from '../../../lib/onboarding.server'
 import { PiStoryDiscovery, type PiProposal, type PiApproval, type PiModel } from './-PiStoryDiscovery'
+import { inspectRepositoryInitialization, initializeRepositoryStory,
+  prepareRepositoryJob, loadOnboardingWorkspace, saveOnboardingWorkspace,
+  reviewOnboardingWorkspace } from '../../../lib/story-workflows.functions'
+import { saveGenerationConfiguration } from '../../../lib/generation.functions'
 
 const rounds = [
   { title: '1. Story concept', fields: [
@@ -29,14 +36,6 @@ type Reviewed = { foundation: Omit<OnboardingDraft, 'task' | 'constraints'> | Pi
     constraints: string[]; envelope: { presentation: string; hardLimits: string[]; preferences: string[] } } }
 type Created = { jobId: string; headSha: string; branch: string; commit: string;
   story: { id: string; directory: string; title: string }; mode: string }
-async function api<T>(url: string, method: 'GET' | 'POST' | 'PUT' = 'GET', value?: unknown): Promise<T> {
-  const response = await fetch(url, method === 'GET' ? { cache: 'no-store' } : {
-    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value),
-  })
-  const body = await response.json() as T & { error?: string }
-  if (!response.ok) throw new Error(body.error || 'Onboarding request failed')
-  return body
-}
 export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = '', onCreated }: {
   provider: 'github' | 'gitlab'; repositoryId: string; initialWorkspace?: string
   onCreated?: (value: Created) => void
@@ -60,8 +59,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   const [jobReady, setJobReady] = useState(false)
   const [approved, setApproved] = useState<Reviewed | null>(null)
   const [unconfirmedWrite, setUnconfirmedWrite] = useState(false)
-  const query = (path: string) => '/api/onboarding?' +
-    new URLSearchParams({ repositoryId, workspace: path })
+
   useEffect(() => {
     setWorkspaceInput(initialWorkspace)
     setPiApproved(null); setPiApproval(null); setPiModel(null)
@@ -75,11 +73,12 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   const open = async () => {
     setBusy(true); setError(null)
     try {
-      const result = await api<{workspace: string; target: string; revision: number; draft: OnboardingDraft }>(
-        query(workspaceInput))
-      const params = new URLSearchParams({ repositoryId })
-      if (provider === 'github') params.set('directory', result.workspace)
-      const checked = await api<Snapshot>('/api/' + provider + '/initialize?' + params)
+      const result = JSON.parse(await loadOnboardingWorkspace({ data: {
+        repositoryId, workspace: workspaceInput,
+      } })) as { workspace: string; target: string; revision: number; draft: OnboardingDraft }
+      const checked = JSON.parse(await inspectRepositoryInitialization({ data: {
+        provider, repositoryId, ...(provider === 'github' ? { directory: result.workspace } : {}),
+      } })) as Snapshot
       setVerified(checked)
       if (provider === 'gitlab') setInitialBranch(checked.defaultBranch ?? 'main')
       setWorkspace(result.workspace); setWorkspaceInput(result.workspace)
@@ -91,8 +90,9 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   }
   const persist = async () => {
     if (workspace === null) throw new Error('Select a workspace.')
-    const result = await api<{revision: number; target: string}>(
-      query(workspace), 'PUT', { revision, draft })
+    const result = JSON.parse(await saveOnboardingWorkspace({ data: {
+      repositoryId, workspace, json: JSON.stringify({ revision, draft }),
+    } })) as { revision: number; target: string }
     setRevision(result.revision)
     setTarget(result.target)
     return result
@@ -114,10 +114,10 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
     envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] },
   })
   const saveJobContract = async (record: Created, proposal: Reviewed) => {
-    await api('/api/jobs/' + encodeURIComponent(record.jobId) + '/configuration', 'PUT', {
+    await saveGenerationConfiguration({ data: { jobId: record.jobId, draftJson: JSON.stringify({
       version: 1, headSha: record.headSha, task: proposal.task,
       contract: proposal.contract, limits: {}, model: discoveryMode === 'pi' ? piModel : null,
-    })
+    }) } })
     setContractSaved(true)
   }
   const create = async (piProposal?: PiProposal | null, piReference?: PiApproval | null) => {
@@ -128,10 +128,9 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       if (created) {
         if (!approved) throw new Error('The reviewed generation contract is unavailable; inspect the prepared job.')
         if (!jobReady && provider === 'gitlab') {
-          const prepared = await api<{job: {id: string; headSha: string}}>(
-            '/api/gitlab/jobs', 'POST', {
-              storyId: created.story.id, jobId: created.jobId, commit: created.commit,
-            })
+          const prepared = JSON.parse(await prepareRepositoryJob({ data: { provider: 'gitlab',
+            json: JSON.stringify({ storyId: created.story.id, jobId: created.jobId, commit: created.commit }),
+          } })) as { job: { id: string; headSha: string } }
           if (prepared.job.id !== created.jobId) throw new Error('Prepared job identity mismatch.')
           const updated = { ...created, headSha: prepared.job.headSha }
           setCreated(updated); setJobReady(true)
@@ -145,7 +144,9 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         proposal = piProposal
       } else {
         const saved = await persist()
-        proposal = await api<Reviewed>(query(workspace), 'POST', { revision: saved.revision })
+        proposal = JSON.parse(await reviewOnboardingWorkspace({ data: {
+          repositoryId, workspace, json: JSON.stringify({ revision: saved.revision }),
+        } })) as Reviewed
       }
       setApproved(proposal)
       const foundation = proposal.foundation
@@ -154,21 +155,19 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       let record: Created
       if (provider === 'github') {
         remoteAttempted = true
-        const result = await api<{story: Created['story']; job: {id: string; headSha: string; branch: string};
-          mode: string}>( '/api/github/initialize', 'POST', {
-          repositoryId, directory: workspace, title: draft.title.trim(), jobId,
-          commit: verified.commit, foundation, ...discoveryApproval,
-        })
+        const result = JSON.parse(await initializeRepositoryStory({ data: { provider: 'github',
+          json: JSON.stringify({ repositoryId, directory: workspace, title: draft.title.trim(), jobId,
+            commit: verified.commit, foundation, ...discoveryApproval }),
+        } })) as { story: Created['story']; job: { id: string; headSha: string; branch: string }; mode: string }
         record = { story: result.story, jobId: result.job.id, headSha: result.job.headSha,
           branch: result.job.branch, commit: result.job.headSha, mode: result.mode }
         setJobReady(true)
       } else {
         remoteAttempted = true
-        const result = await api<{story: Created['story']; commit: string; branch: string; mode: string}>(
-          '/api/gitlab/initialize', 'POST', {
-            repositoryId, directory: workspace, expectedCommit: verified.commit,
-            ...(verified.empty ? { initialBranch } : {}), foundation, ...discoveryApproval,
-          })
+        const result = JSON.parse(await initializeRepositoryStory({ data: { provider: 'gitlab',
+          json: JSON.stringify({ repositoryId, directory: workspace, expectedCommit: verified.commit,
+            ...(verified.empty ? { initialBranch } : {}), foundation, ...discoveryApproval }),
+        } })) as { story: Created['story']; commit: string; branch: string; mode: string }
         record = { story: result.story, jobId, headSha: result.commit,
           branch: result.branch, commit: result.commit, mode: result.mode }
       }
@@ -176,10 +175,9 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       remoteAttempted = false
       onCreated?.(record)
       if (provider === 'gitlab') {
-        const prepared = await api<{job: {id: string; headSha: string}}>(
-          '/api/gitlab/jobs', 'POST', {
-            storyId: record.story.id, jobId: record.jobId, commit: record.commit,
-          })
+        const prepared = JSON.parse(await prepareRepositoryJob({ data: { provider: 'gitlab',
+          json: JSON.stringify({ storyId: record.story.id, jobId: record.jobId, commit: record.commit }),
+        } })) as { job: { id: string; headSha: string } }
         if (prepared.job.id !== record.jobId) throw new Error('Prepared job identity mismatch.')
         record = { ...record, headSha: prepared.job.headSha }
         setCreated(record); setJobReady(true)
@@ -200,17 +198,17 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       ? 'Existing repository: the initialization is isolated from the default branch.'
       : 'Genuinely empty repository: the first commit establishes the default branch.'}</p>}
     <label>Workspace (blank = repository root; a story/ child is created)
-      <input value={workspaceInput} disabled={busy || workspace !== null}
+      <Input value={workspaceInput} disabled={busy || workspace !== null}
         onChange={e => setWorkspaceInput(e.target.value)} placeholder="projects/demo" />
     </label>
-    {workspace === null ? <button type="button" disabled={busy} onClick={() => void open()}>
+    {workspace === null ? <Button type="button" disabled={busy} onClick={() => void open()}>
       Open or resume discovery
-    </button> : <>
+    </Button> : <>
       <p>Resolved canonical Story root: <code>/{target}</code>.
         The private <code>.story-inbox/</code> remains outside this content root.</p>
       {!created && <div className="actions">
-        <button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('pi')}>Collaborate with Pi</button>
-        <button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('structured')}>Structured questionnaire</button>
+        <Button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('pi')}>Collaborate with Pi</Button>
+        <Button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('structured')}>Structured questionnaire</Button>
       </div>}
       {!created && discoveryMode === 'pi' && <>
         <PiStoryDiscovery repositoryId={repositoryId} workspace={workspace}
@@ -221,11 +219,11 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
           }} />
         {piApproved && piApproval && <div className="actions">
           {provider === 'gitlab' && verified?.empty && <label>Initial default branch
-            <input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} />
+            <Input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} />
           </label>}
-          <button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create(piApproved, piApproval)}>
+          <Button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create(piApproved, piApproval)}>
             {busy ? 'Creating…' : 'Initialize approved Pi foundation'}
-          </button>
+          </Button>
         </div>}
       </>}
       {!created && discoveryMode === 'structured' && step < rounds.length && <div>
@@ -234,17 +232,17 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
           {name === 'body' || name === 'constraints' || name === 'premise' ||
           name === 'central_conflict' || name === 'scope' || name === 'player_experience' ||
           name === 'task' || name === 'decision'
-            ? <textarea rows={name === 'body' ? 5 : 2} maxLength={name === 'body' ? 12000 : 4000}
+            ? <Textarea rows={name === 'body' ? 5 : 2} maxLength={name === 'body' ? 12000 : 4000}
                 value={draft[name]} disabled={busy}
                 onChange={e => setDraft(old => ({...old, [name]: e.target.value}))} />
-            : <input value={draft[name]} maxLength={name === 'title' ? 120 : name === 'id' ? 100 : 4000} disabled={busy}
+            : <Input value={draft[name]} maxLength={name === 'title' ? 120 : name === 'id' ? 100 : 4000} disabled={busy}
                 onChange={e => setDraft(old => ({...old, [name]: e.target.value}))} />}
         </label>)}
         <div className="actions">
-          {step > 0 && <button type="button" disabled={busy} onClick={() => setStep(n => n - 1)}>Previous</button>}
-          <button type="button" disabled={busy} onClick={() => void advance()}>
+          {step > 0 && <Button type="button" disabled={busy} onClick={() => setStep(n => n - 1)}>Previous</Button>}
+          <Button type="button" disabled={busy} onClick={() => void advance()}>
             {busy ? 'Saving…' : 'Save answers and continue'}
-          </button>
+          </Button>
         </div>
       </div>}
       {!created && discoveryMode === 'structured' && step === rounds.length && <div>
@@ -259,12 +257,12 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
           You can refine it in the prepared job's scope editor before execution.</p>
         <p>Commit target: <code>/{target}/creative-direction/foundation.md</code></p>
         {provider === 'gitlab' && verified?.empty && <label>Initial default branch
-          <input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label>}
+          <Input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label>}
         <div className="actions">
-          <button type="button" disabled={busy} onClick={() => setStep(2)}>Revise answers</button>
-          <button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create()}>
+          <Button type="button" disabled={busy} onClick={() => setStep(2)}>Revise answers</Button>
+          <Button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create()}>
             {busy ? 'Creating…' : 'Approve foundation and initialize Story'}
-          </button>
+          </Button>
         </div>
       </div>}
       {created && <div role="status">
@@ -276,14 +274,14 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         {contractSaved ? <p>Generation contract saved. <a href={'/jobs/' + created.jobId}>Open prepared job</a></p>
           : <p>Story creation succeeded, but job preparation or contract persistence needs attention.
             {jobReady && <a href={'/jobs/' + created.jobId}> Inspect the job</a>}
-            {' '}<button type="button" disabled={busy} onClick={() => void create()}>Retry remaining setup only</button></p>}
+            {' '}<Button type="button" disabled={busy} onClick={() => void create()}>Retry remaining setup only</Button></p>}
       </div>}
       {unconfirmedWrite && <p role="alert" className="error">The provider write outcome is unknown.
         Inspect the repository branches and saved Story before retrying any initialization.
         This wizard will not submit another commit automatically.</p>}
-      {!created && !unconfirmedWrite && <button type="button" disabled={busy} onClick={() => {
+      {!created && !unconfirmedWrite && <Button type="button" disabled={busy} onClick={() => {
         setWorkspace(null); setVerified(null); setError(null); setStep(0)
-      }}>Choose another workspace</button>}
+      }}>Choose another workspace</Button>}
     </>}
     {error && <p role="alert" className="error">{error}</p>}
   </section>
