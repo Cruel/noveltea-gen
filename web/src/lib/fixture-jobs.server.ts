@@ -139,7 +139,14 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     FROM story_thread_messages WHERE owner_user_id=? AND thread_id=? ORDER BY sequence`)
     .all(owner, studioThread.id) as Array<{ role: 'user' | 'assistant'; status: 'delivered' | 'queued';
       body: string; originMessageId: string | null; verifiedCommitSha: string | null; createdAt: string }> : []
-  const base = { recoveryCheckpoints, forkSource: forkSourceSummary(job), storyThreadId: studioThread?.id ?? null,
+  const restart = store.sqlite.prepare(`SELECT source_thread_id AS sourceThreadId,
+    source_job_id AS sourceJobId,root_job_id AS originalJobId,
+    original_sha AS originalSha,selected_sha AS selectedSha,mode,target_branch AS targetBranch
+    FROM thread_restarts WHERE child_id=? AND owner_user_id=? AND prepared_at IS NOT NULL`)
+    .get(row.id, owner) as { sourceThreadId: string; sourceJobId: string; originalJobId: string;
+      originalSha: string; selectedSha: string; mode: 'original' | 'newer'; targetBranch: string | null } | undefined
+  const base = { recoveryCheckpoints, forkSource: forkSourceSummary(job), restartSource: restart ?? null,
+    storyThreadId: studioThread?.id ?? null,
     threadMessages,
     id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
     baseSha: job.baseSha, headSha: job.headSha, fixture: pinned?.fixture ?? true }

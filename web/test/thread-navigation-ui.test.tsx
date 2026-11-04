@@ -35,6 +35,8 @@ test('Thread navigation renders job links, progress and accessible reduced-motio
   assert.match(expanded, /child-job/)
   assert.match(expanded, /Event · arc.one/)
   assert.match(expanded, /motion-reduce:animate-none/)
+  assert.match(expanded, /Restart Thread/,
+    'each Thread exposes an accessible restart action without opening provider operations')
   assert.match(expanded, /aria-level="2"/)
   assert.match(expanded, /Execution timeline/)
   assert.doesNotMatch(expanded, /Branch from here/,

@@ -304,6 +304,16 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
         <div><span>Revision verified</span><strong>{job.revisionVerified === false ? 'No' : 'Not marked unverified'}</strong></div>
       </CardContent>
     </Card>
+    {job.restartSource && <Card>
+      <CardHeader><CardTitle className="text-sm">Prepared Thread restart</CardTitle></CardHeader>
+      <CardContent className="space-y-2 text-sm">
+        <p>Restarted from <a className="underline" href={'/jobs/' + encodeURIComponent(job.restartSource.sourceJobId)}>source Thread run</a>, rather than continuing its saved work.</p>
+        <p>Original Story SHA: <code className="break-all">{job.restartSource.originalSha}</code></p>
+        <p>Selected {job.restartSource.mode === 'original' ? 'original' : 'upstream'} SHA: <code className="break-all">{job.restartSource.selectedSha}</code>
+          {job.restartSource.targetBranch && <> · Branch: {job.restartSource.targetBranch}</>}</p>
+        <p className="text-muted-foreground">This is a clean, independent run. The original Thread, approvals, sessions and budget remain unchanged. Review settings and explicitly Run.</p>
+      </CardContent>
+    </Card>}
     {job.forkSource && <Card>
       <CardHeader><CardTitle className="text-sm">Inherited checkpoint</CardTitle></CardHeader>
       <CardContent className="space-y-2 text-sm">

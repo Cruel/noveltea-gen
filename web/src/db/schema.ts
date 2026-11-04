@@ -202,6 +202,27 @@ export const storyThreadMessages = sqliteTable('story_thread_messages', {
   index('story_thread_messages_thread_idx').on(table.ownerUserId, table.threadId, table.sequence),
 ])
 
+export const threadRestarts = sqliteTable('thread_restarts', {
+  childId: text('child_id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  sourceThreadId: text('source_thread_id').notNull(),
+  sourceJobId: text('source_job_id').notNull(),
+  rootJobId: text('root_job_id').notNull(),
+  originalSha: text('original_sha').notNull(),
+  mode: text('mode', { enum: ['original', 'newer'] }).notNull(),
+  selectedSha: text('selected_sha').notNull(),
+  targetBranch: text('target_branch'),
+  draftJson: text('draft_json').notNull(),
+  createdAt: text('created_at').notNull(),
+  preparedAt: text('prepared_at'),
+}, table => [
+  foreignKey({ columns: [table.sourceThreadId, table.ownerUserId],
+    foreignColumns: [storyThreads.id, storyThreads.ownerUserId] }),
+  foreignKey({ columns: [table.sourceJobId, table.ownerUserId],
+    foreignColumns: [sessions.id, sessions.ownerUserId] }),
+  index('thread_restarts_owner_source').on(table.ownerUserId, table.sourceThreadId),
+])
+
 export const storyThreadPreferences = sqliteTable('story_thread_preferences', {
   ownerUserId: text('owner_user_id').notNull(),
   storyId: text('story_id').notNull(),

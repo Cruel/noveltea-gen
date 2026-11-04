@@ -352,6 +352,28 @@ const appMigrations = [
          WHERE role='user' AND phase='preparing'`,
     ],
   },
+  {
+    version: 20,
+    statements: [
+      `CREATE TABLE thread_restarts (
+        child_id TEXT PRIMARY KEY NOT NULL,
+        owner_user_id TEXT NOT NULL REFERENCES user(id),
+        source_thread_id TEXT NOT NULL,
+        source_job_id TEXT NOT NULL,
+        root_job_id TEXT NOT NULL,
+        original_sha TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('original','newer')),
+        selected_sha TEXT NOT NULL,
+        target_branch TEXT,
+        draft_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        prepared_at TEXT,
+        FOREIGN KEY (source_thread_id,owner_user_id) REFERENCES story_threads(id,owner_user_id),
+        FOREIGN KEY (source_job_id,owner_user_id) REFERENCES studio_sessions(id,owner_user_id)
+      )`,
+      `CREATE INDEX thread_restarts_owner_source ON thread_restarts(owner_user_id,source_thread_id)`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -407,7 +429,8 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   const repoColumns = store.sqlite.pragma('table_info(repositories)') as Array<{ name: string }>
   const hasForks = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_forks'`).get()
   const hasMessages = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='story_thread_messages'`).get()
-  if (!hasForks || !hasMessages || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasRestarts = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_restarts'`).get()
+  if (!hasRestarts || !hasForks || !hasMessages || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

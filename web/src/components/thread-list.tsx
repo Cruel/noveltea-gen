@@ -1,6 +1,7 @@
 import { AlertCircle, Archive, ArchiveRestore, CheckCircle2, ChevronDown, ChevronRight, Clock3, GitBranch, LoaderCircle, Pencil } from 'lucide-react'
 import { orderThreads } from '@/lib/thread-navigation'
 import { ThreadExecutionTimeline } from '@/components/thread-execution-timeline'
+import { ThreadRestartControl } from '@/components/thread-restart-control'
 import type { StoryThread } from '@/lib/threads.server'
 
 const statusText = (status: StoryThread['status']) => ({
@@ -86,6 +87,7 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
               {thread.activityAt.slice(0, 10)}</time>
           </div>
         </div>
+        {thread.jobId && <ThreadRestartControl threadId={thread.id} />}
         <button type="button" title={'Rename ' + thread.title} aria-label={'Rename Thread ' + thread.title}
           className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2"
           onClick={() => onRename(thread)}><Pencil className="size-3.5" /></button>
