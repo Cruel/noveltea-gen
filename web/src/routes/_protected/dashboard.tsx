@@ -1,7 +1,10 @@
 import { createFileRoute, useRouter } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Button } from '@/components/ui/button'
+import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { LogOut, Settings } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { dashboardQuery } from '../../lib/dashboard.queries'
@@ -17,22 +20,53 @@ function Dashboard() {
   const queryClient = useQueryClient()
   const router = useRouter()
   const [error, setError] = useState<string | null>(null)
+  const [signingOut, setSigningOut] = useState(false)
+  const initials = dashboard.user.name?.trim().split(/\s+/).slice(0, 2)
+    .map(part => part.charAt(0)).join('').toUpperCase() || dashboard.user.email.charAt(0).toUpperCase()
   const disconnect = async () => {
-    const response = await authClient.signOut()
-    if (response.error) setError(response.error.message || 'Sign out failed')
-    else {
-      // Never let the next signed-in user see cached data from the previous account.
-      queryClient.clear()
-      await router.navigate({ to: '/login' })
+    if (signingOut) return
+    setSigningOut(true)
+    setError(null)
+    try {
+      const response = await authClient.signOut()
+      if (response.error) setError(response.error.message || 'Sign out failed')
+      else {
+        // Never let the next signed-in user see cached data from the previous account.
+        queryClient.clear()
+        await router.navigate({ to: '/login' })
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Sign out failed')
+    } finally {
+      setSigningOut(false)
     }
   }
   return <main className="page">
-    <header>
-      <div><p className="eyebrow">NovelTea</p><h1>Story Studio</h1></div>
-      <nav aria-label="Main navigation"><a href="/dashboard" aria-current="page">Dashboard</a><a href="/settings">Settings</a><Button variant="outline" type="button" onClick={() => void disconnect()}>Sign out</Button></nav>
+    <header className="pb-4">
+      <div><p className="eyebrow">NovelTea</p><h1 className="mb-0">Story Studio</h1></div>
+      <DropdownMenu>
+        <DropdownMenuTrigger aria-label="Account menu" title="Account menu"
+          className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+          <Avatar size="lg">
+            <AvatarFallback className="bg-secondary font-medium text-secondary-foreground">{initials}</AvatarFallback>
+          </Avatar>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-64">
+          <div className="min-w-0 px-2 py-2">
+            <p className="m-0 truncate text-sm font-medium text-popover-foreground">{dashboard.user.name}</p>
+            <p className="m-0 truncate text-xs text-muted-foreground" title={dashboard.user.email}>{dashboard.user.email}</p>
+          </div>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => void router.navigate({ to: '/settings' })}>
+            <Settings className="size-4" /> Settings
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem disabled={signingOut} variant="destructive" onClick={() => void disconnect()}>
+            <LogOut className="size-4" /> {signingOut ? 'Signing out…' : 'Sign out'}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </header>
-    <p>Signed in as <strong>{dashboard.user.name}</strong> ({dashboard.user.email})</p>
-    <p>Manage <a href="/settings#integrations">repository integrations</a> and <a href="/settings#account">login methods</a> independently in Settings.</p>
     {error && <p role="alert" className="error">{error}</p>}
     <div className="dashboard-grid">
       <Card><CardHeader><CardTitle>Stories</CardTitle></CardHeader><CardContent>
