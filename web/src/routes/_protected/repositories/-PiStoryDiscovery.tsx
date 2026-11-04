@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { NativeSelect } from '@/components/ui/native-select'
+import { StudioSelect } from '@/components/studio-select'
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { loadPiDiscovery, actPiDiscovery } from '../../../lib/story-workflows.functions'
@@ -83,17 +83,17 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
           onChange={e => setBrief(e.target.value)} placeholder="A one-sentence premise is enough." />
       </label>
       <label>Connected Pi model
-        <NativeSelect value={selection} disabled={busy} onChange={e => { setSelection(e.target.value); setThinking('') }}>
-          <option value="">Select model</option>
-          {models.map(m => <option key={m.provider + '/' + m.id} value={m.provider + '/' + m.id}>
-            {m.provider} / {m.id}</option>)}
-        </NativeSelect>
+        <StudioSelect aria-label="Connected Pi model" value={selection} disabled={busy}
+          onValueChange={value => { setSelection(value); setThinking('') }}
+          options={[{ value: '', label: 'Select model' },
+            ...models.map(m => ({ value: m.provider + '/' + m.id,
+              label: m.provider + ' / ' + m.id }))]} />
       </label>
       {selected?.reasoning && <label>Reasoning effort
-        <NativeSelect value={thinking} disabled={busy} onChange={e => setThinking(e.target.value as typeof thinking)}>
-          <option value="">Default</option>
-          <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
-        </NativeSelect>
+        <StudioSelect aria-label="Reasoning effort" value={thinking} disabled={busy}
+          onValueChange={value => setThinking(value as typeof thinking)}
+          options={[{ value: '', label: 'Default' }, { value: 'low', label: 'Low' },
+            { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }]} />
       </label>}
       <Button type="button" disabled={busy || !brief.trim() || !selected}
         onClick={() => { if (selected) void perform({ action: 'start', text: brief,

@@ -1,5 +1,5 @@
 import { Button } from '@/components/ui/button'
-import { NativeSelect } from '@/components/ui/native-select'
+import { StudioSelect } from '@/components/studio-select'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -57,10 +57,11 @@ function GitLabRepositories() {
       <CardHeader><CardTitle>GitLab identity</CardTitle></CardHeader>
       <CardContent className="grid gap-3">
         <label className="grid gap-2">Repository account
-          <NativeSelect className="w-full" value={connectionId} onChange={e => { setConnectionId(e.target.value); setPageNumber(1) }}>
-            <option value="">{connections.length ? 'Choose an account' : 'Historical login-linked identity'}</option>
-            {connections.map(entry => <option key={entry.id} value={entry.id}>{entry.login}</option>)}
-          </NativeSelect>
+          <StudioSelect aria-label="Repository account" value={connectionId}
+            onValueChange={value => { setConnectionId(value); setPageNumber(1) }}
+            options={[{ value: '', label: connections.length
+              ? 'Choose an account' : 'Historical login-linked identity' },
+              ...connections.map(entry => ({ value: entry.id, label: entry.login }))]} />
         </label>
         {connections.length > 1 && !connectionId && <p>Select a GitLab account to browse projects.</p>}
         <p className="muted">Manage accounts in <a href="/settings#integrations">Settings → Git integrations</a>.</p>

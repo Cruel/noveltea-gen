@@ -1,5 +1,5 @@
 import { Button } from '@/components/ui/button'
-import { NativeSelect } from '@/components/ui/native-select'
+import { StudioSelect } from '@/components/studio-select'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
@@ -126,21 +126,23 @@ function SettingsPage() {
         }} />
         <div className="generation-controls">
           <label>Default model
-            <NativeSelect value={selected} disabled={busy} onChange={e => { setSelected(e.target.value); setThinking('') }}>
-              <option value="">No default (choose for each job)</option>
-              {selected && !models.some(model => model.provider + '/' + model.id === selected) &&
-                <option value={selected}>{selected} (disconnected)</option>}
-              {models.map(model => <option key={model.provider + '/' + model.id} value={model.provider + '/' + model.id}>
-                {model.provider} / {model.id}
-              </option>)}
-            </NativeSelect>
+            <StudioSelect aria-label="Default model" value={selected} disabled={busy}
+              onValueChange={value => { setSelected(value); setThinking('') }}
+              options={[
+                { value: '', label: 'No default (choose for each job)' },
+                ...(selected && !models.some(model => model.provider + '/' + model.id === selected)
+                  ? [{ value: selected, label: selected + ' (disconnected)' }] : []),
+                ...models.map(model => ({ value: model.provider + '/' + model.id,
+                  label: model.provider + ' / ' + model.id })),
+              ]} />
           </label>
           <label>Default reasoning
-            <NativeSelect value={thinking} disabled={busy || !models.some(m => m.provider + '/' + m.id === selected && m.reasoning)}
-              onChange={e => setThinking(e.target.value)}>
-              <option value="">Provider default</option>
-              <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
-            </NativeSelect>
+            <StudioSelect aria-label="Default reasoning" value={thinking}
+              disabled={busy || !models.some(m => m.provider + '/' + m.id === selected && m.reasoning)}
+              onValueChange={setThinking}
+              options={[{ value: '', label: 'Provider default' },
+                { value: 'low', label: 'Low' }, { value: 'medium', label: 'Medium' },
+                { value: 'high', label: 'High' }]} />
           </label>
         </div>
         <Button type="button" disabled={busy} onClick={() => void save()}>Save model defaults</Button>
@@ -173,14 +175,14 @@ function SettingsPage() {
             return <li className="settings-connection" key={repo.id}>
               <div><strong>{repo.name}</strong><small>{names[repo.provider]}{repo.connectionId ? '' : ' · Historical login-linked access'}</small></div>
               <div className="actions settings-actions">
-                <NativeSelect aria-label={'Git identity for ' + repo.name} value={selected} disabled={busy}
-                  onChange={event => setBindings(previous => ({ ...previous, [repo.id]: event.target.value }))}>
-                  <option value="" disabled>Choose a connection</option>
-                  {settings.gitConnections.filter(connection => connection.provider === repo.provider)
-                    .map(connection => <option key={connection.id} value={connection.id} disabled={connection.status !== 'connected'}>
-                      {connection.login}{connection.status === 'connected' ? '' : ' (reconnect first)'}
-                    </option>)}
-                </NativeSelect>
+                <StudioSelect aria-label={'Git identity for ' + repo.name} value={selected} disabled={busy}
+                  placeholder="Choose a connection"
+                  onValueChange={value => setBindings(previous => ({ ...previous, [repo.id]: value }))}
+                  options={settings.gitConnections.filter(connection => connection.provider === repo.provider)
+                    .map(connection => ({ value: connection.id,
+                      label: connection.login + (connection.status === 'connected' ? '' : ' (reconnect first)'),
+                      disabled: connection.status !== 'connected',
+                    }))} />
                 <Button type="button" disabled={busy || !selected || selected === repo.connectionId ||
                   !available.some(connection => connection.id === selected)}
                   onClick={() => void rebindRepository(repo.id, selected)}>Save binding</Button>

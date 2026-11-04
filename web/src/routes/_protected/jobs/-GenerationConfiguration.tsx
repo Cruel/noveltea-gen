@@ -1,7 +1,7 @@
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
-import { NativeSelect } from '@/components/ui/native-select'
+import { StudioSelect } from '@/components/studio-select'
 import { Input } from '@/components/ui/input'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -167,24 +167,23 @@ export function GenerationConfiguration({ jobId, onStarted }: {
     </label>
     <div className="generation-controls">
       <label>Scope
-        <NativeSelect value={scope.kind} disabled={busy} onChange={e => {
-          const kind = e.target.value as 'full-story' | 'partial'
-          if (kind === 'full-story') setBranchesText('')
-          updateScope(kind === 'full-story'
-            ? { kind, depth: 'composition', targets: [], supportingTargets: [], branches: [] }
-            : { kind })
-        }}>
-          <option value="full-story">Entire Story</option>
-          <option value="partial">Bounded selection</option>
-        </NativeSelect>
+        <StudioSelect aria-label="Generation scope" value={scope.kind} disabled={busy}
+          onValueChange={value => {
+            const kind = value as 'full-story' | 'partial'
+            if (kind === 'full-story') setBranchesText('')
+            updateScope(kind === 'full-story'
+              ? { kind, depth: 'composition', targets: [], supportingTargets: [], branches: [] }
+              : { kind })
+          }}
+          options={[{ value: 'full-story', label: 'Entire Story' },
+            { value: 'partial', label: 'Bounded selection' }]} />
       </label>
       {scope.kind === 'partial' && <label>Generation depth
-        <NativeSelect value={scope.depth} disabled={busy}
-          onChange={e => updateScope({ depth: e.target.value as CompletionContract['scope']['depth'] })}>
-          <option value="architecture">Architecture outline</option>
-          <option value="interactive">Interactive development</option>
-          <option value="composition">Full composition</option>
-        </NativeSelect>
+        <StudioSelect aria-label="Generation depth" value={scope.depth} disabled={busy}
+          onValueChange={value => updateScope({ depth: value as CompletionContract['scope']['depth'] })}
+          options={[{ value: 'architecture', label: 'Architecture outline' },
+            { value: 'interactive', label: 'Interactive development' },
+            { value: 'composition', label: 'Full composition' }]} />
       </label>}
     </div>
     {scope.kind === 'partial' && <>
@@ -255,24 +254,20 @@ export function GenerationConfiguration({ jobId, onStarted }: {
       Without a model, the job uses deterministic fixtures.</p>
     <div className="generation-controls">
       <label>Model
-        <NativeSelect disabled={busy} value={selectedModel} onChange={e => {
-          setSelectedModel(e.target.value); setThinking(''); setSaved(false)
-        }}>
-          <option value="">No model (deterministic fixture)</option>
-          {selectedModel && !data.models.some(m => m.provider + '/' + m.id === selectedModel) &&
-            <option value={selectedModel}>{selectedModel} (disconnected — reconnect)</option>}
-          {data.models.map(model => <option key={model.provider + '/' + model.id}
-            value={model.provider + '/' + model.id}>{model.provider} / {model.id}</option>)}
-        </NativeSelect>
+        <StudioSelect aria-label="Generation model" disabled={busy} value={selectedModel}
+          onValueChange={value => { setSelectedModel(value); setThinking(''); setSaved(false) }}
+          options={[{ value: '', label: 'No model (deterministic fixture)' },
+            ...(selectedModel && !data.models.some(m => m.provider + '/' + m.id === selectedModel)
+              ? [{ value: selectedModel, label: selectedModel + ' (disconnected — reconnect)' }] : []),
+            ...data.models.map(model => ({ value: model.provider + '/' + model.id,
+              label: model.provider + ' / ' + model.id }))]} />
       </label>
       <label>Reasoning
-        <NativeSelect disabled={busy || !data.models.some(m => m.provider + '/' + m.id === selectedModel && m.reasoning)}
-          value={thinking} onChange={e => { setThinking(e.target.value); setSaved(false) }}>
-          <option value="">Provider default</option>
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-        </NativeSelect>
+        <StudioSelect aria-label="Generation reasoning" disabled={busy ||
+            !data.models.some(m => m.provider + '/' + m.id === selectedModel && m.reasoning)}
+          value={thinking} onValueChange={value => { setThinking(value); setSaved(false) }}
+          options={[{ value: '', label: 'Provider default' }, { value: 'low', label: 'Low' },
+            { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }]} />
       </label>
     </div>
     <div className="generation-controls">

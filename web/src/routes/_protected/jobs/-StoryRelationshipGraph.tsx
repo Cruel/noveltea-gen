@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
-import { NativeSelect } from '@/components/ui/native-select'
+import { StudioSelect } from '@/components/studio-select'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { readStoryGraph } from '../../../lib/story-data.functions'
@@ -151,16 +151,19 @@ export function StoryRelationshipGraph({ jobId, index, selectedId, onSelect }: P
       </Button>
     </div>
     <div className="story-graph-filters">
-      <label>Neighborhood <NativeSelect value={scope} onChange={e => setScope(e.target.value as typeof scope)}>
-        <option value="focused">Focused</option><option value="related">Related</option>
-      </NativeSelect></label>
-      <label>Record type <NativeSelect value={kind} onChange={e => setKind(e.target.value)}>
-        <option value="all">All types</option>
-        {kinds.map(type => <option key={type} value={type}>{type}</option>)}
-      </NativeSelect></label>
-      <label>Visible records <NativeSelect value={limit} onChange={e => setLimit(Number(e.target.value))}>
-        {limits.map(n => <option key={n} value={n}>{n}</option>)}
-      </NativeSelect></label>
+      <label>Neighborhood <StudioSelect aria-label="Relationship neighborhood"
+        value={scope} onValueChange={value => setScope(value as typeof scope)}
+        options={[{ value: 'focused', label: 'Focused' }, { value: 'related', label: 'Related' }]} />
+      </label>
+      <label>Record type <StudioSelect aria-label="Relationship record type"
+        value={kind} onValueChange={setKind}
+        options={[{ value: 'all', label: 'All types' },
+          ...kinds.map(type => ({ value: type, label: type }))]} />
+      </label>
+      <label>Visible records <StudioSelect aria-label="Visible relationship records"
+        value={String(limit)} onValueChange={value => setLimit(Number(value))}
+        options={limits.map(n => ({ value: String(n), label: String(n) }))} />
+      </label>
       <label className="story-graph-checkbox"><Checkbox checked={connectedOnly}
         onCheckedChange={checked => setConnectedOnly(checked)} /> Only connected</label>
       <label className="story-graph-checkbox"><Checkbox checked={collapseOuter}

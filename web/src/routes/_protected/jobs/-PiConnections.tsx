@@ -1,5 +1,5 @@
 import { Button } from '@/components/ui/button'
-import { NativeSelect } from '@/components/ui/native-select'
+import { StudioSelect } from '@/components/studio-select'
 import { Input } from '@/components/ui/input'
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -79,10 +79,9 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
       </li>)}</ul> : <p>No connected model providers.</p>}
     <div className="generation-controls">
       <label>API key provider
-        <NativeSelect disabled={busy} value={provider} onChange={e => setProvider(e.target.value)}>
-          {Object.entries(apiProviders).map(([id, name]) =>
-            <option key={id} value={id}>{name}</option>)}
-        </NativeSelect>
+        <StudioSelect aria-label="API key provider" disabled={busy} value={provider}
+          onValueChange={setProvider}
+          options={Object.entries(apiProviders).map(([value, label]) => ({ value, label }))} />
       </label>
       <label>Personal API key
         <Input type="password" autoComplete="off" value={secret} disabled={busy}
@@ -93,11 +92,9 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
     </div>
     <div className="generation-controls">
       <label>Device-code subscription provider
-        <NativeSelect disabled={busy || active} value={oauthProvider}
-          onChange={e => setOauthProvider(e.target.value)}>
-          {Object.entries(deviceProviders).map(([id, name]) =>
-            <option key={id} value={id}>{name}</option>)}
-        </NativeSelect>
+        <StudioSelect aria-label="Device-code subscription provider" disabled={busy || active}
+          value={oauthProvider} onValueChange={setOauthProvider}
+          options={Object.entries(deviceProviders).map(([value, label]) => ({ value, label }))} />
       </label>
       <Button type="button" disabled={busy || active}
         onClick={() => void mutate('POST', { action: 'oauth', provider: oauthProvider })}>
@@ -123,10 +120,11 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
       }}>
         <label>{catalog.oauth.prompt.message}
           {catalog.oauth.prompt.type === 'select' ?
-            <NativeSelect value={answer} disabled={busy} onChange={e => setAnswer(e.target.value)}>
-              {catalog.oauth.prompt.options?.map(option =>
-                <option key={option.id} value={option.id}>{option.label}</option>)}
-            </NativeSelect> :
+            <StudioSelect aria-label="Provider authorization answer" value={answer} disabled={busy}
+              onValueChange={setAnswer} placeholder="Choose a response"
+              options={(catalog.oauth.prompt.options ?? []).map(option => ({
+                value: option.id, label: option.label,
+              }))} /> :
             <Input type={catalog.oauth.prompt.type === 'secret' ? 'password' : 'text'}
               autoComplete="off" disabled={busy} value={answer}
               placeholder={catalog.oauth.prompt.placeholder}

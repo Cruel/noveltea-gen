@@ -31,7 +31,7 @@
 .story-relationships p { margin: .25rem 0 .5rem; font-size: .82rem; }
 .story-graph-filters { display: flex; flex-wrap: wrap; gap: .55rem; margin-bottom: .65rem; align-items: end; }
 .story-graph-filters label { display: grid; gap: .3rem; color: #b0beca; font-size: .78rem; }
-.story-graph-filters [data-slot=native-select-wrapper] { max-width: 170px; }
+.story-graph-filters [data-slot=select-trigger] { min-width: 130px; max-width: 170px; }
 .story-graph-filters .story-graph-checkbox { display: flex; align-items: center; gap: .4rem; padding-bottom: .45rem; }
 .story-graph-canvas { height: 360px; min-width: 0; background: #101820; border: 1px solid #344657; border-radius: 6px; overflow: hidden; }
 .story-graph-canvas .react-flow__controls button { background: #263847; color: #e4e9ef; fill: #e4e9ef; border-color: #60788b; }
@@ -50,7 +50,7 @@
 @media (max-width: 680px) { .story-explorer-layout { grid-template-columns: 1fr; } .story-explorer-tree { max-height: 300px; border-right: 0; border-bottom: 1px solid #344657; } }
 .generation-config { margin-top: 1rem; }
 .generation-config label { display: grid; gap: .35rem; margin: .8rem 0; color: #c1cdd7; }
-.generation-config [data-slot=input], .generation-config [data-slot=textarea], .generation-config [data-slot=native-select-wrapper] { width: 100%; }
+.generation-config [data-slot=input], .generation-config [data-slot=textarea], .generation-config [data-slot=select-trigger] { width: 100%; }
 .generation-config textarea { resize: vertical; }
 .generation-config h3 { font-size: .95rem; margin: 1.4rem 0 .5rem; }
 .generation-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); column-gap: 1rem; }
@@ -72,7 +72,7 @@
 .settings-page section { margin-top: 1.2rem; }
 .settings-page .generation-controls { gap: 1rem; margin: 1rem 0; }
 .settings-page label { display: grid; gap: .35rem; color: var(--foreground); }
-.settings-page [data-slot=native-select-wrapper] { width: 100%; }
+.settings-page [data-slot=select-trigger] { width: 100%; }
 .settings-page [data-slot=input] { width: 100%; }
 .settings-page .settings-actions { justify-content: flex-start; margin-top: 1rem; }
 .settings-connection { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
