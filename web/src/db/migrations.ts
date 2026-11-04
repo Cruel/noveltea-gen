@@ -239,6 +239,67 @@ const appMigrations = [
       `ALTER TABLE github_install_flows ADD COLUMN connection_id TEXT REFERENCES git_connections(id) ON DELETE SET NULL`,
     ],
   },
+  {
+    version: 16,
+    statements: [
+      `CREATE TABLE story_conversations (
+         id TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL,
+         story_id TEXT NOT NULL,
+         title TEXT NOT NULL,
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         FOREIGN KEY (story_id, owner_user_id) REFERENCES stories (id, owner_user_id) ON DELETE CASCADE,
+         UNIQUE (id, owner_user_id)
+       )`,
+      `CREATE INDEX story_conversations_story_idx ON story_conversations (owner_user_id, story_id)`,
+      `CREATE TABLE story_threads (
+         id TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL,
+         conversation_id TEXT NOT NULL,
+         parent_thread_id TEXT,
+         title TEXT NOT NULL,
+         activity_at TEXT NOT NULL,
+         archived_at TEXT,
+         created_at TEXT NOT NULL,
+         FOREIGN KEY (conversation_id, owner_user_id) REFERENCES story_conversations (id, owner_user_id) ON DELETE CASCADE,
+         FOREIGN KEY (parent_thread_id, owner_user_id, conversation_id)
+           REFERENCES story_threads (id, owner_user_id, conversation_id),
+         CHECK (parent_thread_id IS NULL OR parent_thread_id <> id),
+         UNIQUE (id, owner_user_id),
+         UNIQUE (id, owner_user_id, conversation_id)
+       )`,
+      `CREATE INDEX story_threads_conversation_idx ON story_threads (owner_user_id, conversation_id)`,
+      `CREATE TABLE story_thread_runs (
+         job_id TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL,
+         thread_id TEXT NOT NULL,
+         run_order INTEGER NOT NULL,
+         needs_author INTEGER NOT NULL DEFAULT 0 CHECK (needs_author IN (0, 1)),
+         FOREIGN KEY (thread_id, owner_user_id) REFERENCES story_threads (id, owner_user_id) ON DELETE CASCADE,
+         FOREIGN KEY (job_id, owner_user_id) REFERENCES studio_sessions (id, owner_user_id) ON DELETE CASCADE,
+         UNIQUE (thread_id, run_order)
+       )`,
+      `CREATE INDEX story_thread_runs_thread_idx ON story_thread_runs (owner_user_id, thread_id, run_order)`,
+      `CREATE TABLE story_thread_preferences (
+         owner_user_id TEXT NOT NULL,
+         story_id TEXT NOT NULL,
+         view_mode TEXT NOT NULL CHECK (view_mode IN ('tree', 'flat')),
+         expanded_ids_json TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         PRIMARY KEY (owner_user_id, story_id),
+         FOREIGN KEY (story_id, owner_user_id) REFERENCES stories (id, owner_user_id) ON DELETE CASCADE
+       )`,
+      // Keep historical jobs intact: each becomes one root Thread of its own
+      // Conversation, without claiming historical graph checkpoints are forkable.
+      `INSERT INTO story_conversations (id,owner_user_id,story_id,title,created_at,updated_at)
+         SELECT 'legacy:' || id,owner_user_id,story_id,title,created_at,created_at FROM studio_sessions`,
+      `INSERT INTO story_threads (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
+         SELECT 'root:' || id,owner_user_id,'legacy:' || id,NULL,title,created_at,created_at FROM studio_sessions`,
+      `INSERT INTO story_thread_runs (job_id,owner_user_id,thread_id,run_order)
+         SELECT id,owner_user_id,'root:' || id,0 FROM studio_sessions`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -285,10 +346,13 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     WHERE type='table' AND name='git_connections'`).get()
   const hasPrefs = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='user_preferences'`).get()
+  const hasThreads = ['story_conversations', 'story_threads', 'story_thread_runs', 'story_thread_preferences']
+    .every(name => !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
+      WHERE type='table' AND name=?`).get(name))
   const hasGitFlows = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='git_connection_flows'`).get()
   const repoColumns = store.sqlite.pragma('table_info(repositories)') as Array<{ name: string }>
-  if (!hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  if (!hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

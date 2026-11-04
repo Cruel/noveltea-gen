@@ -23,6 +23,14 @@ Studio uses TanStack Start/Router, React, **Tailwind CSS v4** and **shadcn with 
 
 **Internal application operations use TanStack Start `createServerFn`** (see `src/lib/*.functions.ts`) instead of browser `fetch()` to Studio JSON routes. They preserve the owner checks, bounded payloads, revision preflight and authorization enforced by the existing server-side handlers. Keep explicit HTTP endpoints for Better Auth/OAuth/provider callbacks, GitHub App installation return, SSE job-progress streaming, and compatibility with existing tools/tests; do not add new browser-facing JSON endpoints without a specific protocol or external-consumer requirement. The legacy internal HTTP handlers remain available during this migration and are not required by the new UI; their removal should be a separately audited compatibility change. Use ordinary React local state for short-lived form/interaction state and Router search parameters for shareable selections. **Zustand is intentionally deferred**, not installed.
 
+## Story Conversations and Thread navigation (#78)
+
+After applying Studio schema migration **16** with the web services stopped, choose a Story on the Dashboard to open its **Conversations**. Existing generation jobs remain accessible through their original job pages; each receives a stable root Thread within an automatically created Conversation. Authors can create additional Conversations, edit Conversation and Thread titles, and switch between a compact ancestry-aware tree and an activity-sorted flat Thread list. The selected Conversation is shareable through the URL. Tree/flat and expansion preferences are stored per owner and Story.
+
+The navigation reads the existing owner-scoped catalog, durable generation events and execution queue. Meaningful work and status transitions affect activity ordering; HTTP polling and SSE heartbeats do not. Running work shows the most recent specialist work item. Status distinguishes queued, running, paused, blocked, author attention, completed and archived where applicable. No existing LangGraph execution identity or job worktree is changed, and the legacy root mapping **does not** reconstruct historical forkable recovery checkpoints. Creating child Threads, branching and continuing runs are separate follow-up milestones of spec #73.
+
+Run `pnpm --filter @noveltea/studio migrate` while Studio is stopped **before** deploying this code; the running server refuses a missing migration.
+
 ## Setup
 
 Use Node.js 24 (Node >=22.12 supported by Better Auth, 24 recommended for

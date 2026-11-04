@@ -7,7 +7,7 @@
     "build": "vite build && node ../scripts/check-studio-oauth-bundle.mjs",
     "start": "node .output/server/index.mjs",
     "typecheck": "vite build && tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test test/*.test.ts test/*.test.tsx",
     "check": "pnpm typecheck && pnpm test",
     "migrate": "tsx src/db/migrate-cli.ts",
     "host:controller": "tsx src/host-controller.ts",
