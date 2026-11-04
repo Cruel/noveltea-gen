@@ -54,6 +54,9 @@ export function useJobEventStream(jobId: string, activityVisible: boolean) {
           return { ...current, events: mergeJobEvents(current.events, [event]) }
         })
         if (!received) return
+        // Conversation navigation uses the same durable progress events; SSE
+        // heartbeats are comments and never reach this mutation path.
+        void queryClient.invalidateQueries({ queryKey: ['story-conversations'] })
         setLatestUpdate(event)
         if (!activityVisibleRef.current) setUnread(count => count + 1)
         if (event.kind === 'started' || event.kind === 'verified' ||

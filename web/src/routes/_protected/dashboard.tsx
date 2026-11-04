@@ -21,7 +21,9 @@ function Dashboard() {
             ? '/repositories/gitlab/' + story.repositoryId + '?' +
               new URLSearchParams({ directory: story.directory, commit: story.commitSha })
             : null
-          return <li key={story.id}>{href ? <a href={href}>{story.title}</a> : story.title}</li>
+          return <li key={story.id}><a href={'/stories/' + encodeURIComponent(story.id) + '/conversations'}>{story.title}</a>
+            {href && <> · <a href={href} className="text-xs text-muted-foreground">Browse repository</a></>}
+          </li>
         })}</ul> : <p>No Stories imported yet.</p>}
       </CardContent></Card>
       <Card><CardHeader><CardTitle>Active jobs</CardTitle></CardHeader><CardContent>

@@ -90,8 +90,9 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
 
   return <main className="page job-page">
     <div className="mb-4">
-      <a className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground" href="/dashboard">
-        <ArrowLeft className="size-4" /> Back to dashboard
+      <a className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        href={job?.storyId ? '/stories/' + encodeURIComponent(job.storyId) + '/conversations' : '/dashboard'}>
+        <ArrowLeft className="size-4" /> {job?.storyId ? 'Back to Conversations' : 'Back to dashboard'}
       </a>
     </div>
     {(error || jobError) && <Alert variant="destructive" className="mb-4">

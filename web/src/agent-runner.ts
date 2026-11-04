@@ -119,13 +119,20 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         }
       }
       const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
-      const outcome = snapshot.values as { status?: string }
+      const outcome = snapshot.values as { status?: string; reason?: string | null }
       const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
         ? outcome.status! : 'blocked'
       store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
         WHERE id=? AND owner_user_id=? AND generation_thread_id=?`)
         .run(state, new Date().toISOString(), row.id, item.ownerId, threadId)
       if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
+      // The graph owns the author-input distinction; a generic pause must
+      // never be presented as a request for creative approval.
+      const needsAuthor = (state === 'paused' || state === 'blocked') &&
+        typeof outcome.reason === 'string' &&
+        /author (decision|choice|approval|question|input)|waiting for (your|an author)|approval required|author review/i.test(outcome.reason)
+      store.sqlite.prepare(`UPDATE story_thread_runs SET needs_author=?
+        WHERE job_id=? AND owner_user_id=?`).run(needsAuthor ? 1 : 0, row.id, item.ownerId)
       appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
         status: state as 'paused' | 'blocked' | 'completed' | 'cancelled' })
     } finally { saver.db.close() }

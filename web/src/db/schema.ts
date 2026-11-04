@@ -134,6 +134,62 @@ export const gitlabPublications = sqliteTable('gitlab_publications', {
     foreignColumns: [sessions.id, sessions.ownerUserId] }),
 ])
 
+export const storyConversations = sqliteTable('story_conversations', {
+  id: text('id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  storyId: text('story_id').notNull(),
+  title: text('title').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.storyId, table.ownerUserId], foreignColumns: [stories.id, stories.ownerUserId] }),
+  uniqueIndex('story_conversations_owner_pair').on(table.id, table.ownerUserId),
+  index('story_conversations_story_idx').on(table.ownerUserId, table.storyId),
+])
+
+export const storyThreads = sqliteTable('story_threads', {
+  id: text('id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  conversationId: text('conversation_id').notNull(),
+  parentThreadId: text('parent_thread_id'),
+  title: text('title').notNull(),
+  activityAt: text('activity_at').notNull(),
+  archivedAt: text('archived_at'),
+  createdAt: text('created_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.conversationId, table.ownerUserId],
+    foreignColumns: [storyConversations.id, storyConversations.ownerUserId] }),
+  foreignKey({ columns: [table.parentThreadId, table.ownerUserId, table.conversationId],
+    foreignColumns: [table.id, table.ownerUserId, table.conversationId] }),
+  uniqueIndex('story_threads_owner_pair').on(table.id, table.ownerUserId),
+  uniqueIndex('story_threads_owner_conversation').on(table.id, table.ownerUserId, table.conversationId),
+  index('story_threads_conversation_idx').on(table.ownerUserId, table.conversationId),
+])
+
+export const storyThreadRuns = sqliteTable('story_thread_runs', {
+  jobId: text('job_id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  threadId: text('thread_id').notNull(),
+  runOrder: integer('run_order').notNull(),
+  needsAuthor: integer('needs_author', { mode: 'boolean' }).notNull().default(false),
+}, table => [
+  foreignKey({ columns: [table.threadId, table.ownerUserId], foreignColumns: [storyThreads.id, storyThreads.ownerUserId] }),
+  foreignKey({ columns: [table.jobId, table.ownerUserId], foreignColumns: [sessions.id, sessions.ownerUserId] }),
+  uniqueIndex('story_thread_runs_order').on(table.threadId, table.runOrder),
+  index('story_thread_runs_thread_idx').on(table.ownerUserId, table.threadId, table.runOrder),
+])
+
+export const storyThreadPreferences = sqliteTable('story_thread_preferences', {
+  ownerUserId: text('owner_user_id').notNull(),
+  storyId: text('story_id').notNull(),
+  viewMode: text('view_mode', { enum: ['tree', 'flat'] }).notNull(),
+  expandedIdsJson: text('expanded_ids_json').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  primaryKey({ columns: [table.ownerUserId, table.storyId] }),
+  foreignKey({ columns: [table.storyId, table.ownerUserId], foreignColumns: [stories.id, stories.ownerUserId] }),
+])
+
 export const sessions = sqliteTable('studio_sessions', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),

@@ -1,6 +1,7 @@
 import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { acquireCachedStory, GitCacheError, initializeStoryBranch } from './git-cache.server'
+import { ensureRootThreads } from './threads.server'
 
 type Provider = 'github' | 'gitlab'
 export type CachedCatalogStory = {
@@ -86,6 +87,7 @@ export async function prepareCachedJob(
   if (saved.changes !== 1) {
     throw new GitCacheError(409, 'Job ID was assigned concurrently to another Story or revision.')
   }
+  ensureRootThreads(store, ownerId, row.id)
   return { id: input.jobId, storyId: row.id, status: 'paused' as const,
     baseSha: job.baseSha, headSha: job.headSha }
 }
