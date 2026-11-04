@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Search, RefreshCw } from 'lucide-react'
+import { siGithub, siGitlab } from 'simple-icons'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -233,11 +234,12 @@ export function AddRepositoryDialog() {
           <div role="list" aria-label="Available repositories">
             {rows.slice(0, 150).map(repo => {
               const key = candidateKey(repo)
+              const icon = repo.provider === 'github' ? siGithub : siGitlab
               return <div role="listitem" key={key}
                 className="flex min-w-0 items-center gap-2 border-b border-border/60 py-2 last:border-0">
-                <span aria-label={repo.provider === 'github' ? 'GitHub' : 'GitLab'}
-                  className="inline-flex size-7 shrink-0 items-center justify-center rounded bg-muted text-[10px] font-semibold text-muted-foreground">
-                  {repo.provider === 'github' ? 'GH' : 'GL'}
+                <span className="inline-flex size-7 shrink-0 items-center justify-center rounded bg-muted text-foreground">
+                  <svg role="img" aria-label={icon.title} viewBox="0 0 24 24"
+                    className="size-[18px] fill-current"><path d={icon.path} /></svg>
                 </span>
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                   <span className="min-w-0 truncate text-sm font-medium" title={repo.name}>{repo.name}</span>
