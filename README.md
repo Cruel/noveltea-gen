@@ -17,6 +17,30 @@ Run `pnpm certify:story` with an installed native CLI and canonical fixture to
 require real native validation (no skipped checks). Opt-in real Pi results are
 reported separately; deterministic fixtures do not certify narrative quality.
 
+### GitHub Actions CI
+
+[CI](.github/workflows/ci.yml) runs on pushes to `main`, pull requests and manual
+dispatch. The mandatory **offline** job installs the frozen pnpm lockfile and runs
+`pnpm check`: root/Studio typechecking, deterministic tests and production builds.
+It requires no model sign-in, provider API keys, GitHub/GitLab OAuth secrets, or
+hosted tracing. Credential-gated Pi tests and rootless-Docker/Compose
+certification are deliberately not enabled by this workflow.
+
+For the broader native Story integration suite, configure a repository Actions
+secret named `NOVELTEA_CI_READ_TOKEN` with **Contents: read** access to
+the private `Cruel/noveltea-skills` repository and **Actions: read** access to
+the public `Cruel/nt` repository (for example, a narrowly scoped fine-grained
+GitHub token covering both repositories). On non-fork events, the
+additional job then checks out those skills, downloads the native Linux CLI
+artifact from the latest successful public `Cruel/nt` **Build** workflow,
+installs both projects' locked dependencies and runs `pnpm certify:story`, the
+root tests, and the Studio tests with real native validation. No LLM credentials
+are used. The job records the external Build run and skills commit in its run
+summary. Without the read-only repository credential, the job explicitly
+reports that the private-skills-dependent integration suite was **not run**;
+a green offline job must not be mistaken for native certification. Fork PRs
+only run the offline gate.
+
 Authenticate using Pi's supported mechanism, for example `pi /login` for your OpenAI sign-in, or configure a provider API key through Pi/environment variables. NovelTea-gen has **no additional model credential store**; Pi manages saved credentials and OAuth refresh.
 
 ## Developer quick start: run, inspect, locate
