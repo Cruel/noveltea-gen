@@ -222,7 +222,7 @@ export function AddRepositoryDialog() {
             <span>{rows.length} {search ? 'matching' : 'available'} repositories</span>
             <Button variant="ghost" size="xs" disabled={catalog.isFetching || !!busy}
               onClick={() => void refresh()}>
-              <RefreshCw className="size-3.5" /> Refresh
+              <RefreshCw className={catalog.isFetching ? "size-3.5 motion-safe:animate-spin" : "size-3.5"} /> Refresh
             </Button>
           </div>
           {rows.length === 0 && <div className="py-9 text-center text-sm text-muted-foreground">
