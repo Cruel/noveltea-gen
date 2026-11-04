@@ -198,6 +198,16 @@ with the same child ID and source are idempotent; conflicting IDs or sources
 are rejected. From the prepared child's Job view, review the inherited work,
 edit corrective task guidance, choose a model/budget and start. The inherited
 contract cannot be broadened without an explicit new plan approval.
+A fork from the **World** commit of an unfinished Character/World foundations
+stage resumes with **Character** as its next work item, even when the source
+Character specialist has stopped with dirty files. The child starts at the
+exact World SHA, inherits the verified World receipt and approved dependencies,
+and resets only the uncommitted Character work. Studio shows the selected
+checkpoint's next prerequisites; source drafts and Pi sessions remain solely
+in the parent. A fresh child graph or restart must not replay World, and
+Character is committed only under the child's own job identity after pinned
+native validation. A rejected duplicate ID or dangling reference leaves the
+child dirty/blocked for explicit reconciliation, never silently completed.
 
 To exercise cross-process resume, use `--pause-after foundation` (or
 `architecture`, `foundations`, `event`, `interactive`, `composition`, `review`) on

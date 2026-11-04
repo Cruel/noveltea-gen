@@ -18,6 +18,7 @@ import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { inspectRecoveryCheckpoints } from '../../src/recovery-checkpoints'
 import { startStoryJob } from '../../src/job'
 import { readRecoveryFork } from '../../src/recovery-fork-state'
+import { validateStoryJob } from '../../src/validator'
 
 const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../noveltea-skills')
 const native = process.env.NT_NATIVE_CLI ?? '/home/thomas/dev/nt/build/cli/linux/noveltea'
@@ -65,17 +66,31 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         VALUES (?,?,?,'Fork Story',?,'running','2026-01-01','2026-01-01',?,?,?)`).run(parentId, user.id, storyId, initial,
         JSON.stringify(request), parent.threadId + ':generation:web', JSON.stringify(draft))
       const runtime = openWebGenerationGraph(join(parent.stateDir, 'web-generation.sqlite'))
+      process.env.NT_FOUNDATIONS_FIXTURE_CASE = 'dangling'
       try {
         const cfg = { configurable: { thread_id: parent.threadId + ':generation:web' }, recursionLimit: 1000 }
         await runtime.graph.updateState(cfg, { request, pauseAfter: 'foundations' })
         const result = await runtime.graph.invoke(null, cfg)
-        assert.equal(result.status, 'paused', result.reason ?? '')
-      } finally { runtime.saver.db.close() }
+        assert.equal(result.status, 'blocked', 'Character must actually fail inside the unfinished foundations stage')
+        assert.ok(result.completedStages.some(item => item.stage === 'architecture'))
+        assert.ok(!result.completedStages.some(item => item.stage === 'foundations'))
+      } finally {
+        delete process.env.NT_FOUNDATIONS_FIXTURE_CASE
+        runtime.saver.db.close()
+      }
       parent = await startStoryJob({ story: parent.storyRoot, job: parentId }, false)
       const world = (await inspectRecoveryCheckpoints(parent)).find(p => p.eligible && p.workItem === 'world-foundations')!
       assert.ok(world)
+      assert.equal(world.nextWorkItem, 'character-foundations')
+      assert.deepEqual(world.dependencies['character-foundations'], ['world-foundations'])
+      assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), world.commitSha)
+      const failedFoundations = JSON.parse(readFileSync(join(parent.stateDir, 'character-world.json'), 'utf8'))
+      assert.equal(failedFoundations.units[0].phase, 'committed')
+      assert.equal(failedFoundations.units[1].phase, 'authored')
+      assert.equal(failedFoundations.units[1].commitSha, undefined)
+      assert.equal(git(parent.worktreeRoot, 'status', '--porcelain') !== '', true,
+        'failed Character draft must remain uncommitted on the parent')
       assert.equal(JSON.parse(readFileSync(join(parent.stateDir, 'validator.json'), 'utf8')).implementation, 'native-cli')
-      writeFileSync(join(parent.worktreeStoryRoot, 'characters', 'unfinished.md'), 'private uncommitted draft')
       mkdirSync(join(parent.stateDir, '.story-job-running'))
       writeFileSync(join(parent.stateDir, '.story-job-running', 'owner.json'), 'live parent lock evidence')
       writeFileSync(join(parent.stateDir, 'pi-budget.json'), 'parent budget evidence')
@@ -123,7 +138,13 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(child.headSha, world.commitSha)
       assert.notEqual(child.threadId, parent.threadId); assert.notEqual(child.branch, parent.branch)
       assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
-      assert.equal(existsSync(join(child.worktreeStoryRoot, 'characters', 'unfinished.md')), false)
+      assert.equal(existsSync(join(child.worktreeStoryRoot, 'characters', 'ada.md')), false,
+        'failed Character bytes must not leak into the child')
+      const inheritedFoundations = JSON.parse(readFileSync(join(child.stateDir, 'character-world.json'), 'utf8'))
+      assert.equal(inheritedFoundations.units[0].commitSha, world.commitSha)
+      assert.equal(inheritedFoundations.units[1].phase, 'pending')
+      assert.equal(inheritedFoundations.units[1].beforeHead, undefined)
+      assert.equal(inheritedFoundations.units[1].piSessionId, undefined)
       assert.equal(existsSync(join(child.stateDir, 'web-generation.sqlite')), false)
       assert.equal(existsSync(join(child.stateDir, 'pi-budget.json')), false)
       const bundleFile = join(child.stateDir, 'recovery-fork.json')
@@ -135,10 +156,17 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         assert.throws(() => readRecoveryFork(child), /immutable job pin/)
       } finally { writeFileSync(bundleFile, bundleBytes) }
       assert.equal((await fork(input)).body.id, childId)
-      assert.equal((await fork({ ...input, commitSha: parent.headSha })).status, 409)
+      assert.equal((await fork({ ...input, commitSha: initial })).status, 409)
       const inspected = await inspectRegisteredJob(store, selectedJob(store, user.id, childId), user.id)
       assert.equal(inspected.status, 'prepared')
       assert.equal(inspected.forkSource?.nextWorkItem, 'character-foundations')
+      assert.deepEqual(inspected.forkSource?.dependencies['character-foundations'], ['world-foundations'])
+      assert.ok(inspected.forkSource?.completedWorkItems.includes('world-foundations'))
+      assert.ok(!inspected.forkSource?.completedWorkItems.includes('character-foundations'))
+      // Reopen the prepared child as another process would after a restart.
+      const reopened = await startStoryJob({ story: child.storyRoot, job: childId }, false)
+      assert.equal(reopened.headSha, world.commitSha)
+      assert.equal(readRecoveryFork(reopened)?.checkpoint.nextWorkItem, 'character-foundations')
       const browser = (method: 'GET' | 'PUT' | 'POST', body?: unknown) => new Request(config.baseURL + '/jobs/' + childId, {
         method, headers: { origin: config.baseURL, cookie, ...(body ? { 'content-type': 'application/json' } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -159,11 +187,46 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       }), childId, config.baseURL)
       assert.equal(started.status, 202, JSON.stringify(await started.clone().json()))
       const childRequest = JSON.parse(selectedJob(store, user.id, childId).requestJson!)
+      // A sibling retry from the exact same World point must reject duplicate
+      // Character IDs during native validation, with no fabricated commit.
+      const invalidId = randomUUID()
+      assert.equal((await fork({ ...input, childId: invalidId })).status, 200)
+      const invalidChild = await authorizedStoryJob(store, user.id, invalidId)
+      const invalidStart = await generationJobRequest(auth, store, new Request(config.baseURL + '/jobs/' + invalidId, {
+        method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ task: request.task, contract: request.contract }),
+      }), invalidId, config.baseURL)
+      assert.equal(invalidStart.status, 202)
+      const invalidRequest = JSON.parse(selectedJob(store, user.id, invalidId).requestJson!)
+      const badRuntime = openWebGenerationGraph(join(invalidChild.stateDir, 'web-generation.sqlite'))
+      process.env.NT_FOUNDATIONS_FIXTURE_CASE = 'duplicate-id'
+      try {
+        const cfg = { configurable: { thread_id: invalidChild.threadId + ':generation:web' }, recursionLimit: 1000 }
+        await badRuntime.graph.updateState(cfg, { request: invalidRequest })
+        const rejected = await badRuntime.graph.invoke(null, cfg)
+        assert.equal(rejected.status, 'blocked', 'native validation must reject duplicate Character IDs')
+      } finally {
+        delete process.env.NT_FOUNDATIONS_FIXTURE_CASE
+        badRuntime.saver.db.close()
+      }
+      assert.equal(git(invalidChild.worktreeRoot, 'rev-parse', 'HEAD'), world.commitSha)
+      assert.notEqual(git(invalidChild.worktreeRoot, 'status', '--porcelain'), '')
+      assert.ok(!(await inspectRecoveryCheckpoints(invalidChild)).some(p => p.workItem === 'character-foundations' && p.eligible))
+      const invalidValidation = await validateStoryJob(invalidChild)
+      assert.equal(invalidValidation.status, 'rejected')
+      assert.match(JSON.stringify(invalidValidation.report?.diagnostics), /duplicate/i)
+
+      const childCfg = { configurable: { thread_id: child.threadId + ':generation:web' }, recursionLimit: 1000 }
+      const initialized = openWebGenerationGraph(join(child.stateDir, 'web-generation.sqlite'))
+      try {
+        await initialized.graph.updateState(childCfg, { request: childRequest, pauseAfter: 'foundations' })
+        const pending = await initialized.graph.getState(childCfg)
+        assert.equal(pending.values.request.job, childId)
+      } finally { initialized.saver.db.close() }
+      // The graph is reopened from its persisted initialization, not replayed as a new Thread.
       const childRuntime = openWebGenerationGraph(join(child.stateDir, 'web-generation.sqlite'))
       try {
-        const cfg = { configurable: { thread_id: child.threadId + ':generation:web' }, recursionLimit: 1000 }
-        await childRuntime.graph.updateState(cfg, { request: childRequest, pauseAfter: 'foundations' })
-        const result = await childRuntime.graph.invoke(null, cfg)
+        const result = await childRuntime.graph.invoke(null, childCfg)
         assert.equal(result.status, 'paused', result.reason ?? '')
         const messages = git(child.worktreeRoot, 'log', '--format=%B', world.commitSha + '..HEAD')
         assert.match(messages, /NovelTea-Work-Item: character-foundations/)
@@ -173,6 +236,17 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const character = (await inspectRecoveryCheckpoints(advancedChild))
         .find(point => point.eligible && point.workItem === 'character-foundations')
       assert.ok(character, 'the child publishes its own eligible character checkpoint')
+      assert.equal(character.parentSha, world.commitSha)
+      assert.equal(character.commitSha, advancedChild.headSha)
+      assert.ok(character.completedWorkItems.includes('character-foundations'))
+      assert.equal(character.validation.validatorSha256, world.validation.validatorSha256)
+      assert.match(git(child.worktreeRoot, 'log', '-1', '--format=%B'), new RegExp('NovelTea-Job: ' + childId))
+      const validated = await validateStoryJob(advancedChild)
+      assert.equal(validated.status, 'passed', JSON.stringify(validated.report?.diagnostics))
+      const records = (validated.report as { records?: Array<{ metadata: { id: string } }> }).records ?? []
+      assert.equal(new Set(records.map(record => record.metadata.id)).size, records.length,
+        'native catalog must contain exactly one record per Character/Story ID')
+      assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
       const grandId = randomUUID()
       const grandResponse = await checkpointForkRequest(auth, store, new Request(config.baseURL + '/fork', {
         method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },

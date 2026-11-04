@@ -50,5 +50,7 @@ export function forkSourceSummary(job: JobStartResult) {
   const fork = readRecoveryFork(job);
   return fork ? { jobId: fork.sourceJobId, commitSha: fork.checkpoint.commitSha,
     completedWorkItems: fork.checkpoint.completedWorkItems,
-    remainingWorkItems: fork.checkpoint.remainingWorkItems, nextWorkItem: fork.checkpoint.nextWorkItem } : null;
+    remainingWorkItems: fork.checkpoint.remainingWorkItems, nextWorkItem: fork.checkpoint.nextWorkItem,
+    dependencies: Object.fromEntries(fork.checkpoint.remainingWorkItems.map(id =>
+      [id, fork.checkpoint.dependencies[id] ?? []])) } : null;
 }

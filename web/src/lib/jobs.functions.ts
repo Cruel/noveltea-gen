@@ -12,12 +12,13 @@ export type JobOverview = {
   contract: object | null; reason: string | null; completedStages: Array<{ stage: string; status: string }>
   revisionVerified?: boolean
   forkSource: { jobId: string; commitSha: string; completedWorkItems: string[];
-    remainingWorkItems: string[]; nextWorkItem: string | null } | null
+    remainingWorkItems: string[]; nextWorkItem: string | null; dependencies: Record<string, string[]> } | null
   recoveryCheckpoints: Array<{
     commitSha: string; parentSha: string; workItem: string; stage: string; eligible: boolean; reason: string | null
     planVersion: number | null; planDigest: string | null; proofDigest: string; source: string; snapshotId: string | null
     completedWorkItems: string[]; remainingWorkItems: string[]
-    nextWorkItem: string | null; validation: { status: string; validatorSha256: string }
+    nextWorkItem: string | null; dependencies: Record<string, string[]>
+    validation: { status: string; validatorSha256: string }
   }>
   recovery?: {
     kind: 'manual-specialist' | 'operator-reconciliation'

@@ -308,7 +308,8 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
       <CardContent className="space-y-2 text-sm">
         <p>Forked from <a className="underline" href={'/jobs/' + encodeURIComponent(job.forkSource.jobId)}>source job</a> at <code>{job.forkSource.commitSha.slice(0, 12)}</code>.</p>
         <p>Inherited verified work: {job.forkSource.completedWorkItems.join(', ')}.</p>
-        <p>Continuation starts with: <strong>{job.forkSource.nextWorkItem ?? 'scope review'}</strong>.</p>
+        <p>Continuation starts with: <strong>{job.forkSource.nextWorkItem ?? 'scope review'}</strong>.
+          {job.forkSource.nextWorkItem && <> Prerequisites: {(job.forkSource.dependencies[job.forkSource.nextWorkItem] ?? []).join(', ') || 'none'}.</>}</p>
         <p className="text-muted-foreground">Review generation settings, then Run. This job has its own budget and sessions; source drafts and approval grants were not copied.</p>
       </CardContent>
     </Card>}
@@ -325,6 +326,7 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
             <div>Stage: {point.stage} · Plan: {point.planVersion ?? "not yet established"}</div>
             <div>Verified work: {point.completedWorkItems.join(", ") || "none"}</div>
             <div>Next: {point.nextWorkItem ?? "No ready work item"} · Remaining: {point.remainingWorkItems.join(", ") || "none"}</div>
+            {point.nextWorkItem && <div>Next prerequisites: {(point.dependencies[point.nextWorkItem] ?? []).join(", ") || "none"}</div>}
             <div>Validator: {point.validation.status} ({point.validation.validatorSha256.slice(0, 12)})</div>
             {point.eligible && <>
               <ForkCheckpoint job={job} commitSha={point.commitSha} />

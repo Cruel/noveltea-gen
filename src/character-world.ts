@@ -372,6 +372,11 @@ async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: Foundation
     const target = join(job.worktreeStoryRoot, "characters/ada.md");
     await writeFile(target, (await readFile(target, "utf8")).replace("fact.evidence-concealed", "fact.nonexistent"));
   }
+  if (process.env.NT_FOUNDATIONS_FIXTURE_CASE === "duplicate-id" && unit.domain === "character") {
+    const original = await readFile(join(job.worktreeStoryRoot, "characters/ada.md"), "utf8");
+    await writeFile(join(job.worktreeStoryRoot, "characters/ada-copy.md"), original, { flag: "wx" });
+    paths.push("characters/ada-copy.md");
+  }
   return { claimedPaths: paths, skillReads: [], architecturalConflicts: [],
     laterObligations: unit.domain === "world"
       ? ["A later Event must establish who learns the concealed evidence; objective truth remains initially true."]
