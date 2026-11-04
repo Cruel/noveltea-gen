@@ -179,6 +179,27 @@ export const storyThreadRuns = sqliteTable('story_thread_runs', {
   index('story_thread_runs_thread_idx').on(table.ownerUserId, table.threadId, table.runOrder),
 ])
 
+/** Immutable author-visible message history. Only messages bound to a verified
+ * commit can be inherited by an earlier checkpoint fork; queued guidance stays
+ * in the new Thread until its prepared run starts. */
+export const storyThreadMessages = sqliteTable('story_thread_messages', {
+  id: text('id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  threadId: text('thread_id').notNull(),
+  sequence: integer('sequence').notNull(),
+  role: text('role', { enum: ['user', 'assistant'] }).notNull(),
+  status: text('status', { enum: ['delivered', 'queued'] }).notNull(),
+  body: text('body').notNull(),
+  originMessageId: text('origin_message_id'),
+  verifiedCommitSha: text('verified_commit_sha'),
+  createdAt: text('created_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.threadId, table.ownerUserId],
+    foreignColumns: [storyThreads.id, storyThreads.ownerUserId] }),
+  uniqueIndex('story_thread_messages_order').on(table.threadId, table.sequence),
+  index('story_thread_messages_thread_idx').on(table.ownerUserId, table.threadId, table.sequence),
+])
+
 export const storyThreadPreferences = sqliteTable('story_thread_preferences', {
   ownerUserId: text('owner_user_id').notNull(),
   storyId: text('story_id').notNull(),

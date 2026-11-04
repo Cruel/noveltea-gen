@@ -8,7 +8,9 @@ import { checkpointForkRequest } from './checkpoint-fork.server'
 
 export type JobOverview = {
   id: string; storyId: string; title: string; provider: string; baseSha: string; headSha: string
-  status: string; threadId: string | null; fixture: boolean; task: string | null
+  status: string; threadId: string | null; storyThreadId: string | null; fixture: boolean; task: string | null
+  threadMessages: Array<{ role: 'user' | 'assistant'; status: 'delivered' | 'queued'; body: string;
+    originMessageId: string | null; verifiedCommitSha: string | null; createdAt: string }>
   contract: object | null; reason: string | null; completedStages: Array<{ stage: string; status: string }>
   revisionVerified?: boolean
   forkSource: { jobId: string; commitSha: string; completedWorkItems: string[];
@@ -64,9 +66,11 @@ export const getJob = createServerFn({ method: 'GET' })
   })
 
 export const forkJobCheckpoint = createServerFn({ method: 'POST' })
-  .validator((data: { jobId: string; childId: string; commitSha: string; sourceBaseSha: string }) => data)
+  .validator((data: { jobId: string; childId: string; commitSha: string; sourceBaseSha: string;
+    sourceThreadId: string; proofDigest: string; guidance: string }) => data)
   .handler(async ({ data }) => result<{ id: string }>(await checkpointForkRequest(auth, database,
-    request(data.jobId, '/fork', { childId: data.childId, commitSha: data.commitSha, sourceBaseSha: data.sourceBaseSha }),
+    request(data.jobId, '/fork', { childId: data.childId, commitSha: data.commitSha, sourceBaseSha: data.sourceBaseSha,
+      sourceThreadId: data.sourceThreadId, proofDigest: data.proofDigest, guidance: data.guidance }),
     data.jobId, readAuthConfig().baseURL)))
 
 export const getJobControls = createServerFn({ method: 'GET' })

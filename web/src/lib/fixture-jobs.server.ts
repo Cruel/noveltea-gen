@@ -29,11 +29,11 @@ const SHA = /^[a-f0-9]{40}$/i
 type SavedJob = {
   id: string; storyId: string; title: string; commitSha: string | null
   provider: string; providerId: string; directory: string
-  requestJson: string | null; threadId: string | null; configJson: string | null; status: string
+  requestJson: string | null; threadId: string | null; configJson: string | null; status: string; createdAt: string
 }
 export function selectedJob(store: StudioDatabase, owner: string, id: string): SavedJob {
   if (!UUID.test(id)) throw new JobError(400, 'Invalid job ID.')
-  const row = store.sqlite.prepare(`SELECT j.id, j.story_id AS storyId, j.title, j.status,
+  const row = store.sqlite.prepare(`SELECT j.id, j.story_id AS storyId, j.title, j.status, j.created_at AS createdAt,
     j.source_commit_sha AS commitSha, j.generation_request_json AS requestJson,
     j.generation_thread_id AS threadId, j.generation_config_json AS configJson, s.directory,
     r.provider, r.provider_repository_id AS providerId
@@ -132,7 +132,16 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
       ? "Checkpoint finalization is incomplete; reconcile the original receipt."
       : "Checkpoint failed verification; operator reconciliation required.",
   }))
-  const base = { recoveryCheckpoints, forkSource: forkSourceSummary(job), id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
+  const studioThread = store.sqlite.prepare(`SELECT thread_id AS id FROM story_thread_runs
+    WHERE job_id=? AND owner_user_id=?`).get(row.id, owner) as { id: string } | undefined
+  const threadMessages = studioThread ? store.sqlite.prepare(`SELECT role,status,body,
+    origin_message_id AS originMessageId,verified_commit_sha AS verifiedCommitSha,created_at AS createdAt
+    FROM story_thread_messages WHERE owner_user_id=? AND thread_id=? ORDER BY sequence`)
+    .all(owner, studioThread.id) as Array<{ role: 'user' | 'assistant'; status: 'delivered' | 'queued';
+      body: string; originMessageId: string | null; verifiedCommitSha: string | null; createdAt: string }> : []
+  const base = { recoveryCheckpoints, forkSource: forkSourceSummary(job), storyThreadId: studioThread?.id ?? null,
+    threadMessages,
+    id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
     baseSha: job.baseSha, headSha: job.headSha, fixture: pinned?.fixture ?? true }
   if (!pinned) {
     // A crash between the server-owner claim and the database publication
@@ -391,6 +400,11 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     catch { throw new JobError(409, 'CLI or conflicting server generation ownership prevents this queue admission.') }
     queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),
       job.threadId + ':generation:web')
+    // Corrective guidance is now part of the admitted, pinned request.
+    // Do not mark other queued author messages delivered: those need their
+    // own explicit safe-boundary injection and receipt.
+    store.sqlite.prepare(`UPDATE story_thread_messages SET status='delivered'
+      WHERE id=? AND owner_user_id=? AND status='queued'`).run('guidance:fork:' + row.id, user.id)
     // The agent process owns graph execution, including fixture runs.
     return reply({ job: await inspectRegisteredJob(store, selectedJob(store, user.id, id), user.id) }, 202)
   } catch (error) {

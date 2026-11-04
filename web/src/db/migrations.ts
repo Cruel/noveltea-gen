@@ -315,6 +315,30 @@ const appMigrations = [
        )`,
     ],
   },
+  {
+    version: 18,
+    statements: [
+      `ALTER TABLE checkpoint_forks ADD COLUMN source_thread_id TEXT`,
+      `ALTER TABLE checkpoint_forks ADD COLUMN proof_digest TEXT`,
+      `ALTER TABLE checkpoint_forks ADD COLUMN guidance TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE checkpoint_forks ADD COLUMN history_json TEXT`,
+      `CREATE TABLE story_thread_messages (
+         id TEXT PRIMARY KEY NOT NULL,
+         owner_user_id TEXT NOT NULL,
+         thread_id TEXT NOT NULL,
+         sequence INTEGER NOT NULL,
+         role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+         status TEXT NOT NULL CHECK (status IN ('delivered','queued')),
+         body TEXT NOT NULL,
+         origin_message_id TEXT,
+         verified_commit_sha TEXT,
+         created_at TEXT NOT NULL,
+         FOREIGN KEY (thread_id, owner_user_id) REFERENCES story_threads (id, owner_user_id) ON DELETE CASCADE,
+         UNIQUE (thread_id, sequence)
+       )`,
+      `CREATE INDEX story_thread_messages_thread_idx ON story_thread_messages (owner_user_id, thread_id, sequence)`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -368,7 +392,8 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     WHERE type='table' AND name='git_connection_flows'`).get()
   const repoColumns = store.sqlite.pragma('table_info(repositories)') as Array<{ name: string }>
   const hasForks = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_forks'`).get()
-  if (!hasForks || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  const hasMessages = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='story_thread_messages'`).get()
+  if (!hasForks || !hasMessages || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

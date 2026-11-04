@@ -11,6 +11,7 @@ import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { checkpointForkRequest } from '../src/lib/checkpoint-fork.server'
+import { ensureRootThreads } from '../src/lib/threads.server'
 import { generationConfigurationRequest } from '../src/lib/generation-config.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { authorizedStoryJob, inspectRegisteredJob, selectedJob } from '../src/lib/fixture-jobs.server'
@@ -94,6 +95,17 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       mkdirSync(join(parent.stateDir, '.story-job-running'))
       writeFileSync(join(parent.stateDir, '.story-job-running', 'owner.json'), 'live parent lock evidence')
       writeFileSync(join(parent.stateDir, 'pi-budget.json'), 'parent budget evidence')
+      ensureRootThreads(store, user.id, storyId)
+      const sourceThreadId = 'root:' + parentId
+      const insertMessage = store.sqlite.prepare(`INSERT INTO story_thread_messages
+        (id,owner_user_id,thread_id,sequence,role,status,body,verified_commit_sha,created_at)
+        VALUES (?,?,?,?,'user',?,?,?,'2026-01-01')`)
+      insertMessage.run(randomUUID(), user.id, sourceThreadId, 0, 'delivered', 'Keep the witness uncertain', initial)
+      insertMessage.run(randomUUID(), user.id, sourceThreadId, 1, 'delivered', 'Future change after World', 'f'.repeat(40))
+      insertMessage.run(randomUUID(), user.id, sourceThreadId, 2, 'queued', 'Do not inherit active steering', null)
+      const parentMessages = () => store.sqlite.prepare(`SELECT body,status,verified_commit_sha FROM story_thread_messages
+        WHERE thread_id=? ORDER BY sequence`).all(sourceThreadId)
+      const originalMessages = parentMessages()
       const before = { head: git(parent.worktreeRoot, 'rev-parse', 'HEAD'), dirty: git(parent.worktreeRoot, 'status', '--porcelain'),
         database: readFileSync(join(parent.stateDir, 'web-generation.sqlite')) }
       const fork = async (body: unknown, authenticated = true) => {
@@ -103,11 +115,14 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         }), parentId, config.baseURL)
         return { status: response.status, body: await response.json() as any }
       }
-      const input = { childId, commitSha: world.commitSha, sourceBaseSha: initial }
+      const input = { childId, commitSha: world.commitSha, sourceBaseSha: initial,
+        sourceThreadId, proofDigest: world.proofDigest, guidance: 'Focus on the witness and avoid new Character IDs.' }
       const forkCount = () => (store.sqlite.prepare('SELECT COUNT(*) AS n FROM checkpoint_forks').get() as { n: number }).n
       assert.equal(forkCount(), 0)
       assert.equal((await fork(input, false)).status, 401)
       assert.equal((await fork({ ...input, sourceBaseSha: world.commitSha })).status, 409)
+      assert.equal((await fork({ ...input, sourceThreadId: 'root:invalid' })).status, 409)
+      assert.equal((await fork({ ...input, proofDigest: 'a'.repeat(64) })).status, 409)
       assert.equal((await fork({ ...input, commitSha: initial })).status, 409)
       assert.equal(forkCount(), 0)
       const checkpointPath = join(parent.stateDir, 'recovery-checkpoints', world.commitSha + '.json')
@@ -214,9 +229,29 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         assert.throws(() => readRecoveryFork(child), /immutable job pin/)
       } finally { writeFileSync(bundleFile, bundleBytes) }
       assert.equal((await fork(input)).body.id, childId)
+      assert.equal((await fork({ ...input, guidance: 'Changed after submission' })).status, 409,
+        'the same child UUID cannot silently change the author message')
       assert.equal((await fork({ ...input, commitSha: initial })).status, 409)
       const inspected = await inspectRegisteredJob(store, selectedJob(store, user.id, childId), user.id)
       assert.equal(inspected.status, 'prepared')
+      assert.equal(inspected.storyThreadId, 'fork:' + childId)
+      assert.deepEqual(inspected.threadMessages.map(message => message.body),
+        ['Keep the witness uncertain', input.guidance], 'the child displays only inherited and new guidance history')
+      const childMessages = store.sqlite.prepare(`SELECT role,status,body,origin_message_id AS origin,
+        verified_commit_sha AS verifiedSha FROM story_thread_messages
+        WHERE thread_id=? ORDER BY sequence`).all('fork:' + childId) as Array<{
+          role: string; status: string; body: string; origin: string | null; verifiedSha: string | null
+        }>
+      assert.equal(childMessages.length, 2)
+      assert.equal(childMessages[0]?.body, 'Keep the witness uncertain')
+      assert.equal(childMessages[0]?.verifiedSha, initial)
+      assert.ok(childMessages[0]?.origin)
+      assert.equal(childMessages[1]?.status, 'queued')
+      assert.equal(childMessages[1]?.body, input.guidance)
+      assert.equal(childMessages[1]?.verifiedSha, null)
+      assert.deepEqual(parentMessages(), originalMessages,
+        'a live parent\'s delivered, future and queued messages must remain untouched')
+      assert.match(selectedJob(store, user.id, childId).configJson!, /Focus on the witness/)
       assert.equal(inspected.forkSource?.nextWorkItem, 'character-foundations')
       assert.deepEqual(inspected.forkSource?.dependencies['character-foundations'], ['world-foundations'])
       assert.ok(inspected.forkSource?.completedWorkItems.includes('world-foundations'))
@@ -233,11 +268,13 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(configuration.status, 200)
       const saved = (await configuration.json() as { saved: any }).saved
       assert.equal(saved.headSha, world.commitSha)
+      assert.match(saved.task, /Corrective guidance for this branch:/)
+      assert.match(saved.task, /Focus on the witness and avoid new Character IDs/)
       const invalid = await generationConfigurationRequest(auth, store, browser('PUT', {
         ...saved, contract: { ...saved.contract, constraints: ['Changed without plan authorization'] },
       }), childId, config.baseURL)
       assert.equal(invalid.status, 409)
-      const updated = { ...saved, task: 'Pursue the witness with a different tone', limits: { steps: 28 }, model: null }
+      const updated = { ...saved, limits: { steps: 28 }, model: null }
       const childValidatorFile = join(child.stateDir, 'validator.json')
       const childValidatorBytes = readFileSync(childValidatorFile, 'utf8')
       try {
@@ -254,6 +291,10 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       }), childId, config.baseURL)
       assert.equal(started.status, 202, JSON.stringify(await started.clone().json()))
       const childRequest = JSON.parse(selectedJob(store, user.id, childId).requestJson!)
+      const delivered = store.sqlite.prepare(`SELECT status FROM story_thread_messages
+        WHERE owner_user_id=? AND thread_id=? AND body=?`).get(user.id, 'fork:' + childId, input.guidance) as
+        { status: string } | undefined
+      assert.equal(delivered?.status, 'delivered', 'queued branch guidance is delivered with the admitted run')
       // A sibling retry from the exact same World point must reject duplicate
       // Character IDs during native validation, with no fabricated commit.
       const invalidId = randomUUID()
@@ -261,7 +302,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const invalidChild = await authorizedStoryJob(store, user.id, invalidId)
       const invalidStart = await generationJobRequest(auth, store, new Request(config.baseURL + '/jobs/' + invalidId, {
         method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ task: request.task, contract: request.contract }),
+        body: JSON.stringify({ task: updated.task, contract: request.contract }),
       }), invalidId, config.baseURL)
       assert.equal(invalidStart.status, 202)
       const invalidRequest = JSON.parse(selectedJob(store, user.id, invalidId).requestJson!)
@@ -320,7 +361,8 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const grandId = randomUUID()
       const grandResponse = await checkpointForkRequest(auth, store, new Request(config.baseURL + '/fork', {
         method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ childId: grandId, commitSha: character.commitSha, sourceBaseSha: child.baseSha }),
+        body: JSON.stringify({ childId: grandId, commitSha: character.commitSha, sourceBaseSha: child.baseSha,
+          sourceThreadId: 'fork:' + childId, proofDigest: character.proofDigest, guidance: '' }),
       }), childId, config.baseURL)
       assert.equal(grandResponse.status, 200, JSON.stringify(await grandResponse.clone().json()))
       const grand = await authorizedStoryJob(store, user.id, grandId)
@@ -350,7 +392,8 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const fourthId = randomUUID()
       const fourthResponse = await checkpointForkRequest(auth, store, new Request(config.baseURL + '/fork', {
         method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ childId: fourthId, commitSha: event.commitSha, sourceBaseSha: grand.baseSha }),
+        body: JSON.stringify({ childId: fourthId, commitSha: event.commitSha, sourceBaseSha: grand.baseSha,
+          sourceThreadId: 'fork:' + grandId, proofDigest: event.proofDigest, guidance: '' }),
       }), grandId, config.baseURL)
       assert.equal(fourthResponse.status, 200, JSON.stringify(await fourthResponse.clone().json()))
       const fourth = await authorizedStoryJob(store, user.id, fourthId)
@@ -380,7 +423,8 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const fifthId = randomUUID()
       const fifthResponse = await checkpointForkRequest(auth, store, new Request(config.baseURL + '/fork', {
         method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ childId: fifthId, commitSha: choice.commitSha, sourceBaseSha: fourth.baseSha }),
+        body: JSON.stringify({ childId: fifthId, commitSha: choice.commitSha, sourceBaseSha: fourth.baseSha,
+          sourceThreadId: 'fork:' + fourthId, proofDigest: choice.proofDigest, guidance: '' }),
       }), fourthId, config.baseURL)
       assert.equal(fifthResponse.status, 200, JSON.stringify(await fifthResponse.clone().json()))
       const fifth = await authorizedStoryJob(store, user.id, fifthId)
@@ -398,7 +442,8 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const sixthId = randomUUID()
       const sixthResponse = await checkpointForkRequest(auth, store, new Request(config.baseURL + '/fork', {
         method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ childId: sixthId, commitSha: puzzle.commitSha, sourceBaseSha: fourth.baseSha }),
+        body: JSON.stringify({ childId: sixthId, commitSha: puzzle.commitSha, sourceBaseSha: fourth.baseSha,
+          sourceThreadId: 'fork:' + fourthId, proofDigest: puzzle.proofDigest, guidance: '' }),
       }), fourthId, config.baseURL)
       assert.equal(sixthResponse.status, 200, JSON.stringify(await sixthResponse.clone().json()))
       const sixth = await authorizedStoryJob(store, user.id, sixthId)

@@ -36,6 +36,9 @@ test('Thread navigation renders job links, progress and accessible reduced-motio
   assert.match(expanded, /Event · arc.one/)
   assert.match(expanded, /motion-reduce:animate-none/)
   assert.match(expanded, /aria-level="2"/)
+  assert.match(expanded, /Execution timeline/)
+  assert.doesNotMatch(expanded, /Branch from here/,
+    'checkpoint actions load only after the authenticated timeline is expanded')
   assert.ok(expanded.indexOf('first-job') < expanded.indexOf('second-job'),
     'the active child promotes the parent above a newer sibling root')
   const flat = renderToStaticMarkup(createElement(ThreadList, {

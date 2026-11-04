@@ -1,5 +1,6 @@
 import { AlertCircle, Archive, ArchiveRestore, CheckCircle2, ChevronDown, ChevronRight, Clock3, GitBranch, LoaderCircle, Pencil } from 'lucide-react'
 import { orderThreads } from '@/lib/thread-navigation'
+import { ThreadExecutionTimeline } from '@/components/thread-execution-timeline'
 import type { StoryThread } from '@/lib/threads.server'
 
 const statusText = (status: StoryThread['status']) => ({
@@ -93,6 +94,7 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
           {thread.archivedAt ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
         </button>}
       </div>
+      {thread.jobId && <ThreadExecutionTimeline jobId={thread.jobId} />}
     </li>)}
   </ul>
 }

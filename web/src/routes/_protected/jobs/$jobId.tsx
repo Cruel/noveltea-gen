@@ -4,14 +4,15 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ArrowLeft, CheckCircle2, Circle, Clock3, RefreshCw, Settings2 } from 'lucide-react'
 import { jobQuery, jobControlsQuery } from '../../../lib/jobs.queries'
 import { jobEventsQuery } from '../../../lib/job-events.queries'
 import { useJobEventStream } from '@/hooks/use-job-event-stream'
-import { forkJobCheckpoint, updateJobControl, type JobOverview, type JobControls, type BudgetLimits } from '../../../lib/jobs.functions'
+import { updateJobControl, type JobOverview, type JobControls, type BudgetLimits } from '../../../lib/jobs.functions'
+import { CheckpointTimeline, ThreadHistory } from '@/components/checkpoint-timeline'
 import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity, progressDescription } from './-GenerationActivity'
@@ -313,31 +314,12 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
         <p className="text-muted-foreground">Review generation settings, then Run. This job has its own budget and sessions; source drafts and approval grants were not copied.</p>
       </CardContent>
     </Card>}
+    {job.threadMessages.length > 0 && <Card>
+      <CardContent className="pt-4"><ThreadHistory messages={job.threadMessages} /></CardContent>
+    </Card>}
     {job.recoveryCheckpoints.length > 0 && <Card>
       <CardHeader><CardTitle className="text-sm">Verified recovery checkpoints ({job.recoveryCheckpoints.filter(point => point.eligible).length} eligible)</CardTitle></CardHeader>
-      <CardContent className="space-y-3">
-        {job.recoveryCheckpoints.map(point => <details key={point.commitSha} className="border-b border-border/50 pb-2 last:border-0">
-          <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-            <code className="text-xs">{point.commitSha.slice(0, 12)}</code>
-            <span className="font-medium">{point.workItem}</span>
-            <span className="text-xs text-muted-foreground">{point.eligible ? "Branchable" : "Not branchable"}</span>
-          </summary>
-          <div className="mt-2 space-y-1 break-words text-xs text-muted-foreground">
-            <div>Stage: {point.stage} · Plan: {point.planVersion ?? "not yet established"}</div>
-            <div>Verified work: {point.completedWorkItems.join(", ") || "none"}</div>
-            <div>Next: {point.nextWorkItem ?? "No ready work item"} · Remaining: {point.remainingWorkItems.join(", ") || "none"}</div>
-            {point.nextWorkItem && <div>Next prerequisites: {(point.dependencies[point.nextWorkItem] ?? []).join(", ") || "none"}</div>}
-            <div>Validator: {point.validation.status} ({point.validation.validatorSha256.slice(0, 12)})</div>
-            {point.eligible && <>
-              <ForkCheckpoint job={job} commitSha={point.commitSha} />
-              <div>Parent commit: <code>{point.parentSha.slice(0, 12)}</code> · Receipt: {point.source}</div>
-              <div>Receipt proof: <code>{point.proofDigest.slice(0, 20)}</code></div>
-              <div>Plan digest: <code>{point.planDigest?.slice(0, 20) ?? "not established"}</code> · Skills: <code>{point.snapshotId?.slice(0, 20) ?? "not pinned"}</code></div>
-            </>}
-            {point.reason && <div>{point.reason}</div>}
-          </div>
-        </details>)}
-      </CardContent>
+      <CardContent><CheckpointTimeline job={job} /></CardContent>
     </Card>}
     {job.status !== 'prepared' && <Card>
       <CardHeader><CardTitle className="text-sm">Saved generation request</CardTitle></CardHeader>
@@ -359,30 +341,6 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
         <Button size="sm" variant="outline" onClick={() => void onRefresh()}>Inspect latest saved state</Button>
       </CardContent>
     </Card>
-  </div>
-}
-
-function ForkCheckpoint({ job, commitSha }: { job: JobOverview; commitSha: string }) {
-  const navigate = useNavigate()
-  const queryClient = useQueryClient()
-  const [childId] = useState(() => crypto.randomUUID())
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const fork = async () => {
-    setBusy(true); setError(null)
-    try {
-      const child = await forkJobCheckpoint({ data: { jobId: job.id, childId, commitSha, sourceBaseSha: job.baseSha } })
-      await queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      await navigate({ to: '/jobs/$jobId', params: { jobId: child.id } })
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Fork preparation failed') }
-    finally { setBusy(false) }
-  }
-  return <div className="py-2">
-    <Button size="sm" variant="outline" disabled={busy} onClick={() => void fork()}>
-      {busy ? 'Preparing fork…' : 'Fork checkpoint'}
-    </Button>
-    <p className="mt-1">Creates a separate prepared job. The source may keep running.</p>
-    {error && <p role="alert" className="whitespace-pre-line text-destructive">{error}</p>}
   </div>
 }
 
