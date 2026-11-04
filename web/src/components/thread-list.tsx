@@ -22,11 +22,12 @@ function StatusIcon({ status }: { status: StoryThread['status'] }) {
 }
 
 export function ThreadList({ threads, view, expandedIds, archivedView = false,
-  busyThreadId, onExpand, onRename, onArchiveChange }: {
+  busyThreadId, onExpand, onRename, onArchiveChange, onOpen }: {
   threads: StoryThread[]; view: 'tree' | 'flat'; expandedIds: string[]
   archivedView?: boolean; busyThreadId?: string | null
   onExpand: (id: string) => void; onRename: (thread: StoryThread) => void
   onArchiveChange: (thread: StoryThread, archived: boolean) => void
+  onOpen?: (thread: StoryThread) => void
 }) {
   const rows = orderThreads(threads, view)
   const threadsById = new Map(threads.map(thread => [thread.id, thread]))
@@ -66,9 +67,12 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
             </button>
           : <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
         <div className="min-w-0 flex-1">
-          {thread.jobId ? <a href={'/jobs/' + encodeURIComponent(thread.jobId)}
-            className="block truncate text-sm font-medium" title={thread.title}>{thread.title}</a>
-            : <span className="block truncate text-sm font-medium">{thread.title}</span>}
+          {onOpen ? <button type="button" onClick={() => onOpen(thread)}
+            className="block max-w-full truncate text-left text-sm font-medium hover:underline"
+            title={'Open chat for ' + thread.title}>{thread.title}</button>
+            : thread.jobId ? <a href={'/jobs/' + encodeURIComponent(thread.jobId)}
+              className="block truncate text-sm font-medium" title={thread.title}>{thread.title}</a>
+              : <span className="block truncate text-sm font-medium">{thread.title}</span>}
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
             <span className={thread.status === 'needs-author' ? 'text-amber-400' : ''}>
               <span className="inline-flex items-center gap-1"><StatusIcon status={thread.status} />

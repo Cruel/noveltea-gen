@@ -179,9 +179,8 @@ export const storyThreadRuns = sqliteTable('story_thread_runs', {
   index('story_thread_runs_thread_idx').on(table.ownerUserId, table.threadId, table.runOrder),
 ])
 
-/** Immutable author-visible message history. Only messages bound to a verified
- * commit can be inherited by an earlier checkpoint fork; queued guidance stays
- * in the new Thread until its prepared run starts. */
+/** Immutable author-visible fork history and sequential chat messages.
+ * The v19 phase/job fields are optional for legacy checkpoint-fork records. */
 export const storyThreadMessages = sqliteTable('story_thread_messages', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),
@@ -192,6 +191,9 @@ export const storyThreadMessages = sqliteTable('story_thread_messages', {
   body: text('body').notNull(),
   originMessageId: text('origin_message_id'),
   verifiedCommitSha: text('verified_commit_sha'),
+  phase: text('phase', { enum: ['queued', 'preparing', 'running', 'finished', 'blocked'] }),
+  jobId: text('job_id'),
+  sourceJobId: text('source_job_id'),
   createdAt: text('created_at').notNull(),
 }, table => [
   foreignKey({ columns: [table.threadId, table.ownerUserId],

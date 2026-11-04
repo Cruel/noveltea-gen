@@ -339,6 +339,19 @@ const appMigrations = [
       `CREATE INDEX story_thread_messages_thread_idx ON story_thread_messages (owner_user_id, thread_id, sequence)`,
     ],
   },
+  {
+    version: 19,
+    statements: [
+      // Append-only extension of #79's version 18 Thread history.
+      // Previously delivered/queued fork messages retain their original shape.
+      `ALTER TABLE story_thread_messages ADD COLUMN phase TEXT
+         CHECK (phase IS NULL OR phase IN ('queued','preparing','running','finished','blocked'))`,
+      `ALTER TABLE story_thread_messages ADD COLUMN job_id TEXT`,
+      `ALTER TABLE story_thread_messages ADD COLUMN source_job_id TEXT`,
+      `CREATE UNIQUE INDEX story_thread_messages_one_preparing ON story_thread_messages (thread_id)
+         WHERE role='user' AND phase='preparing'`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -385,7 +398,8 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     WHERE type='table' AND name='git_connections'`).get()
   const hasPrefs = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
     WHERE type='table' AND name='user_preferences'`).get()
-  const hasThreads = ['story_conversations', 'story_threads', 'story_thread_runs', 'story_thread_preferences']
+  const hasThreads = ['story_conversations', 'story_threads', 'story_thread_runs',
+    'story_thread_preferences', 'story_thread_messages']
     .every(name => !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master
       WHERE type='table' AND name=?`).get(name))
   const hasGitFlows = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master

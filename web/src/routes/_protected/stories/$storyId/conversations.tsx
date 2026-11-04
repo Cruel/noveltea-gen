@@ -5,6 +5,7 @@ import { Archive, ArrowLeft, List, LoaderCircle, Pencil, Plus, Network } from 'l
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ThreadList } from '@/components/thread-list'
+import { ThreadChat } from '@/components/thread-chat'
 import { storyNavigationQuery, storyNavigationKey } from '@/lib/threads.queries'
 import { addConversation, changeThreadArchive, setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
 import { selectNavigationThreads } from '@/lib/thread-navigation'
@@ -12,8 +13,9 @@ import type { StoryThread } from '@/lib/threads.server'
 import { useJobEventStream } from '@/hooks/use-job-event-stream'
 
 export const Route = createFileRoute('/_protected/stories/$storyId/conversations')({
-  validateSearch: (search: Record<string, unknown>): { conversation?: string; archived?: boolean } => ({
+  validateSearch: (search: Record<string, unknown>): { conversation?: string; thread?: string; archived?: boolean } => ({
     ...(typeof search.conversation === 'string' ? { conversation: search.conversation } : {}),
+    ...(typeof search.thread === 'string' ? { thread: search.thread } : {}),
     ...(search.archived === true || search.archived === 'true' ? { archived: true } : {}),
   }),
   loader: ({ context, params }) =>
@@ -50,7 +52,7 @@ function TitleEditor({ title, label, onSubmit, onCancel }: {
 }
 function StoryConversations() {
   const { storyId } = Route.useParams()
-  const { conversation: selectedId, archived } = Route.useSearch()
+  const { conversation: selectedId, thread: selectedThreadId, archived } = Route.useSearch()
   const archivedView = archived === true
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -73,6 +75,7 @@ function StoryConversations() {
   const visibleThreads = conversation ? selectNavigationThreads(conversation.threads,
     archivedView ? 'archived' : 'active') : []
   const archivedCount = conversation?.threads.filter(thread => !!thread.archivedAt).length ?? 0
+  const selectedThread = visibleThreads.find(thread => thread.id === selectedThreadId)
   const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds) => {
     setIssue(null)
     try {
@@ -194,12 +197,18 @@ function StoryConversations() {
               onArchiveChange={(thread, archive) => void changeArchive(thread, archive)}
               onExpand={id => void savePreferences(view,
                 expandedIds.includes(id) ? expandedIds.filter(item => item !== id) : [...expandedIds, id])}
-              onRename={(thread: StoryThread) => setEditing({ kind: 'thread', id: thread.id })} />
+              onRename={(thread: StoryThread) => setEditing({ kind: 'thread', id: thread.id })}
+              onOpen={(thread: StoryThread) => void navigate({
+                to: '/stories/$storyId/conversations', params: { storyId },
+                search: { conversation: conversation.id, thread: thread.id,
+                  ...(archivedView ? { archived: true } : {}) },
+              })} />
             : <p className="text-sm text-muted-foreground">{archivedView
               ? 'No archived Threads in this Conversation.'
               : conversation.threads.length
                 ? 'No active Threads. Open Archived to inspect or restore a Thread.'
                 : 'No Threads yet. The first generation run will create a root Thread in this Story.'}</p>}
+          {selectedThread && <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />}
         </> : <p className="text-sm text-muted-foreground">
           {data ? 'Create a Conversation to get started.' : 'Loading Conversations…'}
         </p>}

@@ -310,6 +310,22 @@ export async function bootstrapEmptyGithubRepository(input: Omit<CachedStoryRequ
 
 /** Reuse quota admission and the repository lease without moving the shared
  * base, fetching a new revision, or acquiring the active parent's writer lock. */
+/** A successive run starts with fresh receipts and a fresh budget at an exact
+ * previously verified Story commit. Unlike checkpoint forking, it does not
+ * inherit the prior request's completed work or approvals. The caller must
+ * verify source ownership, clean worktree and trusted HEAD first. */
+export async function continueCachedStory(parent: JobStartResult, childId: string, commitSha: string) {
+  const cache = process.env.NT_GIT_CACHE_DIR
+  if (!cache || !isAbsolute(cache) || !parent.cacheRoot)
+    throw new GitCacheError(503, 'Thread continuation requires the registered Git cache.')
+  const sizes = treeSizes(parent.worktreeRoot, gitEnvironment('', ''), commitSha, parent.storyRelativePath)
+  return withAdmission(resolve(cache), parent.cacheRoot, GIT_OPERATION_OVERHEAD + sizes.bytes,
+    () => withRepositoryLock(parent.cacheRoot!, () => startStoryJob({
+      story: parent.storyRoot, job: childId, pinnedBaseSha: commitSha,
+      worktreeCacheRoot: parent.cacheRoot, sparseStoryOnly: true,
+    })))
+}
+
 export async function forkCachedStory(parent: JobStartResult, bundle: RecoveryForkBundle) {
   const cache = process.env.NT_GIT_CACHE_DIR
   if (!cache || !isAbsolute(cache) || !parent.cacheRoot)

@@ -60,6 +60,15 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     messages.run(randomUUID(), owner, parentThread, 2, 'delivered', 'Character feedback', futureSha)
     messages.run(randomUUID(), owner, parentThread, 3, 'queued', 'In-flight steering', null)
     const source = { worktreeRoot: root, baseSha: initial, jobId } as JobStartResult
+    // A #81 chat read may seed a legacy pinned request without a separate
+    // verification receipt. It must not suppress the #79 baseline fallback.
+    const seededThread = randomUUID()
+    db.sqlite.prepare(`INSERT INTO story_threads
+      (id,owner_user_id,conversation_id,title,activity_at,created_at)
+      VALUES (?,?,?,'Chat seeded','now','now')`).run(seededThread, owner, conversation)
+    messages.run(randomUUID(), owner, seededThread, 0, 'delivered', 'Rendered unverified chat', null)
+    assert.deepEqual(snapshotForkBoundaryHistory(db, owner, seededThread, source,
+      'Pinned author task', 'now', forkSha).map(m => m.body), ['Pinned author task'])
     const frozen = snapshotForkBoundaryHistory(db, owner, parentThread, source,
       'Pinned author task', 'now', forkSha)
     assert.deepEqual(frozen.map(m => m.body), ['Initial direction', 'World feedback'])

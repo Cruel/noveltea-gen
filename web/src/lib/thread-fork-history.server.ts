@@ -38,10 +38,14 @@ export function snapshotForkBoundaryHistory(store: StudioDatabase, owner: string
     !!row.verifiedSha && ancestor(row.verifiedSha))
   // Pre-conversation jobs have a pinned request but no conversation messages.
   // Represent it only in the child: the live parent is never mutated by a fork.
-  const history = rows.length ? inherited : [{
+  // #81 can materialize the pre-conversation request as a delivered chat
+  // message before that historical run has an attributable message receipt.
+  // Such unverified rows must not suppress the original pinned-request fallback.
+  const canUsePinnedRequest = rows.every(row => !row.verifiedSha)
+  const history = inherited.length ? inherited : canUsePinnedRequest ? [{
     id: 'request:' + sourceJob.jobId, role: 'user' as const, body: sourceTask,
     origin: null, verifiedSha: sourceJob.baseSha, createdAt: sourceCreatedAt,
-  }]
+  }] : []
   return history.map(message => ({
     role: message.role, body: message.body, originId: message.origin ?? message.id,
     verifiedSha: message.verifiedSha!, createdAt: message.createdAt,

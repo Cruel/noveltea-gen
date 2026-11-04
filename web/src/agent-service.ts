@@ -7,6 +7,7 @@ import { authorizedStoryJob } from './lib/fixture-jobs.server'
 import { appendGenerationEvent } from './lib/generation-progress.server'
 import { claimNext, finishAttempt, fenceAbandonedRuns, queueRecord } from './lib/generation-queue.server'
 import { runPersistedGeneration } from './agent-runner'
+import { recoverSettledThreadRuns, settleThreadRun } from './lib/thread-chat.server'
 import { executeAuthorCommand } from './lib/agent-author-command.server'
 import { validAuthorCommand } from './lib/agent-author-validation'
 
@@ -31,6 +32,10 @@ export function pumpAgentQueue(store: StudioDatabase) {
     // Never re-enter an unfinished writer from a previous server lifetime.
     fenceAbandonedRuns(store)
     initialized.add(store)
+    // Crash-safe chat catch-up only; this does not resume an unfinished writer.
+    void recoverSettledThreadRuns(store).catch(() => {
+      console.error('[Studio] Some settled Thread messages need operator reconciliation')
+    })
   }
   for (;;) {
     const record = claimNext(store)
@@ -44,7 +49,11 @@ export function pumpAgentQueue(store: StudioDatabase) {
         appendGenerationEvent(store, record.ownerId, record.jobId, { kind: 'interrupted' })
         throw new Error('Generation failed; preserve its original receipts for recovery.')
       })
-      .finally(() => {
+      .finally(async () => {
+        // Settlement also runs on failure. Never replace the original writer
+        // outcome with a chat-generation error or automatically replay it.
+        try { await settleThreadRun(store, record.ownerId, record.jobId) }
+        catch { console.error('[Studio] Unable to settle Thread chat; retained durable queue state') }
         inFlight.delete(record.jobId)
         pumpAgentQueue(store)
       })
