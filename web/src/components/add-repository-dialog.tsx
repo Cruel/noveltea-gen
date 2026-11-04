@@ -80,6 +80,11 @@ export function AddRepositoryDialog() {
   const rows = useMemo(() => eligibleCandidates(
     mergeCandidates(catalog.data?.repositories ?? [], extraRows), search, addedIds,
   ), [catalog.data, extraRows, search, addedIds])
+  const hasMultipleAccounts = (provider: AvailableRepository['provider']) =>
+    accounts.filter(account => account.provider === provider).length > 1
+  const hasMixedVisibility = (provider: AvailableRepository['provider']) =>
+    rows.some(repo => repo.provider === provider && repo.private) &&
+    rows.some(repo => repo.provider === provider && !repo.private)
 
   const refresh = async () => {
     setError(null)
@@ -229,18 +234,18 @@ export function AddRepositoryDialog() {
             {rows.slice(0, 150).map(repo => {
               const key = candidateKey(repo)
               return <div role="listitem" key={key}
-                className="flex min-w-0 items-center gap-2 border-b border-border/60 py-2.5 last:border-0">
+                className="flex min-w-0 items-center gap-2 border-b border-border/60 py-2 last:border-0">
                 <span aria-label={repo.provider === 'github' ? 'GitHub' : 'GitLab'}
                   className="inline-flex size-7 shrink-0 items-center justify-center rounded bg-muted text-[10px] font-semibold text-muted-foreground">
                   {repo.provider === 'github' ? 'GH' : 'GL'}
                 </span>
-                <div className="min-w-0 flex-1">
-                  <p className="m-0 truncate text-sm font-medium" title={repo.name}>{repo.name}</p>
-                  <p className="m-0 truncate text-xs text-muted-foreground">
-                    {repo.provider === 'github' ? 'GitHub' : 'GitLab'} · {repo.account}
-                    {repo.private ? ' · Private' : ''}
-                    {repo.empty ? ' · Empty' : ''}
-                  </p>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="min-w-0 truncate text-sm font-medium" title={repo.name}>{repo.name}</span>
+                  {hasMultipleAccounts(repo.provider) &&
+                    <span className="max-w-28 shrink-0 truncate text-xs text-muted-foreground" title={repo.account}>{repo.account}</span>}
+                  {repo.private && hasMixedVisibility(repo.provider) &&
+                    <Badge variant="outline" className="shrink-0 text-[10px]">Private</Badge>}
+                  {repo.empty && <Badge variant="outline" className="shrink-0 text-[10px]">Empty</Badge>}
                 </div>
                 <Button variant="outline" size="sm" className="shrink-0"
                   disabled={!!busy} onClick={() => void importRepository(repo)}>
