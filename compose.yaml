@@ -138,6 +138,25 @@ services:
     cap_drop: [ALL]
     networks: [frontend, backend]
 
+  # Optional Vite/HMR variant of the web service. Both variants publish the
+  # same localhost port: scale web to zero before enabling this profile.
+  # Extends retains the same DB, credentials, healthcheck, volumes and networks.
+  web-dev:
+    extends: web
+    profiles: [dev]
+    command: ["pnpm", "--filter", "@noveltea/studio", "exec", "vite", "--host", "0.0.0.0", "--port", "3000"]
+    environment:
+      NODE_ENV: development
+    volumes:
+      # Mount only the sources to avoid masking the image's pnpm node_modules.
+      - type: bind
+        source: ./web/src
+        target: /app/web/src
+      - type: bind
+        source: ./web/vite.config.ts
+        target: /app/web/vite.config.ts
+        read_only: true
+
   agent:
     image: noveltea-trusted:local
     command: ["pnpm", "--filter", "@noveltea/studio", "agent:worker"]

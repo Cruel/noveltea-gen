@@ -136,6 +136,46 @@ remotely, configure a trusted HTTPS reverse proxy with request limits and
 align `BETTER_AUTH_URL` and OAuth redirect origins. Never publish the
 agent's port 7001 or the controller socket.
 
+## Live web development with Compose
+
+Production remains the default: `docker compose up -d` starts `web`,
+which serves the built TanStack Start application. The **same**
+`compose.yaml` also defines a `web-dev` service in the optional `dev`
+profile. It inherits the production web environment, persistent volumes,
+private network and health check, but runs Vite with hot module replacement
+(HMR). No second Compose file is required.
+
+To switch an existing deployment to development mode:
+
+```sh
+docker compose stop web
+docker compose --profile dev up -d --scale web=0
+docker compose --profile dev logs -f web-dev
+```
+
+For a fresh development deployment, only the second command is needed.
+The `--scale web=0` flag keeps the production web container off; both
+variants bind the **same** localhost port 3000 and must not run together.
+All other services continue running with the same storage and credentials.
+
+Open `http://localhost:3000`. Edits under `web/src/` are reflected without
+an image rebuild (client HMR or a full reload for server-side modules).
+`web/vite.config.ts` is also mounted. Only those paths are mounted so
+the image's pnpm-installed `node_modules` remain available. The port stays
+localhost-only. An initial image build is still necessary, and changed
+dependencies, root `src/`, or backend agent/controller code require
+rebuilding the relevant image.
+
+To return to production:
+
+```sh
+docker compose --profile dev stop web-dev
+docker compose up -d
+```
+
+Never run both web profiles at once, or `down --volumes` when switching
+modes: the latter destroys saved Studio data and job state.
+
 ## Controller API (trusted agent only)
 
 All requests go to the private Unix socket with
