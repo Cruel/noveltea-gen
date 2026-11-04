@@ -108,7 +108,7 @@ function GithubStories() {
       </div>}
     </section>
     <p>Need a new repository? <a href="https://github.com/new" target="_blank" rel="noreferrer">Create an empty repository on GitHub</a>
-      {' '}then connect it through <a href="/repositories/add">Add Repository</a>.</p>
+      {' '}then connect it through <a href="/dashboard?addRepository=open">Add repository</a> on the dashboard.</p>
     <NewStoryOnboarding key={repositoryId + ':' + initPath}
       provider="github" repositoryId={repositoryId} initialWorkspace={initPath} />
     <section>

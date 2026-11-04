@@ -255,7 +255,7 @@ export async function githubInstallStart(auth: StudioAuth, store: StudioDatabase
 export async function githubInstallCallback(auth: StudioAuth, store: StudioDatabase, request: Request, options: Options): Promise<Response> {
   const redirect = (result: string) => {
     return new Response(null, { status: 303, headers: {
-      Location: `${options.baseURL}/repositories/add?result=${result}`,
+      Location: `${options.baseURL}/dashboard?addRepository=${result}`,
       'Cache-Control': 'no-store',
       'Set-Cookie': `nt-gh-install-state=; HttpOnly; SameSite=Lax; Path=/api/github/install/callback; Max-Age=0${options.baseURL.startsWith('https:') ? '; Secure' : ''}`,
     } })

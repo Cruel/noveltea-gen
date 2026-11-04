@@ -88,16 +88,16 @@ test('GitHub App connection: only authenticated, installed push repositories are
     const state = url.searchParams.get('state')
     assert.ok(state)
     const forged = await githubInstallCallback(auth, store, req('GET', '/api/github/install/callback?installation_id=12&state=bogus'), opts)
-    assert.match(forged.headers.get('location') || '', /result=invalid/)
+    assert.match(forged.headers.get('location') || '', /\/dashboard\?addRepository=invalid/)
     // The other user has a real linked GitHub identity too; state ownership
     // must still reject the return instead of relying on a missing token.
     await context.internalAdapter.createAccount({ userId: bob.id, providerId: 'github', accountId: 'bob', accessToken: 'mock-secret' })
     const otherUser = await githubInstallCallback(auth, store, req('GET', '/api/github/install/callback?installation_id=12&state=' + state, bobHeaders), opts)
-    assert.match(otherUser.headers.get('location') || '', /result=invalid/)
+    assert.match(otherUser.headers.get('location') || '', /\/dashboard\?addRepository=invalid/)
     const callback = await githubInstallCallback(auth, store, req('GET', '/api/github/install/callback?installation_id=12&state=' + state), opts)
-    assert.match(callback.headers.get('location') || '', /result=pending/)
+    assert.match(callback.headers.get('location') || '', /\/dashboard\?addRepository=pending/)
     const replay = await githubInstallCallback(auth, store, req('GET', '/api/github/install/callback?installation_id=12&state=' + state), opts)
-    assert.match(replay.headers.get('location') || '', /result=invalid/)
+    assert.match(replay.headers.get('location') || '', /\/dashboard\?addRepository=invalid/)
     const pending = await githubRepositoryRequest(auth, store, req('GET', '/api/github/repositories'), opts)
     assert.deepEqual((await pending.json()).pending, ['Acme/New'])
     // GitHub sometimes drops state from setup redirects. The secure, user-bound
@@ -110,19 +110,19 @@ test('GitHub App connection: only authenticated, installed push repositories are
     const returnHeaders = { ...aliceHeaders, cookie: aliceHeaders.cookie + '; ' + cookie }
     const completed = await githubInstallCallback(auth, store,
       req('GET', '/api/github/install/callback?installation_id=12', returnHeaders), opts)
-    assert.match(completed.headers.get('location') || '', /result=added/)
+    assert.match(completed.headers.get('location') || '', /\/dashboard\?addRepository=added/)
     assert.match(completed.headers.get('set-cookie') || '', /Max-Age=0/)
     assert.equal((store.sqlite.prepare('SELECT count(*) count FROM repositories').get() as { count: number }).count, 2)
     const rejected = await githubInstallCallback(auth, store,
       req('GET', '/api/github/install/callback?installation_id=12', returnHeaders), opts)
-    assert.match(rejected.headers.get('location') || '', /result=invalid/)
+    assert.match(rejected.headers.get('location') || '', /\/dashboard\?addRepository=invalid/)
     const tampered = await githubInstallCallback(auth, store,
       req('GET', '/api/github/install/callback?installation_id=13&state=' + secondUrl.searchParams.get('state')), opts)
-    assert.match(tampered.headers.get('location') || '', /result=invalid/)
+    assert.match(tampered.headers.get('location') || '', /\/dashboard\?addRepository=invalid/)
     // A setup redirect with no active installation flow must not mutate the catalog.
     const unsolicited = await githubInstallCallback(auth, store,
       req('GET', '/api/github/install/callback?installation_id=12'), opts)
-    assert.match(unsolicited.headers.get('location') || '', /result=installed/)
+    assert.match(unsolicited.headers.get('location') || '', /\/dashboard\?addRepository=installed/)
     assert.equal((store.sqlite.prepare('SELECT count(*) count FROM repositories').get() as { count: number }).count, 2)
     assert.ok(requests.every(s => !s.includes('mock-secret')))
     assert.equal(createHash('sha256').update(state).digest('hex').length, 64)
