@@ -15,7 +15,7 @@ export class ThreadChatError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 export type ThreadMessage = {
-  id: string; role: 'user' | 'assistant'; content: string
+  id: string; role: 'user' | 'assistant'; status: 'delivered' | 'queued'; content: string
   phase: 'queued' | 'preparing' | 'running' | 'finished' | 'blocked'
   jobId: string | null; createdAt: string; sequence: number
 }
@@ -29,7 +29,7 @@ function nextSequence(store: StudioDatabase, threadId: string): number {
     FROM story_thread_messages WHERE thread_id=?`).get(threadId) as { next: number }
   return row.next
 }
-const messageColumns = `sequence,id,role,body AS content,
+const messageColumns = `sequence,id,role,status,body AS content,
   COALESCE(phase, CASE status WHEN 'queued' THEN 'queued' ELSE 'finished' END) AS phase,
   job_id AS jobId,created_at AS createdAt`
 

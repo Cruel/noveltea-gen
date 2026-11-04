@@ -4,6 +4,7 @@ import { Link } from '@tanstack/react-router'
 import { LoaderCircle, Send } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { getThreadChat, postThreadMessage } from '@/lib/thread-chat.functions'
+import { ThreadMessageEdit } from './thread-message-edit'
 
 export function ThreadChat({ threadId }: { threadId: string }) {
   const key = ['thread-chat', threadId]
@@ -57,6 +58,11 @@ export function ThreadChat({ threadId }: { threadId: string }) {
             <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
         <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
+        {data && item.role === 'user' && item.status === 'delivered' &&
+          item.phase === 'finished' && !data.archived &&
+          <ThreadMessageEdit key={item.id} threadId={threadId} storyId={data.storyId}
+            messageId={item.id} original={item.content}
+            originalJobId={data.runs[0]?.jobId ?? null} />}
         {item.jobId && item.role === 'assistant' &&
           <details className="mt-2 text-xs text-muted-foreground">
             <summary className="cursor-pointer">Run evidence</summary>

@@ -412,6 +412,11 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     // own explicit safe-boundary injection and receipt.
     store.sqlite.prepare(`UPDATE story_thread_messages SET status='delivered'
       WHERE id=? AND owner_user_id=? AND status='queued'`).run('guidance:fork:' + row.id, user.id)
+    // An edited message is the child's new initial request, not merely fork
+    // guidance. Mark it delivered only after the exact pinned run is admitted.
+    store.sqlite.prepare(`UPDATE story_thread_messages SET status='delivered', phase='running'
+      WHERE id=? AND owner_user_id=? AND status='queued' AND job_id=?`)
+      .run('edit:' + row.id, user.id, row.id)
     // The agent process owns graph execution, including fixture runs.
     return reply({ job: await inspectRegisteredJob(store, selectedJob(store, user.id, id), user.id) }, 202)
   } catch (error) {

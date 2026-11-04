@@ -17,6 +17,8 @@ import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { authorizedStoryJob, inspectRegisteredJob, selectedJob } from '../src/lib/fixture-jobs.server'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { inspectRecoveryCheckpoints } from '../../src/recovery-checkpoints'
+import { sendAuthorUpdate } from '../../src/author-updates'
+import { previewThreadMessageEdit, branchEditedThreadMessage, syncAppliedAuthorMessages } from '../src/lib/thread-message-edit.server'
 import { startStoryJob } from '../../src/job'
 import { readRecoveryFork } from '../../src/recovery-fork-state'
 import { validateStoryJob } from '../../src/validator'
@@ -458,6 +460,76 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         assert.match(commits, /NovelTea-Work-Item: composition-/)
         assert.doesNotMatch(commits, /NovelTea-Work-Item: (interactive-|event-|character-foundations|world-foundations)/)
       } finally { sixthRuntime.saver.db.close() }
+      // #82: simulate a persisted live steering acknowledgement that landed
+      // after World but before Character finalized. Editing it must fork from
+      // World, excluding future instructions and retaining the dirty parent.
+      const steeringId = 'between-specialists'
+      const steeringBody = 'Give the witness a false alibi'
+      const submitted = await sendAuthorUpdate(parent, {
+        id: steeringId, kind: 'idea', payload: { original: steeringBody },
+      })
+      mkdirSync(join(parent.stateDir, 'author-updates', 'receipts'), { recursive: true })
+      writeFileSync(join(parent.stateDir, 'author-updates', 'receipts', steeringId + '.json'),
+        JSON.stringify({ ...submitted, phase: 'applied', pinned: {
+          jobId: parentId, threadId: parent.threadId, branch: parent.branch,
+          baseSha: initial, headSha: world.commitSha,
+          planVersion: null, skillSnapshot: null, piSessions: {},
+        } }))
+      await syncAppliedAuthorMessages(store, user.id, sourceThreadId)
+      const steeringMessage = store.sqlite.prepare(`SELECT id FROM story_thread_messages
+        WHERE owner_user_id=? AND thread_id=? AND origin_message_id=?`)
+        .get(user.id, sourceThreadId, 'author-update:' + steeringId) as { id: string }
+      assert.ok(steeringMessage?.id)
+      const editedTask = 'The witness has a truthful alibi instead'
+      const editPreview = await previewThreadMessageEdit(store, user.id, sourceThreadId,
+        steeringMessage.id, editedTask)
+      assert.equal(editPreview.appliedBeforeSha, world.commitSha)
+      assert.equal(editPreview.checkpoint?.commitSha, world.commitSha)
+      assert.equal(editPreview.checkpoint?.workItem, 'world-foundations')
+      const editSourceMessages = parentMessages()
+      const editChildId = randomUUID()
+      const edited = await branchEditedThreadMessage(store, user.id, {
+        threadId: sourceThreadId, messageId: steeringMessage.id, edited: editedTask,
+        childId: editChildId, commitSha: world.commitSha, proofDigest: world.proofDigest,
+      })
+      assert.equal(edited.checkpoint.commitSha, world.commitSha)
+      assert.equal((await branchEditedThreadMessage(store, user.id, {
+        threadId: sourceThreadId, messageId: steeringMessage.id, edited: editedTask,
+        childId: editChildId, commitSha: world.commitSha, proofDigest: world.proofDigest,
+      })).id, editChildId, 'a duplicate child UUID is idempotent')
+      await assert.rejects(() => branchEditedThreadMessage(store, user.id, {
+        threadId: sourceThreadId, messageId: steeringMessage.id, edited: 'Change the edit',
+        childId: editChildId, commitSha: world.commitSha, proofDigest: world.proofDigest,
+      }), /already reserved|different edit|different operation/i)
+      const editedJob = await authorizedStoryJob(store, user.id, editChildId)
+      assert.equal(editedJob.baseSha, world.commitSha)
+      const savedEdit = store.sqlite.prepare('SELECT generation_config_json AS draft FROM studio_sessions WHERE id=?')
+        .get(editChildId) as { draft: string }
+      assert.equal(JSON.parse(savedEdit.draft).task, editedTask)
+      const editedHistory = store.sqlite.prepare(`SELECT body,status FROM story_thread_messages
+        WHERE owner_user_id=? AND thread_id=? ORDER BY sequence`)
+        .all(user.id, 'fork:' + editChildId) as Array<{ body: string; status: string }>
+      assert.deepEqual(editedHistory.map(message => message.body),
+        ['Keep the witness uncertain', editedTask])
+      assert.deepEqual(editedHistory.map(message => message.status), ['delivered', 'queued'])
+      // The prepared edit remains an independent runnable recovery fork. Its
+      // Character stage uses the corrected task and publishes its own proof.
+      const editedRuntime = openWebGenerationGraph(join(editedJob.stateDir, 'web-generation.sqlite'))
+      try {
+        const cfg = { configurable: { thread_id: editedJob.threadId + ':generation:web' }, recursionLimit: 1000 }
+        await editedRuntime.graph.updateState(cfg, { request: {
+          story: editedJob.storyRoot, job: editChildId, task: editedTask,
+          contract: JSON.parse(savedEdit.draft).contract, fixture: true, skillsSource: skills,
+        }, pauseAfter: 'foundations' })
+        const result = await editedRuntime.graph.invoke(null, cfg)
+        assert.equal(result.status, 'paused', result.reason ?? '')
+      } finally { editedRuntime.saver.db.close() }
+      const verifiedEdited = await startStoryJob({ story: editedJob.storyRoot, job: editChildId }, false)
+      const editedCharacter = (await inspectRecoveryCheckpoints(verifiedEdited))
+        .find(point => point.eligible && point.workItem === 'character-foundations')
+      assert.ok(editedCharacter, 'edited child independently verifies its continuation')
+      assert.equal(editedCharacter.parentSha, world.commitSha)
+      assert.deepEqual(parentMessages(), editSourceMessages)
       assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), before.head)
       assert.equal(git(parent.worktreeRoot, 'status', '--porcelain'), before.dirty)
       assert.deepEqual(readFileSync(join(parent.stateDir, 'web-generation.sqlite')), before.database)

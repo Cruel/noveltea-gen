@@ -374,6 +374,13 @@ const appMigrations = [
       `CREATE INDEX thread_restarts_owner_source ON thread_restarts(owner_user_id,source_thread_id)`,
     ],
   },
+  {
+    version: 21,
+    statements: [
+      `ALTER TABLE checkpoint_forks ADD COLUMN edited_message_id TEXT`,
+      `ALTER TABLE checkpoint_forks ADD COLUMN edited_body TEXT`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version

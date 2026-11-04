@@ -93,6 +93,24 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     assert.deepEqual(snapshotForkBoundaryHistory(db, owner, parentThread, source,
       'Pinned author task', 'now', initial).map(m => m.body), ['Initial direction'],
       'a branch from before World excludes World and later messages')
+    // A live steering receipt may be imported late, after a newer Thread run
+    // has completed. Message sequence alone must not inherit that newer run,
+    // even if it happened to produce the same verified Story commit.
+    const laterJob = randomUUID()
+    db.sqlite.prepare(`INSERT INTO studio_sessions
+      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
+      VALUES (?,?,?,'Later follow-up',?,'completed','now','now')`).run(laterJob, owner, story, forkSha)
+    db.sqlite.prepare(`INSERT INTO story_thread_runs (job_id,owner_user_id,thread_id,run_order)
+      VALUES (?,?,?,1)`).run(laterJob, owner, parentThread)
+    const lateId = randomUUID()
+    messages.run(lateId, owner, parentThread, 5, 'delivered', 'Newer follow-up', forkSha)
+    db.sqlite.prepare('UPDATE story_thread_messages SET job_id=? WHERE id=?').run(laterJob, lateId)
+    assert.ok(snapshotForkBoundaryHistory(db, owner, parentThread, source,
+      'Pinned author task', 'now', forkSha, 6).some(row => row.body === 'Newer follow-up'))
+    const causal = snapshotForkBoundaryHistory(db, owner, parentThread, source,
+      'Pinned author task', 'now', forkSha, 6, 0)
+    assert.ok(!causal.some(row => row.body === 'Newer follow-up'),
+      'a later run is excluded independently of message timestamp and selected SHA')
   } finally {
     db.sqlite.close()
     removeTestTree(root)

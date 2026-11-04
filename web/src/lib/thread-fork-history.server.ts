@@ -17,11 +17,17 @@ const SHA = /^[a-f0-9]{40}$/
  * receiving messages and committing work during child Git preparation. */
 export function snapshotForkBoundaryHistory(store: StudioDatabase, owner: string,
   parentThreadId: string, sourceJob: JobStartResult, sourceTask: string,
-  sourceCreatedAt: string, forkSha: string): ForkHistoryMessage[] {
-  const rows = store.sqlite.prepare(`SELECT id,role,status,body,origin_message_id AS origin,
-    verified_commit_sha AS verifiedSha,created_at AS createdAt
-    FROM story_thread_messages WHERE owner_user_id=? AND thread_id=? ORDER BY sequence`)
-    .all(owner, parentThreadId) as Message[]
+  sourceCreatedAt: string, forkSha: string, beforeSequence?: number, beforeRunOrder?: number): ForkHistoryMessage[] {
+  const rows = store.sqlite.prepare(`SELECT m.id,m.role,m.status,m.body,
+    m.origin_message_id AS origin,m.verified_commit_sha AS verifiedSha,m.created_at AS createdAt
+    FROM story_thread_messages m WHERE m.owner_user_id=? AND m.thread_id=?
+      AND (? IS NULL OR m.sequence < ?)
+      AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM story_thread_runs r
+        WHERE r.job_id=m.job_id AND r.owner_user_id=m.owner_user_id
+          AND r.thread_id=m.thread_id AND r.run_order > ?))
+    ORDER BY m.sequence`)
+    .all(owner, parentThreadId, beforeSequence ?? null, beforeSequence ?? null,
+      beforeRunOrder ?? null, beforeRunOrder ?? null) as Message[]
 
   const env = { ...process.env }
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
@@ -42,7 +48,7 @@ export function snapshotForkBoundaryHistory(store: StudioDatabase, owner: string
   // message before that historical run has an attributable message receipt.
   // Such unverified rows must not suppress the original pinned-request fallback.
   const canUsePinnedRequest = rows.every(row => !row.verifiedSha)
-  const history = inherited.length ? inherited : canUsePinnedRequest ? [{
+  const history = inherited.length ? inherited : beforeSequence === undefined && canUsePinnedRequest ? [{
     id: 'request:' + sourceJob.jobId, role: 'user' as const, body: sourceTask,
     origin: null, verifiedSha: sourceJob.baseSha, createdAt: sourceCreatedAt,
   }] : []
