@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Search, RefreshCw } from 'lucide-react'
+import { Plus, Search, RefreshCw, LoaderCircle } from 'lucide-react'
 import { siGithub, siGitlab } from 'simple-icons'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -217,7 +217,10 @@ export function AddRepositoryDialog() {
       {notice && <p role="status" className="m-0 shrink-0 text-sm text-foreground">{notice}</p>}
       {catalog.error && <p role="alert" className="m-0 text-sm text-destructive">{catalog.error.message}</p>}
       <div className="min-h-32 flex-1 overflow-y-auto rounded-md border border-border/70 px-3">
-        {catalog.isPending && <div className="py-9 text-center text-sm text-muted-foreground">Checking connected providers…</div>}
+        {catalog.isPending && <div role="status" aria-label="Loading repositories"
+          className="flex items-center justify-center py-9 text-muted-foreground">
+          <LoaderCircle aria-hidden="true" className="size-5 motion-safe:animate-spin" />
+        </div>}
         {!catalog.isPending && <>
           <div className="flex items-center justify-between gap-2 border-b border-border py-2 text-xs text-muted-foreground">
             <span>{rows.length} {search ? 'matching' : 'available'} repositories</span>
