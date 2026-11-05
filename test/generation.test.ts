@@ -24,20 +24,58 @@ function git(cwd: string, ...args: string[]) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
 }
-function setup(name: string, seed?: (story: string) => void) {
-  const repo = join(root, name), story = join(repo, "story");
+// All scenarios share one immutable seed object database, not one writable
+// repository. Each local --shared clone retains its own refs, index, checkout
+// and worktree registry, so mutation and crash-recovery tests cannot leak
+// state across scenarios. Avoid Git init/config/add/commit for every empty case.
+let seedSha: string | undefined;
+let compiledEntry: readonly string[] | undefined;
+function cliEntry(): readonly string[] {
+  // The test still starts a fresh process for each public CLI invocation.
+  // Compile the current checkout only once rather than reloading the TS
+  // transpiler in every child. Explicit opt-out aids source-level debugging.
+  if (process.env.NT_GENERATION_TEST_SOURCE_CLI === "1")
+    return ["--import", "tsx", resolve("src/cli.ts")];
+  if (!compiledEntry) {
+    const build = spawnSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"),
+      "-p", resolve("tsconfig.json")], { encoding: "utf8", timeout: 120_000 });
+    assert.equal(build.status, 0, build.stderr || build.stdout || "Unable to build generation test CLI.");
+    compiledEntry = [resolve("dist/cli.js")];
+  }
+  return compiledEntry;
+}
+function prepareSeed(): string {
+  if (seedSha) return seedSha;
+  const template = join(root, "template-repo");
+  const story = join(template, "story");
   mkdirSync(story, { recursive: true });
   writeFileSync(join(story, ".gitkeep"), "");
-  seed?.(story);
-  git(repo, "init", "-q"); git(repo, "config", "user.name", "Author");
-  git(repo, "config", "user.email", "author@example.test");
-  git(repo, "add", "."); git(repo, "commit", "-qm", "Initial Story");
-  const initial = git(repo, "rev-parse", "HEAD");
-  writeFileSync(join(root, "config.json"), JSON.stringify({ novelteaSkills: source, skillDiscovery: "explicit-only" }));
+  git(template, "init", "-q");
+  git(template, "config", "user.name", "Author");
+  git(template, "config", "user.email", "author@example.test");
+  git(template, "add", ".");
+  git(template, "commit", "-qm", "Initial Story");
+  writeFileSync(join(root, "config.json"),
+    JSON.stringify({ novelteaSkills: source, skillDiscovery: "explicit-only" }));
+  seedSha = git(template, "rev-parse", "HEAD");
+  return seedSha;
+}
+function setup(name: string, seed?: (story: string) => void) {
+  const base = prepareSeed();
+  cliEntry();
+  const repo = join(root, name), story = join(repo, "story");
+  git(root, "clone", "-q", "--shared", "-c", "user.name=Author",
+    "-c", "user.email=author@example.test", join(root, "template-repo"), repo);
+  if (seed) {
+    seed(story);
+    git(repo, "add", ".");
+    git(repo, "commit", "-qm", "Initial Story");
+  }
+  const initial = seed ? git(repo, "rev-parse", "HEAD") : base;
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "config.json"), NT_SKILL_CACHE_DIR: join(root, "skills") };
   function cli(args: string[], success = true) {
-    const result = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
+    const result = spawnSync(process.execPath, [...cliEntry(),
       "job", ...args, "--story", story, "--job", "single"], {
       encoding: "utf8", env, timeout: process.env.NT_LIVE_GENERATION === "1" ||
         process.env.NT_LIVE_GENERATION_IDEA === "1" ? 1_800_000 : 240_000, maxBuffer: 32 * 1024 * 1024 });
@@ -375,7 +413,7 @@ function plannedDependencyInventory(f: ReturnType<typeof setup>, edit: (items: a
   // be used as a fixture for a production recovery checkpoint.
   edit(architecture.plan.items);
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
-  const validated = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
+  const validated = spawnSync(process.execPath, [...cliEntry(),
     "job", "validate", "--story", f.story, "--job", "single"], {
     encoding: "utf8", env: f.env, timeout: 90000, maxBuffer: 32 * 1024 * 1024,
   });
@@ -697,7 +735,9 @@ test("Studio exposes production scheduling rather than the retired prototype", a
   assert.equal(config.graphs.noveltea, undefined);
   assert.equal(config.graphs.story_generation, "./src/studio.ts:graph");
   const f = setup("studio-input");
-  const prepared = spawnSync(process.execPath, ["--import", "tsx", resolve("src/studio-input.ts"),
+  const studioEntry = process.env.NT_GENERATION_TEST_SOURCE_CLI === "1"
+    ? ["--import", "tsx", resolve("src/studio-input.ts")] : [resolve("dist/studio-input.js")];
+  const prepared = spawnSync(process.execPath, [...studioEntry,
     "--story", f.story, "--job", "single", "--task", "A scoped mystery", "--contract", f.contract, "--fixture"],
   { encoding: "utf8", env: f.env, timeout: 30_000 });
   assert.equal(prepared.status, 0, prepared.stderr);

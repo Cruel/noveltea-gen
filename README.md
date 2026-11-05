@@ -346,6 +346,14 @@ NT_LIVE_GENERATION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
   pnpm exec tsx --test --test-name-pattern='opt-in real Pi single-Milestone' test/generation.test.ts
 ```
 
+The generation suite creates one immutable local Git seed, then uses separate
+`git clone --shared` repositories per scenario. Clones share committed objects,
+not writable refs, indexes, worktrees, or job state. The harness also compiles the
+current CLI once and invokes that build in a fresh Node process for every public
+command (including restart tests), avoiding repeated TypeScript-loader setup.
+Set `NT_GENERATION_TEST_SOURCE_CLI=1` to exercise the source CLI via `tsx`
+instead when debugging. The one-time build writes only ignored `dist/` files.
+
 The live test verifies actual pinned discovery-skill reads and Markdown editing,
 then resumes the parent in a new process and checks its truthful outcome and author
 checkout isolation. With `NT_KEEP_FAILED_LIVE=1`, disposable evidence is preserved
