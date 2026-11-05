@@ -1,7 +1,10 @@
 import { randomBytes } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import Database from 'better-sqlite3'
+import { drizzle } from 'drizzle-orm/better-sqlite3'
 import type { StudioDatabase } from '../src/db/connection'
+import * as schema from '../src/db/schema'
+import { createSqlitePersistence } from '../src/persistence/sqlite'
 import { userPiCredentials } from '../src/lib/pi-credentials.server'
 
 /** Read-only access to a provider's existing device-code OAuth credential. The real OAuth
@@ -21,8 +24,10 @@ export async function readIsolatedStudioOAuth(sourcePath: string, encryptionKey:
       ? owners.find(candidate => candidate.id === selectedOwner)?.id
       : owners.length === 1 ? owners[0]!.id : undefined
     if (!owner) throw new Error('Select exactly one connected Studio account for ' + provider + ' using NT_TEST_WEB_PI_SOURCE_USER_ID.')
+    const db = drizzle(sqlite, { schema })
+    const store: StudioDatabase = { sqlite, db, persistence: createSqlitePersistence(db) }
     const credential = await userPiCredentials(
-      { sqlite } as StudioDatabase, owner, { NT_PI_CREDENTIAL_KEY: encryptionKey },
+      store, owner, { NT_PI_CREDENTIAL_KEY: encryptionKey },
     ).read(provider)
     if (credential?.type !== 'oauth')
       throw new Error('Selected Studio provider must have a device-code OAuth credential, not an API key.')

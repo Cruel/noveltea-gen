@@ -17,7 +17,7 @@ export async function githubJobRequest(
   try {
     const user = await requireUser(auth, request.headers)
     const input = await request.clone().json().catch(() => null)
-    const repositoryId = user ? repositoryForStory(store, user.id, input?.storyId, 'github') : undefined
+    const repositoryId = user ? await repositoryForStory(store, user.id, input?.storyId, 'github') : undefined
     const actor = await actorFor(auth, store, request.headers, repositoryId)
     if (actor instanceof Response) return actor
     const job = await prepareCachedJob(store, actor.id, actor.token, 'github', request,

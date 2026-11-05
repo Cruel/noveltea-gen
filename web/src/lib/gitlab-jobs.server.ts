@@ -17,7 +17,7 @@ export async function gitlabJobRequest(
   try {
     const user = await requireUser(auth, request.headers)
     const input = await request.clone().json().catch(() => null)
-    const repositoryId = user ? repositoryForStory(store, user.id, input?.storyId, 'gitlab') : undefined
+    const repositoryId = user ? await repositoryForStory(store, user.id, input?.storyId, 'gitlab') : undefined
     const current = await actor(auth, store, request.headers, repositoryId)
     const job = await prepareCachedJob(store, current.id, current.token, 'gitlab', request, async (row, commit) => {
       const projectId = Number(row.providerId)

@@ -49,19 +49,16 @@ type GitLabListing = {
   page: number; nextPage: number | null
 }
 
-function installed(store: StudioDatabase, userId: string): Set<string> {
-  const rows = store.sqlite.prepare(`SELECT provider,provider_repository_id AS id
-    FROM repositories WHERE owner_user_id=?`).all(userId) as Array<{ provider: string; id: string }>
+async function installed(store: StudioDatabase, userId: string): Promise<Set<string>> {
+  const rows = await store.persistence.repositories.identities(userId)
   return new Set(rows.map(row => row.provider + ':' + row.id))
 }
 
-export function discoverAccounts(store: StudioDatabase, userId: string): {
+export async function discoverAccounts(store: StudioDatabase, userId: string): Promise<{
   accounts: RepositoryAccount[]; warnings: string[]
-} {
-  const connections = listGitConnections(store, userId)
-  const legacy = store.sqlite.prepare(`SELECT DISTINCT providerId AS provider
-    FROM account WHERE userId=? AND providerId IN ('github','gitlab')`)
-    .all(userId) as Array<{ provider: RepositoryProvider }>
+}> {
+  const connections = await listGitConnections(store, userId)
+  const legacy = await store.persistence.git.legacyProviders(userId)
   const accounts: RepositoryAccount[] = []
   const warnings: string[] = []
   for (const provider of ['github', 'gitlab'] as const) {
@@ -77,7 +74,7 @@ export function discoverAccounts(store: StudioDatabase, userId: string): {
     // is connected or awaiting reauthorization. The existing provider handlers
     // remain authoritative for token and permission verification.
     if (!forProvider.some(connection => connection.status !== 'disconnected') &&
-        legacy.some(entry => entry.provider === provider)) {
+        legacy.includes(provider)) {
       accounts.push({ provider, connectionId: null, label: providerLabel(provider) + ' login' })
     }
   }
@@ -145,8 +142,8 @@ export async function discoverRepositoryCatalog(auth: StudioAuth, store: StudioD
   headers: Headers, baseURL: string): Promise<RepositoryCatalog> {
   const viewer = await requireUser(auth, headers)
   if (!viewer) throw new Error('Sign in required.')
-  const { accounts, warnings } = discoverAccounts(store, viewer.id)
-  const known = installed(store, viewer.id)
+  const { accounts, warnings } = await discoverAccounts(store, viewer.id)
+  const known = await installed(store, viewer.id)
   const catalog: RepositoryCatalog = { accounts, warnings, repositories: [], sources: [], pendingGitHub: [] }
   const results = await forAccounts(accounts, async account => {
     if (account.provider === 'gitlab') return { account, data: await gitlabPage(auth, store, headers, baseURL, account) }
@@ -213,13 +210,13 @@ export async function loadRepositorySourcePage(auth: StudioAuth, store: StudioDa
   headers: Headers, baseURL: string, source: RepositorySource): Promise<RepositoryPage> {
   const viewer = await requireUser(auth, headers)
   if (!viewer) throw new Error('Sign in required.')
-  const available = discoverAccounts(store, viewer.id).accounts
+  const available = (await discoverAccounts(store, viewer.id)).accounts
   const account = available.find(item => item.provider === source.provider &&
     item.connectionId === source.connectionId)
   if (!account) throw new Error('Repository identity is no longer connected.')
   if (!Number.isSafeInteger(source.page) || source.page < 2 || source.page > 100)
     throw new Error('Invalid repository page.')
-  const known = installed(store, viewer.id)
+  const known = await installed(store, viewer.id)
   if (account.provider === 'gitlab') {
     const page = await gitlabPage(auth, store, headers, baseURL, account, source.page)
     return { repositories: gitlabItems(page, account, known), source: {

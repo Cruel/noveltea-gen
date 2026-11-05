@@ -85,7 +85,7 @@ test('two Studio users may authorize the same Git integration without linking lo
         origin + '/api/integrations/git/callback/' + provider + '?code=replay&state=' + state, { headers },
       ), provider, config)
       assert.match(replay.headers.get('location')!, /integration_error=expired/)
-      return listGitConnections(store, (headers === aliceHeaders ? alice : bob).id)
+      return (await listGitConnections(store, (headers === aliceHeaders ? alice : bob).id))
         .find(connection => connection.provider === provider)!
     }
     const a = await begin(aliceHeaders)
@@ -102,7 +102,7 @@ test('two Studio users may authorize the same Git integration without linking lo
     githubAccountId = 214
     await begin(aliceHeaders)
     githubAccountId = 212
-    const aliceGithub = listGitConnections(store, alice.id).filter(item => item.provider === 'github')
+    const aliceGithub = (await listGitConnections(store, alice.id)).filter(item => item.provider === 'github')
     assert.equal(aliceGithub.length, 2, 'multiple GitHub identities coexist within one Studio user')
     const second = aliceGithub.find(item => item.login === 'second-github')!
     await assert.rejects(() => getRepositoryToken(auth, store, aliceHeaders, 'github', undefined, undefined, config),
@@ -134,7 +134,7 @@ test('two Studio users may authorize the same Git integration without linking lo
         'content-type': 'application/json' }, body: JSON.stringify({ connectionId: a.id }),
     }), config)
     assert.equal(disconnected.status, 200)
-    assert.equal(listGitConnections(store, alice.id).find(item => item.id === a.id)?.status, 'disconnected')
+    assert.equal((await listGitConnections(store, alice.id)).find(item => item.id === a.id)?.status, 'disconnected')
     await assert.rejects(() => getRepositoryToken(auth, store, aliceHeaders, 'github', 'alice-repo', undefined, config),
       /reauthorization/)
     assert.equal(await tokenForGitConnection(store, bob.id, b.id, config), 'connected-secret')

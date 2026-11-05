@@ -38,7 +38,13 @@ export interface SettingsPreferences {
   putThreadPreferences(ownerUserId: string, storyId: string, view: 'tree' | 'flat',
     expandedIds: string[], updatedAt: string): Promise<void>
 }
+import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding, PiCredentialVault } from './git-contracts'
+
 export interface StudioPersistence {
   dashboard: DashboardCatalog
   settings: SettingsPreferences
+  git: GitIdentities
+  repositories: RepositoryCatalogWrites
+  onboarding: StoryOnboarding
+  piCredentials: PiCredentialVault
 }

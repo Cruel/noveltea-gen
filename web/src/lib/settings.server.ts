@@ -27,7 +27,7 @@ export async function settingsRequest(auth: StudioAuth, store: StudioDatabase, r
         defaultModel: await readDefaultModel(preferences, actor.id),
         loginMethods: accounts.filter(row => row.providerId === 'github' || row.providerId === 'gitlab')
           .map(row => ({ id: row.id, provider: row.providerId, accountId: row.accountId })),
-        gitConnections: listGitConnections(store, actor.id),
+        gitConnections: await listGitConnections(store, actor.id),
         repositories: await preferences.listRepositories(actor.id),
       })
     }

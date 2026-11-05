@@ -22,7 +22,6 @@ type Proposal = { foundation: Foundation; task: string; contract: ReturnType<typ
 type Phase = 'running' | 'questions' | 'proposed' | 'approved' | 'blocked'
 type Session = { phase: Phase; revision: number; model: PiSelection; skillId: string; brief: string;
   turns: Turn[]; questions?: string; proposal?: Proposal; digest?: string; startedAt?: number }
-type Row = { revision: number; state: string }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const reply = (value: unknown, status = 200) => Response.json(value, {
@@ -148,27 +147,18 @@ A model suggestion is not the author's original decision.
 Do not use Markdown fences or extra text.
 \nPINNED SKILLS:\n${sections.join('\n')}`
 }
-function load(store: StudioDatabase, owner: string, repo: string, workspace: string): Session | null {
-  const row = store.sqlite.prepare(`SELECT revision,state_json AS state FROM story_onboarding_conversations
-    WHERE owner_user_id=? AND repository_id=? AND workspace=?`)
-    .get(owner, repo, workspace) as Row | undefined
+async function load(store: StudioDatabase, owner: string, repo: string, workspace: string): Promise<Session | null> {
+  const row = await store.persistence.onboarding.conversation(owner, repo, workspace)
   if (!row) return null
   const state = JSON.parse(row.state) as Session
   if (row.revision !== state.revision) throw new DiscoveryError(409, 'Discovery revision is inconsistent')
   return state
 }
-function save(store: StudioDatabase, owner: string, repo: string, workspace: string,
-  state: Session, previous: number | null) {
-  const now = new Date().toISOString()
-  const changed = previous === null
-    ? store.sqlite.prepare(`INSERT INTO story_onboarding_conversations
-        (owner_user_id,repository_id,workspace,revision,state_json,updated_at)
-        VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
-      .run(owner, repo, workspace, state.revision, JSON.stringify(state), now).changes
-    : store.sqlite.prepare(`UPDATE story_onboarding_conversations SET revision=?,state_json=?,updated_at=?
-        WHERE owner_user_id=? AND repository_id=? AND workspace=? AND revision=?`)
-      .run(state.revision, JSON.stringify(state), now, owner, repo, workspace, previous).changes
-  if (changed !== 1) throw new DiscoveryError(409, 'Discovery changed concurrently. Reload the conversation.')
+async function save(store: StudioDatabase, owner: string, repo: string, workspace: string,
+  state: Session, previous: number | null): Promise<void> {
+  const changed = await store.persistence.onboarding.saveConversation(
+    owner, repo, workspace, state.revision, JSON.stringify(state), previous, new Date().toISOString())
+  if (!changed) throw new DiscoveryError(409, 'Discovery changed concurrently. Reload the conversation.')
 }
 function authorMessages(state: Session) {
   return state.turns.filter(turn => turn.role === 'user').map(turn => turn.text)
@@ -208,10 +198,9 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         !UUID.test(params.get('repositoryId') ?? '')) throw new DiscoveryError(400, 'Invalid repository/workspace')
     const repo = params.get('repositoryId')!
     const workspace = onboardingWorkspace(params.get('workspace') ?? '')
-    const own = store.sqlite.prepare('SELECT id FROM repositories WHERE id=? AND owner_user_id=?')
-      .get(repo, actor.id)
+    const own = await store.persistence.repositories.get(actor.id, repo)
     if (!own) throw new DiscoveryError(404, 'Repository is not connected to this account')
-    const saved = load(store, actor.id, repo, workspace)
+    const saved = await load(store, actor.id, repo, workspace)
     if (request.method === 'GET') return reply({ session: saved ? scope(saved) : null })
     const data = await input(request)
     const action = data.action
@@ -224,7 +213,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       // may have died. It does not run any model or mutate a Story file. A
       // late former worker response cannot overwrite this CAS revision.
       const blocked: Session = { ...saved, phase: 'blocked', revision: saved.revision + 1 }
-      save(store, actor.id, repo, workspace, blocked, saved.revision)
+      await save(store, actor.id, repo, workspace, blocked, saved.revision)
       return reply({ session: scope(blocked) })
     }
     if (action === 'approve') {
@@ -237,7 +226,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
               ? { ...d, authority: 'user-protected' as const } : d),
         } } }
       approved.digest = sha(approved.proposal)
-      save(store, actor.id, repo, workspace, approved, saved.revision)
+      await save(store, actor.id, repo, workspace, approved, saved.revision)
       return reply({ session: scope(approved) })
     }
     if (!['start', 'answer', 'revise', 'retry'].includes(String(action))) throw new DiscoveryError(400, 'Invalid discovery action')
@@ -275,7 +264,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     // Durable in-flight reservation precedes provider invocation, preventing
     // duplicated model calls on concurrent requests and unsafe automatic replay
     // after a worker dies during a provider turn.
-    save(store, actor.id, repo, workspace, session, saved?.revision ?? null)
+    await save(store, actor.id, repo, workspace, session, saved?.revision ?? null)
     try {
       const instructions = await skillInstructions(session.skillId)
       const raw = await (infer ?? ((s, i) => realInference(store, actor.id, s, i)))(session, instructions)
@@ -285,13 +274,13 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         ...(outcome.questions ? { questions: outcome.questions } : {}),
         ...(outcome.proposal ? { proposal: outcome.proposal, digest: sha(outcome.proposal) } : {}),
       }
-      save(store, actor.id, repo, workspace, next, session.revision)
+      await save(store, actor.id, repo, workspace, next, session.revision)
       return reply({ session: scope(next) })
     } catch {
       // Never repeat an uncertain provider turn automatically or expose raw
       // model errors/credentials. Saved author input survives for inspection.
       const blocked = { ...session, phase: 'blocked' as const, revision: session.revision + 1 }
-      try { save(store, actor.id, repo, workspace, blocked, session.revision) } catch { /* preserve races */ }
+      try { await save(store, actor.id, repo, workspace, blocked, session.revision) } catch { /* preserve races */ }
       throw new DiscoveryError(503, 'Discovery turn did not complete. State preserved; inspect it before choosing a new conversation.')
     }
   } catch (error) {
@@ -303,12 +292,12 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
 /** Server-side approval binding checked immediately before either provider's Git
  * mutation. The browser cannot replace a model-reviewed proposal with a forged
  * canonical record merely by submitting a different foundation object. */
-export function assertApprovedPiFoundation(store: StudioDatabase, owner: string, repo: string,
-  workspace: string, reference: unknown, foundation: unknown) {
+export async function assertApprovedPiFoundation(store: StudioDatabase, owner: string, repo: string,
+  workspace: string, reference: unknown, foundation: unknown): Promise<void> {
   if (!reference || typeof reference !== 'object' || Array.isArray(reference))
     throw new DiscoveryError(409, 'Missing reviewed discovery approval')
   const ref = reference as Record<string, unknown>
-  const session = load(store, owner, repo, onboardingWorkspace(workspace))
+  const session = await load(store, owner, repo, onboardingWorkspace(workspace))
   if (!session || session.phase !== 'approved' || session.revision !== ref.revision ||
       session.digest !== ref.digest || JSON.stringify(session.proposal?.foundation) !== JSON.stringify(foundation)) {
     throw new DiscoveryError(409, 'Approved Pi proposal does not match the selected repository, workspace or exact foundation')

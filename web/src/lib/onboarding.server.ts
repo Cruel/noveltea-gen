@@ -100,12 +100,9 @@ export async function onboardingRequest(auth: StudioAuth, store: StudioDatabase,
     const repositoryId = params.get('repositoryId')
     const workspace = onboardingWorkspace(params.get('workspace') ?? '')
     if (!repositoryId || !uuid.test(repositoryId)) throw new OnboardingError(400, 'Invalid repository.')
-    const owner = store.sqlite.prepare('SELECT provider FROM repositories WHERE id=? AND owner_user_id=?')
-      .get(repositoryId, user.id) as { provider: string } | undefined
+    const owner = await store.persistence.repositories.get(user.id, repositoryId)
     if (!owner) throw new OnboardingError(404, 'Repository is not connected to this account.')
-    const saved = store.sqlite.prepare(`SELECT revision,draft_json AS draftJson FROM story_onboarding_drafts
-      WHERE owner_user_id=? AND repository_id=? AND workspace=?`)
-      .get(user.id, repositoryId, workspace) as { revision: number; draftJson: string } | undefined
+    const saved = await store.persistence.onboarding.draft(user.id, repositoryId, workspace)
     if (request.method === 'GET') {
       return response({ repositoryId, provider: owner.provider, workspace,
         target: storyContentDirectory(workspace), revision: saved?.revision ?? 0,
@@ -140,15 +137,10 @@ export async function onboardingRequest(auth: StudioAuth, store: StudioDatabase,
     }
     const draft = validateOnboardingDraft(body.draft)
     const revision = (saved?.revision ?? 0) + 1
-    const updated = store.sqlite.prepare(`INSERT INTO story_onboarding_drafts
-      (owner_user_id,repository_id,workspace,revision,draft_json,updated_at)
-      VALUES (?,?,?,?,?,?)
-      ON CONFLICT(owner_user_id,repository_id,workspace) DO UPDATE SET
-      revision=excluded.revision,draft_json=excluded.draft_json,updated_at=excluded.updated_at
-      WHERE story_onboarding_drafts.revision=?`)
-      .run(user.id, repositoryId, workspace, revision, JSON.stringify(draft), new Date().toISOString(),
-        saved?.revision ?? 0)
-    if (updated.changes !== 1) throw new OnboardingError(409, 'Discovery changed concurrently; refresh.')
+    const updated = await store.persistence.onboarding.saveDraft(
+      user.id, repositoryId, workspace, saved?.revision ?? 0,
+      JSON.stringify(draft), new Date().toISOString())
+    if (!updated) throw new OnboardingError(409, 'Discovery changed concurrently; refresh.')
     return response({ revision, draft, workspace, target: storyContentDirectory(workspace) })
   } catch (error) {
     if (error instanceof OnboardingError) return response({ error: error.message }, error.status)

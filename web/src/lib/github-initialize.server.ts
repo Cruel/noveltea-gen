@@ -40,9 +40,7 @@ export async function githubInitializationRequest(
         part.includes('=') || /[*?\[\]!]/.test(part))) {
       throw new GithubError(400, 'Story initialization cannot write into internal metadata or author-only inbox directories.')
     }
-    const row = store.sqlite.prepare(`SELECT provider_repository_id AS providerId, name
-      FROM repositories WHERE id=? AND owner_user_id=? AND provider='github'`)
-      .get(repositoryId, actor.id) as { providerId: string; name: string } | undefined
+    const row = await store.persistence.repositories.get(actor.id, repositoryId, 'github')
     if (!row) throw new GithubError(404, 'GitHub repository not connected.')
     const remote = await matchingRepository(actor.token, row.name)
     if (String(remote.id) !== row.providerId) {
@@ -62,7 +60,7 @@ export async function githubInitializationRequest(
     }
     if (input.discoveryApproval !== undefined) {
       try {
-        assertApprovedPiFoundation(store, actor.id, repositoryId,
+        await assertApprovedPiFoundation(store, actor.id, repositoryId,
           directory.slice(0, -5).replace(/\/$/, ''), input.discoveryApproval, input.foundation)
       } catch {
         throw new GithubError(409, 'Pi discovery approval is missing, stale, or does not match the exact proposed foundation.')
@@ -88,12 +86,8 @@ export async function githubInitializationRequest(
     // A Story may have multiple jobs, but initialization may run only once.
     // Replays must name the same persisted job; other jobs cannot overwrite
     // an already connected Story directory.
-    const existingStory = store.sqlite.prepare(`SELECT id, initial_content_sha256 AS contentSha256 FROM stories
-      WHERE repository_id=? AND owner_user_id=? AND directory=?`)
-      .get(repositoryId, actor.id, directory) as { id: string; contentSha256: string | null } | undefined
-    const existingJob = store.sqlite.prepare(`SELECT story_id AS storyId, owner_user_id AS ownerId,
-      source_commit_sha AS commitSha FROM studio_sessions WHERE id=?`)
-      .get(input.jobId) as { storyId: string; ownerId: string; commitSha: string | null } | undefined
+    const existingStory = await store.persistence.onboarding.story(actor.id, repositoryId, directory)
+    const existingJob = await store.persistence.onboarding.initializationJob(input.jobId)
     if (existingJob && (!existingStory || existingStory.id !== existingJob.storyId ||
         existingJob.ownerId !== actor.id || existingJob.commitSha !== inspected.commit)) {
       throw new GithubError(409, 'Initialization job ID is assigned to different saved work.')
@@ -141,22 +135,10 @@ export async function githubInitializationRequest(
 
     const storyId = existingStory?.id ?? randomUUID()
     const now = new Date().toISOString()
-    store.sqlite.transaction(() => {
-      if (!existingStory) {
-        store.sqlite.prepare(`INSERT INTO stories
-          (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha,initial_content_sha256)
-          VALUES (?,?,?,?,?,?,?,?)`)
-          .run(storyId, actor.id, repositoryId, directory, common.title, now, baseSha, contentSha256)
-      }
-      store.sqlite.prepare(`INSERT INTO studio_sessions
-        (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-        VALUES (?,?,?,?,?,'paused',?,?)
-        ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
-        WHERE studio_sessions.owner_user_id=excluded.owner_user_id AND
-          studio_sessions.story_id=excluded.story_id AND
-          studio_sessions.source_commit_sha=excluded.source_commit_sha`)
-        .run(input.jobId, actor.id, storyId, common.title, baseSha, now, now)
-    })()
+    await store.persistence.onboarding.commitGithubInitialization({
+      id: storyId, owner: actor.id, repositoryId, directory, title: common.title,
+      createdAt: now, commitSha: baseSha, contentSha256,
+    }, input.jobId)
     return json({ story: { id: storyId, title: common.title, directory, commit: baseSha },
       job: { id: input.jobId, baseSha, headSha, branch, status: 'paused' },
       mode: inspected.mode, published: inspected.mode === 'bootstrap' })

@@ -29,13 +29,9 @@ export async function getRepositoryToken(
   if (repositoryId) {
     // Preserve the existing disconnected-provider behavior before checking the
     // caller's catalog. Never disclose whether a foreign repository exists.
-    const hasLogin = !!store.sqlite.prepare('SELECT 1 FROM account WHERE userId=? AND providerId=?')
-      .get(actor.id, provider)
-    const hasIntegration = !!store.sqlite.prepare(`SELECT 1 FROM git_connections
-      WHERE owner_user_id=? AND provider=? AND status!='disconnected'`).get(actor.id, provider)
-    const repo = store.sqlite.prepare(`SELECT connection_id AS connectionId FROM repositories
-      WHERE id=? AND owner_user_id=? AND provider=?`).get(repositoryId, actor.id, provider) as
-        { connectionId: string | null } | undefined
+    const hasLogin = (await store.persistence.git.legacyAccounts(actor.id, provider)).length > 0
+    const hasIntegration = await store.persistence.git.hasActive(actor.id, provider)
+    const repo = await store.persistence.repositories.get(actor.id, repositoryId, provider)
     if (!repo && !hasLogin && !hasIntegration) return null
     if (!repo) throw new GitConnectionError(404, 'Repository does not belong to this user.')
     if (!repo.connectionId && !hasLogin) {
@@ -49,37 +45,33 @@ export async function getRepositoryToken(
     historical = !connectionId
   }
   if (!historical && !connectionId) {
-    connectionId = selectGitConnection(store, actor.id, provider)
+    connectionId = await selectGitConnection(store, actor.id, provider)
   }
   if (connectionId) {
-    const row = store.sqlite.prepare('SELECT provider FROM git_connections WHERE id=? AND owner_user_id=?')
-      .get(connectionId, actor.id) as { provider: string } | undefined
+    const row = await store.persistence.git.read(actor.id, connectionId)
     if (!row || row.provider !== provider) throw new GitConnectionError(403, 'Invalid provider connection selection.')
     return tokenForGitConnection(store, actor.id, connectionId, config)
   }
-  const accounts = store.sqlite.prepare(
-    'SELECT id FROM account WHERE userId=? AND providerId=?',
-  ).all(actor.id, provider) as Array<{ id: string }>
+  const accounts = await store.persistence.git.legacyAccounts(actor.id, provider)
   if (accounts.length > 1) throw new GitConnectionError(409,
     'Multiple legacy login identities exist. Connect a dedicated repository identity in Settings.')
   if (!accounts.length) return null
-  const token = await auth.api.getAccessToken({ headers, body: { accountId: accounts[0]!.id } })
+  const token = await auth.api.getAccessToken({ headers, body: { accountId: accounts[0]! } })
   return token.accessToken
 }
 
 // Used by both token selection and catalog imports. A new repository must
 // persist the same credential selection that authorized the provider lookup.
-export function selectGitConnection(store: StudioDatabase, owner: string,
-  provider: 'github' | 'gitlab', requestedId?: string): string | undefined {
+export async function selectGitConnection(store: StudioDatabase, owner: string,
+  provider: 'github' | 'gitlab', requestedId?: string): Promise<string | undefined> {
   if (requestedId) {
-    const match = store.sqlite.prepare(`SELECT id,status FROM git_connections
-      WHERE id=? AND owner_user_id=? AND provider=?`)
-      .get(requestedId, owner, provider) as { id: string; status: string } | undefined
+    const match = await store.persistence.git.read(owner, requestedId)
+    if (match && match.provider !== provider) throw new GitConnectionError(403, 'Invalid Git connection selection.')
     if (!match) throw new GitConnectionError(403, 'Invalid Git connection selection.')
     if (match.status !== 'connected') throw new GitConnectionError(409, 'Git connection requires reauthorization.')
     return match.id
   }
-  const connections = listGitConnections(store, owner)
+  const connections = (await listGitConnections(store, owner))
     .filter(item => item.provider === provider && item.status !== 'disconnected')
   if (connections.length > 1)
     throw new GitConnectionError(409, 'Choose which ' + provider + ' account to use for this operation.')
@@ -88,14 +80,10 @@ export function selectGitConnection(store: StudioDatabase, owner: string,
   return connections[0]?.id
 }
 
-export function repositoryForStory(store: StudioDatabase, owner: string, storyId: unknown,
-  provider: 'github' | 'gitlab'): string | undefined {
+export async function repositoryForStory(store: StudioDatabase, owner: string, storyId: unknown,
+  provider: 'github' | 'gitlab'): Promise<string | undefined> {
   if (typeof storyId !== 'string') return undefined
-  const row = store.sqlite.prepare(`SELECT r.id FROM stories s JOIN repositories r
-    ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
-    WHERE s.id=? AND s.owner_user_id=? AND r.provider=?`)
-    .get(storyId, owner, provider) as { id: string } | undefined
-  return row?.id
+  return (await store.persistence.repositories.repositoryForStory(owner, storyId, provider)) ?? undefined
 }
 
 export async function dashboardResponse(auth: StudioAuth, store: StudioDatabase, request: Request): Promise<Response> {

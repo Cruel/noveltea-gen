@@ -145,13 +145,13 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal(accepted.body.session.phase, 'approved')
     assert.ok(hasUserProtectedDecision(candidate(foundation).file))
     const ref = { revision: accepted.body.session.revision, digest: accepted.body.session.digest }
-    assert.doesNotThrow(() => assertApprovedPiFoundation(store, alice.id, repo,
+    await assert.doesNotReject(() => assertApprovedPiFoundation(store, alice.id, repo,
       'projects/demo', ref, foundation))
-    assert.throws(() => assertApprovedPiFoundation(store, alice.id, repo,
+    await assert.rejects(() => assertApprovedPiFoundation(store, alice.id, repo,
       'projects/other', ref, foundation), /does not match/)
-    assert.throws(() => assertApprovedPiFoundation(store, alice.id, repo,
+    await assert.rejects(() => assertApprovedPiFoundation(store, alice.id, repo,
       'projects/demo', ref, {...foundation, title: 'Altered'}), /does not match/)
-    assert.throws(() => assertApprovedPiFoundation(store, alice.id, repo,
+    await assert.rejects(() => assertApprovedPiFoundation(store, alice.id, repo,
       'projects/demo', {...ref, revision: ref.revision - 1}, foundation), /does not match/)
     assert.equal((await request('POST', {action: 'answer', revision: ref.revision, text: 'Late'})).status, 409)
     assert.equal((await request('GET', undefined, foreign)).status, 404)

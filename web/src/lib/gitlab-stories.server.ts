@@ -331,11 +331,9 @@ export async function gitlabStoryRequest(auth: StudioAuth, store: StudioDatabase
     if (typeof repositoryId !== 'string' || !/^[a-f\d-]{36}$/i.test(repositoryId)) {
       throw new ProviderFailure(400, 'Invalid repository ID.')
     }
-    const row = store.sqlite.prepare(`SELECT name,provider_repository_id AS projectId FROM repositories
-      WHERE id=? AND owner_user_id=? AND provider='gitlab'`)
-      .get(repositoryId, current.id) as { name: string; projectId: string } | undefined
+    const row = await store.persistence.repositories.get(current.id, repositoryId, 'gitlab')
     if (!row) throw new ProviderFailure(404, 'GitLab project is not connected.')
-    const projectId = Number(row.projectId)
+    const projectId = Number(row.providerId)
     if (!Number.isSafeInteger(projectId) || projectId <= 0) invalid('GitLab catalog has invalid project metadata.')
     if (request.method === 'POST') assertStudioSchemaCurrent(store)
     const authorized = await authorizedProject(current.token, projectId)
@@ -358,15 +356,11 @@ export async function gitlabStoryRequest(auth: StudioAuth, store: StudioDatabase
     }
     const result = await preflight(reader, directory, authorized.path_with_namespace)
     const now = new Date().toISOString()
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT(repository_id,directory) DO UPDATE SET title=excluded.title,source_commit_sha=excluded.source_commit_sha`)
-      .run(randomUUID(), current.id, repositoryId, directory,
-        directory.split('/').filter(Boolean).at(-1) || row.name, now, commit)
-    const story = store.sqlite.prepare(`SELECT id,directory,title,source_commit_sha AS commitSha FROM stories
-      WHERE repository_id=? AND owner_user_id=? AND directory=?`)
-      .get(repositoryId, current.id, directory) as { id: string; title: string; directory: string; commitSha: string }
+    const story = await store.persistence.onboarding.importStory({
+      id: randomUUID(), owner: current.id, repositoryId, directory,
+      title: directory.split('/').filter(Boolean).at(-1) || row.name,
+      createdAt: now, commitSha: commit,
+    })
     return reply({ story: { id: story.id, title: story.title, directory: story.directory, commit: story.commitSha }, ...result })
   } catch (error) {
     if (error instanceof StudioSchemaError) return reply({ error: error.message }, 503)

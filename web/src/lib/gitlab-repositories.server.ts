@@ -79,7 +79,7 @@ export async function gitlabRepositoryRequest(auth: StudioAuth, store: StudioDat
     const requestedConnection = typeof selected === 'string' && selected ? selected : undefined
     const viewer = await requireUser(auth, request.headers)
     if (!viewer) return reply({ error: 'Sign in required.' }, 401)
-    const connectionId = selectGitConnection(store, viewer.id, 'gitlab', requestedConnection)
+    const connectionId = await selectGitConnection(store, viewer.id, 'gitlab', requestedConnection)
     const user = await actor(auth, store, request.headers, undefined, connectionId)
     if (request.method === 'GET') {
       const raw = new URL(request.url).searchParams.get('page') || '1'
@@ -103,13 +103,10 @@ export async function gitlabRepositoryRequest(auth: StudioAuth, store: StudioDat
       if (i === 100) throw new ProviderFailure(503, 'Too many projects to verify safely')
     }
     if (!matched) return reply({ error: 'Project not found among your push-access GitLab projects' }, 403)
-    store.sqlite.prepare(`INSERT INTO repositories (id, owner_user_id, provider, provider_repository_id, name, created_at, connection_id)
-      VALUES (?, ?, 'gitlab', ?, ?, ?, ?)
-      ON CONFLICT(owner_user_id, provider, provider_repository_id) DO UPDATE SET name=excluded.name
-      -- Existing binding changes require explicit Settings rebinding after verification.`)
-      .run(randomUUID(), user.id, String(matched.id), matched.path_with_namespace, new Date().toISOString(), connectionId ?? null)
-    const repository = store.sqlite.prepare(`SELECT id, name, provider FROM repositories
-      WHERE owner_user_id=? AND provider='gitlab' AND provider_repository_id=?`).get(user.id, String(matched.id))
+    const saved = await store.persistence.repositories.upsert(user.id, 'gitlab',
+      String(matched.id), matched.path_with_namespace, connectionId ?? null,
+      randomUUID(), new Date().toISOString())
+    const repository = { id: saved.id, name: saved.name, provider: saved.provider }
     return reply({ repository })
   } catch (err) { return failure(err) }
 }

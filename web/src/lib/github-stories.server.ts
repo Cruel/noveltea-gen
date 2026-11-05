@@ -411,9 +411,7 @@ export async function githubStoryRequest(
     if (typeof repositoryId !== 'string' || !/^[a-f0-9-]{36}$/i.test(repositoryId)) {
       throw new GithubError(400, 'Invalid repository ID')
     }
-    const row = store.sqlite.prepare(`SELECT name FROM repositories
-      WHERE id=? AND owner_user_id=? AND provider='github'`)
-      .get(repositoryId, actor.id) as { name: string } | undefined
+    const row = await store.persistence.repositories.get(actor.id, repositoryId, 'github')
     if (!row) throw new GithubError(404, 'GitHub repository not connected.')
     if (request.method === 'POST') assertStudioSchemaCurrent(store)
     // A catalog row alone is not current authorization: GitHub installation
@@ -433,16 +431,11 @@ export async function githubStoryRequest(
     }
     const result = await preflight(reader, revision.root, directory, tree)
     const now = new Date().toISOString()
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT(repository_id,directory) DO UPDATE SET
-        title=excluded.title,source_commit_sha=excluded.source_commit_sha`)
-      .run(randomUUID(), actor.id, repositoryId, directory,
-        directory.split('/').filter(Boolean).at(-1) || row.name, now, revision.commit)
-    const story = store.sqlite.prepare(`SELECT id,directory,title,source_commit_sha AS commitSha
-      FROM stories WHERE repository_id=? AND owner_user_id=? AND directory=?`)
-      .get(repositoryId, actor.id, directory) as { id: string; title: string; directory: string; commitSha: string }
+    const story = await store.persistence.onboarding.importStory({
+      id: randomUUID(), owner: actor.id, repositoryId, directory,
+      title: directory.split('/').filter(Boolean).at(-1) || row.name,
+      createdAt: now, commitSha: revision.commit,
+    })
     return json({ story: { id: story.id, title: story.title, directory: story.directory, commit: story.commitSha }, ...result })
   } catch (error) { return errorResponse(error) }
 }

@@ -159,19 +159,10 @@ async function importRepository(store: StudioDatabase, actor: Actor, fullName: s
   const repo = await matchingRepository(actor.token, fullName, installationId)
   const now = new Date().toISOString()
   const id = randomUUID()
-  store.sqlite.prepare(`
-    INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at,connection_id)
-    VALUES (?,?,'github',?,?,?,?)
-    ON CONFLICT(owner_user_id,provider,provider_repository_id) DO UPDATE SET name=excluded.name
-    -- Never silently switch an existing repository's authorization identity.
-    -- Explicit Settings rebinding verifies the remote repository first.
-  `).run(id, actor.id, String(repo.id), repo.full_name, now, connectionId ?? null)
-  const row = store.sqlite.prepare(`
-    SELECT id, name, provider FROM repositories WHERE owner_user_id=? AND provider='github' AND provider_repository_id=?
-  `).get(actor.id, String(repo.id)) as { id: string; name: string; provider: string }
-  store.sqlite.prepare('DELETE FROM github_install_flows WHERE owner_user_id=? AND lower(desired_repository)=lower(?) AND status=?')
-    .run(actor.id, repo.full_name, 'pending')
-  return row
+  const row = await store.persistence.repositories.upsert(
+    actor.id, 'github', String(repo.id), repo.full_name, connectionId ?? null, id, now)
+  await store.persistence.repositories.clearPendingInstall(actor.id, repo.full_name)
+  return { id: row.id, name: row.name, provider: row.provider }
 }
 
 function sameOrigin(request: Request, options: Options) {
@@ -188,7 +179,7 @@ export async function githubRepositoryRequest(auth: StudioAuth, store: StudioDat
     const requestedConnection = typeof connectionId === 'string' && connectionId ? connectionId : undefined
     const viewer = await requireUser(auth, request.headers)
     if (!viewer) return json({ error: 'Sign in required' }, 401)
-    const selectedConnection = selectGitConnection(store, viewer.id, 'github', requestedConnection)
+    const selectedConnection = await selectGitConnection(store, viewer.id, 'github', requestedConnection)
     const actor = await actorFor(auth, store, request.headers, undefined, selectedConnection)
     if (actor instanceof Response) return actor
     if (request.method === 'POST') {
@@ -211,9 +202,7 @@ export async function githubRepositoryRequest(auth: StudioAuth, store: StudioDat
         ? `https://github.com/organizations/${encodeURIComponent(i.account.login)}/settings/installations/${i.id}`
         : `https://github.com/settings/installations/${i.id}`,
     }))
-    const pending = (store.sqlite.prepare(`SELECT desired_repository FROM github_install_flows
-      WHERE owner_user_id=? AND status='pending' AND expires_at>? AND desired_repository IS NOT NULL
-      ORDER BY created_at DESC`).all(actor.id, Date.now()) as Array<{ desired_repository: string }>).map(row => row.desired_repository)
+    const pending = await store.persistence.repositories.pendingInstallNames(actor.id, Date.now())
     if (!chosen) return json({ installations: visible, pending })
     if (!/^[1-9]\d*$/.test(chosen) || !all.some(i => String(i.id) === chosen)) return json({ error: 'Installation not accessible' }, 404)
     const install = all.find(i => String(i.id) === chosen)!
@@ -234,16 +223,17 @@ export async function githubInstallStart(auth: StudioAuth, store: StudioDatabase
     const requested = typeof body?.connectionId === 'string' ? body.connectionId : undefined
     const viewer = await requireUser(auth, request.headers)
     if (!viewer) return json({ error: 'Sign in required' }, 401)
-    const connectionId = selectGitConnection(store, viewer.id, 'github', requested)
+    const connectionId = await selectGitConnection(store, viewer.id, 'github', requested)
     const actor = await actorFor(auth, store, request.headers, undefined, connectionId)
     if (actor instanceof Response) return actor
     const desired = body?.fullName ? normalizeFullName(body.fullName) : null
-    store.sqlite.prepare('DELETE FROM github_install_flows WHERE expires_at < ?').run(Date.now())
     const state = randomBytes(32).toString('base64url')
-    store.sqlite.prepare(`INSERT INTO github_install_flows
-      (state_hash, owner_user_id, desired_repository, created_at, expires_at, status, connection_id)
-      VALUES (?, ?, ?, ?, ?, 'started', ?)`)
-      .run(createHash('sha256').update(state).digest('hex'), actor.id, desired, Date.now(), Date.now() + 20 * 60_000, connectionId ?? null)
+    const now = Date.now()
+    await store.persistence.repositories.beginInstall({
+      stateHash: createHash('sha256').update(state).digest('hex'),
+      owner: actor.id, desired, createdAt: now, expiresAt: now + 20 * 60_000,
+      connectionId: connectionId ?? null,
+    }, now)
     const url = new URL(`https://github.com/apps/${options.appSlug}/installations/new`)
     url.searchParams.set('state', state)
     const response = json({ url: url.toString() })
@@ -273,33 +263,27 @@ export async function githubInstallCallback(auth: StudioAuth, store: StudioDatab
     if (!/^[a-zA-Z0-9_-]{43}$/.test(state)) return redirect('invalid')
     const digest = createHash('sha256').update(state).digest('hex')
     // Consume atomically, bound to this authenticated actor and single use.
-    const row = store.sqlite.prepare(`UPDATE github_install_flows SET status='used'
-      WHERE state_hash=? AND owner_user_id=? AND status='started' AND expires_at>?
-      RETURNING desired_repository,connection_id`).get(digest, user.id, Date.now()) as
-      { desired_repository: string | null; connection_id: string | null } | undefined
+    const row = await store.persistence.repositories.consumeInstall(user.id, digest, Date.now())
     if (!row) return redirect('invalid')
-    const actor = await actorFor(auth, store, request.headers, undefined, row.connection_id ?? undefined)
+    const actor = await actorFor(auth, store, request.headers, undefined, row.connectionId ?? undefined)
     if (actor instanceof Response) return redirect('invalid')
     const installId = params.get('installation_id')
     if (!installId || !/^[1-9]\d*$/.test(installId)) {
-      store.sqlite.prepare("UPDATE github_install_flows SET status='pending', expires_at=? WHERE state_hash=?")
-        .run(Date.now() + 24 * 60 * 60_000, digest)
+      await store.persistence.repositories.deferInstall(user.id, digest, Date.now() + 24 * 60 * 60_000)
       return redirect('pending')
     }
     const found = (await installations(actor.token)).some(install => String(install.id) === installId && usable(install))
     if (!found) {
-      store.sqlite.prepare(`UPDATE github_install_flows SET status='pending', expires_at=? WHERE state_hash=?`)
-        .run(Date.now() + 24 * 60 * 60_000, digest)
+      await store.persistence.repositories.deferInstall(user.id, digest, Date.now() + 24 * 60 * 60_000)
       return redirect('pending')
     }
-    if (!row.desired_repository) return redirect('installed')
+    if (!row.desired) return redirect('installed')
     try {
-      await importRepository(store, actor, row.desired_repository, row.connection_id ?? undefined, Number(installId))
+      await importRepository(store, actor, row.desired, row.connectionId ?? undefined, Number(installId))
       return redirect('added')
     } catch (error) {
       if (error instanceof GithubError && [403, 404, 503].includes(error.status)) {
-        store.sqlite.prepare(`UPDATE github_install_flows SET status='pending', expires_at=? WHERE state_hash=?`)
-          .run(Date.now() + 24 * 60 * 60_000, digest)
+        await store.persistence.repositories.deferInstall(user.id, digest, Date.now() + 24 * 60 * 60_000)
         return redirect('pending')
       }
       throw error

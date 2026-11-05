@@ -46,43 +46,36 @@ function unseal(owner: string, provider: string, value: string, key: Buffer): Cr
 export function userPiCredentials(store: StudioDatabase, owner: string,
   env: NodeJS.ProcessEnv = process.env): Credentials {
   const key = encryptionKey(env)
-  const readRow = (provider: string) => store.sqlite.prepare(
-    'SELECT ciphertext, revision FROM pi_credentials WHERE owner_user_id=? AND provider=?',
-  ).get(owner, provider) as { ciphertext: string; revision: number } | undefined
+  const readRow = (provider: string) => store.persistence.piCredentials.read(owner, provider)
   const read: Credentials['read'] = async provider => {
     if (!providerId.test(provider)) return undefined
-    const row = readRow(provider)
+    const row = await readRow(provider)
     return row ? unseal(owner, provider, row.ciphertext, key) : undefined
   }
   return {
     read,
     async list() {
-      const rows = store.sqlite.prepare('SELECT provider, ciphertext FROM pi_credentials WHERE owner_user_id=?')
-        .all(owner) as Array<{ provider: string; ciphertext: string }>
+      const rows = await store.persistence.piCredentials.list(owner)
       return rows.map(row => ({ providerId: row.provider, type: unseal(owner, row.provider, row.ciphertext, key).type }))
     },
     async modify(provider, fn, options) {
       options?.signal?.throwIfAborted()
       if (!providerId.test(provider)) throw new Error('Invalid Pi provider')
-      const current = readRow(provider)
+      const current = await readRow(provider)
       const next = await fn(current ? unseal(owner, provider, current.ciphertext, key) : undefined)
       options?.signal?.throwIfAborted()
       if (next === undefined) return current ? unseal(owner, provider, current.ciphertext, key) : undefined
       if (JSON.stringify(next).length > 16_384) throw new Error('Pi credential exceeds size limit')
       const encrypted = seal(owner, provider, next, key)
-      const changed = current
-        ? store.sqlite.prepare(`UPDATE pi_credentials SET ciphertext=?, revision=revision+1
-            WHERE owner_user_id=? AND provider=? AND revision=?`)
-          .run(encrypted, owner, provider, current.revision).changes
-        : store.sqlite.prepare(`INSERT INTO pi_credentials (owner_user_id,provider,ciphertext)
-            VALUES (?,?,?) ON CONFLICT DO NOTHING`).run(owner, provider, encrypted).changes
-      if (changed !== 1) throw new Error('Pi credentials changed concurrently; reconnect before retrying')
+      const changed = await store.persistence.piCredentials.compareAndSwap(
+        owner, provider, encrypted, current?.revision ?? null)
+      if (!changed) throw new Error('Pi credentials changed concurrently; reconnect before retrying')
       return next
     },
     async delete(provider, options) {
       options?.signal?.throwIfAborted()
       if (!providerId.test(provider)) throw new Error('Invalid Pi provider')
-      store.sqlite.prepare('DELETE FROM pi_credentials WHERE owner_user_id=? AND provider=?').run(owner, provider)
+      await store.persistence.piCredentials.delete(owner, provider)
     },
   }
 }

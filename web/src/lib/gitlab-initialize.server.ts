@@ -97,11 +97,9 @@ export async function gitlabInitializeRequest(
       !/^[a-f0-9]{8}-[a-f0-9-]{27}$/i.test(data.repositoryId)) {
       throw new ProviderFailure(400, 'Select a connected GitLab project.')
     }
-    const row = store.sqlite.prepare(`SELECT provider_repository_id AS projectId,name FROM repositories
-      WHERE id=? AND owner_user_id=? AND provider='gitlab'`).get(data.repositoryId, current.id) as
-      { projectId: string; name: string } | undefined
+    const row = await store.persistence.repositories.get(current.id, data.repositoryId, 'gitlab')
     if (!row) throw new ProviderFailure(404, 'GitLab project is not connected to this account.')
-    const projectId = Number(row.projectId)
+    const projectId = Number(row.providerId)
     if (!Number.isSafeInteger(projectId) || projectId <= 0) throw new ProviderFailure(409, 'Invalid saved GitLab project ID.')
     const project = await authorizedProject(current.token, projectId)
     if (project.path_with_namespace !== row.name) {
@@ -125,14 +123,13 @@ export async function gitlabInitializeRequest(
     assertStudioSchemaCurrent(store)
     const input = data as Initialization
     const path = storyContentDirectory(directory(input.directory))
-    const existing = store.sqlite.prepare(`SELECT id FROM stories WHERE repository_id=? AND directory=?`)
-      .get(data.repositoryId, path)
+    const existing = await store.persistence.onboarding.story(current.id, data.repositoryId, path)
     if (existing) {
       throw new ProviderFailure(409, 'This Story directory is already registered. Open it instead of initializing a new Story.')
     }
     if ('discoveryApproval' in input) {
       try {
-        assertApprovedPiFoundation(store, current.id, input.repositoryId,
+        await assertApprovedPiFoundation(store, current.id, input.repositoryId,
           directory(input.directory), (input as Initialization & { discoveryApproval: unknown }).discoveryApproval,
           input.foundation)
       } catch {
@@ -206,16 +203,15 @@ export async function gitlabInitializeRequest(
       throw new ProviderFailure(503, `Story commit was created on ${branch} at ${created.id}, but provider preflight failed. Inspect that branch before retrying; no catalog record was written.`)
     }
     const now = new Date().toISOString()
+    let story
     try {
-      store.sqlite.prepare(`INSERT INTO stories
-        (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-        VALUES (?,?,?,?,?,?,?)`)
-        .run(randomUUID(), current.id, data.repositoryId, path, title, now, created.id)
+      story = await store.persistence.onboarding.createStory({
+        id: randomUUID(), owner: current.id, repositoryId: data.repositoryId,
+        directory: path, title, createdAt: now, commitSha: created.id,
+      })
     } catch {
       throw new ProviderFailure(409, `Story commit exists on ${branch} at ${created.id}, but catalog registration conflicted. Reconcile it before retrying.`)
     }
-    const story = store.sqlite.prepare(`SELECT id,directory,title,source_commit_sha AS commitSha FROM stories
-      WHERE repository_id=? AND owner_user_id=? AND directory=?`).get(data.repositoryId, current.id, path)
     return reply({ story, branch, mode: empty ? 'initial-default' : 'review-branch',
       baseSha, commit: created.id })
   } catch (error) {

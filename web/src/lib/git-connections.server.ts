@@ -5,15 +5,11 @@ import type { StudioDatabase } from '../db/connection'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './session.server'
 import { JsonInputError, readJsonInput } from './json-input.server'
+import type { GitConnectionRecord, GitProvider } from '../persistence/git-contracts'
 
-export type GitProvider = 'github' | 'gitlab'
+export type { GitProvider } from '../persistence/git-contracts'
 type Tokens = { access: string; refresh: string | null }
-type Connection = {
-  id: string; owner: string; provider: GitProvider; providerAccountId: string; login: string
-  credentials: string; revision: number; accessExpiresAt: number | null; refreshExpiresAt: number | null
-  refreshLeaseId: string | null; refreshLeaseUntil: number | null
-  status: 'connected' | 'reauthorize' | 'disconnected'
-}
+type Connection = GitConnectionRecord
 export class GitConnectionError extends Error {
   constructor(readonly statusCode: number, message: string) { super(message) }
 }
@@ -56,22 +52,13 @@ function unseal(row: Connection, config: StudioAuthConfig): Tokens {
     throw new GitConnectionError(409, 'Stored credentials are invalid; reconnect this account.')
   return value as Tokens
 }
-function readConnection(store: StudioDatabase, owner: string, id: string): Connection {
-  const row = store.sqlite.prepare(`SELECT id, owner_user_id AS owner, provider,
-    provider_account_id AS providerAccountId, login, credentials, revision,
-    refresh_lease_id AS refreshLeaseId, refresh_lease_until AS refreshLeaseUntil,
-    access_expires_at AS accessExpiresAt, refresh_expires_at AS refreshExpiresAt, status
-    FROM git_connections WHERE id=? AND owner_user_id=?`).get(id, owner) as Connection | undefined
+async function readConnection(store: StudioDatabase, owner: string, id: string): Promise<Connection> {
+  const row = await store.persistence.git.read(owner, id)
   if (!row) throw new GitConnectionError(404, 'Git connection not found for this user.')
   return row
 }
-export function listGitConnections(store: StudioDatabase, owner: string) {
-  return store.sqlite.prepare(`SELECT id, provider, provider_account_id AS accountId, login, status,
-    access_expires_at AS accessExpiresAt FROM git_connections
-    WHERE owner_user_id=? ORDER BY provider, login`).all(owner) as Array<{
-    id: string; provider: GitProvider; accountId: string; login: string
-    status: string; accessExpiresAt: number | null
-  }>
+export async function listGitConnections(store: StudioDatabase, owner: string) {
+  return store.persistence.git.list(owner)
 }
 function credentialsResponse(input: unknown): { access: string; refresh: string | null;
   accessExpiry: number | null; refreshExpiry: number | null } {
@@ -121,7 +108,7 @@ export async function gitConnectionRequest(auth: StudioAuth, store: StudioDataba
     assertStudioSchemaCurrent(store)
     const actor = await requireUser(auth, request.headers)
     if (!actor) throw new GitConnectionError(401, 'Sign in required.')
-    if (request.method === 'GET') return response({ connections: listGitConnections(store, actor.id) })
+    if (request.method === 'GET') return response({ connections: await listGitConnections(store, actor.id) })
     if (request.method !== 'POST' && request.method !== 'DELETE' && request.method !== 'PUT')
       throw new GitConnectionError(405, 'Method not allowed.')
     if (request.headers.get('origin') !== config.baseURL)
@@ -131,11 +118,9 @@ export async function gitConnectionRequest(auth: StudioAuth, store: StudioDataba
       if (typeof body?.connectionId !== 'string' || typeof body.repositoryId !== 'string' ||
           !/^[0-9a-f-]{36}$/i.test(body.connectionId) || !/^[0-9a-f-]{36}$/i.test(body.repositoryId))
         throw new GitConnectionError(422, 'Choose a repository and Git connection.')
-      const repository = store.sqlite.prepare(`SELECT id,provider,provider_repository_id AS providerId,name
-        FROM repositories WHERE id=? AND owner_user_id=?`)
-        .get(body.repositoryId, actor.id) as { id: string; provider: GitProvider; providerId: string; name: string } | undefined
+      const repository = await store.persistence.repositories.get(actor.id, body.repositoryId)
       if (!repository) throw new GitConnectionError(404, 'Repository not found for this Studio user.')
-      const connection = readConnection(store, actor.id, body.connectionId)
+      const connection = await readConnection(store, actor.id, body.connectionId)
       if (connection.provider !== repository.provider || connection.status !== 'connected')
         throw new GitConnectionError(409, 'Select an active connection for this repository provider.')
       const token = await tokenForGitConnection(store, actor.id, connection.id, config)
@@ -165,33 +150,25 @@ export async function gitConnectionRequest(auth: StudioAuth, store: StudioDataba
           throw error
         }
       }
-      const updated = store.sqlite.prepare(`UPDATE repositories SET connection_id=?
-        WHERE id=? AND owner_user_id=? AND provider=? AND name=? AND provider_repository_id=?
-        AND EXISTS(SELECT 1 FROM git_connections WHERE id=? AND owner_user_id=? AND status='connected')`)
-        .run(connection.id, repository.id, actor.id, repository.provider, repository.name,
-          repository.providerId, connection.id, actor.id).changes
+      const updated = await store.persistence.repositories.rebind(actor.id, repository, connection.id)
       if (!updated) throw new GitConnectionError(409, 'Repository or connection changed during verification. Retry.')
       return response({ rebound: true, repositoryId: repository.id, connectionId: connection.id })
     }
     if (request.method === 'DELETE') {
       if (!body || typeof body.connectionId !== 'string') throw new GitConnectionError(422, 'Connection ID required.')
       // Keep the binding and identity so disconnect cannot silently switch to an unrelated credential.
-      const changed = store.sqlite.prepare(`UPDATE git_connections SET status='disconnected',
-        credentials='',access_expires_at=NULL,refresh_expires_at=NULL,revision=revision+1,
-        refresh_lease_id=NULL,refresh_lease_until=NULL,updated_at=? WHERE id=? AND owner_user_id=?`)
-        .run(new Date().toISOString(), body.connectionId, actor.id).changes
+      const changed = await store.persistence.git.disconnect(actor.id, body.connectionId, new Date().toISOString())
       if (!changed) throw new GitConnectionError(404, 'Connection not found.')
-      return response({ connections: listGitConnections(store, actor.id) })
+      return response({ connections: await listGitConnections(store, actor.id) })
     }
     if (body?.provider !== 'github' && body?.provider !== 'gitlab')
       throw new GitConnectionError(422, 'Choose GitHub or GitLab.')
     const provider = body.provider
-    store.sqlite.prepare('DELETE FROM git_connection_flows WHERE expires_at<?').run(Date.now())
     const state = randomBytes(32).toString('base64url')
     const verifier = randomBytes(32).toString('base64url')
-    store.sqlite.prepare(`INSERT INTO git_connection_flows
-      (state_hash,owner_user_id,provider,verifier,expires_at) VALUES (?,?,?,?,?)`)
-      .run(digest(state), actor.id, provider, verifier, Date.now() + 10 * 60_000)
+    const now = Date.now()
+    await store.persistence.git.startFlow(actor.id, provider, digest(state), verifier,
+      now + 10 * 60_000, now)
     const url = new URL(provider === 'github'
       ? 'https://github.com/login/oauth/authorize' : 'https://gitlab.com/oauth/authorize')
     const client = provider === 'github' ? config.github : config.gitlab
@@ -213,10 +190,7 @@ export async function gitConnectionCallback(auth: StudioAuth, store: StudioDatab
   const state = url.searchParams.get('state')
   if (!state || !/^[a-zA-Z0-9_-]{43}$/.test(state)) return success('integration_error=invalid_state')
   // Atomically consume the state exactly once before exchanging the authorization code.
-  const row = store.sqlite.prepare(`DELETE FROM git_connection_flows
-    WHERE state_hash=? AND provider=? AND expires_at>=?
-    RETURNING owner_user_id AS owner, verifier`).get(digest(state), provider, Date.now()) as
-      { owner: string; verifier: string } | undefined
+  const row = await store.persistence.git.consumeFlow(digest(state), provider, Date.now())
   if (!row) return success('integration_error=expired')
   try {
     assertStudioSchemaCurrent(store)
@@ -235,15 +209,11 @@ export async function gitConnectionCallback(auth: StudioAuth, store: StudioDatab
     const identity = await profile(provider, tokens.access)
     const sealed = seal(actor.id, provider, identity.id, { access: tokens.access, refresh: tokens.refresh }, config)
     const now = new Date().toISOString()
-    store.sqlite.prepare(`INSERT INTO git_connections
-      (id,owner_user_id,provider,provider_account_id,login,credentials,access_expires_at,refresh_expires_at,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(owner_user_id,provider,provider_account_id) DO UPDATE SET
-        login=excluded.login, credentials=excluded.credentials, access_expires_at=excluded.access_expires_at,
-        refresh_expires_at=excluded.refresh_expires_at, revision=git_connections.revision+1,
-        status='connected', refresh_lease_id=NULL, refresh_lease_until=NULL, updated_at=excluded.updated_at`)
-      .run(randomUUID(), actor.id, provider, identity.id, identity.login, sealed,
-        tokens.accessExpiry, tokens.refreshExpiry, now, now)
+    await store.persistence.git.connect({
+      id: randomUUID(), owner: actor.id, provider, providerAccountId: identity.id,
+      login: identity.login, credentials: sealed, accessExpiresAt: tokens.accessExpiry,
+      refreshExpiresAt: tokens.refreshExpiry, now,
+    })
     return success('integration_connected=' + provider)
   } catch (error) {
     console.error('[Studio Git integration] OAuth callback rejected', {
@@ -255,15 +225,13 @@ export async function gitConnectionCallback(auth: StudioAuth, store: StudioDatab
 
 export async function tokenForGitConnection(store: StudioDatabase, owner: string, id: string,
   config: StudioAuthConfig = readAuthConfig()): Promise<string> {
-  const initial = readConnection(store, owner, id)
+  const initial = await readConnection(store, owner, id)
   if (initial.status !== 'connected') throw new GitConnectionError(409, 'Git connection requires reauthorization.')
   if (initial.refreshLeaseId) {
     if (!initial.refreshLeaseUntil || initial.refreshLeaseUntil <= Date.now()) {
       // The prior outcome is unknowable after a worker crash. The old one-time
       // refresh token must not be replayed; require explicit reauthorization.
-      store.sqlite.prepare(`UPDATE git_connections SET status='reauthorize'
-        WHERE id=? AND owner_user_id=? AND revision=? AND refresh_lease_id=?`)
-        .run(id, owner, initial.revision, initial.refreshLeaseId)
+      await store.persistence.git.requireReauthorization(owner, id, initial.revision, initial.refreshLeaseId)
       throw new GitConnectionError(409, 'Git credential refresh was interrupted. Reauthorize this connection.')
     }
     throw new GitConnectionError(409, 'Git connection is refreshing. Retry shortly.')
@@ -271,21 +239,18 @@ export async function tokenForGitConnection(store: StudioDatabase, owner: string
   if (!initial.accessExpiresAt || initial.accessExpiresAt > Date.now() + 90_000)
     return unseal(initial, config).access
   if (initial.refreshExpiresAt && initial.refreshExpiresAt < Date.now()) {
-    store.sqlite.prepare(`UPDATE git_connections SET status='reauthorize'
-      WHERE id=? AND owner_user_id=? AND revision=?`).run(id, owner, initial.revision)
+    await store.persistence.git.requireReauthorization(owner, id, initial.revision)
     throw new GitConnectionError(409, 'Git refresh authorization expired. Reconnect.')
   }
   const tokens = unseal(initial, config)
   if (!tokens.refresh) {
-    store.sqlite.prepare(`UPDATE git_connections SET status='reauthorize'
-      WHERE id=? AND owner_user_id=? AND revision=?`).run(id, owner, initial.revision)
+    await store.persistence.git.requireReauthorization(owner, id, initial.revision)
     throw new GitConnectionError(409, 'Git connection requires reauthorization.')
   }
   const lease = randomUUID()
-  const updated = store.sqlite.prepare(`UPDATE git_connections
-    SET refresh_lease_id=?,refresh_lease_until=? WHERE id=? AND owner_user_id=? AND revision=?
-      AND status='connected' AND (refresh_lease_until IS NULL OR refresh_lease_until<?)`)
-    .run(lease, Date.now() + 30_000, id, owner, initial.revision, Date.now()).changes
+  const now = Date.now()
+  const updated = await store.persistence.git.acquireRefreshLease(owner, id, initial.revision, lease,
+    now + 30_000, now)
   if (!updated) throw new GitConnectionError(409, 'Git connection is refreshing. Retry shortly.')
   try {
     const client = initial.provider === 'github' ? config.github : config.gitlab
@@ -296,19 +261,16 @@ export async function tokenForGitConnection(store: StudioDatabase, owner: string
     const sealed = seal(owner, initial.provider, initial.providerAccountId, {
       access: refreshed.access, refresh: refreshed.refresh ?? tokens.refresh,
     }, config)
-    const changed = store.sqlite.prepare(`UPDATE git_connections
-      SET credentials=?, access_expires_at=?,refresh_expires_at=?, revision=revision+1,
-        refresh_lease_id=NULL,refresh_lease_until=NULL,updated_at=?
-      WHERE id=? AND owner_user_id=? AND revision=? AND refresh_lease_id=?`)
-      .run(sealed, refreshed.accessExpiry, refreshed.refreshExpiry ?? initial.refreshExpiresAt,
-        new Date().toISOString(), id, owner, initial.revision, lease).changes
+    const changed = await store.persistence.git.finishRefresh(owner, id, initial.revision, lease, {
+      credentials: sealed, accessExpiresAt: refreshed.accessExpiry,
+      refreshExpiresAt: refreshed.refreshExpiry ?? initial.refreshExpiresAt,
+      now: new Date().toISOString(),
+    })
     if (!changed) throw new GitConnectionError(409, 'Git connection changed during token refresh.')
     return refreshed.access
   } catch (error) {
     // A refresh grant may be one-time. Never replay it after an uncertain response.
-    store.sqlite.prepare(`UPDATE git_connections SET status='reauthorize',
-      refresh_lease_id=NULL,refresh_lease_until=NULL WHERE id=? AND owner_user_id=? AND refresh_lease_id=?`)
-      .run(id, owner, lease)
+    await store.persistence.git.failRefresh(owner, id, lease)
     throw error
   }
 }
