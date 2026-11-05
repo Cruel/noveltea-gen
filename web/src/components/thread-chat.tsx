@@ -19,6 +19,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       query.state.data?.runs.at(-1)?.status === 'running' ? 2500 : 15000,
   })
   const [message, setMessage] = useState('')
+  const [liveMode, setLiveMode] = useState<'steer' | 'follow-up'>('steer')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [pendingRetry, setPendingRetry] = useState<{ id: string; content: string } | null>(null)
@@ -51,7 +52,10 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       const content = message.trim()
       const id = pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID()
       setPendingRetry({ id, content })
-      const result = await postThreadMessage({ data: { threadId, id, content } })
+      const active = data?.runs.at(-1)
+      const mode = active?.status === 'running' && !active.fixture ? liveMode : undefined
+      const result = await postThreadMessage({ data: { threadId, id, content,
+        ...(mode ? { liveMode: mode } : {}) } })
       client.setQueryData(key, result.chat)
       setPendingRetry(null)
       setMessage('')
@@ -170,11 +174,19 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong>
           <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString()}</time>
-          {item.role === 'user' && item.phase !== 'finished' &&
-            <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
+          {item.role === 'user' && item.phase === 'cancelled' ? <span>Cancelled</span> :
+           item.role === 'user' && item.liveMode
+            ? <span>{item.liveState === 'delivered' ? 'Delivered to active Pi' :
+                item.liveState === 'sdk-queued' || item.liveState === 'dispatching'
+                  ? 'Accepted by active Pi' : item.liveState === 'blocked'
+                    ? 'Delivery uncertain — inspect job' : item.liveState === 'deferred'
+                      ? 'Queued for next run after Pi settles' : 'Accepted · awaiting Pi boundary'}</span>
+            : item.role === 'user' && item.phase !== 'finished' &&
+              <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
         <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
         {item.role === 'user' && item.phase === 'queued' && !data?.archived &&
+          !['dispatching', 'sdk-queued'].includes(item.liveState ?? '') &&
           <div className="mt-2 flex flex-wrap gap-2">
             {!item.hasRevisionScope && latest?.status === 'completed' && latest.queuePhase === 'finished' &&
               item.id === data?.messages.find(m => m.role === 'user' && m.phase === 'queued')?.id &&
@@ -185,7 +197,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           </div>}
         {item.phase === 'cancelled' && item.cancelledAt &&
           <p className="mt-1 text-xs text-muted-foreground">Cancelled at {new Date(item.cancelledAt).toLocaleString()}. Original request retained for history.</p>}
-        {data && item.role === 'user' && item.status === 'delivered' &&
+        {data && item.role === 'user' && !item.liveMode && item.status === 'delivered' &&
           item.phase === 'finished' && !data.archived &&
           <ThreadMessageEdit key={item.id} threadId={threadId} storyId={data.storyId}
             messageId={item.id} original={item.content}
@@ -268,6 +280,15 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     </section>}
     {sendError && <p role="alert" className="text-sm text-destructive">{sendError}</p>}
     {data?.archived && <p className="text-xs text-muted-foreground">Restore this Thread to send a message.</p>}
+    {latest?.status === 'running' && !latest.fixture && !data?.archived &&
+      <div role="group" aria-label="Live message delivery" className="mb-2 flex gap-2 text-xs">
+        <Button type="button" size="sm" variant={liveMode === 'steer' ? 'secondary' : 'outline'}
+          aria-pressed={liveMode === 'steer'} disabled={sending} onClick={() => setLiveMode('steer')}>
+          Steer · after current Pi turn</Button>
+        <Button type="button" size="sm" variant={liveMode === 'follow-up' ? 'secondary' : 'outline'}
+          aria-pressed={liveMode === 'follow-up'} disabled={sending} onClick={() => setLiveMode('follow-up')}>
+          Follow up · after Pi task</Button>
+      </div>}
     <form onSubmit={event => { event.preventDefault(); void send() }} className="flex min-w-0 items-end gap-2">
       <textarea aria-label="Follow-up message" rows={2} maxLength={4000} value={message}
         onChange={event => { setMessage(event.target.value); setPendingRetry(null); setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }} disabled={sending || data?.archived}
@@ -282,7 +303,10 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       Every revision is checked against canonical Story relationships and the verified source commit.
       Material expansions require explicit scope review. Unrelated records stay read-only; each run has its own budget.
       A queued request that cannot be clarified can be cancelled without deleting its audit history;
-      the next instruction will then be considered in order.
+      the next instruction will then be considered in order. During a live Pi run, Steer is the default:
+      it is queued for the exact active specialist after its current turn and tools settle.
+      Follow up is queued after the current Pi task (or after the run if no eligible Pi turn remains).
+      Neither option grants extra file or protected-decision authority.
     </p>
   </section>
 }

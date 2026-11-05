@@ -10,6 +10,8 @@ import { runPersistedGeneration } from './agent-runner'
 import { recoverSettledThreadRuns, settleThreadRun } from './lib/thread-chat.server'
 import { executeAuthorCommand } from './lib/agent-author-command.server'
 import { validAuthorCommand } from './lib/agent-author-validation'
+import { observePiTurnSettlement } from '../../src/live-pi-registry'
+import { dispatchPendingPiSteering, settlePiSteering } from './lib/thread-live-steering.server'
 
 const inFlight = new Map<string, Promise<void>>()
 const initialized = new WeakSet<StudioDatabase>()
@@ -127,10 +129,17 @@ export function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
     throw new Error('Invalid agent polling interval.')
   assertStudioSchemaCurrent(store)
   stopping = false
+  observePiTurnSettlement((turn, succeeded) => settlePiSteering(store, turn, succeeded))
   // Detect prior dead workers before taking new jobs. Never replay their
   // interrupted writers automatically; the existing reconciliation path owns that.
   pumpAgentQueue(store)
-  const timer = setInterval(() => pumpAgentQueue(store), intervalMs)
+  const tick = () => {
+    pumpAgentQueue(store)
+    void dispatchPendingPiSteering(store).catch(() => {
+      console.error('[Studio] Could not dispatch queued Pi steering; messages remain in their recorded state')
+    })
+  }
+  const timer = setInterval(tick, intervalMs)
   return () => { stopping = true; clearInterval(timer) }
 }
 

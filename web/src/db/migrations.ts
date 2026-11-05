@@ -428,6 +428,28 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    version: 25,
+    statements: [
+      // Live steering is durable and independent of the ordinary next-run
+      // queue. A PI acknowledgement is specific to a job and a session turn.
+      `CREATE TABLE thread_live_inputs (
+        message_id TEXT PRIMARY KEY NOT NULL REFERENCES story_thread_messages(id) ON DELETE CASCADE,
+        owner_user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        source_job_id TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('steer','follow-up')),
+        state TEXT NOT NULL CHECK (state IN ('pending','dispatching','sdk-queued','delivered','deferred','blocked')),
+        pi_token TEXT,
+        pi_session_id TEXT,
+        delivered_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (thread_id,owner_user_id) REFERENCES story_threads(id,owner_user_id),
+        FOREIGN KEY (source_job_id,owner_user_id) REFERENCES studio_sessions(id,owner_user_id)
+      )`,
+      `CREATE INDEX thread_live_inputs_pending ON thread_live_inputs(source_job_id,state)`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version

@@ -1718,7 +1718,45 @@ This revision-only child runs **no Pi generation** and does not replay already
 finished Story work. Other canon edits still use normal inferred, bounded
 Story revision scopes. Ambiguous protected requests must first name an exact
 existing protected decision and proposed statement; Studio does not infer
-human permission from natural-language intent.
+human permission from natural-language intent. A conservative contrast check
+also flags natural-language requests that reverse a recognizable protected
+statement (such as revenge instead of repair); it displays the original
+statement and requested direction but does not invent exact replacement prose.
+Ambiguous cases remain held for an exact author proposal. Native Git protection
+still rejects unapproved retcons that language-level inference misses.
+
+### Live Thread steering and deferred follow-ups (#86)
+
+While a real Pi generation run is active, Thread chat defaults to **Steer**;
+the author can explicitly select **Follow up** instead. Steer saves a durable,
+owner-scoped message tied to the running job. The trusted agent host delivers
+pending messages through only that job's active specialist Pi SDK `steer()`
+method, after the current turn and tool calls. It cannot start another writer,
+address another user's session or change the bounded work contract. Steering
+instructions explicitly reaffirm existing writable paths, sandbox isolation
+and protected Creative Decisions; native structural validation remains binding.
+
+After the turn settles, an exact matching user message in the Pi transcript is
+required before Studio marks a live message delivered. An ambiguous SDK
+dispatch is blocked for inspection rather than replayed. **Follow up** goes
+to the same active Pi session's SDK `followUp()` queue, which runs only once
+that specialist's current task settles; it cannot authorize another writer.
+A message submitted during graph scheduling, commit or checkpoint publication
+waits for the next eligible Pi turn; when no Pi turn occurs before settlement
+it becomes an ordinary queued next-run follow-up requiring fresh scope
+review. Ordering prevents later messages from overtaking earlier deferred
+author requests.
+
+Schema v25 persists the author-selected mode, source job, SDK turn identity
+and accepted/delivered/deferred/blocked status independently of the immutable
+Thread message. Studio chat refreshes these statuses across reconnects. The
+credential-free tests cover actual Pi SDK tool-boundary steering and
+follow-up model turns (`web/test/pi-sdk-steering.test.ts`), plus durable
+Studio routing, cancellation, reconnect, ordering and failure cases
+(`web/test/thread-live-steering.test.ts`). A failed acknowledgement also
+retains the writer lease and persists a non-successful interruption receipt.
+Full real-provider Pi certification remains opt-in with the rootless sandbox,
+credentials and `NT_TEST_WEB_PI_STEERING=1`.
 
 Corrective checkpoint-branch guidance is bound into each applicable specialist's
 actual Pi assignment/prompt without granting broader file or protected-decision

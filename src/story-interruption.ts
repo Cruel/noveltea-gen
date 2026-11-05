@@ -8,6 +8,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import { activeStoryWriter } from "./job-lock.js";
 import { readJobControl } from "./job-control.js";
+import { registerPiTurn, settlePiTurn, type ActivePiTurn, type LivePiSession } from "./live-pi-registry.js";
 
 type AbortableSession = Pick<AgentSession, "abort" | "waitForIdle" | "isStreaming"> &
   Partial<Pick<AgentSession, "sessionId" | "sessionManager" | "messages">>;
@@ -104,6 +105,13 @@ export async function runCancellableStoryTurn<T>(
     } : {}),
   };
   await persist(job, receipt);
+  const piTurn: ActivePiTurn | null = session.sessionId &&
+    "steer" in session && typeof session.steer === "function" &&
+    "followUp" in session && typeof session.followUp === "function" &&
+    "messages" in session && Array.isArray(session.messages)
+    ? { jobId: job.jobId, token: receipt.token, workItem,
+        session: session as LivePiSession } : null;
+  const unregister = piTurn ? registerPiTurn(piTurn) : () => {};
   const initialMessageCount = session.messages?.length ?? 0;
   let finished = false, cancelSeen = false, abortError: unknown;
   let checking: Promise<void> | undefined;
@@ -159,9 +167,23 @@ export async function runCancellableStoryTurn<T>(
     receipt.dirtyFiles = git(job, "status", "--porcelain=v1", "--untracked-files=all").split("\n").filter(Boolean);
     await persist(job, receipt);
   } catch (error) {
+    unregister();
     throw new Error("Cannot record Story interruption safely; writer lock retained: " + String(error));
   }
-  writer.retainLease = Boolean(abortError);
+  // An unrecorded Pi-steering acknowledgement is ambiguous execution, not
+  // proof that the writer can be released or the message replayed elsewhere.
+  try {
+    if (piTurn) await settlePiTurn(piTurn, !cancelled && !failure && !abortError);
+    writer.retainLease = Boolean(abortError);
+  } catch {
+    // The original turn may have consumed the message even if SQLite could
+    // not store its delivery receipt. Neither release this writer nor report
+    // success: on restart the message must be inspected, never replayed.
+    receipt.phase = "provider-failed";
+    receipt.error = "Pi steering acknowledgement could not be persisted; writer lock retained for reconciliation.";
+    await persist(job, receipt).catch(() => {});
+    throw new Error(receipt.error);
+  } finally { unregister(); }
   if (abortError) throw new Error("Pi abort unavailable or provider unresponsive for " + workItem +
     "; writer lock retained for inspection: " + String(abortError));
   if (cancelled) throw new StoryCancelledError(workItem);

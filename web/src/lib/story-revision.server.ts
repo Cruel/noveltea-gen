@@ -103,11 +103,19 @@ export async function previewThreadRevision(store: StudioDatabase, owner: string
 /** One transaction binds the reviewed preview to the immutable queued message.
  * A retry with the same UUID cannot replace its earlier controller grant. */
 export async function submitThreadRevision(store: StudioDatabase, owner: string, threadId: string,
-  id: string, content: string, selectedTargets?: string[], approvalDigest?: string): Promise<ThreadMessage> {
+  id: string, content: string, selectedTargets?: string[], approvalDigest?: string,
+  liveMode?: 'steer' | 'follow-up'): Promise<ThreadMessage> {
+  if (liveMode && (selectedTargets || approvalDigest))
+    throw new ThreadChatError(409, 'Live Pi instructions cannot grant a new Story write scope.')
   // Reserve the UUID and its exact place in the queue *synchronously* before
   // any native validation, Git access or other asynchronous scope inference.
   // The second concurrent request therefore always has its own durable slot.
-  const saved = enqueueThreadMessage(store, owner, threadId, id, content)
+  const saved = enqueueThreadMessage(store, owner, threadId, id, content, liveMode)
+  if (saved.liveMode && liveMode) {
+    if (selectedTargets || approvalDigest)
+      throw new ThreadChatError(409, 'Steering is not a new scope approval or a writer grant.')
+    return saved
+  }
   if (saved.phase === 'cancelled')
     throw new ThreadChatError(409, 'This instruction was cancelled. Send a new instruction with a new ID.')
   const pinnedRow = store.sqlite.prepare(`SELECT revision_scope_json AS scope

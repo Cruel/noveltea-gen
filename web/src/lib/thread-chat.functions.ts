@@ -125,19 +125,21 @@ export const cancelThreadMessage = createServerFn({ method: 'POST' })
 
 export const postThreadMessage = createServerFn({ method: 'POST' })
   .validator((data: { threadId: string; id: string; content: string;
-    selectedTargets?: string[]; approvalDigest?: string }) => {
+    selectedTargets?: string[]; approvalDigest?: string;
+    liveMode?: 'steer' | 'follow-up' }) => {
     if (!data || !ID.test(data.threadId) || typeof data.id !== 'string' ||
         typeof data.content !== 'string' || data.content.length > 4000 ||
         data.selectedTargets !== undefined && (!Array.isArray(data.selectedTargets) ||
           data.selectedTargets.length > 128 || data.selectedTargets.some(id => typeof id !== 'string')) ||
-        data.approvalDigest !== undefined && !/^[a-f0-9]{64}$/.test(data.approvalDigest))
+        data.approvalDigest !== undefined && !/^[a-f0-9]{64}$/.test(data.approvalDigest) ||
+        data.liveMode !== undefined && !['steer','follow-up'].includes(data.liveMode))
       throw new Error('Invalid Thread message.')
     return data
   })
   .handler(async ({ data }) => {
     const ownerId = await owner()
     const message = await submitThreadRevision(database, ownerId, data.threadId, data.id,
-      data.content, data.selectedTargets, data.approvalDigest)
+      data.content, data.selectedTargets, data.approvalDigest, data.liveMode)
     await advanceThread(database, ownerId, data.threadId)
     return { message, chat: readThreadChat(database, ownerId, data.threadId) }
   })

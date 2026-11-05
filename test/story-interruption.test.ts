@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, after } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { startStoryJob } from "../src/job.js";
+import { withStoryJobLock } from "../src/job-lock.js";
+import { runCancellableStoryTurn } from "../src/story-interruption.js";
+import { observePiTurnSettlement } from "../src/live-pi-registry.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-interrupt-"));
 after(() => removeTestTree(root));
@@ -187,6 +191,37 @@ test("crashed writer is reported as unconfirmed, never as a successful cancellat
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(existsSync(join(x.job.worktreeRoot, "../.story-job-running")), true);
   assert.equal(readFileSync(join(x.job.worktreeStoryRoot, "unfinished.md"), "utf8"), "Partial specialist edit\n");
+});
+
+test("failed durable Pi steering acknowledgement retains writer lease and reports non-success", async () => {
+  const x = setup("steering-ack-failure");
+  const originalStateDir = process.env.NT_STATE_DIR;
+  process.env.NT_STATE_DIR = x.state;
+  try {
+    const job = await startStoryJob({ story: x.story, job: "draft" }, false);
+    observePiTurnSettlement(async () => { throw new Error("DB unavailable during acknowledgement"); });
+    await assert.rejects(withStoryJobLock(job, "steering-ack-failure", async () => {
+      const session = {
+        sessionId: "steering-ack-session",
+        sessionManager: { getSessionFile: () => undefined },
+        messages: [],
+        isStreaming: false,
+        async steer() { return "queued" as const; },
+        async followUp() { return "queued" as const; },
+        async abort() {}, async waitForIdle() {},
+      };
+      await runCancellableStoryTurn(session, async () => {});
+    }), /acknowledgement could not be persisted/);
+    const inspection = json(x.run("author", "inspect")).activeSpecialist;
+    assert.equal(inspection.phase, "provider-failed");
+    assert.match(inspection.error, /steering acknowledgement/);
+    assert.equal(existsSync(join(job.stateDir, ".story-job-running")), true,
+      "an uncertain delivery cannot release the exclusive writer lease");
+  } finally {
+    observePiTurnSettlement(undefined);
+    if (originalStateDir === undefined) delete process.env.NT_STATE_DIR;
+    else process.env.NT_STATE_DIR = originalStateDir;
+  }
 });
 
 test("paused control finishes the active turn and prevents the next work item at its safe boundary", async () => {

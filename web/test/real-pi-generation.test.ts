@@ -17,6 +17,9 @@ import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { listGenerationEvents } from '../src/lib/generation-progress.server'
 import { queueRecord } from '../src/lib/generation-queue.server'
+import { ensureRootThreads } from '../src/lib/threads.server'
+import { readThreadChat } from '../src/lib/thread-chat.server'
+import { submitThreadRevision } from '../src/lib/story-revision.server'
 import { interpretNaturalStoryPrompt } from '../src/lib/natural-story-plan'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../src/lib/pi-credentials.server'
@@ -188,6 +191,37 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       await new Promise(done => setTimeout(done, 100))
     }
     assert.equal(ready, true, 'independent trusted agent must accept and execute real Pi jobs')
+    // Optional real SDK certification for #86. It uses the same separate
+    // trusted agent and rootless Pi process, NOT the test's in-memory fake.
+    // Steering and follow-up must both reach that exact session and appear
+    // in its persisted transcript; tests without live credentials stay off.
+    let liveSteeringIds: string[] = []
+    if (process.env.NT_TEST_WEB_PI_STEERING === '1') {
+      ensureRootThreads(store, user.id, storyId)
+      const turnPath = join(job.stateDir, 'active-specialist.json')
+      const turnDeadline = Date.now() + 90_000
+      let active = false
+      while (Date.now() < turnDeadline) {
+        if (existsSync(turnPath)) {
+          const turn = JSON.parse(readFileSync(turnPath, 'utf8')) as {
+            phase?: string; piSessionId?: string
+          }
+          if (turn.phase === 'running' && turn.piSessionId) { active = true; break }
+        }
+        await new Promise(done => setTimeout(done, 100))
+      }
+      assert.ok(active, 'Live Pi must expose an active session before steering')
+      const threadId = 'root:' + jobId
+      const steerId = randomUUID(), followId = randomUUID()
+      const steer = await submitThreadRevision(store, user.id, threadId, steerId,
+        'Preserve all author choices while keeping the Story readable.', undefined, undefined, 'steer')
+      const follow = await submitThreadRevision(store, user.id, threadId, followId,
+        'After the current Pi task, check the assigned result for consistency without expanding scope.',
+        undefined, undefined, 'follow-up')
+      assert.equal(steer.liveState, 'pending')
+      assert.equal(follow.liveState, 'pending')
+      liveSteeringIds = [steerId, followId]
+    }
     const deadline = Date.now() + 250_000
     let verified = false, finished = false
     while (Date.now() < deadline) {
@@ -198,6 +232,13 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       await new Promise(resolve => setTimeout(resolve, 1000))
     }
     assert.ok(finished, 'real generation must produce a durable terminal/pause event')
+    if (liveSteeringIds.length) {
+      const chat = readThreadChat(store, user.id, 'root:' + jobId)
+      for (const id of liveSteeringIds) {
+        assert.equal(chat.messages.find(message => message.id === id)?.liveState,
+          'delivered', 'Real Pi must consume and persist each exact live SDK message')
+      }
+    }
     if (!verified) {
       const events = listGenerationEvents(store, user.id, jobId, 0).map(e =>
         ({ kind: e.kind, stage: e.stage, status: e.status }))

@@ -6,6 +6,7 @@ import { trustedHead } from '../../../src/revision'
 import { continueCachedStory } from './git-cache.server'
 import { assertServerClaimPermitted } from '../../../src/generation-owner'
 import { queueGeneration, queueRecord } from './generation-queue.server'
+import { deferUndeliveredSteering } from './thread-live-steering.server'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { GenerationRequest } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
@@ -23,6 +24,8 @@ export type ThreadMessage = {
   phase: 'queued' | 'preparing' | 'running' | 'finished' | 'blocked' | 'cancelled'
   jobId: string | null; createdAt: string; sequence: number; hasRevisionScope: number
   cancelledAt: string | null
+  liveMode: 'steer' | 'follow-up' | null
+  liveState: 'pending' | 'dispatching' | 'sdk-queued' | 'delivered' | 'deferred' | 'blocked' | null
 }
 type Run = { jobId: string; status: string; queuePhase: string | null; runOrder: number }
 const now = () => new Date().toISOString()
@@ -41,7 +44,9 @@ const messageColumns = `sequence,id,role,status,body AS content,
   CASE WHEN EXISTS (SELECT 1 FROM story_thread_message_cancellations c
       WHERE c.message_id=story_thread_messages.id) THEN 'cancelled'
     ELSE COALESCE(phase, CASE status WHEN 'queued' THEN 'queued' ELSE 'finished' END) END AS phase,
-  job_id AS jobId,created_at AS createdAt`
+  job_id AS jobId,created_at AS createdAt,
+  (SELECT l.mode FROM thread_live_inputs l WHERE l.message_id=story_thread_messages.id) AS liveMode,
+  (SELECT l.state FROM thread_live_inputs l WHERE l.message_id=story_thread_messages.id) AS liveState`
 
 function thread(store: StudioDatabase, owner: string, id: string) {
   const row = store.sqlite.prepare(`SELECT t.id,t.archived_at AS archivedAt,c.story_id AS storyId
@@ -175,7 +180,7 @@ export function readThreadChat(store: StudioDatabase, owner: string, threadId: s
 /** Durable idempotent admission. Multiple rapid posts preserve their order
  * without granting more than one active execution to the same Thread. */
 export function enqueueThreadMessage(store: StudioDatabase, owner: string, threadId: string,
-  id: string, content: string): ThreadMessage {
+  id: string, content: string, mode?: 'steer' | 'follow-up'): ThreadMessage {
   if (!UUID.test(id) || typeof content !== 'string' || !content.trim() ||
       content.length > 4000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(content))
     throw new ThreadChatError(400, 'Send a printable message of 1–4000 characters with a UUID.')
@@ -187,6 +192,7 @@ export function enqueueThreadMessage(store: StudioDatabase, owner: string, threa
       FROM story_thread_messages WHERE id=?`).get(id) as ThreadMessage | undefined
     if (existing) {
       if (existing.role !== 'user' || existing.content !== content.trim() ||
+          (mode !== undefined && existing.liveMode !== mode) ||
           !store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
             WHERE id=? AND owner_user_id=? AND thread_id=?`).get(id, owner, threadId))
         throw new ThreadChatError(409, 'Message ID is already in use.')
@@ -197,10 +203,17 @@ export function enqueueThreadMessage(store: StudioDatabase, owner: string, threa
     if (!currentRun(store, owner, threadId))
       throw new ThreadChatError(409, 'Create a generation run for this Thread before sending follow-ups.')
     const time = now()
+    const run = currentRun(store, owner, threadId)!
+    if (mode && (run.status !== 'running' || run.queuePhase !== 'running'))
+      throw new ThreadChatError(409, 'Steer or Follow up is available only while a generation run is active.')
     store.sqlite.prepare(`INSERT INTO story_thread_messages
       (id,owner_user_id,thread_id,sequence,role,status,body,phase,created_at)
       VALUES (?,?,?,?,'user','queued',?,'queued',?)`)
       .run(id, owner, threadId, nextSequence(store, threadId), content.trim(), time)
+    if (mode) store.sqlite.prepare(`INSERT INTO thread_live_inputs
+      (message_id,owner_user_id,thread_id,source_job_id,mode,state,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(id, owner, threadId, run.jobId, mode,
+        'pending', time)
     store.sqlite.prepare(`UPDATE story_threads SET activity_at=? WHERE id=? AND owner_user_id=?`)
       .run(time, threadId, owner)
     return store.sqlite.prepare(`SELECT ${messageColumns}
@@ -224,6 +237,7 @@ export function cancelQueuedThreadMessage(store: StudioDatabase, owner: string,
     if (message.role !== 'user') throw new ThreadChatError(409, 'Only author instructions can be cancelled.')
     if (message.phase === 'cancelled') return message
     if (message.phase !== 'queued' || message.jobId !== null ||
+        ['dispatching','sdk-queued','delivered'].includes(message.liveState ?? '') ||
         store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
           WHERE id=? AND source_job_id IS NOT NULL`).get(id))
       throw new ThreadChatError(409, 'The instruction has entered execution and cannot be cancelled.')
@@ -453,6 +467,7 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
   store.sqlite.transaction(() => {
     const phase = queueRecord(store, jobId)?.phase
     if (!['finished', 'interrupted'].includes(phase ?? '')) return
+    deferUndeliveredSteering(store, owner, jobId)
     // Publish the initial user request before its assistant settlement. Agent
     // workers can settle before anyone opens chat; an untouched Thread must
     // never present the assistant response ahead of the author's first prompt.
