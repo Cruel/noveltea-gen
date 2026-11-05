@@ -22,7 +22,7 @@ const shutdown = async () => {
   // Shutdown is intentionally fail-closed. The queue records remain durable;
   // unfinished writers are fenced on restart rather than blindly replayed.
   await service.close()
-  database.sqlite.close()
+  database.close()
 }
 process.on('SIGTERM', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })
 process.on('SIGINT', () => { void shutdown().then(() => process.exit(0), () => process.exit(1)) })

@@ -6,7 +6,7 @@ import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
 import { readMigrationFiles } from 'drizzle-orm/migrator'
 import { getTableConfig } from 'drizzle-orm/sqlite-core'
 import { getMigrations } from 'better-auth/db/migration'
-import type { StudioDatabase } from './connection'
+import { studioDrizzleForMigrations, studioSqliteDriver, type StudioDatabase } from './connection'
 import * as schema from './schema'
 import { createStudioAuth, studioAuthOptions, type StudioAuthConfig } from '../lib/auth'
 
@@ -48,7 +48,7 @@ export class StudioSchemaError extends Error {
 }
 
 function hasTable(store: StudioDatabase, table: string) {
-  return !!store.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)
+  return !!studioSqliteDriver(store).prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)
 }
 
 function expectedMigrations() {
@@ -82,7 +82,7 @@ function assertNotLegacy(store: StudioDatabase) {
 // the same durable journal before permitting writes or serving application data.
 function compatibleMigrationCount(store: StudioDatabase, expected: ReturnType<typeof expectedMigrations>) {
   const rows = hasTable(store, '__drizzle_migrations')
-    ? store.sqlite.prepare('SELECT hash, created_at AS createdAt FROM __drizzle_migrations ORDER BY created_at').all() as Array<{ hash: string; createdAt: number }>
+    ? studioSqliteDriver(store).prepare('SELECT hash, created_at AS createdAt FROM __drizzle_migrations ORDER BY created_at').all() as Array<{ hash: string; createdAt: number }>
     : []
   if (rows.length > expected.length) {
     throw new StudioSchemaError('Studio database was created by a newer application; refusing downgrade')
@@ -108,7 +108,7 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     )
   }
 
-  const schemaVersion = store.sqlite.pragma('schema_version', { simple: true }) as number
+  const schemaVersion = studioSqliteDriver(store).pragma('schema_version', { simple: true }) as number
   if (inspected.get(store) === schemaVersion) return
   // Better Auth owns these tables; we verify their presence but never define
   // or migrate them via Drizzle. Its own schema checker verifies their shape.
@@ -121,8 +121,8 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     if (!hasTable(store, table.name)) {
       throw new StudioSchemaError(`Studio database migration journal does not match its schema (missing ${table.name}). Restore or explicitly reset Studio.`)
     }
-    const columns = (store.sqlite.pragma(`table_info("${table.name}")`) as Array<{ name: string }>).map(c => c.name).sort()
-    const indexes = new Set((store.sqlite.pragma(`index_list("${table.name}")`) as Array<{ name: string }>).map(i => i.name))
+    const columns = (studioSqliteDriver(store).pragma(`table_info("${table.name}")`) as Array<{ name: string }>).map(c => c.name).sort()
+    const indexes = new Set((studioSqliteDriver(store).pragma(`index_list("${table.name}")`) as Array<{ name: string }>).map(i => i.name))
     if (columns.length !== table.columns.length || columns.some((column, i) => column !== table.columns[i])
       || table.indexes.some(index => !indexes.has(index))) {
       throw new StudioSchemaError(`Studio database migration journal does not match its schema (${table.name}). Restore or explicitly reset Studio.`)
@@ -139,17 +139,17 @@ export async function migrateStudio(store: StudioDatabase, config: StudioAuthCon
   // Better Auth comes first because Studio's app foreign keys reference user.
   const { runMigrations } = await getMigrations(studioAuthOptions(store, config))
   await runMigrations()
-  migrate(store.db, migrationConfig())
+  migrate(studioDrizzleForMigrations(store), migrationConfig())
   assertStudioSchemaCurrent(store)
 
   const context = await createStudioAuth(store, config).$context
   if (!context.checkSchema) throw new Error('Better Auth adapter does not support schema validation')
   await context.checkSchema()
-  const integrity = store.sqlite.pragma('integrity_check') as Array<{ integrity_check: string }>
+  const integrity = studioSqliteDriver(store).pragma('integrity_check') as Array<{ integrity_check: string }>
   if (integrity.length !== 1 || integrity[0]?.integrity_check !== 'ok') {
     throw new Error('Studio SQLite integrity check failed')
   }
-  if ((store.sqlite.pragma('foreign_key_check') as Array<unknown>).length) {
+  if ((studioSqliteDriver(store).pragma('foreign_key_check') as Array<unknown>).length) {
     throw new Error('Studio SQLite foreign-key check failed')
   }
 }

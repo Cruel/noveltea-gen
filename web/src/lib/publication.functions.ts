@@ -18,10 +18,7 @@ async function execute(jobId: string, serialized?: string) {
   const headers = getRequestHeaders()
   const user = await requireUser(auth, headers)
   if (!user) throw new Error('Sign in required.')
-  const row = database.sqlite.prepare(`SELECT r.provider FROM studio_sessions j
-    JOIN stories s ON j.story_id=s.id AND j.owner_user_id=s.owner_user_id
-    JOIN repositories r ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
-    WHERE j.id=? AND j.owner_user_id=?`).get(jobId, user.id) as { provider: string } | undefined
+  const row = await database.persistence.approvalJobs.job(user.id, jobId)
   if (!row) throw new Error('Job not found.')
   const req = request(jobId, serialized)
   const base = readAuthConfig().baseURL

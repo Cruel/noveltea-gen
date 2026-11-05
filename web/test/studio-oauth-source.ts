@@ -25,7 +25,7 @@ export async function readIsolatedStudioOAuth(sourcePath: string, encryptionKey:
       : owners.length === 1 ? owners[0]!.id : undefined
     if (!owner) throw new Error('Select exactly one connected Studio account for ' + provider + ' using NT_TEST_WEB_PI_SOURCE_USER_ID.')
     const db = drizzle(sqlite, { schema })
-    const store: StudioDatabase = { sqlite, db, persistence: createSqlitePersistence(db) }
+    const store: StudioDatabase = { persistence: createSqlitePersistence(db), close: () => sqlite.close() }
     const credential = await userPiCredentials(
       store, owner, { NT_PI_CREDENTIAL_KEY: encryptionKey },
     ).read(provider)

@@ -397,10 +397,12 @@ foreign-key target for Better Auth's `user` table.
 The command runs Better Auth's migrator **first**, then Drizzle's
 `web/drizzle/` migrations, then Better Auth's runtime schema check and
 SQLite integrity/foreign-key checks. The application migration journal is
-`__drizzle_migrations`. Both raw `store.sqlite` queries and typed
-`store.db` Drizzle queries share one connection and those same tables.
-Normal Studio startup is read-only with respect to schema; missing, stale or
-incompatible migrations (or schema drift) fail closed.
+`__drizzle_migrations`. The public `StudioDatabase` API exposes only the
+Drizzle-backed persistence ports and a lifecycle `close()` method. Raw SQLite
+handles are confined to the adapter, Better Auth's required embedded-driver
+configuration, migration/schema maintenance, and the controller's isolated
+read-only catalog. Normal Studio startup is read-only with respect to schema;
+missing, stale or incompatible migrations (or schema drift) fail closed.
 
 **Persistence expand (#94):** `web/src/persistence/contracts.ts` defines focused,
 owner-scoped, Promise-returning ports for dashboard/catalog reads and settings
@@ -418,10 +420,9 @@ Promise; a multi-statement atomic method must use a synchronous Drizzle
 transaction callback with **no `await` or asynchronous work inside it**.
 Do not expose a generic cross-adapter async transaction callback: PostgreSQL
 may implement the same owner-scoped business method using its own async
-transaction internally. Old raw-SQL and converted Drizzle paths share the one
-Studio SQLite database and schema throughout this expansion; neither dual
-writes nor data synchronization are used. Other workflows remain raw SQL until
-later migration tickets.
+transaction internally. All application persistence targets the same Studio SQLite database through
+Drizzle-backed ports. There is no separate application storage, dual-write,
+or data synchronization mechanism.
 
 **Generation persistence (#96):** `web/src/persistence/generation-contracts.ts`
 defines queue admission/claim/recovery, owner-scoped job metadata and status,
@@ -438,12 +439,26 @@ The Promise-returning ports isolate SQLite-specific locking. A future
 PostgreSQL implementation must serialize capacity reservation (for example
 with dedicated slot/advisory locks) and claim FIFO rows with row locks such as
 `FOR UPDATE SKIP LOCKED` in one transaction. Never count slots outside that
-transaction. A narrowly labelled `sqliteTransactionBridge` remains only for
-existing synchronous Thread transactions and SSE consumers until their own
-migration tickets; the bridge still uses Drizzle, not raw SQLite statements.
+transaction. The existing `sqliteTransactionBridge` remains a synchronous, **Drizzle-based**
+compatibility API for queue consumers whose transaction and worker lifecycle
+contracts are synchronous. These interfaces require async conversion before a
+PostgreSQL backend could be supported; changing driver alone is insufficient.
 LangGraph checkpoints and saved Pi sessions remain separate from Studio DB.
 `web/test/generation-persistence.test.ts` exercises two independent WAL
 connections and shared claim/cancel/recovery behavior.
+
+**Persistence boundary (#100):** Studio's runtime database type exposes
+`persistence` and `close()` only. The source check
+`pnpm --filter @noveltea/studio persistence:boundary` runs within `pnpm check`
+and rejects raw SQLite imports, raw statements, migration handles, or direct
+SQLite-adapter imports in application services and routes. Its exemptions are
+confined to `web/src/persistence/` implementations, `db/connection.ts`,
+`db/migrations.ts`, `db/migrate-cli.ts`, and `db/trusted-catalog.ts` (the
+rootless controller's read-only host catalog); `lib/auth.ts` uses only the
+internal driver accessor required by Better Auth. Test-only legacy white-box
+fixtures live in `web/test/support/studio-database.ts` and cannot be imported
+by application code. New normal-behavior tests should use the public ports,
+with SQL assertions reserved for explicit schema/adapter certification.
 
 For later schema changes: edit only the Drizzle application schema, run
 `pnpm --filter @noveltea/studio db:generate`, inspect and commit the

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory, continueCachedStory } from '../src/lib/git-cache.server'
@@ -126,7 +126,7 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     const before = git(f.parent.worktreeRoot, 'status', '--porcelain')
     const prepared = await f.send(f.threadId, 'POST', selected)
     assert.equal(prepared.status, 200, JSON.stringify(prepared.body))
-    const child = await restoreJob(selectedJob(f.db, f.owner.id, selected.childId), f.owner.id)
+    const child = await restoreJob(await selectedJob(f.db, f.owner.id, selected.childId), f.owner.id)
     assert.equal(child.baseSha, f.original)
     assert.equal(child.headSha, f.original)
     assert.notEqual(child.threadId, f.parent.threadId)
@@ -136,8 +136,8 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     assert.equal(readFileSync(parentDirty, 'utf8'), 'In-flight parent writer')
     assert.equal(existsSync(join(child.stateDir, 'pi-budget.json')), false)
     assert.equal(existsSync(join(child.stateDir, 'web-generation.sqlite')), false)
-    assert.equal((await inspectRegisteredJob(f.db, selectedJob(f.db, f.owner.id, selected.childId), f.owner.id)).status, 'prepared')
-    const record = selectedJob(f.db, f.owner.id, selected.childId)
+    assert.equal((await inspectRegisteredJob(f.db, await selectedJob(f.db, f.owner.id, selected.childId), f.owner.id)).status, 'prepared')
+    const record = await selectedJob(f.db, f.owner.id, selected.childId)
     assert.equal(JSON.parse(record.configJson!).task, 'Original creative goal')
     assert.equal(JSON.parse(record.configJson!).limits.steps, 7)
     const conversations = await listStoryConversations(f.db, f.owner.id, f.storyId)
@@ -198,7 +198,7 @@ test('newer restart revalidates canonical Story, protected decisions, exact remo
         mode: 'newer', selectedSha: latest, targetBranch: 'main' }
       const attempt = await f.send(f.threadId, 'POST', newer)
       assert.equal(attempt.status, 200, JSON.stringify(attempt.body))
-      const child = await restoreJob(selectedJob(f.db, f.owner.id, newer.childId), f.owner.id)
+      const child = await restoreJob(await selectedJob(f.db, f.owner.id, newer.childId), f.owner.id)
       assert.equal(child.baseSha, latest)
       assert.equal(child.headSha, latest)
       assert.equal(existsSync(join(child.worktreeStoryRoot, 'notes.txt')), true)
@@ -206,7 +206,7 @@ test('newer restart revalidates canonical Story, protected decisions, exact remo
       assert.equal(existsSync(join(child.stateDir, 'pi-budget.json')), false)
       assert.equal(git(f.parent.worktreeRoot, 'rev-parse', 'HEAD'), f.original)
       assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
-      const inspected = await inspectRegisteredJob(f.db, selectedJob(f.db, f.owner.id, newer.childId), f.owner.id)
+      const inspected = await inspectRegisteredJob(f.db, await selectedJob(f.db, f.owner.id, newer.childId), f.owner.id)
       assert.equal(inspected.status, 'prepared')
       assert.equal(inspected.restartSource?.mode, 'newer')
       assert.equal(inspected.restartSource?.originalSha, f.original)
@@ -271,11 +271,11 @@ test('a sequential Thread run still restarts from its first pinned Story SHA and
       originalSha: f.original, selectedSha: f.original, mode: 'original', targetBranch: null }
     const restarted = await f.send(f.threadId, 'POST', input)
     assert.equal(restarted.status, 200, JSON.stringify(restarted.body))
-    const child = await restoreJob(selectedJob(f.db, f.owner.id, input.childId), f.owner.id)
+    const child = await restoreJob(await selectedJob(f.db, f.owner.id, input.childId), f.owner.id)
     assert.equal(child.baseSha, f.original)
-    assert.equal(JSON.parse(selectedJob(f.db, f.owner.id, input.childId).configJson!).task,
+    assert.equal(JSON.parse((await selectedJob(f.db, f.owner.id, input.childId)).configJson!).task,
       'Original creative goal')
-    assert.equal(JSON.parse(selectedJob(f.db, f.owner.id, input.childId).configJson!).limits.steps, 12)
+    assert.equal(JSON.parse((await selectedJob(f.db, f.owner.id, input.childId)).configJson!).limits.steps, 12)
     assert.equal(git(follow.worktreeRoot, 'rev-parse', 'HEAD'), newer)
     assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
   } finally { f.cleanup() }

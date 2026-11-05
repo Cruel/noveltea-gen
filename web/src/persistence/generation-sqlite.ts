@@ -200,8 +200,7 @@ export function createSqliteGenerationPersistence(db: StudioDrizzle): Generation
       async hasAfter(owner, jobId, after) { return progressBridge.hasAfter(owner, jobId, after) },
     },
     jobs: {
-      sqliteBridge: {
-        selected(owner, jobId) {
+      async selected(owner, jobId) {
           assertOwner(owner)
           return db.select({
             id: sessions.id, storyId: sessions.storyId, title: sessions.title,
@@ -215,9 +214,7 @@ export function createSqliteGenerationPersistence(db: StudioDrizzle): Generation
           )).innerJoin(repositories, and(
             eq(stories.repositoryId, repositories.id), eq(stories.ownerUserId, repositories.ownerUserId),
           )).where(and(eq(sessions.id, jobId), eq(sessions.ownerUserId, owner))).get() ?? null
-        },
       },
-      async selected(owner, jobId) { return this.sqliteBridge.selected(owner, jobId) },
       async state(owner, jobId) {
         assertOwner(owner)
         return db.select(stateFields).from(sessions).where(and(eq(sessions.id, jobId),

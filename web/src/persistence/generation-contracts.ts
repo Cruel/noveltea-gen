@@ -60,8 +60,6 @@ export interface GenerationQueueStore {
   sqliteTransactionBridge: GenerationQueueSqliteBridge
 }
 export interface GenerationJobs {
-  /** Temporary synchronous bridge for Thread/runner consumers pending their migration. */
-  sqliteBridge: { selected(owner: string, jobId: string): SavedGenerationJob | null }
   selected(owner: string, jobId: string): Promise<SavedGenerationJob | null>
   state(owner: string, jobId: string): Promise<JobState | null>
   catalogStory(owner: string, storyId: string, provider: 'github' | 'gitlab'):

@@ -7,7 +7,7 @@ import { generationRunQueue as queue, sessions, storyThreads as threads,
 import { insertThreadAssistantSqlite, nextThreadSequenceSqlite,
   seedThreadMessagesSqlite } from './thread-message-sqlite'
 import type { GenerationQueueSqliteBridge } from './generation-contracts'
-import type { ProtectedDecisionRecords } from './publication-contracts'
+import { consumeProtectedDecisionSqlite } from './approval-revision-sqlite'
 import type { SteeringPersistence } from './steering-contracts'
 import type { ContinuationAdmission, ContinuationPersistence, ContinuationSqliteBridge, ContinuationRun,
   ContinuationRequest, QueuedContinuation } from './continuation-contracts'
@@ -19,7 +19,7 @@ const ordered = sql`COALESCE((SELECT original.sequence FROM thread_steering_inte
   WHERE intent.review_message_id=${messages.id}), ${messages.sequence})`
 
 export function createSqliteContinuationPersistence(db: Db, queueBridge: GenerationQueueSqliteBridge,
-  protectedDecisions: ProtectedDecisionRecords['sqliteBridge'], steering: SteeringPersistence): ContinuationPersistence {
+  steering: SteeringPersistence): ContinuationPersistence {
   const current = (owner: string, threadId: string): ContinuationRun | null => {
     auth(owner)
     return db.select({
@@ -114,7 +114,7 @@ export function createSqliteContinuationPersistence(db: Db, queueBridge: Generat
           jobId: data.claim.id, ownerUserId: data.owner, intent: 'start', phase: 'finished',
           createdAt: data.at, updatedAt: data.at,
         }).run()
-        if (!protectedDecisions.consume(data.owner, data.claim.id, committedSha))
+        if (!consumeProtectedDecisionSqlite(db, data.owner, data.claim.id, committedSha))
           throw new Error('Protected approval was already consumed or its commit identity changed.')
         finishReview(data)
         db.update(messages).set({

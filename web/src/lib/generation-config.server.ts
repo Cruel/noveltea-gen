@@ -169,9 +169,7 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
     // An edited sequential follow-up uses a fresh worktree, not a recovery
     // bundle. Its approved revision scope remains immutable even though its
     // budget/model can be adjusted before the new generation starts.
-    const edited = store.sqlite.prepare(`SELECT bundle_json AS bundle,draft_json AS original
-      FROM checkpoint_forks WHERE child_id=? AND owner_user_id=?`).get(id, user.id) as
-      { bundle: string; original: string } | undefined
+    const edited = await store.persistence.advancedThreads.forkDraft(user.id, id)
     if (edited) {
       let marker: { mode?: string }, original: GenerationDraft
       try {

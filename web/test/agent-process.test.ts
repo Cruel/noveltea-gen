@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 
 const config = { baseURL: 'http://localhost:3000',

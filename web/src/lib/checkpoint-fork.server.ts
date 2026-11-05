@@ -40,7 +40,7 @@ export async function checkpointForkRequest(auth: StudioAuth, store: StudioDatab
         /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.guidance))
       return reply({ error: 'Select an exact Thread, finalized checkpoint proof and bounded guidance.' }, 400)
     const guidance = input.guidance.trim()
-    const row = selectedJob(store, user.id, sourceId)
+    const row = await selectedJob(store, user.id, sourceId)
     if (row.commitSha !== input.sourceBaseSha) return reply({ error: 'Source identity changed; refresh the job.' }, 409)
     const parent = await restoreJob(row, user.id)
     await ensureRootThreads(store, user.id, row.storyId)
@@ -57,7 +57,7 @@ export async function checkpointForkRequest(auth: StudioAuth, store: StudioDatab
     if (intent && !matches(intent) || existing && !intent)
       return reply({ error: 'Child ID is already assigned to another operation.' }, 409)
     if (existing && intent) {
-      const child = await restoreJob(selectedJob(store, user.id, input.childId), user.id)
+      const child = await restoreJob(await selectedJob(store, user.id, input.childId), user.id)
       const source = forkSourceSummary(child)
       if (source?.jobId !== sourceId || source.commitSha !== input.commitSha)
         throw new GitCacheError(409, 'Child fork source does not match its saved intent.')

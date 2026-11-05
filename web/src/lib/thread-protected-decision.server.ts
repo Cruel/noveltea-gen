@@ -27,12 +27,12 @@ function matching(receipt: Receipt, owner: string, threadId: string, messageId: 
 /** No caller-supplied principal or inline digest grants consent. This is only
  * called by an authenticated POST handler after a fresh canonical preview.
  * A denial creates no Git job, worktree, or Story mutation. */
-export function recordProtectedThreadDecision(store: StudioDatabase, owner: string,
+export async function recordProtectedThreadDecision(store: StudioDatabase, owner: string,
   threadId: string, messageId: string, sourceJobId: string, plan: RevisionPreview,
   decision: 'approved' | 'rejected') {
   if (!plan.protectedChange || !DIGEST.test(plan.digest) || !SHA.test(plan.headSha))
     throw new ThreadChatError(409, 'There is no exact protected decision proposal to review.')
-  const receipt = store.persistence.protectedDecisions.sqliteBridge.record(owner, {
+  const receipt = await store.persistence.protectedDecisions.record(owner, {
     messageId, owner, threadId, sourceJobId, sourceSha: plan.headSha,
     digest: plan.digest, changeJson: JSON.stringify(plan.protectedChange),
     nonce: randomUUID(), decision, principal: 'user:' + owner,
@@ -47,9 +47,9 @@ export function recordProtectedThreadDecision(store: StudioDatabase, owner: stri
 
 /** The controller-owned DB is authoritative, not the browser's scope digest,
  * a copied parent approval or any model-provided signed-looking payload. */
-export function assertProtectedThreadApproval(store: StudioDatabase, owner: string,
-  threadId: string, messageId: string, sourceJobId: string, plan: RevisionPreview): Receipt {
-  const receipt = store.persistence.protectedDecisions.sqliteBridge.get(owner, messageId)
+export async function assertProtectedThreadApproval(store: StudioDatabase, owner: string,
+  threadId: string, messageId: string, sourceJobId: string, plan: RevisionPreview): Promise<Receipt> {
+  const receipt = await store.persistence.protectedDecisions.get(owner, messageId)
   if (!receipt || !matching(receipt, owner, threadId, messageId, sourceJobId, plan) ||
       receipt.decision !== 'approved' || receipt.consumedSha)
     throw new ThreadChatError(409, 'This protected decision needs fresh, exact approval by the current Thread owner.')
@@ -158,13 +158,6 @@ export async function commitProtectedThreadChange(job: JobStartResult, change: P
   if (committed.status !== 'committed' || !committed.commitSha || !SHA.test(committed.commitSha))
     throw new Error('Protected decision was not committed by the verified revision graph.')
   return committed.commitSha
-}
-
-export function markProtectedThreadConsumed(store: StudioDatabase, owner: string,
-  messageId: string, sha: string) {
-  if (!SHA.test(sha) || !store.persistence.protectedDecisions.sqliteBridge.consume(owner, messageId, sha))
-    throw new Error('Protected approval was already consumed or its commit identity changed.')
-
 }
 
 /** A protected-only child has a native revision receipt instead of a Pi graph.

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 import { fenceAbandonedRuns } from '../src/lib/generation-queue.server'
 

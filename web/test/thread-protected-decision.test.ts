@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, inspectRegisteredJob } from '../src/lib/fixture-jobs.server'
@@ -128,14 +128,14 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       assert.equal(git(f.source.worktreeRoot, 'status', '--porcelain'), '')
       assert.equal((f.store.sqlite.prepare('SELECT COUNT(*) AS n FROM studio_sessions')
         .get() as { n: number }).n, 1)
-      assert.throws(() => recordProtectedThreadDecision(f.store, f.stranger, f.threadId,
+      await assert.rejects(() => recordProtectedThreadDecision(f.store, f.stranger, f.threadId,
         firstId, f.sourceId, plan, 'approved'), /queued|source|review|not found/i)
-      const denied = recordProtectedThreadDecision(f.store, f.owner, f.threadId,
+      const denied = await recordProtectedThreadDecision(f.store, f.owner, f.threadId,
         firstId, f.sourceId, plan, 'rejected')
       assert.equal(denied.decision, 'rejected')
-      assert.throws(() => recordProtectedThreadDecision(f.store, f.owner, f.threadId,
+      await assert.rejects(() => recordProtectedThreadDecision(f.store, f.owner, f.threadId,
         firstId, f.sourceId, plan, 'approved'), /different|stale/i)
-      assert.throws(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
+      await assert.rejects(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
         firstId, f.sourceId, plan), /fresh|exact/i)
       assert.equal(git(f.source.worktreeRoot, 'status', '--porcelain'), '')
       await cancelQueuedThreadMessage(f.store, f.owner, f.threadId, firstId)
@@ -143,14 +143,14 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       const childId = randomUUID()
       const preview = await previewThreadRevision(f.store, f.owner, f.threadId, message)
       await submitThreadRevision(f.store, f.owner, f.threadId, childId, message)
-      const granted = recordProtectedThreadDecision(f.store, f.owner, f.threadId,
+      const granted = await recordProtectedThreadDecision(f.store, f.owner, f.threadId,
         childId, f.sourceId, preview, 'approved')
       assert.equal(granted.digest, preview.digest)
-      assert.throws(() => assertProtectedThreadApproval(f.store, f.stranger, f.threadId,
+      await assert.rejects(() => assertProtectedThreadApproval(f.store, f.stranger, f.threadId,
         childId, f.sourceId, preview), /fresh|exact/i)
-      assert.throws(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
+      await assert.rejects(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
         childId, f.sourceId, { ...preview, digest: 'f'.repeat(64) }), /fresh|exact/i)
-      assert.throws(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
+      await assert.rejects(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
         childId, randomUUID(), preview), /fresh|exact/i)
       await submitThreadRevision(f.store, f.owner, f.threadId, childId, message, undefined, preview.digest)
       assert.equal((await readThreadChat(f.store, f.owner, f.threadId)).messages.find(m => m.id === childId)?.hasRevisionScope, 1)
@@ -159,7 +159,7 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       assert.equal(current.messages.find(m => m.id === childId)?.phase, 'finished',
         JSON.stringify(current.messages))
       assert.deepEqual(current.runs.map(r => r.jobId), [f.sourceId, childId])
-      const child = await restoreJob(selectedJob(f.store, f.owner, childId), f.owner)
+      const child = await restoreJob(await selectedJob(f.store, f.owner, childId), f.owner)
       assert.equal(child.baseSha, f.sha)
       assert.notEqual(child.headSha, f.sha)
       const changedFile = readFileSync(join(child.worktreeStoryRoot,
@@ -172,10 +172,10 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       assert.equal(git(f.source.worktreeRoot, 'rev-parse', 'HEAD'), f.sha,
         'parent protected decision is immutable')
       assert.equal(git(f.source.worktreeRoot, 'status', '--porcelain'), '')
-      assert.equal((await inspectRegisteredJob(f.store, selectedJob(f.store, f.owner, childId),
+      assert.equal((await inspectRegisteredJob(f.store, await selectedJob(f.store, f.owner, childId),
         f.owner)).status, 'completed')
       assert.equal(current.messages.filter(m => m.id === childId).length, 1)
-      assert.throws(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
+      await assert.rejects(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
         childId, f.sourceId, preview), /fresh|exact/i, 'approval cannot be replayed')
       const nextId = randomUUID()
       const newerMessage = 'Make the investigation invite revenge instead of forgiveness'
@@ -188,14 +188,14 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
         nextId, newerMessage, undefined, newerPlan.digest)
       assert.equal(notInherited.hasRevisionScope, 0,
         'even an ancestor author approval cannot be reused for a new protected change')
-      recordProtectedThreadDecision(f.store, f.owner, f.threadId, nextId, childId,
+      await recordProtectedThreadDecision(f.store, f.owner, f.threadId, nextId, childId,
         newerPlan, 'approved')
       await submitThreadRevision(f.store, f.owner, f.threadId,
         nextId, newerMessage, undefined, newerPlan.digest)
       await advanceThread(f.store, f.owner, f.threadId)
       assert.equal((await readThreadChat(f.store, f.owner, f.threadId))
         .messages.find(m => m.id === nextId)?.phase, 'finished')
-      const nextJob = await restoreJob(selectedJob(f.store, f.owner, nextId), f.owner)
+      const nextJob = await restoreJob(await selectedJob(f.store, f.owner, nextId), f.owner)
       assert.notEqual(nextJob.headSha, child.headSha,
         'natural-language proposal requires a distinct approved child commit')
       assert.equal(git(f.source.worktreeRoot, 'rev-parse', 'HEAD'), f.sha)

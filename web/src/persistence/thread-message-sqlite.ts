@@ -186,6 +186,28 @@ export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string
 
 export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
   return {
+    async owned(owner, threadId, id) {
+      ownerRequired(owner)
+      return ownedMessage(db, owner, threadId, id) ?? null
+    },
+    async markAdmitted(owner, jobId) {
+      ownerRequired(owner)
+      // Never mark guidance or an edited instruction as delivered until the
+      // generation request has actually been admitted to the durable queue.
+      db.transaction(tx => {
+        const admitted = tx.select({ id: generationRunQueue.jobId }).from(generationRunQueue)
+          .where(and(eq(generationRunQueue.ownerUserId, owner),
+            eq(generationRunQueue.jobId, jobId))).get()
+        if (!admitted) throw new ThreadMessageConflict(409, 'Generation was not admitted.')
+        tx.update(m).set({ status: 'delivered' }).where(and(
+          eq(m.id, 'guidance:fork:' + jobId), eq(m.ownerUserId, owner), eq(m.status, 'queued'),
+        )).run()
+        tx.update(m).set({ status: 'delivered', phase: 'running' }).where(and(
+          eq(m.id, 'edit:' + jobId), eq(m.ownerUserId, owner),
+          eq(m.status, 'queued'), eq(m.jobId, jobId),
+        )).run()
+      }, { behavior: 'immediate' })
+    },
     async membership(owner, threadId) {
       const row = membership(db, owner, threadId)
       return { storyId: row.storyId, archivedAt: row.archivedAt }

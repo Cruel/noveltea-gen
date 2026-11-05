@@ -65,13 +65,6 @@ export interface ProtectedDecisionRecords {
   record(owner: string, data: ProtectedDecisionGrant, request: string): Promise<ProtectedDecisionReceipt>
   /** Exactly one controller-approved consumption, even across worker restarts. */
   consume(owner: string, messageId: string, sha: string): Promise<boolean>
-  /** No awaits inside a better-sqlite3 transaction. Advanced Thread operations
-   * use these atomic bridges until their separate migration. */
-  sqliteBridge: {
-    get(owner: string, messageId: string): ProtectedDecisionReceipt | null
-    record(owner: string, data: ProtectedDecisionGrant, request: string): ProtectedDecisionReceipt
-    consume(owner: string, messageId: string, sha: string): boolean
-  }
 }
 
 export type RevisionQueueHead = { id: string; content: string; phase: string }

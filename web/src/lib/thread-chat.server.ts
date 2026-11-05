@@ -109,7 +109,7 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
   const claim = await claimMessage(store, owner, threadId)
   if (!claim) return
   try {
-    const row = selectedJob(store, owner, claim.source)
+    const row = await selectedJob(store, owner, claim.source)
     const parent = await restoreJob(row, owner)
     const prior = pinnedRequest(row, parent)
     if (!prior || row.status !== 'completed' || queueRecord(store, claim.source)?.phase !== 'finished')
@@ -132,7 +132,7 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
       scope.protectedChange ? undefined : scope.selectedTargets)
     assertPinnedRevision(scope, refreshed, claim.source, head)
     if (scope.protectedChange)
-      assertProtectedThreadApproval(store, owner, threadId, claim.id, claim.source, refreshed)
+      await assertProtectedThreadApproval(store, owner, threadId, claim.id, claim.source, refreshed)
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX'])
       delete env[key]
@@ -209,7 +209,7 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
     // explicitly clean, independently verified Story HEADs can become fork
     // ancestry for delivered follow-up messages.
     try {
-      const saved = selectedJob(store, owner, jobId)
+      const saved = await selectedJob(store, owner, jobId)
       if (saved.status === 'completed') {
         const job = await restoreJob(saved, owner)
         const inspected = await inspectRegisteredJob(store, saved, owner)
@@ -222,7 +222,7 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
   // Recover a verified per-specialist attribution if the controller crashed
   // after checkpoint finalization but before publishing the activity receipt.
   try {
-    const job = await restoreJob(selectedJob(store, owner, jobId), owner)
+    const job = await restoreJob(await selectedJob(store, owner, jobId), owner)
     for (const point of await inspectRecoveryCheckpoints(job)) {
       attributeSteeringCheckpoint(store, owner, jobId, point)
       if (point.eligible) attributeApprovedReplanCheckpoint(store, owner, jobId, point,

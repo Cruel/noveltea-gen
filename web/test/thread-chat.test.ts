@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { submitThreadRevision } from '../src/lib/story-revision.server'
 import { migrateStudio, assertStudioSchemaCurrent } from '../src/db/migrations'
 import {

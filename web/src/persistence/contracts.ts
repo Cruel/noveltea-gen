@@ -38,6 +38,7 @@ export interface SettingsPreferences {
   putThreadPreferences(ownerUserId: string, storyId: string, view: 'tree' | 'flat',
     expandedIds: string[], updatedAt: string): Promise<void>
 }
+import type { NaturalStoryPersistence } from './natural-story-contracts'
 import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding, PiCredentialVault } from './git-contracts'
 import type { GenerationPersistence } from './generation-contracts'
 import type { ConversationCatalog } from './conversation-contracts'
@@ -49,6 +50,7 @@ import type { ApprovalJobCatalog, ProtectedDecisionRecords, PublicationRecords,
   RevisionRecords } from './publication-contracts'
 
 export interface StudioPersistence {
+  naturalStory: NaturalStoryPersistence
   dashboard: DashboardCatalog
   settings: SettingsPreferences
   git: GitIdentities

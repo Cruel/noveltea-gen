@@ -12,7 +12,7 @@ import { existsSync, lstatSync, realpathSync, readdirSync, readFileSync, chmodSy
 import { mkdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import Database from 'better-sqlite3'
+import { readTrustedControllerJob, type TrustedControllerJobRow } from './db/trusted-catalog'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SHA = /^[0-9a-f]{40}$/i
@@ -110,9 +110,7 @@ function checkRecordTree(root: string) {
 }
 
 type TrustedJob = { id: string; storyRoot: string; volumeSubpath: string; identity: string; imageId: string }
-type JobRow = {
-  ownerId: string; provider: string; providerId: string; directory: string; pin: string
-}
+type JobRow = TrustedControllerJobRow
 type Manifest = {
   version: number; jobId: string; gitRoot: string; gitCommonDir: string;
   storyRoot: string; storyRelativePath: string; baseSha: string; branch: string;
@@ -126,20 +124,9 @@ type Manifest = {
 export function resolveTrustedJob(config: ControllerConfig, jobId: string, imageId: string): TrustedJob {
   if (!UUID.test(jobId)) throw new SandboxError(400, 'Invalid job identity.')
   const dbPath = join(config.appVolume, 'studio.sqlite')
-  let db: Database.Database
-  try { db = new Database(dbPath, { readonly: true, fileMustExist: true }) }
-  catch { throw new SandboxError(503, 'Studio catalog is unavailable.') }
-  let row: JobRow | undefined
-  try {
-    row = db.prepare(`SELECT s.owner_user_id AS ownerId, r.provider AS provider,
-      r.provider_repository_id AS providerId, st.directory AS directory,
-      s.source_commit_sha AS pin
-      FROM studio_sessions s
-      JOIN stories st ON st.id=s.story_id AND st.owner_user_id=s.owner_user_id
-      JOIN repositories r ON r.id=st.repository_id AND r.owner_user_id=s.owner_user_id
-      WHERE s.id=?`).get(jobId) as JobRow | undefined
-  } catch { throw new SandboxError(503, 'Studio catalog schema is unavailable.') }
-  finally { db.close() }
+  let row: JobRow | null
+  try { row = readTrustedControllerJob(dbPath, jobId) }
+  catch { throw new SandboxError(503, 'Studio catalog is unavailable or its schema is incomplete.') }
   if (!row) throw new SandboxError(404, 'Registered job was not found.')
   if (!SHA.test(row.pin) || !canonicalStoryPath(row.directory)) {
     throw new SandboxError(409, 'Registered job source identity is invalid.')

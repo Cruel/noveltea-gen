@@ -4,6 +4,7 @@ import * as schema from '../db/schema'
 import { repositories, sessions, stories, storyThreadPreferences, userPreferences } from '../db/schema'
 import type { StudioPersistence } from './contracts'
 import { createGitSqlitePersistence } from './git-sqlite'
+import { createSqliteNaturalStoryPersistence } from './natural-story-sqlite'
 import { createSqliteGenerationPersistence } from './generation-sqlite'
 import { createSqliteConversationCatalog } from './conversation-sqlite'
 import { createSqliteThreadMessages } from './thread-message-sqlite'
@@ -31,13 +32,14 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
   const protectedDecisions = createSqliteProtectedDecisionRecords(db)
   return {
     ...createGitSqlitePersistence(db),
+    naturalStory: createSqliteNaturalStoryPersistence(db),
     generation,
     conversations: createSqliteConversationCatalog(db),
     messages: createSqliteThreadMessages(db),
     advancedThreads: createSqliteAdvancedThreads(db),
     steering,
     continuation: createSqliteContinuationPersistence(db,
-      generation.queue.sqliteTransactionBridge, protectedDecisions.sqliteBridge, steering),
+      generation.queue.sqliteTransactionBridge, steering),
     publications: createSqlitePublicationRecords(db),
     approvalJobs: createSqliteApprovalJobCatalog(db),
     protectedDecisions,

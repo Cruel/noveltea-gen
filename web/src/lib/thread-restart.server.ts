@@ -55,8 +55,8 @@ async function sourceFor(store: StudioDatabase, owner: string, threadId: string)
   const latest = await store.persistence.advancedThreads.run(owner, threadId, 'last')
   const first = await store.persistence.advancedThreads.run(owner, root.id, 'first')
   if (!first || !latest) throw new ThreadRestartError(409, 'Thread has no pinned generation run.')
-  const original = selectedJob(store, owner, first.jobId)
-  const current = selectedJob(store, owner, latest.jobId)
+  const original = await selectedJob(store, owner, first.jobId)
+  const current = await selectedJob(store, owner, latest.jobId)
   if (original.storyId !== member.story || current.storyId !== member.story)
     throw new ThreadRestartError(409, 'Run Story identity differs.')
   if (!original.commitSha || !SHA.test(original.commitSha))
@@ -242,7 +242,7 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
       !intent && await store.persistence.advancedThreads.forkIntent(input.childId))
     throw new ThreadRestartError(409, 'Child ID is already assigned to a different operation.')
   if (intent?.preparedAt) {
-    const registered = selectedJob(store, actor.id, input.childId)
+    const registered = await selectedJob(store, actor.id, input.childId)
     if (registered.storyId !== source.storyId || registered.commitSha !== intent.selected ||
         !await store.persistence.advancedThreads.preparedRestart(actor.id, input.childId,
           'restart:' + input.childId))
@@ -253,8 +253,8 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
     throw new ThreadRestartError(409, 'Source Thread or original Story revision changed. Refresh before restarting.')
   // Verify that both saved execution identities remain recoverable. Do not
   // acquire a writer lock or touch either source worktree.
-  await restoreJob(selectedJob(store, actor.id, source.sourceJobId), actor.id)
-  const original = await restoreJob(selectedJob(store, actor.id, source.rootJobId), actor.id)
+  await restoreJob(await selectedJob(store, actor.id, source.sourceJobId), actor.id)
+  const original = await restoreJob(await selectedJob(store, actor.id, source.rootJobId), actor.id)
   const currentDraft: GenerationDraft = { version: 1, headSha: input.selectedSha,
     task: source.task, contract: source.contract, model: source.model, limits: source.limits }
   let upstream: Upstream | null = null

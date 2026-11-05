@@ -91,12 +91,10 @@ export const postThreadProtectedDecision = createServerFn({ method: 'POST' })
       data.content, undefined, data.messageId)
     if (!plan.protectedChange || plan.clarification || plan.digest !== data.digest)
       throw new Error('Protected decision changed or no exact proposal is available. Refresh the review.')
-    const source = database.sqlite.prepare(`SELECT r.job_id AS id FROM story_thread_runs r
-      WHERE r.thread_id=? AND r.owner_user_id=? ORDER BY r.run_order DESC LIMIT 1`)
-      .get(data.threadId, ownerId) as { id: string } | undefined
+    const source = await database.persistence.advancedThreads.run(ownerId, data.threadId, 'last')
     if (!source) throw new Error('No verified source run is available.')
-    const receipt = recordProtectedThreadDecision(database, ownerId, data.threadId,
-      data.messageId, source.id, plan, data.decision)
+    const receipt = await recordProtectedThreadDecision(database, ownerId, data.threadId,
+      data.messageId, source.jobId, plan, data.decision)
     if (data.decision === 'approved') {
       await submitThreadRevision(database, ownerId, data.threadId, data.messageId,
         data.content, undefined, plan.digest)

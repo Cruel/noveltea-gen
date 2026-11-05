@@ -29,6 +29,18 @@ export type HistoryMessage = {
   id: string; role: 'user' | 'assistant'; status: 'delivered' | 'queued'
   body: string; origin: string | null; verifiedSha: string | null; createdAt: string
 }
+export type JobInspection = {
+  threadId: string | null
+  messages: Array<{
+    role: 'user' | 'assistant'; status: 'delivered' | 'queued'; body: string
+    originMessageId: string | null; verifiedCommitSha: string | null; createdAt: string
+  }>
+  restart: {
+    sourceThreadId: string; sourceJobId: string; originalJobId: string
+    originalSha: string; selectedSha: string; mode: 'original' | 'newer'
+    targetBranch: string | null
+  } | null
+}
 export type ForkInheritedMessage = {
   role: 'user' | 'assistant'; body: string; originId: string; verifiedSha: string; createdAt: string
 }
@@ -56,6 +68,8 @@ export interface AdvancedThreadPersistence {
     repository: string; directory: string
   } | null>
   sourceThread(owner: string, jobId: string): Promise<{ id: string; conversation: string } | null>
+  inspectJob(owner: string, jobId: string): Promise<JobInspection>
+  forkDraft(owner: string, childId: string): Promise<{ bundle: string; original: string } | null>
   jobClaimed(childId: string): Promise<boolean>
   forkIntent(childId: string): Promise<ForkIntent | null>
   reserveFork(data: ForkReservation): Promise<ForkIntent>

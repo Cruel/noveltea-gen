@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory, continueCachedStory } from '../src/lib/git-cache.server'
@@ -226,7 +226,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal((await fork({ ...input, guidance: 'Changed after submission' })).status, 409,
         'the same child UUID cannot silently change the author message')
       assert.equal((await fork({ ...input, commitSha: initial })).status, 409)
-      const inspected = await inspectRegisteredJob(store, selectedJob(store, user.id, childId), user.id)
+      const inspected = await inspectRegisteredJob(store, await selectedJob(store, user.id, childId), user.id)
       assert.equal(inspected.status, 'prepared')
       assert.equal(inspected.storyThreadId, 'fork:' + childId)
       assert.deepEqual(inspected.threadMessages.map(message => message.body),
@@ -245,7 +245,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(childMessages[1]?.verifiedSha, null)
       assert.deepEqual(parentMessages(), originalMessages,
         'a live parent\'s delivered, future and queued messages must remain untouched')
-      assert.match(selectedJob(store, user.id, childId).configJson!, /Focus on the witness/)
+      assert.match((await selectedJob(store, user.id, childId)).configJson!, /Focus on the witness/)
       assert.equal(inspected.forkSource?.nextWorkItem, 'character-foundations')
       assert.deepEqual(inspected.forkSource?.dependencies['character-foundations'], ['world-foundations'])
       assert.ok(inspected.forkSource?.completedWorkItems.includes('world-foundations'))
@@ -284,7 +284,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         task: updated.task, contract: updated.contract,
       }), childId, config.baseURL)
       assert.equal(started.status, 202, JSON.stringify(await started.clone().json()))
-      const childRequest = JSON.parse(selectedJob(store, user.id, childId).requestJson!)
+      const childRequest = JSON.parse((await selectedJob(store, user.id, childId)).requestJson!)
       const delivered = store.sqlite.prepare(`SELECT status FROM story_thread_messages
         WHERE owner_user_id=? AND thread_id=? AND body=?`).get(user.id, 'fork:' + childId, input.guidance) as
         { status: string } | undefined
@@ -299,7 +299,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         body: JSON.stringify({ task: updated.task, contract: request.contract }),
       }), invalidId, config.baseURL)
       assert.equal(invalidStart.status, 202)
-      const invalidRequest = JSON.parse(selectedJob(store, user.id, invalidId).requestJson!)
+      const invalidRequest = JSON.parse((await selectedJob(store, user.id, invalidId)).requestJson!)
       const badRuntime = openWebGenerationGraph(join(invalidChild.stateDir, 'web-generation.sqlite'))
       process.env.NT_FOUNDATIONS_FIXTURE_CASE = 'duplicate-id'
       try {
@@ -375,7 +375,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         body: JSON.stringify({ task: childRequest.task, contract: childRequest.contract }),
       }), grandId, config.baseURL)
       assert.equal(grandStart.status, 202, JSON.stringify(await grandStart.clone().json()))
-      const grandRequest = JSON.parse(selectedJob(store, user.id, grandId).requestJson!)
+      const grandRequest = JSON.parse((await selectedJob(store, user.id, grandId)).requestJson!)
       const grandRuntime = openWebGenerationGraph(join(grand.stateDir, 'web-generation.sqlite'))
       try {
         const cfg = { configurable: { thread_id: grand.threadId + ':generation:web' }, recursionLimit: 1000 }
@@ -404,7 +404,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         body: JSON.stringify({ task: grandRequest.task, contract: grandRequest.contract }),
       }), fourthId, config.baseURL)
       assert.equal(fourthStart.status, 202, JSON.stringify(await fourthStart.clone().json()))
-      const fourthRequest = JSON.parse(selectedJob(store, user.id, fourthId).requestJson!)
+      const fourthRequest = JSON.parse((await selectedJob(store, user.id, fourthId)).requestJson!)
       const fourthRuntime = openWebGenerationGraph(join(fourth.stateDir, 'web-generation.sqlite'))
       try {
         const cfg = { configurable: { thread_id: fourth.threadId + ':generation:web' }, recursionLimit: 1000 }
@@ -545,7 +545,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       } finally { sourceGraph.saver.db.close() }
       store.sqlite.prepare("UPDATE studio_sessions SET status='completed' WHERE id=?").run(childId)
       store.sqlite.prepare("UPDATE generation_run_queue SET phase='finished' WHERE job_id=?").run(childId)
-      assert.equal((await inspectRegisteredJob(store, selectedJob(store, user.id, childId), user.id)).status,
+      assert.equal((await inspectRegisteredJob(store, await selectedJob(store, user.id, childId), user.id)).status,
         'completed', 'source must have a verified, settled run before follow-up scope inference')
       const priorId = randomUUID()
       const prior = await continueCachedStory(advancedChild, priorId, character.commitSha)
@@ -555,7 +555,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,
         source_commit_sha,status,created_at,updated_at,generation_request_json,generation_thread_id)
         VALUES (?,?,?,'Previous follow-up',?,'completed','now','now',?,?)`)
-        .run(priorId, user.id, selectedJob(store, user.id, childId).storyId,
+        .run(priorId, user.id, (await selectedJob(store, user.id, childId)).storyId,
           character.commitSha, JSON.stringify(priorRequest),
           prior.threadId + ':generation:web')
       store.sqlite.prepare(`INSERT INTO story_thread_runs(job_id,owner_user_id,thread_id,run_order)
@@ -586,7 +586,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(readRecoveryFork(focusedJob), null, 'no prior plan/completed stages can be inherited')
       assert.equal(existsSync(join(focusedJob.stateDir, 'character-world.json')), false)
       assert.equal(existsSync(join(focusedJob.stateDir, 'architecture.json')), false)
-      const focusedConfig = JSON.parse(selectedJob(store, user.id, focusedChildId).configJson!)
+      const focusedConfig = JSON.parse((await selectedJob(store, user.id, focusedChildId)).configJson!)
       assert.deepEqual(focusedConfig.contract.scope.targets, ['character.ada'])
       assert.equal(focusedConfig.contract.scope.kind, 'partial')
       assert.equal(focusedConfig.task, better)
@@ -605,7 +605,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
           body: JSON.stringify({ task: better, contract: focusedConfig.contract }),
         }), focusedChildId, config.baseURL)
       assert.equal(focusedStart.status, 202, JSON.stringify(await focusedStart.clone().json()))
-      const focusedRequest = JSON.parse(selectedJob(store, user.id, focusedChildId).requestJson!)
+      const focusedRequest = JSON.parse((await selectedJob(store, user.id, focusedChildId)).requestJson!)
       const focusedRuntime = openWebGenerationGraph(join(focusedJob.stateDir, 'web-generation.sqlite'))
       try {
         const cfg = { configurable: { thread_id: focusedJob.threadId + ':generation:web' },

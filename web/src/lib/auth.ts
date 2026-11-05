@@ -1,7 +1,7 @@
 import { betterAuth, type BetterAuthOptions } from 'better-auth'
 import { tanstackStartCookies } from 'better-auth/tanstack-start'
 import { lastLoginMethod } from 'better-auth/plugins'
-import type { StudioDatabase } from '../db/connection'
+import { studioSqliteDriver, type StudioDatabase } from '../db/connection'
 
 type OAuthCredentials = { clientId: string; clientSecret: string }
 
@@ -37,7 +37,7 @@ export function readAuthConfig(env: NodeJS.ProcessEnv = process.env): StudioAuth
 export function studioAuthOptions(store: StudioDatabase, config: StudioAuthConfig) {
   return {
     appName: 'NovelTea Studio',
-    database: store.sqlite,
+    database: studioSqliteDriver(store),
     baseURL: config.baseURL,
     secret: config.secret,
     emailAndPassword: { enabled: false },

@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { claimServerGeneration } from '../../src/generation-owner'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
@@ -173,8 +173,8 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.equal(after.messages.find(m => m.id === continuation.id)?.phase, 'running')
       assert.deepEqual(after.runs.map(r => r.jobId), [sourceId, continuation.id])
       assert.equal(after.steeringActivity.find(a => a.messageId === originalId)?.state, 'approved-run')
-      const child = await restoreJob(selectedJob(store, owner, continuation.id), owner)
-      const pinned = pinnedRequest(selectedJob(store, owner, continuation.id), child)!
+      const child = await restoreJob(await selectedJob(store, owner, continuation.id), owner)
+      const pinned = pinnedRequest(await selectedJob(store, owner, continuation.id), child)!
       assert.deepEqual(pinned.contract.scope.targets,
         ['authored-content.confession', 'event.confession'])
       assert.equal(pinned.contract.scope.kind, 'partial')
@@ -320,8 +320,8 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     const chat = (await readThreadChat(store, owner, threadId))
     assert.equal(chat.messages.find(item => item.id === childId)?.phase, 'running')
     assert.deepEqual(chat.runs.map(run => run.jobId), [sourceId, childId])
-    const child = await restoreJob(selectedJob(store, owner, childId), owner)
-    const pinned = pinnedRequest(selectedJob(store, owner, childId), child)
+    const child = await restoreJob(await selectedJob(store, owner, childId), owner)
+    const pinned = pinnedRequest(await selectedJob(store, owner, childId), child)
     assert.deepEqual(pinned?.contract.scope.targets, kind === 'broad'
       ? ['authored-content.confession', 'event.confession'] : ['character.nia'])
     assert.equal(pinned?.contract.scope.kind, 'partial')

@@ -27,9 +27,9 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const SHA = /^[a-f0-9]{40}$/i
 
 import type { SavedGenerationJob as SavedJob } from '../persistence/generation-contracts'
-export function selectedJob(store: StudioDatabase, owner: string, id: string): SavedJob {
+export async function selectedJob(store: StudioDatabase, owner: string, id: string): Promise<SavedJob> {
   if (!UUID.test(id)) throw new JobError(400, 'Invalid job ID.')
-  const row = store.persistence.generation.jobs.sqliteBridge.selected(owner, id) ?? undefined
+  const row = await store.persistence.generation.jobs.selected(owner, id) ?? undefined
   if (!row) throw new JobError(404, 'Job is not connected to this account.')
   if (!row.commitSha || !SHA.test(row.commitSha) || !['github', 'gitlab'].includes(row.provider) ||
       (row.requestJson === null) !== (row.threadId === null)) {
@@ -60,7 +60,7 @@ export async function restoreJob(row: SavedJob, owner: string): Promise<JobStart
 
 /** Resolve an owner-scoped registered job without accepting filesystem paths from clients. */
 export async function authorizedStoryJob(store: StudioDatabase, owner: string, id: string): Promise<JobStartResult> {
-  return restoreJob(selectedJob(store, owner, id), owner)
+  return restoreJob(await selectedJob(store, owner, id), owner)
 }
 
 export async function verifyTrustedRevision(job: JobStartResult) {
@@ -122,19 +122,10 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
       ? "Checkpoint finalization is incomplete; reconcile the original receipt."
       : "Checkpoint failed verification; operator reconciliation required.",
   }))
-  const studioThread = store.sqlite.prepare(`SELECT thread_id AS id FROM story_thread_runs
-    WHERE job_id=? AND owner_user_id=?`).get(row.id, owner) as { id: string } | undefined
-  const threadMessages = studioThread ? store.sqlite.prepare(`SELECT role,status,body,
-    origin_message_id AS originMessageId,verified_commit_sha AS verifiedCommitSha,created_at AS createdAt
-    FROM story_thread_messages WHERE owner_user_id=? AND thread_id=? ORDER BY sequence`)
-    .all(owner, studioThread.id) as Array<{ role: 'user' | 'assistant'; status: 'delivered' | 'queued';
-      body: string; originMessageId: string | null; verifiedCommitSha: string | null; createdAt: string }> : []
-  const restart = store.sqlite.prepare(`SELECT source_thread_id AS sourceThreadId,
-    source_job_id AS sourceJobId,root_job_id AS originalJobId,
-    original_sha AS originalSha,selected_sha AS selectedSha,mode,target_branch AS targetBranch
-    FROM thread_restarts WHERE child_id=? AND owner_user_id=? AND prepared_at IS NOT NULL`)
-    .get(row.id, owner) as { sourceThreadId: string; sourceJobId: string; originalJobId: string;
-      originalSha: string; selectedSha: string; mode: 'original' | 'newer'; targetBranch: string | null } | undefined
+  const inspection = await store.persistence.advancedThreads.inspectJob(owner, row.id)
+  const studioThread = inspection.threadId ? { id: inspection.threadId } : null
+  const threadMessages = inspection.messages
+  const restart = inspection.restart
   const base = { recoveryCheckpoints, forkSource: forkSourceSummary(job), restartSource: restart ?? null,
     storyThreadId: studioThread?.id ?? null,
     threadMessages,
@@ -359,7 +350,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     assertStudioSchemaCurrent(store)
     const user = await requireUser(auth, request.headers)
     if (!user) throw new JobError(401, 'Sign in required.')
-    const row = selectedJob(store, user.id, id)
+    const row = await selectedJob(store, user.id, id)
     if (request.method === 'GET') {
       return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
@@ -408,18 +399,11 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     catch { throw new JobError(409, 'CLI or conflicting server generation ownership prevents this queue admission.') }
     queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),
       job.threadId + ':generation:web')
-    // Corrective guidance is now part of the admitted, pinned request.
-    // Do not mark other queued author messages delivered: those need their
-    // own explicit safe-boundary injection and receipt.
-    store.sqlite.prepare(`UPDATE story_thread_messages SET status='delivered'
-      WHERE id=? AND owner_user_id=? AND status='queued'`).run('guidance:fork:' + row.id, user.id)
-    // An edited message is the child's new initial request, not merely fork
-    // guidance. Mark it delivered only after the exact pinned run is admitted.
-    store.sqlite.prepare(`UPDATE story_thread_messages SET status='delivered', phase='running'
-      WHERE id=? AND owner_user_id=? AND status='queued' AND job_id=?`)
-      .run('edit:' + row.id, user.id, row.id)
+    // Only the admitted run may deliver fork guidance or an edited initial
+    // instruction. The port checks the queue before changing either message.
+    await store.persistence.messages.markAdmitted(user.id, row.id)
     // The agent process owns graph execution, including fixture runs.
-    return reply({ job: await inspectRegisteredJob(store, selectedJob(store, user.id, id), user.id) }, 202)
+    return reply({ job: await inspectRegisteredJob(store, await selectedJob(store, user.id, id), user.id) }, 202)
   } catch (error) {
     if (error instanceof JobError) return reply({ error: error.message }, error.status)
     // Do not include Pi/provider exceptions; they can contain credentials.

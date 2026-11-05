@@ -119,6 +119,35 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
           eq(threads.ownerUserId, runs.ownerUserId)))
         .where(and(eq(runs.jobId, jobId), eq(runs.ownerUserId, owner))).get() ?? null
     },
+    async inspectJob(owner, jobId) {
+      requireOwner(owner)
+      const entry = db.select({ id: runs.threadId }).from(runs).where(and(
+        eq(runs.jobId, jobId), eq(runs.ownerUserId, owner),
+      )).get()
+      const threadId = entry?.id ?? null
+      const threadMessages = threadId ? db.select({
+        role: messages.role, status: messages.status, body: messages.body,
+        originMessageId: messages.originMessageId,
+        verifiedCommitSha: messages.verifiedCommitSha, createdAt: messages.createdAt,
+      }).from(messages).where(and(
+        eq(messages.ownerUserId, owner), eq(messages.threadId, threadId),
+      )).orderBy(asc(messages.sequence)).all() : []
+      const restart = db.select({
+        sourceThreadId: restarts.sourceThreadId, sourceJobId: restarts.sourceJobId,
+        originalJobId: restarts.rootJobId, originalSha: restarts.originalSha,
+        selectedSha: restarts.selectedSha, mode: restarts.mode,
+        targetBranch: restarts.targetBranch,
+      }).from(restarts).where(and(
+        eq(restarts.childId, jobId), eq(restarts.ownerUserId, owner),
+        isNotNull(restarts.preparedAt),
+      )).get() ?? null
+      return { threadId, messages: threadMessages, restart }
+    },
+    async forkDraft(owner, childId) {
+      requireOwner(owner)
+      return db.select({ bundle: forks.bundleJson, original: forks.draftJson }).from(forks)
+        .where(and(eq(forks.childId, childId), eq(forks.ownerUserId, owner))).get() ?? null
+    },
     async jobClaimed(id) { return jobClaimed(id) },
     async forkIntent(id) { return forkIntent(id) },
     async reserveFork(data: ForkReservation) {

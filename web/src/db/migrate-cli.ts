@@ -13,5 +13,5 @@ try {
   await migrateStudio(store, readAuthConfig(env))
   console.log('NovelTea Studio SQLite migrations applied.')
 } finally {
-  store.sqlite.close()
+  store.close()
 }

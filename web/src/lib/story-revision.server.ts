@@ -7,7 +7,6 @@ import type { CanonicalScopeRecord } from '../../../src/focused-scope'
 import { inferStoryRevision, type RevisionPreview, type ProtectedDecisionChange } from './story-revision-plan'
 import { assertProtectedThreadApproval } from './thread-protected-decision.server'
 import { enqueueThreadMessage, type ThreadMessage, ThreadChatError } from './thread-chat.server'
-import { ownedThreadMessageSqlite } from '../persistence/thread-message-sqlite'
 
 type Source = { jobId: string; status: string; queuePhase: string | null }
 export type PinnedRevision = {
@@ -56,7 +55,7 @@ async function latestRun(store: StudioDatabase, owner: string, threadId: string)
 }
 export async function revisionFromSource(store: StudioDatabase, owner: string,
   sourceJobId: string, prompt: string, selectedTargets?: string[]) {
-  const jobRow = selectedJob(store, owner, sourceJobId)
+  const jobRow = await selectedJob(store, owner, sourceJobId)
   const parent = await restoreJob(jobRow, owner)
   const pinned = pinnedRequest(jobRow, parent)
   if (!pinned) throw new ThreadChatError(409, 'Source run has no pinned generation contract.')
@@ -104,7 +103,7 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   const saved = await enqueueThreadMessage(store, owner, threadId, id, content, liveMode)
   // Admission is durable, but scope inference is asynchronous: retry/cancel
   // may update the row before this request returns to the caller.
-  const latest = () => ownedThreadMessageSqlite(store.db, owner, threadId, id) ?? saved
+  const latest = async () => await store.persistence.messages.owned(owner, threadId, id) ?? saved
   // A duplicate HTTP request may arrive after the author has edited the
   // queued message. Return the durable current version without inferring or
   // granting a new scope from the stale pre-edit text.
@@ -146,7 +145,7 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   if (plan.protectedChange) {
     // A reviewed scope digest is not an authorization. A separate authenticated
     // controller decision must exist in the owner-scoped immutable ledger.
-    try { assertProtectedThreadApproval(store, owner, threadId, id, source.jobId, plan) }
+    try { await assertProtectedThreadApproval(store, owner, threadId, id, source.jobId, plan) }
     catch (error) {
       if (error instanceof ThreadChatError && error.status === 409) return latest()
       throw error

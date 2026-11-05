@@ -4,7 +4,7 @@ import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 import { activeLimit, claimNext, finishAttempt, queueGeneration, queueRecord,
   fenceAbandonedRuns, dequeueBeforeStart } from '../src/lib/generation-queue.server'

@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import type { JobStartResult } from '../../src/job'
 import { removeTestTree } from '../../test/helpers'
-import { openStudioDatabase } from '../src/db/connection'
+import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from '../src/db/migrations'
 import { snapshotForkBoundaryHistory, recordForkBoundaryHistory } from '../src/lib/thread-fork-history.server'
 

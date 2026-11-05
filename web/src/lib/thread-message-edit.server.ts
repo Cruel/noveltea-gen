@@ -92,7 +92,7 @@ async function sourceOf(store: StudioDatabase, owner: string, message: Message):
   if (original.origin?.startsWith('author-update:')) {
     // Live Pi steering is acknowledged under the writer lock. Its pinned HEAD
     // is the pre-application boundary, even between two specialist commits.
-    const authorJob = await restoreJob(selectedJob(store, owner, owningJob), owner)
+    const authorJob = await restoreJob(await selectedJob(store, owner, owningJob), owner)
     const updates = await inspectAuthorUpdates(authorJob)
     const id = original.origin.slice('author-update:'.length)
     const record = updates.records.find(item => item.message.id === id)
@@ -105,7 +105,7 @@ async function sourceOf(store: StudioDatabase, owner: string, message: Message):
     sourceId = owningJob
     boundary = record.acknowledgement.pinned.headSha
   } else {
-    const own = selectedJob(store, owner, owningJob)
+    const own = await selectedJob(store, owner, owningJob)
     const pinned = await restoreJob(own, owner)
     const request = pinnedRequest(own, pinned)
     if (!request || request.task !== original.body)
@@ -115,7 +115,7 @@ async function sourceOf(store: StudioDatabase, owner: string, message: Message):
     sourceId = original.sourceJobId ?? owningJob
     boundary = pinned.baseSha
   }
-  const sourceJob = await restoreJob(selectedJob(store, owner, sourceId), owner)
+  const sourceJob = await restoreJob(await selectedJob(store, owner, sourceId), owner)
   if (!ancestor(sourceJob.worktreeRoot, boundary, git(sourceJob.worktreeRoot, 'rev-parse', 'HEAD')))
     throw new ThreadEditError(409, 'The saved application boundary is no longer on the source history.')
   return { sourceJob, sourceId, boundary }
@@ -128,7 +128,7 @@ export async function syncAppliedAuthorMessages(store: StudioDatabase, owner: st
   const runs = (await store.persistence.advancedThreads.runJobs(owner, threadId)).map(jobId => ({ jobId }))
   for (const { jobId } of runs) {
     let job: JobStartResult
-    try { job = await restoreJob(selectedJob(store, owner, jobId), owner) }
+    try { job = await restoreJob(await selectedJob(store, owner, jobId), owner) }
     catch { continue }
     const updates = await inspectAuthorUpdates(job)
     for (const { message, acknowledgement } of updates.records) {
@@ -195,8 +195,8 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
     throw new ThreadEditError(409, 'Checkpoint application boundary changed; refresh the edit preview.')
   if (data.childId === preview.sourceJobId)
     throw new ThreadEditError(409, 'Child job identity must differ from its parent.')
-  const source = await restoreJob(selectedJob(store, owner, preview.sourceJobId), owner)
-  const row = selectedJob(store, owner, preview.sourceJobId)
+  const source = await restoreJob(await selectedJob(store, owner, preview.sourceJobId), owner)
+  const row = await selectedJob(store, owner, preview.sourceJobId)
   const original = pinnedRequest(row, source)
   if (!original) throw new ThreadEditError(409, 'Source generation contract is no longer pinned.')
   const sourceThread = await store.persistence.advancedThreads.identity(owner, data.threadId)

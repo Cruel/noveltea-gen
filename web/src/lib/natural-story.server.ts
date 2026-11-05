@@ -25,21 +25,11 @@ export type NaturalStoryInput = {
   fixture?: boolean
   approvedDigest?: string
 }
-type SelectedConversation = {
-  id: string; storyId: string; provider: 'github' | 'gitlab'
-  headSha: string | null
-}
-function selectedConversation(store: StudioDatabase, owner: string, conversationId: string): SelectedConversation {
+async function selectedConversation(store: StudioDatabase, owner: string, conversationId: string) {
   if (!CONVERSATION_ID.test(conversationId)) throw new Error('Invalid Conversation ID.')
-  const row = store.sqlite.prepare(`SELECT c.id,c.story_id AS storyId,
-    s.source_commit_sha AS headSha,r.provider
-    FROM story_conversations c JOIN stories s ON s.id=c.story_id
-      AND s.owner_user_id=c.owner_user_id
-    JOIN repositories r ON r.id=s.repository_id AND r.owner_user_id=s.owner_user_id
-    WHERE c.id=? AND c.owner_user_id=?`).get(conversationId, owner) as SelectedConversation | undefined
+  const row = await store.persistence.naturalStory.conversation(owner, conversationId)
   if (!row) throw new Error('Conversation not found.')
   if (!SHA.test(row.headSha ?? '')) throw new Error('Story has no verified source commit.')
-  if (!['github', 'gitlab'].includes(row.provider)) throw new Error('Unsupported Story provider.')
   return row
 }
 async function modelOptions(store: StudioDatabase, owner: string) {
@@ -55,7 +45,7 @@ async function modelOptions(store: StudioDatabase, owner: string) {
 export async function previewNaturalStory(store: StudioDatabase, owner: string,
   conversationId: string, prompt: string, edits?: PlanEdits) {
   assertStudioSchemaCurrent(store)
-  const conversation = selectedConversation(store, owner, conversationId)
+  const conversation = await selectedConversation(store, owner, conversationId)
   const plan = interpretNaturalStoryPrompt(prompt, edits)
   return { plan, storyId: conversation.storyId, headSha: conversation.headSha!,
     ...await modelOptions(store, owner) }
@@ -89,31 +79,11 @@ async function responseJson(response: Response): Promise<Record<string, unknown>
 /** A prepared job already owns a root Thread. Rehome only that root into the
  * author's selected Conversation; never alter a fork or another owner/thread.
  * A failed acquisition remains inspectable rather than being silently retried. */
-export function associateNaturalThread(store: StudioDatabase, owner: string,
+export async function associateNaturalThread(store: StudioDatabase, owner: string,
   conversationId: string, jobId: string, title: string) {
-  const threadId = 'root:' + jobId
-  return store.sqlite.transaction(() => {
-    const membership = selectedConversation(store, owner, conversationId)
-    const row = store.sqlite.prepare(`SELECT t.conversation_id AS conversationId,
-      t.parent_thread_id AS parentId
-      FROM story_threads t JOIN story_thread_runs r ON r.thread_id=t.id
-      JOIN studio_sessions j ON j.id=r.job_id AND j.owner_user_id=r.owner_user_id
-      WHERE t.id=? AND t.owner_user_id=? AND r.job_id=? AND r.run_order=0
-        AND j.story_id=?`).get(threadId, owner, jobId, membership.storyId) as
-      { conversationId: string; parentId: string | null } | undefined
-    if (!row || row.parentId ||
-        (row.conversationId !== conversationId && row.conversationId !== 'legacy:' + jobId))
-      throw new Error('Generation job already belongs to another Thread or Conversation.')
-    const now = new Date().toISOString()
-    store.sqlite.prepare(`UPDATE story_threads SET conversation_id=?, title=?, activity_at=?
-      WHERE id=? AND owner_user_id=?`).run(conversationId, title.slice(0, 120), now, threadId, owner)
-    store.sqlite.prepare(`UPDATE story_conversations SET updated_at=?
-      WHERE id=? AND owner_user_id=?`).run(now, conversationId, owner)
-    store.sqlite.prepare(`DELETE FROM story_conversations WHERE id=? AND owner_user_id=?
-      AND NOT EXISTS (SELECT 1 FROM story_threads WHERE conversation_id=?)`)
-      .run('legacy:' + jobId, owner, 'legacy:' + jobId)
-    return threadId
-  })()
+  // The adapter checks the Conversation and root run again under one transaction.
+  return store.persistence.naturalStory.associateRoot(owner, conversationId, jobId,
+    title, new Date().toISOString())
 }
 
 /** One trusted admission path: provider-pinned acquisition -> typed canonical
@@ -127,7 +97,7 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   const origin = headers.get('origin')
   if (origin && origin !== baseURL) throw new Error('Cross-origin write refused.')
   if (!input || !UUID.test(input.jobId)) throw new Error('Invalid idempotent job ID.')
-  const conversation = selectedConversation(store, actor.id, input.conversationId)
+  const conversation = await selectedConversation(store, actor.id, input.conversationId)
   if (input.headSha !== conversation.headSha)
     throw new Error('The Story base revision changed. Review the refreshed plan before starting.')
   const plan = interpretNaturalStoryPrompt(input.prompt, input.edits)
@@ -146,15 +116,7 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   if (model) await assertUserPiSelection(store, actor.id, model)
   verifyWebExecution(!model)
 
-  const previous = store.sqlite.prepare(`SELECT j.story_id AS storyId,
-    j.generation_request_json AS requestJson,j.generation_config_json AS configJson,
-    t.conversation_id AS conversationId
-    FROM studio_sessions j LEFT JOIN story_thread_runs r ON r.job_id=j.id
-    LEFT JOIN story_threads t ON t.id=r.thread_id
-    WHERE j.id=? AND j.owner_user_id=?`).get(input.jobId, actor.id) as {
-      storyId: string; requestJson: string | null; configJson: string | null
-      conversationId: string | null
-    } | undefined
+  const previous = await store.persistence.naturalStory.previousJob(actor.id, input.jobId)
   if (previous && (previous.storyId !== conversation.storyId ||
       !['legacy:' + input.jobId, input.conversationId].includes(previous.conversationId ?? '')))
     throw new Error('Job ID already belongs to a different Story or Conversation.')
@@ -182,7 +144,7 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
         { storyId: conversation.storyId, jobId: input.jobId, commit: conversation.headSha }), baseURL)))
   const job = prepared.job as { headSha?: string } | undefined
   if (!job?.headSha || !SHA.test(job.headSha)) throw new Error('Provider did not return a pinned job revision.')
-  const threadId = associateNaturalThread(store, actor.id, input.conversationId,
+  const threadId = await associateNaturalThread(store, actor.id, input.conversationId,
     input.jobId, plan.task.slice(0, 120))
   await responseJson(await generationConfigurationRequest(auth, store,
     asRequest(baseURL, headers, '/api/jobs/' + input.jobId + '/configuration',

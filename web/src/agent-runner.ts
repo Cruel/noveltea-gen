@@ -20,7 +20,7 @@ import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint } from '
 
 /** Verify the queued identity and resume the pinned graph, never browser inputs. */
 export async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
-  const row = selectedJob(store, item.ownerId, item.jobId)
+  const row = await selectedJob(store, item.ownerId, item.jobId)
   const job = await restoreJob(row, item.ownerId)
   assertNativeVersion(job.validatorVersion)
   const pinned = pinnedRequest(row, job)

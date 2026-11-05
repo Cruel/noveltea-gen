@@ -5,7 +5,7 @@ import { generationRunQueue, repositories, sessions, stories, storyThreadMessage
   storyThreadMessages, storyThreadRuns, storyThreads, threadProtectedDecisions,
   threadSteeringIntents } from '../db/schema'
 import { ThreadMessageConflict } from './thread-message-contracts'
-import type { ApprovalJobCatalog, ProtectedDecisionReceipt,
+import type { ApprovalJobCatalog, ProtectedDecisionGrant, ProtectedDecisionReceipt,
   ProtectedDecisionRecords, RevisionQueueHead, RevisionRun, RevisionRecords } from './publication-contracts'
 
 type Db = BetterSQLite3Database<typeof schema>
@@ -68,8 +68,24 @@ export function createSqliteApprovalJobCatalog(db: Db): ApprovalJobCatalog {
   }
 }
 
+/** Shared synchronous statement used by the protected continuation's
+ * transaction and by the public async port. The caller decides the transaction
+ * boundary; no async operation may occur inside a SQLite writer transaction. */
+export function consumeProtectedDecisionSqlite(db: Db, owner: string,
+  messageId: string, sha: string): boolean {
+  assertOwner(owner)
+  return db.update(p).set({ consumedSha: sha }).where(and(
+    eq(p.messageId, messageId), eq(p.ownerUserId, owner),
+    eq(p.decision, 'approved'), isNull(p.consumedSha),
+  )).run().changes === 1
+}
+
 export function createSqliteProtectedDecisionRecords(db: Db): ProtectedDecisionRecords {
-  const bridge: ProtectedDecisionRecords['sqliteBridge'] = {
+  const bridge: {
+    get(owner: string, messageId: string): ProtectedDecisionReceipt | null
+    record(owner: string, data: ProtectedDecisionGrant, request: string): ProtectedDecisionReceipt
+    consume(owner: string, messageId: string, sha: string): boolean
+  } = {
     get(owner, messageId) { return decisionReceipt(db, owner, messageId) },
     record(owner, data, request) {
       assertOwner(owner)
@@ -108,15 +124,10 @@ export function createSqliteProtectedDecisionRecords(db: Db): ProtectedDecisionR
       }, { behavior: 'immediate' })
     },
     consume(owner, messageId, sha) {
-      assertOwner(owner)
-      return db.update(p).set({ consumedSha: sha }).where(and(
-        eq(p.messageId, messageId), eq(p.ownerUserId, owner),
-        eq(p.decision, 'approved'), isNull(p.consumedSha),
-      )).run().changes === 1
+      return consumeProtectedDecisionSqlite(db, owner, messageId, sha)
     },
   }
   return {
-    sqliteBridge: bridge,
     async get(owner, messageId) { return bridge.get(owner, messageId) },
     async record(owner, data, request) { return bridge.record(owner, data, request) },
     async consume(owner, messageId, sha) { return bridge.consume(owner, messageId, sha) },
