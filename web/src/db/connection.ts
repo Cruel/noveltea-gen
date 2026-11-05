@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import * as schema from './schema'
+import { createSqlitePersistence } from '../persistence/sqlite'
 
 export function defaultStudioPath(env: NodeJS.ProcessEnv = process.env): string {
   if (env.NT_STUDIO_DB_PATH) {
@@ -26,7 +27,8 @@ export function openStudioDatabase(path = defaultStudioPath()) {
     sqlite.pragma('journal_mode = WAL')
   }
   sqlite.pragma('foreign_keys = ON')
-  return { sqlite, db: drizzle(sqlite, { schema }) }
+  const db = drizzle(sqlite, { schema })
+  return { sqlite, db, persistence: createSqlitePersistence(db) }
 }
 
 export type StudioDatabase = ReturnType<typeof openStudioDatabase>

@@ -12,7 +12,7 @@ export async function getDashboardData(auth: StudioAuth, store: StudioDatabase, 
   const providers = accounts
     .filter(account => account.providerId === 'github' || account.providerId === 'gitlab')
     .map(account => account.providerId)
-  return { user, connectedProviders: [...new Set(providers)], ...readUserDashboard(store, user.id) }
+  return { user, connectedProviders: [...new Set(providers)], ...(await readUserDashboard(store.persistence.dashboard, user.id)) }
 }
 
 // A repository's connection always wins over the user's other provider accounts.

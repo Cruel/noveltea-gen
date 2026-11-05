@@ -1,0 +1,95 @@
+import { and, desc, eq, isNull } from 'drizzle-orm'
+import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
+import * as schema from '../db/schema'
+import { repositories, sessions, stories, storyThreadPreferences, userPreferences } from '../db/schema'
+import type { StudioPersistence } from './contracts'
+
+type StudioDrizzle = BetterSQLite3Database<typeof schema>
+
+function assertOwner(owner: string): void {
+  if (!owner) throw new Error('Authenticated actor required')
+}
+
+/** SQLite driver operations and transactions stay synchronous.
+ * These async-compatible ports use resolved Promises around complete, atomic
+ * Drizzle operations; never await within a better-sqlite3 transaction callback.
+ * A later PostgreSQL implementation may implement the same ports with async IO.
+ */
+export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
+  return {
+    dashboard: {
+      async forOwner(owner) {
+        assertOwner(owner)
+        const repoRows = db.select({
+          id: repositories.id, name: repositories.name, provider: repositories.provider,
+        }).from(repositories).where(eq(repositories.ownerUserId, owner)).all()
+        const storyRows = db.select({
+          id: stories.id, title: stories.title, repositoryId: stories.repositoryId,
+          directory: stories.directory, commitSha: stories.sourceCommitSha,
+        }).from(stories).where(eq(stories.ownerUserId, owner)).all()
+        const sessionRows = db.select({
+          id: sessions.id, storyId: sessions.storyId, title: sessions.title,
+          status: sessions.status, updatedAt: sessions.updatedAt,
+        }).from(sessions).where(eq(sessions.ownerUserId, owner))
+          .orderBy(desc(sessions.updatedAt)).limit(20).all()
+        return {
+          repositories: repoRows,
+          stories: storyRows,
+          activeJobs: sessionRows.filter(row =>
+            row.status === 'running' || row.status === 'paused' || row.status === 'blocked'),
+          recentSessions: sessionRows,
+        }
+      },
+    },
+    settings: {
+      async getDefaultModel(owner) {
+        assertOwner(owner)
+        const row = db.select({ value: userPreferences.defaultModelJson })
+          .from(userPreferences).where(eq(userPreferences.ownerUserId, owner)).get()
+        return row?.value ? { selection: JSON.parse(row.value) as unknown } : null
+      },
+      async putDefaultModel(owner, model, updatedAt) {
+        assertOwner(owner)
+        const defaultModelJson = model === null ? null : JSON.stringify(model)
+        db.insert(userPreferences).values({
+          ownerUserId: owner, defaultModelJson, updatedAt,
+        }).onConflictDoUpdate({
+          target: userPreferences.ownerUserId,
+          set: { defaultModelJson, updatedAt },
+        }).run()
+      },
+      async listRepositories(owner) {
+        assertOwner(owner)
+        return db.select({
+          id: repositories.id, provider: repositories.provider, name: repositories.name,
+          connectionId: repositories.connectionId,
+        }).from(repositories).where(eq(repositories.ownerUserId, owner))
+          .orderBy(repositories.provider, repositories.name).all()
+      },
+      async hasLegacyRepositories(owner, provider) {
+        assertOwner(owner)
+        return !!db.select({ id: repositories.id }).from(repositories)
+          .where(and(eq(repositories.ownerUserId, owner), eq(repositories.provider, provider),
+            isNull(repositories.connectionId))).limit(1).get()
+      },
+      async getThreadPreferences(owner, storyId) {
+        assertOwner(owner)
+        const row = db.select({
+          view: storyThreadPreferences.viewMode, expanded: storyThreadPreferences.expandedIdsJson,
+        }).from(storyThreadPreferences).where(and(eq(storyThreadPreferences.ownerUserId, owner),
+          eq(storyThreadPreferences.storyId, storyId))).get()
+        return row ? { view: row.view, expandedIds: JSON.parse(row.expanded) as string[] } : null
+      },
+      async putThreadPreferences(owner, storyId, view, expandedIds, updatedAt) {
+        assertOwner(owner)
+        const expandedIdsJson = JSON.stringify(expandedIds)
+        db.insert(storyThreadPreferences).values({
+          ownerUserId: owner, storyId, viewMode: view, expandedIdsJson, updatedAt,
+        }).onConflictDoUpdate({
+          target: [storyThreadPreferences.ownerUserId, storyThreadPreferences.storyId],
+          set: { viewMode: view, expandedIdsJson, updatedAt },
+        }).run()
+      },
+    },
+  }
+}

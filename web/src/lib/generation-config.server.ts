@@ -157,7 +157,7 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
       }
       const models = await availableUserPiModels(store, user.id)
       return reply({ index, saved, editable: row.status === 'paused' && !row.requestJson,
-        defaultModel: readDefaultModel(store, user.id),
+        defaultModel: await readDefaultModel(store.persistence.settings, user.id),
         models, modelAvailability: models.length ? 'Connected user models available.' :
           'Connect your Pi API key or ChatGPT account to select a model.' })
     }

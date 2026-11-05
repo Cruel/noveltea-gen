@@ -140,7 +140,7 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     const record = selectedJob(f.db, f.owner.id, selected.childId)
     assert.equal(JSON.parse(record.configJson!).task, 'Original creative goal')
     assert.equal(JSON.parse(record.configJson!).limits.steps, 7)
-    const conversations = listStoryConversations(f.db, f.owner.id, f.storyId)
+    const conversations = await listStoryConversations(f.db, f.owner.id, f.storyId)
     const all = conversations.conversations.flatMap(c => c.threads)
     const restart = all.find(t => t.id === 'restart:' + selected.childId)
     assert.equal(restart?.parentThreadId, f.threadId)

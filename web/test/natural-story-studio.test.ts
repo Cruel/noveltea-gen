@@ -78,7 +78,7 @@ test('natural prompt preview and initial Thread registration are owner scoped an
     assert.equal(associateNaturalThread(db, alice, chosen.id, jobId, brief), 'root:' + jobId)
     assert.throws(() => associateNaturalThread(db, bob, chosen.id, jobId, brief), /not found/)
     assert.throws(() => associateNaturalThread(db, alice, other.id, jobId, brief), /already belongs/)
-    const navigation = listStoryConversations(db, alice, storyId)
+    const navigation = await listStoryConversations(db, alice, storyId)
     assert.equal(navigation.conversations.find(item => item.id === chosen.id)?.threads.length, 1)
     assert.equal(navigation.conversations.find(item => item.id === chosen.id)?.threads[0]?.title, brief)
     assert.equal(navigation.conversations.some(item => item.id === 'legacy:' + jobId), false)

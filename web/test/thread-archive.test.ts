@@ -40,7 +40,7 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     appendGenerationEvent(store, owner, job, {
       kind: 'verified', stage: 'foundation', files: ['creative-direction/foundation.md'],
     })
-    const original = listStoryConversations(store, owner, story).conversations[0]!.threads[0]!
+    const original = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
     const archiveId = original.id
     const beforeRun = store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job)
     const beforeJob = store.sqlite.prepare('SELECT * FROM studio_sessions WHERE id=?').get(job)
@@ -56,7 +56,7 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     archiveThread(store, owner, archiveId)
     assert.deepEqual(store.sqlite.prepare('SELECT archived_at AS archivedAt FROM story_threads WHERE id=?')
       .get(archiveId), archivedAt, 'retry never advances the archive timestamp')
-    const after = listStoryConversations(store, owner, story)
+    const after = await listStoryConversations(store, owner, story)
     assert.deepEqual(selectNavigationThreads(after.conversations[0]!.threads, 'active'), [])
     assert.equal(selectNavigationThreads(after.conversations[0]!.threads, 'archived')[0]?.id, archiveId)
     assert.equal(after.conversations[0]!.threads[0]?.status, 'archived')
@@ -68,11 +68,11 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     store.sqlite.close()
     store = openStudioDatabase(join(root, 'studio.sqlite'))
     await migrateStudio(store, config)
-    assert.ok(listStoryConversations(store, owner, story).conversations[0]!.threads[0]?.archivedAt)
+    assert.ok((await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]?.archivedAt)
     assert.throws(() => restoreThread(store, stranger, archiveId), /not found/i)
     restoreThread(store, owner, archiveId)
     restoreThread(store, owner, archiveId)
-    const restored = listStoryConversations(store, owner, story).conversations[0]!.threads[0]!
+    const restored = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
     assert.deepEqual(restored, { ...original }, 'restore preserves original status, title and activity')
     assert.deepEqual(store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job), beforeRun)
     assert.deepEqual(listGenerationEvents(store, owner, job, 0), beforeEvents)
@@ -100,7 +100,7 @@ test('archiving an ancestor preserves active child navigation and archived desce
     store.sqlite.prepare(`INSERT INTO studio_sessions
       (id,owner_user_id,story_id,title,status,created_at,updated_at)
       VALUES (?,?,?,'Job','completed','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')`).run(job, owner, story)
-    const nav = listStoryConversations(store, owner, story)
+    const nav = await listStoryConversations(store, owner, story)
     const parent = nav.conversations[0]!.threads[0]!
     const childId = 'child:' + randomUUID(), grandchildId = 'child:' + randomUUID()
     const childJob = randomUUID()
@@ -124,7 +124,7 @@ test('archiving an ancestor preserves active child navigation and archived desce
     const childQueue = store.sqlite.prepare('SELECT * FROM generation_run_queue WHERE job_id=?').get(childJob)
     archiveThread(store, owner, parent.id)
     archiveThread(store, owner, grandchildId)
-    const updated = listStoryConversations(store, owner, story)
+    const updated = await listStoryConversations(store, owner, story)
     const all = updated.conversations[0]!.threads
     const active = selectNavigationThreads(all, 'active')
     const archived = selectNavigationThreads(all, 'archived')
@@ -141,7 +141,7 @@ test('archiving an ancestor preserves active child navigation and archived desce
       childQueue, 'archiving a parent does not interrupt an active child job')
     restoreThread(store, owner, parent.id)
     assert.deepEqual(selectNavigationThreads(
-      listStoryConversations(store, owner, story).conversations[0]!.threads, 'active'
+      (await listStoryConversations(store, owner, story)).conversations[0]!.threads, 'active'
     ).map(t => t.id).sort(), [parent.id, childId].sort())
     assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
   } finally { store.sqlite.close() }

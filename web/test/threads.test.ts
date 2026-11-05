@@ -42,7 +42,7 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
     db.sqlite.prepare(`INSERT INTO generation_events
       (job_id,owner_user_id,kind,stage,milestone,files_json,status,created_at)
       VALUES (?,?,'working','event','arc.one','[]',NULL,'2026-11-02T03:00:00Z')`).run(ids[0], alice)
-    const first = listStoryConversations(db, alice, 'story-' + alice)
+    const first = await listStoryConversations(db, alice, 'story-' + alice)
     assert.equal(first.conversations.length, 3)
     assert.equal(first.conversations.every(item => item.threads.length === 1), true)
     const running = first.conversations.flatMap(c => c.threads).find(t => t.jobId === ids[0])
@@ -50,17 +50,17 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
     assert.equal(running?.currentWork, 'Event · arc.one')
     assert.equal(running?.activityAt, '2026-11-02T03:00:00Z')
     renameThread(db, alice, running!.id, 'Character branch')
-    assert.equal(listStoryConversations(db, alice, 'story-' + alice).conversations
+    assert.equal((await listStoryConversations(db, alice, 'story-' + alice)).conversations
       .flatMap(c => c.threads).find(t => t.id === running!.id)?.title, 'Character branch')
     // An updated_at heartbeat must not move a job or silently generate new IDs.
     db.sqlite.prepare("UPDATE studio_sessions SET updated_at='2099-01-01T00:00:00Z' WHERE id=?").run(ids[1])
-    const second = listStoryConversations(db, alice, 'story-' + alice)
+    const second = await listStoryConversations(db, alice, 'story-' + alice)
     assert.deepEqual(second.conversations.map(c => c.id), first.conversations.map(c => c.id))
     assert.equal(second.conversations.flatMap(c => c.threads).find(t => t.jobId === ids[1])?.activityAt,
       '2026-11-01T00:00:00Z')
     db.sqlite.prepare("UPDATE studio_sessions SET generation_request_json='{}' WHERE id=?").run(ids[1])
     db.sqlite.prepare('UPDATE story_thread_runs SET needs_author=1 WHERE job_id=?').run(ids[1])
-    assert.equal(listStoryConversations(db, alice, 'story-' + alice).conversations
+    assert.equal((await listStoryConversations(db, alice, 'story-' + alice)).conversations
       .flatMap(c => c.threads).find(t => t.jobId === ids[1])?.status, 'needs-author')
     const branchId = 'branch:' + randomUUID(), parent = running!.id
     const parentConversation = first.conversations.find(c => c.threads.some(t => t.id === parent))!.id
@@ -68,7 +68,7 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
       (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
       VALUES (?,?,?,?,'Alternative','2026-11-04T00:00:00Z','2026-11-04T00:00:00Z')`)
       .run(branchId, alice, parentConversation, parent)
-    const nested = listStoryConversations(db, alice, 'story-' + alice)
+    const nested = (await listStoryConversations(db, alice, 'story-' + alice))
       .conversations.find(c => c.id === parentConversation)!.threads
     assert.deepEqual(orderThreads(nested, 'tree').map(row => [row.id, row.depth]),
       [[parent, 0], [branchId, 1]])
@@ -77,7 +77,7 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
       VALUES (?,?,?,?,'Crossed','2026-11-04T00:00:00Z','2026-11-04T00:00:00Z')`)
       .run('cross:' + randomUUID(), alice, first.conversations.find(c => c.id !== parentConversation)!.id,
         parent), /FOREIGN KEY/, 'a branch cannot cross Conversations')
-    assert.throws(() => listStoryConversations(db, bob, 'story-' + alice), /not found/i)
+    await assert.rejects(() => listStoryConversations(db, bob, 'story-' + alice), /not found/i)
     assert.throws(() => renameThread(db, bob, running!.id, 'Stolen'), /not found/i)
     assert.throws(() => renameConversation(db, bob, first.conversations[0]!.id, 'Stolen'), /not found/i)
     assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
@@ -98,15 +98,15 @@ test('authors can create, rename and persist navigation preferences, with bounds
       VALUES (?,?,?,'story','Story','now')`).run(story, alice, repo)
     const conversation = createConversation(db, alice, story)
     assert.match(conversation.title, /New conversation/)
-    assert.equal(listStoryConversations(db, alice, story).conversations.length, 1)
+    assert.equal((await listStoryConversations(db, alice, story)).conversations.length, 1)
     renameConversation(db, alice, conversation.id, 'Character alternatives')
-    assert.equal(listStoryConversations(db, alice, story).conversations[0]?.title, 'Character alternatives')
+    assert.equal((await listStoryConversations(db, alice, story)).conversations[0]?.title, 'Character alternatives')
     assert.throws(() => createConversation(db, bob, story), /not found/i)
-    assert.throws(() => saveThreadPreferences(db, bob, story, 'flat', []), /not found/i)
+    await assert.rejects(() => saveThreadPreferences(db, bob, story, 'flat', []), /not found/i)
     assert.throws(() => renameConversation(db, alice, conversation.id, ' '.repeat(5)), /title/i)
     assert.throws(() => renameConversation(db, alice, conversation.id, 'X'.repeat(121)), /title/i)
-    saveThreadPreferences(db, alice, story, 'flat', ['root-1', 'root-1', 'root-2'])
-    assert.deepEqual(listStoryConversations(db, alice, story).preferences,
+    await saveThreadPreferences(db, alice, story, 'flat', ['root-1', 'root-1', 'root-2'])
+    assert.deepEqual((await listStoryConversations(db, alice, story)).preferences,
       { view: 'flat', expandedIds: ['root-1', 'root-2'] })
     assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
   } finally { db.sqlite.close() }

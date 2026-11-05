@@ -1,0 +1,44 @@
+/** Owner-scoped Studio persistence ports. Consumers await every operation so
+ * a future remote PostgreSQL implementation can replace the local adapter.
+ * The owner is always derived from the authenticated session, never input JSON.
+ */
+export type CatalogProvider = 'github' | 'gitlab'
+export type DefaultModelPreference = {
+  provider: string
+  id: string
+  thinking?: 'low' | 'medium' | 'high'
+}
+export type DashboardSnapshot = {
+  repositories: Array<{ id: string; name: string; provider: CatalogProvider }>
+  stories: Array<{ id: string; title: string; repositoryId: string;
+    directory: string; commitSha: string | null }>
+  activeJobs: DashboardJob[]
+  recentSessions: DashboardJob[]
+}
+export type DashboardJob = {
+  id: string; storyId: string; title: string
+  status: 'running' | 'paused' | 'blocked' | 'completed' | 'cancelled'
+  updatedAt: string
+}
+export interface DashboardCatalog {
+  forOwner(ownerUserId: string): Promise<DashboardSnapshot>
+}
+export interface SettingsPreferences {
+  /** Distinguish absent/SQL NULL from a corrupt JSON literal such as 'null'.
+   * The caller validates the stored selection before using it. */
+  getDefaultModel(ownerUserId: string): Promise<{ selection: unknown } | null>
+  putDefaultModel(ownerUserId: string, model: DefaultModelPreference | null, updatedAt: string): Promise<void>
+  listRepositories(ownerUserId: string): Promise<Array<{
+    id: string; provider: CatalogProvider; name: string; connectionId: string | null
+  }>>
+  hasLegacyRepositories(ownerUserId: string, provider: CatalogProvider): Promise<boolean>
+  getThreadPreferences(ownerUserId: string, storyId: string): Promise<{
+    view: 'tree' | 'flat'; expandedIds: string[]
+  } | null>
+  putThreadPreferences(ownerUserId: string, storyId: string, view: 'tree' | 'flat',
+    expandedIds: string[], updatedAt: string): Promise<void>
+}
+export interface StudioPersistence {
+  dashboard: DashboardCatalog
+  settings: SettingsPreferences
+}

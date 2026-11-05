@@ -75,6 +75,6 @@ export const setThreadPreferences = createServerFn({ method: 'POST' })
     return data
   })
   .handler(async ({ data }) => {
-    saveThreadPreferences(database, await ownerId(), data.storyId, data.view, data.expandedIds)
+    await saveThreadPreferences(database, await ownerId(), data.storyId, data.view, data.expandedIds)
     return { success: true }
   })

@@ -84,7 +84,7 @@ function threadStatus(row: ThreadRow): ThreadStatus {
   return 'prepared'
 }
 
-export function listStoryConversations(store: StudioDatabase, owner: string, storyId: string): StoryNavigation {
+export async function listStoryConversations(store: StudioDatabase, owner: string, storyId: string): Promise<StoryNavigation> {
   const story = selectedStory(store, owner, storyId)
   ensureRootThreads(store, owner, storyId)
   const rows = store.sqlite.prepare(`SELECT id,title,created_at AS createdAt,updated_at AS updatedAt
@@ -138,12 +138,8 @@ export function listStoryConversations(store: StudioDatabase, owner: string, sto
     const activityAt = latestActivity([row.createdAt, ...threads.map(thread => thread.activityAt)])
     return { ...row, activityAt, threads }
   }).sort((a, b) => compareActivity(b.activityAt, a.activityAt) || a.id.localeCompare(b.id))
-  const prefs = store.sqlite.prepare(`SELECT view_mode AS view,expanded_ids_json AS expanded
-    FROM story_thread_preferences WHERE owner_user_id=? AND story_id=?`)
-    .get(owner, storyId) as { view: 'tree' | 'flat'; expanded: string } | undefined
-  return { story, conversations, preferences: prefs
-    ? { view: prefs.view, expandedIds: JSON.parse(prefs.expanded) as string[] }
-    : { view: 'tree', expandedIds: [] } }
+  const prefs = await store.persistence.settings.getThreadPreferences(owner, storyId)
+  return { story, conversations, preferences: prefs ?? { view: 'tree', expandedIds: [] } }
 }
 
 export function createConversation(store: StudioDatabase, owner: string, storyId: string) {
@@ -199,17 +195,12 @@ export function restoreThread(store: StudioDatabase, owner: string, id: string):
   setThreadArchive(store, owner, id, false)
 }
 
-export function saveThreadPreferences(store: StudioDatabase, owner: string, storyId: string,
+export async function saveThreadPreferences(store: StudioDatabase, owner: string, storyId: string,
   view: 'tree' | 'flat', expandedIds: string[]) {
   selectedStory(store, owner, storyId)
   if (!['tree', 'flat'].includes(view) || !Array.isArray(expandedIds) || expandedIds.length > 200 ||
       expandedIds.some(id => typeof id !== 'string' || !ID.test(id)))
     throw new Error('Invalid Thread preferences.')
   const unique = [...new Set(expandedIds)]
-  store.sqlite.prepare(`INSERT INTO story_thread_preferences
-    (owner_user_id,story_id,view_mode,expanded_ids_json,updated_at)
-    VALUES (?,?,?,?,?) ON CONFLICT(owner_user_id,story_id) DO UPDATE SET
-    view_mode=excluded.view_mode,expanded_ids_json=excluded.expanded_ids_json,
-    updated_at=excluded.updated_at`)
-    .run(owner, storyId, view, JSON.stringify(unique), new Date().toISOString())
+  await store.persistence.settings.putThreadPreferences(owner, storyId, view, unique, new Date().toISOString())
 }

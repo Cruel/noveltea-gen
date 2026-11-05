@@ -188,7 +188,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.equal(JSON.stringify(commits).includes('.noveltea'), false)
     assert.equal(previousDefault, start)
     assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM stories').get() as {n: number}).n, 1)
-    assert.deepEqual(readUserDashboard(store, user.id).stories.map(story => ({
+    assert.deepEqual((await readUserDashboard(store.persistence.dashboard, user.id)).stories.map(story => ({
       directory: story.directory, commitSha: story.commitSha, repositoryId: story.repositoryId,
     })), [{ directory: 'story', commitSha: committed, repositoryId }])
     assert.equal((await post(payload())).status, 409)

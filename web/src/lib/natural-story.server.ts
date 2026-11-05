@@ -44,7 +44,7 @@ function selectedConversation(store: StudioDatabase, owner: string, conversation
 }
 async function modelOptions(store: StudioDatabase, owner: string) {
   const models = await availableUserPiModels(store, owner)
-  const preferred = readDefaultModel(store, owner)
+  const preferred = await readDefaultModel(store.persistence.settings, owner)
   // Never silently switch a default to an arbitrary connected, billable model.
   // The author can make an explicit alternative selection in advanced settings.
   const defaultModel = preferred && models.some(m =>

@@ -402,6 +402,27 @@ SQLite integrity/foreign-key checks. The application migration journal is
 Normal Studio startup is read-only with respect to schema; missing, stale or
 incompatible migrations (or schema drift) fail closed.
 
+**Persistence expand (#94):** `web/src/persistence/contracts.ts` defines focused,
+owner-scoped, Promise-returning ports for dashboard/catalog reads and settings
+(default model, repository listings, legacy-login guard, and per-Story Thread
+view preferences). `web/src/persistence/sqlite.ts` implements these contracts
+with Drizzle and is assembled by `openStudioDatabase`. HTTP handlers obtain the
+owner from the authenticated session; callers cannot supply a different owner
+through request bodies. For tests, inject a contract implementation directly
+into `readUserDashboard` or as the optional preferences dependency to
+`settingsRequest`. These converted consumers do not read the SQLite driver.
+
+**Transaction convention:** a port method is the unit of work. SQLite methods
+perform all reads/writes synchronously and only return an already-settled
+Promise; a multi-statement atomic method must use a synchronous Drizzle
+transaction callback with **no `await` or asynchronous work inside it**.
+Do not expose a generic cross-adapter async transaction callback: PostgreSQL
+may implement the same owner-scoped business method using its own async
+transaction internally. Old raw-SQL and converted Drizzle paths share the one
+Studio SQLite database and schema throughout this expansion; neither dual
+writes nor data synchronization are used. Other workflows remain raw SQL until
+later migration tickets.
+
 For later schema changes: edit only the Drizzle application schema, run
 `pnpm --filter @noveltea/studio db:generate`, inspect and commit the
 generated SQL, snapshot and journal together. Run
