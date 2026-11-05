@@ -62,7 +62,7 @@ interface RevisionReceipt {
   verifiedHead: string;
   proposalSha256: string;
   authoredFileSha256: string;
-  validatorSha256: string;
+  validatorVersion: string;
   changes: ProtectedDelta[];
   affected: unknown[];
   approvals: ApprovalEvidence[];
@@ -140,7 +140,7 @@ async function readReceipt(job: JobStartResult, id: string): Promise<RevisionRec
   if (data.version !== 1 || data.jobId !== job.jobId || data.workItemId !== id ||
       data.baseSha !== job.baseSha || !SHA.test(data.verifiedHead) ||
       !HASH.test(data.proposalSha256) || !HASH.test(data.authoredFileSha256) ||
-      !HASH.test(data.validatorSha256) || !Array.isArray(data.changes) ||
+      !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(data.validatorVersion) || !Array.isArray(data.changes) ||
       !Array.isArray(data.approvals) || !Array.isArray(data.affected) ||
       !["proposed", "committed"].includes(data.status) ||
       (data.status === "committed" && (!data.commitSha || !SHA.test(data.commitSha)))) {
@@ -367,7 +367,7 @@ async function inspectProposal(job: JobStartResult, target: string, head: string
     return {
       changes: [...combined.values()].sort((a,b) => a.decision.localeCompare(b.decision) || a.base.localeCompare(b.base)),
       affected: [...initial.affected, ...latest.affected],
-      validatorSha256: original.validator.sha256,
+      validatorVersion: original.validator.version,
     };
   });
   return { proposalSha256, authoredFileSha256: sha(content), ...out };
@@ -415,7 +415,7 @@ async function assertOriginalProposedChanges(job: JobStartResult, receipt: Revis
   const verified = await inspectProposal(job, receipt.target, receipt.verifiedHead, undefined, bytes);
   if (verified.proposalSha256 !== receipt.proposalSha256 ||
       verified.authoredFileSha256 !== receipt.authoredFileSha256 ||
-      verified.validatorSha256 !== receipt.validatorSha256 ||
+      verified.validatorVersion !== receipt.validatorVersion ||
       JSON.stringify(verified.changes) !== JSON.stringify(receipt.changes)) {
     throw new Error("Revision receipt protected-change inventory differs from canonical Git comparison.");
   }
@@ -527,7 +527,7 @@ export async function runRevisionAction(input: RevisionOptions, alreadyLocked = 
       if (receipt) {
         validateCurrent(receipt, proposal.proposalSha256, head);
         if (receipt.authoredFileSha256 !== proposal.authoredFileSha256 ||
-            receipt.validatorSha256 !== proposal.validatorSha256 ||
+            receipt.validatorVersion !== proposal.validatorVersion ||
             JSON.stringify(receipt.changes) !== JSON.stringify(proposal.changes)) {
           throw new Error("Existing proposal evidence changed; new work-item ID required.");
         }
@@ -567,7 +567,7 @@ export async function runRevisionAction(input: RevisionOptions, alreadyLocked = 
     const current = await inspectProposal(job, receipt.target, head, input.validatorSource);
     validateCurrent(receipt, current.proposalSha256, head);
     if (JSON.stringify(current.changes) !== JSON.stringify(receipt.changes) ||
-        current.validatorSha256 !== receipt.validatorSha256) {
+        current.validatorVersion !== receipt.validatorVersion) {
       throw new Error("Canonical protected changes or pinned validator differ from the reviewed proposal.");
     }
     if (input.action === "status") return publicStatus(receipt, unrelated);

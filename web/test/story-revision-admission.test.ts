@@ -66,6 +66,10 @@ async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'concurrent'
   const cli = join(root, 'noveltea')
   writeFileSync(cli, `#!/usr/bin/env node
 const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === '--version') {
+  process.stdout.write('1.0.0\\n');
+  process.exit(0);
+}
 const ready = args.includes('readiness');
 const base = args[args.indexOf('--base') + 1];
 const catalog = ${JSON.stringify(catalog)};

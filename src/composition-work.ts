@@ -54,7 +54,7 @@ interface Receipt {
   commitSha?: string; sessionFile?: string; reviewSessionFile?: string;
   reviewedDigest?: string; reviewedEvidence?: SemanticReview;
   skillReads?: string[]; obligations?: string[]; conflicts?: string[]; failure?: string;
-  validation?: { protectionBase: string; validatorSha256: string; branchReview: ReviewEvidence;
+  validation?: { protectionBase: string; validatorVersion: string; branchReview: ReviewEvidence;
     eventCoverage: Array<{ id: string; witness: string[] }> };
 }
 export interface CompositionOptions {
@@ -653,7 +653,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         const sha = git(job, "rev-parse", "HEAD");
         verifyCommit(job, s, sha);
         s.commitSha = sha; s.phase = "committed";
-        s.validation = { protectionBase: base, validatorSha256: result.validator.sha256,
+        s.validation = { protectionBase: base, validatorVersion: result.validator.version,
           branchReview, eventCoverage: structural.eventCoverage };
         delete s.failure; await save(file, s);
         await publishHead(job, base, sha, s.workItemId);

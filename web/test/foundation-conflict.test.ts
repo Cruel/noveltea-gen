@@ -47,12 +47,11 @@ function fixtureState(job: JobStartResult, options: { tool?: string; committed?:
 
 test('completed no-write Foundation blocks safely and requires exact human authorization', { timeout: 45_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-foundation-conflict-'))
-  const keys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_NATIVE_CLI', 'NT_VALIDATOR_TEST_LEGACY'] as const
+  const keys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_NATIVE_CLI'] as const
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]))
   process.env.NT_STATE_DIR = join(root, 'state')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_NATIVE_CLI = resolve(process.env.NT_NATIVE_CLI || '/home/thomas/dev/nt/build/cli/linux/noveltea')
-  delete process.env.NT_VALIDATOR_TEST_LEGACY
   try {
     if (!existsSync(process.env.NT_NATIVE_CLI)) return
     const repo = join(root, 'repo'), story = join(repo, 'story')

@@ -23,7 +23,7 @@ function fixture(name: string) {
   git(repo, "config", "user.email", "author@example.test");
   git(repo, "add", "."); git(repo, "commit", "-qm", "Author baseline");
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
-    NT_SKILL_CACHE_DIR: join(root, "skills"), NT_VALIDATOR_CACHE_DIR: join(root, "validators") };
+    NT_SKILL_CACHE_DIR: join(root, "skills"),  };
   const contractPath = join(root, name + "-scope.json");
   const contract = (targets: string[], depth: string, branches: string[] = []) => {
     writeFileSync(contractPath, JSON.stringify({

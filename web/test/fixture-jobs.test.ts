@@ -54,14 +54,12 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-studio-fixture-'))
   const old = Object.fromEntries(['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_STUDIO_SKILLS_SOURCE',
-    'NT_CONFIG_FILE', 'NT_VALIDATOR_TEST_LEGACY', 'NT_VALIDATOR_CACHE_DIR',
+    'NT_CONFIG_FILE',
     'NT_SKILL_CACHE_DIR', 'NT_LIVE_GENERATION_IDEA'].map(key => [key, process.env[key]]))
   process.env.NT_STATE_DIR = join(root, 'durable')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STUDIO_SKILLS_SOURCE = skills
   process.env.NT_CONFIG_FILE = join(root, 'config.json')
-  process.env.NT_VALIDATOR_TEST_LEGACY = '1'
-  process.env.NT_VALIDATOR_CACHE_DIR = join(root, 'validators')
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshots')
   delete process.env.NT_LIVE_GENERATION_IDEA
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))
@@ -221,6 +219,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
         NT_SANDBOX_TOKEN_FILE: join(root, 'fixture-controller-token'), NT_REQUIRE_SANDBOX_TOOLS: '1',
       },
     })
+    let workerStderr = ''
+    worker.stderr?.on('data', (chunk: Buffer) => { workerStderr += chunk.toString() })
     let ready = false
     for (let i = 0; i < 100; i++) {
       if (worker.exitCode !== null) break
@@ -232,7 +232,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       } catch { /* separate process still starting */ }
       await new Promise(resolve => setTimeout(resolve, 75))
     }
-    assert.equal(ready, true, 'independent agent process must start and drain queued work')
+    assert.equal(ready, true, 'independent agent process must start and drain queued work: ' + workerStderr.slice(-4000))
     const liveFirst = await liveReader.read()
     assert.match(new TextDecoder().decode(liveFirst.value), /event: progress\ndata: .*"kind":"started"/)
     const deadline = Date.now() + 30_000

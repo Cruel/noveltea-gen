@@ -62,9 +62,8 @@ function fixtureReport() {
 function validated(report: ReturnType<typeof fixtureReport>): ValidationResult {
   return { status: "rejected", report, contract: "noveltea-validator/v1", jobId: "fixture",
     worktreeStoryRoot: "/fixture/story", baseSha: "expected", exitCode: 1,
-    validator: { contract: "noveltea-validator/v1", implementation: "canonical-typescript-bundle",
-      sha256: "a".repeat(64), sourceSha256: "b".repeat(64), sourceCommit: "c".repeat(40),
-      sourceDirty: false, sourceCheckout: "/fixture/skills" },
+    validator: { contract: "noveltea-validator/v1", implementation: "native-cli",
+      sha256: "a".repeat(64), executable: "/fixture/noveltea" },
   } as ValidationResult;
 }
 test("partial scope ignores unrelated catalog failures, full scope requires the other Arc", () => {
@@ -174,7 +173,7 @@ Ada questions Neri about the missing witness.
     const initial = git(dir, "rev-parse", "HEAD");
     const env = { ...process.env, NT_STATE_DIR: join(root, "public-state"),
       NT_CONFIG_FILE: join(root, "missing-config.json"),
-      NT_SKILL_CACHE_DIR: join(root, "snapshots"), NT_VALIDATOR_CACHE_DIR: join(root, "validators") };
+      NT_SKILL_CACHE_DIR: join(root, "snapshots"),  };
     function cli(args: string[], jobId = "review-fixture") {
       const x = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
         "job", ...args, "--story", story, "--job", jobId], {

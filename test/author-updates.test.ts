@@ -57,7 +57,7 @@ The witness disappears and no one agrees why.
     ["--import", "tsx", cli, "job", ...args, "--story", story, "--job", "draft"], {
       encoding: "utf8", timeout: 90000, env: { ...process.env, NT_STATE_DIR: state,
         NT_CONFIG_FILE: join(root, name + "-config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-        NT_VALIDATOR_CACHE_DIR: join(root, "validators") },
+         },
     });
   const ok = (result: ReturnType<typeof run>): any => {
     assert.equal(result.status, 0, result.stderr);
@@ -152,8 +152,7 @@ test("foundation generation processes queued author ideas automatically before i
   x.send({ id: "idea-before-foundation", kind: "idea",
     payload: x.idea("An unplaced scene the foundation writer must not see") });
   const run = x.ok(x.run("foundation", "--fixture", "--mode", "autonomous",
-    "--task", "The missing witness must be found", "--skills-source", source,
-    "--validator-source", source));
+    "--task", "The missing witness must be found", "--skills-source", source));
   assert.equal(run.status, "committed");
   assert.equal(x.inspect().records[0].acknowledgement.phase, "applied");
   assert.equal(git(x.job.worktreeRoot, "rev-list", "--count", x.base + "..HEAD"), "2");
@@ -501,7 +500,7 @@ test("an exact signed protected-decision approval resumes its own graph gate wit
   writeFileSync(target, readFileSync(target, "utf8").replace(
     "The witness must survive", "The witness may disappear permanently"));
   const proposed = x.ok(x.run("revision", "inspect", "--work-item", "change-witness",
-    "--path", "creative-direction/foundation.md", "--validator-source", source));
+    "--path", "creative-direction/foundation.md"));
   assert.equal(proposed.protectedChanges.length, 1);
   const change = proposed.protectedChanges[0];
   x.send({ id: "sign-witness", kind: "approval", payload: {

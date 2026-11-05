@@ -5,10 +5,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { nativeExecutable } from "../src/validator.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-foundation-"));
 after(() => removeTestTree(root));
 const cli = resolve("src/cli.ts");
+let nativeAvailable = false;
+try { nativeAvailable = existsSync(nativeExecutable()); } catch { /* Offline CI does not include native CLI. */ }
+const nativeTest = nativeAvailable ? test : test.skip;
 
 function git(root: string, ...args: string[]) {
   const run = spawnSync("git", args, { cwd: root, encoding: "utf8" });
@@ -64,7 +68,6 @@ function fixtureCheckout(name: string) {
   git(source, "init", "-q");
   git(source, "config", "user.name", "Test");
   git(source, "config", "user.email", "test@example.test");
-  mkdirSync(join(source, "src"));
   for (const name of ["nt-story-discovery", "nt-catalog"]) {
     mkdirSync(join(source, "skills", name, "references"), { recursive: true });
     writeFileSync(join(source, "skills", name, "SKILL.md"), "# " + name + "\n");
@@ -72,45 +75,8 @@ function fixtureCheckout(name: string) {
   for (const name of ["records.md", "authority-and-validation.md", "glossary.md"]) {
     writeFileSync(join(source, "skills/nt-catalog/references", name), "# " + name + "\n");
   }
-  writeFileSync(join(source, "package.json"), JSON.stringify({ name: "noveltea-story-catalog" }));
-  writeFileSync(join(source, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
-  writeFileSync(join(source, "src/cli.ts"), `
-import { existsSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { join, relative } from "node:path";
-const story = process.argv[2];
-const baseIndex = process.argv.indexOf("--base");
-const base = baseIndex < 0 ? execFileSync("git", ["rev-parse", "HEAD"], { cwd: story, encoding: "utf8" }).trim() : process.argv[baseIndex + 1];
-const target = join(story, "creative-direction/foundation.md");
-const data = existsSync(target) ? readFileSync(target, "utf8") : "";
-const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: story, encoding: "utf8" }).trim();
-const rel = relative(gitRoot, target).split("\\\\").join("/");
-let previous = "";
-try { previous = execFileSync("git", ["show", base + ":" + rel], { cwd: story, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); }
-catch {}
-const hasBaseline = !!execFileSync("git", ["ls-tree", "-r", "--name-only", base, "--", relative(gitRoot, story)],
-  { cwd: gitRoot, encoding: "utf8" }).toString().trim().match(/\\.md/);
-const altered = previous.includes("The genre must remain mystery") && !data.includes("The genre must remain mystery");
-const diagnostics = data.includes("INVALID") ? [{ path: "creative-direction/foundation.md", line: 3, code: "invalid", message: "Invalid foundation" }] : [];
-const report = {
-  records: [], diagnostics,
-  readiness: { design: { stages: { foundation: { minimum: data ? "passed" : "needs-work" } } } },
-  coverage: { unverified: ["editorial-quality"] },
-  protection: { status: hasBaseline ? "checked" : "no-baseline", base,
-    changes: altered ? [{decision:"creative-direction.foundation#user-genre", kind:"changed"}] : [],
-    warnings: altered ? [{code:"protected-decision-change"}] : [],
-    impact: { changed: [], moved: [], affected: [] } }
-};
-if (!hasBaseline && process.argv.includes("--strict-protection")) {
-  console.error("Git baseline does not contain Story Markdown files");
-  process.exitCode = 2;
-} else {
-  console.log(JSON.stringify(report));
-  process.exitCode = altered || diagnostics.length ? 1 : 0;
-}
-`);
   git(source, "add", ".");
-  git(source, "commit", "-qm", "Skills and validator");
+  git(source, "commit", "-qm", "Pinned skills fixture");
   return source;
 }
 const source = fixtureCheckout("pinned-source");
@@ -119,7 +85,6 @@ function launch(args: string[], name: string) {
   return spawnSync(process.execPath, ["--import", "tsx", cli, "job", ...args], {
     cwd: resolve("."), encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, NT_STATE_DIR: state, NT_SKILL_CACHE_DIR: join(root, "skills-cache"),
-      NT_VALIDATOR_CACHE_DIR: join(root, "validator-cache"), NT_VALIDATOR_TEST_LEGACY: "1",
       NT_CONFIG_FILE: join(root, "test-config.json") },
   });
 }
@@ -137,7 +102,7 @@ function foundation(story: string, name: string, ...args: string[]) {
   return { result, data: result.stdout ? JSON.parse(result.stdout) : undefined };
 }
 
-test("public CLI authors a new empty Story in its job branch, without writing source/engine records", () => {
+nativeTest("public CLI authors a new empty Story in its job branch, without writing source/engine records", () => {
   const { repo, story, baseline } = repository("empty");
   const job = start(story, "empty");
   const { result, data } = foundation(story, "empty",
@@ -145,7 +110,7 @@ test("public CLI authors a new empty Story in its job branch, without writing so
     "--envelope", "A visual novel with two reusable backgrounds");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(data.status, "committed");
-  assert.equal(data.validation, "unverified-empty-baseline");
+  assert.equal(data.validation, "passed");
   assert.equal(data.baseSha, baseline);
   assert.equal(data.skillReads.length, 5);
   assert.match(data.commitSha, /^[a-f0-9]{40}$/);
@@ -168,7 +133,7 @@ test("public CLI authors a new empty Story in its job branch, without writing so
   assert.equal(git(job.worktreeRoot, "rev-list", "--count", baseline + "..HEAD"), "1");
 });
 
-test("public foundation CLI pauses before writer start and resumes after raising the budget", () => {
+nativeTest("public foundation CLI pauses before writer start and resumes after raising the budget", () => {
   const { repo, story, baseline } = repository("budget-pause");
   const job = start(story, "budget-pause");
   const configure = (max: number) => launch(["pi", "configure", "--story", story, "--job", "first",
@@ -197,7 +162,7 @@ test("public foundation CLI pauses before writer start and resumes after raising
   assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
 });
 
-test("missing required model fails before starting any foundation writer", () => {
+nativeTest("missing required model fails before starting any foundation writer", () => {
   const { story, baseline } = repository("model-unavailable");
   const job = start(story, "model-unavailable");
   const attempt = launch(["foundation", "--story", story, "--job", "first",
@@ -211,7 +176,7 @@ test("missing required model fails before starting any foundation writer", () =>
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
 });
 
-test("onboarding idea commits remain independent and foundation continues from their verified HEAD", () => {
+nativeTest("onboarding idea commits remain independent and foundation continues from their verified HEAD", () => {
   const { repo, story, baseline } = repository("inbox-before-foundation");
   const job = start(story, "inbox-before-foundation");
   const input = join(root, "onboarding-idea.json");
@@ -246,7 +211,7 @@ test("onboarding idea commits remain independent and foundation continues from t
   assert.equal(foundation(story, "inbox-before-foundation").result.status, 0);
 });
 
-test("existing protected foundation is preserved and validated against the trusted base", () => {
+nativeTest("existing protected foundation is preserved and validated against the trusted base", () => {
   const { repo, story, baseline } = repository("existing", true);
   const job = start(story, "existing");
   const { result, data } = foundation(story, "existing",
@@ -261,7 +226,7 @@ test("existing protected foundation is preserved and validated against the trust
     "story/creative-direction/foundation.md");
 });
 
-test("collaborative discovery pauses without writes and preserves author response as user-protected", () => {
+nativeTest("collaborative discovery pauses without writes and preserves author response as user-protected", () => {
   const { story } = repository("collaboration");
   const job = start(story, "collab");
   const initial = foundation(story, "collab", "--mode", "collaborative",
@@ -290,7 +255,7 @@ test("collaborative discovery pauses without writes and preserves author respons
   assert.match(changedBrief.result.stderr, /inputs differ/);
 });
 
-test("unexpected staged or out-of-scope files block the commit and preserve job files", () => {
+nativeTest("unexpected staged or out-of-scope files block the commit and preserve job files", () => {
   for (const [name, path, stage] of [
     ["staged", "creative-direction/foundation.md", true],
     ["outside", "engine-record.md", false],
@@ -312,7 +277,7 @@ test("unexpected staged or out-of-scope files block the commit and preserve job 
 });
 
 
-test("opt-in real canonical catalog validates a fixture-authored empty Story", {
+nativeTest("opt-in real canonical catalog validates a fixture-authored empty Story", {
   skip: !existsSync(join(process.env.NT_SKILLS_CHECKOUT || resolve("../noveltea-skills"), "src/cli.ts"))
     ? "noveltea-skills checkout unavailable" : false,
 }, () => {
@@ -321,20 +286,23 @@ test("opt-in real canonical catalog validates a fixture-authored empty Story", {
   const job = start(story, "real-catalog");
   const { result, data } = foundation(story, "real-catalog",
     "--task", "A train mystery set in a single compartment",
-    "--skills-source", canonical, "--validator-source", canonical);
+    "--skills-source", canonical);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(data.status, "committed");
-  assert.equal(data.validation, "unverified-empty-baseline");
+  assert.equal(data.validation, "passed");
   assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
 });
 
-test("validator rejection leaves agent work uncommitted and does not certify completion", () => {
-  const { story } = repository("rejection");
+nativeTest("validator rejection leaves agent work uncommitted and does not certify completion", () => {
+  const { story } = repository("rejection", true);
   const job = start(story, "reject");
-  const bad = foundation(story, "reject", "--task", "INVALID forbidden fixture");
+  const path = join(job.worktreeStoryRoot, "creative-direction/foundation.md");
+  const original = readFileSync(path, "utf8");
+  writeFileSync(path, original.replace("central_conflict:", "unsupported_field: true\ncentral_conflict:"));
+  const bad = foundation(story, "reject", "--task", "An archive mystery");
   assert.notEqual(bad.result.status, 0);
-  assert.match(bad.result.stderr, /foundation validation failed|not passing/i);
+  assert.match(bad.result.stderr, /validation failed|not passing|unexpected|dirty/i);
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), job.baseSha);
-  assert.match(readFileSync(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"), /INVALID/);
+  assert.match(readFileSync(path, "utf8"), /unsupported_field/);
 });

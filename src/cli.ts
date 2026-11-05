@@ -93,8 +93,6 @@ Job start:
   --story <path>     Required existing canonical Story directory within a Git worktree
   --job <id>         Required stable logical job ID (reopen by repeating the same ID)
   --noveltea-project <path>  Optional future engine project root (start only; metadata)
-  --validator-source <path>  Legacy pinned jobs only (new jobs use native CLI)
-                           (otherwise uses configured novelteaSkills)
 
 Job revision:
   inspect            Record the exact proposed Story Markdown change and canonical Git impact
@@ -116,7 +114,6 @@ Job architecture:
   --digest <sha256>        Exact reviewed candidate digest from inspect (reconcile only)
   --approval <file>         Recorded controller reference JSON {receiptId,nonce}
   --skills-source <path>   NovelTea skills checkout to pin
-  --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
   --fixture                Deterministic test adapter, not live Pi evidence
 
@@ -124,7 +121,6 @@ Job foundations (Character and World foundations after architecture):
   run|inspect|reconcile   Serialize and safely recover Worldbuilding and Character specialist work units
   --digest <sha256>        Exact inspected authored-bytes digest for explicit recovery
   --skills-source <path>   Pinned NovelTea skills checkout (first run)
-  --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model      Real Pi specialist model (default openai/gpt-6-luna)
   --fixture                Deterministic test adapter, not live Pi evidence
 
@@ -132,7 +128,6 @@ Job interactive (Choice Point and Puzzle alternatives after Event design):
   run|inspect             Two serialized pinned specialists with independent validation/commits
   --milestone <id>        Required typed Milestone ID from completed Event work item
   --skills-source <path>  NovelTea skills checkout to pin (first run)
-  --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
   --thinking low|medium|high     Explicit thinking effort for both Pi specialists
   --fixture               Deterministic test adapter, not live Pi evidence
@@ -141,7 +136,6 @@ Job composition (branch-aware Authored Content after interactive design):
   run|inspect             Pinned composition specialist, independent branch-prose review, and commit
   --milestone <id>        Required typed Milestone ID from committed interactive work
   --skills-source <path>  NovelTea skills checkout to pin (first run)
-  --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
   --thinking low|high     Explicit thinking effort for writer and reviewer
   --fixture               Structural/lexical test adapter, NOT independent literary proof
@@ -154,7 +148,6 @@ Job report (read-only generation outcome and integration evidence):
 
 Job merge preview (non-destructive integration assessment):
   --story, --job        Existing Story job; compares the job branch with the author's committed HEAD
-  --validator-source   Legacy validator source (compatibility only)
   --skills-source      NovelTea skills checkout for independent read-only narrative review
   --provider, --model, --thinking low|high  Independent Pi reviewer profile
   --fixture            Deterministic-only preview; literary conflicts explicitly unverified
@@ -163,7 +156,6 @@ Job merge preview (non-destructive integration assessment):
 Job review (independent end-of-scope completion assessment):
   run|inspect           Validate the versioned scope, review alternate routes and editorial quality
   --skills-source <path> Pinned nt-narrative-review and nt-catalog source (first run)
-  --validator-source <path> Legacy validator source (compatibility only)
   --provider, --model   Pi reviewer and bounded composition repair specialist
   --thinking low|high  Explicit thinking effort
   --fixture             Deterministic structural checks ONLY, never an editorial pass
@@ -172,7 +164,6 @@ Job event (bounded Event-design work item after Character/World foundations):
   run|inspect             Run or inspect a pinned nt-event-design Milestone work item
   --milestone <id>        Required typed Milestone ID from the approved architecture plan
   --skills-source <path>  NovelTea skills checkout to pin (first run)
-  --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model     Pi specialist provider/model (default openai/gpt-6-luna)
   --fixture               Deterministic tests only, not real Pi evidence
 
@@ -214,7 +205,6 @@ Job foundation:
   --envelope <text>        Author's narrative/presentation constraints
   --author-input <text>    Respond to the collaborative discovery handoff
   --skills-source <path>   NovelTea skills checkout to pin (or configured checkout)
-  --validator-source <path>  Legacy validator source (compatibility only)
   --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
   --fixture                Deterministic test adapter, not live Pi evidence
 
@@ -345,6 +335,9 @@ function parseJobOptions(
 }
 
 async function main(): Promise<void> {
+  if (process.argv.slice(2).some(arg =>
+    arg === "--validator-source" || arg.startsWith("--validator-source=")))
+    throw new Error("--validator-source has been removed; all Story validation uses the native NovelTea CLI.");
   if (process.argv[2] === "job" && process.argv[3] === "approval") {
     const args = process.argv.slice(4);
     const action = args.shift();

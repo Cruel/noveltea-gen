@@ -31,14 +31,12 @@ test('authenticated GitHub draft publication previews canonical validation, push
   skip: !available, timeout: 180_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-github-publish-'))
-  const originals = Object.fromEntries(['NT_STATE_DIR','NT_GIT_CACHE_DIR','NT_VALIDATOR_TEST_LEGACY',
-    'NT_STUDIO_SKILLS_SOURCE','NT_VALIDATOR_CACHE_DIR','NT_CONFIG_FILE'].map(k => [k, process.env[k]]))
+  const originals = Object.fromEntries(['NT_STATE_DIR','NT_GIT_CACHE_DIR',
+    'NT_STUDIO_SKILLS_SOURCE','NT_CONFIG_FILE'].map(k => [k, process.env[k]]))
   const originalFetch = globalThis.fetch
   process.env.NT_STATE_DIR = join(root, 'state')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
-  process.env.NT_VALIDATOR_CACHE_DIR = join(root, 'validators')
   process.env.NT_STUDIO_SKILLS_SOURCE = skills
-  process.env.NT_VALIDATOR_TEST_LEGACY = '1'
   process.env.NT_CONFIG_FILE = join(root, 'config.json')
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))
   let store = openStudioDatabase(join(root, 'studio.sqlite'))

@@ -12,7 +12,7 @@ async function main(args: string[]) {
     if (name === "--fixture") { values.set(name, "true"); continue; }
     const value = args[++i];
     if (!value || value.startsWith("--") || !["--story", "--job", "--task", "--contract",
-      "--provider", "--model", "--skills-source", "--validator-source"].includes(name)) {
+      "--provider", "--model", "--skills-source"].includes(name)) {
       throw new Error("Usage: pnpm studio:input --story <existing-story> --job <id> --task <objective> --contract <json-file> [--fixture] [--skills-source <path>]");
     }
     values.set(name, value);
@@ -23,7 +23,7 @@ async function main(args: string[]) {
   const contract = parseGenerationContract(JSON.parse(await readFile(file, "utf8")));
   process.stdout.write(JSON.stringify({ request: { story: selected.storyRoot, job, task, contract,
     fixture: values.has("--fixture"), provider: values.get("--provider"), model: values.get("--model"),
-    skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source") } }, null, 2) + "\n");
+    skillsSource: values.get("--skills-source") } }, null, 2) + "\n");
 }
 main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`noveltea-gen studio input: ${error instanceof Error ? error.message : "error"}\n`);

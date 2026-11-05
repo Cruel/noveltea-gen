@@ -6,6 +6,7 @@ import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import type { GenerationEvidence } from "./generation-plan.js";
 import type { CompletionContract } from "./architecture.js";
 import { openSkillSnapshot } from "./snapshot.js";
+import { assertNativeVersion } from "./native-cli-version.js";
 import { RecoveryCompatibilityError, type RecoveryToolchain } from "./recovery-compatibility.js";
 
 // Heterogeneous specialist receipts are retained as evidence, not executable
@@ -38,7 +39,7 @@ export function readRecoveryFork(job: JobStartResult, requireReady = true): Reco
       bundle.toolchain?.runtime?.continuationSchema !== "noveltea-fork/v2" ||
       typeof bundle.toolchain?.runtime?.nodeVersion !== "string" ||
       bundle.toolchain?.validator?.implementation !== "native-cli" ||
-      !/^[a-f0-9]{64}$/.test(bundle.toolchain?.validator?.sha256 ?? "") ||
+      !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(bundle.toolchain?.validator?.version ?? "") ||
       !/^[a-f0-9]{64}$/.test(bundle.toolchain?.skills?.id ?? "") ||
       bundle.childId !== job.jobId || bundle.storyRoot !== job.storyRoot ||
       bundle.sourceJobId !== pin.sourceJobId || bundle.sourceBaseSha !== pin.sourceBaseSha ||
@@ -57,14 +58,10 @@ export async function verifyReadyRecoveryFork(job: JobStartResult): Promise<void
   let bundle: RecoveryForkBundle;
   try {
     bundle = readRecoveryFork(job)!;
-    const file = join(job.stateDir, "validator.json");
-    const pin = JSON.parse(regular(file)) as RecoveryToolchain["validator"];
+    assertNativeVersion(job.validatorVersion);
     if (bundle.toolchain.runtime.nodeVersion !== process.version ||
-        job.validatorSha256 !== bundle.toolchain.validator.sha256 ||
-        pin.sha256 !== bundle.toolchain.validator.sha256 ||
-        pin.executable !== bundle.toolchain.validator.executable ||
-        pin.contract !== bundle.toolchain.validator.contract ||
-        createHash("sha256").update(readFileSync(pin.executable)).digest("hex") !== pin.sha256 ||
+        job.validatorVersion !== bundle.toolchain.validator.version ||
+        bundle.toolchain.validator.contract !== "noveltea-validator/v1" ||
         await openSkillSnapshot(bundle.toolchain.skills.id) !== bundle.toolchain.skills.path)
       throw new Error("pinned tool identities changed");
   } catch {

@@ -1,14 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import { authorizedFoundationException } from "./foundation-conflict.js";
 import { nativeValidate } from "./native-validator.js";
-import { nativeExecutable, type NativeValidatorPin } from "./validator.js";
+import { nativeVersion } from "./native-cli-version.js";
+import type { NativeValidatorPin } from "./validator.js";
 
 const HASH = /^[a-f0-9]{64}$/;
+const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const SHA = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const path = (job: JobStartResult, name: string) => join(job.stateDir, name);
 const AUDIT = "validator-upgrade.json";
@@ -42,37 +44,33 @@ async function atomic(file: string, value: unknown) {
 function native(value: unknown): value is NativeValidatorPin {
   const p = value as Partial<NativeValidatorPin> | null;
   return !!p && p.contract === "noveltea-validator/v1" && p.implementation === "native-cli" &&
-    typeof p.executable === "string" && isAbsolute(p.executable) && HASH.test(p.sha256 ?? "");
+    typeof p.version === "string" && VERSION.test(p.version);
 }
 async function identity(job: JobStartResult) {
   const manifest = await json(path(job, "job.json"));
-  const saved = await json(path(job, "validator.json"));
-  if (!native(saved) || manifest.jobId !== job.jobId ||
-      manifest.threadId !== job.threadId || manifest.baseSha !== job.baseSha ||
-      manifest.branch !== job.branch || manifest.worktreeRoot !== job.worktreeRoot ||
-      manifest.validatorSha256 !== saved.sha256 ||
-      job.validatorSha256 !== saved.sha256)
-    throw Error("Job manifest and pinned validator receipt differ; an operator must reconcile them.");
-  return { manifest, previous: saved };
+  if (manifest.jobId !== job.jobId || manifest.threadId !== job.threadId ||
+      manifest.baseSha !== job.baseSha || manifest.branch !== job.branch ||
+      manifest.worktreeRoot !== job.worktreeRoot ||
+      manifest.validatorVersion !== job.validatorVersion || !VERSION.test(job.validatorVersion))
+    throw Error("Job manifest and saved validator version differ; an operator must reconcile them.");
+  return { manifest, previous: {
+    contract: "noveltea-validator/v1" as const,
+    implementation: "native-cli" as const,
+    version: job.validatorVersion,
+  } };
 }
-async function currentCandidate() {
-  const executable = await realpath(nativeExecutable());
-  const st = await lstat(executable);
-  if (!st.isFile() || st.isSymbolicLink()) throw Error("Replacement validator must be a regular trusted executable.");
-  const sha256 = SHA(await readFile(executable));
-  return { contract: "noveltea-validator/v1" as const, implementation: "native-cli" as const,
-    executable, sha256 };
+function currentCandidate(): NativeValidatorPin {
+  return { contract: "noveltea-validator/v1", implementation: "native-cli", version: nativeVersion() };
 }
 function proposalDigest(candidate: Omit<Candidate, "proposalSha256">) {
   return SHA(JSON.stringify(candidate));
 }
 function validateReceipt(value: Record<string, unknown>, job: JobStartResult): Receipt {
   const r = value as unknown as Receipt;
-  const { proposalSha256: digest, ...proposal } = r;
-  const immutable = { version: proposal.version, jobId: proposal.jobId, threadId: proposal.threadId,
-    baseSha: proposal.baseSha, headSha: proposal.headSha, conflictDigest: proposal.conflictDigest,
-    previous: proposal.previous, replacement: proposal.replacement, validationDigest: proposal.validationDigest,
-    diagnostics: proposal.diagnostics };
+  const immutable = { version: r.version, jobId: r.jobId, threadId: r.threadId,
+    baseSha: r.baseSha, headSha: r.headSha, conflictDigest: r.conflictDigest,
+    previous: r.previous, replacement: r.replacement, validationDigest: r.validationDigest,
+    diagnostics: r.diagnostics };
   if (r.version !== 1 || r.jobId !== job.jobId || r.threadId !== job.threadId ||
       r.baseSha !== job.baseSha || !HASH.test(r.conflictDigest) ||
       !native(r.previous) || !native(r.replacement) || !HASH.test(r.validationDigest) ||
@@ -88,32 +86,26 @@ async function journal(job: JobStartResult): Promise<Receipt | null> {
   const f = path(job, AUDIT);
   return existsSync(f) ? validateReceipt(await json(f), job) : null;
 }
-/** Only the clean, completed Foundation refusal with the author's exact
- * authorization permits replacing a missing validator. Later committed stages
- * require a separate history-aware migration, never a silent repin. */
+/** Only a clean, completed Foundation refusal with the author's exact
+ * authorization permits changing the job's CLI version. */
 async function safeBoundary(job: JobStartResult) {
   const conflict = await authorizedFoundationException(job);
   if (!conflict || conflict.retryUsed || git(job, "rev-parse", "HEAD") !== job.baseSha ||
       git(job, "status", "--porcelain=v1", "--untracked-files=all") ||
       existsSync(path(job, "revisions/verified-head.json")))
-    throw Error("Validator changes require a clean, authorized no-write Foundation boundary.");
+    throw Error("Validator version changes require a clean, authorized no-write Foundation boundary.");
   return conflict;
 }
 async function candidate(job: JobStartResult): Promise<Candidate | null> {
   const conflict = await safeBoundary(job);
   const { previous } = await identity(job);
-  const replacement = await currentCandidate();
-  if (replacement.sha256 === previous.sha256 && replacement.executable === previous.executable)
-    return null;
-  const before = SHA(await readFile(replacement.executable));
+  const replacement = currentCandidate();
+  if (replacement.version === previous.version) return null;
   const validation = nativeValidate(job, replacement);
-  const after = SHA(await readFile(replacement.executable));
-  if (before !== replacement.sha256 || after !== replacement.sha256)
-    throw Error("Replacement validator changed during preflight.");
   if (validation.status !== "passed" || validation.report?.protection == null ||
       (validation.report.protection as { status?: string }).status !== "checked" ||
       (validation.report?.diagnostics as unknown[] | undefined)?.length !== 0)
-    throw Error("Replacement validator does not pass the unchanged Story: " +
+    throw Error("Replacement CLI version does not pass the unchanged Story: " +
       (validation.error ?? validation.status));
   const immutable = {
     version: 1 as const, jobId: job.jobId, threadId: job.threadId, baseSha: job.baseSha,
@@ -128,10 +120,8 @@ export async function inspectValidatorUpgrade(job: JobStartResult) {
   const preview = await candidate(job);
   return { proposal: preview, phase: preview ? "review-required" as const : "unchanged" as const };
 }
-/** Controller-only; caller MUST hold the per-Story writer lock and verify
- * queue is idle, job ownership and same-origin authentication before invoking.
- * Journal is written before both identity files; an interrupted publication
- * remains inspectable and can only be completed for the same approved digest. */
+/** Author-approved upgrade atomically changes the version in job.json. The
+ * journal is written first for crash recovery; no executable bytes are read. */
 export async function approveValidatorUpgrade(job: JobStartResult,
   digest: string, rationale: string, principal: string): Promise<Receipt> {
   if (!HASH.test(digest) || !/^user:[A-Za-z0-9_-]{1,128}$/.test(principal) ||
@@ -150,29 +140,22 @@ export async function approveValidatorUpgrade(job: JobStartResult,
       authorizedAt: new Date().toISOString() };
     await atomic(path(job, AUDIT), saved);
   }
-  // Recovery after a partial two-file publication only accepts the two
-  // original hashes and the exact controller-authorized replacement.
   await safeBoundary(job);
-  const old = await json(path(job, "validator.json"));
   const manifest = await json(path(job, "job.json"));
-  if (!native(old) || ![saved.previous.sha256, saved.replacement.sha256].includes(old.sha256) ||
-      ![saved.previous.sha256, saved.replacement.sha256].includes(String(manifest.validatorSha256)) ||
+  if (![saved.previous.version, saved.replacement.version].includes(String(manifest.validatorVersion)) ||
       manifest.jobId !== job.jobId || manifest.threadId !== job.threadId ||
       manifest.baseSha !== job.baseSha || manifest.branch !== job.branch ||
       manifest.worktreeRoot !== job.worktreeRoot)
-    throw Error("Partial validator migration has unexpected job or receipt bytes. Do not replay.");
-  const current = await currentCandidate();
-  if (current.sha256 !== saved.replacement.sha256 ||
-      current.executable !== saved.replacement.executable)
-    throw Error("Approved replacement executable changed. Restore its exact bytes.");
+    throw Error("Partial validator upgrade has unexpected job or version metadata. Do not replay.");
+  const current = currentCandidate();
+  if (current.version !== saved.replacement.version)
+    throw Error("Approved replacement CLI version is unavailable.");
   const result = nativeValidate(job, current);
   if (result.status !== "passed" ||
-      SHA(JSON.stringify(result.report)) !== saved.validationDigest ||
-      SHA(await readFile(current.executable)) !== current.sha256)
-    throw Error("Replacement validator output differs from the approved preflight. Do not repin.");
-  if (old.sha256 !== current.sha256) await atomic(path(job, "validator.json"), current);
-  if (manifest.validatorSha256 !== current.sha256)
-    await atomic(path(job, "job.json"), { ...manifest, validatorSha256: current.sha256 });
+      SHA(JSON.stringify(result.report)) !== saved.validationDigest)
+    throw Error("Replacement validator output differs from the approved preflight. Do not upgrade.");
+  if (manifest.validatorVersion !== current.version)
+    await atomic(path(job, "job.json"), { ...manifest, validatorVersion: current.version });
   saved = { ...saved, phase: "committed", committedAt: new Date().toISOString() };
   await atomic(path(job, AUDIT), saved);
   return saved;

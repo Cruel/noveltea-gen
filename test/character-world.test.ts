@@ -69,7 +69,7 @@ Ada investigates a missing witness and Neri's concealed evidence.
   const baseline = git(repo, "rev-parse", "HEAD");
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "missing-config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-    NT_VALIDATOR_CACHE_DIR: join(root, "validators") };
+     };
   const cli = (args: string[], caseName?: string) => spawnSync(process.execPath,
     ["--import", "tsx", resolve("src/cli.ts"), "job", ...args, "--story", story, "--job", "draft"],
     { encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024,

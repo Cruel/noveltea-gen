@@ -63,7 +63,7 @@ A witness disappears. The inquiry challenges a friendship.
       env: { ...process.env, NT_CONFIG_FILE: config,
         NT_GIT_CACHE_DIR: name === "handoff" ? join(root, "evictable-cache") : undefined,
         NT_STATE_DIR: stateRoot, NT_SKILL_CACHE_DIR: join(root, "skills-cache"),
-        NT_VALIDATOR_CACHE_DIR: join(root, "validator-cache") },
+         },
     });
   }
   const created = cli("start");
@@ -109,7 +109,7 @@ test("separate-process handoff and resume accept exactly one architecture commit
   assert.equal(receipt.worktreeRoot, x.job.worktreeRoot);
   assert.equal(receipt.threadId, x.job.threadId);
   assert.equal(receipt.expectedHead, completed.headSha);
-  assert.equal(existsSync(join(x.job.stateDir, "validator.json")), true);
+  assert.equal(JSON.parse(readFileSync(join(x.job.stateDir, "job.json"), "utf8")).validatorVersion, x.job.validatorVersion);
   assert.equal(existsSync(join(x.job.stateDir, "architecture.json")), true);
   assert.equal(existsSync(join(x.job.worktreeRoot, "architecture.json")), false);
   const replay = expectOk(x.cli("architecture", "run", "--mode", "collaborative", "--fixture"));

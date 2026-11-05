@@ -23,7 +23,7 @@ test("opt-in real Pi specialist reads pinned skills and directly writes validate
       cwd: resolve("."), encoding: "utf8", timeout: 270_000, maxBuffer: 32 * 1024 * 1024,
       env: { ...process.env, NT_STATE_DIR: join(temp, "state"),
         NT_SKILL_CACHE_DIR: join(temp, "skill-cache"),
-        NT_VALIDATOR_CACHE_DIR: join(temp, "validator-cache") },
+         },
     });
   }
   const originalStatus = git(source, "status", "--porcelain");
@@ -45,7 +45,7 @@ test("opt-in real Pi specialist reads pinned skills and directly writes validate
     const args = ["foundation", "--story", story, "--job", "live-foundation",
       "--task", "Write a concise mystery visual-novel foundation: an archivist on a stranded midnight train discovers that every passenger is concealing part of a disappearance. You are delegated all unspecified creative choices.",
       "--envelope", "Small cast, two reusable locations, dialogue-led clues, no fixed number of endings.",
-      "--skills-source", source, "--validator-source", source];
+      "--skills-source", source];
     if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
     if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
     const result = command(...args);

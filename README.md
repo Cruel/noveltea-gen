@@ -559,10 +559,12 @@ pnpm dev job validate --story /path/to/git-repo/story --job draft-1
 New jobs use only `noveltea narrative validate` with the verified Git
 `--base` and `noveltea narrative readiness`. Native context selection uses
 `noveltea narrative context`. The generator does not compile a TypeScript
-catalog or implement a second narrative schema. The native executable's
-resolved path and SHA-256 are pinned in `validator.json` and `job.json`;
-missing or changed binaries fail closed. Replace or restore the originally
-pinned binary explicitly rather than silently switching versions mid-job.
+catalog or implement a second narrative schema. The native CLI's `--version` is saved in `job.json` at job creation.
+Production workers cache the installed version and compare it with the
+saved version when resuming generation or validation. No executable SHA-256
+or per-validation file metadata check is performed. A different version
+requires explicit recovery or a new Thread; developer rebuilds reporting
+the same version are considered compatible.
 A valid historical commit with no Story Markdown is a checked empty Story
 baseline: newly authored records appear in `protection.impact.changed`.
 
@@ -575,12 +577,11 @@ the trusted job baseline automatically; no fake `noveltea` executable or
 PATH interception is installed. Agent Bash remains available for ordinary
 authoring and inspection, not as the source of authorization.
 
-Historical jobs already pinned to `canonical-typescript-bundle` continue
-using their original verified, content-addressed artifacts; missing or
-corrupted pins fail closed. New jobs never bundle the experimental validator.
-`--validator-source` is retained only for compatibility with such jobs.
-See [docs/validator-cutover.md](docs/validator-cutover.md) for native parity
-tests and legacy compatibility details.
+The experimental TypeScript validator, executable-hash pins, and legacy
+job receipts are no longer supported. Existing jobs using those formats
+must be recreated; no migration or automatic repinning is performed.
+See [docs/validator-cutover.md](docs/validator-cutover.md) for native
+validation and version-compatibility tests.
 
 ## Git-backed Creative Direction generation (#15)
 
@@ -682,8 +683,8 @@ Job state always lives in the durable `stateDir`, independently of whether the
 Git worktree resides in the optional cache. `job.json` pins Git,
 branch/worktree, trusted base and thread identity; `foundation.json` and
 `architecture.json` pin current work-item state, the last expected verified
-HEAD, authoring files/digests and Pi-session identity. The model and skills
-snapshot and independently pinned validator are unchanged on resume.
+HEAD, authoring files/digests and Pi-session identity. The model and skills snapshot remain pinned. The saved native CLI version
+must match the installed version before work resumes.
 
 `job architecture inspect --story <original-story> --job <id>` reports
 `recovery` with actual HEAD, uncommitted paths and either `ready`,

@@ -27,8 +27,8 @@ export interface AuthorDecisionReview {
   decision?: AuthorVerdict;
   note?: string;
   details: { sourceExcerpt: string; explanation: string } | {
-    original: { executable: string; sha256: string };
-    replacement: { executable: string; sha256: string };
+    original: { version: string };
+    replacement: { version: string };
     validationDigest: string; diagnostics: number;
   };
 }
@@ -87,13 +87,13 @@ async function foundationReview(job: JobStartResult): Promise<AuthorDecisionRevi
   };
 }
 async function validatorReview(job: JobStartResult): Promise<AuthorDecisionReview | null> {
-  if (!job.validatorSha256 || !existsSync(join(job.stateDir, "validator.json"))) return null;
+  if (!job.validatorVersion) return null;
   const c = await inspectValidatorUpgrade(job);
   if (!c.proposal) return null;
   const p = c.proposal;
   return {
     id: "validator-upgrade", title: "Native validator replacement",
-    description: "The original validator has changed. The installed replacement passed validation of the unchanged Story with zero diagnostics and checked protection. Authorizing records a new exact validator pin; it does not restart generation.",
+    description: "The installed CLI version differs from the job version. The replacement passed validation of the unchanged Story with zero diagnostics and checked protection. Authorizing updates the job version; it does not restart generation.",
     proposalSha256: p.proposalSha256, verifiedHead: p.headSha,
     phase: c.phase === "committed" ? "recorded" : c.phase === "approved" ? "applying" : "awaiting-author",
     ...(["committed", "approved"].includes(c.phase) ? {

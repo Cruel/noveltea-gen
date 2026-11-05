@@ -78,7 +78,7 @@ test("registered rootless Docker controller supports Foundation through Event st
   const story = join(repository, "story");
   mkdirSync(story, { recursive: true });
   const originalEnv = Object.fromEntries(
-    ["NT_STATE_DIR", "NT_GIT_CACHE_DIR", "NT_SKILL_CACHE_DIR", "NT_VALIDATOR_CACHE_DIR",
+    ["NT_STATE_DIR", "NT_GIT_CACHE_DIR", "NT_SKILL_CACHE_DIR",
       "NT_SANDBOX_SOCKET", "NT_SANDBOX_TOKEN_FILE", "NT_REQUIRE_SANDBOX_TOOLS",
       "NT_CONFIG_FILE"].map(key => [key, process.env[key]])
   );
@@ -100,7 +100,6 @@ test("registered rootless Docker controller supports Foundation through Event st
     process.env.NT_STATE_DIR = state;
     process.env.NT_GIT_CACHE_DIR = scoped;
     process.env.NT_SKILL_CACHE_DIR = join(state, "skill-snapshots");
-    process.env.NT_VALIDATOR_CACHE_DIR = join(state, "validator-cache");
     process.env.NT_CONFIG_FILE = join(temporary, "skill-config.json");
     if (!resumeDir) writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({
       novelteaSkills: source, skillDiscovery: "explicit-only", requiredSkills: ["nt-catalog"], skillDirs: [],

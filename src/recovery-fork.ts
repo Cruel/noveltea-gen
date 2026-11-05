@@ -163,9 +163,8 @@ export async function prepareRecoveryFork(parent: JobStartResult, bundle: Recove
     const validation = await validateStoryJob(child);
     const report = validation.report as { protection?: { status?: string; changes?: unknown[]; warnings?: unknown[] };
       contractRevision?: unknown; readiness?: { contractRevision?: unknown } } | undefined;
-    if (validation.validator.sha256 !== bundle.toolchain.validator.sha256 ||
-        validation.validator.implementation !== "native-cli" ||
-        validation.validator.executable !== bundle.toolchain.validator.executable)
+    if (validation.validator.version !== bundle.toolchain.validator.version ||
+        validation.validator.implementation !== "native-cli")
       throw new RecoveryCompatibilityError("changed-tooling",
         "The installed native CLI changed during fork preparation.");
     if (validation.status !== "passed" || !report || !report.contractRevision ||

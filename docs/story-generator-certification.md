@@ -122,9 +122,10 @@ self-report is not independent evidence.
    of file extension in upstream native catalog discovery. Do not copy private
    idea content into ordinary Story context or logs. Tracked in
    [nt#575](https://github.com/Cruel/nt/issues/575).
-3. The native executable and historical validator pins are immutable job
-   dependencies. Do not silently retarget a job to a new binary; a broken
-   digest is an error, not permission to repin.
+3. Story jobs persist the native CLI `--version` in their manifest. A
+   different installed version blocks validation and generation until an
+   authorized upgrade or a fresh Thread. Deployment must keep the executable
+   unchanged within a worker lifetime.
 4. Neither fixture assertions nor native reachability proves human consent,
    manuscript import, engine runtime behavior, actual GUI integration, or
    successful automatic merges. Engine records, manuscript imports, GUI

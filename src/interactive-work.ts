@@ -26,7 +26,7 @@ interface Unit {
   beforeHead?: string; commitSha?: string; paths?: string[]; digest?: string;
   claimedPaths?: string[]; piSessionFile?: string; skillReads?: string[];
   conflicts?: string[]; obligations?: string[]; failure?: string;
-  validation?: { status: "passed"; validatorSha256: string; protectionBase: string;
+  validation?: { status: "passed"; validatorVersion: string; protectionBase: string;
     choices: ChoiceEvidence[]; puzzles: PuzzleEvidence[]; downstreamObligations: string[]; searchTruncated: boolean };
 }
 interface Receipt {
@@ -745,6 +745,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       : receipt.snapshot
         ? { discovery: "explicit-only" as const, novelteaSkills: undefined, skillDirs: [], requiredSkills: [] }
         : await loadSkillConfig(undefined, false);
+
     if (!receipt.snapshot) {
       const snapshot = await createSkillSnapshot({ ...config,
         novelteaSkills: input.skillsSource ?? config.novelteaSkills,
@@ -899,7 +900,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         verifyCommit(job, state, unit, before, sha);
         unit.commitSha = sha;
         unit.phase = "committed";
-        unit.validation = { status: "passed", validatorSha256: checked.validator.sha256,
+        unit.validation = { status: "passed", validatorVersion: checked.validator.version,
           protectionBase: before, ...evidence, downstreamObligations: unit.obligations ?? [],
           searchTruncated: report.coverage.search.truncated };
         delete unit.failure;

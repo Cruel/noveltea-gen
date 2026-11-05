@@ -1,3 +1,4 @@
+import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { readRecoveryFork, verifyReadyRecoveryFork } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
@@ -148,7 +149,11 @@ const Channels = Annotation.Root({
   escalation: Annotation<GenerationEscalation | null>(),
 });
 type State = typeof Channels.State;
-const openJob = (s: State) => startStoryJob({ story: s.request.story, job: s.request.job }, false);
+const openJob = async (s: State) => {
+  const job = await startStoryJob({ story: s.request.story, job: s.request.job }, false);
+  assertNativeVersion(job.validatorVersion);
+  return job;
+};
 function clean(job: JobStartResult) {
   const env = { ...process.env };
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[key];
@@ -524,6 +529,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
 
 export async function runStoryGeneration(options: GenerationOptions) {
   const job = await startStoryJob({ story: options.story, job: options.job }, false);
+  assertNativeVersion(job.validatorVersion);
   return withStoryGenerationLock(job, async () => {
     ensureNotServerOwned(job);
     const path = join(job.stateDir, "generation.sqlite");

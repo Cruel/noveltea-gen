@@ -51,7 +51,7 @@ Ada and Neri disagree about whether a concealed ledger should be revealed. The p
     const baseline = git(repo, "rev-parse", "HEAD");
     const env = { ...process.env, NT_STATE_DIR: join(temp, "state"),
       NT_CONFIG_FILE: join(temp, "absent.json"), NT_SKILL_CACHE_DIR: join(temp, "skills"),
-      NT_VALIDATOR_CACHE_DIR: join(temp, "validators") };
+       };
     const cli = (...args: string[]) => {
       const res = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
         "job", ...args, "--story", story, "--job", "live"], {

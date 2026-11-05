@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import type { JobStartResult } from "./job.js";
 import type { ValidationResult, NativeValidatorPin } from "./validator.js";
+import { nativeExecutable } from "./native-cli-version.js";
 
 type ObjectValue = Record<string, any>;
 const gitVars = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"];
@@ -30,7 +31,7 @@ export function nativeValidate(job: JobStartResult, pin: NativeValidatorPin): Va
     jobId: job.jobId, baseSha: job.baseSha, worktreeStoryRoot: job.worktreeStoryRoot,
     validator: pin };
   try {
-    const { exit, result: response } = invoke(pin.executable, job,
+    const { exit, result: response } = invoke(nativeExecutable(), job,
       ["validate", job.worktreeStoryRoot, "--base", job.baseSha]);
     const catalog = response.catalog as ObjectValue | undefined;
     if (!catalog || !Array.isArray(catalog.records) ||
@@ -60,7 +61,7 @@ export function nativeValidate(job: JobStartResult, pin: NativeValidatorPin): Va
     }));
     // Native readiness is an independent public command; obtain it without
     // computing Story rules or reconstructing relationships in the generator.
-    const ready = invoke(pin.executable, job,
+    const ready = invoke(nativeExecutable(), job,
       ["readiness", job.worktreeStoryRoot, "--stage", "review", "--view", "design"]).result;
     if (!ready.readiness || ready.readiness.contractRevision !== catalog.contractRevision ||
         !ready.readiness.design?.stages || !ready.readiness.approved?.stages ||

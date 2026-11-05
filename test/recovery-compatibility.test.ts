@@ -24,7 +24,7 @@ const valid = (): RecoveryCheckpoint => ({
   },
   completedWorkItems: ["foundation", "global-architecture", "world-foundations"],
   remainingWorkItems: ["character-foundations"], nextWorkItem: "character-foundations",
-  dependencies: {}, validation: { status: "passed", validatorSha256: "b".repeat(64) },
+  dependencies: {}, validation: { status: "passed", validatorVersion: "1.0.0" },
   source: "character-world.json", proofDigest: "c".repeat(64), snapshotId: "d".repeat(64),
   compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
   provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
@@ -54,7 +54,7 @@ test("obsolete graph, approval and receipt shapes fail closed without replay", (
   rejects(oldAuthorization, "invalid-evidence");
 
   const missingPin = valid();
-  missingPin.validation.validatorSha256 = "";
+  missingPin.validation.validatorVersion = "";
   rejects(missingPin, "invalid-evidence");
 
   const changedPlan = valid();

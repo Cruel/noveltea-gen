@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { nativeExecutable } from "../src/validator.js";
 
 const sandbox = mkdtempSync(join(tmpdir(), "nt-merge-preview-"));
 after(() => removeTestTree(sandbox));
@@ -29,63 +30,50 @@ function fixture(name: string) {
 function run(args: string[], name: string) {
   const child = spawnSync(process.execPath, ["--import", "tsx", cli, "job", ...args], {
     cwd: resolve("."), encoding: "utf8", timeout: 60_000,
-    env: { ...globalThis.process.env, NT_STATE_DIR: join(sandbox, "state-" + name),
-      NT_VALIDATOR_CACHE_DIR: join(sandbox, "validator-cache-" + name), NT_VALIDATOR_TEST_LEGACY: "1" },
+    env: { ...process.env, NT_STATE_DIR: join(sandbox, "state-" + name) },
   });
   return { status: child.status, stderr: child.stderr,
     result: child.stdout.trim() ? JSON.parse(child.stdout) : undefined };
 }
-function catalogSource() {
-  const source = fixture("catalog-source");
-  mkdirSync(join(source, "src"));
-  writeFileSync(join(source, "package.json"), JSON.stringify({ name: "noveltea-story-catalog" }));
-  writeFileSync(join(source, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
-  writeFileSync(join(source, "src/cli.ts"), `
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
-const root = process.argv[2];
-const read = (path) => existsSync(join(root,path)) ? readFileSync(join(root,path),"utf8") : "";
-const files = ["characters/hero.md","events/scene.md","revelations/truth.md"];
-const body = files.map(read).join("\\n");
-const diagnostics = body.includes("BROKEN_DEP") ? [{path:"events/scene.md",line:3,code:"invalid-reference",message:"Missing Character"}] : [];
-const protection = body.includes("PROTECTED_CHANGE") ? [{code:"protected-decision-change",decision:"character.hero#commitment"}] : [];
-console.log(JSON.stringify({ records:files.filter(f => read(f)).map(f=>({path:f,metadata:{id:read(f).match(/id: (.*)/)?.[1]??f,type:f.split("/")[0]}})),
-  diagnostics, outstanding:[], readiness:{}, coverage:{search:{truncated:false},eventProgress:[],milestoneRoutes:[],branchProgress:[],puzzleSolutions:[]},
-  protection:{status:"checked",base:process.argv[process.argv.indexOf("--base")+1],changes:protection,warnings:protection} }));
-process.exitCode = diagnostics.length || protection.length ? 1 : 0;
-`);
-  commit(source, "Catalog fixture");
-  return source;
-}
-const source = catalogSource();
+const fixtureRoot = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills", "fixtures/reference-story");
+let nativeAvailable = false;
+try { nativeAvailable = existsSync(nativeExecutable()); } catch { /* Native CLI unavailable in offline CI. */ }
+const available = nativeAvailable && existsSync(join(fixtureRoot, "creative-direction/last-bell.md"));
+const nativeTest = available ? test : test.skip;
 function setup(name: string) {
   const root = fixture(name);
-  mkdirSync(join(root, "story"));
-  mkdirSync(join(root, "story/characters"));
-  mkdirSync(join(root, "story/events"));
-  mkdirSync(join(root, "story/revelations"));
-  writeFileSync(join(root, "story/characters/hero.md"),
-    "---\nid: character.hero\ntype: character\n---\nMotivation: protect the city.\nDetail A: unchanged.\nDetail B: unchanged.\nDetail C: unchanged.\nDetail D: unchanged.\n");
-  writeFileSync(join(root, "story/events/scene.md"), "---\nid: event.scene\n---\nOpening.\n");
-  writeFileSync(join(root, "story/revelations/truth.md"), "---\nid: revelation.truth\n---\nThe hero knows the secret.\n");
+  cpSync(fixtureRoot, join(root, "story"), { recursive: true });
+  const direction = join(root, "story/creative-direction/last-bell.md");
+  writeFileSync(direction, readFileSync(direction, "utf8").replace(
+    "origin: agent\n    authority: delegated", "origin: user\n    authority: user-protected"));
   commit(root, "Baseline");
   const original = git(root, "rev-parse", "HEAD");
   const started = run(["start", "--story", join(root, "story"), "--job", "draft"], name);
   assert.equal(started.status, 0, started.stderr);
   const job = started.result;
   const preview = () => run(["merge", "preview", "--story", join(root, "story"), "--job", "draft",
-    "--fixture", "--validator-source", source], name);
+    "--fixture"], name);
   return { root, original, job, preview };
 }
 function edit(root: string, path: string, value: string) {
   writeFileSync(join(root, "story", path), value);
   commit(root, "Story update");
 }
+function append(root: string, path: string, prose: string) {
+  const file = join(root, "story", path);
+  edit(root, path, readFileSync(file, "utf8") + "\n" + prose + "\n");
+}
+function change(root: string, path: string, before: string, after: string) {
+  const file = join(root, "story", path);
+  const previous = readFileSync(file, "utf8");
+  assert.ok(previous.includes(before), path + ": expected text missing");
+  edit(root, path, previous.replace(before, after));
+}
 
-test("clean preview preserves author checkout, generation branch and previous target revision", () => {
+nativeTest("clean preview preserves author checkout, generation branch and previous target revision", () => {
   const { root, original, job, preview } = setup("clean");
-  edit(job.worktreeRoot, "events/scene.md", "---\nid: event.scene\n---\nGeneration scene.\n");
-  edit(root, "revelations/truth.md", "---\nid: revelation.truth\n---\nTarget ending.\n");
+  append(job.worktreeRoot, "events/find-cut-strap.md", "Additional scene details from the generator.");
+  append(root, "revelations/ivos-secret.md", "Additional ending details from the author.");
   const head = git(root, "rev-parse", "HEAD");
   const generation = git(job.worktreeRoot, "rev-parse", "HEAD");
   writeFileSync(join(root, "local-note.txt"), "unsaved author work\n");
@@ -108,68 +96,72 @@ test("clean preview preserves author checkout, generation branch and previous ta
   assert.equal(git(root, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
 });
 
-test("text conflict reports the paths and IDs without claiming validation", () => {
+nativeTest("text conflict reports the paths and IDs without claiming validation", () => {
   const { root, job, preview } = setup("text-collision");
-  edit(job.worktreeRoot, "characters/hero.md", "---\nid: character.hero\ntype: character\n---\nMotivation: run away.\nDetail A: unchanged.\nDetail B: unchanged.\nDetail C: unchanged.\nDetail D: unchanged.\n");
-  edit(root, "characters/hero.md", "---\nid: character.hero\ntype: character\n---\nMotivation: attack the city.\nDetail A: unchanged.\nDetail B: unchanged.\nDetail C: unchanged.\nDetail D: unchanged.\n");
+  const motivation = "Keep the departing fleet safe and earn the right to repair the harbor machinery again.";
+  change(job.worktreeRoot, "characters/mara.md", motivation, "Abandon the harbor and flee alone.");
+  change(root, "characters/mara.md", motivation, "Confront the city leadership openly.");
   const result = preview();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.result.candidate.status, "text-conflicts");
   assert.ok(result.result.candidate.conflicts.some((c: { path: string; ids: string[] }) =>
-    c.path === "characters/hero.md" && c.ids.includes("character.hero")));
+    c.path === "characters/mara.md" && c.ids.includes("character.mara")));
   assert.equal(result.result.validation.status, "not-run");
   assert.equal(result.result.narrative.status, "not-run");
 });
 
-test("clean textual merge with broken typed dependency is rejected", () => {
+nativeTest("clean textual merge with broken typed dependency is rejected", () => {
   const { root, job, preview } = setup("broken-typed");
-  edit(job.worktreeRoot, "events/scene.md", "---\nid: event.scene\n---\nBROKEN_DEP\n");
-  edit(root, "revelations/truth.md", "---\nid: revelation.truth\n---\nChanged ending.\n");
+  change(job.worktreeRoot, "events/find-cut-strap.md",
+    "participants: [character.mara]", "participants: [character.missing]");
+  append(root, "revelations/ivos-secret.md", "Changed ending details.");
   const result = preview();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.result.candidate.status, "constructed");
   assert.equal(result.result.validation.status, "rejected", JSON.stringify(result.result.validation));
-  assert.ok(result.result.validation.diagnostics.some((d: { code: string }) => d.code === "invalid-reference"));
+  assert.ok(result.result.validation.diagnostics.some((d: { code: string }) => /reference/.test(d.code)));
   assert.ok(result.result.issues.some((d: { ids: string[]; evidence: string[]; options: string[] }) =>
-    d.ids.includes("event.scene") && d.evidence.length && d.options.length === 3));
+    d.ids.includes("event.find-cut-strap") && d.evidence.length && d.options.length === 3));
 });
 
-test("overlapping record changes surface semantic risk even without Git conflict", () => {
+nativeTest("overlapping record changes surface semantic risk even without Git conflict", () => {
   const { root, job, preview } = setup("semantic");
-  const name = "characters/hero.md";
+  const name = "characters/mara.md";
   const gen = readFileSync(join(job.worktreeRoot, "story", name), "utf8").replace(
-    "Motivation: protect the city.", "Motivation: betray the city.");
+    "Keep the departing fleet safe and earn the right to repair the harbor machinery again.",
+    "Protect the harbor while concealing her doubts.");
   const target = readFileSync(join(root, "story", name), "utf8").replace(
-    "Detail D: unchanged.", "Detail D: the hero sacrifices everything to save the city.");
+    "responsibility remains", "guilt and responsibility remain");
   edit(job.worktreeRoot, name, gen);
   edit(root, name, target);
   const result = preview();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.result.candidate.status, "constructed");
   assert.ok(result.result.narrative.risks.some((r: { ids: string[]; path: string }) =>
-    r.path === name && r.ids.includes("character.hero")));
+    r.path === name && r.ids.includes("character.mara")));
   assert.equal(result.result.narrative.status, "unverified");
 });
 
-test("protected-decision changes are blocked and not reconciled automatically", () => {
+nativeTest("protected-decision changes are blocked and not reconciled automatically", () => {
   const { root, job, preview } = setup("protected");
-  edit(job.worktreeRoot, "characters/hero.md", "---\nid: character.hero\ntype: character\n---\nMotivation: PROTECTED_CHANGE\nDetail A: unchanged.\nDetail B: unchanged.\nDetail C: unchanged.\nDetail D: unchanged.\n");
-  edit(root, "events/scene.md", "---\nid: event.scene\n---\nTarget event.\n");
+  change(job.worktreeRoot, "creative-direction/last-bell.md",
+    "repair rather than revenge", "revenge rather than repair");
+  append(root, "events/find-cut-strap.md", "Target event narrative detail.");
   const result = preview();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.result.candidate.status, "constructed");
   assert.equal(result.result.validation.status, "rejected", JSON.stringify(result.result.validation));
   assert.ok(result.result.validation.protectedDecisions.length);
   assert.ok(result.result.issues.some((d: { ids: string[]; options: string[] }) =>
-    d.ids.includes("character.hero") && d.options.length === 3));
+    d.ids.includes("creative-direction.last-bell") && d.options.length === 3));
   assert.equal(git(root, "status", "--porcelain"), "");
 });
 
-test("repeat preview incorporates target changes without stale caching or source mutations", () => {
+nativeTest("repeat preview incorporates target changes without stale caching or source mutations", () => {
   const { root, job, preview } = setup("advance");
-  edit(job.worktreeRoot, "events/scene.md", "---\nid: event.scene\n---\nGeneration scene.\n");
+  append(job.worktreeRoot, "events/find-cut-strap.md", "Generation scene detail.");
   const first = preview();
-  edit(root, "revelations/truth.md", "---\nid: revelation.truth\n---\nNew target ending.\n");
+  append(root, "revelations/ivos-secret.md", "New target ending detail.");
   const second = preview();
   assert.equal(first.status, 0, first.stderr);
   assert.equal(second.status, 0, second.stderr);
@@ -179,14 +171,14 @@ test("repeat preview incorporates target changes without stale caching or source
   assert.equal(git(root, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
 });
 
-test("canonical validator assesses a real combined Story from both revisions", {
+nativeTest("canonical validator assesses a real combined Story from both revisions", {
   skip: !existsSync(join(resolve("../noveltea-skills"), "fixtures/reference-story/creative-direction/last-bell.md"))
     ? "NovelTea canonical checkout is unavailable" : false,
 }, () => {
   const name = "canonical-combined";
   const root = fixture(name);
   const story = join(root, "story");
-  cpSync(join(resolve("../noveltea-skills"), "fixtures/reference-story"), story, { recursive: true });
+  cpSync(fixtureRoot, story, { recursive: true });
   commit(root, "Reference Story baseline");
   const started = run(["start", "--story", story, "--job", "draft"], name);
   assert.equal(started.status, 0, started.stderr);
@@ -201,7 +193,7 @@ test("canonical validator assesses a real combined Story from both revisions", {
   const originalHead = git(root, "rev-parse", "HEAD");
   const generatedHead = git(job.worktreeRoot, "rev-parse", "HEAD");
   const preview = run(["merge", "preview", "--story", story, "--job", "draft",
-    "--fixture", "--validator-source", resolve("../noveltea-skills")], name);
+    "--fixture"], name);
   assert.equal(preview.status, 0, preview.stderr);
   assert.equal(preview.result.candidate.status, "constructed");
   assert.equal(preview.result.validation.status, "passed", JSON.stringify(preview.result.validation));
@@ -214,7 +206,7 @@ test("canonical validator assesses a real combined Story from both revisions", {
   assert.equal(git(root, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
 });
 
-test("private deferred author text is never included in merge-preview evidence", () => {
+nativeTest("private deferred author text is never included in merge-preview evidence", () => {
   const { root, job, preview } = setup("private-idea-conflict");
   const path = ".story-inbox/ideas/secret.yaml";
   const privateDir = join(root, ".story-inbox", "ideas");
@@ -245,21 +237,20 @@ test("private deferred author text is never included in merge-preview evidence",
   assert.ok(!JSON.stringify(result.result).includes(privateWords));
 });
 
-test("opt-in independent Pi reviewer reports a genuine cross-record contradiction", {
+nativeTest("opt-in independent Pi reviewer reports a genuine cross-record contradiction", {
   skip: process.env.NT_LIVE_MERGE_PREVIEW !== "1"
     ? "Set NT_LIVE_MERGE_PREVIEW=1 to test independent Pi editorial reasoning" : false,
   timeout: 1_200_000,
 }, () => {
   const { root, job } = setup("live-contradiction");
-  edit(job.worktreeRoot, "events/scene.md",
-    "---\nid: event.scene\n---\nThe hero publicly reveals the secret at the opening.\n");
-  edit(root, "revelations/truth.md",
-    "---\nid: revelation.truth\n---\nThe hero never discovers or learns the secret at any point.\n");
+  append(job.worktreeRoot, "events/find-cut-strap.md",
+    "Mara publicly reveals the secret at the opening.");
+  append(root, "revelations/ivos-secret.md",
+    "Mara never discovers or learns the secret at any point.");
   const authorHead = git(root, "rev-parse", "HEAD");
   const generationHead = git(job.worktreeRoot, "rev-parse", "HEAD");
   const args = ["--import", "tsx", cli, "job", "merge", "preview", "--story", join(root, "story"),
-    "--job", "draft", "--validator-source", source,
-    "--skills-source", resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills")];
+    "--job", "draft", "--skills-source", resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills")];
   if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
   if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
   if (["low", "high"].includes(process.env.NT_THINKING ?? ""))
@@ -267,7 +258,6 @@ test("opt-in independent Pi reviewer reports a genuine cross-record contradictio
   const child = spawnSync(process.execPath, args, {
     cwd: resolve("."), encoding: "utf8", timeout: 900_000, maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, NT_STATE_DIR: join(sandbox, "state-live-contradiction"),
-      NT_VALIDATOR_CACHE_DIR: join(sandbox, "validator-cache-live-contradiction"),
       NT_SKILL_CACHE_DIR: join(sandbox, "skill-cache-live-contradiction") },
   });
   assert.equal(child.status, 0, child.stderr || child.stdout);

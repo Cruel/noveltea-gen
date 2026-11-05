@@ -22,7 +22,7 @@ export type JobOverview = {
     planVersion: number | null; planDigest: string | null; proofDigest: string; source: string; snapshotId: string | null
     completedWorkItems: string[]; remainingWorkItems: string[]
     nextWorkItem: string | null; dependencies: Record<string, string[]>
-    validation: { status: string; validatorSha256: string }
+    validation: { status: string; validatorVersion: string }
   }>
   recovery?: {
     kind: 'manual-specialist' | 'operator-reconciliation'

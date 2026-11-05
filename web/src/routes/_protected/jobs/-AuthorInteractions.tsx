@@ -24,8 +24,8 @@ type RecoveryDecision = {
   phase: 'awaiting-author' | 'applying' | 'recorded'
   decision?: 'approved' | 'rejected'; note?: string
   details: { sourceExcerpt: string; explanation: string } | {
-    original: { executable: string; sha256: string }
-    replacement: { executable: string; sha256: string }
+    original: { version: string }
+    replacement: { version: string }
     validationDigest: string; diagnostics: number
   }
 }
@@ -192,9 +192,8 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
           </pre>
         </details>
       </> : <>
-        <p><strong>Original validator:</strong> <code>{item.details.original.sha256}</code></p>
-        <p><strong>Installed replacement:</strong> <code>{item.details.replacement.sha256}</code></p>
-        <p><strong>Installed path:</strong> <code>{item.details.replacement.executable}</code></p>
+        <p><strong>Original CLI version:</strong> <code>{item.details.original.version}</code></p>
+        <p><strong>Replacement CLI version:</strong> <code>{item.details.replacement.version}</code></p>
         <p><strong>Native preflight:</strong> {item.details.diagnostics} diagnostics,
           protected-decision checks passed.</p>
         <p><small>Validation digest: <code>{item.details.validationDigest}</code></small></p>

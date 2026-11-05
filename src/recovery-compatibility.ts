@@ -51,8 +51,8 @@ export function assertRecoveryCompatibility(point: RecoveryCheckpoint): Plan | n
       "This checkpoint uses obsolete authorization evidence; prior approvals cannot be transferred.");
   }
   if (!Array.isArray(point.completedWorkItems) || !Array.isArray(point.remainingWorkItems) ||
-      !point.completedWorkItems.includes(point.workItem) || !point.validation?.validatorSha256 ||
-      !/^[a-f0-9]{64}$/.test(point.validation.validatorSha256) ||
+      !point.completedWorkItems.includes(point.workItem) || !point.validation?.validatorVersion ||
+      !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(point.validation.validatorVersion) ||
       point.validation.status === "not-verified") {
     throw new RecoveryCompatibilityError("invalid-evidence",
       "This checkpoint has incomplete committed-work or validator evidence.");
@@ -130,7 +130,7 @@ export function assertRecoveryReceiptCompatibility(
 export async function selectCurrentRecoveryToolchain(parent: JobStartResult,
   point: RecoveryCheckpoint, skillsSource?: string): Promise<RecoveryToolchain> {
   let validator: NativeValidatorPin;
-  try { validator = await verifyForkValidator(parent, point.validation.validatorSha256); }
+  try { validator = await verifyForkValidator(parent, point.validation.validatorVersion); }
   catch {
     throw new RecoveryCompatibilityError("missing-tooling",
       "The source validator pin or current native CLI cannot be verified.");

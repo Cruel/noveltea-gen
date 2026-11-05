@@ -1,3 +1,4 @@
+import { nativeExecutable } from "../../../src/native-cli-version.js";
 import { execFileSync, spawnSync } from 'node:child_process'
 import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
@@ -337,7 +338,7 @@ export async function storyRelationshipsRequest(auth: StudioAuth, store: StudioD
       throw new ExplorerError(409, 'A pinned native Context Manifest is required for the relationship graph.')
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
-    const run = spawnSync(result.validator.executable,
+    const run = spawnSync(nativeExecutable(),
       ['--json', 'narrative', 'context', job.worktreeStoryRoot, '--kind', 'review',
         '--id', selectedId, '--scope', scope],
       { cwd: job.worktreeRoot, env, encoding: 'utf8', timeout: 30_000,

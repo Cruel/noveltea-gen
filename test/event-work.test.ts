@@ -46,7 +46,7 @@ A missing witness leaves a ledger and suspicion between two former collaborators
   const baseline = git(repo, "rev-parse", "HEAD");
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_SKILL_CACHE_DIR: join(root, "skills"),
-    NT_VALIDATOR_CACHE_DIR: join(root, "validators"),
+
     NT_CONFIG_FILE: join(root, "absent-config.json") };
   function cli(args: string[], variant?: string) {
     return spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "job", ...args,
@@ -89,7 +89,7 @@ test("public CLI commits a reachable causal Event cluster with validated Milesto
   assert.deepEqual(data.validation.routes.map((route: any) => route.status), ["reachable"]);
   assert.equal(data.validation.eventProgress[0].status, "reachable");
   assert.equal(data.validation.protectionBase, before);
-  assert.match(data.validation.validatorSha256, /^[a-f0-9]{64}$/);
+  assert.match(data.validation.validatorVersion, /^\d+\.\d+\.\d+/);
   assert.ok(data.outstanding.every((o: any) => o.id !== "milestone.disclosure" || o.field !== "fulfillment.any_of"));
   assert.equal(data.completionEvidence.unrelatedComposition, "not-required");
   const eventMarkdown = readFileSync(join(job.worktreeStoryRoot, "events/disclose-ledger.md"), "utf8");

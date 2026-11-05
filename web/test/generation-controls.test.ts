@@ -38,15 +38,13 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-studio-control-'))
   const keys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_STUDIO_SKILLS_SOURCE',
-    'NT_CONFIG_FILE', 'NT_VALIDATOR_TEST_LEGACY', 'NT_VALIDATOR_CACHE_DIR',
+    'NT_CONFIG_FILE',
     'NT_SKILL_CACHE_DIR', 'NT_LIVE_GENERATION_IDEA'] as const
   const env = Object.fromEntries(keys.map(key => [key, process.env[key]]))
   process.env.NT_STATE_DIR = join(root, 'durable')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STUDIO_SKILLS_SOURCE = skills
   process.env.NT_CONFIG_FILE = join(root, 'config.json')
-  process.env.NT_VALIDATOR_TEST_LEGACY = '1'
-  process.env.NT_VALIDATOR_CACHE_DIR = join(root, 'validators')
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshots')
   delete process.env.NT_LIVE_GENERATION_IDEA
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))

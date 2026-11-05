@@ -48,12 +48,11 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
   timeout: 180_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-explorer-'))
-  const envKeys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_VALIDATOR_TEST_LEGACY', 'NT_PI_CREDENTIAL_KEY']
+  const envKeys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_PI_CREDENTIAL_KEY']
   const previous = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STATE_DIR = join(root, 'durable')
   process.env.NT_PI_CREDENTIAL_KEY = Buffer.alloc(32, 8).toString('base64')
-  delete process.env.NT_VALIDATOR_TEST_LEGACY
   let store = openStudioDatabase(join(root, 'studio.sqlite'))
   try {
     await migrateStudio(store, config)
@@ -111,6 +110,10 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
     const cli = join(root, 'noveltea')
     writeFileSync(cli, `#!/usr/bin/env node
 const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === '--version') {
+  process.stdout.write('1.0.0\\n');
+  process.exit(0);
+}
 const fs = require('node:fs');
 const path = require('node:path');
 const root = args[3];

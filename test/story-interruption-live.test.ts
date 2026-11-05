@@ -31,7 +31,7 @@ test("opt-in live Pi specialist cooperatively aborts without publishing unfinish
   const base = git("rev-parse", "HEAD");
   const env = { ...process.env, NT_STATE_DIR: join(temp, "state"),
     NT_SKILL_CACHE_DIR: join(temp, "skills-cache"),
-    NT_VALIDATOR_CACHE_DIR: join(temp, "validator-cache") };
+     };
   const cmd = (...args: string[]) => {
     const result = spawnSync(process.execPath, ["--import", "tsx", cli, "job", ...args], {
       cwd: resolve("."), env, encoding: "utf8", timeout: 45000,
@@ -45,7 +45,7 @@ test("opt-in live Pi specialist cooperatively aborts without publishing unfinish
     "--job", "live-cancel", "--task",
     "Develop a dialogue-driven mystery about a forgotten witness on a remote island. " +
     "Invent the character motivations, conflicts, scope and central creative direction.",
-    "--skills-source", source, "--validator-source", source];
+    "--skills-source", source];
   if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
   if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
   const worker = spawn(process.execPath, args, { cwd: resolve("."), env,

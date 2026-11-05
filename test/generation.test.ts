@@ -35,8 +35,7 @@ function setup(name: string, seed?: (story: string) => void) {
   const initial = git(repo, "rev-parse", "HEAD");
   writeFileSync(join(root, "config.json"), JSON.stringify({ novelteaSkills: source, skillDiscovery: "explicit-only" }));
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
-    NT_CONFIG_FILE: join(root, "config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-    NT_VALIDATOR_CACHE_DIR: join(root, "validators"), NT_VALIDATOR_TEST_LEGACY: "1" };
+    NT_CONFIG_FILE: join(root, "config.json"), NT_SKILL_CACHE_DIR: join(root, "skills") };
   function cli(args: string[], success = true) {
     const result = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
       "job", ...args, "--story", story, "--job", "single"], {
@@ -315,6 +314,11 @@ test("multi-Milestone generation develops every selected cluster across process 
 });
 
 function plannedCluster(story: string, arc: string, milestone: string) {
+  const direction = join(story, "creative-direction/foundation.md");
+  if (!existsSync(direction)) {
+    mkdirSync(dirname(direction), { recursive: true });
+    writeFileSync(direction, `---\nschema: '0.1'\ntype: creative-direction\nid: creative-direction.foundation\ntitle: "The Archive Mystery"\nstatus: draft\ndecisions: []\npremise: "A missing witness challenges an archivist to investigate a hidden truth."\ncentral_conflict: "The archivist must choose between truth and protecting witnesses."\ngenre: "Mystery"\ntone: "Suspenseful"\nplayer_experience: "A dialogue-led investigation with meaningful choices."\nscope: "A small town and its archive."\n---\n\n# Foundation\n\nAn investigator discovers the cost of secrecy.\n`);
+  }
   for (const [folder, slug, type, fields] of [
     ["arcs", arc, "arc", 'dramatic_question: "Will loyalty survive?"\ncharacters: []'],
     ["milestones", milestone, "milestone", `completeness: partial\nchange: "The witness accepts responsibility"\narcs: [arc.${arc}]\nfulfillment: {any_of: []}`],

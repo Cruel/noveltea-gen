@@ -54,7 +54,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
     const env = { ...process.env, NT_STATE_DIR: join(temp, "state"),
       NT_CONFIG_FILE: join(temp, "missing-config.json"),
       NT_SKILL_CACHE_DIR: join(temp, "skills"),
-      NT_VALIDATOR_CACHE_DIR: join(temp, "validator") };
+       };
     function cli(...args: string[]) {
       const run = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
         "job", ...args, "--story", story, "--job", "live"], {

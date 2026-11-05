@@ -45,16 +45,15 @@ test('validator upgrade requires exact author review, records history and handle
   skip: !existsSync(cli), timeout: 80_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-validator-upgrade-'))
-  const envKeys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_NATIVE_CLI', 'NT_VALIDATOR_TEST_LEGACY'] as const
+  const envKeys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_NATIVE_CLI'] as const
   const before = Object.fromEntries(envKeys.map(k => [k, process.env[k]]))
   try {
     process.env.NT_STATE_DIR = join(root, 'state')
     delete process.env.NT_GIT_CACHE_DIR
-    delete process.env.NT_VALIDATOR_TEST_LEGACY
     const old = join(root, 'old-validator'), next = join(root, 'next-validator')
     for (const [name, path] of [['old', old], ['next', next]] as const) {
-      writeFileSync(path, '#!/bin/sh\n# validator-' + name +
-        '\nexec "' + cli + '" "$@"\n')
+      writeFileSync(path, '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "' +
+        (name === 'next' ? '1.0.1' : '1.0.0') + '\\n"; else exec "' + cli + '" "$@"; fi\n')
       chmodSync(path, 0o755)
     }
     const story = join(root, 'repo', 'story')
@@ -95,7 +94,7 @@ test('validator upgrade requires exact author review, records history and handle
     assert.equal(preview.phase, 'review-required')
     const p = preview.proposal!
     assert.ok(p)
-    assert.notEqual(p.previous.sha256, p.replacement.sha256)
+    assert.notEqual(p.previous.version, p.replacement.version)
     assert.equal(p.headSha, baseline)
     assert.equal(p.diagnostics, 0)
     assert.equal((await inspectValidatorUpgrade(job)).proposal?.proposalSha256, p.proposalSha256)
@@ -114,8 +113,8 @@ test('validator upgrade requires exact author review, records history and handle
     assert.equal(approved.note, '')
     const actual = await inspectValidatorUpgrade(job)
     assert.equal(actual.phase, 'committed')
-    assert.equal(actual.proposal?.previous.sha256, p.previous.sha256)
-    assert.equal(actual.proposal?.replacement.sha256, p.replacement.sha256)
+    assert.equal(actual.proposal?.previous.version, p.previous.version)
+    assert.equal(actual.proposal?.replacement.version, p.replacement.version)
     assert.equal((await inspectAuthorDecisions(job))[1]?.decision, 'approved')
     assert.equal((await decideAuthorDecision(job, {
       id: 'validator-upgrade', proposalSha256: p.proposalSha256,
@@ -124,7 +123,7 @@ test('validator upgrade requires exact author review, records history and handle
     assert.equal(git(job.worktreeRoot, 'rev-parse', 'HEAD'), baseline)
     assert.equal(git(job.worktreeRoot, 'status', '--porcelain'), '')
     const repinned = await startStoryJob({ story, job: job.jobId }, false)
-    assert.equal(repinned.validatorSha256, p.replacement.sha256)
+    assert.equal(repinned.validatorVersion, p.replacement.version)
     assert.equal((await validateStoryJob(repinned)).status, 'passed')
     assert.equal((await inspectValidatorUpgrade(repinned)).phase, 'committed')
     await assert.rejects(() => approveValidatorUpgrade(repinned, p.proposalSha256,
@@ -134,14 +133,19 @@ test('validator upgrade requires exact author review, records history and handle
     // A swapped candidate after preview must never be accepted.
     const drift = await makeJob()
     const fresh = (await inspectValidatorUpgrade(drift)).proposal!
-    writeFileSync(next, readFileSync(next, 'utf8') + '# changed after review\n')
+    const changedVersion = join(root, 'changed-cli-version')
+    writeFileSync(changedVersion,
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "1.0.2\\n"; else exec "' +
+        cli + '" "$@"; fi\n')
+    chmodSync(changedVersion, 0o755)
+    process.env.NT_NATIVE_CLI = changedVersion
     await assert.rejects(() => approveValidatorUpgrade(drift, fresh.proposalSha256,
-      'I reviewed and authorize the replacement for this test job.', 'user:author'), /changed/)
+      'I reviewed and authorize the replacement for this test job.', 'user:author'), /changed|version/)
     assert.equal(existsSync(join(drift.stateDir, 'validator-upgrade.json')), false)
 
     // Repair only the same already-authorized journal, without a second
     // controller decision or a new generation attempt.
-    writeFileSync(next, readFileSync(next, 'utf8').replace('# changed after review\n', ''))
+    process.env.NT_NATIVE_CLI = next
     const partial = await makeJob()
     const proposal = (await inspectValidatorUpgrade(partial)).proposal!
     const rationale = 'I reviewed and authorize the replacement for this test job.'
@@ -149,7 +153,11 @@ test('validator upgrade requires exact author review, records history and handle
       ...proposal, phase: 'approved', principal: 'user:author',
       rationale, authorizedAt: new Date().toISOString(),
     }))
-    writeFileSync(join(partial.stateDir, 'validator.json'), JSON.stringify(proposal.replacement))
+    const manifestPath = join(partial.stateDir, 'job.json')
+    writeFileSync(manifestPath, JSON.stringify({
+      ...JSON.parse(readFileSync(manifestPath, 'utf8')),
+      validatorVersion: proposal.replacement.version,
+    }))
     const pendingRecovery = (await inspectAuthorDecisions(partial))[1]
     assert.equal(pendingRecovery?.phase, 'applying')
     assert.equal(pendingRecovery?.note, rationale)
@@ -159,8 +167,8 @@ test('validator upgrade requires exact author review, records history and handle
     })
     assert.equal(complete.phase, 'recorded')
     assert.equal((await inspectValidatorUpgrade(partial)).phase, 'committed')
-    assert.equal((await startStoryJob({ story, job: partial.jobId }, false)).validatorSha256,
-      proposal.replacement.sha256)
+    assert.equal((await startStoryJob({ story, job: partial.jobId }, false)).validatorVersion,
+      proposal.replacement.version)
 
     const declined = await makeJob()
     const declinedProposal = (await inspectValidatorUpgrade(declined)).proposal!
@@ -170,8 +178,8 @@ test('validator upgrade requires exact author review, records history and handle
     })).decision, 'rejected')
     assert.equal((await inspectAuthorDecisions(declined))[1]?.phase, 'recorded')
     assert.equal((await inspectAuthorDecisions(declined))[1]?.decision, 'rejected')
-    assert.equal((await startStoryJob({ story, job: declined.jobId }, false)).validatorSha256,
-      declinedProposal.previous.sha256)
+    assert.equal((await startStoryJob({ story, job: declined.jobId }, false)).validatorVersion,
+      declinedProposal.previous.version)
     await assert.rejects(() => decideAuthorDecision(declined, {
       id: 'validator-upgrade', proposalSha256: declinedProposal.proposalSha256,
       decision: 'approved', principal: 'user:author',

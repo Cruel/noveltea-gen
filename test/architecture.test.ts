@@ -49,7 +49,7 @@ An investigator must decide what loyalty costs when a friend conceals evidence.
       encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
         NT_CONFIG_FILE: join(root, "absent.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-        NT_VALIDATOR_CACHE_DIR: join(root, "validators") },
+         },
     });
   }
   const started = cli("start"); assert.equal(started.status, 0, started.stderr);
@@ -238,7 +238,7 @@ test("architecture follows a foundation generated from an empty Git baseline and
   writeFileSync(join(root, "absent.json"), "{}");
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "absent.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-    NT_VALIDATOR_CACHE_DIR: join(root, "validators") };
+     };
   const cli = (...args: string[]) => spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
     "job", ...args, "--story", story, "--job", "draft"], {
     encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024, env,
@@ -271,7 +271,7 @@ test("architecture accepts a previously author-approved protected revision again
   writeFileSync(foundation, readFileSync(foundation, "utf8").replace(
     'statement: "Loyalty must matter"', 'statement: "Loyalty can yield to truth"'));
   const inspected = cli("revision", "inspect", "--work-item", "adjust-loyalty",
-    "--path", "creative-direction/foundation.md", "--validator-source", source);
+    "--path", "creative-direction/foundation.md");
   assert.equal(inspected.status, 0, inspected.stderr);
   const proposal = JSON.parse(inspected.stdout);
   assert.equal(proposal.protectedChanges.length, 1);

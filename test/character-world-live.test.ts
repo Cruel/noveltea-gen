@@ -51,7 +51,7 @@ A ledger implicates a trusted member of the community, threatening a close frien
     git(repo, "add", "."); git(repo, "commit", "-qm", "Creative Direction");
     const baseline = git(repo, "rev-parse", "HEAD");
     const env = { ...process.env, NT_STATE_DIR: join(temp, "state"),
-      NT_SKILL_CACHE_DIR: join(temp, "skills"), NT_VALIDATOR_CACHE_DIR: join(temp, "validator"),
+      NT_SKILL_CACHE_DIR: join(temp, "skills"),
       NT_CONFIG_FILE: join(temp, "missing-config.json") };
     function cli(...args: string[]) {
       const run = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "job", ...args,

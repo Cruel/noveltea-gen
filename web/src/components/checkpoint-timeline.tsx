@@ -41,7 +41,7 @@ export function CheckpointTimeline({ job }: { job: JobOverview }) {
         <div>Verified work: {point.completedWorkItems.join(', ') || 'none'}</div>
         <div>Next: {point.nextWorkItem ?? 'No ready work item'} · Remaining: {point.remainingWorkItems.join(', ') || 'none'}</div>
         {point.nextWorkItem && <div>Next prerequisites: {(point.dependencies[point.nextWorkItem] ?? []).join(', ') || 'none'}</div>}
-        <div>Validator: {point.validation.status} (<code>{point.validation.validatorSha256.slice(0, 12)}</code>)</div>
+        <div>Validator: {point.validation.status} (<code>{point.validation.validatorVersion.slice(0, 12)}</code>)</div>
         {point.eligible && <>
           <div>Parent commit: <code>{point.parentSha.slice(0, 12)}</code> · Receipt: {point.source}</div>
           <div>Receipt proof: <code>{point.proofDigest.slice(0, 20)}</code></div>

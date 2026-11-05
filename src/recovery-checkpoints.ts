@@ -83,7 +83,7 @@ function proofOf(id: string, receipt: Receipt, sha: string) {
   } else if (id !== "global-architecture") {
     // A specialist's recorded proof is mandatory, not merely its self-reported
     // 'committed' phase. Focus uses the verified authored digest instead.
-    const evidence = item.validation as { validatorSha256?: string; status?: string;
+    const evidence = item.validation as { validatorVersion?: string; status?: string;
       branchReview?: { status?: string } } | undefined;
     if (id.startsWith("focus:")) {
       if (!HASH.test(item.sha256 ?? "")) throw new Error("Focused work lacks its pinned content digest.");
@@ -155,7 +155,7 @@ export interface RecoveryCheckpoint {
   planDigest: string | null; plan: unknown;
   completedWorkItems: string[]; remainingWorkItems: string[];
   nextWorkItem: string | null; dependencies: Record<string, string[]>;
-  validation: { status: "passed" | "unverified-empty-baseline" | "not-verified"; validatorSha256: string };
+  validation: { status: "passed" | "unverified-empty-baseline" | "not-verified"; validatorVersion: string };
   source: string; proofDigest: string; snapshotId: string | null;
   compatibility: { logicalSchema: "noveltea-recovery/v1"; graphSchema: "noveltea-generation/v1" };
   /** Context references, never transferable approval grants. */
@@ -322,8 +322,8 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
       point.graphThread !== await graphThread(job) ||
       point.compatibility?.logicalSchema !== "noveltea-recovery/v1" ||
       point.compatibility.graphSchema !== "noveltea-generation/v1" ||
-      point.validation?.validatorSha256 !== job.validatorSha256 ||
-      !HASH.test(point.validation?.validatorSha256 ?? "") ||
+      point.validation?.validatorVersion !== job.validatorVersion ||
+      !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(point.validation?.validatorVersion ?? "") ||
       point.provenance?.authorApprovals !== "source-bound-not-reusable" ||
       point.provenance.authorMessages !== "source-bound-not-reusable" ||
       point.stage !== stageOf(point.workItem) ||
@@ -393,8 +393,8 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
   if (point.planVersion !== (source.planVersion ?? (point.plan as { version?: number } | null)?.version ?? null) ||
       point.validation.status !== (source.proof.validation === "unverified-empty-baseline"
         ? "unverified-empty-baseline" : "passed") ||
-      source.proof.validation?.validatorSha256 &&
-        source.proof.validation.validatorSha256 !== point.validation.validatorSha256 ||
+      source.proof.validation?.validatorVersion &&
+        source.proof.validation.validatorVersion !== point.validation.validatorVersion ||
       source.source !== point.source || source.proofDigest !== point.proofDigest ||
       source.snapshotId !== (point.snapshotId ?? undefined)) {
     throw new Error("Recovery checkpoint no longer matches its exact trusted specialist receipt.");
@@ -406,7 +406,7 @@ function nonBranchable(job: JobStartResult, sha: string, reason: string): Recove
     branch: job.branch, graphThread: job.threadId + ":generation", baseSha: job.baseSha,
     commitSha: sha, parentSha: "", workItem: "unknown", stage: "unknown",
     planVersion: null, planDigest: null, plan: null, completedWorkItems: [], remainingWorkItems: [],
-    nextWorkItem: null, dependencies: {}, validation: { status: "not-verified", validatorSha256: "" },
+    nextWorkItem: null, dependencies: {}, validation: { status: "not-verified", validatorVersion: "" },
     source: "", proofDigest: "", snapshotId: null,
     compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
     provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
@@ -439,7 +439,7 @@ export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<R
 export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   workItem: string, parentSha: string, commitSha: string) {
   job = await startStoryJob({ story: job.storyRoot, job: job.jobId }, false);
-  if (!job.validatorSha256 || !HASH.test(job.validatorSha256))
+  if (!job.validatorVersion || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(job.validatorVersion))
     throw new Error("Recovery checkpoint requires the pinned native validator identity.");
   // A Git commit plus a specialist JSON receipt is insufficient until the
   // original specialist has also published its trusted verified-head boundary.
@@ -460,8 +460,8 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   if (receipt.planVersion !== null && (!Number.isInteger(receipt.planVersion) || receipt.planVersion < 1))
     throw new Error("Recovery checkpoint has an invalid plan version.");
   const sourceProof = receipt.proof as Receipt;
-  if (sourceProof.validation?.validatorSha256 &&
-      sourceProof.validation.validatorSha256 !== job.validatorSha256)
+  if (sourceProof.validation?.validatorVersion &&
+      sourceProof.validation.validatorVersion !== job.validatorVersion)
     throw new Error("Specialist validation uses a different pinned validator.");
   const intent: RecoveryIntent = { version: 2, jobId: job.jobId, commitSha, parentSha, workItem,
     proofDigest: receipt.proofDigest, planDigest: plan ? digest(plan) : null,
@@ -497,7 +497,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     completedWorkItems: completed, remainingWorkItems: remaining,
     nextWorkItem: next, dependencies: work.dependencies,
     validation: { status: sourceProof.validation === "unverified-empty-baseline"
-      ? "unverified-empty-baseline" : "passed", validatorSha256: job.validatorSha256 },
+      ? "unverified-empty-baseline" : "passed", validatorVersion: job.validatorVersion },
     source: receipt.source, proofDigest: receipt.proofDigest, snapshotId: receipt.snapshotId ?? null,
     compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
     provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },

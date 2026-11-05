@@ -9,11 +9,13 @@ native CLI for Story context, structural validation, readiness and Git protectio
 
 The canonical implementation is the **native** `noveltea` executable.
 Specify `NT_NATIVE_CLI=/absolute/path/to/noveltea` or install it on `PATH`.
-The first validation pins the real executable path and SHA-256 in
-`validator.json` and the job manifest. Its bytes are checked on each use;
-the generator never rebuilds a validator from `noveltea-skills`.
-Missing or changed executables fail closed rather than silently upgrading
-a job to a different Story authority.
+Job creation records `noveltea --version` in `job.json`. The installed
+CLI version is read once per worker process and compared with the saved
+version when validation or generation resumes. Normal validation does not
+hash the executable or inspect its filesystem metadata; the deployment
+guarantees that its CLI stays fixed for the worker lifetime. Different
+versions require explicit recovery or a fresh Thread. During development,
+rebuilt binaries reporting the same version are intentionally compatible.
 
 The generator invokes `noveltea --json narrative validate <story> --base
 <verified-commit>` and `noveltea --json narrative readiness <story> --stage
@@ -40,22 +42,16 @@ approval. Context selection uses the native `story_context` manifest.
 
 ## Existing pinned jobs
 
-Jobs with a saved `canonical-typescript-bundle` receipt continue to
-validate with their **original** content-addressed executable, provided
-the receipt and artifact remain intact. No automatic repinning, migrating
-or fallback to the live skills checkout is allowed. The esbuild-based
-historical adapter remains solely for compatibility and deterministic
-transport fixtures (the latter use `NT_VALIDATOR_TEST_LEGACY=1`).
-New production jobs always use native validation, irrespective of
-`--validator-source`.
+Old hash-pinned job manifests and `validator.json` receipts are obsolete
+in this development cutover and are not migrated automatically. Start a
+fresh job or Thread. Only the native CLI is used; `--validator-source`
+is ignored for validation.
 
 ## Acceptance
 
-The parity suite `test/validator.test.ts` compares both validators on
-the canonical reference Story, including unchanged content, protected
-decision edits, malformed metadata, readiness design/approved minima,
-and downstream impacted IDs. It tests native empty and invalid baselines,
-new-job pinning and legacy continuity. Run:
+The native suite `test/validator.test.ts` tests the canonical reference
+Story, protected-decision edits, malformed metadata, readiness, empty
+historical baselines, saved CLI version compatibility, missing tooling and resume rejection. Run:
 
 ```sh
 NT_SKILLS_CHECKOUT=/absolute/path/to/noveltea-skills \

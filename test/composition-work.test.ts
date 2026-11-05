@@ -50,7 +50,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
   const original = git(repo, "rev-parse", "HEAD");
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "missing-config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-    NT_VALIDATOR_CACHE_DIR: join(root, "validators") };
+     };
   function cli(args: string[], fixtureCase = "") {
     return spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "job", ...args,
       "--story", story, "--job", "draft"], { encoding: "utf8",

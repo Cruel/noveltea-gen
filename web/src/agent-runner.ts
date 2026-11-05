@@ -1,3 +1,4 @@
+import { assertNativeVersion } from '../../src/native-cli-version';
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import type { StudioDatabase } from './db/connection'
@@ -21,6 +22,7 @@ import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint } from '
 export async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
   const row = selectedJob(store, item.ownerId, item.jobId)
   const job = await restoreJob(row, item.ownerId)
+  assertNativeVersion(job.validatorVersion)
   const pinned = pinnedRequest(row, job)
   if (!pinned || row.status !== 'paused' || queueRecord(store, row.id)?.phase !== 'running')
     throw new Error('Queued generation state changed before execution.')

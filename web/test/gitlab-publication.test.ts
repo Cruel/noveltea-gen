@@ -31,14 +31,12 @@ test('GitLab draft MR publication retains verified work, enforces author review 
   skip: !available, timeout: 180_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-gitlab-publish-'))
-  const old = Object.fromEntries(['NT_STATE_DIR','NT_GIT_CACHE_DIR','NT_VALIDATOR_TEST_LEGACY',
-    'NT_STUDIO_SKILLS_SOURCE','NT_VALIDATOR_CACHE_DIR','NT_CONFIG_FILE'].map(key => [key, process.env[key]]))
+  const old = Object.fromEntries(['NT_STATE_DIR','NT_GIT_CACHE_DIR',
+    'NT_STUDIO_SKILLS_SOURCE','NT_CONFIG_FILE'].map(key => [key, process.env[key]]))
   const oldFetch = globalThis.fetch
   process.env.NT_STATE_DIR = join(root, 'state')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
-  process.env.NT_VALIDATOR_CACHE_DIR = join(root, 'validators')
   process.env.NT_STUDIO_SKILLS_SOURCE = skills
-  process.env.NT_VALIDATOR_TEST_LEGACY = '1'
   process.env.NT_CONFIG_FILE = join(root, 'config.json')
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))
   let store = openStudioDatabase(join(root, 'studio.sqlite'))

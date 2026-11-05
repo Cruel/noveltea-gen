@@ -54,8 +54,17 @@ jobs:
           git config --global user.email "ci@noveltea.invalid"
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Run root and Studio checks
-        run: pnpm check
+      # Offline CI has no native CLI artifact: run the credential-free,
+      # native-independent test sets. The integration job below exercises the
+      # full root and Studio suites against a real native CLI when available.
+      - name: Typecheck, build and run offline-safe root and Studio tests
+        run: |
+          pnpm typecheck
+          pnpm test:offline
+          pnpm build
+          pnpm --filter @noveltea/studio db:check
+          pnpm --filter @noveltea/studio typecheck
+          pnpm --filter @noveltea/studio test:offline
 
   native-integration:
     name: Native Story integration (private skills access)

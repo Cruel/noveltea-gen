@@ -52,7 +52,7 @@ Ada wants to resolve the witness's disappearance without unjustly condemning Ner
   const baseline = git(repo, "rev-parse", "HEAD");
   const env = { ...process.env, NT_STATE_DIR: state, NT_CONFIG_FILE: join(root, "missing.json"),
     NT_SKILL_CACHE_DIR: join(root, name + "-skills"),
-    NT_VALIDATOR_CACHE_DIR: join(root, name + "-validators") };
+     };
   function call(...args: string[]) {
     return spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
       "job", ...args, "--story", story, "--job", name], {

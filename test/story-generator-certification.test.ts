@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 
@@ -53,8 +53,7 @@ test("certification #31: public native Story jobs are isolated, pinned, protecte
   const state = join(root, "state");
   const env = {
     ...process.env, NT_STATE_DIR: state, NT_NATIVE_CLI: native!,
-    NT_VALIDATOR_TEST_LEGACY: "0", NT_SKILL_CACHE_DIR: join(root, "skill-cache"),
-    NT_VALIDATOR_CACHE_DIR: join(root, "validator-cache"),
+    NT_SKILL_CACHE_DIR: join(root, "skill-cache"),
     LANGSMITH_TRACING: "true", LANGCHAIN_TRACING_V2: "true",
     TRACE_TO_LANGSMITH: "true", LANGSMITH_API_KEY: "", LANGCHAIN_API_KEY: "",
   };
@@ -86,8 +85,8 @@ test("certification #31: public native Story jobs are isolated, pinned, protecte
     const report = publicJob(story, id, "validate");
     assert.equal(report.status, "passed");
     assert.equal(report.validator.implementation, "native-cli");
-    assert.equal(report.validator.executable, realpathSync(native!));
-    assert.match(report.validator.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(report.validator.version, job.validatorVersion);
+    assert.match(report.validator.version, /^\d+\.\d+\.\d+/);
     assert.equal(report.report.protection.base, job.baseSha);
     assert.equal(report.report.protection.status, "checked");
     assert.equal(report.report.protection.authorizationVerified, false);
@@ -95,8 +94,8 @@ test("certification #31: public native Story jobs are isolated, pinned, protecte
     assert.ok(report.report.records.length > 10);
     assert.ok(report.report.coverage.milestoneRoutes.length > 0);
     assert.ok(!JSON.stringify(report.report).includes("PRIVATE_ENGINE_RECORD"));
-    const receipt = JSON.parse(readFileSync(join(dirname(job.worktreeRoot), "validator.json"), "utf8"));
-    assert.equal(receipt.sha256, report.validator.sha256);
+    const manifest = JSON.parse(readFileSync(join(job.stateDir, "job.json"), "utf8"));
+    assert.equal(manifest.validatorVersion, report.validator.version);
   }
 
   // The verified reference is the original committed author tree, not another
@@ -139,17 +138,16 @@ test("certification #31: public native Story jobs are isolated, pinned, protecte
   assert.equal(git(b.worktreeRoot, "status", "--porcelain"), "");
   assert.equal(git(c.worktreeRoot, "status", "--porcelain"), "");
 
-  // A saved native validator cannot be replaced, fabricated or silently
-  // repinned from the latest executable when its durable receipt is corrupt.
-  const pinFile = join(dirname(c.worktreeRoot), "validator.json");
-  const pinned = JSON.parse(readFileSync(pinFile, "utf8"));
-  writeFileSync(pinFile, JSON.stringify({ ...pinned, sha256: "0".repeat(64) }));
+  // Tampering with the saved version must fail closed without touching Story.
+  const manifestPath = join(c.stateDir, "job.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  writeFileSync(manifestPath, JSON.stringify({ ...manifest, validatorVersion: "9.9.9" }));
   const tampered = spawnSync(process.execPath,
     ["--import", "tsx", cli, "job", "validate", "--story", second.story, "--job", "one"],
     { cwd: resolve("."), encoding: "utf8", env, timeout: 30_000 });
   assert.notEqual(tampered.status, 0);
-  assert.match(tampered.stderr, /validator pin|receipt|manifest/i);
+  assert.match(tampered.stderr, /version|job identity/i);
   assert.equal(git(second.repo, "rev-parse", "HEAD"), second.base);
   assert.equal(git(second.repo, "status", "--porcelain"), "");
-  assert.equal(JSON.parse(readFileSync(pinFile, "utf8")).sha256, "0".repeat(64));
+  assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).validatorVersion, "9.9.9");
 });

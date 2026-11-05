@@ -62,7 +62,7 @@ This separate Arc has no Milestones, Events, or authored ending.
   git(repo, "add", "."); git(repo, "commit", "-qm", "Story baseline");
   const base = git(repo, "rev-parse", "HEAD");
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
-    NT_VALIDATOR_CACHE_DIR: join(root, name + "-validator"),
+
     NT_SKILL_CACHE_DIR: join(root, name + "-skills"),
     NT_CONFIG_FILE: join(root, "nonexistent.json") };
   const call = (args: string[], job = "draft") => spawnSync(process.execPath,
@@ -273,13 +273,12 @@ test("completed evidence and unresolved textual integration remain independently
   mkdirSync(join(x.story, "arcs"), { recursive: true });
   writeFileSync(join(x.story, "arcs/truth.md"), "---\\nid: arc.truth\\n---\\nConflicting author Arc.\\n");
   git(x.repo, "add", "."); git(x.repo, "commit", "-qm", "Competing Arc");
-  const conflict = x.ok(["report", "--preview", "--fixture", "--validator-source", skills]);
+  const conflict = x.ok(["report", "--preview", "--fixture"]);
   assert.equal(conflict.generation.status, "completed");
   assert.equal(conflict.integration.status, "conflicts");
   assert.equal(conflict.integration.preview.candidate.status, "text-conflicts");
   assert.equal(conflict.integration.preview.validation.status, "not-run");
-  const readable = x.call(["report", "--preview", "--fixture", "--format", "markdown",
-    "--validator-source", skills]);
+  const readable = x.call(["report", "--preview", "--fixture", "--format", "markdown"]);
   assert.equal(readable.status, 0, readable.stderr);
   assert.match(readable.stdout, /Reconciliation option:/);
   assert.match(readable.stdout, /Uncertainty:/);
@@ -350,7 +349,7 @@ test("author pause and target drift remain separate from deferred integration", 
   const first = x.ok(["report"]);
   assert.equal(first.generation.status, "paused");
   assert.equal(first.integration.status, "not assessed");
-  const second = x.ok(["report", "--preview", "--fixture", "--validator-source", skills]);
+  const second = x.ok(["report", "--preview", "--fixture"]);
   assert.equal(second.generation.status, "paused");
   assert.notEqual(second.integration.targetHead, x.base);
   assert.equal(second.integration.preview.target.drift.length, 1);

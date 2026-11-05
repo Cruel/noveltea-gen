@@ -56,7 +56,7 @@ function setup(name: string, existing = true, authorKeyPinned = true) {
       cwd: resolve("."), encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, NT_STATE_DIR: state,
         NT_SKILL_CACHE_DIR: join(root, "skill-cache"),
-        NT_VALIDATOR_CACHE_DIR: join(root, "validator-cache") },
+         },
     });
     return { result, data: result.stdout.trim() ? JSON.parse(result.stdout) : undefined };
   }
@@ -70,7 +70,7 @@ function setup(name: string, existing = true, authorKeyPinned = true) {
       "--work-item", id, ...args);
   }
   function inspect(id: string) {
-    return revision("inspect", id, "--path", target, "--validator-source", skills);
+    return revision("inspect", id, "--path", target);
   }
   function receipt(id: string) {
     return JSON.parse(readFileSync(join(state, "jobs", job.branch.split("/")[1],
@@ -348,7 +348,7 @@ test("later protected decisions are enforced even when initial trusted Story bas
   const s = setup("later-protected", false);
   const generated = s.cliRun("foundation", "--story", s.story, "--job", "draft",
     "--fixture", "--task", "Murder mystery with a protected premise",
-    "--skills-source", skills, "--validator-source", skills);
+    "--skills-source", skills);
   assert.equal(generated.result.status, 0, generated.result.stderr);
   const foundationSha = generated.data.commitSha;
   const text = readFileSync(s.file, "utf8");

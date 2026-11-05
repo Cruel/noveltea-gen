@@ -28,7 +28,7 @@ interface EventReceipt {
   sessionFile?: string; skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
   conflicts?: string[]; obligations?: string[]; validation?: {
-    status: "passed"; validatorSha256: string; protectionBase: string;
+    status: "passed"; validatorVersion: string; protectionBase: string;
     eventIds: string[]; routes: Route[]; eventProgress: Progress[];
     branchProgress: Array<{ event: string; step: string; branch: string; status: Progress["status"] }>;
     remaining: unknown[]; truncated: boolean;
@@ -559,7 +559,7 @@ export async function runEventWorkItem(input: EventOptions) {
         if (dirty(job).length) throw new Error("Event commit left unexpected modifications.");
         const commit = git(job, "rev-parse", "HEAD");
         verifyCommit(job, receipt, commit);
-        receipt.validation = { status: "passed", validatorSha256: checked.validator.sha256,
+        receipt.validation = { status: "passed", validatorVersion: checked.validator.version,
           protectionBase: prior, ...proof };
         receipt.commitSha = commit;
         receipt.phase = "committed";

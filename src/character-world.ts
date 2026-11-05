@@ -41,7 +41,7 @@ interface Unit {
   outstanding?: Obligation[];
   laterObligations?: string[];
   architecturalConflicts?: string[];
-  validation?: { status: "passed"; protectionBase: string; validatorSha256: string; records: string[] };
+  validation?: { status: "passed"; protectionBase: string; validatorVersion: string; records: string[] };
 }
 interface Receipt {
   version: 1;
@@ -767,7 +767,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       unit.outstanding = report.outstanding.filter(o => report.records.some(r => r.path === o.path &&
         (unit.paths!.includes(r.path) || assign.arcIds.includes(r.metadata.id))));
       unit.validation = { status: "passed", protectionBase: before,
-        validatorSha256: (await startStoryJob({ story: input.story, job: input.job }, false)).validatorSha256!,
+        validatorVersion: (await startStoryJob({ story: input.story, job: input.job }, false)).validatorVersion!,
         records: unit.paths };
       unit.commitSha = sha; unit.phase = "committed";
       await persist(file, state);

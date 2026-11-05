@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { nativeVersion } from "./native-cli-version.js";
 
 export interface RecoveryForkPin {
   sourceJobId: string;
@@ -29,8 +30,8 @@ interface JobManifest {
   worktreeRoot: string;
   worktreeStoryRoot: string;
   threadId: string;
-  /** Set on first validation; missing validator receipt after this is fatal. */
-  validatorSha256?: string;
+  /** CLI version pinned when this Story job was created. */
+  validatorVersion: string;
   recoveryFork?: RecoveryForkPin;
 }
 
@@ -244,7 +245,7 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
           inside(gitRoot, saved.worktreeRoot))) ||
         !/^[0-9a-f]{40,64}$/.test(saved.baseSha) ||
         !/^[0-9a-f-]{36}$/.test(saved.threadId) ||
-        (saved.validatorSha256 !== undefined && !/^[a-f0-9]{64}$/.test(saved.validatorSha256))) {
+        (typeof saved.validatorVersion !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(saved.validatorVersion))) {
       throw new Error("Saved job identity does not match the selected Story, repository or job. No worktree was changed.");
     }
     const headSha = await validateWorktree(saved);
@@ -276,6 +277,7 @@ export async function startStoryJob(options: JobStartOptions, create = true): Pr
     baseSha, branch, stateDir: jobRoot, ...(cacheRoot ? { cacheRoot } : {}),
     ...(options.recoveryFork ? { recoveryFork: options.recoveryFork } : {}),
     worktreeRoot, worktreeStoryRoot, threadId: randomUUID(),
+    validatorVersion: nativeVersion(),
   };
   await mkdir(join(stateRoot, "jobs"), { recursive: true });
   try {
