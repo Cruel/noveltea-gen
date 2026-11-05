@@ -17,12 +17,14 @@ guarantees that its CLI stays fixed for the worker lifetime. Different
 versions require explicit recovery or a fresh Thread. During development,
 rebuilt binaries reporting the same version are intentionally compatible.
 
-The generator invokes `noveltea --json narrative validate <story> --base
-<verified-commit>` and `noveltea --json narrative readiness <story> --stage
-review --view design` (the native response includes approved readiness).
+The generator invokes a single native command:
+`noveltea --json narrative validate <story> --base <verified-commit>
+--readiness --stage review --view design`. Validation, Git protection,
+and both design/approved readiness views reuse one parsed Story catalog.
 The native `catalog.records`, `coverage`, and source-located diagnostics
 are forwarded; readiness and outstanding obligations are taken directly
-from the native readiness response. Native protection `findings` are
+from the same native response. The generator requires the combined response
+and fails closed if readiness evidence is missing. Native protection `findings` are
 mapped to the existing job-facing `protection.changes` and `warnings`
 fields without altering canonical decisions or author authorization.
 The generator does not implement Story parsing, reachability, or

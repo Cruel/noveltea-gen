@@ -70,17 +70,19 @@ if (args.length === 1 && args[0] === '--version') {
   process.stdout.write('1.0.0\\n');
   process.exit(0);
 }
-const ready = args.includes('readiness');
+const ready = args.includes('--readiness');
 const base = args[args.indexOf('--base') + 1];
 const catalog = ${JSON.stringify(catalog)};
-const report = ready ? { readiness: { contractRevision: '0.1',
-  design: { stages: { foundation: { minimum: 'passed' }, architecture: { minimum: 'passed' } } },
-  approved: { stages: {} }, outstanding: [] } }
-  : { catalog: { contractRevision: '0.1', records: catalog, diagnostics: [],
+const report = {
+  catalog: { contractRevision: '0.1', records: catalog, diagnostics: [],
     coverage: { search: { truncated: false }, eventProgress: [], milestoneRoutes: [],
       branchProgress: [], puzzleSolutions: [] }, authorization: {},
     protection: { status: 'checked', base, complete: true, authorizationVerified: false,
-      findings: [], impact: { changed: [], moved: [], affected: [] } } } };
+      findings: [], impact: { changed: [], moved: [], affected: [] } } },
+  ...(ready ? { readiness: { contractRevision: '0.1', stage: 'review', view: 'design',
+    design: { stages: { foundation: { minimum: 'passed' }, architecture: { minimum: 'passed' } } },
+    approved: { stages: {} }, outstanding: [] } } : {}),
+};
 process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: true,
   diagnostics: [], ...report}));
 `)

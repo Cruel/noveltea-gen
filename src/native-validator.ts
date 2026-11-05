@@ -32,7 +32,8 @@ export function nativeValidate(job: JobStartResult, pin: NativeValidatorPin): Va
     validator: pin };
   try {
     const { exit, result: response } = invoke(nativeExecutable(), job,
-      ["validate", job.worktreeStoryRoot, "--base", job.baseSha]);
+      ["validate", job.worktreeStoryRoot, "--base", job.baseSha,
+        "--readiness", "--stage", "review", "--view", "design"]);
     const catalog = response.catalog as ObjectValue | undefined;
     if (!catalog || !Array.isArray(catalog.records) ||
         !Array.isArray(catalog.diagnostics) || !catalog.coverage ||
@@ -59,16 +60,15 @@ export function nativeValidate(job: JobStartResult, pin: NativeValidatorPin): Va
       code: f.code, decision: f.decisionId, kind: f.category, path: f.afterLocation?.path ?? f.beforeLocation?.path,
       message: f.message ?? "Protected Story decision requires independent author authorization.",
     }));
-    // Native readiness is an independent public command; obtain it without
-    // computing Story rules or reconstructing relationships in the generator.
-    const ready = invoke(nativeExecutable(), job,
-      ["readiness", job.worktreeStoryRoot, "--stage", "review", "--view", "design"]).result;
-    if (!ready.readiness || ready.readiness.contractRevision !== catalog.contractRevision ||
-        !ready.readiness.design?.stages || !ready.readiness.approved?.stages ||
-        !Array.isArray(ready.readiness.outstanding))
-      throw new Error("Native narrative readiness returned an incomplete report.");
+    // Native validation and readiness share one parsed catalog and subprocess.
+    const readiness = response.readiness as ObjectValue | undefined;
+    if (!readiness || readiness.contractRevision !== catalog.contractRevision ||
+        readiness.stage !== "review" || readiness.view !== "design" ||
+        !readiness.design?.stages || !readiness.approved?.stages ||
+        !Array.isArray(readiness.outstanding))
+      throw new Error("Native narrative validation returned an incomplete readiness report.");
     const report = {
-      ...catalog, readiness: ready.readiness, outstanding: ready.readiness.outstanding,
+      ...catalog, readiness, outstanding: readiness.outstanding,
       protection: { ...rawProtection, changes, warnings,
         impact: rawProtection.impact ?? { changed: [], moved: [], affected: [] } },
     };

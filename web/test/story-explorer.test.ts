@@ -125,7 +125,7 @@ for (const [file, id] of [['new.md', 'event.new'], ['draft.md', 'event.draft']])
 }
 const diagnostics = ${JSON.stringify(diagnostics)};
 const base = args[args.indexOf('--base') + 1];
-const readiness = args.includes('readiness');
+const readiness = args.includes('--readiness');
 const context = args.includes('context');
 const manifest = { contractRevision: '0.1', unresolved: [], bounded: { truncated: false, maxDepth: 2, maxFiles: 128 },
   files: [
@@ -137,13 +137,15 @@ const manifest = { contractRevision: '0.1', unresolved: [], bounded: { truncated
     { id: 'milestone.bell', path: 'milestones/bell.md', inclusions: [
       { code: 'fulfillment', sourceId: 'milestone.bell', targetId: 'event.bell' }] },
   ] };
-const payload = context ? { manifest } : readiness
-  ? { readiness: { contractRevision: '0.1', design: { stages: {} }, approved: { stages: {} }, outstanding: [] } }
-  : { catalog: { contractRevision: '0.1', records, diagnostics,
-      coverage: {}, authorization: {}, protection: { status: 'checked', base,
-        authorizationVerified: false, complete: true, findings: [],
-        impact: { changed: [], moved: [], affected: [] } } } };
-const exit = readiness || context ? 0 : 1;
+const payload = context ? { manifest } : {
+  catalog: { contractRevision: '0.1', records, diagnostics,
+    coverage: {}, authorization: {}, protection: { status: 'checked', base,
+      authorizationVerified: false, complete: true, findings: [],
+      impact: { changed: [], moved: [], affected: [] } } },
+  ...(readiness ? { readiness: { contractRevision: '0.1', stage: 'review', view: 'design',
+    design: { stages: {} }, approved: { stages: {} }, outstanding: [] } } : {}),
+};
+const exit = context ? 0 : 1;
 process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: exit,
   success: exit === 0, diagnostics: [], ...payload}));
 process.exit(exit);

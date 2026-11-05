@@ -89,6 +89,33 @@ test("new jobs persist the CLI version and preserve the trusted historical basel
   assert.equal(git(repo, "status", "--porcelain"), "");
 });
 
+test("a validation obtains catalog, Git protection and readiness in one native command", {
+  skip: process.platform === "win32" || !available
+    ? "Requires POSIX launcher and the current native CLI" : false,
+}, () => {
+  const { story } = repository("single-native-command");
+  const state = join(root, "single-native-command-state");
+  const job = start(story, state);
+  const launcher = join(root, "single-native-command-launcher");
+  const calls = join(root, "single-native-command-calls.txt");
+  writeFileSync(launcher, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " +
+    JSON.stringify(calls) + "\nexec " + JSON.stringify(executable!) + " \"$@\"\n");
+  chmodSync(launcher, 0o755);
+  const result = validate(story, state, { NT_NATIVE_CLI: launcher });
+  assert.equal(result.proc.status, 0, result.proc.stderr);
+  assert.equal(result.output?.status, "passed");
+  assert.equal(result.output?.report.protection.status, "checked");
+  assert.equal(result.output?.report.readiness.stage, "review");
+  assert.equal(result.output?.report.readiness.view, "design");
+  assert.deepEqual(result.output?.report.outstanding, result.output?.report.readiness.outstanding);
+  const commands = readFileSync(calls, "utf8").trim().split("\n")
+    .filter(line => line.includes("narrative "));
+  assert.equal(commands.length, 1, "normal validation must launch only one narrative subprocess");
+  assert.match(commands[0], /narrative validate .* --base [a-f0-9]+ --readiness --stage review --view design/);
+  assert.ok(!commands.some(line => line.includes("narrative readiness")));
+  assert.equal(existsSync(join(job.stateDir, "validator.json")), false);
+});
+
 test("native validator reports protected decisions, malformed records, and downstream impact", requiresNative, () => {
   const { story } = repository("native-protection");
   const state = join(root, "native-protection-state");
