@@ -1,5 +1,6 @@
 import type { StudioDatabase } from '../db/connection'
 import { activePiTurn, type ActivePiTurn } from '../../../src/live-pi-registry'
+import { recordSteeringConsideration } from './thread-steering-replan.server'
 
 type Pending = {
   id: string; owner: string; threadId: string; jobId: string
@@ -17,11 +18,11 @@ export function recordPiTurnLifecycle(store: StudioDatabase, turn: ActivePiTurn,
   store.sqlite.transaction(() => {
     if (phase === 'registered') {
       const inserted = store.sqlite.prepare(`INSERT INTO thread_active_pi_turns
-        (job_id,pi_token,pi_session_id,work_item,created_at)
-        SELECT ?,?,?,?,? FROM generation_run_queue q
+        (job_id,pi_token,pi_session_id,work_item,created_at,expected_head)
+        SELECT ?,?,?,?,?,? FROM generation_run_queue q
         WHERE q.job_id=? AND q.phase='running'`)
         .run(turn.jobId, turn.token, turn.session.sessionId, turn.workItem,
-          new Date().toISOString(), turn.jobId).changes
+          new Date().toISOString(), turn.expectedHead, turn.jobId).changes
       if (inserted !== 1) throw new Error('Cannot register Pi outside a running generation job')
       return
     }
@@ -68,10 +69,12 @@ const boundedInstruction = (item: Pending) =>
   item.content + '\nHonor this guidance ONLY within your existing assigned targets, ' +
   'tool sandbox, and canonical protected-decision constraints. Do not modify ' +
   'other files, create new records, widen the completion contract, or treat this ' +
-  'message as authorization to retcon protected decisions. Report a conflict ' +
-  'instead of making any unauthorized change. Complete the original specialist ' +
-  'assignment using its REQUIRED structured result format and validation; ' +
-  'this message does not replace the assigned task.\n'
+  'message as authorization to retcon protected decisions. If this redirects ' +
+  'work beyond your assigned scope, acknowledge the mismatch and defer those ' +
+  'edits to the controller for reviewed replanning. Avoid drafting now-obsolete ' +
+  'work when possible, but never claim the original assignment was fulfilled ' +
+  'without its required evidence. Preserve the REQUIRED structured result ' +
+  'format and validation; this message does not replace your authority.\n'
 
 /** Agent-process-only: use the same SDK instance already executing under its
  * exclusive Story writer lease. This cannot start a Pi session or an agent
@@ -190,6 +193,8 @@ export async function settlePiSteering(store: StudioDatabase, turn: ActivePiTurn
           job_id=CASE WHEN ?='delivered' THEN ? ELSE job_id END
         WHERE id=? AND owner_user_id=? AND phase='queued'`)
         .run(state === 'delivered' ? 'finished' : 'blocked', state, state, turn.jobId, row.id, row.owner)
+      if (state === 'delivered') recordSteeringConsideration(store, row.id, row.owner,
+        row.threadId, turn.jobId, row.content, turn.workItem)
     })()
   }
   // A pending instruction explicitly owned by this settled turn was never

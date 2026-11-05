@@ -7,7 +7,7 @@ import { readJobControl } from '../../src/job-control'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { withStoryJobLock } from '../../src/job-lock'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
-import { reconcileRecoveryCheckpoints } from '../../src/recovery-checkpoints'
+import { reconcileRecoveryCheckpoints, inspectRecoveryCheckpoints } from '../../src/recovery-checkpoints'
 import { configurePiPolicy, resolvePiModel, type PiPolicy } from '../../src/job-pi-policy'
 import { withJobModelRuntime } from '../../src/model-runtime'
 import { SandboxClient } from '../../src/sandbox-client'
@@ -15,6 +15,7 @@ import { assertUserPiSelection, createUserPiRuntime, validPiSelection, type PiSe
 import { appendGenerationEvent, committedStoryFiles } from './lib/generation-progress.server'
 import { queueRecord, type QueueRecord } from './lib/generation-queue.server'
 import { selectedJob, restoreJob, pinnedRequest, verifyTrustedRevision, verifyWebExecution } from './lib/fixture-jobs.server'
+import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint } from './lib/thread-steering-replan.server'
 
 /** Verify the queued identity and resume the pinned graph, never browser inputs. */
 export async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
@@ -113,6 +114,14 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
             const files = committedStoryFiles(job, previousHead, evidence.headSha)
             appendGenerationEvent(store, item.ownerId, row.id, { kind: 'verified',
               stage: evidence.stage, milestone: evidence.milestone, files })
+            // Only a finalized recovery proof can associate a steering message
+            // with this verified Git boundary. If publication is interrupted,
+            // terminal settlement reconciles the same proof idempotently.
+            const points = await inspectRecoveryCheckpoints(job)
+            for (const point of points.filter(p => p.commitSha === evidence.headSha)) {
+              attributeSteeringCheckpoint(store, item.ownerId, row.id, point)
+              attributeApprovedReplanCheckpoint(store, item.ownerId, row.id, point, files)
+            }
             previousHead = evidence.headSha
           }
           verified = completed.length

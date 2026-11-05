@@ -14,6 +14,8 @@ import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
 import { advanceThread, readThreadChat, cancelQueuedThreadMessage } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
+import { recordSteeringConsideration, prepareSteeringBoundaryReviews,
+  attributeApprovedReplanCheckpoint } from '../src/lib/thread-steering-replan.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
 
 const config = { baseURL: 'http://localhost:3000',
@@ -42,7 +44,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'concurrent' | 'cancel' | 'cancel-inflight') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
@@ -123,11 +125,76 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       { status: 'completed' }, 'completion_decision')
     sourceGraph.saver.db.close()
 
-    const task = kind === 'broad'
+    const task = kind === 'broad' || kind === 'redirect'
       ? 'Rewrite milestone.confession for better emotional pacing'
       : kind === 'cancel' ? 'Change this Event' : 'Make character.nia less confrontational'
     await assert.rejects(previewThreadRevision(store, stranger, threadId, task), /no source generation|has no source|not found/i)
     const plan = await previewThreadRevision(store, owner, threadId, task)
+    if (kind === 'redirect') {
+      const originalId = randomUUID()
+      const existing = readThreadChat(store, owner, threadId)
+      const sequence = Math.max(...existing.messages.map(m => m.sequence), -1) + 1
+      store.sqlite.prepare(`INSERT INTO story_thread_messages
+        (id,owner_user_id,thread_id,sequence,role,status,body,phase,job_id,created_at)
+        VALUES (?,?,?,?,'user','delivered',?,'finished',?,'now')`)
+        .run(originalId, owner, threadId, sequence, task, sourceId)
+      store.sqlite.prepare(`INSERT INTO thread_live_inputs
+        (message_id,owner_user_id,thread_id,source_job_id,mode,state,created_at)
+        VALUES (?,?,?,?,'steer','delivered','now')`)
+        .run(originalId, owner, threadId, sourceId)
+      recordSteeringConsideration(store, originalId, owner, threadId,
+        sourceId, task, 'focus:character.nia')
+      assert.equal(prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 1)
+      assert.equal(prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 0)
+      const continuation = readThreadChat(store, owner, threadId)
+        .messages.find(m => m.phase === 'queued')!
+      assert.equal(continuation.hasRevisionScope, 0)
+      assert.equal(continuation.content, task)
+      await advanceThread(store, owner, threadId)
+      assert.equal(readThreadChat(store, owner, threadId)
+        .messages.find(m => m.id === continuation.id)?.phase, 'queued')
+      assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM story_thread_runs')
+        .get() as { n: number }).n, 1,
+      'no automatic specialist for out-of-scope change')
+      const reviewed = await previewThreadRevision(store, owner, threadId, task,
+        undefined, continuation.id)
+      assert.equal(reviewed.digest, plan.digest)
+      assert.deepEqual(reviewed.targets, ['authored-content.confession', 'event.confession'])
+      await submitThreadRevision(store, owner, threadId, continuation.id, task,
+        undefined, reviewed.digest)
+      await advanceThread(store, owner, threadId)
+      const after = readThreadChat(store, owner, threadId)
+      assert.equal(after.messages.find(m => m.id === continuation.id)?.phase, 'running')
+      assert.deepEqual(after.runs.map(r => r.jobId), [sourceId, continuation.id])
+      assert.equal(after.steeringActivity.find(a => a.messageId === originalId)?.state, 'approved-run')
+      const child = await restoreJob(selectedJob(store, owner, continuation.id), owner)
+      const pinned = pinnedRequest(selectedJob(store, owner, continuation.id), child)!
+      assert.deepEqual(pinned.contract.scope.targets,
+        ['authored-content.confession', 'event.confession'])
+      assert.equal(pinned.contract.scope.kind, 'partial')
+      assert.equal(pinned.contract.scope.depth, 'composition')
+      assert.equal(child.baseSha, sha, 'previous committed Story stays the new baseline')
+      const proof = { eligible: true, parentSha: sha, commitSha: 'a'.repeat(40),
+        proofDigest: 'b'.repeat(64), workItem: 'focus:event.confession' }
+      assert.equal(attributeApprovedReplanCheckpoint(store, stranger,
+        continuation.id, proof, ['events/confession.md']), 0)
+      assert.equal(attributeApprovedReplanCheckpoint(store, owner,
+        continuation.id, proof, ['characters/nia.md']), 0,
+      'a committed out-of-scope path cannot be misattributed as approved')
+      assert.equal(attributeApprovedReplanCheckpoint(store, owner,
+        continuation.id, proof, ['events/confession.md']), 1)
+      assert.equal(attributeApprovedReplanCheckpoint(store, owner,
+        continuation.id, proof, ['events/confession.md']), 0,
+      'recovery never duplicates verified checkpoint associations')
+      const activity = readThreadChat(store, owner, threadId).steeringActivity
+        .find(item => item.messageId === originalId)!
+      assert.equal(activity.implementationCount, 1)
+      assert.equal(activity.implementationSha, proof.commitSha)
+      assert.equal(activity.verifiedEffectAt, null,
+        'verified scoped file change cannot claim narrative fulfillment')
+      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      return
+    }
     if (kind === 'cancel-inflight') {
       const pendingId = randomUUID()
       const inFlight = submitThreadRevision(store, owner, threadId, pendingId, task)
@@ -268,6 +335,8 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
   }
 }
 
+test('out-of-scope Character steering requires reviewed Milestone continuation with bounded downstream inventory',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('redirect'))
 test('reviewed Milestone expansion admits a scoped child and rejects changed approval',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('broad'))
 test('unambiguous Character revision admits only its one focused path without a form',

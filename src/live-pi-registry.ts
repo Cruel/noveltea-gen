@@ -7,6 +7,7 @@ export type ActivePiTurn = {
   jobId: string;
   token: string;
   workItem: string;
+  expectedHead: string;
   session: LivePiSession;
 };
 const active = new Map<string, ActivePiTurn>();

@@ -3,10 +3,14 @@ import { createHash } from 'node:crypto'
 import type { StudioDatabase } from '../db/connection'
 import { selectedJob, restoreJob, pinnedRequest, inspectRegisteredJob, verifyWebExecution } from './fixture-jobs.server'
 import { trustedHead } from '../../../src/revision'
+import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
 import { continueCachedStory } from './git-cache.server'
 import { assertServerClaimPermitted } from '../../../src/generation-owner'
 import { queueGeneration, queueRecord } from './generation-queue.server'
 import { deferUndeliveredSteering } from './thread-live-steering.server'
+import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint,
+  prepareSteeringBoundaryReviews, steeringActivity } from './thread-steering-replan.server'
+import { committedStoryFiles } from './generation-progress.server'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { GenerationRequest } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
@@ -21,6 +25,7 @@ export class ThreadChatError extends Error {
 }
 export type ThreadMessage = {
   id: string; role: 'user' | 'assistant'; status: 'delivered' | 'queued'; content: string
+  queuePriority: number
   phase: 'queued' | 'preparing' | 'running' | 'finished' | 'blocked' | 'cancelled'
   jobId: string | null; createdAt: string; sequence: number; hasRevisionScope: number
   cancelledAt: string | null
@@ -44,6 +49,9 @@ function nextSequence(store: StudioDatabase, threadId: string): number {
   return row.next
 }
 const messageColumns = `sequence,id,role,status,body AS content,
+  COALESCE((SELECT original.sequence FROM thread_steering_intents intent
+    JOIN story_thread_messages original ON original.id=intent.message_id
+    WHERE intent.review_message_id=story_thread_messages.id), sequence) AS queuePriority,
   (revision_scope_json IS NOT NULL) AS hasRevisionScope,
   (SELECT c.cancelled_at FROM story_thread_message_cancellations c
     WHERE c.message_id=story_thread_messages.id) AS cancelledAt,
@@ -196,7 +204,8 @@ export function readThreadChat(store: StudioDatabase, owner: string, threadId: s
       filesJson: string; status: string | null; createdAt: string
     }>
   return { threadId, storyId: membership.storyId, archived: !!membership.archivedAt,
-    messages, runs: runs.map(({ requestJson, ...run }) => ({
+    messages, steeringActivity: steeringActivity(store, owner, threadId),
+    runs: runs.map(({ requestJson, ...run }) => ({
       ...run, status: run.queuePhase === 'interrupted' ? 'interrupted'
         : run.queuePhase === 'queued' ? 'queued'
         : run.queuePhase === 'running' ? 'running' : run.status,
@@ -251,14 +260,16 @@ export function enqueueThreadMessage(store: StudioDatabase, owner: string, threa
       // The turn snapshot and message admission share SQLite's serialization
       // order across the web and agent processes. Never target a later Pi
       // specialist merely because it happens to be active at dispatch time.
-      const target = store.sqlite.prepare(`SELECT t.pi_token AS token,t.work_item AS workItem FROM thread_active_pi_turns t
+      const target = store.sqlite.prepare(`SELECT t.pi_token AS token,t.work_item AS workItem,
+        t.expected_head AS expectedHead FROM thread_active_pi_turns t
         JOIN generation_run_queue q ON q.job_id=t.job_id AND q.phase='running'
         WHERE t.job_id=? AND q.owner_user_id=?`).get(run.jobId, owner) as
-        { token: string; workItem: string } | undefined
+        { token: string; workItem: string; expectedHead: string } | undefined
       store.sqlite.prepare(`INSERT INTO thread_live_inputs
-        (message_id,owner_user_id,thread_id,source_job_id,mode,state,created_at,target_pi_token,target_work_item)
-        VALUES (?,?,?,?,?,?,?,?,?)`).run(id, owner, threadId, run.jobId, mode,
-          target ? 'pending' : 'deferred', time, target?.token ?? null, target?.workItem ?? null)
+        (message_id,owner_user_id,thread_id,source_job_id,mode,state,created_at,target_pi_token,target_work_item,submitted_head)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, owner, threadId, run.jobId, mode,
+          target ? 'pending' : 'deferred', time, target?.token ?? null,
+          target?.workItem ?? null, target?.expectedHead ?? null)
     }
     store.sqlite.prepare(`UPDATE story_threads SET activity_at=? WHERE id=? AND owner_user_id=?`)
       .run(time, threadId, owner)
@@ -358,7 +369,9 @@ function claimMessage(store: StudioDatabase, owner: string, threadId: string): A
       FROM story_thread_messages m WHERE m.owner_user_id=? AND m.thread_id=?
         AND m.role='user' AND m.phase='queued'
         AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id)
-      ORDER BY m.sequence LIMIT 1`).get(owner, threadId) as
+      ORDER BY COALESCE((SELECT original.sequence FROM thread_steering_intents intent
+        JOIN story_thread_messages original ON original.id=intent.message_id
+        WHERE intent.review_message_id=m.id),m.sequence), m.sequence LIMIT 1`).get(owner, threadId) as
       { id: string; content: string; scopeJson: string | null } | undefined
     if (!next || !next.scopeJson) return null
     const changed = store.sqlite.prepare(`UPDATE story_thread_messages SET phase='preparing',
@@ -375,7 +388,9 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     FROM story_thread_messages m WHERE m.owner_user_id=? AND m.thread_id=?
       AND m.role='user' AND m.phase='queued'
       AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id)
-    ORDER BY m.sequence LIMIT 1`)
+    ORDER BY COALESCE((SELECT original.sequence FROM thread_steering_intents intent
+      JOIN story_thread_messages original ON original.id=intent.message_id
+      WHERE intent.review_message_id=m.id),m.sequence),m.sequence LIMIT 1`)
     .get(owner, threadId) as { id: string; content: string; scope: string | null } | undefined
   const source = currentRun(store, owner, threadId)
   if (candidate && !candidate.scope && source?.status === 'completed' && source.queuePhase === 'finished') {
@@ -456,6 +471,9 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
           (job_id,owner_user_id,intent,phase,created_at,updated_at)
           VALUES (?,?,'start','finished',?,?)`).run(claim.id, owner, time, time)
         markProtectedThreadConsumed(store, owner, claim.id, committed)
+        store.sqlite.prepare(`UPDATE thread_steering_intents SET review_state='approved-run'
+          WHERE review_message_id=? AND owner_user_id=? AND thread_id=? AND review_state='awaiting-review'`)
+          .run(claim.id, owner, threadId)
         store.sqlite.prepare(`UPDATE story_thread_messages SET phase='finished',
           status='delivered',job_id=?,verified_commit_sha=?
           WHERE id=? AND owner_user_id=? AND phase='preparing'`)
@@ -499,6 +517,9 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
         .run(claim.id, owner, threadId, claim.runOrder)
       queueGeneration(store, owner, child.jobId, 'start', 'prepared', JSON.stringify(pinned),
         child.threadId + ':generation:web')
+      store.sqlite.prepare(`UPDATE thread_steering_intents SET review_state='approved-run'
+        WHERE review_message_id=? AND owner_user_id=? AND thread_id=? AND review_state='awaiting-review'`)
+        .run(claim.id, owner, threadId)
       store.sqlite.prepare(`UPDATE story_thread_messages SET phase='running',job_id=?
         WHERE id=? AND owner_user_id=? AND phase='preparing'`).run(claim.id, claim.id, owner)
     })()
@@ -509,6 +530,9 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     store.sqlite.transaction(() => {
       store.sqlite.prepare(`UPDATE story_thread_messages SET phase='blocked'
         WHERE id=? AND owner_user_id=? AND phase='preparing'`).run(claim.id, owner)
+      store.sqlite.prepare(`UPDATE thread_steering_intents SET review_state='unresolved'
+        WHERE review_message_id=? AND owner_user_id=? AND thread_id=? AND review_state='awaiting-review'`)
+        .run(claim.id, owner, threadId)
       store.sqlite.prepare(`INSERT OR IGNORE INTO story_thread_messages
         (id,owner_user_id,thread_id,sequence,role,status,body,phase,created_at)
         VALUES (?,?,?,?,'assistant','delivered',?,'blocked',?)`)
@@ -557,6 +581,16 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
       }
     } catch { /* Missing or unsafe worktrees remain inspectable, not inheritable. */ }
   }
+  // Recover a verified per-specialist attribution if the controller crashed
+  // after checkpoint finalization but before publishing the activity receipt.
+  try {
+    const job = await restoreJob(selectedJob(store, owner, jobId), owner)
+    for (const point of await inspectRecoveryCheckpoints(job)) {
+      attributeSteeringCheckpoint(store, owner, jobId, point)
+      if (point.eligible) attributeApprovedReplanCheckpoint(store, owner, jobId, point,
+        committedStoryFiles(job, point.parentSha, point.commitSha))
+    }
+  } catch { /* No fabricated checkpoint or effect assertion on recovery failure. */ }
   store.sqlite.transaction(() => {
     const phase = queueRecord(store, jobId)?.phase
     if (!['finished', 'interrupted'].includes(phase ?? '')) return
@@ -571,13 +605,9 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
       WHERE owner_user_id=? AND job_id=? AND role='user' AND phase='running'`)
       .run(phase === 'finished' ? 'finished' : 'blocked',
         phase, verifiedCommit, verifiedCommit, owner, jobId)
-    // A verified HEAD provides a reviewable baseline, not proof that a
-    // particular natural-language steering instruction was fulfilled.
-    if (verifiedCommit) store.sqlite.prepare(`UPDATE story_thread_messages
-      SET verified_commit_sha=? WHERE owner_user_id=? AND thread_id=?
-        AND id IN (SELECT message_id FROM thread_live_inputs
-          WHERE source_job_id=? AND owner_user_id=? AND state='delivered')`)
-      .run(verifiedCommit, owner, record.threadId, jobId, owner)
+    // A delivered steer without a finalized, matching specialist checkpoint
+    // has no inheritable Git boundary. A terminal run HEAD cannot invent one.
+    prepareSteeringBoundaryReviews(store, owner, jobId, record.threadId, verifiedCommit)
     const assistantId = insertAssistant(store, owner, record.threadId, jobId)
     if (verifiedCommit) store.sqlite.prepare(`UPDATE story_thread_messages
       SET verified_commit_sha=? WHERE owner_user_id=? AND thread_id=? AND id=?`)

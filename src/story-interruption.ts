@@ -110,6 +110,7 @@ export async function runCancellableStoryTurn<T>(
     "followUp" in session && typeof session.followUp === "function" &&
     "messages" in session && Array.isArray(session.messages)
     ? { jobId: job.jobId, token: receipt.token, workItem,
+        expectedHead: receipt.expectedHead,
         session: session as LivePiSession } : null;
   const unregister = piTurn ? registerPiTurn(piTurn) : () => {};
   const initialMessageCount = session.messages?.length ?? 0;

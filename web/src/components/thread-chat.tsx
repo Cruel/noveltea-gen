@@ -62,7 +62,8 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       setPendingRetry(null)
       setMessage('')
       const candidate = result.chat.messages.find(item => item.id === id)
-      const firstQueued = result.chat.messages.find(item => item.role === 'user' && item.phase === 'queued')
+      const firstQueued = result.chat.messages.filter(item => item.role === 'user' && item.phase === 'queued')
+        .sort((a, b) => a.queuePriority - b.queuePriority || a.sequence - b.sequence)[0]
       const currentRun = result.chat.runs.at(-1)
       if (candidate?.phase === 'queued' && !candidate.hasRevisionScope &&
           firstQueued?.id === id && currentRun?.status === 'completed' &&
@@ -208,6 +209,22 @@ export function ThreadChat({ threadId }: { threadId: string }) {
               <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
         <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
+        {data?.steeringActivity.filter(activity => activity.messageId === item.id).map(activity =>
+          <div key={activity.messageId} className="mt-2 text-xs text-muted-foreground">
+            <p className="m-0">Controller: {activity.disposition === 'within-scope' ? 'Within assigned scope' :
+              activity.disposition === 'scope-review' ? 'Additional Story scope needs approval' :
+              activity.disposition === 'protected-review' ? 'Protected decision requires separate authorization' :
+              'Intent unresolved; no additional scope authorized'} · {activity.state.replaceAll('-', ' ')}</p>
+            {activity.checkpointSha ? <p className="mt-1">
+              Verified checkpoint {activity.checkpointSha.slice(0, 12)} · {activity.checkpointWorkItem} ·
+              causal influence only, not editorial fulfillment
+            </p> : <p className="mt-1">No attributable verified checkpoint yet</p>}
+            {activity.implementationSha && <p className="mt-1">Approved continuation: {activity.implementationCount} verified work-item checkpoint(s), latest {activity.implementationSha.slice(0, 12)}. Structural implementation evidence only.</p>}
+            {activity.verifiedEffectAt && <p className="mt-1">Independent effect verified: {new Date(activity.verifiedEffectAt).toLocaleString()}</p>}
+            {activity.reviewMessageId && <p className="mt-1">Continuation queued for explicit scope review (linked to this instruction).</p>}
+          </div>)}
+        {item.role === 'user' && data?.steeringActivity.some(activity => activity.reviewMessageId === item.id) &&
+          <p className="mt-1 text-xs text-muted-foreground">Scope-review continuation from a previous delivered steer; approval required before a new writer can start.</p>}
         {item.editCount > 0 && <details className="mt-1 text-xs text-muted-foreground">
           <summary className="cursor-pointer">Edited {item.editCount} {item.editCount === 1 ? 'time' : 'times'} before delivery · view history</summary>
           <ol className="ml-4 mt-1 list-decimal space-y-1">
@@ -243,7 +260,8 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           !['dispatching', 'sdk-queued'].includes(item.liveState ?? '') &&
           <div className="mt-2 flex flex-wrap gap-2">
             {!item.hasRevisionScope && latest?.status === 'completed' && latest.queuePhase === 'finished' &&
-              item.id === data?.messages.find(m => m.role === 'user' && m.phase === 'queued')?.id &&
+              item.id === data?.messages.filter(m => m.role === 'user' && m.phase === 'queued')
+                .sort((a, b) => a.queuePriority - b.queuePriority || a.sequence - b.sequence)[0]?.id &&
               <Button type="button" size="sm" variant="outline" disabled={sending}
                 onClick={() => void reviewQueuedMessage(item)}>Review queued scope</Button>}
             <Button type="button" size="sm" variant="outline" disabled={sending}

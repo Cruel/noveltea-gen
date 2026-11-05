@@ -1,18 +1,23 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
-import { submitThreadRevision } from '../src/lib/story-revision.server'
+import { submitThreadRevision, previewThreadRevision } from '../src/lib/story-revision.server'
 import { readThreadChat, cancelQueuedThreadMessage, editQueuedThreadMessage,
   settleThreadRun, recoverSettledThreadRuns } from '../src/lib/thread-chat.server'
 import { dispatchPendingPiSteering, settlePiSteering, deferUndeliveredSteering,
   recordPiTurnLifecycle, recoverOrphanedPiTurns, recordIndependentSteeringReview }
   from '../src/lib/thread-live-steering.server'
+import { classifySteeringIntent, steeringActivity, prepareSteeringBoundaryReviews,
+  attributeSteeringCheckpoint } from '../src/lib/thread-steering-replan.server'
+import { snapshotForkBoundaryHistory } from '../src/lib/thread-fork-history.server'
+import type { JobStartResult } from '../../src/job'
 import { registerPiTurn, activePiTurn, observePiTurnLifecycle,
   type ActivePiTurn } from '../../src/live-pi-registry'
 
@@ -53,12 +58,13 @@ async function setup() {
     cleanup() { observePiTurnLifecycle(undefined); db.sqlite.close(); removeTestTree(root) } }
 }
 
-function fakePi(job: string) {
+function fakePi(job: string, expectedHead = '0'.repeat(40)) {
   const sent: string[] = []
   const followUps: string[] = []
   const messages: Array<{ role: 'user'; content: string }> = []
   let streaming = true
   const turn = { jobId: job, token: randomUUID(), workItem: 'focus:character.mara',
+    expectedHead,
     session: { sessionId: randomUUID(), get isStreaming() { return streaming },
       messages, async steer(text: string) { sent.push(text); return 'queued' as const },
       async followUp(text: string) { followUps.push(text); return 'queued' as const } } } as unknown as ActivePiTurn
@@ -374,6 +380,178 @@ test('withdrawal racing an in-flight SDK call is rejected; settlement waits for 
     assert.equal(readThreadChat(f.db, f.owner, f.threadId)
       .messages.find(m => m.id === id)?.liveState, 'delivered')
   } finally { release(); f.cleanup() }
+})
+
+test('a Character specialist redirection becomes one separately reviewed Milestone proposal', async () => {
+  const f = await setup(), pi = fakePi(f.job)
+  const release = registerPiTurn(pi.turn)
+  try {
+    const id = randomUUID()
+    const instruction = 'Revise milestone.reckoning to change the ending.'
+    assert.equal(classifySteeringIntent(instruction, pi.turn.workItem), 'scope-review')
+    const original = await submitThreadRevision(f.db, f.owner, f.threadId,
+      id, instruction, undefined, undefined, 'steer')
+    assert.equal(original.hasRevisionScope, 0)
+    const laterId = randomUUID()
+    await submitThreadRevision(f.db, f.owner, f.threadId, laterId,
+      'Later independent instruction')
+    await dispatchPendingPiSteering(f.db)
+    assert.equal(pi.sent.length, 1)
+    assert.match(pi.sent[0]!, /not new write authority/i)
+    pi.messages.push({ role: 'user', content: pi.sent[0]! })
+    pi.stop()
+    await settlePiSteering(f.db, pi.turn, true)
+    assert.equal(steeringActivity(f.db, f.owner, f.threadId)[0]?.disposition, 'scope-review')
+    assert.equal(steeringActivity(f.db, f.stranger, f.threadId).length, 0)
+    release()
+    // Replanning is not attempted mid-specialist, or from an unverified run.
+    assert.equal(prepareSteeringBoundaryReviews(f.db, f.owner, f.job, f.threadId,
+      'a'.repeat(40)), 0)
+    f.db.sqlite.prepare("UPDATE generation_run_queue SET phase='finished' WHERE job_id=?").run(f.job)
+    f.db.sqlite.prepare("UPDATE studio_sessions SET status='completed' WHERE id=?").run(f.job)
+    assert.equal(prepareSteeringBoundaryReviews(f.db, f.owner, f.job, f.threadId, null), 0)
+    assert.equal(prepareSteeringBoundaryReviews(f.db, f.owner, f.job, f.threadId,
+      'a'.repeat(40)), 1)
+    assert.equal(prepareSteeringBoundaryReviews(f.db, f.owner, f.job, f.threadId,
+      'a'.repeat(40)), 0, 'worker restart cannot duplicate the redirect')
+    const chat = readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal(chat.messages.filter(m => m.role === 'user').length, 3)
+    const queued = chat.messages.find(m => m.content === instruction && m.phase === 'queued')!
+    const later = chat.messages.find(m => m.id === laterId)!
+    assert.ok(queued.sequence > later.sequence, 'append-only history stays chronological')
+    assert.ok(queued.queuePriority < later.queuePriority,
+      'causal redirect review is considered before a later queued instruction')
+    await assert.rejects(() => previewThreadRevision(f.db, f.owner, f.threadId,
+      later.content, undefined, laterId), /preceding Thread instruction/)
+    assert.equal(queued.content, instruction)
+    assert.equal(queued.hasRevisionScope, 0, 'no additional writer authority was granted')
+    const activity = chat.steeringActivity.find(a => a.messageId === id)!
+    assert.equal(activity.reviewMessageId, queued.id)
+    assert.equal(activity.state, 'awaiting-review')
+    assert.equal(chat.messages.find(m => m.id === id)?.phase, 'finished',
+      'the consumed instruction remains immutable')
+    assert.throws(() => cancelQueuedThreadMessage(f.db, f.stranger, f.threadId, queued.id),
+      /not found/)
+  } finally { release(); f.cleanup() }
+})
+
+test('pending coordinator messages remain unresolved at a verified checkpoint without false influence', async () => {
+  const f = await setup()
+  try {
+    const id = randomUUID()
+    const original = await submitThreadRevision(f.db, f.owner, f.threadId,
+      id, 'Change milestone.reckoning after the current specialist finishes',
+      undefined, undefined, 'follow-up')
+    assert.equal(original.liveState, 'deferred')
+    const point = {
+      eligible: true, commitSha: 'c'.repeat(40), parentSha: '0'.repeat(40),
+      proofDigest: 'd'.repeat(64),
+      workItem: 'focus:character.mara',
+    }
+    attributeSteeringCheckpoint(f.db, f.owner, f.job, point)
+    const unresolved = steeringActivity(f.db, f.owner, f.threadId).find(a => a.messageId === id)!
+    assert.equal(unresolved.state, 'deferred')
+    assert.equal(unresolved.checkpointSha, point.commitSha)
+    assert.equal(unresolved.checkpointWorkItem, point.workItem)
+    assert.equal((f.db.sqlite.prepare('SELECT verified_commit_sha AS sha FROM story_thread_messages WHERE id=?')
+      .get(id) as { sha: string | null }).sha, null,
+    'unconsumed instruction cannot become inherited verified history')
+    assert.equal((f.db.sqlite.prepare('SELECT association FROM thread_steering_checkpoint_links WHERE message_id=?')
+      .get(id) as { association: string }).association, 'pending-unresolved')
+    assert.equal((f.db.sqlite.prepare('SELECT COUNT(*) AS count FROM thread_steering_intents')
+      .get() as { count: number }).count, 0)
+  } finally { f.cleanup() }
+})
+
+test('protected redirection requires its own approval, not Pi acknowledgement or a plan digest', async () => {
+  const f = await setup(), pi = fakePi(f.job), release = registerPiTurn(pi.turn)
+  try {
+    const id = randomUUID()
+    const text = 'Change protected decision creative-direction.last-bell#repair-not-revenge to "Revenge".'
+    await submitThreadRevision(f.db, f.owner, f.threadId,
+      id, text, undefined, undefined, 'steer')
+    await dispatchPendingPiSteering(f.db)
+    pi.messages.push({ role: 'user', content: pi.sent[0]! })
+    pi.stop()
+    await settlePiSteering(f.db, pi.turn, true)
+    assert.equal(steeringActivity(f.db, f.owner, f.threadId)[0]?.disposition, 'protected-review')
+    release()
+    f.db.sqlite.prepare("UPDATE generation_run_queue SET phase='finished' WHERE job_id=?").run(f.job)
+    f.db.sqlite.prepare("UPDATE studio_sessions SET status='completed' WHERE id=?").run(f.job)
+    assert.equal(prepareSteeringBoundaryReviews(f.db, f.owner, f.job, f.threadId,
+      'b'.repeat(40)), 1)
+    const derived = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.phase === 'queued')!
+    assert.equal(derived.hasRevisionScope, 0)
+    assert.equal((f.db.sqlite.prepare('SELECT COUNT(*) AS n FROM thread_protected_decisions')
+      .get() as { n: number }).n, 0, 'Pi delivery is never author consent')
+  } finally { release(); f.cleanup() }
+})
+
+test('verified checkpoint provenance branches between two delivered steering messages', async () => {
+  const f = await setup()
+  try {
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: f.root, encoding: 'utf8' }).trim()
+    git('init', '-q')
+    git('config', 'user.name', 'Test')
+    git('config', 'user.email', 'test@example.test')
+    writeFileSync(join(f.root, 'story.md'), 'baseline\n')
+    git('add', 'story.md')
+    git('commit', '-qm', 'baseline')
+    const baseline = git('rev-parse', 'HEAD')
+    const emit = async (message: string, expectedHead: string) => {
+      const pi = fakePi(f.job, expectedHead), release = registerPiTurn(pi.turn)
+      const id = randomUUID()
+      try {
+        await submitThreadRevision(f.db, f.owner, f.threadId,
+          id, message, undefined, undefined, 'steer')
+        await dispatchPendingPiSteering(f.db)
+        pi.messages.push({ role: 'user', content: pi.sent[0]! })
+        pi.stop()
+        await settlePiSteering(f.db, pi.turn, true)
+      } finally { release() }
+      return id
+    }
+    const first = await emit('Keep character.mara within existing scope', baseline)
+    writeFileSync(join(f.root, 'story.md'), 'first checkpoint\n')
+    git('add', 'story.md')
+    git('commit', '-qm', 'one')
+    const one = git('rev-parse', 'HEAD')
+    const proof = 'a'.repeat(64)
+    assert.equal(attributeSteeringCheckpoint(f.db, f.owner, f.job, {
+      eligible: true, commitSha: one, parentSha: '9'.repeat(40),
+      proofDigest: proof, workItem: 'focus:character.mara',
+    }), 0, 'wrong checkpoint parent cannot acquire earlier or later steering')
+    attributeSteeringCheckpoint(f.db, f.owner, f.job, {
+      eligible: true, commitSha: one, parentSha: baseline,
+      proofDigest: proof, workItem: 'focus:character.mara',
+    })
+    const second = await emit('Keep character.mara consistent with the previous chapter', one)
+    writeFileSync(join(f.root, 'story.md'), 'second checkpoint\n')
+    git('add', 'story.md')
+    git('commit', '-qm', 'two')
+    const two = git('rev-parse', 'HEAD')
+    attributeSteeringCheckpoint(f.db, f.owner, f.job, {
+      eligible: true, commitSha: two, parentSha: one,
+      proofDigest: 'b'.repeat(64), workItem: 'focus:character.mara',
+    })
+    const messages = readThreadChat(f.db, f.owner, f.threadId).messages
+    assert.equal(messages.find(m => m.id === first)?.effectVerifiedAt, null)
+    assert.equal(messages.find(m => m.id === first)?.jobId, f.job)
+    assert.equal((f.db.sqlite.prepare('SELECT verified_commit_sha AS sha FROM story_thread_messages WHERE id=?')
+      .get(first) as { sha: string }).sha, one)
+    assert.equal((f.db.sqlite.prepare('SELECT verified_commit_sha AS sha FROM story_thread_messages WHERE id=?')
+      .get(second) as { sha: string }).sha, two)
+    const source = { worktreeRoot: f.root, baseSha: baseline, jobId: f.job } as JobStartResult
+    const frozen = snapshotForkBoundaryHistory(f.db, f.owner, f.threadId, source,
+      'Original task', 'now', one)
+    assert.ok(frozen.some(m => m.originId === first))
+    assert.ok(!frozen.some(m => m.originId === second),
+      'fork from intermediate checkpoint cannot inherit later message')
+    const both = snapshotForkBoundaryHistory(f.db, f.owner, f.threadId, source,
+      'Original task', 'now', two)
+    assert.ok(both.some(m => m.originId === first))
+    assert.ok(both.some(m => m.originId === second))
+  } finally { f.cleanup() }
 })
 
 test('worker crash with an ambiguous SDK call fences replay and preserves owner identity', async () => {

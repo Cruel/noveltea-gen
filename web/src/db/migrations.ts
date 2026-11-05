@@ -494,6 +494,45 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    version: 27,
+    statements: [
+      // One durable, source-bound decision for each consumed live instruction.
+      // A Pi acknowledgement is only consideration; no new paths are granted.
+      // The pre-Pi Git HEAD must equal the finalized specialist commit's
+      // parent before we can attribute a delivered instruction to that work.
+      `ALTER TABLE thread_active_pi_turns ADD COLUMN expected_head TEXT`,
+      `ALTER TABLE thread_live_inputs ADD COLUMN submitted_head TEXT`,
+      `CREATE TABLE thread_steering_intents (
+        message_id TEXT PRIMARY KEY NOT NULL REFERENCES thread_live_inputs(message_id) ON DELETE CASCADE,
+        owner_user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        source_job_id TEXT NOT NULL,
+        disposition TEXT NOT NULL CHECK (disposition IN ('within-scope','scope-review','protected-review','unresolved')),
+        work_item TEXT,
+        considered_at TEXT NOT NULL,
+        checkpoint_sha TEXT,
+        checkpoint_proof TEXT,
+        review_message_id TEXT UNIQUE REFERENCES story_thread_messages(id),
+        review_state TEXT NOT NULL CHECK (review_state IN ('considered','pending-boundary','awaiting-review','approved-run','unresolved')),
+        FOREIGN KEY (thread_id,owner_user_id) REFERENCES story_threads(id,owner_user_id),
+        FOREIGN KEY (source_job_id,owner_user_id) REFERENCES studio_sessions(id,owner_user_id)
+      )`,
+      `CREATE INDEX thread_steering_intents_source ON thread_steering_intents(source_job_id,review_state)`,
+      `CREATE TABLE thread_steering_checkpoint_links (
+        message_id TEXT NOT NULL REFERENCES thread_live_inputs(message_id) ON DELETE CASCADE,
+        owner_user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        source_job_id TEXT NOT NULL,
+        checkpoint_sha TEXT NOT NULL,
+        proof_digest TEXT NOT NULL,
+        work_item TEXT NOT NULL,
+        association TEXT NOT NULL CHECK (association IN ('considered','verified-influence','pending-unresolved','verified-implementation')),
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY (message_id,checkpoint_sha)
+      )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version

@@ -37,7 +37,9 @@ function pendingInstruction(store: StudioDatabase, owner: string, threadId: stri
     FROM story_thread_messages m WHERE m.owner_user_id=? AND m.thread_id=? AND m.role='user'
       AND m.phase IN ('queued','preparing','running','blocked')
       AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id)
-    ORDER BY m.sequence LIMIT 1`).get(owner, threadId) as
+    ORDER BY COALESCE((SELECT original.sequence FROM thread_steering_intents intent
+      JOIN story_thread_messages original ON original.id=intent.message_id
+      WHERE intent.review_message_id=m.id),m.sequence),m.sequence LIMIT 1`).get(owner, threadId) as
     { id: string; content: string; phase: string } | undefined
 }
 function assertHeadOfQueue(store: StudioDatabase, owner: string, threadId: string,
@@ -144,6 +146,13 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   // Clarifications and unapproved material expansions stay durably queued for
   // review or cancellation, rather than consuming the head of the Thread.
   if (plan.clarification) return saved
+  // A delivered steer asking for additional scope must never auto-admit a
+  // single-target replan. Author approval is required even if the inferred
+  // new scope would normally be eligible for automatic continuation.
+  const redirected = store.sqlite.prepare(`SELECT i.disposition FROM thread_steering_intents i
+    WHERE i.review_message_id=? AND i.owner_user_id=? AND i.thread_id=?`)
+    .get(id, owner, threadId) as { disposition: string } | undefined
+  if (redirected && !approvalDigest) return saved
   if (approvalDigest && approvalDigest !== plan.digest)
     throw new ThreadChatError(409, 'Story scope changed since review. Inspect the updated proposal.')
   if (plan.protectedChange) {

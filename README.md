@@ -1775,6 +1775,48 @@ retains the writer lease and persists a non-successful interruption receipt.
 Full real-provider Pi certification remains opt-in with the rootless sandbox,
 credentials and `NT_TEST_WEB_PI_STEERING=1`.
 
+### Scope-aware Thread steering and checkpoint attribution (#88)
+
+Live Pi steering has **no authority to modify another specialist's files**.
+When an author redirects a Character specialist to a Milestone, different
+existing record, or protected Creative Decision, the Pi prompt instructs the
+specialist to acknowledge and defer out-of-scope work instead of claiming it
+was completed. A controller-owned, owner/job/Thread-bound SQLite receipt
+records which exact instruction Pi consumed and triages its affected canonical
+record IDs. Ambiguous requests remain unresolved; text heuristics never grant
+write access. No graph-critical validation, commit, or checkpoint node is
+interrupted. The current generation may finish at its existing safe terminal
+boundary; completed and independently verified source work is never rewritten.
+
+Once that completed source run has a verified HEAD, each consumed scope
+expansion becomes exactly **one** separate queued continuation. The original
+delivered message is immutable. The derived continuation retains the original
+message as its provenance and is prioritized according to its original
+instruction sequence, ahead of subsequently queued work, without rewriting
+chat history. **Even a one-record redirect now requires explicit scope
+approval.** Existing native catalog inspection, #84's reviewed plan digest and
+#85's separate protected-decision consent guard its new isolated child. The
+child uses a newly scoped generation contract; only approved existing record
+paths are writable. Prior committed work remains Git ancestry, never
+automatically reclassified as work completed by this new child. Interrupted or
+unverified source jobs retain the unresolved directive for manual checkpoint
+recovery; no new writer is silently started.
+
+Schema v27 records exact Pi pre-turn Git HEAD, source-bound steering
+dispositions, derived approval queue identity, and verified checkpoint links.
+A delivered instruction can be attributed to a finalized specialist commit
+only when the specialist work-item identity and exact pre-turn HEAD match the
+verified commit's parent. Unconsumed pending instructions may be linked as
+**unresolved at checkpoint**, but never assigned an inheritable Git SHA.
+Approved child checkpoints are separately linked only if independently
+verified changed files belong to the approved selected targets and paths.
+These are **verified structural implementation**, not proof that natural-language
+editorial intent was fulfilled: semantic fulfillment requires an independent
+effect review. The Thread activity timeline shows each state, source run,
+verified checkpoint, associated work item, approved continuation and any
+independent effect-review evidence. Recovery is idempotent; branching at a
+checkpoint between two messages excludes the later instruction.
+
 Corrective checkpoint-branch guidance is bound into each applicable specialist's
 actual Pi assignment/prompt without granting broader file or protected-decision
 authority. Editing an already delivered **sequential follow-up** creates a
