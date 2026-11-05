@@ -450,6 +450,50 @@ const appMigrations = [
       `CREATE INDEX thread_live_inputs_pending ON thread_live_inputs(source_job_id,state)`,
     ],
   },
+  {
+    version: 26,
+    statements: [
+      // SQLite orders turn registration, author admission and turn closure.
+      // Without this durable ownership snapshot a late steer could be sent to
+      // whichever unrelated Pi specialist happened to run next.
+      `CREATE TABLE thread_active_pi_turns (
+        job_id TEXT PRIMARY KEY NOT NULL REFERENCES studio_sessions(id) ON DELETE CASCADE,
+        pi_token TEXT NOT NULL UNIQUE,
+        pi_session_id TEXT NOT NULL,
+        work_item TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `ALTER TABLE thread_live_inputs ADD COLUMN target_pi_token TEXT`,
+      `ALTER TABLE thread_live_inputs ADD COLUMN target_work_item TEXT`,
+      // A prior #86 message admitted before exact turn ownership was recorded
+      // cannot safely be retroactively bound to whatever Pi runs next.
+      `UPDATE thread_live_inputs SET state='deferred' WHERE state='pending'`,
+      // Mutable queued text has an append-only audit trail. An edit request ID
+      // makes ambiguous HTTP retries idempotent without recycling message IDs.
+      `CREATE TABLE thread_queued_message_edits (
+        request_id TEXT PRIMARY KEY NOT NULL,
+        message_id TEXT NOT NULL REFERENCES story_thread_messages(id) ON DELETE CASCADE,
+        owner_user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        old_body TEXT NOT NULL,
+        new_body TEXT NOT NULL,
+        edited_at TEXT NOT NULL,
+        FOREIGN KEY (thread_id,owner_user_id) REFERENCES story_threads(id,owner_user_id)
+      )`,
+      // An explicit independent review is required to claim an instruction's
+      // *effect* was verified. SDK transcript delivery is not that evidence.
+      `CREATE TABLE thread_live_effect_reviews (
+        message_id TEXT PRIMARY KEY NOT NULL REFERENCES thread_live_inputs(message_id) ON DELETE CASCADE,
+        owner_user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        reviewer TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        verified_at TEXT NOT NULL
+      )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version

@@ -1670,8 +1670,8 @@ protected retcons stop with an explanation; approval of scope never supplies
 independent protected-decision authorization.
 
 The approved scope records its exact source SHA, canonical IDs, paths, context,
-contract and digest with the immutable queued Thread message (Studio DB schema
-v22). At admission, the controller **revalidates** the source and recomputes the
+contract and digest with the exact queued Thread message (Studio DB schema
+v22). An edit before admission invalidates that scope, requiring a new review. At admission, the controller **revalidates** the source and recomputes the
 scope before allocating a new child worktree. The existing focused specialists
 independently enforce exact path changes and protected Git validation. Selected
 Event edits precede their linked authored prose; final review waits for all
@@ -1696,7 +1696,13 @@ the original message, UUID, sequence and body are preserved for audit. A
 cancelled instruction cannot be resumed or reused and never authorizes a
 writer. The next active queued instruction is then considered against the
 current verified Story HEAD. Already preparing, running or blocked instructions
-cannot be cancelled through this queued-only operation.
+cannot be cancelled through this queued-only operation. Schema v26 also
+allows edits while still queued and before any SDK dispatch or writer claim.
+Each edit uses an expected-text comparison and idempotent request UUID;
+its before/after text and time are retained in an append-only audit trail.
+Editing invalidates the previous scope review, and an already-authorized
+protected decision cannot be silently rewritten. The delivered instruction is
+immutable; corrections require another message or a new Thread branch.
 
 A follow-up that changes an existing author-protected Creative Decision is held
 for an **exact before/after review**, not admitted by the ordinary Story scope
@@ -1741,15 +1747,26 @@ required before Studio marks a live message delivered. An ambiguous SDK
 dispatch is blocked for inspection rather than replayed. **Follow up** goes
 to the same active Pi session's SDK `followUp()` queue, which runs only once
 that specialist's current task settles; it cannot authorize another writer.
-A message submitted during graph scheduling, commit or checkpoint publication
-waits for the next eligible Pi turn; when no Pi turn occurs before settlement
-it becomes an ordinary queued next-run follow-up requiring fresh scope
-review. Ordering prevents later messages from overtaking earlier deferred
-author requests.
+SQLite serializes active Pi-turn registration, message admission, and turn
+closure. Messages are pinned to the precise turn active *at submission*; a
+message arriving during graph scheduling, commit, checkpoint publication, or
+just as Pi settles instead receives **pending coordinator routing** status.
+It is never blindly passed to a later specialist. Once the source run settles,
+it remains an ordinary queued next-run instruction eligible only for fresh,
+verified canonical impact analysis and bounded scope review. Ordering prevents
+later messages from overtaking earlier deferred author requests.
 
 Schema v25 persists the author-selected mode, source job, SDK turn identity
-and accepted/delivered/deferred/blocked status independently of the immutable
-Thread message. Studio chat refreshes these statuses across reconnects. The
+and send/acknowledgement/deferred/blocked status independently of Thread text.
+Schema v26 adds exact-turn ownership, durable coordinator routing, queued edit
+history and separately recorded independent effect-review receipts. Studio chat
+shows sent-to-SDK, Pi-transcript-acknowledged, pending-coordinator and
+independently-verified-effect as distinct states, and preserves source run,
+assigned specialist, Pi session and acknowledgement timestamp. **Delivery is
+not proof of fulfillment**: an effect can be marked verified only with a
+separate review anchored to a controller-verified Story commit, never by the
+Pi transcript itself. Worker restart fences uncertain SDK calls rather than
+replaying them. Reconnected clients read the same durable queue and provenance. The
 credential-free tests cover actual Pi SDK tool-boundary steering and
 follow-up model turns (`web/test/pi-sdk-steering.test.ts`), plus durable
 Studio routing, cancellation, reconnect, ordering and failure cases

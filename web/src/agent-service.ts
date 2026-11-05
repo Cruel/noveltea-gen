@@ -10,8 +10,9 @@ import { runPersistedGeneration } from './agent-runner'
 import { recoverSettledThreadRuns, settleThreadRun } from './lib/thread-chat.server'
 import { executeAuthorCommand } from './lib/agent-author-command.server'
 import { validAuthorCommand } from './lib/agent-author-validation'
-import { observePiTurnSettlement } from '../../src/live-pi-registry'
-import { dispatchPendingPiSteering, settlePiSteering } from './lib/thread-live-steering.server'
+import { observePiTurnSettlement, observePiTurnLifecycle } from '../../src/live-pi-registry'
+import { dispatchPendingPiSteering, settlePiSteering, recordPiTurnLifecycle,
+  recoverOrphanedPiTurns } from './lib/thread-live-steering.server'
 
 const inFlight = new Map<string, Promise<void>>()
 const initialized = new WeakSet<StudioDatabase>()
@@ -33,6 +34,7 @@ export function pumpAgentQueue(store: StudioDatabase) {
   if (!initialized.has(store)) {
     // Never re-enter an unfinished writer from a previous server lifetime.
     fenceAbandonedRuns(store)
+    recoverOrphanedPiTurns(store)
     initialized.add(store)
     // Crash-safe chat catch-up only; this does not resume an unfinished writer.
     void recoverSettledThreadRuns(store).catch(() => {
@@ -130,6 +132,7 @@ export function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
   assertStudioSchemaCurrent(store)
   stopping = false
   observePiTurnSettlement((turn, succeeded) => settlePiSteering(store, turn, succeeded))
+  observePiTurnLifecycle((turn, phase) => recordPiTurnLifecycle(store, turn, phase))
   // Detect prior dead workers before taking new jobs. Never replay their
   // interrupted writers automatically; the existing reconciliation path owns that.
   pumpAgentQueue(store)

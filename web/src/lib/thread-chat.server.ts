@@ -26,6 +26,12 @@ export type ThreadMessage = {
   cancelledAt: string | null
   liveMode: 'steer' | 'follow-up' | null
   liveState: 'pending' | 'dispatching' | 'sdk-queued' | 'delivered' | 'deferred' | 'blocked' | null
+  effectVerifiedAt: string | null
+  effectReviewer: string | null; effectEvidence: string | null; effectCommitSha: string | null
+  liveSourceJobId: string | null; livePiSessionId: string | null
+  liveWorkItem: string | null; liveDeliveredAt: string | null
+  editCount: number
+  editHistory?: Array<{ old: string; replacement: string; editedAt: string }>
 }
 type Run = { jobId: string; status: string; queuePhase: string | null; runOrder: number }
 const now = () => new Date().toISOString()
@@ -46,7 +52,25 @@ const messageColumns = `sequence,id,role,status,body AS content,
     ELSE COALESCE(phase, CASE status WHEN 'queued' THEN 'queued' ELSE 'finished' END) END AS phase,
   job_id AS jobId,created_at AS createdAt,
   (SELECT l.mode FROM thread_live_inputs l WHERE l.message_id=story_thread_messages.id) AS liveMode,
-  (SELECT l.state FROM thread_live_inputs l WHERE l.message_id=story_thread_messages.id) AS liveState`
+  (SELECT l.state FROM thread_live_inputs l WHERE l.message_id=story_thread_messages.id) AS liveState,
+  (SELECT r.verified_at FROM thread_live_effect_reviews r
+    WHERE r.message_id=story_thread_messages.id) AS effectVerifiedAt,
+  (SELECT r.reviewer FROM thread_live_effect_reviews r
+    WHERE r.message_id=story_thread_messages.id) AS effectReviewer,
+  (SELECT r.evidence FROM thread_live_effect_reviews r
+    WHERE r.message_id=story_thread_messages.id) AS effectEvidence,
+  (SELECT r.commit_sha FROM thread_live_effect_reviews r
+    WHERE r.message_id=story_thread_messages.id) AS effectCommitSha,
+  (SELECT l.source_job_id FROM thread_live_inputs l
+    WHERE l.message_id=story_thread_messages.id) AS liveSourceJobId,
+  (SELECT l.pi_session_id FROM thread_live_inputs l
+    WHERE l.message_id=story_thread_messages.id) AS livePiSessionId,
+  (SELECT l.target_work_item FROM thread_live_inputs l
+    WHERE l.message_id=story_thread_messages.id) AS liveWorkItem,
+  (SELECT l.delivered_at FROM thread_live_inputs l
+    WHERE l.message_id=story_thread_messages.id) AS liveDeliveredAt,
+  (SELECT COUNT(*) FROM thread_queued_message_edits e
+    WHERE e.message_id=story_thread_messages.id) AS editCount`
 
 function thread(store: StudioDatabase, owner: string, id: string) {
   const row = store.sqlite.prepare(`SELECT t.id,t.archived_at AS archivedAt,c.story_id AS storyId
@@ -148,6 +172,14 @@ export function readThreadChat(store: StudioDatabase, owner: string, threadId: s
   const messages = store.sqlite.prepare(`SELECT ${messageColumns} FROM story_thread_messages
     WHERE owner_user_id=? AND thread_id=? ORDER BY sequence`)
     .all(owner, threadId) as ThreadMessage[]
+  const edits = store.sqlite.prepare(`SELECT e.message_id AS messageId,e.old_body AS old,
+    e.new_body AS replacement,e.edited_at AS editedAt FROM thread_queued_message_edits e
+    WHERE e.owner_user_id=? AND e.thread_id=? ORDER BY e.rowid`)
+    .all(owner, threadId) as Array<{ messageId: string; old: string; replacement: string; editedAt: string }>
+  const history = new Map<string, Array<{ old: string; replacement: string; editedAt: string }>>()
+  for (const { messageId, ...edit } of edits)
+    history.set(messageId, [...(history.get(messageId) ?? []), edit])
+  for (const message of messages) message.editHistory = history.get(message.id) ?? []
   const runs = store.sqlite.prepare(`SELECT r.job_id AS jobId,r.run_order AS runOrder,j.status,
     q.phase AS queuePhase,j.generation_request_json AS requestJson
     FROM story_thread_runs r JOIN studio_sessions j
@@ -191,7 +223,12 @@ export function enqueueThreadMessage(store: StudioDatabase, owner: string, threa
     const existing = store.sqlite.prepare(`SELECT ${messageColumns}
       FROM story_thread_messages WHERE id=?`).get(id) as ThreadMessage | undefined
     if (existing) {
-      if (existing.role !== 'user' || existing.content !== content.trim() ||
+      const firstEdit = store.sqlite.prepare(`SELECT old_body AS body FROM thread_queued_message_edits
+        WHERE message_id=? ORDER BY rowid LIMIT 1`).get(id) as { body: string } | undefined
+      // A retry of the original POST after a queued edit must return the same
+      // durable message, not reinsert or overwrite the author's later edit.
+      if (existing.role !== 'user' ||
+          existing.content !== content.trim() && firstEdit?.body !== content.trim() ||
           (mode !== undefined && existing.liveMode !== mode) ||
           !store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
             WHERE id=? AND owner_user_id=? AND thread_id=?`).get(id, owner, threadId))
@@ -210,14 +247,70 @@ export function enqueueThreadMessage(store: StudioDatabase, owner: string, threa
       (id,owner_user_id,thread_id,sequence,role,status,body,phase,created_at)
       VALUES (?,?,?,?,'user','queued',?,'queued',?)`)
       .run(id, owner, threadId, nextSequence(store, threadId), content.trim(), time)
-    if (mode) store.sqlite.prepare(`INSERT INTO thread_live_inputs
-      (message_id,owner_user_id,thread_id,source_job_id,mode,state,created_at)
-      VALUES (?,?,?,?,?,?,?)`).run(id, owner, threadId, run.jobId, mode,
-        'pending', time)
+    if (mode) {
+      // The turn snapshot and message admission share SQLite's serialization
+      // order across the web and agent processes. Never target a later Pi
+      // specialist merely because it happens to be active at dispatch time.
+      const target = store.sqlite.prepare(`SELECT t.pi_token AS token,t.work_item AS workItem FROM thread_active_pi_turns t
+        JOIN generation_run_queue q ON q.job_id=t.job_id AND q.phase='running'
+        WHERE t.job_id=? AND q.owner_user_id=?`).get(run.jobId, owner) as
+        { token: string; workItem: string } | undefined
+      store.sqlite.prepare(`INSERT INTO thread_live_inputs
+        (message_id,owner_user_id,thread_id,source_job_id,mode,state,created_at,target_pi_token,target_work_item)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(id, owner, threadId, run.jobId, mode,
+          target ? 'pending' : 'deferred', time, target?.token ?? null, target?.workItem ?? null)
+    }
     store.sqlite.prepare(`UPDATE story_threads SET activity_at=? WHERE id=? AND owner_user_id=?`)
       .run(time, threadId, owner)
     return store.sqlite.prepare(`SELECT ${messageColumns}
       FROM story_thread_messages WHERE id=?`).get(id) as ThreadMessage
+  })()
+}
+
+/** Edits to messages not yet admitted to a writer or SDK are audited, not
+ * silently rewritten in history. All existing scope reviews are invalidated.
+ * Request IDs and expected text guard two-tab edits and HTTP retries. */
+export function editQueuedThreadMessage(store: StudioDatabase, owner: string,
+  threadId: string, id: string, requestId: string, expected: string, replacement: string): ThreadMessage {
+  if (!UUID.test(id) || !UUID.test(requestId) || typeof expected !== 'string' ||
+      typeof replacement !== 'string' || !replacement.trim() || replacement.length > 4000 ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(replacement))
+    throw new ThreadChatError(400, 'Invalid queued message edit.')
+  return store.sqlite.transaction(() => {
+    thread(store, owner, threadId)
+    const read = () => store.sqlite.prepare(`SELECT ${messageColumns} FROM story_thread_messages
+      WHERE id=? AND owner_user_id=? AND thread_id=?`).get(id, owner, threadId) as ThreadMessage | undefined
+    const prior = store.sqlite.prepare(`SELECT message_id AS messageId,owner_user_id AS owner,
+      thread_id AS threadId,old_body AS oldBody,new_body AS newBody
+      FROM thread_queued_message_edits WHERE request_id=?`).get(requestId) as
+      { messageId: string; owner: string; threadId: string; oldBody: string; newBody: string } | undefined
+    if (prior) {
+      if (prior.messageId !== id || prior.owner !== owner || prior.threadId !== threadId ||
+          prior.oldBody !== expected || prior.newBody !== replacement.trim())
+        throw new ThreadChatError(409, 'Edit request ID is already in use.')
+      return read()!
+    }
+    const message = read()
+    if (!message) throw new ThreadChatError(404, 'Queued Thread instruction not found.')
+    if (message.role !== 'user' || message.phase !== 'queued' || message.jobId !== null ||
+        ['dispatching','sdk-queued','delivered','blocked'].includes(message.liveState ?? '') ||
+        store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
+          WHERE id=? AND source_job_id IS NOT NULL`).get(id) ||
+        store.sqlite.prepare(`SELECT 1 FROM thread_protected_decisions
+          WHERE message_id=?`).get(id))
+      throw new ThreadChatError(409, 'This instruction is already admitted or approved and cannot be edited.')
+    if (message.content !== expected || message.content === replacement.trim())
+      throw new ThreadChatError(409, 'Queued message changed. Refresh the Thread before editing.')
+    const time = now()
+    store.sqlite.prepare(`INSERT INTO thread_queued_message_edits
+      (request_id,message_id,owner_user_id,thread_id,old_body,new_body,edited_at)
+      VALUES (?,?,?,?,?,?,?)`).run(requestId, id, owner, threadId, expected, replacement.trim(), time)
+    store.sqlite.prepare(`UPDATE story_thread_messages SET body=?,revision_scope_json=NULL
+      WHERE id=? AND owner_user_id=? AND thread_id=? AND phase='queued'`)
+      .run(replacement.trim(), id, owner, threadId)
+    store.sqlite.prepare(`UPDATE story_threads SET activity_at=?
+      WHERE id=? AND owner_user_id=?`).run(time, threadId, owner)
+    return read()!
   })()
 }
 
@@ -478,6 +571,13 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
       WHERE owner_user_id=? AND job_id=? AND role='user' AND phase='running'`)
       .run(phase === 'finished' ? 'finished' : 'blocked',
         phase, verifiedCommit, verifiedCommit, owner, jobId)
+    // A verified HEAD provides a reviewable baseline, not proof that a
+    // particular natural-language steering instruction was fulfilled.
+    if (verifiedCommit) store.sqlite.prepare(`UPDATE story_thread_messages
+      SET verified_commit_sha=? WHERE owner_user_id=? AND thread_id=?
+        AND id IN (SELECT message_id FROM thread_live_inputs
+          WHERE source_job_id=? AND owner_user_id=? AND state='delivered')`)
+      .run(verifiedCommit, owner, record.threadId, jobId, owner)
     const assistantId = insertAssistant(store, owner, record.threadId, jobId)
     if (verifiedCommit) store.sqlite.prepare(`UPDATE story_thread_messages
       SET verified_commit_sha=? WHERE owner_user_id=? AND thread_id=? AND id=?`)

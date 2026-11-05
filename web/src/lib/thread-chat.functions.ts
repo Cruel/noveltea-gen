@@ -3,7 +3,8 @@ import { getRequestHeaders } from '@tanstack/react-start/server'
 import { auth, database } from './runtime.server'
 import { requireUser } from './access.server'
 import { assertStudioSchemaCurrent } from '../db/migrations'
-import { readThreadChat, advanceThread, cancelQueuedThreadMessage } from './thread-chat.server'
+import { readThreadChat, advanceThread, cancelQueuedThreadMessage,
+  editQueuedThreadMessage } from './thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from './story-revision.server'
 import { recordProtectedThreadDecision } from './thread-protected-decision.server'
 import {
@@ -106,6 +107,24 @@ export const postThreadProtectedDecision = createServerFn({ method: 'POST' })
     }
     await advanceThread(database, ownerId, data.threadId)
     return { receipt, chat: readThreadChat(database, ownerId, data.threadId) }
+  })
+
+/** Compare-and-swap edit; request ID survives duplicate HTTP submissions. */
+export const editThreadQueuedMessage = createServerFn({ method: 'POST' })
+  .validator((data: { threadId: string; messageId: string; requestId: string;
+    expected: string; replacement: string }) => {
+    if (!data || !ID.test(data.threadId) || !ID.test(data.messageId) ||
+        !ID.test(data.requestId) || typeof data.expected !== 'string' ||
+        typeof data.replacement !== 'string' || data.replacement.length > 4000)
+      throw new Error('Invalid queued message edit.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    const ownerId = await owner()
+    const message = editQueuedThreadMessage(database, ownerId, data.threadId,
+      data.messageId, data.requestId, data.expected, data.replacement)
+    await advanceThread(database, ownerId, data.threadId)
+    return { message, chat: readThreadChat(database, ownerId, data.threadId) }
   })
 
 /** Idempotent owner-scoped cancellation. An admitted writer cannot be cancelled

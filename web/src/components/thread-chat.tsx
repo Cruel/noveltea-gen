@@ -4,7 +4,7 @@ import { Link } from '@tanstack/react-router'
 import { LoaderCircle, Send } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { getThreadChat, getThreadRevisionPreview, postThreadMessage, cancelThreadMessage,
-  postThreadProtectedDecision } from '@/lib/thread-chat.functions'
+  editThreadQueuedMessage, postThreadProtectedDecision } from '@/lib/thread-chat.functions'
 import type { RevisionPreview } from '@/lib/story-revision-plan'
 import { ThreadMessageEdit } from './thread-message-edit'
 
@@ -23,6 +23,8 @@ export function ThreadChat({ threadId }: { threadId: string }) {
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [pendingRetry, setPendingRetry] = useState<{ id: string; content: string } | null>(null)
+  const [queuedEdit, setQueuedEdit] = useState<{ id: string; original: string; text: string;
+    requestId: string } | null>(null)
   const [review, setReview] = useState<RevisionPreview | null>(null)
   const [reviewQueued, setReviewQueued] = useState<{ id: string; content: string } | null>(null)
   const [selectedTargets, setSelectedTargets] = useState<string[] | undefined>()
@@ -119,6 +121,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     try {
       const result = await cancelThreadMessage({ data: { threadId, messageId: id } })
       client.setQueryData(key, result.chat)
+      if (queuedEdit?.id === id) setQueuedEdit(null)
       if (reviewQueued?.id === id) {
         setReview(null)
         setReviewQueued(null)
@@ -126,6 +129,24 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       }
     } catch (cause) {
       setSendError(cause instanceof Error ? cause.message : 'Queued instruction could not be cancelled.')
+      await client.invalidateQueries({ queryKey: key })
+    } finally { setSending(false) }
+  }
+  const saveQueuedEdit = async () => {
+    if (!queuedEdit || !queuedEdit.text.trim() || sending) return
+    setSending(true); setSendError(null)
+    try {
+      const result = await editThreadQueuedMessage({ data: {
+        threadId, messageId: queuedEdit.id, requestId: queuedEdit.requestId,
+        expected: queuedEdit.original, replacement: queuedEdit.text,
+      } })
+      client.setQueryData(key, result.chat)
+      if (reviewQueued?.id === queuedEdit.id) {
+        setReview(null); setReviewQueued(null); setSelectedTargets(undefined)
+      }
+      setQueuedEdit(null)
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : 'Queued edit was not accepted.')
       await client.invalidateQueries({ queryKey: key })
     } finally { setSending(false) }
   }
@@ -176,15 +197,48 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString()}</time>
           {item.role === 'user' && item.phase === 'cancelled' ? <span>Cancelled</span> :
            item.role === 'user' && item.liveMode
-            ? <span>{item.liveState === 'delivered' ? 'Delivered to active Pi' :
-                item.liveState === 'sdk-queued' || item.liveState === 'dispatching'
-                  ? 'Accepted by active Pi' : item.liveState === 'blocked'
-                    ? 'Delivery uncertain — inspect job' : item.liveState === 'deferred'
-                      ? 'Queued for next run after Pi settles' : 'Accepted · awaiting Pi boundary'}</span>
+            ? <span>{item.effectVerifiedAt ? 'Effect independently verified' :
+                item.liveState === 'delivered' ? 'Pi acknowledged · effect not independently verified' :
+                item.liveState === 'sdk-queued' ? 'Sent to Pi · awaiting acknowledgement' :
+                item.liveState === 'dispatching' ? 'Sending to Pi · delivery unresolved' :
+                item.liveState === 'blocked' ? 'Delivery uncertain — inspect job' :
+                item.liveState === 'deferred' ? 'Pending coordinator routing' :
+                'Queued for the current Pi turn'}</span>
             : item.role === 'user' && item.phase !== 'finished' &&
               <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
         <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
+        {item.editCount > 0 && <details className="mt-1 text-xs text-muted-foreground">
+          <summary className="cursor-pointer">Edited {item.editCount} {item.editCount === 1 ? 'time' : 'times'} before delivery · view history</summary>
+          <ol className="ml-4 mt-1 list-decimal space-y-1">
+            {item.editHistory?.map((edit, index) => <li key={index}>
+              <time dateTime={edit.editedAt}>{new Date(edit.editedAt).toLocaleString()}</time>
+              <p className="whitespace-pre-wrap break-words">Before: {edit.old}</p>
+              <p className="whitespace-pre-wrap break-words">After: {edit.replacement}</p>
+            </li>)}
+          </ol>
+        </details>}
+        {item.liveMode && (item.livePiSessionId || item.liveWorkItem || item.liveDeliveredAt) &&
+          <details className="mt-1 text-xs text-muted-foreground">
+            <summary className="cursor-pointer">Pi delivery provenance</summary>
+            <p>Source run: {item.liveSourceJobId}</p>
+            {item.liveWorkItem && <p>Assigned specialist: {item.liveWorkItem}</p>}
+            {item.livePiSessionId && <p>Pi session: {item.livePiSessionId}</p>}
+            {item.liveDeliveredAt && <p>Acknowledged: {new Date(item.liveDeliveredAt).toLocaleString()}</p>}
+            {item.effectVerifiedAt && <p>Independent review: {item.effectReviewer} · {item.effectCommitSha} · {item.effectEvidence}</p>}
+          </details>}
+        {queuedEdit?.id === item.id && <div className="mt-2 grid gap-2">
+          <textarea aria-label="Edit queued instruction" rows={3} maxLength={4000}
+            className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+            value={queuedEdit.text} disabled={sending}
+            onChange={event => setQueuedEdit({ ...queuedEdit, text: event.target.value })} />
+          <div className="flex gap-2">
+            <Button type="button" size="sm" disabled={sending || !queuedEdit.text.trim()}
+              onClick={() => void saveQueuedEdit()}>Save edit</Button>
+            <Button type="button" size="sm" variant="ghost" disabled={sending}
+              onClick={() => setQueuedEdit(null)}>Close</Button>
+          </div>
+        </div>}
         {item.role === 'user' && item.phase === 'queued' && !data?.archived &&
           !['dispatching', 'sdk-queued'].includes(item.liveState ?? '') &&
           <div className="mt-2 flex flex-wrap gap-2">
@@ -192,8 +246,11 @@ export function ThreadChat({ threadId }: { threadId: string }) {
               item.id === data?.messages.find(m => m.role === 'user' && m.phase === 'queued')?.id &&
               <Button type="button" size="sm" variant="outline" disabled={sending}
                 onClick={() => void reviewQueuedMessage(item)}>Review queued scope</Button>}
+            <Button type="button" size="sm" variant="outline" disabled={sending}
+              onClick={() => setQueuedEdit({ id: item.id, original: item.content,
+                text: item.content, requestId: crypto.randomUUID() })}>Edit queued</Button>
             <Button type="button" size="sm" variant="ghost" disabled={sending}
-              onClick={() => void cancelQueued(item.id)}>Cancel queued instruction</Button>
+              onClick={() => void cancelQueued(item.id)}>Withdraw</Button>
           </div>}
         {item.phase === 'cancelled' && item.cancelledAt &&
           <p className="mt-1 text-xs text-muted-foreground">Cancelled at {new Date(item.cancelledAt).toLocaleString()}. Original request retained for history.</p>}
@@ -302,7 +359,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     <p className="mt-2 text-xs text-muted-foreground">
       Every revision is checked against canonical Story relationships and the verified source commit.
       Material expansions require explicit scope review. Unrelated records stay read-only; each run has its own budget.
-      A queued request that cannot be clarified can be cancelled without deleting its audit history;
+      A queued request can be edited or withdrawn before delivery, retaining its audit history;
       the next instruction will then be considered in order. During a live Pi run, Steer is the default:
       it is queued for the exact active specialist after its current turn and tools settle.
       Follow up is queued after the current Pi task (or after the run if no eligible Pi turn remains).

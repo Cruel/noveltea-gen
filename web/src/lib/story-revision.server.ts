@@ -111,6 +111,10 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   // any native validation, Git access or other asynchronous scope inference.
   // The second concurrent request therefore always has its own durable slot.
   const saved = enqueueThreadMessage(store, owner, threadId, id, content, liveMode)
+  // A duplicate HTTP request may arrive after the author has edited the
+  // queued message. Return the durable current version without inferring or
+  // granting a new scope from the stale pre-edit text.
+  if (saved.content !== content.trim()) return saved
   if (saved.liveMode && liveMode) {
     if (selectedTargets || approvalDigest)
       throw new ThreadChatError(409, 'Steering is not a new scope approval or a writer grant.')
@@ -161,8 +165,8 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
     const head = pendingInstruction(store, owner, threadId)
     // A cancellation, concurrent claim or newly completed predecessor means
     // this preview is no longer a writer grant. Leave the original in history.
-    if (currentMessage.phase !== 'queued' || head?.id !== id ||
-        live.jobId !== source.jobId || live.status !== 'completed' || live.queuePhase !== 'finished')
+    if (currentMessage.phase !== 'queued' || currentMessage.content !== content.trim() ||
+        head?.id !== id || live.jobId !== source.jobId || live.status !== 'completed' || live.queuePhase !== 'finished')
       return currentMessage
     const existing = store.sqlite.prepare(`SELECT revision_scope_json AS scope FROM story_thread_messages
       WHERE id=? AND owner_user_id=? AND thread_id=?`).get(id, owner, threadId) as
