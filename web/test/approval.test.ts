@@ -52,12 +52,14 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     const commit = git('rev-parse', 'HEAD'), jobId = randomUUID(), storyId = randomUUID(), repositoryId = randomUUID()
     const job = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!, ownerId: alice.id,
       repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story', commit, jobId })
-    store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Author/Story','2026-10-31')`).run(repositoryId, alice.id)
-    store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Story','2026-10-31',?)`).run(storyId, alice.id, repositoryId, commit)
-    store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,status,source_commit_sha,created_at,updated_at)
-      VALUES (?,?,?,'Job','paused',?,'2026-10-31','2026-10-31')`).run(jobId, alice.id, storyId, commit)
+    await store.persistence.repositories.upsert(alice.id, 'github', '123',
+      'Author/Story', null, repositoryId, '2026-10-31')
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: alice.id, repositoryId, directory: 'story', title: 'Story',
+      createdAt: '2026-10-31', commitSha: commit,
+    })
+    await store.persistence.generation.jobs.register(alice.id, jobId, storyId,
+      'Job', commit, '2026-10-31')
     const firstContract = { scope: { kind: 'partial', depth: 'architecture', targets: [], branches: [] },
       constraints: ['Preserve the original mystery'],
       envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
@@ -75,16 +77,15 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     const realContract = { scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
       constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
     const requestBody = { task: 'Generate a mystery', contract: realContract }
-    store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=? WHERE id=?').run(
+    await store.persistence.generation.jobs.saveConfiguration(alice.id, jobId,
       JSON.stringify({ version: 1, headSha: commit, ...requestBody, limits: { modelCalls: 1 },
-        model: { provider: models[0]!.provider, id: models[0]!.id } }), jobId)
+        model: { provider: models[0]!.provider, id: models[0]!.id } }), new Date().toISOString())
     const realStart = await fixtureJobRequest(auth, store, new Request(config.baseURL + '/api/jobs/' + jobId, {
       method: 'POST', headers: { origin: config.baseURL, cookie: aliceCookie, 'content-type': 'application/json' },
       body: JSON.stringify(requestBody),
     }), jobId, config.baseURL)
     assert.equal(realStart.status, 503, await realStart.clone().text())
-    assert.equal((store.sqlite.prepare('SELECT generation_request_json AS request FROM studio_sessions WHERE id=?')
-      .get(jobId) as { request: string | null }).request, null)
+    assert.equal((await store.persistence.generation.jobs.state(alice.id, jobId))?.requestJson, null)
     assert.equal(existsSync(join(job.stateDir, 'generation-server-owner.json')), false)
     assert.equal(existsSync(join(job.stateDir, 'pi-policy.json')), false,
       'failed sandbox admission must not lock a draft to an unstarted model')

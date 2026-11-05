@@ -6,7 +6,7 @@ import { removeTestTree } from '../../test/helpers'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { onboardingPiRequest, assertApprovedPiFoundation, type DiscoveryInference } from '../src/lib/onboarding-pi.server'
@@ -71,9 +71,8 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         createHmac('sha256', config.secret).update(session.token).digest('base64')
     }
     const own = await cookie(alice.id), foreign = await cookie(bob.id)
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','1','test/repo','2026-11-01')`).run(repo, alice.id)
+    await store.persistence.repositories.upsert(alice.id, 'github', '1',
+      'test/repo', null, repo, '2026-11-01')
     await userPiCredentials(store, alice.id).modify('openai',
       async () => ({ type: 'api_key', key: 'TEST-USER-ONLY-KEY' }))
     const models = await availableUserPiModels(store, alice.id)
@@ -117,7 +116,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       text: 'The player should feel wary, and always have a choice.' })
     assert.equal(second.status, 200, JSON.stringify(second.body))
     assert.equal(second.body.session.phase, 'questions')
-    store.sqlite.close()
+    store.close()
     store = openStudioDatabase(db)
     auth = createStudioAuth(store, config)
     const reopened = await request('GET')
@@ -156,10 +155,10 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal((await request('POST', {action: 'answer', revision: ref.revision, text: 'Late'})).status, 409)
     assert.equal((await request('GET', undefined, foreign)).status, 404)
     assert.equal(calls.length, 3)
-    assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM stories').get() as {n: number}).n, 0,
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 0,
       'discovery and approval cannot write canonical Story before provider initialization')
   } finally {
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of [['NT_PI_CREDENTIAL_KEY', env.key], ['NT_STUDIO_SKILLS_SOURCE', env.source],
       ['NT_SKILL_CACHE_DIR', env.cache]] as const) {
       if (value === undefined) delete process.env[key]
@@ -187,8 +186,8 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     const sess = await ctx.internalAdapter.createSession(alice.id)
     const cookie = 'better-auth.session_token=' + sess.token + '.' +
       createHmac('sha256', config.secret).update(sess.token).digest('base64')
-    store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','1','test/repo','2026-11-01')`).run(repo, alice.id)
+    await store.persistence.repositories.upsert(alice.id, 'github', '1',
+      'test/repo', null, repo, '2026-11-01')
     await userPiCredentials(store, alice.id).modify('openai', async () =>
       ({type:'api_key', key:'TEST-USER-ONLY-KEY'}))
     const model = (await availableUserPiModels(store, alice.id))[0]!
@@ -205,7 +204,7 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     const resubmit = await req({action:'start', model:{provider:model.provider, id:model.id},
       text:'A small-town mystery'}, async () => { throw new Error('should never be called') })
     assert.equal(resubmit.status, 409)
-    const revision = (store.sqlite.prepare('SELECT revision FROM story_onboarding_conversations').get() as {revision:number}).revision
+    const revision = (await store.persistence.onboarding.conversation(alice.id, repo, ''))!.revision
     let calls = 0
     const retry = await req({action:'retry', revision}, async state => {
       calls++
@@ -218,12 +217,11 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     assert.equal((await req({action:'retry', revision}, async () => { throw new Error('unexpected') })).status, 409)
     // Simulate a worker dying after reserving an expensive Pi turn. Recovery
     // must require an explicit acknowledgement, with no automatic model call.
-    const existing = store.sqlite.prepare('SELECT revision,state_json AS json FROM story_onboarding_conversations')
-      .get() as {revision:number; json:string}
-    const hanging = {...JSON.parse(existing.json), revision: existing.revision + 1,
+    const existing = (await store.persistence.onboarding.conversation(alice.id, repo, ''))!
+    const hanging = {...JSON.parse(existing.state), revision: existing.revision + 1,
       phase: 'running', startedAt: Date.now() - 11 * 60_000 }
-    store.sqlite.prepare('UPDATE story_onboarding_conversations SET revision=?,state_json=?')
-      .run(hanging.revision, JSON.stringify(hanging))
+    assert.equal(await store.persistence.onboarding.saveConversation(alice.id, repo, '',
+      hanging.revision, JSON.stringify(hanging), existing.revision, new Date().toISOString()), true)
     const recovered = await req({action:'reconcile',revision:hanging.revision}, async () => {
       throw new Error('reconcile must not call Pi')
     })
@@ -234,7 +232,7 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
       throw new Error('duplicate reconcile must not call Pi')
     })).status, 409)
   } finally {
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of [['NT_PI_CREDENTIAL_KEY', prev.key], ['NT_STUDIO_SKILLS_SOURCE', prev.source],
       ['NT_SKILL_CACHE_DIR', prev.cache]] as const) {
       if (value === undefined) delete process.env[key]

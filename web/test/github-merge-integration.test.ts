@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { prepareCachedJob } from '../src/lib/cached-jobs.server'
 import { initializeStoryBranch } from '../src/lib/git-cache.server'
@@ -62,18 +62,14 @@ test('shared GitHub job controller reopens only the saved unpublished initializa
     const initialized = await initializeStoryBranch(sourceInput)
     assert.notEqual(initialized.headSha, pinned)
     const now = new Date().toISOString()
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?, 'github','123','Acme/Repo',?)`)
-      .run(repositoryId, owner.id, now)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,source_commit_sha,created_at)
-      VALUES (?,?,?,'new-story',?,?,?)`)
-      .run(storyId, owner.id, repositoryId, title, pinned, now)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,'paused',?,?)`)
-      .run(jobId, owner.id, storyId, title, pinned, now, now)
+    await store.persistence.repositories.upsert(owner.id, 'github', '123',
+      'Acme/Repo', null, repositoryId, now)
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: owner.id, repositoryId, directory: 'new-story',
+      title, createdAt: now, commitSha: pinned,
+    })
+    await store.persistence.generation.jobs.register(
+      owner.id, jobId, storyId, title, pinned, now)
 
     const request = (id: string) => new Request('http://localhost:3000/api/github/jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -98,9 +94,9 @@ test('shared GitHub job controller reopens only the saved unpublished initializa
         async () => ({ remoteUrl: sourceInput.remoteUrl, reopenDraft: true })),
       /could not be created or reopened safely/,
     )
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM studio_sessions').get() as { n: number }).n, 1)
+    assert.equal((await store.persistence.dashboard.forOwner(owner.id)).recentSessions.length, 1)
   } finally {
-    store.sqlite.close()
+    store.close()
     if (oldState === undefined) delete process.env.NT_STATE_DIR
     else process.env.NT_STATE_DIR = oldState
     if (oldCache === undefined) delete process.env.NT_GIT_CACHE_DIR

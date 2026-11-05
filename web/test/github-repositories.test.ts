@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { githubRepositoryRequest, githubInstallStart, githubInstallCallback } from '../src/lib/github-repositories.server'
 
@@ -76,8 +76,10 @@ test('GitHub App connection: only authenticated, installed push repositories are
     assert.equal(added.status, 200)
     assert.equal((await added.json()).repository.name, 'Acme/Story')
     const repeated = await githubRepositoryRequest(auth, store, req('POST', '/api/github/repositories', aliceHeaders, { fullName: 'Acme/Story' }), opts)
-    assert.equal((await repeated.json()).repository.id, (store.sqlite.prepare('SELECT id FROM repositories WHERE owner_user_id = ?').get(alice.id) as { id: string }).id)
-    assert.equal((store.sqlite.prepare('SELECT count(*) count FROM repositories').get() as { count: number }).count, 1)
+    assert.equal((await repeated.json()).repository.id,
+      (await store.persistence.repositories.identities(alice.id)).length === 1
+        ? (await store.persistence.dashboard.forOwner(alice.id)).repositories[0]!.id : null)
+    assert.equal((await store.persistence.repositories.identities(alice.id)).length, 1)
     assert.equal((await githubRepositoryRequest(auth, store, req('GET', '/api/github/repositories', { origin }), opts)).status, 401)
     assert.equal((await githubRepositoryRequest(auth, store, req('POST', '/api/github/repositories', { ...aliceHeaders, origin: 'https://evil.example' }, { fullName: 'Acme/Story' }), opts)).status, 403)
     const begin = await githubInstallStart(auth, store, req('POST', '/api/github/install', aliceHeaders, { fullName: 'Acme/New' }), opts)
@@ -112,7 +114,7 @@ test('GitHub App connection: only authenticated, installed push repositories are
       req('GET', '/api/github/install/callback?installation_id=12', returnHeaders), opts)
     assert.match(completed.headers.get('location') || '', /\/dashboard\?addRepository=added/)
     assert.match(completed.headers.get('set-cookie') || '', /Max-Age=0/)
-    assert.equal((store.sqlite.prepare('SELECT count(*) count FROM repositories').get() as { count: number }).count, 2)
+    assert.equal((await store.persistence.repositories.identities(alice.id)).length, 2)
     const rejected = await githubInstallCallback(auth, store,
       req('GET', '/api/github/install/callback?installation_id=12', returnHeaders), opts)
     assert.match(rejected.headers.get('location') || '', /\/dashboard\?addRepository=invalid/)
@@ -123,12 +125,12 @@ test('GitHub App connection: only authenticated, installed push repositories are
     const unsolicited = await githubInstallCallback(auth, store,
       req('GET', '/api/github/install/callback?installation_id=12'), opts)
     assert.match(unsolicited.headers.get('location') || '', /\/dashboard\?addRepository=installed/)
-    assert.equal((store.sqlite.prepare('SELECT count(*) count FROM repositories').get() as { count: number }).count, 2)
+    assert.equal((await store.persistence.repositories.identities(alice.id)).length, 2)
     assert.ok(requests.every(s => !s.includes('mock-secret')))
     assert.equal(createHash('sha256').update(state).digest('hex').length, 64)
   } finally {
     globalThis.fetch = original
-    store.sqlite.close()
+    store.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

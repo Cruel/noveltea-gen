@@ -16,27 +16,25 @@ export function activeLimit(): number {
   return Number(raw)
 }
 
-/** Compatibility helpers for existing synchronous Thread transactions.
- * All storage and concurrency decisions are implemented by the Drizzle port.
- * New consumers should call the async store.persistence.generation.queue API.
+/** All application callers use the asynchronous persistence contract.
+ * SQLite remains free to use a synchronous transaction internally.
  */
-export function queueRecord(store: StudioDatabase, jobId: string): QueueRecord | undefined {
-  return store.persistence.generation.queue.sqliteTransactionBridge.record(jobId) ?? undefined
+export async function queueRecord(store: StudioDatabase, jobId: string): Promise<QueueRecord | undefined> {
+  return await store.persistence.generation.queue.record(jobId) ?? undefined
 }
-export function queueGeneration(store: StudioDatabase, owner: string, jobId: string,
+export async function queueGeneration(store: StudioDatabase, owner: string, jobId: string,
   intent: QueueIntent, expected: 'prepared' | 'paused',
-  requestJson?: string, threadId?: string): void {
-  store.persistence.generation.queue.sqliteTransactionBridge.enqueue(
+  requestJson?: string, threadId?: string): Promise<void> {
+  await store.persistence.generation.queue.enqueue(
     owner, jobId, intent, expected, new Date().toISOString(), requestJson, threadId)
 }
-/** Atomic across WAL connections: SQLite takes BEGIN IMMEDIATE before counting
- * slots and claiming the lowest-sequence queued job. */
-export function claimNext(store: StudioDatabase): QueueRecord | null {
-  return store.persistence.generation.queue.sqliteTransactionBridge.claim(
+export async function claimNext(store: StudioDatabase): Promise<QueueRecord | null> {
+  return store.persistence.generation.queue.claim(
     serverInstance, activeLimit(), new Date().toISOString())
 }
-export function finishAttempt(store: StudioDatabase, jobId: string, succeeded: boolean): void {
-  store.persistence.generation.queue.sqliteTransactionBridge.finish(
+export async function finishAttempt(store: StudioDatabase, jobId: string,
+  succeeded: boolean): Promise<void> {
+  await store.persistence.generation.queue.finish(
     jobId, serverInstance, succeeded, new Date().toISOString())
 }
 
@@ -44,9 +42,9 @@ export function finishAttempt(store: StudioDatabase, jobId: string, succeeded: b
  * PID on this host (or the same PID with an obsolete instance nonce) can be
  * fenced, always to interrupted, NEVER re-enqueued or automatically replayed.
  */
-export function fenceAbandonedRuns(store: StudioDatabase): number {
-  const storage = store.persistence.generation.queue.sqliteTransactionBridge
-  const rows = storage.foreignRunning(serverInstance)
+export async function fenceAbandonedRuns(store: StudioDatabase): Promise<number> {
+  const storage = store.persistence.generation.queue
+  const rows = await storage.foreignRunning(serverInstance)
   let count = 0
   for (const row of rows) {
     const pieces = row.worker?.split(':')
@@ -60,10 +58,11 @@ export function fenceAbandonedRuns(store: StudioDatabase): number {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue
       }
     }
-    if (storage.interrupt(row.jobId, row.worker, new Date().toISOString())) count++
+    if (await storage.interrupt(row.jobId, row.worker, new Date().toISOString())) count++
   }
   return count
 }
-export function dequeueBeforeStart(store: StudioDatabase, owner: string, jobId: string): boolean {
-  return store.persistence.generation.queue.sqliteTransactionBridge.dequeue(owner, jobId)
+export async function dequeueBeforeStart(store: StudioDatabase, owner: string,
+  jobId: string): Promise<boolean> {
+  return store.persistence.generation.queue.dequeue(owner, jobId)
 }

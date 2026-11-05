@@ -4,11 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth, readAuthConfig, studioAuthOptions } from '../src/lib/auth'
 import { dashboardResponse, getDashboardData, getRepositoryToken } from '../src/lib/access.server'
-import { repositories, sessions, stories } from '../src/db/schema'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -50,29 +49,23 @@ test('migrations survive restart, account identity is persisted, and catalog is 
     const bob = await ctx.internalAdapter.createUser({
       name: 'Bob', email: 'bob@example.test', emailVerified: true,
     }, { method: 'test' })
-    // These records are seeded through the server store; the browser cannot
-    // supply ownerUserId or a filesystem path to the dashboard API.
+    // Normal behavior tests seed via the same owner-scoped ports as Studio.
     const users: Array<[string, string]> = [[alice.id, 'alice'], [bob.id, 'bob']]
     for (const [owner, suffix] of users) {
-      store.db.insert(repositories).values({
-        id: `repo-${suffix}`, ownerUserId: owner, provider: 'github',
-        providerRepositoryId: `id-${suffix}`, name: `repo-${suffix}`,
-        createdAt: '2026-10-31T00:00:00Z',
-      }).run()
-      store.db.insert(stories).values({
-        id: `story-${suffix}`, repositoryId: `repo-${suffix}`, ownerUserId: owner,
-        directory: 'Story', title: `Story ${suffix}`, createdAt: '2026-10-31T00:00:00Z',
-      }).run()
-      store.db.insert(sessions).values({
-        id: `job-${suffix}`, storyId: `story-${suffix}`, ownerUserId: owner,
-        title: `Job ${suffix}`, status: 'running',
-        createdAt: '2026-10-31T00:00:00Z', updatedAt: '2026-10-31T00:00:00Z',
-      }).run()
+      const repositoryId = `repo-${suffix}`, storyId = `story-${suffix}`
+      await store.persistence.repositories.upsert(owner, 'github', `id-${suffix}`,
+        `repo-${suffix}`, null, repositoryId, '2026-10-31T00:00:00Z')
+      await store.persistence.onboarding.importStory({
+        id: storyId, owner, repositoryId, directory: 'Story', title: `Story ${suffix}`,
+        commitSha: 'a'.repeat(40), createdAt: '2026-10-31T00:00:00Z',
+      })
+      assert.equal(await store.persistence.generation.jobs.register(owner, `job-${suffix}`,
+        storyId, `Job ${suffix}`, 'a'.repeat(40), '2026-10-31T00:00:00Z'), true)
     }
-    assert.throws(() => store.db.insert(stories).values({
-      id: 'foreign-story', ownerUserId: alice.id, repositoryId: 'repo-bob',
-      directory: 'bad', title: 'bad', createdAt: 'now',
-    }).run(), /FOREIGN KEY/)
+    await assert.rejects(() => store.persistence.onboarding.importStory({
+      id: 'foreign-story', owner: alice.id, repositoryId: 'repo-bob',
+      directory: 'bad', title: 'bad', createdAt: 'now', commitSha: 'a'.repeat(40),
+    }), /FOREIGN KEY/)
     const headers = await sessionHeaders(auth, alice.id)
     assert.equal((await dashboardResponse(auth, store, new Request('http://localhost:3000/api/dashboard'))).status, 401)
     const response = await dashboardResponse(auth, store, new Request('http://localhost:3000/api/dashboard', { headers }))
@@ -91,9 +84,9 @@ test('migrations survive restart, account identity is persisted, and catalog is 
     assert.doesNotMatch(bobBody, /alice/)
     assert.equal(await getRepositoryToken(auth, store, headers, 'gitlab'), null)
     assert.equal(await getRepositoryToken(auth, store, new Headers(), 'github'), null)
-    const beforeRestart = readUserIds(store, alice.id)
+    const beforeRestart = await readUserIds(store, alice.id)
     assert.equal(beforeRestart, 'story-alice')
-    store.sqlite.close()
+    store.close()
 
     store = openStudioDatabase(path)
     await migrateStudio(store, config)
@@ -103,13 +96,13 @@ test('migrations survive restart, account identity is persisted, and catalog is 
     assert.deepEqual(persisted?.stories.map(story => story.id), ['story-alice'])
     assert.deepEqual(persisted?.activeJobs.map(job => job.id), ['job-alice'])
   } finally {
-    if (store.sqlite.open) store.sqlite.close()
+    store.close()
     rmSync(directory, { recursive: true, force: true })
   }
 })
 
-function readUserIds(store: ReturnType<typeof openStudioDatabase>, ownerId: string) {
-  return (store.sqlite.prepare('SELECT id FROM stories WHERE owner_user_id = ?').get(ownerId) as { id: string } | undefined)?.id
+async function readUserIds(store: ReturnType<typeof openStudioDatabase>, ownerId: string) {
+  return (await store.persistence.dashboard.forOwner(ownerId)).stories[0]?.id
 }
 
 test('encrypted OAuth tokens and disabled implicit linking are required auth policy', () => {
@@ -120,5 +113,5 @@ test('encrypted OAuth tokens and disabled implicit linking are required auth pol
     assert.equal(options.account.accountLinking.disableImplicitLinking, true)
     assert.equal(options.emailAndPassword.enabled, false)
     assert.deepEqual(options.account.accountLinking.trustedProviders, ['github','gitlab'])
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })

@@ -236,10 +236,10 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     const liveFirst = await liveReader.read()
     assert.match(new TextDecoder().decode(liveFirst.value), /event: progress\ndata: .*"kind":"started"/)
     const deadline = Date.now() + 30_000
-    while (queueRecord(store, jobId)?.phase !== 'finished' && Date.now() < deadline) {
+    while ((await queueRecord(store, jobId))?.phase !== 'finished' && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 30))
     }
-    assert.equal(queueRecord(store, jobId)?.phase, 'finished', 'agent must finish independently of web traffic')
+    assert.equal((await queueRecord(store, jobId))?.phase, 'finished', 'agent must finish independently of web traffic')
     worker.kill('SIGTERM')
     const [workerCode] = await once(worker, 'exit')
     assert.equal(workerCode, 0)
@@ -267,7 +267,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.match(points[0]?.proofDigest ?? '', /^[a-f0-9]{64}$/)
     assert.equal(points[0]?.source, 'foundation.json')
     assert.ok(!('repository' in points[0]!) && !('story' in points[0]!))
-    const events = listGenerationEvents(store, alice.id, jobId, 0)
+    const events = (await listGenerationEvents(store, alice.id, jobId, 0))
     assert.deepEqual(events.map(event => event.kind), ['started', 'working', 'verified', 'finished'])
     assert.equal(events[1]?.stage, 'foundation')
     assert.equal(events[2]?.stage, 'foundation')
@@ -276,14 +276,14 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(JSON.stringify(events).includes(root), false, 'no host paths or internal output in progress')
     assert.equal(JSON.stringify(events).includes('tool_calls'), false)
     assert.equal(events.every((event, index) => index === 0 || event.id > events[index - 1]!.id), true)
-    const recent = recentGenerationEvents(store, alice.id, jobId)
+    const recent = (await recentGenerationEvents(store, alice.id, jobId))
     assert.deepEqual(recent.events.map(event => event.id), events.map(event => event.id))
     assert.equal(recent.hasMore, false)
-    assert.deepEqual(recentGenerationEvents(store, alice.id, jobId, events.at(-1)!.id).events
+    assert.deepEqual((await recentGenerationEvents(store, alice.id, jobId, events.at(-1)!.id)).events
       .map(event => event.id), events.slice(0, -1).map(event => event.id))
-    assert.deepEqual(recentGenerationEvents(store, bob.id, jobId).events, [],
+    assert.deepEqual((await recentGenerationEvents(store, bob.id, jobId)).events, [],
       'durable history is owner-scoped just like the stream')
-    assert.throws(() => recentGenerationEvents(store, alice.id, jobId, 0), /Invalid history cursor/)
+    await assert.rejects(() => recentGenerationEvents(store, alice.id, jobId, 0), /Invalid history cursor/)
 
     const eventApi = (cookie: string | undefined, cursor?: string) => generationEventsRequest(
       auth, store, new Request(config.baseURL + '/api/jobs/' + jobId + '/events', {
@@ -343,9 +343,9 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(saved.status, 'paused')
     assert.equal(saved.threadId, started.body.job.threadId)
     assert.deepEqual(saved.completedStages, started.body.job.completedStages)
-    const replayed = listGenerationEvents(store, alice.id, jobId, events[1]!.id)
+    const replayed = (await listGenerationEvents(store, alice.id, jobId, events[1]!.id))
     assert.deepEqual(replayed.map(event => event.id), events.slice(2).map(event => event.id))
-    assert.deepEqual(listGenerationEvents(store, bob.id, jobId, 0), [])
+    assert.deepEqual((await listGenerationEvents(store, bob.id, jobId, 0)), [])
     const reconnected = await generationEventsRequest(restoredAuth, store,
       new Request(config.baseURL + '/api/jobs/' + jobId + '/events', {
         headers: { cookie: aliceCookie, 'Last-Event-ID': String(events[1]!.id) },
@@ -355,16 +355,16 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.match(new TextDecoder().decode((await afterRestart.read()).value),
       new RegExp('id: ' + events[2]!.id + '\\n'))
     await afterRestart.cancel()
-    assert.throws(() => appendGenerationEvent(store, alice.id, jobId, {
+    await assert.rejects(() => appendGenerationEvent(store, alice.id, jobId, {
       kind: 'working', stage: 'foundation', milestone: '../../private',
     }), /Invalid progress milestone/)
-    appendGenerationEvent(store, alice.id, jobId, {
+    await appendGenerationEvent(store, alice.id, jobId, {
       kind: 'verified', stage: 'foundation', files: [
         '/etc/passwd', '../private.md', '.story-inbox/private.md',
         'creative-direction/foundation.md', 'creative-direction/foundation.md',
       ],
     })
-    const sanitized = listGenerationEvents(store, alice.id, jobId, events.at(-1)!.id)
+    const sanitized = await listGenerationEvents(store, alice.id, jobId, events.at(-1)!.id)
     assert.deepEqual(sanitized[0]?.files, ['creative-direction/foundation.md'])
     const pinnedRequest = JSON.parse((store.sqlite.prepare(
       'SELECT generation_request_json AS request FROM studio_sessions WHERE id=?').get(jobId) as { request: string }).request)
@@ -477,14 +477,14 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(conflict.status, 409, 'tampered server thread must fail closed')
     // Initial history is bounded; older pages do not require replaying every
     // event over SSE and never include a different user's event records.
-    for (let index = 0; index < 105; index++) appendGenerationEvent(store, alice.id, jobId,
+    for (let index = 0; index < 105; index++) await appendGenerationEvent(store, alice.id, jobId,
       { kind: 'working', stage: 'foundation' })
-    const newest = recentGenerationEvents(store, alice.id, jobId)
+    const newest = (await recentGenerationEvents(store, alice.id, jobId))
     assert.equal(newest.events.length, 100)
     assert.equal(newest.hasMore, true)
     assert.deepEqual(newest.events.map(event => event.id),
       [...new Set(newest.events.map(event => event.id))].sort((left, right) => left - right))
-    const older = recentGenerationEvents(store, alice.id, jobId, newest.events[0]!.id)
+    const older = (await recentGenerationEvents(store, alice.id, jobId, newest.events[0]!.id))
     assert.equal(older.hasMore, false)
     assert.equal(older.events.length, 10)
     assert.ok(older.events.at(-1)!.id < newest.events[0]!.id)

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { gitlabRepositoryRequest } from '../src/lib/gitlab-repositories.server'
@@ -61,18 +61,18 @@ test('GitLab signed-in and linked users browse scoped projects, import stable ID
     assert.equal(added.status, 200)
     const id = (await added.json()).repository.id
     assert.equal((await gitlabRepositoryRequest(auth, store, req('POST', '/api/gitlab/repositories', aliceHeaders, { projectId: 11 }))).status, 200)
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) count FROM repositories WHERE owner_user_id=?').get(alice.id) as { count: number }).count, 1)
-    assert.equal((store.sqlite.prepare('SELECT provider_repository_id FROM repositories WHERE id=?').get(id) as { provider_repository_id: string }).provider_repository_id, '11')
+    assert.equal((await store.persistence.repositories.identities(alice.id)).length, 1)
+    assert.equal((await store.persistence.repositories.get(alice.id, id, 'gitlab'))?.providerId, '11')
     revoked = true
     const denied = await gitlabRepositoryRequest(auth, store, req('GET', '/api/gitlab/repositories'))
     assert.equal(denied.status, 409)
     assert.match(JSON.stringify(await denied.json()), /expired or was revoked/)
     assert.equal((await gitlabRepositoryRequest(auth, store, req('POST', '/api/gitlab/repositories', aliceHeaders, { projectId: 12 }))).status, 409)
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) count FROM repositories').get() as { count: number }).count, 1)
+    assert.equal((await store.persistence.repositories.identities(alice.id)).length, 1)
     assert.ok(seen.every(url => !url.includes('private-gitlab-token')))
   } finally {
     globalThis.fetch = original
-    store.sqlite.close()
+    store.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

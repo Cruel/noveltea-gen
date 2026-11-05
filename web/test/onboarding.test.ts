@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { onboardingRequest, blankOnboardingDraft, reviewedOnboarding } from '../src/lib/onboarding.server'
@@ -35,9 +35,8 @@ test('owner can answer multiple discovery rounds, resume after restart, and revi
         createHmac('sha256', config.secret).update(session.token).digest('base64')
     }
     const own = await cookie(alice.id), foreign = await cookie(bob.id)
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','1','test/repo','2026-11-01')`).run(repo, alice.id)
+    await store.persistence.repositories.upsert(alice.id, 'github', '1',
+      'test/repo', null, repo, '2026-11-01')
     const call = async (method: 'GET' | 'PUT' | 'POST', workspace = 'projects/demo',
       body?: unknown, session = own, origin = config.baseURL) => {
       const response = await onboardingRequest(auth, store,
@@ -76,7 +75,7 @@ test('owner can answer multiple discovery rounds, resume after restart, and revi
     const round2 = { ...round1, genre: 'Mystery', tone: 'Somber',
       player_experience: 'Investigate two competing accounts', scope: 'One town' }
     assert.equal((await call('PUT', 'projects/demo', {revision: 1, draft: round2})).status, 200)
-    store.sqlite.close()
+    store.close()
     store = openStudioDatabase(file)
     const restarted = createStudioAuth(store, config)
     const reopened = await onboardingRequest(restarted, store,
@@ -116,7 +115,7 @@ test('owner can answer multiple discovery rounds, resume after restart, and revi
       kind: 'full-story', depth: 'composition', targets: [], branches: [],
     })
     assert.deepEqual(proposal.contract.constraints, ['Two player outcomes', 'No forced ending'])
-    assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM stories').get() as {n: number}).n, 0,
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 0,
       'Saving discovery does not write Git or silently register a Story')
-  } finally { store.sqlite.close(); rmSync(root, {recursive: true, force: true}) }
+  } finally { store.close(); rmSync(root, {recursive: true, force: true}) }
 })

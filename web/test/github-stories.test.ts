@@ -129,8 +129,8 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     const cookie = await makeCookie(alice.id)
     const otherCookie = await makeCookie(bob.id)
     const repoId = '11111111-1111-4111-8111-111111111111'
-    store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Acme/BigRepo',?)`).run(repoId, alice.id, new Date().toISOString())
+    await store.persistence.repositories.upsert(alice.id, 'github', '123',
+      'Acme/BigRepo', null, repoId, new Date().toISOString())
     const request = (method: string, query = '', body?: object, session = cookie, suppliedOrigin = origin) =>
       new Request(origin + '/api/github/stories' + query, {
         method, headers: { cookie: session, origin: suppliedOrigin, 'content-type': 'application/json' },
@@ -186,9 +186,8 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     assert.equal(selected.story.commit, commit)
     assert.equal(selected.story.directory, 'sample-story')
     assert.equal((await post(base)).status, 200)
-    assert.equal((store.sqlite.prepare('SELECT count(*) count FROM stories').get() as { count: number }).count, 1)
-    const stored = store.sqlite.prepare('SELECT source_commit_sha FROM stories').get() as { source_commit_sha: string }
-    assert.equal(stored.source_commit_sha, commit)
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 1)
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories[0]?.commitSha, commit)
     assert.equal(calls.some(url => url.includes('/git/blobs/' + otherBlob)), false)
     assert.equal(calls.some(url => url.includes('/git/trees/' + otherTree)), false)
     assert.ok(calls.every(url => !url.includes('mock-secret')))
@@ -230,7 +229,7 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     revoke = true
     assert.equal((await post(base)).status, 404)
     // Existing imported record survives a temporary revoked installation.
-    assert.equal((store.sqlite.prepare('SELECT count(*) count FROM stories').get() as { count: number }).count, 1)
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 1)
   } finally {
     globalThis.fetch = originalFetch
     store.sqlite.close()

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { listGitConnections } from '../src/lib/git-connections.server'
@@ -52,8 +52,7 @@ test('Git connection identity is owner- and provider-scoped; reconnect keeps ide
     assert.equal((await git.read(alice, 'conn-a'))?.credentials, '')
     assert.equal(await git.hasActive(alice, 'github'), false)
     await assert.rejects(git.list(''), /Authenticated actor/)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })
 
 test('repository import never changes an existing Git binding without verified rebinding', async () => {
@@ -108,8 +107,7 @@ test('repository import never changes an existing Git binding without verified r
     await assert.rejects(onboarding.importStory({ ...story, id: 'foreign',
       owner: bob }), /FOREIGN KEY|another owner/)
     await assert.rejects(onboarding.createStory({ ...story, id: 'duplicate' }), /UNIQUE/)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })
 
 test('OAuth states, GitHub installation states, refresh leases, and Pi credentials enforce single-use/CAS', async () => {
@@ -172,7 +170,7 @@ test('OAuth states, GitHub installation states, refresh leases, and Pi credentia
     assert.equal((await vault.read(alice, 'openai'))?.ciphertext, 'encrypted-b')
     await vault.delete(alice, 'openai')
     assert.equal(await vault.read(alice, 'openai'), null)
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })
 
 test('Git and repository consumers respect injected async persistence ports instead of SQLite', async () => {
@@ -215,7 +213,7 @@ test('Git and repository consumers respect injected async persistence ports inst
     assert.equal(await repositoryForStory(store, alice, 'injected-story', 'github'),
       'injected-repository')
     assert.equal(await repositoryForStory(store, alice, null, 'github'), undefined)
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })
 
 test('onboarding revisions conflict safely and GitHub Story registration is all-or-nothing', async () => {
@@ -252,6 +250,5 @@ test('onboarding revisions conflict safely and GitHub Story registration is all-
     assert.equal(await onboard.story(alice, repo.id, other.directory), null,
       'failed registration must not leave an orphan Story')
     assert.equal(await onboard.story(bob, repo.id, story.directory), null)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })

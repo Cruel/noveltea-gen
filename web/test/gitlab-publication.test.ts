@@ -134,16 +134,17 @@ test('GitLab draft MR publication retains verified work, enforces author review 
       JSON.stringify({ version: 1, jobId, headSha: head, workItemId: 'foundation' }))
     git(job.gitRoot, 'config', 'url.file://' + bare + '.insteadOf', 'https://gitlab.com/Acme/Private.git')
     git(job.gitRoot, 'remote', 'set-url', 'origin', 'https://gitlab.com/Acme/Private.git')
-    store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES ('11111111-1111-4111-8111-111111111111',?,'gitlab','123','Acme/Private','2026-11-01')`).run(alice.id)
-    store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES ('22222222-2222-4222-8222-222222222222',?,
-      '11111111-1111-4111-8111-111111111111','story','GitLab Private Story','2026-11-01',?)`)
-      .run(alice.id, upstream)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-      VALUES (?,?,'22222222-2222-4222-8222-222222222222','GitLab Private Story',?,'paused','2026-11-01','2026-11-01')`)
-      .run(jobId, alice.id, upstream)
+    const repositoryId = '11111111-1111-4111-8111-111111111111'
+    const storyId = '22222222-2222-4222-8222-222222222222'
+    await store.persistence.repositories.upsert(alice.id, 'gitlab', '123',
+      'Acme/Private', null, repositoryId, '2026-11-01')
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: alice.id, repositoryId, directory: 'story',
+      title: 'GitLab Private Story', createdAt: '2026-11-01', commitSha: upstream,
+    })
+    await store.persistence.generation.jobs.register(alice.id, jobId, storyId,
+      'GitLab Private Story', upstream, '2026-11-01')
+
     const api = async (method: 'GET' | 'POST', cookie?: string, body?: unknown, origin = config.baseURL) => {
       const res = await gitlabPublicationRequest(auth, store,
         new Request(config.baseURL + '/api/jobs/' + jobId + '/publish', {

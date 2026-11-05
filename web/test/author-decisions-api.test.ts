@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
@@ -68,21 +68,22 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       repositoryId: 'github:123', remoteUrl: 'file://' + repo,
       token: '', directory: 'story', commit, jobId,
     })
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Fixture/Story','2026-11-03')`).run(repositoryId, owner.user.id)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Story','2026-11-03',?)`).run(storyId, owner.user.id, repositoryId, commit)
+    const now = '2026-11-03'
+    await store.persistence.repositories.upsert(owner.user.id, 'github', '123',
+      'Fixture/Story', null, repositoryId, now)
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: owner.user.id, repositoryId, directory: 'story',
+      title: 'Story', commitSha: commit, createdAt: now,
+    })
+    await store.persistence.generation.jobs.register(owner.user.id, jobId,
+      storyId, 'Job', commit, now)
     const generation = JSON.stringify({ task: 'Complete the story' })
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,source_commit_sha,generation_request_json,
-       generation_thread_id,created_at,updated_at)
-      VALUES (?,?,?,'Job','blocked',?,?,?,'2026-11-03','2026-11-03')`)
-      .run(jobId, owner.user.id, storyId, commit, generation, job.threadId)
-    store.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES (?,?,'start','finished','2026-11-03','2026-11-03')`).run(jobId, owner.user.id)
+    const queue = store.persistence.generation.queue
+    await queue.enqueue(owner.user.id, jobId, 'start', 'prepared', now, generation, job.threadId)
+    const worker = 'fixture:author-decisions'
+    assert.equal((await queue.claim(worker, 1, now))?.jobId, jobId)
+    assert.equal(await queue.finish(jobId, worker, true, now), true)
+    await store.persistence.generation.jobs.authorDecision(owner.user.id, jobId, 'blocked', now)
 
     const sessionId = randomUUID()
     const session = join(job.stateDir, 'foundation-sessions', 'first.jsonl')
@@ -142,8 +143,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal(saved.note, '')
     assert.equal(saved.phase, 'recorded')
     assert.equal(saved.principal, 'user:' + owner.user.id)
-    assert.equal((store.sqlite.prepare('SELECT status FROM studio_sessions WHERE id=?').get(jobId) as
-      { status: string }).status, 'paused')
+    assert.equal((await store.persistence.generation.jobs.state(owner.user.id, jobId))?.status, 'paused')
     const reread = await api('GET')
     assert.equal(reread.data.decisions?.[0]?.phase, 'recorded')
     assert.equal(reread.data.decisions?.[0]?.decision, 'approved')
@@ -198,8 +198,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'option')
     assert.equal((await api('POST', payload)).status, 409, 'A submitted choice cannot be rewritten')
     assert.equal((await api('GET')).data.choice?.phase, 'answered')
-    assert.equal((store.sqlite.prepare('SELECT status FROM studio_sessions WHERE id=?').get(jobId) as
-      { status: string }).status, 'paused', 'Author answer does not automatically resume Pi')
+    assert.equal((await store.persistence.generation.jobs.state(owner.user.id, jobId))?.status, 'paused', 'Author answer does not automatically resume Pi')
 
     choice = await recordSpecialistChoice(job, 'character-foundations', question,
       choiceSessionId, choiceFile)
@@ -215,7 +214,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal(custom.status, 200, custom.data.error)
     assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'custom')
   } finally {
-    store.sqlite.close()
+    store.close()
     if (previous.state === undefined) delete process.env.NT_STATE_DIR
     else process.env.NT_STATE_DIR = previous.state
     if (previous.cache === undefined) delete process.env.NT_GIT_CACHE_DIR

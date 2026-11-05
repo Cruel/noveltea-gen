@@ -3,8 +3,8 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { generationRunQueue as runs, generationEvents as events, sessions, stories,
   repositories, storyThreadRuns } from '../db/schema'
-import type { GenerationPersistence, GenerationQueueSqliteBridge,
-  GenerationProgress, QueueRecord, QueueIntent } from './generation-contracts'
+import type { GenerationPersistence, GenerationProgress, GenerationQueueStore,
+  QueueIntent, QueueRecord } from './generation-contracts'
 
 type StudioDrizzle = BetterSQLite3Database<typeof schema>
 function assertOwner(owner: string) {
@@ -25,6 +25,44 @@ const stateFields = {
   threadId: sessions.generationThreadId, configJson: sessions.generationConfigJson,
 }
 
+/** Shared SQLite-only atomic queue admission for both ordinary generation
+ * and the continuation adapter's enclosing Thread transaction. Never expose
+ * this synchronous helper from the application-facing persistence contract. */
+export function enqueueGenerationSqlite(db: StudioDrizzle, owner: string,
+  jobId: string, intent: QueueIntent, expected: 'prepared' | 'paused',
+  now: string, requestJson?: string, threadId?: string): void {
+  assertOwner(owner)
+  db.transaction(tx => {
+    const row = tx.select(stateFields).from(sessions).where(and(
+      eq(sessions.id, jobId), eq(sessions.ownerUserId, owner))).get()
+    if (!row || row.status !== 'paused' ||
+      (expected === 'prepared' ? row.requestJson !== null || row.threadId !== null :
+        row.requestJson === null || row.threadId === null)) {
+      throw new Error('Job state changed before scheduling. Inspect the saved generation.')
+    }
+    const existing = tx.select(queueFields).from(runs).where(eq(runs.jobId, jobId)).get()
+    if (existing && existing.phase !== 'finished' && existing.phase !== 'interrupted')
+      throw new Error('This job is already queued or executing.')
+    if (existing?.phase === 'interrupted')
+      throw new Error('An interrupted attempt requires operator reconciliation before retry.')
+    if (expected === 'prepared') {
+      if (!requestJson || !threadId) throw new Error('Missing pinned generation inputs.')
+      const updated = tx.update(sessions).set({
+        generationRequestJson: requestJson, generationThreadId: threadId, updatedAt: now,
+      }).where(and(eq(sessions.id, jobId), eq(sessions.ownerUserId, owner),
+        eq(sessions.status, 'paused'), isNull(sessions.generationRequestJson),
+        isNull(sessions.generationThreadId))).run()
+      if (!changed(updated)) throw new Error('Job state changed before scheduling.')
+    }
+    if (existing) tx.delete(runs).where(and(eq(runs.jobId, jobId),
+      eq(runs.phase, 'finished'))).run()
+    tx.insert(runs).values({
+      jobId, ownerUserId: owner, intent, phase: 'queued',
+      createdAt: now, updatedAt: now,
+    }).run()
+  }, { behavior: 'immediate' })
+}
+
 /** Only this adapter knows how to acquire an SQLite writer lock. A future
  * PostgreSQL implementation must use a row-locking claim algorithm such as
  * SELECT FOR UPDATE SKIP LOCKED under a transaction, with capacity serialized
@@ -36,40 +74,11 @@ const stateFields = {
 export function createSqliteGenerationPersistence(db: StudioDrizzle): GenerationPersistence {
   const record = (jobId: string): QueueRecord | null =>
     db.select(queueFields).from(runs).where(eq(runs.jobId, jobId)).get() ?? null
-  const enqueue = (owner: string, jobId: string, intent: QueueIntent,
-    expected: 'prepared' | 'paused', now: string, requestJson?: string, threadId?: string) => {
-    assertOwner(owner)
-    db.transaction(tx => {
-      const row = tx.select(stateFields).from(sessions).where(and(
-        eq(sessions.id, jobId), eq(sessions.ownerUserId, owner))).get()
-      if (!row || row.status !== 'paused' ||
-        (expected === 'prepared' ? row.requestJson !== null || row.threadId !== null :
-          row.requestJson === null || row.threadId === null)) {
-        throw new Error('Job state changed before scheduling. Inspect the saved generation.')
-      }
-      const existing = tx.select(queueFields).from(runs).where(eq(runs.jobId, jobId)).get()
-      if (existing && existing.phase !== 'finished' && existing.phase !== 'interrupted')
-        throw new Error('This job is already queued or executing.')
-      if (existing?.phase === 'interrupted')
-        throw new Error('An interrupted attempt requires operator reconciliation before retry.')
-      if (expected === 'prepared') {
-        if (!requestJson || !threadId) throw new Error('Missing pinned generation inputs.')
-        const updated = tx.update(sessions).set({
-          generationRequestJson: requestJson, generationThreadId: threadId, updatedAt: now,
-        }).where(and(eq(sessions.id, jobId), eq(sessions.ownerUserId, owner),
-          eq(sessions.status, 'paused'), isNull(sessions.generationRequestJson),
-          isNull(sessions.generationThreadId))).run()
-        if (!changed(updated)) throw new Error('Job state changed before scheduling.')
-      }
-      if (existing) tx.delete(runs).where(and(eq(runs.jobId, jobId),
-        eq(runs.phase, 'finished'))).run()
-      tx.insert(runs).values({
-        jobId, ownerUserId: owner, intent, phase: 'queued',
-        createdAt: now, updatedAt: now,
-      }).run()
-    }, { behavior: 'immediate' })
-  }
-  const bridge: GenerationQueueSqliteBridge = {
+  const enqueue = (...args: Parameters<GenerationQueueStore['enqueue']>) =>
+    enqueueGenerationSqlite(db, ...args)
+  type SyncQueue = { [K in keyof GenerationQueueStore]:
+    (...args: Parameters<GenerationQueueStore[K]>) => Awaited<ReturnType<GenerationQueueStore[K]>> }
+  const bridge: SyncQueue = {
     record,
     enqueue,
     claim(workerId, limit, now) {
@@ -149,7 +158,9 @@ export function createSqliteGenerationPersistence(db: StudioDrizzle): Generation
       }, { behavior: 'immediate' })
     },
   }
-  const progressBridge: GenerationProgress['sqliteBridge'] = {
+  type SyncEvents = { [K in keyof GenerationProgress]:
+    (...args: Parameters<GenerationProgress[K]>) => Awaited<ReturnType<GenerationProgress[K]>> }
+  const progressBridge: SyncEvents = {
     append(owner, jobId, row) {
       assertOwner(owner)
       db.insert(events).values({
@@ -178,7 +189,6 @@ export function createSqliteGenerationPersistence(db: StudioDrizzle): Generation
   }
   return {
     queue: {
-      sqliteTransactionBridge: bridge,
       async claim(workerId, limit, now) { return bridge.claim(workerId, limit, now) },
       async record(jobId) { return bridge.record(jobId) },
       async enqueue(owner, jobId, intent, expected, now, requestJson, threadId) {
@@ -193,7 +203,6 @@ export function createSqliteGenerationPersistence(db: StudioDrizzle): Generation
       },
     },
     events: {
-      sqliteBridge: progressBridge,
       async append(owner, jobId, row) { progressBridge.append(owner, jobId, row) },
       async after(owner, jobId, after, limit) { return progressBridge.after(owner, jobId, after, limit) },
       async recent(owner, jobId, before, limit) { return progressBridge.recent(owner, jobId, before, limit) },

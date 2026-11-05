@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { gitlabStoryRequest } from '../src/lib/gitlab-stories.server'
 import { STORY_LIMIT_BYTES } from '../src/lib/github-stories.server'
@@ -143,8 +143,8 @@ test('GitLab Story discovery and import are owner-scoped, pinned, paginated and 
     const cookie = await headers(alice.id)
     const other = await headers(bob.id)
     const repositoryId = '11111111-1111-4111-8111-111111111111'
-    store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'gitlab','11','Acme/BigProject',?)`).run(repositoryId, alice.id, new Date().toISOString())
+    await store.persistence.repositories.upsert(alice.id, 'gitlab', '11',
+      'Acme/BigProject', null, repositoryId, new Date().toISOString())
     const request = (method: string, query: string, body?: object, session = cookie, requestOrigin = origin) =>
       new Request(origin + '/api/gitlab/stories' + query, {
         method, headers: { ...session, origin: requestOrigin, 'content-type': 'application/json' },
@@ -179,7 +179,7 @@ test('GitLab Story discovery and import are owner-scoped, pinned, paginated and 
     assert.equal(body.story.directory, 'story')
     assert.equal(body.story.commit, commit)
     assert.equal((await post(base)).status, 200)
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM stories').get() as { n: number }).n, 1)
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 1)
     assert.ok(requests.some(call => call.url.includes('page=2')))
     assert.ok(requests.some(call => call.url === 'https://gitlab.com/api/graphql'))
     assert.equal(requests.some(call => call.url.includes('huge-assets/') && call.method !== 'GET'), false)
@@ -217,7 +217,7 @@ test('GitLab Story discovery and import are owner-scoped, pinned, paginated and 
     duplicatePage = false
     revoked = true
     assert.equal((await post(base)).status, 409)
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM stories').get() as { n: number }).n, 1)
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 1)
     assert.ok(requests.every(call => !call.url.includes('private-gitlab-token')))
     defaultBranch = 'moved'
     // An explicit pin remains immutable even if default-branch config changes.
@@ -225,7 +225,7 @@ test('GitLab Story discovery and import are owner-scoped, pinned, paginated and 
     assert.equal((await post(base)).status, 200)
   } finally {
     globalThis.fetch = original
-    store.sqlite.close()
+    store.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

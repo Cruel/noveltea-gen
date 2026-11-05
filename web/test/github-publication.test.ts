@@ -122,18 +122,17 @@ test('authenticated GitHub draft publication previews canonical validation, push
       'https://github.com/Acme/Private.git')
     git(initialized.gitRoot, 'remote', 'set-url', 'origin', 'https://github.com/Acme/Private.git')
     const digest = createHash('sha256').update(foundation).digest('hex')
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES ('11111111-1111-4111-8111-111111111111',?,'github','123','Acme/Private',?)`).run(alice.id, '2026-11-01')
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha,initial_content_sha256)
-      VALUES ('22222222-2222-4222-8222-222222222222',?,
-        '11111111-1111-4111-8111-111111111111','story','Private Story',?,?,?)`)
-      .run(alice.id, '2026-11-01', remoteTarget, digest)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-      VALUES (?,?,'22222222-2222-4222-8222-222222222222','Private Story',?,'paused',?,?)`)
-      .run(jobId, alice.id, remoteTarget, '2026-11-01', '2026-11-01')
+    const repositoryId = '11111111-1111-4111-8111-111111111111'
+    const storyId = '22222222-2222-4222-8222-222222222222'
+    await store.persistence.repositories.upsert(alice.id, 'github', '123',
+      'Acme/Private', null, repositoryId, '2026-11-01')
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: alice.id, repositoryId, directory: 'story',
+      title: 'Private Story', createdAt: '2026-11-01', commitSha: remoteTarget,
+      contentSha256: digest,
+    })
+    await store.persistence.generation.jobs.register(alice.id, jobId, storyId,
+      'Private Story', remoteTarget, '2026-11-01')
 
     const api = async (method: 'GET' | 'POST', cookie?: string, body?: unknown, origin = config.baseURL) => {
       const response = await githubPublicationRequest(auth, store,

@@ -28,19 +28,19 @@ const canonicalFile = (path: string) =>
 const canonicalMilestone = (id: string) => /^[a-z][a-z0-9-]*\.[a-z0-9.-]+$/.test(id) && id.length <= 160
 
 /** Only controller-authored, bounded fields enter the durable event log. */
-export function appendGenerationEvent(store: StudioDatabase, owner: string, jobId: string, input: EventInput) {
+export async function appendGenerationEvent(store: StudioDatabase, owner: string, jobId: string, input: EventInput) {
   if (input.stage && !stageSet.has(input.stage)) throw new Error('Invalid progress stage')
   if (input.milestone && !canonicalMilestone(input.milestone)) throw new Error('Invalid progress milestone')
   const files = [...new Set((input.files ?? []).filter(canonicalFile))].slice(0, 24)
-  store.persistence.generation.events.sqliteBridge.append(owner, jobId, {
+  await store.persistence.generation.events.append(owner, jobId, {
     kind: input.kind, stage: input.stage ?? null, milestone: input.milestone ?? null,
     filesJson: JSON.stringify(files), status: input.status ?? null, createdAt: new Date().toISOString(),
   })
 }
 
-export function listGenerationEvents(store: StudioDatabase, owner: string, jobId: string,
-  after: number, limit = 100): ProgressEvent[] {
-  const rows = store.persistence.generation.events.sqliteBridge.after(
+export async function listGenerationEvents(store: StudioDatabase, owner: string, jobId: string,
+  after: number, limit = 100): Promise<ProgressEvent[]> {
+  const rows = await store.persistence.generation.events.after(
     owner, jobId, after, Math.max(1, Math.min(100, limit)))
   return rows.map(({ filesJson, ...row }) => ({
     ...row, stage: row.stage as GenerationStage | null, status: row.status as ProgressStatus | null,
@@ -50,11 +50,11 @@ export function listGenerationEvents(store: StudioDatabase, owner: string, jobId
 
 /** Read the newest bounded page in chronological order. Older events are
  * addressable by cursor without requiring an unbounded initial response. */
-export function recentGenerationEvents(store: StudioDatabase, owner: string, jobId: string,
-  before?: number): { events: ProgressEvent[]; hasMore: boolean } {
+export async function recentGenerationEvents(store: StudioDatabase, owner: string, jobId: string,
+  before?: number): Promise<{ events: ProgressEvent[]; hasMore: boolean }> {
   if (before !== undefined && (!Number.isSafeInteger(before) || before <= 0))
     throw new Error('Invalid history cursor')
-  const rows = store.persistence.generation.events.sqliteBridge.recent(
+  const rows = await store.persistence.generation.events.recent(
     owner, jobId, before ?? Number.MAX_SAFE_INTEGER, 101)
   const hasMore = rows.length > 100
   return { events: rows.slice(0, 100).reverse().map(({ filesJson, ...row }) => ({
@@ -120,26 +120,29 @@ export async function generationEventsRequest(auth: StudioAuth, store: StudioDat
         request.signal.addEventListener('abort', close, { once: true })
         if (request.signal.aborted) { close(); return }
         let ticks = 0
-        const poll = () => {
+        const poll = async () => {
           if (closed) return
           try {
             if ((c.desiredSize ?? 0) <= 0) {
               // A disconnected or slow client must not accumulate unlimited
               // buffered events while the durable log keeps growing.
-              timer = setTimeout(poll, 600)
+              timer = setTimeout(() => void poll(), 600)
               return
             }
-            const rows = listGenerationEvents(store, user.id, jobId, after, c.desiredSize ?? 1)
+            const rows = await listGenerationEvents(store, user.id, jobId, after, c.desiredSize ?? 1)
             for (const event of rows) {
+              if (closed) return
               after = event.id
               c.enqueue(encoder.encode(`id: ${event.id}\nevent: progress\ndata: ${JSON.stringify(event)}\n\n`))
             }
             // Heartbeats keep reverse proxies and EventSource reconnects healthy.
             if (++ticks % 25 === 0) c.enqueue(encoder.encode(': heartbeat\n\n'))
-          } catch { close(); return }
-          timer = setTimeout(poll, rowsAvailableSooner(store, user.id, jobId, after) ? 0 : 600)
+            if (closed) return
+            const hasPending = await rowsAvailableSooner(store, user.id, jobId, after)
+            if (!closed) timer = setTimeout(() => void poll(), hasPending ? 0 : 600)
+          } catch { close() }
         }
-        poll()
+        void poll()
       },
       cancel() { close() },
     })
@@ -157,6 +160,6 @@ export async function generationEventsRequest(auth: StudioAuth, store: StudioDat
   }
 }
 
-function rowsAvailableSooner(store: StudioDatabase, owner: string, id: string, after: number): boolean {
-  return store.persistence.generation.events.sqliteBridge.hasAfter(owner, id, after)
+async function rowsAvailableSooner(store: StudioDatabase, owner: string, id: string, after: number): Promise<boolean> {
+  return store.persistence.generation.events.hasAfter(owner, id, after)
 }

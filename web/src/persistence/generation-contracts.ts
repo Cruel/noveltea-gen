@@ -1,8 +1,6 @@
-/** Durable generation persistence. The async facade is the portability boundary.
- * SQLite-only synchronous compatibility is retained temporarily for callers
- * that compose admissions inside older Thread transactions (#97/#98).
- * A PostgreSQL adapter must implement queue admission/claim in its own
- * transaction with row locks, not replicate SQLite's BEGIN IMMEDIATE.
+/** Durable generation persistence. All application consumers use asynchronous,
+ * owner-scoped ports. The SQLite adapter alone chooses its transaction model.
+ * A PostgreSQL implementation must serialize capacity and claim with row locks.
  */
 export type QueueIntent = 'start' | 'resume'
 export type QueuePhase = 'queued' | 'running' | 'finished' | 'interrupted'
@@ -28,21 +26,6 @@ export type ProgressRow = {
   stage: string | null; milestone: string | null; filesJson: string
   status: string | null; createdAt: string
 }
-export interface GenerationQueueSqliteBridge {
-  /** Synchronous only to participate in legacy caller-owned SQLite transactions.
-   * No driver or raw SQL escapes this interface. */
-  record(jobId: string): QueueRecord | null
-  enqueue(owner: string, jobId: string, intent: QueueIntent, expected: 'prepared' | 'paused',
-    now: string, requestJson?: string, threadId?: string): void
-  claim(workerId: string, limit: number, now: string): QueueRecord | null
-  finish(jobId: string, workerId: string, succeeded: boolean, now: string): boolean
-  foreignRunning(workerId: string): Array<{ jobId: string; worker: string | null }>
-  interrupt(jobId: string, worker: string | null, now: string): boolean
-  dequeue(owner: string, jobId: string): boolean
-  reconcileAndEnqueue(owner: string, jobId: string, intent: QueueIntent,
-    saved: { status: string; request: string; thread: string },
-    interrupted: boolean, now: string): void
-}
 export interface GenerationQueueStore {
   /** Single SQLite BEGIN IMMEDIATE operation; limit and oldest claim share one lock. */
   claim(workerId: string, limit: number, now: string): Promise<QueueRecord | null>
@@ -56,8 +39,6 @@ export interface GenerationQueueStore {
   reconcileAndEnqueue(owner: string, jobId: string, intent: QueueIntent,
     saved: { status: string; request: string; thread: string },
     interrupted: boolean, now: string): Promise<void>
-  /** Compatibility bridge only; remove after Thread transactional admission migration. */
-  sqliteTransactionBridge: GenerationQueueSqliteBridge
 }
 export interface GenerationJobs {
   selected(owner: string, jobId: string): Promise<SavedGenerationJob | null>
@@ -82,13 +63,6 @@ export interface GenerationProgress {
   after(owner: string, jobId: string, after: number, limit: number): Promise<ProgressRow[]>
   recent(owner: string, jobId: string, before: number, limit: number): Promise<ProgressRow[]>
   hasAfter(owner: string, jobId: string, after: number): Promise<boolean>
-  /** Existing synchronous SSE + Thread event consumers. */
-  sqliteBridge: {
-    append(owner: string, jobId: string, row: Omit<ProgressRow, 'id'>): void
-    after(owner: string, jobId: string, after: number, limit: number): ProgressRow[]
-    recent(owner: string, jobId: string, before: number, limit: number): ProgressRow[]
-    hasAfter(owner: string, jobId: string, after: number): boolean
-  }
 }
 export interface GenerationPersistence {
   queue: GenerationQueueStore

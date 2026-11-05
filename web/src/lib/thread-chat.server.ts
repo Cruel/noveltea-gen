@@ -112,7 +112,7 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     const row = await selectedJob(store, owner, claim.source)
     const parent = await restoreJob(row, owner)
     const prior = pinnedRequest(row, parent)
-    if (!prior || row.status !== 'completed' || queueRecord(store, claim.source)?.phase !== 'finished')
+    if (!prior || row.status !== 'completed' || (await queueRecord(store, claim.source))?.phase !== 'finished')
       throw new ThreadChatError(409, 'Previous run did not complete; review its saved status.')
     const inspected = await inspectRegisteredJob(store, row, owner)
     if (inspected.status !== 'completed' ||
@@ -203,7 +203,7 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
   const record = { threadId }
   if (!record) return
   let verifiedCommit: string | null = null
-  const settled = queueRecord(store, jobId)
+  const settled = (await queueRecord(store, jobId))
   if (settled?.phase === 'finished') {
     // A terminal queue receipt is not itself narrative verification. Only
     // explicitly clean, independently verified Story HEADs can become fork

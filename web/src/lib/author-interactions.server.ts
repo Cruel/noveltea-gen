@@ -94,7 +94,7 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const job = await authorizedStoryJob(store, user.id, jobId)
     const saved = await store.persistence.generation.jobs.state(user.id, jobId)
     const row = saved ? { status: saved.status, request: saved.requestJson } : undefined
-    const queue = queueRecord(store, jobId)
+    const queue = (await queueRecord(store, jobId))
     const recoverable = !!row?.request && ['paused', 'blocked'].includes(row.status) &&
       queue?.phase === 'finished'
     if (request.method === 'GET') return json(await getRecords(job, recoverable))

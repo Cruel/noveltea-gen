@@ -24,46 +24,59 @@ export async function waitForAgentJob(store: StudioDatabase, jobId: string): Pro
   if (running) { await running; return }
   // Fixture execution can finish before its SSE event has been consumed.
   // Completion is durable even when the in-memory Promise has been released.
-  if (queueRecord(store, jobId)?.phase === 'finished') return
+  if ((await queueRecord(store, jobId))?.phase === 'finished') return
   throw new Error('Job is neither executing nor durably finished in this agent instance.')
 }
 
-/** Agent-only queue consumer; the web server must never run or pump jobs. */
-export function pumpAgentQueue(store: StudioDatabase) {
-  if (stopping) return
-  if (!initialized.has(store)) {
-    // Never re-enter an unfinished writer from a previous server lifetime.
-    fenceAbandonedRuns(store)
-    recoverOrphanedPiTurns(store)
-    initialized.add(store)
-    // Crash-safe chat catch-up only; this does not resume an unfinished writer.
-    void recoverSettledThreadRuns(store).catch(() => {
-      console.error('[Studio] Some settled Thread messages need operator reconciliation')
-    })
-  }
-  for (;;) {
-    const record = claimNext(store)
-    if (!record) break
-    const task = runPersistedGeneration(store, record)
-      .then(() => finishAttempt(store, record.jobId, true))
-      .catch(() => {
-        // Provider errors may include secrets. Only sanitized controller events
-        // and original receipts, not raw exceptions, leave this task.
-        finishAttempt(store, record.jobId, false)
-        appendGenerationEvent(store, record.ownerId, record.jobId, { kind: 'interrupted' })
-        throw new Error('Generation failed; preserve its original receipts for recovery.')
+/** Agent-only queue consumer. The Promise guard serializes asynchronous
+ * scheduler passes and makes initialization fencing exclusive per database.
+ * Every claim is still atomic in the persistence adapter. */
+const pumping = new WeakMap<StudioDatabase, Promise<void>>()
+export function pumpAgentQueue(store: StudioDatabase): Promise<void> {
+  if (stopping) return Promise.resolve()
+  const existing = pumping.get(store)
+  if (existing) return existing
+  const pass = (async () => {
+    if (!initialized.has(store)) {
+      // Never re-enter an unfinished writer from a previous server lifetime.
+      await fenceAbandonedRuns(store)
+      recoverOrphanedPiTurns(store)
+      initialized.add(store)
+      // Crash-safe chat catch-up only; this never replays the writer.
+      void recoverSettledThreadRuns(store).catch(() => {
+        console.error('[Studio] Some settled Thread messages need operator reconciliation')
       })
-      .finally(async () => {
-        // Settlement also runs on failure. Never replace the original writer
-        // outcome with a chat-generation error or automatically replay it.
-        try { await settleThreadRun(store, record.ownerId, record.jobId) }
-        catch { console.error('[Studio] Unable to settle Thread chat; retained durable queue state') }
-        inFlight.delete(record.jobId)
-        pumpAgentQueue(store)
-      })
-    inFlight.set(record.jobId, task)
-    void task.catch(() => {})
-  }
+    }
+    for (;;) {
+      if (stopping) break
+      const record = await claimNext(store)
+      if (!record) break
+      const task = runPersistedGeneration(store, record)
+        .then(async () => { await finishAttempt(store, record.jobId, true) })
+        .catch(async () => {
+          // Provider errors may include secrets. Keep the original outcome
+          // fenced and emit only sanitized controller diagnostics.
+          await finishAttempt(store, record.jobId, false)
+          await appendGenerationEvent(store, record.ownerId, record.jobId, { kind: 'interrupted' })
+          throw new Error('Generation failed; preserve its original receipts for recovery.')
+        })
+        .finally(async () => {
+          try { await settleThreadRun(store, record.ownerId, record.jobId) }
+          catch { console.error('[Studio] Unable to settle Thread chat; retained durable queue state') }
+          inFlight.delete(record.jobId)
+          void pumpAgentQueue(store).catch(() => {
+            console.error('[Studio] Unable to inspect the generation queue')
+          })
+        })
+      inFlight.set(record.jobId, task)
+      void task.catch(() => {})
+    }
+  })()
+  pumping.set(store, pass)
+  void pass.finally(() => {
+    if (pumping.get(store) === pass) pumping.delete(store)
+  }).catch(() => {})
+  return pass
 }
 
 /** A private, explicitly authenticated application-to-agent command surface.
@@ -135,15 +148,19 @@ export function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
   observePiTurnLifecycle((turn, phase) => recordPiTurnLifecycle(store, turn, phase))
   // Detect prior dead workers before taking new jobs. Never replay their
   // interrupted writers automatically; the existing reconciliation path owns that.
-  pumpAgentQueue(store)
+  void pumpAgentQueue(store).catch(() => {
+    console.error('[Studio] Unable to initialize the generation queue')
+  })
   const tick = () => {
-    pumpAgentQueue(store)
+    void pumpAgentQueue(store).catch(() => {
+      console.error('[Studio] Unable to inspect the generation queue')
+    })
     void dispatchPendingPiSteering(store).catch(() => {
       console.error('[Studio] Could not dispatch queued Pi steering; messages remain in their recorded state')
     })
   }
   const timer = setInterval(tick, intervalMs)
-  return () => { stopping = true; clearInterval(timer) }
+  return async () => { stopping = true; clearInterval(timer); await pumping.get(store) }
 }
 
 export async function startAgentServer(store: StudioDatabase, secret: string,
@@ -158,7 +175,7 @@ export async function startAgentServer(store: StudioDatabase, secret: string,
   return {
     port: address.port,
     close: async () => {
-      stopQueue()
+      await stopQueue()
       await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()))
       // A graceful termination must not close SQLite while a graph is still
       // writing. Docker may ultimately SIGKILL a long writer; the next agent

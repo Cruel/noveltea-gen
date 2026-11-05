@@ -91,7 +91,7 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       VALUES (?,?,?,'Job',?,'paused','now','now')`).run(id, author.id, storyId, sha)
     const pinned = { story: job.storyRoot, job: id,
       task: 'Write a mystery foundation', contract, fixture: true, skillsSource: skills }
-    queueGeneration(store, author.id, id, 'start', 'prepared', JSON.stringify(pinned),
+    await queueGeneration(store, author.id, id, 'start', 'prepared', JSON.stringify(pinned),
       job.threadId + ':generation:web')
     const control = async (method: 'GET' | 'POST', cookieHeader?: string, body?: unknown,
       origin = config.baseURL) => {
@@ -109,7 +109,7 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
     assert.equal((await control('POST', authorCookie, { action: 'resume', model: 'override' })).status, 400)
     assert.equal((await control('GET', authorCookie)).body.queue, 'queued')
     assert.equal((await control('POST', authorCookie, { action: 'pause' })).status, 202)
-    assert.equal(queueRecord(store, id), undefined)
+    assert.equal((await queueRecord(store, id)), undefined)
     assert.equal(await readJobControl(job), 'paused')
     assert.equal((await generationJobRequest(auth, store,
       new Request(config.baseURL + '/api/jobs/' + id, {
@@ -131,7 +131,7 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     assert.equal(visible, 'paused')
-    assert.equal(queueRecord(store, id)?.phase, 'finished')
+    assert.equal((await queueRecord(store, id))?.phase, 'finished')
     assert.equal((await control('POST', authorCookie, { action: 'budget', limits: { steps: -2 } })).status, 400)
     assert.equal((await control('POST', authorCookie, { action: 'budget', limits: { steps: 100 } })).status, 409,
       'fixture execution cannot impersonate a pinned Pi budget')
@@ -144,7 +144,7 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
     const unsafe = await control('POST', authorCookie, { action: 'retry' })
     assert.equal(unsafe.status, 409, JSON.stringify(unsafe.body))
     assert.match(unsafe.body.error, /Uncommitted files/)
-    assert.equal(queueRecord(store, id)?.phase, 'interrupted')
+    assert.equal((await queueRecord(store, id))?.phase, 'interrupted')
     assert.ok(existsSync(join(job.worktreeStoryRoot, 'unverified.md')))
     assert.equal((await generationJobRequest(auth, store,
       new Request(config.baseURL + '/api/jobs/' + id, { headers: { cookie: authorCookie } }),

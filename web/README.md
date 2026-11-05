@@ -420,9 +420,9 @@ Promise; a multi-statement atomic method must use a synchronous Drizzle
 transaction callback with **no `await` or asynchronous work inside it**.
 Do not expose a generic cross-adapter async transaction callback: PostgreSQL
 may implement the same owner-scoped business method using its own async
-transaction internally. All application persistence targets the same Studio SQLite database through
-Drizzle-backed ports. There is no separate application storage, dual-write,
-or data synchronization mechanism.
+transaction internally. All application persistence targets the same Studio
+SQLite database through Drizzle-backed ports. There is no separate application
+storage, dual-write, or data synchronization mechanism.
 
 **Generation persistence (#96):** `web/src/persistence/generation-contracts.ts`
 defines queue admission/claim/recovery, owner-scoped job metadata and status,
@@ -439,10 +439,12 @@ The Promise-returning ports isolate SQLite-specific locking. A future
 PostgreSQL implementation must serialize capacity reservation (for example
 with dedicated slot/advisory locks) and claim FIFO rows with row locks such as
 `FOR UPDATE SKIP LOCKED` in one transaction. Never count slots outside that
-transaction. The existing `sqliteTransactionBridge` remains a synchronous, **Drizzle-based**
-compatibility API for queue consumers whose transaction and worker lifecycle
-contracts are synchronous. These interfaces require async conversion before a
-PostgreSQL backend could be supported; changing driver alone is insufficient.
+transaction. The queue/claim/recovery, progress events, and continuation
+interfaces are now entirely Promise-returning. The SQLite implementations
+remain synchronous *inside* their adapters to preserve `BEGIN IMMEDIATE`,
+CAS conditions and multi-record atomicity, including the combined follow-up
+session and queue admission. The agent queue serializes overlapping asynchronous
+polls; SSE rechecks disconnect state after awaiting event reads.
 LangGraph checkpoints and saved Pi sessions remain separate from Studio DB.
 `web/test/generation-persistence.test.ts` exercises two independent WAL
 connections and shared claim/cancel/recovery behavior.
@@ -452,7 +454,7 @@ connections and shared claim/cancel/recovery behavior.
 `pnpm --filter @noveltea/studio persistence:boundary` runs within `pnpm check`
 and rejects raw SQLite imports, raw statements, migration handles, or direct
 SQLite-adapter imports in application services and routes. Its exemptions are
-confined to `web/src/persistence/` implementations, `db/connection.ts`,
+confined to `web/src/persistence/*-sqlite.ts` and `persistence/sqlite.ts` implementations, `db/connection.ts`,
 `db/migrations.ts`, `db/migrate-cli.ts`, and `db/trusted-catalog.ts` (the
 rootless controller's read-only host catalog); `lib/auth.ts` uses only the
 internal driver accessor required by Better Auth. Test-only legacy white-box

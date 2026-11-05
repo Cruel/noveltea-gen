@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import {
   discoverRepositoryCatalog, loadRepositorySourcePage,
@@ -116,12 +116,8 @@ test('unified catalog reads both connected providers, preserves auth and support
       loadRepositorySourcePage(auth, store, otherHeaders, origin, { ...catalog.sources[0]!, page: 2 }),
     /identity is no longer connected/)
 
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at,connection_id)
-      VALUES (?,?,?,?,?,?,NULL)`).run(
-      '44444444-4444-4444-8444-444444444444', owner.id, 'github', '301',
-      'acme/Novel', new Date().toISOString(),
-    )
+    await store.persistence.repositories.upsert(owner.id, 'github', '301',
+      'acme/Novel', null, '44444444-4444-4444-8444-444444444444', new Date().toISOString())
     const repeated = await discoverRepositoryCatalog(auth, store, headers, origin)
     assert.equal(repeated.repositories.find(repo => repo.providerRepositoryId === '301')?.added, true)
     assert.deepEqual(eligibleCandidates(repeated.repositories, '', new Set()).map(repo => repo.name),
@@ -143,7 +139,7 @@ test('unified catalog reads both connected providers, preserves auth and support
     else process.env.GITHUB_APP_SLUG = previousSlug
     if (previousBaseURL === undefined) delete process.env.BETTER_AUTH_URL
     else process.env.BETTER_AUTH_URL = previousBaseURL
-    store.sqlite.close()
+    store.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

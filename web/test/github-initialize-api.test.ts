@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { githubInitializationRequest } from '../src/lib/github-initialize.server'
 
@@ -86,9 +86,8 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
     const aliceCookie = await cookie(alice.id)
     const bobCookie = await cookie(bob.id)
     const repositoryId = '11111111-1111-4111-8111-111111111111'
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Acme/Repo','2026-10-31')`).run(repositoryId, alice.id)
+    await store.persistence.repositories.upsert(alice.id, 'github', '123',
+      'Acme/Repo', null, repositoryId, '2026-10-31')
     const get = (session = aliceCookie) => githubInitializationRequest(auth, store,
       new Request(origin + '/api/github/initialize?' + new URLSearchParams({
         repositoryId, directory: 'story',
@@ -149,11 +148,11 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
     assert.equal(bootstrap.status, 200)
     assert.equal((await bootstrap.json()).mode, 'bootstrap')
     assert.equal((await post(base)).status, 409)
-    assert.equal((store.sqlite.prepare('SELECT count(*) AS count FROM stories').get() as { count: number }).count, 0)
+    assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 0)
     assert.ok(calls.every(url => !url.includes('test-token')))
   } finally {
     globalThis.fetch = originalFetch
-    store.sqlite.close()
+    store.close()
     rmSync(root, { recursive: true, force: true })
   }
 })

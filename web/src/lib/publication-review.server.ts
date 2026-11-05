@@ -96,7 +96,7 @@ async function completedReview(job: JobStartResult, head: string) {
 export async function reviewPublication(store: StudioDatabase, job: JobStartResult,
   source: PublicationSource, token: string, targetBranch: string, targetSha: string,
   linked: PublicationLink | null): Promise<PublicationPreview> {
-  const queue = queueRecord(store, job.jobId)
+  const queue = (await queueRecord(store, job.jobId))
   if (queue && ['queued', 'running', 'interrupted'].includes(queue.phase))
     throw new PublicationFailure(409, 'Generation is queued, running or interrupted. Reconcile the writer before publication.')
   if (gitOutput(job, source, token, 'config', '--local', '--get', 'remote.origin.url') !== source.remoteUrl)

@@ -111,7 +111,7 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
     if (!savedRow) return reply({ error: 'Job not found' }, 404)
     const saved = { status: savedRow.status, request: savedRow.requestJson,
       thread: savedRow.threadId }
-    const queued = queueRecord(store, id)
+    const queued = (await queueRecord(store, id))
     if (request.method === 'GET') {
       const pi = await inspectPiPolicy(job)
       return reply({ control: await readJobControl(job), queue: queued?.phase ?? null,
@@ -188,7 +188,7 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       if (!saved.request && saved.status !== 'paused')
         return reply({ error: 'No recoverable generation exists' }, 409)
       await setJobControl(job, action === 'cancel' ? 'cancelled' : 'paused')
-      const removed = dequeueBeforeStart(store, user.id, id)
+      const removed = (await dequeueBeforeStart(store, user.id, id))
       if (action === 'cancel' && (removed || saved.status === 'paused' || queued?.phase !== 'running')) {
         await store.persistence.generation.jobs.cancel(user.id, id, new Date().toISOString())
       }

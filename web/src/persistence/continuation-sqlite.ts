@@ -6,10 +6,10 @@ import { generationRunQueue as queue, sessions, storyThreads as threads,
   threadSteeringIntents as steeringIntents } from '../db/schema'
 import { insertThreadAssistantSqlite, nextThreadSequenceSqlite,
   seedThreadMessagesSqlite } from './thread-message-sqlite'
-import type { GenerationQueueSqliteBridge } from './generation-contracts'
 import { consumeProtectedDecisionSqlite } from './approval-revision-sqlite'
+import { enqueueGenerationSqlite } from './generation-sqlite'
 import type { SteeringPersistence } from './steering-contracts'
-import type { ContinuationAdmission, ContinuationPersistence, ContinuationSqliteBridge, ContinuationRun,
+import type { ContinuationAdmission, ContinuationPersistence, ContinuationRun,
   ContinuationRequest, QueuedContinuation } from './continuation-contracts'
 type Db = BetterSQLite3Database<typeof schema>
 const auth = (owner: string) => { if (!owner) throw new Error('Authenticated owner required.') }
@@ -18,7 +18,7 @@ const ordered = sql`COALESCE((SELECT original.sequence FROM thread_steering_inte
   JOIN story_thread_messages original ON original.id=intent.message_id
   WHERE intent.review_message_id=${messages.id}), ${messages.sequence})`
 
-export function createSqliteContinuationPersistence(db: Db, queueBridge: GenerationQueueSqliteBridge,
+export function createSqliteContinuationPersistence(db: Db,
   steering: SteeringPersistence): ContinuationPersistence {
   const current = (owner: string, threadId: string): ContinuationRun | null => {
     auth(owner)
@@ -80,7 +80,9 @@ export function createSqliteContinuationPersistence(db: Db, queueBridge: Generat
       eq(steeringIntents.threadId, data.threadId),
       eq(steeringIntents.reviewState, 'awaiting-review'),
     )).run()
-  const sqliteBridge: ContinuationSqliteBridge = {
+  type SynchronousAdapter = { [K in keyof ContinuationPersistence]:
+    (...args: Parameters<ContinuationPersistence[K]>) => Awaited<ReturnType<ContinuationPersistence[K]>> }
+  const operation: SynchronousAdapter = {
     current,
     pending,
     claim(owner, threadId) {
@@ -132,8 +134,8 @@ export function createSqliteContinuationPersistence(db: Db, queueBridge: Generat
       db.transaction(() => {
         verifyClaim(data, 'Thread admission changed during worktree preparation.')
         registerChildRun(data, 'paused', ' (follow-up)')
-        queueBridge.enqueue(data.owner, data.claim.id, 'start', 'prepared', data.at,
-          data.requestJson, data.generationThread)
+        enqueueGenerationSqlite(db, data.owner, data.claim.id, 'start', 'prepared',
+          data.at, data.requestJson, data.generationThread)
         finishReview(data)
         db.update(messages).set({ phase: 'running', jobId: data.claim.id })
           .where(and(eq(messages.id, data.claim.id), eq(messages.ownerUserId, data.owner),
@@ -205,16 +207,16 @@ export function createSqliteContinuationPersistence(db: Db, queueBridge: Generat
     },
   }
   return {
-    async current(owner, threadId) { return sqliteBridge.current(owner, threadId) },
-    async pending(owner, threadId) { return sqliteBridge.pending(owner, threadId) },
-    async claim(owner, threadId) { return sqliteBridge.claim(owner, threadId) },
-    async protectedFinish(data, committedSha) { sqliteBridge.protectedFinish(data, committedSha) },
-    async beginFollowUp(data) { sqliteBridge.beginFollowUp(data) },
-    async block(owner, threadId, claim, reason, at) { sqliteBridge.block(owner, threadId, claim, reason, at) },
-    async settledRuns() { return sqliteBridge.settledRuns() },
-    async runThread(owner, jobId) { return sqliteBridge.runThread(owner, jobId) },
+    async current(owner, threadId) { return operation.current(owner, threadId) },
+    async pending(owner, threadId) { return operation.pending(owner, threadId) },
+    async claim(owner, threadId) { return operation.claim(owner, threadId) },
+    async protectedFinish(data, committedSha) { operation.protectedFinish(data, committedSha) },
+    async beginFollowUp(data) { operation.beginFollowUp(data) },
+    async block(owner, threadId, claim, reason, at) { operation.block(owner, threadId, claim, reason, at) },
+    async settledRuns() { return operation.settledRuns() },
+    async runThread(owner, jobId) { return operation.runThread(owner, jobId) },
     async settle(owner, jobId, verifiedCommit, at) {
-      return sqliteBridge.settle(owner, jobId, verifiedCommit, at)
+      return operation.settle(owner, jobId, verifiedCommit, at)
     },
   }
 }

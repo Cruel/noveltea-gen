@@ -135,9 +135,8 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
       await ctx.internalAdapter.createAccount({ userId: who.id, providerId: 'gitlab',
         accountId: who.id, accessToken: 'fake-gitlab-token' })
     }
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'gitlab','11','Acme/Project','2026-10-31')`).run(repositoryId, user.id)
+    await store.persistence.repositories.upsert(user.id, 'gitlab', '11',
+      'Acme/Project', null, repositoryId, '2026-10-31')
     const cookie = async (id: string) => {
       const session = await ctx.internalAdapter.createSession(id)
       return 'better-auth.session_token=' + session.token + '.' +
@@ -187,7 +186,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.notEqual(commits[0]?.branch, 'main')
     assert.equal(JSON.stringify(commits).includes('.noveltea'), false)
     assert.equal(previousDefault, start)
-    assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM stories').get() as {n: number}).n, 1)
+    assert.equal((await store.persistence.dashboard.forOwner(user.id)).stories.length, 1)
     assert.deepEqual((await readUserDashboard(store.persistence.dashboard, user.id)).stories.map(story => ({
       directory: story.directory, commitSha: story.commitSha, repositoryId: story.repositoryId,
     })), [{ directory: 'story', commitSha: committed, repositoryId }])

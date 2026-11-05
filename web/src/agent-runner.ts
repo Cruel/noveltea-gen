@@ -24,7 +24,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   const job = await restoreJob(row, item.ownerId)
   assertNativeVersion(job.validatorVersion)
   const pinned = pinnedRequest(row, job)
-  if (!pinned || row.status !== 'paused' || queueRecord(store, row.id)?.phase !== 'running')
+  if (!pinned || row.status !== 'paused' || (await queueRecord(store, row.id))?.phase !== 'running')
     throw new Error('Queued generation state changed before execution.')
   const config = row.configJson ? JSON.parse(row.configJson) as {
     model?: PiSelection | null; limits?: PiPolicy['limits']; pauseAfter?: 'foundation'
@@ -52,7 +52,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   const claim = () => withStoryJobLock(job, 'studio-generation-admission', async () => {
     const current = await store.persistence.generation.jobs.state(item.ownerId, row.id)
     if (current?.status !== 'paused' || current.requestJson !== JSON.stringify(pinned) ||
-        current.threadId !== threadId || queueRecord(store, row.id)?.phase !== 'running')
+        current.threadId !== threadId || (await queueRecord(store, row.id))?.phase !== 'running')
       throw new Error('Conflicting generation admission.')
     let sandbox: SandboxClient | null = null
     if (selected) {
@@ -78,7 +78,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   })
   await claim()
   const execute = async () => {
-    appendGenerationEvent(store, item.ownerId, row.id, { kind: 'started' })
+    await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'started' })
     const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
     try {
       if (item.intent !== 'start') {
@@ -102,7 +102,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
           const key = intake.active.stage + ':' + (intake.active.milestone ?? '')
           if (working !== key) {
             working = key
-            appendGenerationEvent(store, item.ownerId, row.id, { kind: 'working',
+            await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'working',
               stage: intake.active.stage, milestone: intake.active.milestone })
           }
         }
@@ -111,7 +111,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         if (completed && completed.length > verified) {
           for (const evidence of completed.slice(verified)) {
             const files = committedStoryFiles(job, previousHead, evidence.headSha)
-            appendGenerationEvent(store, item.ownerId, row.id, { kind: 'verified',
+            await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'verified',
               stage: evidence.stage, milestone: evidence.milestone, files })
             // Only a finalized recovery proof can associate a steering message
             // with this verified Git boundary. If publication is interrupted,
@@ -141,7 +141,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         needsAuthor, item.workerId!, new Date().toISOString())) {
         throw new Error('Generation finished against a changed worker or job state.')
       }
-      appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
+      await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
         status: state as 'paused' | 'blocked' | 'completed' | 'cancelled' })
     } finally { saver.db.close() }
   }

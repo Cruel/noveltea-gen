@@ -14,21 +14,8 @@ export type ContinuationRequest = {
   sourceHead: string; generationThread: string
   draftJson: string; requestJson: string; at: string
 }
-export interface ContinuationSqliteBridge {
-  current(owner: string, threadId: string): ContinuationRun | null
-  pending(owner: string, threadId: string): QueuedContinuation | null
-  claim(owner: string, threadId: string): ContinuationAdmission | null
-  protectedFinish(data: ContinuationRequest, committedSha: string): void
-  beginFollowUp(data: ContinuationRequest): void
-  block(owner: string, threadId: string, claim: ContinuationAdmission, reason: string, at: string): void
-  settledRuns(): Array<{ jobId: string; owner: string }>
-  runThread(owner: string, jobId: string): string | null
-  /** Checked terminalization; never invents a checkpoint or starts a writer. */
-  settle(owner: string, jobId: string, verifiedCommit: string | null, at: string): string | null
-}
-
-/** Future PostgreSQL implementations provide async transactions; synchronous
- * SQLite callbacks exist only behind the adapter for current worker fences. */
+// Every consumer uses the asynchronous port. The SQLite implementation alone
+// owns its synchronous transactions; other adapters may await within theirs.
 export interface ContinuationPersistence {
   current(owner: string, threadId: string): Promise<ContinuationRun | null>
   pending(owner: string, threadId: string): Promise<QueuedContinuation | null>

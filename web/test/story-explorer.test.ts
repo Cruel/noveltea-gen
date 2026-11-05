@@ -94,16 +94,14 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
       commit: pinned, directory: 'story', jobId,
       verifiedSizeBytes: bytes, verifiedBlobCount: records.length + 1,
     })
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Acme/Private','2026-11-01')`).run(repoId, alice.id)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Private Story','2026-11-01',?)`).run(storyId, alice.id, repoId, pinned)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-      VALUES (?,?,?,'Private Story',?,'paused','2026-11-01','2026-11-01')`)
-      .run(jobId, alice.id, storyId, pinned)
+    await store.persistence.repositories.upsert(alice.id, 'github', '123',
+      'Acme/Private', null, repoId, '2026-11-01')
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: alice.id, repositoryId: repoId, directory: 'story',
+      title: 'Private Story', commitSha: pinned, createdAt: '2026-11-01',
+    })
+    await store.persistence.generation.jobs.register(alice.id, jobId,
+      storyId, 'Private Story', pinned, '2026-11-01')
 
     // A deterministic native-CLI protocol fixture: real job pinning, baseline
     // checks and HTTP/auth boundaries run, but the model and provider stay offline.
@@ -280,9 +278,8 @@ process.exit(exit);
     assert.deepEqual(stored.body.saved.contract.scope.targets, ['event.bell'])
     assert.deepEqual(stored.body.saved.limits, full.limits)
     assert.deepEqual((await configuration('GET', undefined, aliceCookie)).body.saved, stored.body.saved)
-    const savedRow = store.sqlite.prepare('SELECT generation_config_json AS config FROM studio_sessions WHERE id=?')
-      .get(jobId) as { config: string }
-    assert.deepEqual(JSON.parse(savedRow.config), stored.body.saved)
+    const savedRow = await store.persistence.generation.jobs.state(alice.id, jobId)
+    assert.deepEqual(JSON.parse(savedRow!.configJson!), stored.body.saved)
     // Once a job is pinned to execution, configuration is immutable.
     store.sqlite.prepare('UPDATE studio_sessions SET generation_request_json=?, generation_thread_id=? WHERE id=?')
       .run('{"pinned":true}', acquired.threadId + ':generation:web', jobId)

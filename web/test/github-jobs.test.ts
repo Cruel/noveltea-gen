@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { githubJobRequest } from '../src/lib/github-jobs.server'
@@ -45,13 +45,12 @@ test('GitHub job acquisition rejects unauthenticated, foreign and conflicting ca
     const repositoryId = '11111111-1111-4111-8111-111111111111'
     const storyId = '22222222-2222-4222-8222-222222222222'
     const jobId = '33333333-3333-4333-8333-333333333333'
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Acme/Private','2026-10-31')`).run(repositoryId, alice.id)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Private Story','2026-10-31',?)`)
-      .run(storyId, alice.id, repositoryId, 'a'.repeat(40))
+    await store.persistence.repositories.upsert(alice.id, 'github', '123', 'Acme/Private',
+      null, repositoryId, '2026-10-31')
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: alice.id, repositoryId, directory: 'story',
+      title: 'Private Story', createdAt: '2026-10-31', commitSha: 'a'.repeat(40),
+    })
     const post = (body: unknown, session?: string, requestOrigin = origin) => githubJobRequest(auth, store,
       new Request(origin + '/api/github/jobs', {
         method: 'POST',
@@ -66,21 +65,21 @@ test('GitHub job acquisition rejects unauthenticated, foreign and conflicting ca
     assert.equal((await post(payload, bobCookie)).status, 404)
     assert.equal((await post({ ...payload, commit: 'b'.repeat(40) }, aliceCookie)).status, 409)
     assert.equal((await post({ ...payload, storyId: '44444444-4444-4444-8444-444444444444' }, aliceCookie)).status, 404)
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES ('55555555-5555-4555-8555-555555555555',?,'github','987','Other/Repo','2026-10-31')`).run(bob.id)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES ('66666666-6666-4666-8666-666666666666',?,'55555555-5555-4555-8555-555555555555',
-        'story','Other Story','2026-10-31',?)`).run(bob.id, 'b'.repeat(40))
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES (?,?,?,'Other Job','paused','2026-10-31','2026-10-31')`)
-      .run(jobId, bob.id, '66666666-6666-4666-8666-666666666666')
+    const bobRepositoryId = '55555555-5555-4555-8555-555555555555'
+    const bobStoryId = '66666666-6666-4666-8666-666666666666'
+    await store.persistence.repositories.upsert(bob.id, 'github', '987',
+      'Other/Repo', null, bobRepositoryId, '2026-10-31')
+    await store.persistence.onboarding.importStory({
+      id: bobStoryId, owner: bob.id, repositoryId: bobRepositoryId,
+      directory: 'story', title: 'Other Story', createdAt: '2026-10-31',
+      commitSha: 'b'.repeat(40),
+    })
+    await store.persistence.generation.jobs.register(
+      bob.id, jobId, bobStoryId, 'Other Job', 'b'.repeat(40), '2026-10-31')
     assert.equal((await post(payload, aliceCookie)).status, 409)
-    assert.equal((store.sqlite.prepare('SELECT count(*) AS count FROM studio_sessions').get() as { count: number }).count, 1)
+    assert.equal((await store.persistence.dashboard.forOwner(bob.id)).recentSessions.length, 1)
   } finally {
-    store.sqlite.close()
+    store.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

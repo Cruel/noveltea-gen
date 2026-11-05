@@ -123,12 +123,14 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story',
       commit, jobId, verifiedSizeBytes: Buffer.byteLength(baselineStory), verifiedBlobCount: 1 })
     acquiredJob = job
-    store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Story/Live','2026-11-01')`).run(repositoryId, user.id)
-    store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Live','2026-11-01',?)`).run(storyId, user.id, repositoryId, commit)
-    store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,status,source_commit_sha,created_at,updated_at)
-      VALUES (?,?,?,'Live','paused',?,'2026-11-01','2026-11-01')`).run(jobId, user.id, storyId, commit)
+    await store.persistence.repositories.upsert(user.id, 'github', '123',
+      'Story/Live', null, repositoryId, '2026-11-01')
+    await store.persistence.onboarding.importStory({
+      id: storyId, owner: user.id, repositoryId, directory: 'story',
+      title: 'Live', commitSha: commit, createdAt: '2026-11-01',
+    })
+    await store.persistence.generation.jobs.register(user.id, jobId, storyId,
+      'Live', commit, '2026-11-01')
     const provider = process.env.NT_TEST_WEB_PI_PROVIDER!
     await userPiCredentials(store, user.id).modify(provider, async () =>
       oauth ?? ({ type: 'api_key', key: process.env.NT_TEST_WEB_PI_API_KEY! }))
@@ -141,12 +143,13 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     const { task, contract } = interpretNaturalStoryPrompt(
       'Write a concise mystery visual novel about an archivist on a stranded train. You can decide unspecified details.')
     const request = { task, contract }
-    store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=? WHERE id=?')
-      // Two specialist steps cannot complete the skill-read + authoring +
-      // native-validation sequence with a real model. Keep a bounded budget
-      // without forcing a premature stop before the first verified commit.
-      .run(JSON.stringify({ version: 1, headSha: job.headSha, ...request,
-        limits: { steps: 8 }, pauseAfter: 'foundation', model: selected }), jobId)
+    // Two specialist steps cannot complete the skill-read + authoring +
+    // native-validation sequence with a real model. Keep a bounded budget
+    // without forcing a premature stop before the first verified commit.
+    await store.persistence.generation.jobs.saveConfiguration(user.id, jobId,
+      JSON.stringify({ version: 1, headSha: job.headSha, ...request,
+        limits: { steps: 8 }, pauseAfter: 'foundation', model: selected }),
+      new Date().toISOString())
     server.listen(socket)
     await once(server, 'listening')
     // Web admission no longer executes LangGraph. It must dispatch through
@@ -168,8 +171,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
         headers: { cookie, origin: config.baseURL, 'content-type': 'application/json' },
         body: JSON.stringify(request) }), jobId, config.baseURL)
     assert.equal(started.status, 202, await started.clone().text())
-    const pinned = JSON.parse((store.sqlite.prepare(
-      'SELECT generation_request_json AS request FROM studio_sessions WHERE id=?').get(jobId) as { request: string }).request)
+    const pinned = JSON.parse((await store.persistence.generation.jobs.state(user.id, jobId))!.requestJson!)
     assert.equal(pinned.fixture, false)
     assert.equal(pinned.provider, selected.provider)
     assert.equal(pinned.model, selected.id)
@@ -225,7 +227,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     const deadline = Date.now() + 250_000
     let verified = false, finished = false
     while (Date.now() < deadline) {
-      const events = listGenerationEvents(store, user.id, jobId, 0)
+      const events = (await listGenerationEvents(store, user.id, jobId, 0))
       verified ||= events.some(event => event.kind === 'verified' && event.stage === 'foundation')
       finished = events.some(event => event.kind === 'finished' || event.kind === 'interrupted')
       if (finished) break
@@ -240,7 +242,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       }
     }
     if (!verified) {
-      const events = listGenerationEvents(store, user.id, jobId, 0).map(e =>
+      const events = (await listGenerationEvents(store, user.id, jobId, 0)).map(e =>
         ({ kind: e.kind, stage: e.stage, status: e.status }))
       let checkpoint: { status?: string; reason?: string; failures?: Record<string,string>;
         cursor?: number; active?: {stage?: string; id?: string} | null;
@@ -249,9 +251,8 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       if (existsSync(checkpointFile)) {
         const { saver, graph } = openWebGenerationGraph(checkpointFile)
         try {
-          const entry = store.sqlite.prepare('SELECT generation_thread_id AS threadId FROM studio_sessions WHERE id=?')
-            .get(jobId) as { threadId: string }
-          const snapshot = await graph.getState({ configurable: { thread_id: entry.threadId } })
+          const entry = await store.persistence.generation.jobs.state(user.id, jobId)
+          const snapshot = await graph.getState({ configurable: { thread_id: entry!.threadId! } })
           checkpoint = snapshot.values as typeof checkpoint
         } finally { saver.db.close() }
       }
@@ -296,7 +297,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
         }
       }
       console.error('Live generation stopped before foundation verification:', JSON.stringify({
-        events, queuePhase: queueRecord(store, jobId)?.phase,
+        events, queuePhase: (await queueRecord(store, jobId))?.phase,
         checkpointStatus: checkpoint.status,
         reasonCategory: classify(checkpoint.reason),
         reasonIndicators: {
@@ -312,7 +313,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       }))
     }
     assert.ok(verified, 'real Pi foundation must validate and commit before the safe-boundary pause')
-    const terminal = listGenerationEvents(store, user.id, jobId, 0)
+    const terminal = (await listGenerationEvents(store, user.id, jobId, 0))
     assert.equal(terminal.find(e => e.kind === 'finished')?.status, 'paused',
       'Foundation-only certification must stop at the first verified boundary')
     assert.equal(terminal.some(e => e.kind === 'verified' && e.stage !== 'foundation'), false,
@@ -324,7 +325,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     const record = readFileSync(join(job.worktreeStoryRoot, 'creative-direction/foundation.md'), 'utf8')
     assert.match(record, /schema: ['"]?0\.1/)
     assert.match(git(job.worktreeRoot, 'log', '-1', '--format=%B'), /NovelTea-Work-Item: foundation/)
-    assert.ok(!JSON.stringify(listGenerationEvents(store, user.id, jobId, 0)).includes(root),
+    assert.ok(!JSON.stringify((await listGenerationEvents(store, user.id, jobId, 0))).includes(root),
       'the public progress journal must not reveal local paths')
   } finally {
     if (agent && agent.exitCode === null && agent.signalCode === null) {

@@ -108,7 +108,7 @@ export function pinnedRequest(row: SavedJob, job: JobStartResult): GenerationReq
 export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob, owner: string) {
   const job = await restoreJob(row, owner)
   const pinned = pinnedRequest(row, job)
-  const queued = queueRecord(store, row.id)
+  const queued = (await queueRecord(store, row.id))
   // Finalized per-work-item points are safe to inspect even while a later
   // specialist is editing: the uncommitted draft is never part of the point.
   const recoveryCheckpoints = (await inspectRecoveryCheckpoints(job)).map(point => ({
@@ -359,7 +359,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     const existing = pinnedRequest(row, job)
     if (existing && JSON.stringify({ task: existing.task, contract: existing.contract }) !== JSON.stringify(input))
       throw new JobError(409, 'Job already has a different pinned generation request.')
-    const queued = queueRecord(store, id)
+    const queued = (await queueRecord(store, id))
     if (existing) {
       return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
@@ -397,7 +397,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     }
     try { await assertServerClaimPermitted(job, job.threadId + ':generation:web', pinned) }
     catch { throw new JobError(409, 'CLI or conflicting server generation ownership prevents this queue admission.') }
-    queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),
+    await queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),
       job.threadId + ':generation:web')
     // Only the admitted run may deliver fork guidance or an edited initial
     // instruction. The port checks the queue before changing either message.

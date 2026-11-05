@@ -113,7 +113,7 @@ test('recovery must fence a dead writer; changed state never partially clears it
     await q.enqueue(owner, id, 'start', 'prepared', stamp, '{"task":"run"}', 'thread')
     const worker = `${hostname()}:999999999:dead`
     assert.equal((await q.claim(worker, 2, stamp))?.jobId, id)
-    assert.equal(fenceAbandonedRuns(f.b), 1)
+    assert.equal((await fenceAbandonedRuns(f.b)), 1)
     assert.equal((await q.record(id))?.phase, 'interrupted')
     await assert.rejects(q.enqueue(owner, id, 'resume', 'paused', stamp), /reconciliation/)
     await assert.rejects(f.b.persistence.generation.queue.reconcileAndEnqueue(

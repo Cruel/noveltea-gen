@@ -37,14 +37,14 @@ test('archive and restore persist, are idempotent and preserve run, history and 
       (id,owner_user_id,story_id,title,status,generation_request_json,generation_thread_id,created_at,updated_at)
       VALUES (?,?,?,'Work on finale','paused','{"task":"finale"}','graph:execution','2026-11-01T00:00:00Z','2026-11-03T00:00:00Z')`)
       .run(job, owner, story)
-    appendGenerationEvent(store, owner, job, {
+    await appendGenerationEvent(store, owner, job, {
       kind: 'verified', stage: 'foundation', files: ['creative-direction/foundation.md'],
     })
     const original = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
     const archiveId = original.id
     const beforeRun = store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job)
     const beforeJob = store.sqlite.prepare('SELECT * FROM studio_sessions WHERE id=?').get(job)
-    const beforeEvents = listGenerationEvents(store, owner, job, 0)
+    const beforeEvents = (await listGenerationEvents(store, owner, job, 0))
     const checkpoint = join(root, 'verified-recovery-receipt.json')
     writeFileSync(checkpoint, JSON.stringify({ job, workItem: 'foundation', verified: true }))
     const originalReceipt = readFileSync(checkpoint)
@@ -62,7 +62,7 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     assert.equal(after.conversations[0]!.threads[0]?.status, 'archived')
     assert.deepEqual(store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job), beforeRun)
     assert.deepEqual(store.sqlite.prepare('SELECT * FROM studio_sessions WHERE id=?').get(job), beforeJob)
-    assert.deepEqual(listGenerationEvents(store, owner, job, 0), beforeEvents)
+    assert.deepEqual((await listGenerationEvents(store, owner, job, 0)), beforeEvents)
     assert.deepEqual(readFileSync(checkpoint), originalReceipt)
 
     store.sqlite.close()
@@ -75,7 +75,7 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     const restored = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
     assert.deepEqual(restored, { ...original }, 'restore preserves original status, title and activity')
     assert.deepEqual(store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job), beforeRun)
-    assert.deepEqual(listGenerationEvents(store, owner, job, 0), beforeEvents)
+    assert.deepEqual((await listGenerationEvents(store, owner, job, 0)), beforeEvents)
     assert.deepEqual(readFileSync(checkpoint), originalReceipt)
     assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
   } finally {
