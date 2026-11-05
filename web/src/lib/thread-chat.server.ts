@@ -10,6 +10,8 @@ import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-
 import type { GenerationRequest } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
 import { assertPinnedRevision, revisionFromSource, submitThreadRevision, type PinnedRevision } from './story-revision.server'
+import { assertProtectedThreadApproval, commitProtectedThreadChange,
+  markProtectedThreadConsumed } from './thread-protected-decision.server'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 
@@ -65,6 +67,9 @@ function jobSummary(store: StudioDatabase, owner: string, jobId: string): string
     WHERE j.id=? AND j.owner_user_id=?`).get(jobId, owner) as
     { status: string; requestJson: string | null; queuePhase: string | null } | undefined
   if (!row) return 'The run is unavailable. Inspect its saved job.'
+  if (store.sqlite.prepare(`SELECT 1 FROM thread_protected_decisions
+    WHERE message_id=? AND consumed_sha IS NOT NULL AND decision='approved'`).get(jobId))
+    return 'The author-approved protected Creative Decision was changed in an isolated Thread and committed through verified native revision and trusted approval receipts.'
   const fixture = (() => {
     try { return (JSON.parse(row.requestJson ?? '{}') as { fixture?: boolean }).fixture === true }
     catch { return true }
@@ -296,8 +301,11 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     if (scope.sourceJobId !== claim.source || scope.sourceSha !== head ||
         !Array.isArray(scope.selectedTargets))
       throw new ThreadChatError(409, 'Revision authorization is stale or incomplete; review the Story impact again.')
-    const refreshed = await revisionFromSource(store, owner, claim.source, claim.content, scope.selectedTargets)
+    const refreshed = await revisionFromSource(store, owner, claim.source, claim.content,
+      scope.protectedChange ? undefined : scope.selectedTargets)
     assertPinnedRevision(scope, refreshed, claim.source, head)
+    if (scope.protectedChange)
+      assertProtectedThreadApproval(store, owner, threadId, claim.id, claim.source, refreshed)
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX'])
       delete env[key]
@@ -308,6 +316,50 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     const child = await continueCachedStory(parent, claim.id, head)
     if (child.baseSha !== head || child.headSha !== head)
       throw new ThreadChatError(409, 'Continuation baseline differs from verified source.')
+    if (scope.protectedChange) {
+      // The controller, not a Pi writer, makes the one explicitly authorized
+      // amendment in an isolated child. Native revision verification and fresh
+      // child-scoped trusted approval receipts are mandatory before committing.
+      const committed = await commitProtectedThreadChange(child, scope.protectedChange, owner)
+      store.sqlite.transaction(() => {
+        const active = store.sqlite.prepare(`SELECT phase,source_job_id AS source
+          FROM story_thread_messages WHERE id=? AND owner_user_id=? AND thread_id=?`)
+          .get(claim.id, owner, threadId) as { phase: string; source: string } | undefined
+        const latest = currentRun(store, owner, threadId)
+        if (active?.phase !== 'preparing' || active.source !== claim.source ||
+            latest?.jobId !== claim.source || latest.status !== 'completed' ||
+            latest.queuePhase !== 'finished')
+          throw new ThreadChatError(409, 'Protected Thread changed during exact native revision.')
+        const time = now()
+        const request: GenerationRequest = { story: child.storyRoot, job: child.jobId,
+          task: claim.content, contract: scope.contract, fixture: true }
+        const draft: GenerationDraft = { version: 1, headSha: head, task: claim.content,
+          contract: scope.contract, limits: {}, model: null }
+        store.sqlite.prepare(`INSERT INTO studio_sessions
+          (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,
+           generation_config_json,generation_request_json,generation_thread_id)
+          SELECT ?,?,story_id,title || ' (protected revision)',?,'completed',?,?,?,?,?
+          FROM studio_sessions WHERE id=? AND owner_user_id=?`)
+          .run(claim.id, owner, head, time, time, JSON.stringify(draft),
+            JSON.stringify(request), child.threadId + ':generation:web', claim.source, owner)
+        store.sqlite.prepare(`INSERT INTO story_thread_runs
+          (job_id,owner_user_id,thread_id,run_order) VALUES (?,?,?,?)`)
+          .run(claim.id, owner, threadId, claim.runOrder)
+        store.sqlite.prepare(`INSERT INTO generation_run_queue
+          (job_id,owner_user_id,intent,phase,created_at,updated_at)
+          VALUES (?,?,'start','finished',?,?)`).run(claim.id, owner, time, time)
+        markProtectedThreadConsumed(store, owner, claim.id, committed)
+        store.sqlite.prepare(`UPDATE story_thread_messages SET phase='finished',
+          status='delivered',job_id=?,verified_commit_sha=?
+          WHERE id=? AND owner_user_id=? AND phase='preparing'`)
+          .run(claim.id, committed, claim.id, owner)
+        insertAssistant(store, owner, threadId, claim.id)
+        store.sqlite.prepare(`UPDATE story_threads SET activity_at=? WHERE id=? AND owner_user_id=?`)
+          .run(time, threadId, owner)
+      })()
+      await advanceThread(store, owner, threadId)
+      return
+    }
     const oldDraft = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
     const model: PiSelection | null = oldDraft?.model ?? null
     if (model && !validPiSelection(model))

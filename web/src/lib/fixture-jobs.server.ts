@@ -204,6 +204,17 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
       throw new JobError(409, 'Unverified job revision requires operator reconciliation.')
     revisionVerified = false
   }
+  // An exact, owner-approved Creative Decision amendment is a completed
+  // native revision-only Thread. It has a sealed revision receipt rather than
+  // a Pi generation checkpoint; no old job's approvals are inherited.
+  if (row.status === 'completed' && queued?.phase === 'finished') {
+    const { inspectProtectedThreadCompletion } = await import('./thread-protected-decision.server')
+    if (await inspectProtectedThreadCompletion(store, owner, job))
+      return { ...base, status: 'completed', threadId: row.threadId,
+        task: pinned.task, contract: pinned.contract, revisionVerified: true,
+        reason: 'Author-approved protected decision amended at the exact verified HEAD.',
+        completedStages: [] }
+  }
   if (queued?.phase === 'queued') return { ...base, status: 'queued',
     threadId: row.threadId, task: pinned.task, contract: pinned.contract,
     reason: 'Waiting for an available generation slot.', completedStages: [] }

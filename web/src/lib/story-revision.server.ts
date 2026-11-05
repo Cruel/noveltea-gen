@@ -4,7 +4,8 @@ import { selectedJob, restoreJob, pinnedRequest, inspectRegisteredJob } from './
 import { trustedHead } from '../../../src/revision'
 import { validateStoryJob } from '../../../src/validator'
 import type { CanonicalScopeRecord } from '../../../src/focused-scope'
-import { inferStoryRevision, type RevisionPreview } from './story-revision-plan'
+import { inferStoryRevision, type RevisionPreview, type ProtectedDecisionChange } from './story-revision-plan'
+import { assertProtectedThreadApproval } from './thread-protected-decision.server'
 import { enqueueThreadMessage, type ThreadMessage, ThreadChatError } from './thread-chat.server'
 
 type Source = { jobId: string; status: string; queuePhase: string | null }
@@ -12,6 +13,7 @@ export type PinnedRevision = {
   sourceJobId: string; sourceSha: string; digest: string
   selectedTargets: string[]; approved: boolean
   contract: RevisionPreview['contract']; writePaths: string[]; contextIds: string[]
+  protectedChange?: ProtectedDecisionChange
 }
 /** Final authority check is performed after a fresh canonical validation and
  * before worktree allocation. A browser- or DB-originated path is never used
@@ -26,7 +28,8 @@ export function assertPinnedRevision(scope: PinnedRevision, refreshed: RevisionP
       JSON.stringify(refreshed.targets) !== JSON.stringify(scope.selectedTargets) ||
       JSON.stringify(refreshed.writePaths) !== JSON.stringify(scope.writePaths) ||
       JSON.stringify(refreshed.contextIds) !== JSON.stringify(scope.contextIds) ||
-      JSON.stringify(refreshed.contract) !== JSON.stringify(scope.contract))
+      JSON.stringify(refreshed.contract) !== JSON.stringify(scope.contract) ||
+      JSON.stringify(refreshed.protectedChange) !== JSON.stringify(scope.protectedChange ?? null))
     throw new ThreadChatError(409, 'Story impact or protected scope changed since approval; no continuation was started.')
 }
 function pendingInstruction(store: StudioDatabase, owner: string, threadId: string) {
@@ -128,12 +131,22 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   const plan = await revisionFromSource(store, owner, source.jobId, content, selectedTargets)
   // Clarifications and unapproved material expansions stay durably queued for
   // review or cancellation, rather than consuming the head of the Thread.
-  if (plan.clarification || plan.reviewRequired && !approvalDigest) return saved
+  if (plan.clarification) return saved
   if (approvalDigest && approvalDigest !== plan.digest)
     throw new ThreadChatError(409, 'Story scope changed since review. Inspect the updated proposal.')
+  if (plan.protectedChange) {
+    // A reviewed scope digest is not an authorization. A separate authenticated
+    // controller decision must exist in the owner-scoped immutable ledger.
+    try { assertProtectedThreadApproval(store, owner, threadId, id, source.jobId, plan) }
+    catch (error) {
+      if (error instanceof ThreadChatError && error.status === 409) return saved
+      throw error
+    }
+  } else if (plan.reviewRequired && !approvalDigest) return saved
   const receipt: PinnedRevision = { sourceJobId: source.jobId, sourceSha: plan.headSha,
-    digest: plan.digest, selectedTargets: plan.targets, approved: !!approvalDigest,
-    contract: plan.contract, writePaths: plan.writePaths, contextIds: plan.contextIds }
+    digest: plan.digest, selectedTargets: plan.targets, approved: !!approvalDigest || !!plan.protectedChange,
+    contract: plan.contract, writePaths: plan.writePaths, contextIds: plan.contextIds,
+    ...(plan.protectedChange ? { protectedChange: plan.protectedChange } : {}) }
   return store.sqlite.transaction(() => {
     const currentMessage = enqueueThreadMessage(store, owner, threadId, id, content)
     const live = latestRunStatus(store, owner, threadId)

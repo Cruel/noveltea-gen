@@ -200,6 +200,8 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
   const point = preview.checkpoint
   const revision = preview.revision
   if (revision?.clarification) throw new ThreadEditError(422, revision.clarification)
+  if (revision?.protectedChange) throw new ThreadEditError(409,
+    'A protected Creative Decision cannot be approved by message editing or a scope digest. Submit the exact change through Thread chat for fresh owner approval.')
   if (revision?.reviewRequired && data.approvalDigest !== revision.digest)
     throw new ThreadEditError(409, 'Review the affected Story records and explicitly approve the exact revised write scope.')
   if (data.approvalDigest && data.approvalDigest !== revision?.digest)

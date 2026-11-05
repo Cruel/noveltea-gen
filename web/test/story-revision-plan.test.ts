@@ -142,6 +142,11 @@ test('ambiguous or protected requests fail closed without selecting unrelated St
   assert.match(unknown.clarification!, /Unknown canonical record/)
   const protectedEdit = inferStoryRevision('Retcon character.nia', catalog, sha, previous)
   assert.match(protectedEdit.clarification!, /Protected narrative decisions/)
+  const creativeDirection = inferStoryRevision(
+    'Change protected Creative Decision creative-direction.foundation#loyalty for event.confession',
+    catalog, sha, previous)
+  assert.match(creativeDirection.clarification!, /Protected narrative decisions/)
+  assert.equal(creativeDirection.reviewRequired, true)
   assert.match(inferStoryRevision('Architecture only: change event.confession',
     catalog, sha, previous).clarification!, /deeper narrative stage/)
   assert.throws(() => inferStoryRevision('Change milestone.confession', catalog, sha, previous,

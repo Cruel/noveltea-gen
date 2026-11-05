@@ -1698,6 +1698,28 @@ writer. The next active queued instruction is then considered against the
 current verified Story HEAD. Already preparing, running or blocked instructions
 cannot be cancelled through this queued-only operation.
 
+A follow-up that changes an existing author-protected Creative Decision is held
+for an **exact before/after review**, not admitted by the ordinary Story scope
+approval. To request a specific change, write for example:
+`Change protected decision creative-direction.last-bell#repair-not-revenge to "Replacement statement"`.
+Studio resolves the canonical decision, verifies its user-protected provenance,
+and displays its original and proposed statement with the pinned source SHA.
+The signed-in Thread owner must explicitly authorize or reject this exact
+change. Schema v24 stores the owner's immutable approve/reject receipt bound to
+the queued message, source job, verified Git HEAD, proposal digest, target and
+before/after statement; rejection cancels the queued message while preserving
+its audit history. The approval is single-use and cannot be transferred from
+another user, parent Thread, run or baseline. On approval, the controller opens
+an isolated child worktree and applies only the exact decision statement edit;
+the **real native validator** and child-specific trusted decision and editorial
+receipts must verify it before the native revision graph can commit. A changed
+or unverified proposal is blocked, preserving the worktree for inspection.
+This revision-only child runs **no Pi generation** and does not replay already
+finished Story work. Other canon edits still use normal inferred, bounded
+Story revision scopes. Ambiguous protected requests must first name an exact
+existing protected decision and proposed statement; Studio does not infer
+human permission from natural-language intent.
+
 Corrective checkpoint-branch guidance is bound into each applicable specialist's
 actual Pi assignment/prompt without granting broader file or protected-decision
 authority. Editing an already delivered **sequential follow-up** creates a

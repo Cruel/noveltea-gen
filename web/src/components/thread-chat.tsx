@@ -3,7 +3,8 @@ import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { LoaderCircle, Send } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { getThreadChat, getThreadRevisionPreview, postThreadMessage, cancelThreadMessage } from '@/lib/thread-chat.functions'
+import { getThreadChat, getThreadRevisionPreview, postThreadMessage, cancelThreadMessage,
+  postThreadProtectedDecision } from '@/lib/thread-chat.functions'
 import type { RevisionPreview } from '@/lib/story-revision-plan'
 import { ThreadMessageEdit } from './thread-message-edit'
 
@@ -124,8 +125,25 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       await client.invalidateQueries({ queryKey: key })
     } finally { setSending(false) }
   }
+  const protectedDecision = async (decision: 'approved' | 'rejected') => {
+    if (!review?.protectedChange || !reviewQueued || sending) return
+    setSending(true); setSendError(null)
+    try {
+      const result = await postThreadProtectedDecision({ data: {
+        threadId, messageId: reviewQueued.id, content: reviewQueued.content,
+        digest: review.digest, decision,
+      } })
+      client.setQueryData(key, result.chat)
+      setReview(null); setReviewQueued(null); setSelectedTargets(undefined)
+      setPendingRetry(null)
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : 'The protected change could not be authorized.')
+      await client.invalidateQueries({ queryKey: key })
+    } finally { setSending(false) }
+  }
   const approve = async () => {
     if (!review || review.clarification || sending) return
+    if (review.protectedChange) { await protectedDecision('approved'); return }
     setSending(true)
     setSendError(null)
     try { await submit(review, true) }
@@ -195,7 +213,19 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       className="mb-3 rounded-md border border-border p-3 text-sm">
       <strong>Review Story revision scope</strong>
       <p className="mt-1 text-muted-foreground">{review.clarification ??
-        'Only the selected existing files will be writable. Linked context remains read-only.'}</p>
+        (review.protectedChange
+          ? 'This changes author-protected Story canon. Scope approval or a prior Thread approval is insufficient; review the exact difference below.'
+          : 'Only the selected existing files will be writable. Linked context remains read-only.')}</p>
+      {review.protectedChange && <div className="mt-3 grid gap-2 text-sm">
+        <p className="m-0 text-xs text-muted-foreground">
+          {review.protectedChange.decision} · {review.protectedChange.path} · source {review.headSha.slice(0, 12)}
+        </p>
+        <div><strong>Current protected statement</strong>
+          <p className="mt-1 whitespace-pre-wrap break-words">{review.protectedChange.before}</p></div>
+        <div><strong>Exact proposed replacement</strong>
+          <p className="mt-1 whitespace-pre-wrap break-words">{review.protectedChange.after}</p></div>
+        <p className="text-xs text-muted-foreground">Approval applies only to this change in a new isolated Thread run. It does not authorize other retcons or transfer a parent's approval.</p>
+      </div>}
       {review.targets.length > 0 && <>
         <p className="mt-2 text-xs text-muted-foreground">Authorized targets · {review.depth} depth</p>
         <div className="mt-1 grid gap-1">
@@ -215,8 +245,11 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       </>}
       {review.rationale.map(reason => <p key={reason} className="mt-1 text-xs text-muted-foreground">{reason}</p>)}
       <div className="mt-3 flex gap-2">
-        <Button type="button" size="sm" disabled={sending || !!review.clarification || !review.targets.length}
-          onClick={() => void approve()}>Approve scoped revision</Button>
+        <Button type="button" size="sm" disabled={sending || !!review.clarification ||
+            (!review.targets.length && !review.protectedChange)}
+          onClick={() => void approve()}>{review.protectedChange ? 'Authorize exact protected change' : 'Approve scoped revision'}</Button>
+        {review.protectedChange && <Button type="button" size="sm" variant="outline"
+          disabled={sending} onClick={() => void protectedDecision('rejected')}>Reject change</Button>}
         <Button type="button" size="sm" variant="outline" disabled={sending}
           onClick={() => { setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }}>
           {reviewQueued ? 'Close review' : 'Edit request'}

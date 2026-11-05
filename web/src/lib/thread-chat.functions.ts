@@ -5,6 +5,7 @@ import { requireUser } from './access.server'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { readThreadChat, advanceThread, cancelQueuedThreadMessage } from './thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from './story-revision.server'
+import { recordProtectedThreadDecision } from './thread-protected-decision.server'
 import {
   syncAppliedAuthorMessages, previewThreadMessageEdit, branchEditedThreadMessage,
 } from './thread-message-edit.server'
@@ -69,6 +70,43 @@ export const getThreadRevisionPreview = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => previewThreadRevision(database, await owner(),
     data.threadId, data.content, data.selectedTargets, data.messageId))
+
+/** Authenticated author decision, distinct from a scope-review digest. The
+ * server recomputes the exact protected diff before binding the current
+ * owner, queued instruction, source job and verified Git baseline. */
+export const postThreadProtectedDecision = createServerFn({ method: 'POST' })
+  .validator((data: { threadId: string; messageId: string; content: string;
+    digest: string; decision: 'approved' | 'rejected' }) => {
+    if (!data || !ID.test(data.threadId) || !ID.test(data.messageId) ||
+        typeof data.content !== 'string' || data.content.length > 4000 ||
+        typeof data.digest !== 'string' || !/^[a-f0-9]{64}$/.test(data.digest) ||
+        !['approved', 'rejected'].includes(data.decision))
+      throw new Error('Invalid protected-decision authorization.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    const ownerId = await owner()
+    const plan = await previewThreadRevision(database, ownerId, data.threadId,
+      data.content, undefined, data.messageId)
+    if (!plan.protectedChange || plan.clarification || plan.digest !== data.digest)
+      throw new Error('Protected decision changed or no exact proposal is available. Refresh the review.')
+    const source = database.sqlite.prepare(`SELECT r.job_id AS id FROM story_thread_runs r
+      WHERE r.thread_id=? AND r.owner_user_id=? ORDER BY r.run_order DESC LIMIT 1`)
+      .get(data.threadId, ownerId) as { id: string } | undefined
+    if (!source) throw new Error('No verified source run is available.')
+    const receipt = recordProtectedThreadDecision(database, ownerId, data.threadId,
+      data.messageId, source.id, plan, data.decision)
+    if (data.decision === 'approved') {
+      await submitThreadRevision(database, ownerId, data.threadId, data.messageId,
+        data.content, undefined, plan.digest)
+    } else {
+      // A denial retains its immutable author receipt but must not leave an
+      // unreviewable rejected queue head blocking later Thread instructions.
+      cancelQueuedThreadMessage(database, ownerId, data.threadId, data.messageId)
+    }
+    await advanceThread(database, ownerId, data.threadId)
+    return { receipt, chat: readThreadChat(database, ownerId, data.threadId) }
+  })
 
 /** Idempotent owner-scoped cancellation. An admitted writer cannot be cancelled
  * through this path; the immutable queued text and its sequence remain visible. */

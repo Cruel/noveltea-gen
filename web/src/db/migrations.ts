@@ -404,6 +404,30 @@ const appMigrations = [
       )`,
     ],
   },
+  {
+    version: 24,
+    statements: [
+      // Consent belongs to the authenticated author and this exact queued
+      // message, source run/HEAD and protected before/after proposal. Neither
+      // a scope digest nor any ancestor job's approval ledger is transferable.
+      `CREATE TABLE thread_protected_decisions (
+        message_id TEXT PRIMARY KEY NOT NULL REFERENCES story_thread_messages(id) ON DELETE CASCADE,
+        owner_user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        source_job_id TEXT NOT NULL,
+        source_sha TEXT NOT NULL,
+        proposal_sha256 TEXT NOT NULL,
+        change_json TEXT NOT NULL,
+        nonce TEXT NOT NULL UNIQUE,
+        decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')),
+        principal TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        consumed_sha TEXT,
+        FOREIGN KEY (thread_id,owner_user_id) REFERENCES story_threads(id,owner_user_id),
+        FOREIGN KEY (source_job_id,owner_user_id) REFERENCES studio_sessions(id,owner_user_id)
+      )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version

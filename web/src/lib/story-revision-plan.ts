@@ -4,13 +4,17 @@ import { resolveFocusedScope, type CanonicalScopeRecord } from '../../../src/foc
 import type { CompletionContract } from '../../../src/architecture'
 
 type RecordItem = CanonicalScopeRecord & { metadata: CanonicalScopeRecord['metadata'] & {
-  title?: string; arcs?: string[]; events?: string[]; fulfillment?: { any_of?: string[][] } } }
+  title?: string; arcs?: string[]; events?: string[]; fulfillment?: { any_of?: string[][] }
+  decisions?: Array<{ id: string; statement: string; origin: string; authority: string }> } }
+export type ProtectedDecisionChange = {
+  decision: string; path: string; before: string; after: string
+}
 export type RevisionPreview = {
   headSha: string; request: string; targets: string[]; writePaths: string[]
   contextIds: string[]; readOnlyIds: string[]; dependencies: Array<{ from: string; to: string; relation: string }>
   depth: CompletionContract['scope']['depth']; contract: CompletionContract
   rationale: string[]; reviewRequired: boolean; clarification: string | null
-  digest: string
+  protectedChange: ProtectedDecisionChange | null; digest: string
 }
 const SHA = /^[a-f0-9]{40}$/
 const unsafe = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
@@ -21,6 +25,8 @@ const ids = (value: unknown) => Array.isArray(value)
   ? value.filter((v): v is string => typeof v === 'string') : []
 const unique = <T>(values: T[]) => [...new Set(values)]
 const exactId = /\b(?:arc|milestone|character|relationship|world-entity|fact|revelation|event|authored-content|choice-point|puzzle)\.[a-z][a-z0-9-]*\b/gi
+const protectedEdit = /^(?:please\s+)?(?:change|replace|revise|update)\s+(?:the\s+)?(?:protected\s+)?(?:creative\s+)?decision\s+(creative-direction\.[a-z][a-z0-9-]*#[a-z][a-z0-9-]*)\s+(?:to|with)\s+("(?:[^"\\]|\\.)*")\s*\.?$/i
+const protectedIntent = /\b(?:protected\s+(?:creative\s+)?decision|creative[-\s]+direction|override\s+canon|retcon|change\s+(?:the\s+)?(?:genre|tone|premise|scope|foundation)|ignore\s+(?:the\s+)?(?:original|author|canon))\b/i
 const includesName = (text: string, name: string) => name.length >= 2 &&
   new RegExp('(^|[^a-z0-9])' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-z0-9])', 'i').test(text)
 const depthFor = (targets: string[]): CompletionContract['scope']['depth'] =>
@@ -40,6 +46,39 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
       typeof r.path !== 'string') || new Set(active.map(r => r.metadata.id)).size !== active.length)
     throw new Error('Canonical Story catalog is incomplete or contains duplicate record IDs.')
   const byId = new Map(active.map(r => [r.metadata.id, r]))
+  // A scope digest is NEVER authority to retcon an author's protected canon.
+  // The only executable protected request names the exact existing decision
+  // and its replacement statement. The trusted controller separately approves
+  // the resulting before/after delta bound to the Thread and Git HEAD.
+  const protectedMatch = protectedEdit.exec(request)
+  if (protectedMatch) {
+    const [recordId, decisionId] = protectedMatch[1]!.toLowerCase().split('#')
+    const record = byId.get(recordId!)
+    const decision = record?.metadata.type === 'creative-direction'
+      ? record.metadata.decisions?.find(d => d.id === decisionId) : undefined
+    let replacement = ''
+    try { replacement = JSON.parse(protectedMatch[2]!) as string }
+    catch { /* Invalid JSON-escaped statement must fail closed. */ }
+    if (!record || !decision || decision.origin !== 'user' ||
+        decision.authority !== 'user-protected' || typeof replacement !== 'string' ||
+        !replacement.trim() || replacement === decision.statement || replacement.length > 1000 ||
+        !/^creative-direction\/[a-z][a-z0-9-]*\.md$/.test(record.path))
+      throw new Error('The protected decision, its exact current statement, or the proposed replacement is invalid.')
+    if (selectedTargets !== undefined) throw new Error('Protected decisions have a fixed one-record scope.')
+    const change: ProtectedDecisionChange = { decision: `${recordId}#${decisionId}`,
+      path: record.path, before: decision.statement, after: replacement }
+    // A direct, controller-authored amendment is NOT a Pi specialist grant.
+    // Preserve the previously pinned valid contract only as historical
+    // context; this revision-only run has no generation graph or Pi writer.
+    // The separate protectedChange controls the sole writable Story file.
+    const contract = parseGenerationContract(previous)
+    const data = { headSha, request, targets: [] as string[], writePaths: [record.path],
+      contextIds: [recordId!], readOnlyIds: [] as string[], dependencies: [] as RevisionPreview['dependencies'],
+      depth: 'architecture' as const, contract,
+      rationale: ['An existing author-protected decision would change. Review the exact before/after text; a prior Thread approval is not transferable.'],
+      reviewRequired: true, clarification: null, protectedChange: change }
+    return { ...data, digest: hash(data) }
+  }
   const typed = unique([...request.matchAll(exactId)].map(m => m[0]!.toLowerCase()))
   const unknown = typed.filter(id => !byId.has(id))
   const names = active.filter(r => typeof r.metadata.title === 'string' &&
@@ -114,8 +153,8 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
     throw new Error('Selected revision targets must be a unique, nonempty subset of the proposed canonical records.')
   const targets = (selectedTargets ?? candidates).slice().sort()
   if (!targets.length) clarification ??= 'No writable existing records were identified. Narrow or replan the request.'
-  if (/\b(retcon|protected|override canon|change (?:the )?(?:foundational|protected) decision)\b/i.test(request)) {
-    clarification = 'Protected narrative decisions require their separate exact author authorization; a scope preview cannot approve them.'
+  if (protectedIntent.test(request) || /\b(?:override|delete|remove)\b.*\b(?:decision|canon)\b/i.test(request)) {
+    clarification = 'Protected narrative decisions require exact authorization. Propose: Change protected decision creative-direction.<record>#<decision> to "new statement". Scope approval cannot authorize a retcon.'
   }
   const depth = depthFor(targets)
   if (depth !== 'architecture' && /\b(?:architecture[- ]only|outline[- ]only|no (?:dialogue|event work))\b/i.test(request))
@@ -146,6 +185,7 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
   if (isMilestone || targets.length > 1) rationale.push('Material scope expansion requires an explicit author-approved plan.')
   if (!rationale.length) rationale.push('A single existing canonical record is writable; its related Story records remain read-only.')
   const data = { headSha, request, targets, writePaths, contextIds, readOnlyIds,
-    dependencies, depth, contract, rationale, reviewRequired, clarification }
+    dependencies, depth, contract, rationale, reviewRequired, clarification,
+    protectedChange: null }
   return { ...data, digest: hash(data) }
 }
