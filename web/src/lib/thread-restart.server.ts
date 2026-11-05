@@ -41,42 +41,26 @@ export type RestartSelection = {
   mode: 'original' | 'newer'; selectedSha: string; targetBranch: string | null
 }
 
-function sourceFor(store: StudioDatabase, owner: string, threadId: string): Source {
-  const visited = new Set<string>()
-  let id = threadId
-  let root: { id: string; parent: string | null; conversation: string; story: string } | undefined
-  for (let i = 0; i < 64; i++) {
-    if (visited.has(id)) throw new ThreadRestartError(409, 'Thread ancestry contains a cycle.')
-    visited.add(id)
-    root = store.sqlite.prepare(`SELECT t.id,t.parent_thread_id AS parent,
-      t.conversation_id AS conversation,c.story_id AS story
-      FROM story_threads t JOIN story_conversations c
-      ON c.id=t.conversation_id AND c.owner_user_id=t.owner_user_id
-      WHERE t.id=? AND t.owner_user_id=?`).get(id, owner) as typeof root
-    if (!root) throw new ThreadRestartError(404, 'Thread not found.')
-    if (!root.parent) break
-    id = root.parent
-    root = undefined
+async function sourceFor(store: StudioDatabase, owner: string, threadId: string): Promise<Source> {
+  let root: Awaited<ReturnType<typeof store.persistence.advancedThreads.ancestor>>
+  try { root = await store.persistence.advancedThreads.ancestor(owner, threadId) }
+  catch (error) {
+    const message = error instanceof Error ? error.message : 'Thread ancestry is unsafe.'
+    throw new ThreadRestartError(409, message)
   }
-  if (!root || root.parent) throw new ThreadRestartError(409, 'Thread ancestry is too deep.')
-  const member = store.sqlite.prepare(`SELECT t.id,t.conversation_id AS conversation,c.story_id AS story,t.title
-    FROM story_threads t JOIN story_conversations c
-      ON c.id=t.conversation_id AND c.owner_user_id=t.owner_user_id
-    WHERE t.id=? AND t.owner_user_id=?`).get(threadId, owner) as
-    { id: string; conversation: string; story: string; title: string } | undefined
+  if (!root) throw new ThreadRestartError(404, 'Thread not found.')
+  const member = await store.persistence.advancedThreads.identity(owner, threadId)
   if (!member || member.conversation !== root.conversation || member.story !== root.story)
     throw new ThreadRestartError(409, 'Thread belongs to a different Story or Conversation.')
-  const run = (id: string, order: 'ASC' | 'DESC') => store.sqlite.prepare(`SELECT r.job_id AS jobId
-    FROM story_thread_runs r WHERE r.thread_id=? AND r.owner_user_id=?
-    ORDER BY r.run_order ${order} LIMIT 1`).get(id, owner) as { jobId: string } | undefined
-  const latest = run(threadId, 'DESC')
-  const first = run(root.id, 'ASC')
+  const latest = await store.persistence.advancedThreads.run(owner, threadId, 'last')
+  const first = await store.persistence.advancedThreads.run(owner, root.id, 'first')
   if (!first || !latest) throw new ThreadRestartError(409, 'Thread has no pinned generation run.')
   const original = selectedJob(store, owner, first.jobId)
   const current = selectedJob(store, owner, latest.jobId)
-  if (original.storyId !== member.story || current.storyId !== member.story) throw new ThreadRestartError(409, 'Run Story identity differs.')
-  if (!original.commitSha || !SHA.test(original.commitSha)) throw new ThreadRestartError(409, 'Original Story SHA is missing.')
-  // A restart always replays the original author goal, never a later follow-up.
+  if (original.storyId !== member.story || current.storyId !== member.story)
+    throw new ThreadRestartError(409, 'Run Story identity differs.')
+  if (!original.commitSha || !SHA.test(original.commitSha))
+    throw new ThreadRestartError(409, 'Original Story SHA is missing.')
   const config = original.configJson ? JSON.parse(original.configJson) as GenerationDraft : null
   const originalRequest = original.requestJson ? JSON.parse(original.requestJson) as GenerationRequest : null
   const task = originalRequest?.task ?? config?.task
@@ -87,11 +71,7 @@ function sourceFor(store: StudioDatabase, owner: string, threadId: string): Sour
   try { contract = parseGenerationContract(priorContract) }
   catch { throw new ThreadRestartError(409, 'Original generation scope or plan is invalid.') }
   const currentConfig = current.configJson ? JSON.parse(current.configJson) as GenerationDraft : null
-  const repository = store.sqlite.prepare(`SELECT r.id AS repositoryId,r.provider,r.provider_repository_id AS providerId,
-    r.name AS repository,s.directory FROM stories s JOIN repositories r
-    ON r.id=s.repository_id AND r.owner_user_id=s.owner_user_id
-    WHERE s.id=? AND s.owner_user_id=?`).get(member.story, owner) as
-    Pick<Source, 'repositoryId' | 'provider' | 'providerId' | 'repository' | 'directory'> | undefined
+  const repository = await store.persistence.advancedThreads.repository(owner, member.story)
   if (!repository || !['github', 'gitlab'].includes(repository.provider))
     throw new ThreadRestartError(409, 'Saved Story provider identity is invalid.')
   return { ...repository, threadId, conversationId: member.conversation, storyId: member.story,
@@ -157,7 +137,7 @@ export async function previewThreadRestart(auth: StudioAuth, store: StudioDataba
   assertStudioSchemaCurrent(store)
   const actor = await requireUser(auth, request.headers)
   if (!actor) throw new ThreadRestartError(401, 'Sign in required.')
-  const source = sourceFor(store, actor.id, threadId)
+  const source = await sourceFor(store, actor.id, threadId)
   let upstream: RestartPreview['upstream'] = null
   let upstreamError: string | null = null
   try {
@@ -249,26 +229,23 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
   const input = requestBody(await readJsonInput(request, 2048))
   // Owner and Thread lookup precedes all resource acquisition. A repeated
   // child ID can only refer to this exact operation, never a foreign claim.
-  const source = sourceFor(store, actor.id, threadId)
-  const existing = () => store.sqlite.prepare(`SELECT owner_user_id AS owner,source_thread_id AS sourceThread,
-    source_job_id AS sourceJob,root_job_id AS rootJob,original_sha AS original,
-    mode,selected_sha AS selected,target_branch AS branch,draft_json AS draft,prepared_at AS preparedAt
-    FROM thread_restarts WHERE child_id=?`).get(input.childId) as RestartIntent | undefined
+  const source = await sourceFor(store, actor.id, threadId)
+  const existing = () => store.persistence.advancedThreads.restartIntent(input.childId)
   const intentMatches = (saved: RestartIntent) => saved.owner === actor.id &&
     saved.sourceThread === threadId && saved.sourceJob === input.sourceJobId &&
     saved.rootJob === source.rootJobId && saved.original === input.originalSha &&
     saved.mode === input.mode && saved.selected === input.selectedSha &&
     saved.branch === input.targetBranch
-  let intent = existing()
+  let intent = await existing()
   if (intent && !intentMatches(intent) ||
-      !intent && store.sqlite.prepare('SELECT 1 FROM studio_sessions WHERE id=?').get(input.childId) ||
-      !intent && store.sqlite.prepare('SELECT 1 FROM checkpoint_forks WHERE child_id=?').get(input.childId))
+      !intent && await store.persistence.advancedThreads.jobClaimed(input.childId) ||
+      !intent && await store.persistence.advancedThreads.forkIntent(input.childId))
     throw new ThreadRestartError(409, 'Child ID is already assigned to a different operation.')
   if (intent?.preparedAt) {
     const registered = selectedJob(store, actor.id, input.childId)
     if (registered.storyId !== source.storyId || registered.commitSha !== intent.selected ||
-        !store.sqlite.prepare(`SELECT 1 FROM story_thread_runs WHERE job_id=? AND owner_user_id=?
-          AND thread_id=?`).get(input.childId, actor.id, 'restart:' + input.childId))
+        !await store.persistence.advancedThreads.preparedRestart(actor.id, input.childId,
+          'restart:' + input.childId))
       throw new ThreadRestartError(409, 'Prepared restart registration differs from the saved intent.')
     return { id: input.childId, storyId: source.storyId, threadId: 'restart:' + input.childId }
   }
@@ -287,20 +264,15 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
       throw new ThreadRestartError(409, 'Upstream moved since selection. Refresh and explicitly select its new SHA.')
   }
   if (!intent) {
-    store.sqlite.transaction(() => {
-      if (store.sqlite.prepare('SELECT 1 FROM studio_sessions WHERE id=?').get(input.childId))
-        throw new ThreadRestartError(409, 'Child job ID was assigned concurrently.')
-      store.sqlite.prepare(`INSERT INTO thread_restarts
-        (child_id,owner_user_id,source_thread_id,source_job_id,root_job_id,original_sha,
-          mode,selected_sha,target_branch,draft_json,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(child_id) DO NOTHING`)
-        .run(input.childId, actor.id, threadId, source.sourceJobId, source.rootJobId,
-          source.originalSha, input.mode, input.selectedSha, input.targetBranch,
-          JSON.stringify(currentDraft), new Date().toISOString())
-      intent = existing()
-      if (!intent || !intentMatches(intent))
-        throw new ThreadRestartError(409, 'Restart reservation changed concurrently.')
-    })()
+    intent = await store.persistence.advancedThreads.reserveRestart({
+      childId: input.childId, owner: actor.id, sourceThread: threadId,
+      sourceJob: source.sourceJobId, rootJob: source.rootJobId,
+      original: source.originalSha, selected: input.selectedSha,
+      mode: input.mode, branch: input.targetBranch,
+      draft: JSON.stringify(currentDraft), at: new Date().toISOString(),
+    })
+    if (!intentMatches(intent))
+      throw new ThreadRestartError(409, 'Restart reservation changed concurrently.')
   }
   // The original Thread is NEVER used as a writer. All preflight files and
   // validator pins belong only to the new isolated job.
@@ -319,29 +291,13 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
     if (refreshed.sha !== input.selectedSha || refreshed.branch !== input.targetBranch)
       throw new ThreadRestartError(409, 'Upstream moved during restart preparation; no child was registered.')
   }
-  store.sqlite.transaction(() => {
-    const live = sourceFor(store, actor.id, threadId)
-    if (live.sourceJobId !== source.sourceJobId || live.originalSha !== source.originalSha)
-      throw new ThreadRestartError(409, 'Thread advanced during restart preparation. Refresh before restarting.')
-    const now = new Date().toISOString()
-    const saved = store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,generation_config_json)
-      VALUES (?,?,?,?,?,'paused',?,?,?) ON CONFLICT(id) DO NOTHING`)
-      .run(input.childId, actor.id, source.storyId, source.sourceTitle + ' (restart)',
-        child.baseSha, now, now, intent!.draft)
-    if (saved.changes === 1) {
-      store.sqlite.prepare(`INSERT INTO story_threads
-        (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-        VALUES (?,?,?,?,?,?,?)`).run('restart:' + input.childId, actor.id,
-          source.conversationId, threadId, source.sourceTitle + ' (restart)', now, now)
-      store.sqlite.prepare(`INSERT INTO story_thread_runs
-        (job_id,owner_user_id,thread_id,run_order) VALUES (?,?,?,0)`)
-        .run(input.childId, actor.id, 'restart:' + input.childId)
-    } else if (selectedJob(store, actor.id, input.childId).commitSha !== input.selectedSha)
-      throw new ThreadRestartError(409, 'Existing prepared job differs from restart intent.')
-    store.sqlite.prepare(`UPDATE thread_restarts SET prepared_at=?
-      WHERE child_id=? AND owner_user_id=? AND prepared_at IS NULL`).run(now, input.childId, actor.id)
-  })()
+  await store.persistence.advancedThreads.registerChild({
+    childId: input.childId, owner: actor.id, storyId: source.storyId,
+    title: source.sourceTitle + ' (restart)', baseSha: child.baseSha,
+    conversationId: source.conversationId, parentThreadId: threadId,
+    threadId: 'restart:' + input.childId, draft: intent!.draft,
+    at: new Date().toISOString(), kind: 'restart',
+  })
   return { id: input.childId, storyId: source.storyId, threadId: 'restart:' + input.childId }
 }
 

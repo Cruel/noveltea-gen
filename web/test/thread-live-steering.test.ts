@@ -542,12 +542,12 @@ test('verified checkpoint provenance branches between two delivered steering mes
     assert.equal((f.db.sqlite.prepare('SELECT verified_commit_sha AS sha FROM story_thread_messages WHERE id=?')
       .get(second) as { sha: string }).sha, two)
     const source = { worktreeRoot: f.root, baseSha: baseline, jobId: f.job } as JobStartResult
-    const frozen = snapshotForkBoundaryHistory(f.db, f.owner, f.threadId, source,
+    const frozen = await snapshotForkBoundaryHistory(f.db, f.owner, f.threadId, source,
       'Original task', 'now', one)
     assert.ok(frozen.some(m => m.originId === first))
     assert.ok(!frozen.some(m => m.originId === second),
       'fork from intermediate checkpoint cannot inherit later message')
-    const both = snapshotForkBoundaryHistory(f.db, f.owner, f.threadId, source,
+    const both = await snapshotForkBoundaryHistory(f.db, f.owner, f.threadId, source,
       'Original task', 'now', two)
     assert.ok(both.some(m => m.originId === first))
     assert.ok(both.some(m => m.originId === second))

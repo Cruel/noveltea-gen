@@ -42,6 +42,9 @@ import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding, PiCredent
 import type { GenerationPersistence } from './generation-contracts'
 import type { ConversationCatalog } from './conversation-contracts'
 import type { ThreadMessagePersistence } from './thread-message-contracts'
+import type { AdvancedThreadPersistence } from './advanced-thread-contracts'
+import type { SteeringPersistence } from './steering-contracts'
+import type { ContinuationPersistence } from './continuation-contracts'
 import type { ApprovalJobCatalog, ProtectedDecisionRecords, PublicationRecords,
   RevisionRecords } from './publication-contracts'
 
@@ -55,6 +58,9 @@ export interface StudioPersistence {
   generation: GenerationPersistence
   conversations: ConversationCatalog
   messages: ThreadMessagePersistence
+  advancedThreads: AdvancedThreadPersistence
+  steering: SteeringPersistence
+  continuation: ContinuationPersistence
   publications: PublicationRecords
   approvalJobs: ApprovalJobCatalog
   protectedDecisions: ProtectedDecisionRecords

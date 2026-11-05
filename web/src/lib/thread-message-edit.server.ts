@@ -26,8 +26,8 @@ type Message = {
   origin: string | null
 }
 type Intent = {
-  owner: string; source: string; base: string; commitSha: string; proofDigest: string
-  sourceThreadId: string; editedMessageId: string | null; editedBody: string | null
+  owner: string; source: string; base: string; commitSha: string; proofDigest: string | null
+  sourceThreadId: string | null; editedMessageId: string | null; editedBody: string | null
   bundle: string; draft: string; history: string | null
 }
 function git(cwd: string, ...args: string[]) {
@@ -55,11 +55,8 @@ export function selectCausalRecoveryPoint<T extends Point>(
   }
   return selected
 }
-function messageRecord(store: StudioDatabase, owner: string, threadId: string, messageId: string): Message {
-  const row = store.sqlite.prepare(`SELECT m.id,m.thread_id AS threadId,m.sequence,m.role,m.status,m.body,
-    m.phase,m.job_id AS jobId,m.source_job_id AS sourceJobId,m.origin_message_id AS origin
-    FROM story_thread_messages m JOIN story_threads t ON t.id=m.thread_id AND t.owner_user_id=m.owner_user_id
-    WHERE m.owner_user_id=? AND m.thread_id=? AND m.id=?`).get(owner, threadId, messageId) as Message | undefined
+async function messageRecord(store: StudioDatabase, owner: string, threadId: string, messageId: string): Promise<Message> {
+  const row = await store.persistence.advancedThreads.editable(owner, threadId, messageId)
   if (!row) throw new ThreadEditError(404, 'Message not found in this Thread.')
   if (row.role !== 'user' || row.status !== 'delivered' || ![null, 'finished'].includes(row.phase))
     throw new ThreadEditError(409, 'Only a delivered user instruction can be edited into a new Thread.')
@@ -71,15 +68,13 @@ function textCheck(original: string, edited: string) {
     throw new ThreadEditError(400, 'Enter a changed, printable instruction of 1–4000 characters.')
   return edited.trim()
 }
-function resolveOriginal(store: StudioDatabase, owner: string, row: Message): Message {
+async function resolveOriginal(store: StudioDatabase, owner: string, row: Message): Promise<Message> {
   let message = row
   const seen = new Set<string>()
   while (message.origin && !message.origin.startsWith('author-update:') && !message.jobId) {
     if (seen.has(message.id)) throw new ThreadEditError(409, 'Inherited message lineage is cyclic.')
     seen.add(message.id)
-    const original = store.sqlite.prepare(`SELECT id,thread_id AS threadId,sequence,role,status,body,phase,
-      job_id AS jobId,source_job_id AS sourceJobId,origin_message_id AS origin
-      FROM story_thread_messages WHERE id=? AND owner_user_id=?`).get(message.origin, owner) as Message | undefined
+    const original = await store.persistence.advancedThreads.origin(owner, message.origin)
     if (!original) break
     if (original.body !== row.body || original.role !== 'user')
       throw new ThreadEditError(409, 'Inherited message provenance changed.')
@@ -89,7 +84,7 @@ function resolveOriginal(store: StudioDatabase, owner: string, row: Message): Me
 }
 type CausalSource = { sourceJob: JobStartResult; sourceId: string; boundary: string }
 async function sourceOf(store: StudioDatabase, owner: string, message: Message): Promise<CausalSource> {
-  const original = resolveOriginal(store, owner, message)
+  const original = await resolveOriginal(store, owner, message)
   const owningJob = original.jobId
   if (!owningJob) throw new ThreadEditError(409, 'This historical message has no saved application receipt.')
   let boundary: string
@@ -130,10 +125,7 @@ async function sourceOf(store: StudioDatabase, owner: string, message: Message):
  * or untrusted Pi text. Their original receipt ID remains available for the
  * edit preview; these entries do not assert editorial acceptance. */
 export async function syncAppliedAuthorMessages(store: StudioDatabase, owner: string, threadId: string): Promise<void> {
-  const runs = store.sqlite.prepare(`SELECT r.job_id AS jobId FROM story_thread_runs r
-    JOIN story_threads t ON t.id=r.thread_id AND t.owner_user_id=r.owner_user_id
-    WHERE r.owner_user_id=? AND r.thread_id=? ORDER BY r.run_order`)
-    .all(owner, threadId) as Array<{ jobId: string }>
+  const runs = (await store.persistence.advancedThreads.runJobs(owner, threadId)).map(jobId => ({ jobId }))
   for (const { jobId } of runs) {
     let job: JobStartResult
     try { job = await restoreJob(selectedJob(store, owner, jobId), owner) }
@@ -146,26 +138,19 @@ export async function syncAppliedAuthorMessages(store: StudioDatabase, owner: st
       if (typeof body !== 'string' || !body.trim() || body.length > 4000 ||
           unsafeText.test(body)) continue
       const id = 'author:' + jobId + ':' + message.id
-      store.sqlite.transaction(() => {
-        if (store.sqlite.prepare('SELECT 1 FROM story_thread_messages WHERE id=?').get(id)) return
-        const next = store.sqlite.prepare(`SELECT COALESCE(MAX(sequence),-1)+1 AS n
-          FROM story_thread_messages WHERE thread_id=?`).get(threadId) as { n: number }
-        store.sqlite.prepare(`INSERT INTO story_thread_messages
-          (id,owner_user_id,thread_id,sequence,role,status,body,origin_message_id,phase,job_id,created_at)
-          VALUES (?,?,?,?,'user','delivered',?,?,'finished',?,?)`)
-          .run(id, owner, threadId, next.n, body, 'author-update:' + message.id, jobId, message.createdAt)
-      })()
+      await store.persistence.advancedThreads.importAppliedMessage(
+        owner, threadId, id, body, message.id, jobId, message.createdAt)
     }
   }
 }
 export async function previewThreadMessageEdit(store: StudioDatabase, owner: string, threadId: string,
   messageId: string, edited: string, selectedTargets?: string[]) {
-  const message = messageRecord(store, owner, threadId, messageId)
+  const message = await messageRecord(store, owner, threadId, messageId)
   const proposed = textCheck(message.body, edited)
   const { sourceJob, sourceId, boundary } = await sourceOf(store, owner, message)
   const points = await inspectRecoveryCheckpoints(sourceJob)
   const point = selectCausalRecoveryPoint(sourceJob.worktreeRoot, points, boundary)
-  const original = resolveOriginal(store, owner, message)
+  const original = await resolveOriginal(store, owner, message)
   const followup = !!original.sourceJobId && !original.origin?.startsWith('author-update:')
   // A later instruction is NOT a continuation of the previous run's writing
   // authorization. Only the already-verified source HEAD can be used to infer
@@ -175,9 +160,8 @@ export async function previewThreadMessageEdit(store: StudioDatabase, owner: str
     ? await revisionFromSource(store, owner, sourceId, proposed, selectedTargets) : null
   return {
     original: message.body, proposed, threadId, messageId,
-    inheritedMessages: store.sqlite.prepare(`SELECT COUNT(*) AS n FROM story_thread_messages
-      WHERE owner_user_id=? AND thread_id=? AND sequence<? AND status='delivered'
-      AND verified_commit_sha IS NOT NULL`).get(owner, threadId, message.sequence) as { n: number },
+    inheritedMessages: { n: await store.persistence.advancedThreads.inheritedCount(
+      owner, threadId, message.sequence) },
     sourceJobId: sourceId,
     appliedBeforeSha: boundary,
     revision,
@@ -215,19 +199,12 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
   const row = selectedJob(store, owner, preview.sourceJobId)
   const original = pinnedRequest(row, source)
   if (!original) throw new ThreadEditError(409, 'Source generation contract is no longer pinned.')
-  const sourceThread = store.sqlite.prepare(`SELECT t.conversation_id AS conversation,
-      c.story_id AS storyId FROM story_threads t
-      JOIN story_conversations c ON c.id=t.conversation_id AND c.owner_user_id=t.owner_user_id
-      WHERE t.id=? AND t.owner_user_id=?`).get(data.threadId, owner) as
-    { conversation: string; storyId: string } | undefined
-  if (!sourceThread || sourceThread.storyId !== row.storyId)
+  const sourceThread = await store.persistence.advancedThreads.identity(owner, data.threadId)
+  const sourceStoryId = sourceThread?.story
+  if (!sourceThread || sourceStoryId !== row.storyId)
     throw new ThreadEditError(409, 'Edit source does not belong to this Story.')
-  const readIntent = () => store.sqlite.prepare(`SELECT owner_user_id AS owner,source_job_id AS source,
-    source_base_sha AS base,commit_sha AS commitSha,proof_digest AS proofDigest,
-    source_thread_id AS sourceThreadId,edited_message_id AS editedMessageId,
-    edited_body AS editedBody,bundle_json AS bundle,draft_json AS draft,history_json AS history
-    FROM checkpoint_forks WHERE child_id=?`).get(data.childId) as Intent | undefined
-  let intent = readIntent()
+  const readIntent = () => store.persistence.advancedThreads.forkIntent(data.childId)
+  let intent = await readIntent()
   const matchesMode = (saved: Intent) => {
     try {
       const bundle = JSON.parse(saved.bundle) as { mode?: string; digest?: string }
@@ -240,8 +217,7 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
     saved.proofDigest === point.proofDigest && saved.sourceThreadId === data.threadId &&
     saved.editedMessageId === data.messageId && saved.editedBody === preview.proposed &&
     matchesMode(saved)
-  const existing = store.sqlite.prepare('SELECT owner_user_id FROM studio_sessions WHERE id=?')
-    .get(data.childId)
+  const existing = await store.persistence.advancedThreads.jobClaimed(data.childId)
   if (intent && !matches(intent) || existing && !intent)
     throw new ThreadEditError(409, 'Child identity is already reserved for a different operation.')
   if (!intent) {
@@ -251,68 +227,41 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
         original.contract, original.skillsSource)
     if (!revision && (bundle as RecoveryForkBundle).checkpoint.proofDigest !== point.proofDigest)
       throw new ThreadEditError(409, 'Finalized checkpoint proof changed.')
-    const rowMessage = messageRecord(store, owner, data.threadId, data.messageId)
-    const run = rowMessage.jobId ? store.sqlite.prepare(`SELECT run_order AS runOrder
-      FROM story_thread_runs WHERE job_id=? AND owner_user_id=? AND thread_id=?`)
-      .get(rowMessage.jobId, owner, data.threadId) as { runOrder: number } | undefined : undefined
-    const history = snapshotForkBoundaryHistory(store, owner, data.threadId, source,
-      original.task, row.createdAt, point.commitSha, rowMessage.sequence, run?.runOrder)
+    const rowMessage = await messageRecord(store, owner, data.threadId, data.messageId)
+    const runOrder = rowMessage.jobId
+      ? await store.persistence.advancedThreads.runOrder(owner, data.threadId, rowMessage.jobId)
+      : null
+
+    const history = await snapshotForkBoundaryHistory(store, owner, data.threadId, source,
+      original.task, row.createdAt, point.commitSha, rowMessage.sequence, runOrder ?? undefined)
     const prior = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
     const draft: GenerationDraft = {
       version: 1, headSha: point.commitSha, task: preview.proposed,
       contract: revision?.contract ?? (bundle as RecoveryForkBundle).contract,
       model: prior?.model ?? null, limits: prior?.limits ?? {},
     }
-    store.sqlite.transaction(() => {
-      if (store.sqlite.prepare('SELECT 1 FROM studio_sessions WHERE id=?').get(data.childId))
-        throw new ThreadEditError(409, 'Child identity was claimed during preparation.')
-      store.sqlite.prepare(`INSERT INTO checkpoint_forks
-        (child_id,owner_user_id,source_job_id,source_base_sha,commit_sha,bundle_json,draft_json,created_at,
-        source_thread_id,proof_digest,guidance,history_json,edited_message_id,edited_body)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'',?,?,?) ON CONFLICT(child_id) DO NOTHING`)
-        .run(data.childId, owner, preview.sourceJobId, row.commitSha, point.commitSha,
-          JSON.stringify(bundle), JSON.stringify(draft), new Date().toISOString(),
-          data.threadId, point.proofDigest, JSON.stringify(history), data.messageId, preview.proposed)
-      intent = readIntent()
-      if (!intent || !matches(intent))
-        throw new ThreadEditError(409, 'Child ID is bound to a different edit.')
-    })()
+    intent = await store.persistence.advancedThreads.reserveFork({
+      childId: data.childId, owner, sourceJobId: preview.sourceJobId,
+      sourceBaseSha: row.commitSha!, commitSha: point.commitSha,
+      bundle: JSON.stringify(bundle), draft: JSON.stringify(draft),
+      sourceThreadId: data.threadId, proofDigest: point.proofDigest,
+      guidance: '', history: JSON.stringify(history), at: new Date().toISOString(),
+      editedMessageId: data.messageId, editedBody: preview.proposed,
+    })
+    if (!matches(intent)) throw new ThreadEditError(409, 'Child ID is bound to a different edit.')
   }
   const savedBundle = JSON.parse(intent!.bundle) as RecoveryForkBundle | { mode: 'fresh-revision'; digest: string }
   const fresh = 'mode' in savedBundle && savedBundle.mode === 'fresh-revision'
   const child = fresh ? await continueCachedStory(source, data.childId, point.commitSha) :
     await forkCachedStory(source, savedBundle as RecoveryForkBundle)
   const now = new Date().toISOString(), childThread = 'fork:' + child.jobId
-  store.sqlite.transaction(() => {
-    const inserted = store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,generation_config_json)
-      VALUES (?,?,?,?,?,'paused',?,?,?) ON CONFLICT(id) DO NOTHING`)
-      .run(child.jobId, owner, row.storyId, row.title + ' (edited message)', child.baseSha,
-        now, now, intent!.draft)
-    if (inserted.changes === 1) {
-      store.sqlite.prepare(`INSERT INTO story_threads
-        (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-        VALUES (?,?,?,?,?,?,?)`)
-        .run(childThread, owner, sourceThread.conversation, data.threadId, row.title + ' (edited message)', now, now)
-      store.sqlite.prepare(`INSERT INTO story_thread_runs (job_id,owner_user_id,thread_id,run_order)
-        VALUES (?,?,?,0)`).run(child.jobId, owner, childThread)
-      if (!intent!.history) throw new ThreadEditError(409, 'Edit history snapshot was not retained.')
-      recordForkBoundaryHistory(store, owner, childThread,
-        JSON.parse(intent!.history) as ForkHistoryMessage[], '', now)
-      const seq = store.sqlite.prepare(`SELECT COALESCE(MAX(sequence),-1)+1 AS n
-        FROM story_thread_messages WHERE thread_id=?`).get(childThread) as { n: number }
-      store.sqlite.prepare(`INSERT INTO story_thread_messages
-        (id,owner_user_id,thread_id,sequence,role,status,body,origin_message_id,phase,job_id,created_at)
-        VALUES (?,?,?,?,'user','queued',?,?,'queued',?,?)`)
-        .run('edit:' + child.jobId, owner, childThread, seq.n,
-          preview.proposed, data.messageId, child.jobId, now)
-    } else {
-      const saved = selectedJob(store, owner, child.jobId)
-      const forkSource = forkSourceSummary(child)
-      if (saved.storyId !== row.storyId || child.baseSha !== point.commitSha ||
-          (!fresh && (forkSource?.jobId !== preview.sourceJobId || forkSource.commitSha !== point.commitSha)))
-        throw new ThreadEditError(409, 'Previously prepared child differs from its saved source.')
-    }
-  })()
+  await store.persistence.advancedThreads.registerChild({
+    childId: child.jobId, owner, storyId: row.storyId, title: row.title + ' (edited message)',
+    baseSha: child.baseSha, conversationId: sourceThread!.conversation,
+    parentThreadId: data.threadId, threadId: childThread,
+    draft: intent!.draft, at: now, kind: 'edit',
+    history: intent!.history ? JSON.parse(intent!.history) as ForkHistoryMessage[] : undefined,
+    editedMessageId: data.messageId, editedBody: preview.proposed,
+  })
   return { id: child.jobId, threadId: childThread, storyId: row.storyId, checkpoint: point }
 }

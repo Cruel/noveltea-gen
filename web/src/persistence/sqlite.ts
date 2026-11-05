@@ -7,6 +7,9 @@ import { createGitSqlitePersistence } from './git-sqlite'
 import { createSqliteGenerationPersistence } from './generation-sqlite'
 import { createSqliteConversationCatalog } from './conversation-sqlite'
 import { createSqliteThreadMessages } from './thread-message-sqlite'
+import { createSqliteAdvancedThreads } from './advanced-thread-sqlite'
+import { createSqliteSteeringPersistence } from './steering-sqlite'
+import { createSqliteContinuationPersistence } from './continuation-sqlite'
 import { createSqlitePublicationRecords } from './publication-sqlite'
 import { createSqliteApprovalJobCatalog, createSqliteProtectedDecisionRecords,
   createSqliteRevisionRecords } from './approval-revision-sqlite'
@@ -23,14 +26,21 @@ function assertOwner(owner: string): void {
  * A later PostgreSQL implementation may implement the same ports with async IO.
  */
 export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
+  const generation = createSqliteGenerationPersistence(db)
+  const steering = createSqliteSteeringPersistence(db)
+  const protectedDecisions = createSqliteProtectedDecisionRecords(db)
   return {
     ...createGitSqlitePersistence(db),
-    generation: createSqliteGenerationPersistence(db),
+    generation,
     conversations: createSqliteConversationCatalog(db),
     messages: createSqliteThreadMessages(db),
+    advancedThreads: createSqliteAdvancedThreads(db),
+    steering,
+    continuation: createSqliteContinuationPersistence(db,
+      generation.queue.sqliteTransactionBridge, protectedDecisions.sqliteBridge, steering),
     publications: createSqlitePublicationRecords(db),
     approvalJobs: createSqliteApprovalJobCatalog(db),
-    protectedDecisions: createSqliteProtectedDecisionRecords(db),
+    protectedDecisions,
     revisions: createSqliteRevisionRecords(db),
     dashboard: {
       async forOwner(owner) {

@@ -10,7 +10,7 @@ import { RecoveryCompatibilityError } from '../../../src/recovery-compatibility'
 import { forkSourceSummary, type RecoveryForkBundle } from '../../../src/recovery-fork-state'
 import type { GenerationDraft } from './generation-config.server'
 import { ensureRootThreads } from './threads.server'
-import { recordForkBoundaryHistory, snapshotForkBoundaryHistory, type ForkHistoryMessage } from './thread-fork-history.server'
+import { snapshotForkBoundaryHistory } from './thread-fork-history.server'
 
 const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'private, no-store' } })
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
@@ -43,19 +43,13 @@ export async function checkpointForkRequest(auth: StudioAuth, store: StudioDatab
     const row = selectedJob(store, user.id, sourceId)
     if (row.commitSha !== input.sourceBaseSha) return reply({ error: 'Source identity changed; refresh the job.' }, 409)
     const parent = await restoreJob(row, user.id)
-    ensureRootThreads(store, user.id, row.storyId)
-    const sourceThread = store.sqlite.prepare(`SELECT r.thread_id AS id,t.conversation_id AS conversation
-      FROM story_thread_runs r JOIN story_threads t ON t.id=r.thread_id AND t.owner_user_id=r.owner_user_id
-      WHERE r.job_id=? AND r.owner_user_id=?`).get(sourceId, user.id) as
-      { id: string; conversation: string } | undefined
+    await ensureRootThreads(store, user.id, row.storyId)
+    const sourceThread = await store.persistence.advancedThreads.sourceThread(user.id, sourceId)
     if (!sourceThread || sourceThread.id !== input.sourceThreadId)
       return reply({ error: 'Source Thread changed; refresh its timeline.' }, 409)
-    const existing = store.sqlite.prepare('SELECT owner_user_id AS owner FROM studio_sessions WHERE id=?').get(input.childId)
-    const readIntent = () => store.sqlite.prepare(`SELECT owner_user_id AS owner,source_job_id AS source,
-      source_base_sha AS base,commit_sha AS commitSha,bundle_json AS bundle,draft_json AS draft,
-      source_thread_id AS sourceThreadId,proof_digest AS proofDigest,guidance,history_json AS history
-      FROM checkpoint_forks WHERE child_id=?`).get(input.childId) as Intent | undefined
-    let intent = readIntent()
+    const existing = await store.persistence.advancedThreads.jobClaimed(input.childId)
+    const readIntent = () => store.persistence.advancedThreads.forkIntent(input.childId as string)
+    let intent = await readIntent()
     const matches = (saved: Intent) => saved.owner === user.id && saved.source === sourceId &&
       saved.base === input.sourceBaseSha && saved.commitSha === input.commitSha &&
       saved.sourceThreadId === input.sourceThreadId && saved.proofDigest === input.proofDigest &&
@@ -78,46 +72,34 @@ export async function checkpointForkRequest(auth: StudioAuth, store: StudioDatab
         return reply({ error: 'Checkpoint proof changed; refresh the timeline.' }, 409)
       const task = guidance ? original.task + '\n\nCorrective guidance for this branch:\n' + guidance : original.task
       if (task.length > 4000) return reply({ error: 'Guidance exceeds the prepared run task limit.' }, 400)
-      const history = snapshotForkBoundaryHistory(store, user.id, sourceThread.id, parent,
+      const history = await snapshotForkBoundaryHistory(store, user.id, sourceThread.id, parent,
         original.task, row.createdAt, input.commitSha as string)
       const prior = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
       const draft: GenerationDraft = { version: 1, headSha: input.commitSha, task,
         contract: bundle.contract, model: prior?.model ?? null, limits: prior?.limits ?? {} }
-      // No awaits inside reservation: all preflight failures have no durable side effects.
-      store.sqlite.transaction(() => {
-        const collision = store.sqlite.prepare('SELECT 1 FROM studio_sessions WHERE id=?').get(input.childId)
-        if (collision) throw new GitCacheError(409, 'Child ID was assigned concurrently.')
-        store.sqlite.prepare(`INSERT INTO checkpoint_forks
-          (child_id,owner_user_id,source_job_id,source_base_sha,commit_sha,bundle_json,draft_json,created_at,
-           source_thread_id,proof_digest,guidance,history_json)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(child_id) DO NOTHING`).run(input.childId, user.id, sourceId,
-          input.sourceBaseSha, input.commitSha, JSON.stringify(bundle), JSON.stringify(draft), new Date().toISOString(),
-          input.sourceThreadId, input.proofDigest, guidance, JSON.stringify(history))
-        intent = readIntent()
-        if (!intent || !matches(intent)) throw new GitCacheError(409, 'Child ID was reserved concurrently.')
-      })()
+      // The port checks child collisions and persists the immutable intent in
+      // one SQLite IMMEDIATE transaction before any Git worktree allocation.
+      intent = await store.persistence.advancedThreads.reserveFork({
+        childId: input.childId, owner: user.id, sourceJobId: sourceId,
+        sourceBaseSha: input.sourceBaseSha, commitSha: input.commitSha,
+        bundle: JSON.stringify(bundle), draft: JSON.stringify(draft),
+        sourceThreadId: input.sourceThreadId as string, proofDigest: input.proofDigest as string,
+        guidance, history: JSON.stringify(history), at: new Date().toISOString(),
+      })
+      if (!matches(intent)) throw new GitCacheError(409, 'Child ID was reserved concurrently.')
+
     }
     const child = await forkCachedStory(parent, JSON.parse(intent!.bundle) as RecoveryForkBundle)
     const now = new Date().toISOString()
-    store.sqlite.transaction(() => {
-      const saved = store.sqlite.prepare(`INSERT INTO studio_sessions
-        (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,generation_config_json)
-        VALUES (?,?,?,?,?,'paused',?,?,?) ON CONFLICT(id) DO NOTHING`).run(input.childId, user.id, row.storyId,
-        row.title + ' (fork)', child.baseSha, now, now, intent!.draft)
-      if (saved.changes === 1) {
-        store.sqlite.prepare(`INSERT INTO story_threads (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-          VALUES (?,?,?,?,?,?,?)`).run('fork:' + child.jobId, user.id, sourceThread.conversation, sourceThread.id, row.title + ' (fork)', now, now)
-        store.sqlite.prepare(`INSERT INTO story_thread_runs (job_id,owner_user_id,thread_id,run_order)
-          VALUES (?,?,?,0)`).run(child.jobId, user.id, 'fork:' + child.jobId)
-        if (!intent!.history) throw new GitCacheError(409, 'Fork history snapshot is missing.')
-        recordForkBoundaryHistory(store, user.id, 'fork:' + child.jobId,
-          JSON.parse(intent!.history) as ForkHistoryMessage[], intent!.guidance, now)
-      } else {
-        const registered = selectedJob(store, user.id, child.jobId)
-        if (registered.storyId !== row.storyId || registered.commitSha !== child.baseSha)
-          throw new GitCacheError(409, 'Child registration changed concurrently.')
-      }
-    })()
+    await store.persistence.advancedThreads.registerChild({
+      childId: child.jobId, owner: user.id, storyId: row.storyId,
+      title: row.title + ' (fork)', baseSha: child.baseSha,
+      conversationId: sourceThread.conversation, parentThreadId: sourceThread.id,
+      threadId: 'fork:' + child.jobId, draft: intent!.draft,
+      at: now, kind: 'fork', history: intent!.history ? JSON.parse(intent!.history) as
+        import('./thread-fork-history.server').ForkHistoryMessage[] : undefined,
+      guidance: intent!.guidance,
+    })
     return reply({ id: child.jobId, storyId: row.storyId, forkSource: forkSourceSummary(child) })
   } catch (error) {
     console.error('[Studio checkpoint fork]', error instanceof Error ? error.message : 'Unknown preparation failure')

@@ -67,16 +67,16 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
       (id,owner_user_id,conversation_id,title,activity_at,created_at)
       VALUES (?,?,?,'Chat seeded','now','now')`).run(seededThread, owner, conversation)
     messages.run(randomUUID(), owner, seededThread, 0, 'delivered', 'Rendered unverified chat', null)
-    assert.deepEqual(snapshotForkBoundaryHistory(db, owner, seededThread, source,
-      'Pinned author task', 'now', forkSha).map(m => m.body), ['Pinned author task'])
-    const frozen = snapshotForkBoundaryHistory(db, owner, parentThread, source,
+    assert.deepEqual((await snapshotForkBoundaryHistory(db, owner, seededThread, source,
+      'Pinned author task', 'now', forkSha)).map(m => m.body), ['Pinned author task'])
+    const frozen = await snapshotForkBoundaryHistory(db, owner, parentThread, source,
       'Pinned author task', 'now', forkSha)
     assert.deepEqual(frozen.map(m => m.body), ['Initial direction', 'World feedback'])
     const parentRows = () => db.sqlite.prepare(`SELECT body,status,verified_commit_sha FROM story_thread_messages
       WHERE thread_id=? ORDER BY sequence`).all(parentThread)
     const original = parentRows()
     messages.run(randomUUID(), owner, parentThread, 4, 'delivered', 'New live parent update', forkSha)
-    recordForkBoundaryHistory(db, owner, childThread, frozen, 'Keep the new branch focused', 'later')
+    await recordForkBoundaryHistory(db, owner, childThread, frozen, 'Keep the new branch focused', 'later')
     const child = db.sqlite.prepare(`SELECT role,status,body,origin_message_id AS origin,verified_commit_sha AS sha
       FROM story_thread_messages WHERE thread_id=? ORDER BY sequence`).all(childThread) as Array<{
         role: string; status: string; body: string; origin: string | null; sha: string | null
@@ -90,8 +90,8 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     assert.equal(parentRows().length, original.length + 1)
     assert.deepEqual(parentRows().slice(0, original.length), original)
     assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
-    assert.deepEqual(snapshotForkBoundaryHistory(db, owner, parentThread, source,
-      'Pinned author task', 'now', initial).map(m => m.body), ['Initial direction'],
+    assert.deepEqual((await snapshotForkBoundaryHistory(db, owner, parentThread, source,
+      'Pinned author task', 'now', initial)).map(m => m.body), ['Initial direction'],
       'a branch from before World excludes World and later messages')
     // A live steering receipt may be imported late, after a newer Thread run
     // has completed. Message sequence alone must not inherit that newer run,
@@ -105,9 +105,9 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     const lateId = randomUUID()
     messages.run(lateId, owner, parentThread, 5, 'delivered', 'Newer follow-up', forkSha)
     db.sqlite.prepare('UPDATE story_thread_messages SET job_id=? WHERE id=?').run(laterJob, lateId)
-    assert.ok(snapshotForkBoundaryHistory(db, owner, parentThread, source,
-      'Pinned author task', 'now', forkSha, 6).some(row => row.body === 'Newer follow-up'))
-    const causal = snapshotForkBoundaryHistory(db, owner, parentThread, source,
+    assert.ok((await snapshotForkBoundaryHistory(db, owner, parentThread, source,
+      'Pinned author task', 'now', forkSha, 6)).some(row => row.body === 'Newer follow-up'))
+    const causal = await snapshotForkBoundaryHistory(db, owner, parentThread, source,
       'Pinned author task', 'now', forkSha, 6, 0)
     assert.ok(!causal.some(row => row.body === 'Newer follow-up'),
       'a later run is excluded independently of message timestamp and selected SHA')
@@ -129,7 +129,7 @@ test('legacy generation request is inherited without modifying the source Thread
     git(root, 'add', '.'); git(root, 'commit', '-qm', 'Initial')
     const sha = git(root, 'rev-parse', 'HEAD')
     const source = { worktreeRoot: root, baseSha: sha, jobId: randomUUID() } as JobStartResult
-    const snapshot = snapshotForkBoundaryHistory(db, 'owner', 'nonexistent-thread',
+    const snapshot = await snapshotForkBoundaryHistory(db, 'owner', 'nonexistent-thread',
       source, 'Original request', '2026-11-01T00:00:00Z', sha)
     assert.deepEqual(snapshot.map(m => m.body), ['Original request'])
     assert.equal(snapshot[0]?.verifiedSha, sha)
