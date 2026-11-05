@@ -7,6 +7,9 @@ import { createGitSqlitePersistence } from './git-sqlite'
 import { createSqliteGenerationPersistence } from './generation-sqlite'
 import { createSqliteConversationCatalog } from './conversation-sqlite'
 import { createSqliteThreadMessages } from './thread-message-sqlite'
+import { createSqlitePublicationRecords } from './publication-sqlite'
+import { createSqliteApprovalJobCatalog, createSqliteProtectedDecisionRecords,
+  createSqliteRevisionRecords } from './approval-revision-sqlite'
 
 type StudioDrizzle = BetterSQLite3Database<typeof schema>
 
@@ -25,6 +28,10 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
     generation: createSqliteGenerationPersistence(db),
     conversations: createSqliteConversationCatalog(db),
     messages: createSqliteThreadMessages(db),
+    publications: createSqlitePublicationRecords(db),
+    approvalJobs: createSqliteApprovalJobCatalog(db),
+    protectedDecisions: createSqliteProtectedDecisionRecords(db),
+    revisions: createSqliteRevisionRecords(db),
     dashboard: {
       async forOwner(owner) {
         assertOwner(owner)

@@ -1,4 +1,5 @@
 import type { StudioDatabase } from '../db/connection'
+import { PublicationStateConflict } from '../persistence/publication-contracts'
 import type { StudioAuth } from './auth'
 import type { JobStartResult } from '../../../src/job'
 import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
@@ -23,17 +24,13 @@ type MergeRequest = {
 }
 const SHA = /^[a-f0-9]{40}$/i
 
-function catalogRow(store: StudioDatabase, owner: string, id: string): Row {
-  const row = store.sqlite.prepare(`SELECT j.id,j.title,r.name AS repository,r.id AS repositoryId,
-    r.provider_repository_id AS projectId,j.source_commit_sha AS baseSha,s.directory
-    FROM studio_sessions j JOIN stories s ON j.story_id=s.id AND j.owner_user_id=s.owner_user_id
-    JOIN repositories r ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
-    WHERE j.id=? AND j.owner_user_id=? AND r.provider='gitlab'`).get(id, owner) as Row | undefined
+async function catalogRow(store: StudioDatabase, owner: string, id: string): Promise<Row> {
+  const row = await store.persistence.publications.job(owner, id, 'gitlab')
   if (!row) throw new ProviderFailure(404, 'GitLab job is not connected to this account.')
-  const projectId = Number(row.projectId)
-  if (!SHA.test(row.baseSha) || !Number.isSafeInteger(projectId) || projectId <= 0)
+  const projectId = Number(row.providerId)
+  if (!SHA.test(row.baseSha ?? '') || !Number.isSafeInteger(projectId) || projectId <= 0)
     throw new ProviderFailure(409, 'Saved GitLab job has invalid baseline or project identity.')
-  return row
+  return { ...row, baseSha: row.baseSha!, projectId: row.providerId }
 }
 
 /** Reconfirm writable membership and immutable provider identity, not just public visibility. */
@@ -60,43 +57,48 @@ async function remoteContext(token: string, row: Row) {
   return { projectId, targetBranch: project.default_branch, targetSha: branch.commit.id,
     path: '/projects/' + projectId + '/merge_requests' }
 }
-function savedPublication(store: StudioDatabase, id: string): Saved | undefined {
-  return store.sqlite.prepare(`SELECT mr_iid AS mrIid,mr_url AS mrUrl,
-    target_branch AS targetBranch,remote_branch AS remoteBranch,head_sha AS headSha,phase
-    FROM gitlab_publications WHERE job_id=?`).get(id) as Saved | undefined
+async function savedPublication(store: StudioDatabase, owner: string, id: string): Promise<Saved | undefined> {
+  const receipt = await store.persistence.publications.get(owner, id, 'gitlab')
+  return receipt ? {
+    mrIid: receipt.number, mrUrl: receipt.url, targetBranch: receipt.targetBranch,
+    remoteBranch: receipt.remoteBranch, headSha: receipt.headSha, phase: receipt.phase,
+  } : undefined
 }
-function savePublication(store: StudioDatabase, owner: string, job: JobStartResult,
-  target: string, head: string, mr?: MergeRequest) {
-  store.sqlite.prepare(`INSERT INTO gitlab_publications
-    (job_id,owner_user_id,target_branch,remote_branch,head_sha,phase,mr_iid,mr_url,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(job_id) DO UPDATE SET
-      head_sha=CASE WHEN excluded.phase='linked' THEN excluded.head_sha ELSE gitlab_publications.head_sha END,
-      phase=excluded.phase,mr_iid=COALESCE(excluded.mr_iid,gitlab_publications.mr_iid),
-      mr_url=COALESCE(excluded.mr_url,gitlab_publications.mr_url),updated_at=excluded.updated_at`)
-    .run(job.jobId, owner, target, job.branch, head, mr ? 'linked' : 'pending',
-      mr?.iid ?? null, mr?.web_url ?? null, new Date().toISOString())
+async function savePublication(store: StudioDatabase, owner: string, job: JobStartResult,
+  target: string, head: string, mr?: MergeRequest): Promise<void> {
+  try {
+    await store.persistence.publications.save(owner, job.jobId, 'gitlab', {
+      targetBranch: target, remoteBranch: job.branch, headSha: head,
+      phase: mr ? 'linked' : 'pending', number: mr?.iid ?? null, url: mr?.web_url ?? null,
+    }, new Date().toISOString())
+  } catch (error) {
+    if (error instanceof PublicationStateConflict) throw new ProviderFailure(409, error.message)
+    throw error
+  }
 }
+
 function linkedRecord(saved: Saved | undefined): PublicationLink | null {
   return saved?.phase === 'linked' && saved.mrIid && saved.mrUrl
     ? { number: saved.mrIid, url: saved.mrUrl, targetBranch: saved.targetBranch, headSha: saved.headSha }
     : null
 }
-function checkSaved(store: StudioDatabase, job: JobStartResult, target: string) {
-  const saved = savedPublication(store, job.jobId)
+async function checkSaved(store: StudioDatabase, owner: string,
+  job: JobStartResult, target: string) {
+  const saved = await savedPublication(store, owner, job.jobId)
   if (saved && (saved.targetBranch !== target || saved.remoteBranch !== job.branch))
     throw new ProviderFailure(409, 'Saved publication targets a different GitLab branch. Manual reconciliation required.')
   return saved
 }
-async function preview(store: StudioDatabase, job: JobStartResult, row: Row, token: string,
+async function preview(store: StudioDatabase, owner: string, job: JobStartResult, row: Row, token: string,
   remote: Awaited<ReturnType<typeof remoteContext>>) {
-  const saved = checkSaved(store, job, remote.targetBranch)
+  const saved = await checkSaved(store, owner, job, remote.targetBranch)
   const source: PublicationSource = { repository: row.repository, directory: row.directory,
     initialContentSha256: null, remoteUrl: 'https://gitlab.com/' + row.repository + '.git' }
   const view = await reviewPublication(store, job, source, token,
     remote.targetBranch, remote.targetSha, linkedRecord(saved))
   return { view, source }
 }
+
 function verifyMr(mr: MergeRequest, row: Row, job: JobStartResult, target: string) {
   const projectId = Number(row.projectId)
   if (!Number.isSafeInteger(mr?.iid) || mr.iid <= 0 ||
@@ -145,20 +147,20 @@ async function publish(store: StudioDatabase, owner: string, row: Row, job: JobS
   token: string, expected: { headSha?: string; targetSha?: string; allowPartial?: boolean }) {
   return withStoryJobLock(job, 'gitlab-draft-publication', async () => {
     const remote = await remoteContext(token, row)
-    const { view, source } = await preview(store, job, row, token, remote)
+    const { view, source } = await preview(store, owner, job, row, token, remote)
     if (expected.headSha !== view.headSha || expected.targetSha !== view.targetSha)
       throw new ProviderFailure(409, 'Publication preview is stale. Refresh job and upstream before publishing.')
     if (!view.canPublish) throw new ProviderFailure(422, 'Canonical validation or worktree safety blocks publication.')
     if (view.blockers.length && expected.allowPartial !== true)
       throw new ProviderFailure(409, 'Partial or divergent draft requires explicit confirmation of listed blockers.')
-    if (!savedPublication(store, job.jobId))
-      savePublication(store, owner, job, remote.targetBranch, view.headSha)
+    if (!await savedPublication(store, owner, job.jobId))
+      await savePublication(store, owner, job, remote.targetBranch, view.headSha)
     pushVerifiedBranch(job, source, token, view.headSha)
-    savePublication(store, owner, job, remote.targetBranch, view.headSha)
+    await savePublication(store, owner, job, remote.targetBranch, view.headSha)
     const after = await remoteContext(token, row)
     if (after.targetBranch !== remote.targetBranch || after.targetSha !== remote.targetSha)
       throw new ProviderFailure(409, 'GitLab upstream changed after push. Branch preserved; refresh before publishing MR.')
-    const saved = savedPublication(store, job.jobId)
+    const saved = await savedPublication(store, owner, job.jobId)
     let mr: MergeRequest | null
     if (saved?.mrIid) {
       mr = (await gitlab<MergeRequest>(token, remote.path + '/' + saved.mrIid)).data
@@ -185,7 +187,7 @@ async function publish(store: StudioDatabase, owner: string, row: Row, job: JobS
     verifyMr(mr, row, job, remote.targetBranch)
     if (mr.sha !== view.headSha || remotePublicationHead(job, source, token, job.branch) !== view.headSha)
       throw new ProviderFailure(409, 'GitLab MR or remote job branch changed from verified HEAD; reconcile before linking.')
-    savePublication(store, owner, job, remote.targetBranch, view.headSha, mr)
+    await savePublication(store, owner, job, remote.targetBranch, view.headSha, mr)
     return { ...view, linked: { number: mr.iid, url: mr.web_url, headSha: view.headSha,
       targetBranch: remote.targetBranch } } satisfies PublicationPreview
   })
@@ -200,7 +202,7 @@ export async function gitlabPublicationRequest(auth: StudioAuth, store: StudioDa
     assertStudioSchemaCurrent(store)
     const user = await requireUser(auth, request.headers)
     if (!user) return reply({ error: 'Sign in required.' }, 401)
-    const row = catalogRow(store, user.id, id)
+    const row = await catalogRow(store, user.id, id)
     const current = await actor(auth, store, request.headers, row.repositoryId)
     const job = await authorizedStoryJob(store, current.id, id)
     if (job.baseSha !== row.baseSha)
@@ -213,7 +215,7 @@ export async function gitlabPublicationRequest(auth: StudioAuth, store: StudioDa
     // race a writer, an ambiguous revision receipt, or another publication.
     return reply({ publication: await withStoryJobLock(job, 'gitlab-publication-preview', async () => {
       const remote = await remoteContext(current.token, row)
-      return (await preview(store, job, row, current.token, remote)).view
+      return (await preview(store, current.id, job, row, current.token, remote)).view
     }) })
   } catch (error) {
     if (error instanceof StudioSchemaError) return reply({ error: error.message }, 503)

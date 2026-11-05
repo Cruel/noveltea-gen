@@ -1,4 +1,5 @@
 import type { StudioDatabase } from '../db/connection'
+import { PublicationStateConflict } from '../persistence/publication-contracts'
 import type { StudioAuth } from './auth'
 import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser, getRepositoryToken } from './access.server'
@@ -22,22 +23,24 @@ type GithubPr = {
 type Remote = { id: number; default_branch: string }
 const SHA = /^[a-f0-9]{40}$/i
 
-function savedPublication(store: StudioDatabase, id: string): Saved | undefined {
-  return store.sqlite.prepare(`SELECT pr_number AS prNumber, pr_url AS prUrl,
-    target_branch AS targetBranch, remote_branch AS remoteBranch, head_sha AS headSha, phase
-    FROM github_publications WHERE job_id=?`).get(id) as Saved | undefined
+async function savedPublication(store: StudioDatabase, owner: string, id: string): Promise<Saved | undefined> {
+  const receipt = await store.persistence.publications.get(owner, id, 'github')
+  return receipt ? {
+    prNumber: receipt.number, prUrl: receipt.url, targetBranch: receipt.targetBranch,
+    remoteBranch: receipt.remoteBranch, headSha: receipt.headSha, phase: receipt.phase,
+  } : undefined
 }
-function savePublication(store: StudioDatabase, owner: string, job: JobStartResult, target: string,
-  head: string, pr?: GithubPr) {
-  store.sqlite.prepare(`INSERT INTO github_publications
-    (job_id,owner_user_id,target_branch,remote_branch,head_sha,phase,pr_number,pr_url,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(job_id) DO UPDATE SET
-      head_sha=CASE WHEN excluded.phase='linked' THEN excluded.head_sha ELSE github_publications.head_sha END,
-      phase=excluded.phase, pr_number=COALESCE(excluded.pr_number, github_publications.pr_number),
-      pr_url=COALESCE(excluded.pr_url, github_publications.pr_url), updated_at=excluded.updated_at`)
-    .run(job.jobId, owner, target, job.branch, head, pr ? 'linked' : 'pending',
-      pr?.number ?? null, pr?.html_url ?? null, new Date().toISOString())
+async function savePublication(store: StudioDatabase, owner: string, job: JobStartResult, target: string,
+  head: string, pr?: GithubPr): Promise<void> {
+  try {
+    await store.persistence.publications.save(owner, job.jobId, 'github', {
+      targetBranch: target, remoteBranch: job.branch, headSha: head,
+      phase: pr ? 'linked' : 'pending', number: pr?.number ?? null, url: pr?.html_url ?? null,
+    }, new Date().toISOString())
+  } catch (error) {
+    if (error instanceof PublicationStateConflict) throw new GithubError(409, error.message)
+    throw error
+  }
 }
 
 function assertSafeBranch(branch: string) {
@@ -59,20 +62,16 @@ async function remoteContext(token: string, row: Row) {
   if (!SHA.test(branch.commit?.sha)) throw new GithubError(502, 'GitHub returned an invalid upstream revision.')
   return { path, target: repo.default_branch, targetSha: branch.commit.sha }
 }
-function readRow(store: StudioDatabase, owner: string, id: string): Row {
-  const row = store.sqlite.prepare(`SELECT j.id, j.title, r.name AS repository, r.id AS repositoryId,
-    r.provider_repository_id AS providerId, j.source_commit_sha AS baseSha,
-    s.directory, s.initial_content_sha256 AS initialContentSha256
-    FROM studio_sessions j JOIN stories s ON j.story_id=s.id AND j.owner_user_id=s.owner_user_id
-    JOIN repositories r ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
-    WHERE j.id=? AND j.owner_user_id=? AND r.provider='github'`).get(id, owner) as Row | undefined
+async function readRow(store: StudioDatabase, owner: string, id: string): Promise<Row> {
+  const row = await store.persistence.publications.job(owner, id, 'github')
   if (!row) throw new GithubError(404, 'GitHub job is not connected to this account.')
-  if (!SHA.test(row.baseSha)) throw new GithubError(409, 'Missing pinned Story baseline.')
-  return row
+  if (!SHA.test(row.baseSha ?? '')) throw new GithubError(409, 'Missing pinned Story baseline.')
+  return { ...row, baseSha: row.baseSha! }
 }
+
 async function preview(store: StudioDatabase, owner: string, row: Row, job: JobStartResult,
   token: string, target: string, targetSha: string): Promise<PublicationPreview> {
-  const saved = savedPublication(store, job.jobId)
+  const saved = await savedPublication(store, owner, job.jobId)
   if (saved && (saved.targetBranch !== target || saved.remoteBranch !== job.branch))
     throw new GithubError(409, 'Saved publication targets a different upstream branch. Operator reconciliation required.')
   return reviewPublication(store, job, {
@@ -128,20 +127,20 @@ async function publish(store: StudioDatabase, owner: string, row: Row, job: JobS
     if (!view.canPublish) throw new GithubError(422, 'Canonical validation or worktree safety blocks publication.')
     if (view.blockers.length && expected.allowPartial !== true)
       throw new GithubError(409, 'This is a partial or divergent draft. Explicitly confirm its listed blockers.')
-    const existing = savedPublication(store, job.jobId)
+    const existing = await savedPublication(store, owner, job.jobId)
     // An intent receipt precedes both the push and PR creation. Crash recovery
     // always reconciles remote refs and PRs before performing any new write.
-    if (!existing) savePublication(store, owner, job, remote.target, view.headSha)
+    if (!existing) await savePublication(store, owner, job, remote.target, view.headSha)
     const source = { repository: row.repository, directory: row.directory,
       initialContentSha256: row.initialContentSha256,
       remoteUrl: 'https://github.com/' + row.repository + '.git' }
     pushVerifiedBranch(job, source, token, view.headSha)
-    savePublication(store, owner, job, remote.target, view.headSha)
+    await savePublication(store, owner, job, remote.target, view.headSha)
     const targetAgain = await remoteContext(token, row)
     if (targetAgain.target !== remote.target || targetAgain.targetSha !== remote.targetSha)
       throw new GithubError(409, 'Upstream changed after push. Branch is preserved; refresh the publication preview.')
     const path = remote.path
-    const saved = savedPublication(store, job.jobId)
+    const saved = await savedPublication(store, owner, job.jobId)
     let pr: GithubPr | null = null
     if (saved?.prNumber) {
       pr = await github<GithubPr>(token, path + '/pulls/' + saved.prNumber)
@@ -165,7 +164,7 @@ async function publish(store: StudioDatabase, owner: string, row: Row, job: JobS
     verifyPr(pr, row.providerId, job.branch, remote.target)
     if (pr.head.sha !== view.headSha || remotePublicationHead(job, source, token, job.branch) !== view.headSha)
       throw new GithubError(409, 'GitHub PR or remote branch moved from the verified job HEAD. Reconcile before linking.')
-    savePublication(store, owner, job, remote.target, view.headSha, pr)
+    await savePublication(store, owner, job, remote.target, view.headSha, pr)
     return { ...view, linked: { number: pr.number, url: pr.html_url,
       headSha: view.headSha, targetBranch: remote.target } }
   })
@@ -181,7 +180,7 @@ export async function githubPublicationRequest(auth: StudioAuth, store: StudioDa
     assertStudioSchemaCurrent(store)
     const actor = await requireUser(auth, request.headers)
     if (!actor) return json({ error: 'Sign in required' }, 401)
-    const row = readRow(store, actor.id, id)
+    const row = await readRow(store, actor.id, id)
     const token = await getRepositoryToken(auth, store, request.headers, 'github', row.repositoryId)
     if (!token) throw new GithubError(409, 'Reconnect your GitHub account before publishing.')
     const job = await authorizedStoryJob(store, actor.id, id)

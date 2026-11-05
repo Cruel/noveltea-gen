@@ -42,6 +42,8 @@ import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding, PiCredent
 import type { GenerationPersistence } from './generation-contracts'
 import type { ConversationCatalog } from './conversation-contracts'
 import type { ThreadMessagePersistence } from './thread-message-contracts'
+import type { ApprovalJobCatalog, ProtectedDecisionRecords, PublicationRecords,
+  RevisionRecords } from './publication-contracts'
 
 export interface StudioPersistence {
   dashboard: DashboardCatalog
@@ -53,4 +55,8 @@ export interface StudioPersistence {
   generation: GenerationPersistence
   conversations: ConversationCatalog
   messages: ThreadMessagePersistence
+  publications: PublicationRecords
+  approvalJobs: ApprovalJobCatalog
+  protectedDecisions: ProtectedDecisionRecords
+  revisions: RevisionRecords
 }

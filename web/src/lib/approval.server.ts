@@ -30,12 +30,7 @@ export async function approvalRequest(auth: StudioAuth, store: StudioDatabase, r
         !['approved', 'rejected'].includes(input.decision)))) {
     return json({ error: 'Invalid typed approval command; principal, paths and inline consent are not accepted.' }, 400)
   }
-  const row = store.sqlite.prepare(`SELECT s.directory, r.provider, r.provider_repository_id AS providerId,
-    j.source_commit_sha AS baseSha FROM studio_sessions j
-    JOIN stories s ON s.id=j.story_id AND s.owner_user_id=j.owner_user_id
-    JOIN repositories r ON r.id=s.repository_id AND r.owner_user_id=j.owner_user_id
-    WHERE j.id=? AND j.owner_user_id=?`).get(input.jobId, user.id) as
-      { directory: string; provider: string; providerId: string; baseSha: string } | undefined
+  const row = await store.persistence.approvalJobs.job(user.id, input.jobId)
   if (!row) return json({ error: 'Job not found.' }, 404)
   const cache = process.env.NT_GIT_CACHE_DIR
   if (!cache || !isAbsolute(cache)) return json({ error: 'Trusted Git cache is not configured.' }, 503)

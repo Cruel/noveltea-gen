@@ -11,17 +11,7 @@ import { ThreadChatError } from './thread-chat.server'
 const SHA = /^[a-f0-9]{40}$/
 const DIGEST = /^[a-f0-9]{64}$/
 const workItem = 'thread-protected'
-type Receipt = {
-  messageId: string; owner: string; threadId: string; sourceJobId: string; sourceSha: string
-  digest: string; changeJson: string; nonce: string; decision: 'approved' | 'rejected'
-  principal: string; recordedAt: string; consumedSha: string | null
-}
-
-const receiptQuery = `SELECT message_id AS messageId,owner_user_id AS owner,
-  thread_id AS threadId,source_job_id AS sourceJobId,source_sha AS sourceSha,
-  proposal_sha256 AS digest,change_json AS changeJson,nonce,decision,
-  principal,recorded_at AS recordedAt,consumed_sha AS consumedSha
-  FROM thread_protected_decisions WHERE message_id=?`
+import type { ProtectedDecisionReceipt as Receipt } from '../persistence/publication-contracts'
 
 function matching(receipt: Receipt, owner: string, threadId: string, messageId: string,
   sourceJobId: string, plan: RevisionPreview): boolean {
@@ -42,50 +32,24 @@ export function recordProtectedThreadDecision(store: StudioDatabase, owner: stri
   decision: 'approved' | 'rejected') {
   if (!plan.protectedChange || !DIGEST.test(plan.digest) || !SHA.test(plan.headSha))
     throw new ThreadChatError(409, 'There is no exact protected decision proposal to review.')
-  return store.sqlite.transaction(() => {
-    const message = store.sqlite.prepare(`SELECT body,phase FROM story_thread_messages
-      WHERE id=? AND owner_user_id=? AND thread_id=? AND role='user'
-        AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c
-          WHERE c.message_id=story_thread_messages.id)`).get(messageId, owner, threadId) as
-      { body: string; phase: string } | undefined
-    const head = store.sqlite.prepare(`SELECT id FROM story_thread_messages
-      WHERE owner_user_id=? AND thread_id=? AND role='user'
-        AND phase IN ('queued','preparing','running','blocked')
-        AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c
-          WHERE c.message_id=story_thread_messages.id)
-      ORDER BY sequence LIMIT 1`).get(owner, threadId) as { id: string } | undefined
-    const run = store.sqlite.prepare(`SELECT r.job_id AS id,j.status,q.phase FROM story_thread_runs r
-      JOIN studio_sessions j ON j.id=r.job_id AND j.owner_user_id=r.owner_user_id
-      JOIN generation_run_queue q ON q.job_id=j.id AND q.owner_user_id=j.owner_user_id
-      WHERE r.thread_id=? AND r.owner_user_id=? ORDER BY r.run_order DESC LIMIT 1`)
-      .get(threadId, owner) as { id: string; status: string; phase: string } | undefined
-    if (!message || message.body !== plan.request || message.phase !== 'queued' ||
-        head?.id !== messageId || run?.id !== sourceJobId ||
-        run.status !== 'completed' || run.phase !== 'finished')
-      throw new ThreadChatError(409, 'Protected decision review is no longer the queued instruction at its verified source.')
-    const existing = store.sqlite.prepare(receiptQuery).get(messageId) as Receipt | undefined
-    if (existing) {
-      if (!matching(existing, owner, threadId, messageId, sourceJobId, plan) ||
-          existing.decision !== decision)
-        throw new ThreadChatError(409, 'This instruction already has a different or stale protected decision receipt.')
-      return { decision: existing.decision, digest: existing.digest }
-    }
-    store.sqlite.prepare(`INSERT INTO thread_protected_decisions
-      (message_id,owner_user_id,thread_id,source_job_id,source_sha,proposal_sha256,
-       change_json,nonce,decision,principal,recorded_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(messageId, owner, threadId, sourceJobId, plan.headSha, plan.digest,
-        JSON.stringify(plan.protectedChange), randomUUID(), decision,
-        'user:' + owner, new Date().toISOString())
-    return { decision, digest: plan.digest }
-  })()
+  const receipt = store.persistence.protectedDecisions.sqliteBridge.record(owner, {
+    messageId, owner, threadId, sourceJobId, sourceSha: plan.headSha,
+    digest: plan.digest, changeJson: JSON.stringify(plan.protectedChange),
+    nonce: randomUUID(), decision, principal: 'user:' + owner,
+    recordedAt: new Date().toISOString(),
+  }, plan.request)
+  if (!matching(receipt, owner, threadId, messageId, sourceJobId, plan) ||
+      receipt.decision !== decision)
+    throw new ThreadChatError(409, 'This instruction already has a different or stale protected decision receipt.')
+  return { decision: receipt.decision, digest: receipt.digest }
+
 }
 
 /** The controller-owned DB is authoritative, not the browser's scope digest,
  * a copied parent approval or any model-provided signed-looking payload. */
 export function assertProtectedThreadApproval(store: StudioDatabase, owner: string,
   threadId: string, messageId: string, sourceJobId: string, plan: RevisionPreview): Receipt {
-  const receipt = store.sqlite.prepare(receiptQuery).get(messageId) as Receipt | undefined
+  const receipt = store.persistence.protectedDecisions.sqliteBridge.get(owner, messageId)
   if (!receipt || !matching(receipt, owner, threadId, messageId, sourceJobId, plan) ||
       receipt.decision !== 'approved' || receipt.consumedSha)
     throw new ThreadChatError(409, 'This protected decision needs fresh, exact approval by the current Thread owner.')
@@ -198,17 +162,16 @@ export async function commitProtectedThreadChange(job: JobStartResult, change: P
 
 export function markProtectedThreadConsumed(store: StudioDatabase, owner: string,
   messageId: string, sha: string) {
-  if (!SHA.test(sha) || store.sqlite.prepare(`UPDATE thread_protected_decisions
-    SET consumed_sha=? WHERE message_id=? AND owner_user_id=? AND decision='approved'
-      AND consumed_sha IS NULL`).run(sha, messageId, owner).changes !== 1)
+  if (!SHA.test(sha) || !store.persistence.protectedDecisions.sqliteBridge.consume(owner, messageId, sha))
     throw new Error('Protected approval was already consumed or its commit identity changed.')
+
 }
 
 /** A protected-only child has a native revision receipt instead of a Pi graph.
  * Preserve this distinction: completion is not evidence of an agent run. */
 export async function inspectProtectedThreadCompletion(store: StudioDatabase, owner: string,
   job: JobStartResult): Promise<boolean> {
-  const receipt = store.sqlite.prepare(receiptQuery).get(job.jobId) as Receipt | undefined
+  const receipt = await store.persistence.protectedDecisions.get(owner, job.jobId)
   if (!receipt) return false
   if (receipt.owner !== owner || receipt.decision !== 'approved' ||
       !receipt.consumedSha || receipt.consumedSha !== job.headSha ||
