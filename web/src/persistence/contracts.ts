@@ -39,6 +39,7 @@ export interface SettingsPreferences {
     expandedIds: string[], updatedAt: string): Promise<void>
 }
 import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding, PiCredentialVault } from './git-contracts'
+import type { GenerationPersistence } from './generation-contracts'
 
 export interface StudioPersistence {
   dashboard: DashboardCatalog
@@ -47,4 +48,5 @@ export interface StudioPersistence {
   repositories: RepositoryCatalogWrites
   onboarding: StoryOnboarding
   piCredentials: PiCredentialVault
+  generation: GenerationPersistence
 }

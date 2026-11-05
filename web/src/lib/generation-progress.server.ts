@@ -19,7 +19,6 @@ type EventInput = {
   kind: ProgressKind; stage?: GenerationStage; milestone?: string
   files?: string[]; status?: ProgressStatus
 }
-type EventRow = Omit<ProgressEvent, 'files'> & { filesJson: string }
 
 const stageSet = new Set<string>(generationStages)
 const canonicalFile = (path: string) =>
@@ -33,19 +32,20 @@ export function appendGenerationEvent(store: StudioDatabase, owner: string, jobI
   if (input.stage && !stageSet.has(input.stage)) throw new Error('Invalid progress stage')
   if (input.milestone && !canonicalMilestone(input.milestone)) throw new Error('Invalid progress milestone')
   const files = [...new Set((input.files ?? []).filter(canonicalFile))].slice(0, 24)
-  store.sqlite.prepare(`INSERT INTO generation_events
-    (job_id, owner_user_id, kind, stage, milestone, files_json, status, created_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run(jobId, owner, input.kind, input.stage ?? null,
-    input.milestone ?? null, JSON.stringify(files), input.status ?? null, new Date().toISOString())
+  store.persistence.generation.events.sqliteBridge.append(owner, jobId, {
+    kind: input.kind, stage: input.stage ?? null, milestone: input.milestone ?? null,
+    filesJson: JSON.stringify(files), status: input.status ?? null, createdAt: new Date().toISOString(),
+  })
 }
 
 export function listGenerationEvents(store: StudioDatabase, owner: string, jobId: string,
   after: number, limit = 100): ProgressEvent[] {
-  const rows = store.sqlite.prepare(`SELECT id,kind,stage,milestone,files_json AS filesJson,
-    status,created_at AS createdAt FROM generation_events
-    WHERE owner_user_id=? AND job_id=? AND id>? ORDER BY id LIMIT ?`)
-    .all(owner, jobId, after, Math.max(1, Math.min(100, limit))) as EventRow[]
-  return rows.map(({ filesJson, ...row }) => ({ ...row, files: JSON.parse(filesJson) as string[] }))
+  const rows = store.persistence.generation.events.sqliteBridge.after(
+    owner, jobId, after, Math.max(1, Math.min(100, limit)))
+  return rows.map(({ filesJson, ...row }) => ({
+    ...row, stage: row.stage as GenerationStage | null, status: row.status as ProgressStatus | null,
+    files: JSON.parse(filesJson) as string[],
+  }))
 }
 
 /** Read the newest bounded page in chronological order. Older events are
@@ -54,13 +54,12 @@ export function recentGenerationEvents(store: StudioDatabase, owner: string, job
   before?: number): { events: ProgressEvent[]; hasMore: boolean } {
   if (before !== undefined && (!Number.isSafeInteger(before) || before <= 0))
     throw new Error('Invalid history cursor')
-  const rows = store.sqlite.prepare(`SELECT id,kind,stage,milestone,files_json AS filesJson,
-    status,created_at AS createdAt FROM generation_events
-    WHERE owner_user_id=? AND job_id=? AND id<? ORDER BY id DESC LIMIT 101`)
-    .all(owner, jobId, before ?? Number.MAX_SAFE_INTEGER) as EventRow[]
+  const rows = store.persistence.generation.events.sqliteBridge.recent(
+    owner, jobId, before ?? Number.MAX_SAFE_INTEGER, 101)
   const hasMore = rows.length > 100
   return { events: rows.slice(0, 100).reverse().map(({ filesJson, ...row }) => ({
-    ...row, files: JSON.parse(filesJson) as string[],
+    ...row, stage: row.stage as GenerationStage | null, status: row.status as ProgressStatus | null,
+    files: JSON.parse(filesJson) as string[],
   })), hasMore }
 }
 
@@ -159,6 +158,5 @@ export async function generationEventsRequest(auth: StudioAuth, store: StudioDat
 }
 
 function rowsAvailableSooner(store: StudioDatabase, owner: string, id: string, after: number): boolean {
-  return !!store.sqlite.prepare(`SELECT 1 FROM generation_events
-    WHERE owner_user_id=? AND job_id=? AND id>? LIMIT 1`).get(owner, id, after)
+  return store.persistence.generation.events.sqliteBridge.hasAfter(owner, id, after)
 }

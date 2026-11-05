@@ -4,6 +4,7 @@ import * as schema from '../db/schema'
 import { repositories, sessions, stories, storyThreadPreferences, userPreferences } from '../db/schema'
 import type { StudioPersistence } from './contracts'
 import { createGitSqlitePersistence } from './git-sqlite'
+import { createSqliteGenerationPersistence } from './generation-sqlite'
 
 type StudioDrizzle = BetterSQLite3Database<typeof schema>
 
@@ -19,6 +20,7 @@ function assertOwner(owner: string): void {
 export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
   return {
     ...createGitSqlitePersistence(db),
+    generation: createSqliteGenerationPersistence(db),
     dashboard: {
       async forOwner(owner) {
         assertOwner(owner)

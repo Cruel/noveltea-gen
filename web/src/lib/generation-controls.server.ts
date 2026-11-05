@@ -107,9 +107,10 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
     const user = await requireUser(auth, request.headers)
     if (!user) return reply({ error: 'Sign in required' }, 401)
     const job = await authorizedStoryJob(store, user.id, id)
-    const saved = store.sqlite.prepare(`SELECT status, generation_request_json AS request,
-      generation_thread_id AS thread FROM studio_sessions WHERE id=? AND owner_user_id=?`)
-      .get(id, user.id) as { status: string; request: string | null; thread: string | null }
+    const savedRow = await store.persistence.generation.jobs.state(user.id, id)
+    if (!savedRow) return reply({ error: 'Job not found' }, 404)
+    const saved = { status: savedRow.status, request: savedRow.requestJson,
+      thread: savedRow.threadId }
     const queued = queueRecord(store, id)
     if (request.method === 'GET') {
       const pi = await inspectPiPolicy(job)
@@ -144,9 +145,10 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
           return reply({ error: 'Invalid budget limit.' }, 400)
       }
       const update = await withStoryJobLock(job, 'studio-budget-increase', async () => {
-        const original = store.sqlite.prepare(`SELECT status, generation_config_json AS draft,
-          generation_request_json AS request FROM studio_sessions WHERE id=? AND owner_user_id=?`)
-          .get(id, user.id) as { status: string; draft: string | null; request: string | null }
+        const current = await store.persistence.generation.jobs.state(user.id, id)
+        if (!current) throw new Error('Job not found')
+        const original = { status: current.status, draft: current.configJson,
+          request: current.requestJson }
         if (original.status !== 'paused' || original.request !== saved.request || !original.draft)
           throw new Error('Generation changed before budget adjustment.')
         const draft = JSON.parse(original.draft) as {
@@ -170,11 +172,10 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
               (previous[key as keyof PiPolicy['limits']] ?? 0) === amount))
           throw new Error('Budget adjustment must increase at least one limit and cannot decrease any.')
         await configurePiPolicy(job, { ...pi.policy, limits: next })
-        const changed = store.sqlite.prepare(`UPDATE studio_sessions SET generation_config_json=?, updated_at=?
-          WHERE id=? AND owner_user_id=? AND status='paused' AND generation_config_json=?`)
-          .run(JSON.stringify({ ...draft, limits: next }), new Date().toISOString(),
-            id, user.id, original.draft)
-        if (changed.changes !== 1) throw new Error('Generation budget was edited concurrently.')
+        const changed = await store.persistence.generation.jobs.increaseBudget(
+          user.id, id, original.draft, JSON.stringify({ ...draft, limits: next }),
+          new Date().toISOString())
+        if (!changed) throw new Error('Generation budget was edited concurrently.')
         return next
       })
       return reply({ limits: update })
@@ -189,8 +190,7 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       await setJobControl(job, action === 'cancel' ? 'cancelled' : 'paused')
       const removed = dequeueBeforeStart(store, user.id, id)
       if (action === 'cancel' && (removed || saved.status === 'paused' || queued?.phase !== 'running')) {
-        store.sqlite.prepare(`UPDATE studio_sessions SET status='cancelled', updated_at=?
-          WHERE id=? AND owner_user_id=?`).run(new Date().toISOString(), id, user.id)
+        await store.persistence.generation.jobs.cancel(user.id, id, new Date().toISOString())
       }
       return reply({ control: action === 'cancel' ? 'cancelled' : 'paused',
         pendingBoundary: !removed && queued?.phase === 'running' }, 202)
@@ -208,19 +208,10 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
     // Persist one exact transition; a second attempt never races this queue
     // claim into a changed request or alternate thread.
     await setJobControl(job, 'running')
-    store.sqlite.transaction(() => {
-      if (queued?.phase === 'interrupted') {
-        const cleared = store.sqlite.prepare(`DELETE FROM generation_run_queue WHERE job_id=? AND phase='interrupted'`).run(id)
-        if (cleared.changes !== 1) throw new Error('Interrupted attempt changed before recovery.')
-      }
-      if (saved.status === 'running') {
-        const reconciled = store.sqlite.prepare(`UPDATE studio_sessions SET status='paused', updated_at=?
-          WHERE id=? AND owner_user_id=? AND generation_request_json=? AND generation_thread_id=? AND status='running'`)
-          .run(new Date().toISOString(), id, user.id, saved.request, saved.thread)
-        if (reconciled.changes !== 1) throw new Error('Recovered job no longer matches verified checkpoint.')
-      }
-      queueGeneration(store, user.id, id, intent, 'paused')
-    })()
+    await store.persistence.generation.queue.reconcileAndEnqueue(
+      user.id, id, intent, {
+        status: saved.status, request: saved.request, thread: saved.thread,
+      }, queued?.phase === 'interrupted', new Date().toISOString())
     // The agent polls this durable queue. No HTTP request owns execution.
     return reply({ control: 'running', queue: 'queued', intent }, 202)
   } catch (error) {

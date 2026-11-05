@@ -50,11 +50,9 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   }
   const threadId = row.threadId!
   const claim = () => withStoryJobLock(job, 'studio-generation-admission', async () => {
-    const current = store.sqlite.prepare(`SELECT status, generation_request_json AS request,
-      generation_thread_id AS thread FROM studio_sessions WHERE id=? AND owner_user_id=?`)
-      .get(row.id, item.ownerId) as { status: string; request: string; thread: string } | undefined
-    if (current?.status !== 'paused' || current.request !== JSON.stringify(pinned) ||
-        current.thread !== threadId || queueRecord(store, row.id)?.phase !== 'running')
+    const current = await store.persistence.generation.jobs.state(item.ownerId, row.id)
+    if (current?.status !== 'paused' || current.requestJson !== JSON.stringify(pinned) ||
+        current.threadId !== threadId || queueRecord(store, row.id)?.phase !== 'running')
       throw new Error('Conflicting generation admission.')
     let sandbox: SandboxClient | null = null
     if (selected) {
@@ -70,10 +68,9 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         await resolvePiModel(job, runtime, selected.provider, selected.id, selected.thinking)
       }
       await claimServerGeneration(job, threadId, pinned)
-      const updated = store.sqlite.prepare(`UPDATE studio_sessions SET status='running', updated_at=?
-        WHERE id=? AND owner_user_id=? AND status='paused' AND generation_thread_id=?`)
-        .run(new Date().toISOString(), row.id, item.ownerId, threadId)
-      if (updated.changes !== 1) throw new Error('Concurrent admission.')
+      const updated = await store.persistence.generation.jobs.start(
+        item.ownerId, row.id, threadId, JSON.stringify(pinned), item.workerId!, new Date().toISOString())
+      if (!updated) throw new Error('Concurrent admission.')
     } catch (error) {
       if (sandbox) await sandbox.dispose(job.jobId).catch(() => {})
       throw error
@@ -133,17 +130,17 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       const outcome = snapshot.values as { status?: string; reason?: string | null }
       const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
         ? outcome.status! : 'blocked'
-      store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
-        WHERE id=? AND owner_user_id=? AND generation_thread_id=?`)
-        .run(state, new Date().toISOString(), row.id, item.ownerId, threadId)
       if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
       // The graph owns the author-input distinction; a generic pause must
       // never be presented as a request for creative approval.
       const needsAuthor = (state === 'paused' || state === 'blocked') &&
         typeof outcome.reason === 'string' &&
         /author (decision|choice|approval|question|input)|waiting for (your|an author)|approval required|author review/i.test(outcome.reason)
-      store.sqlite.prepare(`UPDATE story_thread_runs SET needs_author=?
-        WHERE job_id=? AND owner_user_id=?`).run(needsAuthor ? 1 : 0, row.id, item.ownerId)
+      if (!await store.persistence.generation.jobs.finish(
+        item.ownerId, row.id, threadId, state as 'paused' | 'blocked' | 'completed' | 'cancelled',
+        needsAuthor, item.workerId!, new Date().toISOString())) {
+        throw new Error('Generation finished against a changed worker or job state.')
+      }
       appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
         status: state as 'paused' | 'blocked' | 'completed' | 'cancelled' })
     } finally { saver.db.close() }

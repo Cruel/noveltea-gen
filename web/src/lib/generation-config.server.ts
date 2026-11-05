@@ -136,9 +136,7 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
     const user = await requireUser(auth, request.headers)
     if (!user) throw new ConfigurationError(401, 'Sign in required.')
     if (!uuid.test(id)) throw new ConfigurationError(400, 'Invalid job ID.')
-    const row = store.sqlite.prepare(`SELECT status, generation_request_json AS requestJson,
-      generation_config_json AS configJson FROM studio_sessions WHERE id=? AND owner_user_id=?`)
-      .get(id, user.id) as { status: string; requestJson: string | null; configJson: string | null } | undefined
+    const row = await store.persistence.generation.jobs.state(user.id, id)
     if (!row) throw new ConfigurationError(404, 'Job is not connected to this account.')
     const { index, result } = await validatedExplorer(auth, store, request, id)
     const records = result.report?.records
@@ -188,11 +186,9 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
       try { await assertUserPiSelection(store, user.id, draft.model) }
       catch { throw new ConfigurationError(422, 'The selected user Pi model is unavailable. Reconnect the provider.') }
     }
-    const updated = store.sqlite.prepare(`UPDATE studio_sessions
-      SET generation_config_json=?, updated_at=? WHERE id=? AND owner_user_id=?
-      AND status='paused' AND generation_request_json IS NULL`)
-      .run(JSON.stringify(draft), new Date().toISOString(), id, user.id)
-    if (updated.changes !== 1) throw new ConfigurationError(409, 'Job was started concurrently; configuration was not saved.')
+    const updated = await store.persistence.generation.jobs.saveConfiguration(
+      user.id, id, JSON.stringify(draft), new Date().toISOString())
+    if (!updated) throw new ConfigurationError(409, 'Job was started concurrently; configuration was not saved.')
     return reply({ saved: draft, modelAvailability: 'Generation draft pinned to current user model selection.' })
   } catch (error) {
     if (error instanceof ConfigurationError) return reply({ error: error.message }, error.status)

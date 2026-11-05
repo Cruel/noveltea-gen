@@ -423,6 +423,28 @@ Studio SQLite database and schema throughout this expansion; neither dual
 writes nor data synchronization are used. Other workflows remain raw SQL until
 later migration tickets.
 
+**Generation persistence (#96):** `web/src/persistence/generation-contracts.ts`
+defines queue admission/claim/recovery, owner-scoped job metadata and status,
+configuration CAS, and paginated progress-event interfaces. The
+`generation-sqlite.ts` Drizzle implementation uses `BEGIN IMMEDIATE` before
+counting active slots and claiming the oldest queued sequence, preventing two
+WAL connections from oversubscribing the concurrency limit. Each admission
+pins the request and queue entry atomically; reconciliation conditionally
+replaces an interrupted receipt in the same transaction. Start/finish require
+the worker's exact durable lease, request, Thread and owner, and a stale lease
+cannot finalize another worker's run. Crash fencing never auto-replays a writer.
+
+The Promise-returning ports isolate SQLite-specific locking. A future
+PostgreSQL implementation must serialize capacity reservation (for example
+with dedicated slot/advisory locks) and claim FIFO rows with row locks such as
+`FOR UPDATE SKIP LOCKED` in one transaction. Never count slots outside that
+transaction. A narrowly labelled `sqliteTransactionBridge` remains only for
+existing synchronous Thread transactions and SSE consumers until their own
+migration tickets; the bridge still uses Drizzle, not raw SQLite statements.
+LangGraph checkpoints and saved Pi sessions remain separate from Studio DB.
+`web/test/generation-persistence.test.ts` exercises two independent WAL
+connections and shared claim/cancel/recovery behavior.
+
 For later schema changes: edit only the Drizzle application schema, run
 `pnpm --filter @noveltea/studio db:generate`, inspect and commit the
 generated SQL, snapshot and journal together. Run

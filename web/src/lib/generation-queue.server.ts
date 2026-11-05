@@ -1,16 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import type { StudioDatabase } from '../db/connection'
+import type { QueueIntent, QueueRecord } from '../persistence/generation-contracts'
 
-export type QueueIntent = 'start' | 'resume'
-export type QueuePhase = 'queued' | 'running' | 'finished' | 'interrupted'
-export type QueueRecord = {
-  jobId: string; ownerId: string; intent: QueueIntent; phase: QueuePhase
-  workerId: string | null; sequence: number
-}
+export type { QueueIntent, QueuePhase, QueueRecord } from '../persistence/generation-contracts'
 
-// The LangGraph host is a single execution owner, not an HTTP worker pool.
-// A new host instance cannot inherit an old instance's active run.
+// A new agent incarnation cannot inherit the old process's writer lease.
 export const serverInstance = `${hostname()}:${process.pid}:${randomUUID()}`
 
 export function activeLimit(): number {
@@ -21,105 +16,54 @@ export function activeLimit(): number {
   return Number(raw)
 }
 
+/** Compatibility helpers for existing synchronous Thread transactions.
+ * All storage and concurrency decisions are implemented by the Drizzle port.
+ * New consumers should call the async store.persistence.generation.queue API.
+ */
 export function queueRecord(store: StudioDatabase, jobId: string): QueueRecord | undefined {
-  return store.sqlite.prepare(`SELECT job_id AS jobId, owner_user_id AS ownerId,
-    intent, phase, worker_id AS workerId, sequence
-    FROM generation_run_queue WHERE job_id=?`).get(jobId) as QueueRecord | undefined
+  return store.persistence.generation.queue.sqliteTransactionBridge.record(jobId) ?? undefined
 }
-
 export function queueGeneration(store: StudioDatabase, owner: string, jobId: string,
   intent: QueueIntent, expected: 'prepared' | 'paused',
   requestJson?: string, threadId?: string): void {
-  store.sqlite.transaction(() => {
-    const row = store.sqlite.prepare(`SELECT status, generation_request_json AS request,
-      generation_thread_id AS thread FROM studio_sessions WHERE id=? AND owner_user_id=?`)
-      .get(jobId, owner) as { status: string; request: string | null; thread: string | null } | undefined
-    if (!row || row.status !== 'paused' ||
-      (expected === 'prepared' ? row.request !== null || row.thread !== null :
-        row.request === null || row.thread === null)) {
-      throw new Error('Job state changed before scheduling. Inspect the saved generation.')
-    }
-    const existing = queueRecord(store, jobId)
-    if (existing && !['finished', 'interrupted'].includes(existing.phase))
-      throw new Error('This job is already queued or executing.')
-    if (existing?.phase === 'interrupted')
-      throw new Error('An interrupted attempt requires operator reconciliation before retry.')
-    if (expected === 'prepared') {
-      if (!requestJson || !threadId) throw new Error('Missing pinned generation inputs.')
-      store.sqlite.prepare(`UPDATE studio_sessions
-        SET generation_request_json=?, generation_thread_id=?, updated_at=?
-        WHERE id=? AND owner_user_id=?`)
-        .run(requestJson, threadId, new Date().toISOString(), jobId, owner)
-    }
-    if (existing) {
-      store.sqlite.prepare(`DELETE FROM generation_run_queue WHERE job_id=? AND phase='finished'`)
-        .run(jobId)
-    }
-    const now = new Date().toISOString()
-    store.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id, owner_user_id, intent, phase, created_at, updated_at)
-      VALUES (?, ?, ?, 'queued', ?, ?)`).run(jobId, owner, intent, now, now)
-  })()
+  store.persistence.generation.queue.sqliteTransactionBridge.enqueue(
+    owner, jobId, intent, expected, new Date().toISOString(), requestJson, threadId)
 }
-
-/** Atomic SQLite-wide admission. A request cannot exceed the default two live jobs. */
+/** Atomic across WAL connections: SQLite takes BEGIN IMMEDIATE before counting
+ * slots and claiming the lowest-sequence queued job. */
 export function claimNext(store: StudioDatabase): QueueRecord | null {
-  return store.sqlite.transaction(() => {
-    const occupied = (store.sqlite.prepare(`SELECT count(*) AS count FROM generation_run_queue
-      WHERE phase='running'`).get() as { count: number }).count
-    if (occupied >= activeLimit()) return null
-    const row = store.sqlite.prepare(`SELECT job_id AS jobId, owner_user_id AS ownerId,
-      intent, phase, worker_id AS workerId, sequence FROM generation_run_queue
-      WHERE phase='queued' ORDER BY sequence LIMIT 1`).get() as QueueRecord | undefined
-    if (!row) return null
-    const updated = store.sqlite.prepare(`UPDATE generation_run_queue
-      SET phase='running', worker_id=?, updated_at=?
-      WHERE job_id=? AND phase='queued'`)
-      .run(serverInstance, new Date().toISOString(), row.jobId)
-    if (updated.changes !== 1) throw new Error('Concurrent scheduler claim')
-    return { ...row, phase: 'running' as const, workerId: serverInstance }
-  })()
+  return store.persistence.generation.queue.sqliteTransactionBridge.claim(
+    serverInstance, activeLimit(), new Date().toISOString())
+}
+export function finishAttempt(store: StudioDatabase, jobId: string, succeeded: boolean): void {
+  store.persistence.generation.queue.sqliteTransactionBridge.finish(
+    jobId, serverInstance, succeeded, new Date().toISOString())
 }
 
-export function finishAttempt(store: StudioDatabase, jobId: string, succeeded: boolean) {
-  store.sqlite.prepare(`UPDATE generation_run_queue
-    SET phase=?, updated_at=? WHERE job_id=? AND phase='running' AND worker_id=?`)
-    .run(succeeded ? 'finished' : 'interrupted', new Date().toISOString(), jobId, serverInstance)
-}
-
-/** Never take over a writer merely because a worker ID differs. Other
- * processes may be alive against this same SQLite DB. Only a proven dead PID
- * on the identical host can free its slot, and even then its job is fenced as
- * interrupted rather than replayed. Unknown/other hosts require operator work. */
+/** Unknown/foreign-host writers are not assumed dead. Only an observed dead
+ * PID on this host (or the same PID with an obsolete instance nonce) can be
+ * fenced, always to interrupted, NEVER re-enqueued or automatically replayed.
+ */
 export function fenceAbandonedRuns(store: StudioDatabase): number {
-  const rows = store.sqlite.prepare(`SELECT job_id AS jobId, worker_id AS worker
-    FROM generation_run_queue WHERE phase='running' AND worker_id<>?`)
-    .all(serverInstance) as Array<{ jobId: string; worker: string | null }>
+  const storage = store.persistence.generation.queue.sqliteTransactionBridge
+  const rows = storage.foreignRunning(serverInstance)
   let count = 0
   for (const row of rows) {
     const pieces = row.worker?.split(':')
     if (pieces?.length !== 3 || pieces[0] !== hostname() ||
-        !/^[1-9][0-9]*$/.test(pieces[1] ?? '')) continue
+      !/^[1-9][0-9]*$/.test(pieces[1] ?? '')) continue
     const pid = Number(pieces[1])
     if (!Number.isSafeInteger(pid)) continue
-    // Container restarts commonly reuse PID 1. The current process cannot be
-    // a different live instance with the same PID in its own PID namespace;
-    // the old random instance identity proves the previous owner exited.
     if (pid !== process.pid) {
       try { process.kill(pid, 0); continue }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue
       }
     }
-    count += store.sqlite.prepare(`UPDATE generation_run_queue
-      SET phase='interrupted', updated_at=? WHERE job_id=? AND phase='running' AND worker_id=?`)
-      .run(new Date().toISOString(), row.jobId, row.worker).changes
+    if (storage.interrupt(row.jobId, row.worker, new Date().toISOString())) count++
   }
   return count
 }
-
 export function dequeueBeforeStart(store: StudioDatabase, owner: string, jobId: string): boolean {
-  return store.sqlite.prepare(`DELETE FROM generation_run_queue
-    WHERE owner_user_id=? AND job_id=? AND phase='queued'`)
-    .run(owner, jobId).changes === 1
+  return store.persistence.generation.queue.sqliteTransactionBridge.dequeue(owner, jobId)
 }

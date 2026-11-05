@@ -26,20 +26,10 @@ class JobError extends Error {
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const SHA = /^[a-f0-9]{40}$/i
 
-type SavedJob = {
-  id: string; storyId: string; title: string; commitSha: string | null
-  provider: string; providerId: string; directory: string
-  requestJson: string | null; threadId: string | null; configJson: string | null; status: string; createdAt: string
-}
+import type { SavedGenerationJob as SavedJob } from '../persistence/generation-contracts'
 export function selectedJob(store: StudioDatabase, owner: string, id: string): SavedJob {
   if (!UUID.test(id)) throw new JobError(400, 'Invalid job ID.')
-  const row = store.sqlite.prepare(`SELECT j.id, j.story_id AS storyId, j.title, j.status, j.created_at AS createdAt,
-    j.source_commit_sha AS commitSha, j.generation_request_json AS requestJson,
-    j.generation_thread_id AS threadId, j.generation_config_json AS configJson, s.directory,
-    r.provider, r.provider_repository_id AS providerId
-    FROM studio_sessions j JOIN stories s ON j.story_id=s.id AND j.owner_user_id=s.owner_user_id
-    JOIN repositories r ON s.repository_id=r.id AND s.owner_user_id=r.owner_user_id
-    WHERE j.id=? AND j.owner_user_id=?`).get(id, owner) as SavedJob | undefined
+  const row = store.persistence.generation.jobs.sqliteBridge.selected(owner, id) ?? undefined
   if (!row) throw new JobError(404, 'Job is not connected to this account.')
   if (!row.commitSha || !SHA.test(row.commitSha) || !['github', 'gitlab'].includes(row.provider) ||
       (row.requestJson === null) !== (row.threadId === null)) {

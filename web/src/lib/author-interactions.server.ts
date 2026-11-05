@@ -92,9 +92,8 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const user = await requireUser(auth, request.headers)
     if (!user) return json({ error: 'Sign in required' }, 401)
     const job = await authorizedStoryJob(store, user.id, jobId)
-    const row = store.sqlite.prepare(`SELECT status, generation_request_json AS request
-      FROM studio_sessions WHERE id=? AND owner_user_id=?`).get(jobId, user.id) as
-      { status: string; request: string | null } | undefined
+    const saved = await store.persistence.generation.jobs.state(user.id, jobId)
+    const row = saved ? { status: saved.status, request: saved.requestJson } : undefined
     const queue = queueRecord(store, jobId)
     const recoverable = !!row?.request && ['paused', 'blocked'].includes(row.status) &&
       queue?.phase === 'finished'
@@ -159,9 +158,8 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
         input.id as 'foundation-conflict' | 'validator-upgrade',
         input.decision as 'approved' | 'rejected')
       if (nextStatus) {
-        store.sqlite.prepare(`UPDATE studio_sessions SET status=?, updated_at=?
-          WHERE id=? AND owner_user_id=? AND status IN ('blocked','paused')`)
-          .run(nextStatus, new Date().toISOString(), jobId, user.id)
+        await store.persistence.generation.jobs.authorDecision(
+          user.id, jobId, nextStatus, new Date().toISOString())
       }
       return json({ decision: decided })
     }
