@@ -358,9 +358,26 @@ function frontmatter(value: string): RecordInfo | undefined {
   if (!id || !type) return;
   return { id, type, arcs: list("arcs"), events: list("events"), path: "", completeness: scalar("completeness"), status: scalar("status") };
 }
+/** Only committed Git objects are cached. Never cache HEAD, status or dirty
+ * working-tree bytes: resolving HEAD on each call makes commits visible
+ * immediately without losing cross-process recovery correctness. */
+const committedRecords = new Map<string, Map<string, RecordInfo>>();
+const MAX_COMMITTED_CATALOGS = 16;
+function catalogCopy(items: Map<string, RecordInfo>): Map<string, RecordInfo> {
+  return new Map<string, RecordInfo>([...items].map(([id, record]): [string, RecordInfo] =>
+    [id, { ...record, arcs: [...record.arcs], events: [...record.events] }]));
+}
 export function records(job: JobStartResult) {
+  const head = git(job, "rev-parse", "HEAD");
+  const key = JSON.stringify([job.gitRoot, job.storyRelativePath, head]);
+  const cached = committedRecords.get(key);
+  if (cached) {
+    committedRecords.delete(key);
+    committedRecords.set(key, cached);
+    return catalogCopy(cached);
+  }
   const root = job.storyRelativePath ? job.storyRelativePath + "/" : "";
-  const paths = git(job, "ls-tree", "-r", "--name-only", "HEAD", "--",
+  const paths = git(job, "ls-tree", "-r", "--name-only", head, "--",
     ...["creative-direction", "arcs", "milestones", "events", "characters",
       "world-entities", "facts", "relationships", "revelations", "choice-points",
       "puzzles", "authored-content", "narrative-positions"].map(p => root + p))
@@ -368,12 +385,15 @@ export function records(job: JobStartResult) {
   const items = new Map<string, RecordInfo>();
   for (const p of paths) {
     if (!p.endsWith(".md")) continue;
-    const record = frontmatter(gitRaw(job, "show", "HEAD:" + p));
+    const record = frontmatter(gitRaw(job, "show", head + ":" + p));
     if (record && /^(creative-direction|arc|milestone|event|character|world-entity|fact|relationship|revelation|choice-point|puzzle|authored-content|narrative-position)$/.test(record.type) &&
         record.id.startsWith(record.type + ".") && record.status !== "superseded")
       items.set(record.id, { ...record, path: p.slice(root.length) });
   }
-  return items;
+  committedRecords.set(key, items);
+  if (committedRecords.size > MAX_COMMITTED_CATALOGS)
+    committedRecords.delete(committedRecords.keys().next().value!);
+  return catalogCopy(items);
 }
 function scopeArcs(idea: PersistedIdea, catalog: Map<string, RecordInfo>) {
   const arcs = new Set<string>();
