@@ -24,15 +24,6 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
   }
   try {
     for (let run = 0; run < 3; run++) {
-      if (run === 1) {
-        // Model a user's persisted pre-#43 database, rather than only testing
-        // fresh installations and already-current databases.
-        const oldStore = openStudioDatabase(filename)
-        try {
-          oldStore.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
-          oldStore.sqlite.prepare('DELETE FROM studio_schema_migrations WHERE version=3').run()
-        } finally { oldStore.sqlite.close() }
-      }
       const result = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate-cli.ts'], {
         cwd: webRoot, encoding: 'utf8', env, timeout: 20_000,
       })
@@ -48,9 +39,10 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
         'thread_steering_intents', 'thread_steering_checkpoint_links']) {
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
-      assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(), [
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 },
-      ])
+      const history = store.sqlite.prepare('SELECT hash,created_at AS createdAt FROM __drizzle_migrations').all() as Array<{ hash: string; createdAt: number }>
+      assert.equal(history.length, 1, 'Fresh Studio database has one generated Drizzle baseline')
+      assert.match(history[0]!.hash, /^[a-f0-9]{64}$/)
+      assert.ok(history[0]!.createdAt > 0)
       for (const column of ['source_thread_id', 'proof_digest', 'guidance', 'history_json', 'edited_message_id', 'edited_body']) {
         assert.ok((store.sqlite.pragma('table_info(checkpoint_forks)') as Array<{ name: string }>)
           .some(entry => entry.name === column), 'Missing fork column ' + column)
@@ -69,7 +61,7 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
       assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
       // Simulate an upgrade to a future Studio version: downgrades must fail,
       // never claim success or rewrite a schema owned by newer code.
-      store.sqlite.prepare('INSERT INTO studio_schema_migrations (version) VALUES (999)').run()
+      store.sqlite.prepare("INSERT INTO __drizzle_migrations (hash,created_at) VALUES ('future-version', 9999999999999)").run()
     } finally { store.sqlite.close() }
     const rejected = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate-cli.ts'], {
       cwd: webRoot, encoding: 'utf8', env, timeout: 20_000,
@@ -112,8 +104,7 @@ test('migration CLI loads the Vite development environment including local overr
     assert.equal(existsSync(ignoredPath), false, 'Base .env DB path unexpectedly won')
     const store = openStudioDatabase(databasePath)
     try {
-      assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(),
-        [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }])
+      assert.equal((store.sqlite.prepare('SELECT count(*) AS count FROM __drizzle_migrations').get() as { count: number }).count, 1)
     } finally { store.sqlite.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

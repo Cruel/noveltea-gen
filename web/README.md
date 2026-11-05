@@ -25,7 +25,7 @@ Studio uses TanStack Start/Router, React, **Tailwind CSS v4** and **shadcn with 
 
 ## Story Conversations and Thread navigation (#78)
 
-After applying Studio schema migration **16** with the web services stopped, choose a Story on the Dashboard to open its **Conversations**. Existing generation jobs remain accessible through their original job pages; each receives a stable root Thread within an automatically created Conversation. Authors can create additional Conversations, edit Conversation and Thread titles, and switch between a compact ancestry-aware tree and an activity-sorted flat Thread list. The selected Conversation is shareable through the URL. Tree/flat and expansion preferences are stored per owner and Story.
+After initializing the current Drizzle Studio schema with the web services stopped, choose a Story on the Dashboard to open its **Conversations**. New generation jobs receive a stable root Thread within an automatically created Conversation. The prior Studio database is intentionally not migrated. Authors can create additional Conversations, edit Conversation and Thread titles, and switch between a compact ancestry-aware tree and an activity-sorted flat Thread list. The selected Conversation is shareable through the URL. Tree/flat and expansion preferences are stored per owner and Story.
 
 The navigation reads the existing owner-scoped catalog, durable generation events and execution queue. Meaningful work and status transitions affect activity ordering; HTTP polling and SSE heartbeats do not. Running work shows the most recent specialist work item. Status distinguishes queued, running, paused, blocked, author attention, completed and archived where applicable. No existing LangGraph execution identity or job worktree is changed, and the legacy root mapping **does not** reconstruct historical forkable recovery checkpoints. Creating child Threads, branching and continuing runs are separate follow-up milestones of spec #73.
 
@@ -55,7 +55,7 @@ Configure **both** login and integration callbacks in each provider application:
 
 The same provider client ID/secret is used for its two separate authorization flows. Each callback URL must be explicitly registered with that provider (or OAuth returns to an invalid redirect). The integration flow uses a single-use server-side state, PKCE and an authenticated Studio session; it creates **only** a repository connection, never a Better Auth login account. Existing linked login accounts remain valid sign-in methods until explicitly unlinked. Git identity connections can be shared across distinct Studio users without linking their Studio accounts.
 
-**Upgrade to Settings connections (schema v15):** With Studio stopped, run `pnpm --filter @noveltea/studio migrate` before restarting. New repository imports persist the exact authorized Git connection. Older repository records retain their historical login-backed access until explicitly rebound in **Settings → Git integrations → Repository access bindings**. Rebinder verifies remote repository identity and current push permissions before saving, and a normal repository reimport never changes an existing binding. A login identity cannot be unlinked while repositories still depend on its legacy credentials. Disconnecting a Git connection erases its stored tokens and suspends remote access without deleting repositories, Stories or jobs; reauthorizing the same provider identity restores the existing binding. Do not rotate `BETTER_AUTH_SECRET` without a credential-rotation plan, since the encrypted repository tokens derive their key from that secret. Live OAuth callback/refresh/push testing against configured provider applications is still required for deployment certification.
+**Settings connections:** With Studio stopped, initialize the fresh schema with `pnpm --filter @noveltea/studio migrate` before starting. New repository imports persist the exact authorized Git connection. Repository records created without an integration binding retain login-backed access until explicitly rebound in **Settings → Git integrations → Repository access bindings**. Rebinder verifies remote repository identity and current push permissions before saving, and a normal repository reimport never changes an existing binding. A login identity cannot be unlinked while repositories still depend on its legacy credentials. Disconnecting a Git connection erases its stored tokens and suspends remote access without deleting repositories, Stories or jobs; reauthorizing the same provider identity restores the existing binding. Do not rotate `BETTER_AUTH_SECRET` without a credential-rotation plan, since the encrypted repository tokens derive their key from that secret. Live OAuth callback/refresh/push testing against configured provider applications is still required for deployment certification.
 
 For development the base URL is `http://localhost:3000`; deploy with HTTPS.
 Create a GitHub App under Developer settings > GitHub Apps and copy its **Client ID**
@@ -76,7 +76,7 @@ GitLab receives `api` and `write_repository` (its default `read_user` is also
 included). GitLab requires the `api` scope for merge-request APIs;
 `write_repository` alone covers Git-over-HTTP but not those API calls.
 All repository imports now start at **Dashboard → Add repository**, a single compact dialog that queries every connected GitHub and GitLab identity and presents one searchable list. The list is owner-scoped, excludes previously imported repositories, pages large provider results in 100-item batches, and imports in place without navigating away. Old `/repositories/add` and `/repositories/gitlab` URLs redirect to the dashboard picker. Connecting a new provider identity still happens through Settings.
-Discovery uses the selected independent GitLab integration connection, or for repositories created before the Settings migration, the historical login-linked credential, lists
+Discovery uses the selected independent GitLab integration connection (or a permitted login-linked credential for an unbound repository), and lists
 personal and group projects with Developer (access level 30) or higher access,
 and checks the authenticated membership list again before connecting a stable
 numeric GitLab project ID to the user's catalog. An archived project is excluded.
@@ -137,8 +137,8 @@ GitHub installation/user permissions block new browsing and selection, but
 existing catalog records are retained. API rate limits or missing access
 surface as retry/reconnect errors. New Story catalog records do not clone or validate canonical Markdown
 contents. Job acquisition is an explicit separate action; it does not run an
-agent or replace native narrative validation. Story registration requires app migration 3 (`source_commit_sha`). On an
-older Studio database, POST returns a specific HTTP 503 explaining how to run
+agent or replace native narrative validation. Story registration requires the current Drizzle Studio baseline (`source_commit_sha`). On an
+unmigrated Studio database, POST returns a specific HTTP 503 explaining how to run
 the explicit migration, rather than misreporting a GitHub outage. An inconsistent
 migration journal/schema is rejected without attempting a runtime repair.
 Unexpected internal failures are logged server-side with a short incident
@@ -151,8 +151,8 @@ After verifying and adding a GitHub Story, choose **Create isolated job worktree
 The authenticated `POST /api/github/jobs` accepts `{storyId,jobId,commit}`;
 `jobId` is a client-generated UUID retained for retry, and `commit` must match
 the server's selected or previously saved job SHA exactly. It is an optimistic
-revision assertion, not permission to choose arbitrary remote revisions. App schema migration
-4 records a durable pinned source SHA on each created session; reopening a job
+revision assertion, not permission to choose arbitrary remote revisions. The Studio schema
+records a durable pinned source SHA on each created session; reopening a job
 continues using that SHA even if its Story is later re-imported at a newer
 commit. Older session rows without this pin cannot be adopted as a Git job. The server resolves
 owner, repository, directory and immutable source SHA exclusively from its
@@ -348,7 +348,7 @@ verify and register the selected Story without cloning or downloading unrelated
 project assets. The server revalidates the owner-scoped catalog record and
 current GitLab project membership at every request. New registration is
 idempotent per Story directory, records the selected commit, and requires
-Studio schema migration 3 for Story selection (migration 4 is needed for job acquisition).
+the current Studio Drizzle schema for Story selection and job acquisition.
 
 GitLab's paginated REST tree entries do **not** include blob sizes. The 100 MB
 (decimal, inclusive) preflight uses commit-pinned GraphQL `repository.blobs`
@@ -388,22 +388,56 @@ pnpm --filter @noveltea/studio start
 
 Migrations have two deliberate schema owners, orchestrated by **one**
 `pnpm --filter @noveltea/studio migrate` command. Better Auth's supported
-Kysely migration planner inspects and brings its own `user`, `account`,
-`session`, `verification`, and `rateLimit` tables up to the pinned Better Auth
-schema; it does not maintain an application-style versioned SQL history.
-NovelTea's app tables use an append-only transactional
-`studio_schema_migrations` journal. The command runs the auth migration first,
-then the app migrations, waits for Better Auth's actual schema check, and runs
-SQLite integrity and foreign-key checks **before** reporting success. A failed
-check exits unsuccessfully. The migration command does not start a competing
-auth-runtime schema check before tables exist.
+Kysely migration planner owns `user`, `account`, `session`, `verification`,
+and `rateLimit`. Drizzle Kit generates versioned, immutable SQL for the 29
+application-owned tables from `web/src/db/schema.ts`; it deliberately does
+not create Better Auth tables. `web/src/db/auth-reference.ts` supplies only a
+foreign-key target for Better Auth's `user` table.
 
-Run `migrate` as an explicit deployment step **before** starting web processes
-(and while application writers are stopped); runtime never silently applies
-migrations. Keep Better Auth pinned and review database changes on upgrades:
-its migrator is schema-diff based, not an audited version-by-version journal.
-Back up the database and separately stored encryption secret before upgrades;
-use the same stable secret and database path on migration and runtime.
+The command runs Better Auth's migrator **first**, then Drizzle's
+`web/drizzle/` migrations, then Better Auth's runtime schema check and
+SQLite integrity/foreign-key checks. The application migration journal is
+`__drizzle_migrations`. Both raw `store.sqlite` queries and typed
+`store.db` Drizzle queries share one connection and those same tables.
+Normal Studio startup is read-only with respect to schema; missing, stale or
+incompatible migrations (or schema drift) fail closed.
+
+For later schema changes: edit only the Drizzle application schema, run
+`pnpm --filter @noveltea/studio db:generate`, inspect and commit the
+generated SQL, snapshot and journal together. Run
+`pnpm --filter @noveltea/studio db:check` before release. Never edit the
+applied baseline or add Better Auth's tables to the Drizzle schema.
+Deploy `web/drizzle/` with the application; set `NT_STUDIO_MIGRATIONS_DIR`
+to an explicit directory if the deployment working directory is different.
+Always stop Studio writers and run `migrate` as a separate deployment step.
+Keep Better Auth pinned, and use the same stable secret and database path
+on migration and runtime.
+
+**Breaking cutover (#93): existing Studio databases are not compatible.**
+The 27 handwritten application migrations have been replaced by a fresh
+baseline. The migration command refuses legacy journals and will not
+automatically erase or retrofit an existing database. Back up any data you
+wish to keep; this reset intentionally discards existing Studio users,
+connections, repositories, Stories, jobs, and credentials. The independent
+LangGraph/agent/checkpointer SQLite databases are **not** affected.
+
+To reset deliberately, stop Studio and any agent/worker processes first.
+Set `NT_STUDIO_DB_PATH` to the **absolute path** of the Studio SQLite file
+(the default is documented below). After making a backup, remove only
+that file and its `-wal` and `-shm` companions with all writers stopped:
+
+```sh
+: "${NT_STUDIO_DB_PATH:?Set the absolute Studio DB path before resetting}"
+# Back up the stopped database, including any WAL contents, first.
+rm -f -- "${NT_STUDIO_DB_PATH}" "${NT_STUDIO_DB_PATH}-wal" "${NT_STUDIO_DB_PATH}-shm"
+pnpm --filter @noveltea/studio migrate
+```
+
+For Docker Compose, stop services and perform this operation **inside the
+Studio data volume**, then run the normal `init` service (or migration
+command) and restart. Do not run `docker compose down -v`: that would also
+remove unrelated state volumes. The explicit reset is a one-time cutover,
+not a normal upgrade path.
 
 The SQLite path defaults to
 `$XDG_STATE_HOME/noveltea-gen/studio.sqlite` or
@@ -439,7 +473,7 @@ author on the configured same origin. It validates the canonical
 `parseGenerationContract` scope and reads Story, revision, branch and
 worktree identity exclusively from the database and original durable job
 manifest. No filesystem path, provider credential, model or fixture switch
-comes from the browser. Schema migration 5 adds the durable request and
+comes from the browser. The current Studio baseline stores the durable request and
 thread binding.
 
 **This is strictly fixture execution, not production agent hosting.**
@@ -460,7 +494,7 @@ and `NT_NATIVE_CLI` as usual. An optional
 `NT_STUDIO_SKILLS_SOURCE` specifies the trusted server's NovelTea skills
 checkout for fixture skill snapshots; never accept a skills path from an
 HTTP client. Run `pnpm --filter @noveltea/studio migrate` while Studio is
-stopped to apply migration 5. The **agent** is the sole writer of the per-job LangGraph checkpoint SQLite;
+stopped to initialize the current Studio baseline. The **agent** is the sole writer of the per-job LangGraph checkpoint SQLite;
 Studio only reads checkpoints at safe inspection boundaries. Application
 and checkpoint SQLite persist separately from the evictable Git cache. A reconnect inspects the same state; a missing checkpoint,
 interrupted writer, unverified Git HEAD, or mismatched request/owner
@@ -532,7 +566,7 @@ are enforced server-side. Refresh the job to see the latest validation and
 committed changes independently of activity messages.
 
 **Deploy:** stop Studio and run `pnpm --filter @noveltea/studio migrate` to
-apply schema migration **10** before restarting. Keep the Studio database on a
+initialize the Studio Drizzle schema before startup. Keep the Studio database on a
 durable volume alongside its existing checkpoint and job-state requirements.
 The `fixture-jobs.test.ts` integration covers real fixture graph transitions,
 ordered persisted events, owner isolation, SSE cursor replay, restart,
@@ -553,9 +587,9 @@ active status against the original native report, runs the authoritative
 `resolveFocusedScope`. The server does not silently widen write targets from
 the relationship graph or dependency context.
 
-Schema migration **6** adds durable `generation_config_json` to job sessions.
+The Studio Drizzle schema stores durable `generation_config_json` on job sessions.
 Run `pnpm --filter @noveltea/studio migrate` with the Studio server stopped
-before deploying the new UI. A saved draft survives a restart and is only
+before deploying the UI. A saved draft survives a restart and is only
 editable before generation. If a draft exists, fixture launch must match its
 pinned task and canonical contract; a direct POST cannot replace it. An
 invalid/stale/foreign draft fails closed.
@@ -654,8 +688,8 @@ conflicts.
 **Operator prerequisite:** set `NT_PI_CREDENTIAL_KEY` to an independently stored,
 base64-encoded random 32-byte key (generate with
 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`)
-and run `pnpm --filter @noveltea/studio migrate` with Studio stopped to apply
-migration **14** (provider credentials were introduced in migration 9). The app stores AES-256-GCM encrypted Pi provider credentials
+and run `pnpm --filter @noveltea/studio migrate` with Studio stopped to initialize
+the current schema. The app stores AES-256-GCM encrypted Pi provider credentials
 in `pi_credentials` keyed by the Better Auth user ID, with revision-checked
 OAuth refresh writes. Keep the encryption key outside the Studio SQLite backup
 but back it up securely: **losing/changing the key makes existing connections
@@ -681,7 +715,7 @@ The native catalog/owner-scoped integration cases are covered in
 
 ## Job queue, controls, and crash recovery (#67)
 
-Apply migration **12** while Studio is stopped:
+Initialize the Studio Drizzle schema while Studio is stopped:
 `pnpm --filter @noveltea/studio migrate`. The durable SQLite
 `generation_run_queue` reserves at most **two** active generation runs by default.
 Set `NT_STUDIO_MAX_ACTIVE_JOBS=1..32` in the host environment to change that
@@ -784,9 +818,9 @@ persistence fails, the page reports the partial state and retries **only**
 the remaining setup, never the Git commit. Do not blindly repeat a request
 after an ambiguous provider write.
 
-**Deploy:** stop Studio and run `pnpm --filter @noveltea/studio migrate` for
-migrations **7–8 and 11** (GitHub reviewed-content digest, durable author
-drafts and separate Pi discovery sessions). Set `NT_STUDIO_SKILLS_SOURCE` to
+**Deploy:** stop Studio and run `pnpm --filter @noveltea/studio migrate` to
+initialize the current schema (including reviewed-content digests, durable
+author drafts, and separate Pi discovery sessions). Set `NT_STUDIO_SKILLS_SOURCE` to
 the pinned Narrative Skills Git checkout, and connect a per-user Pi provider
 with `NT_PI_CREDENTIAL_KEY` configured for collaborative mode. The local Git
 cache, durable job state, and installed native CLI must be configured. Tests cover three-round durable answers, multi-user isolation,
@@ -876,7 +910,7 @@ Partial but structurally validated work requires explicit blocker confirmation
 and publishes a draft, never a final PR or merge. POST requires the exact
 previewed job HEAD and upstream SHA and rechecks both before writing. The
 server uses normal non-force Git pushes; remote divergence is rejected. The
-linked PR number, URL, target and last head live in durable migration 13's
+linked PR number, URL, target and last head live in the durable
 `github_publications` table, separate from the evictable Git cache. A pending
 publication intent is persisted before the push, and retries reconcile any
 remote branch and existing draft PR before creating one. Later publication

@@ -132,11 +132,12 @@ test('GitLab job API rejects foreign jobs and revoked or mismatched revisions be
     assert.equal((await post(badOrigin)).status, 403)
     assert.equal((await post(request(aliceCookie, sha('b')))).status, 409)
     assert.equal((await post(request(aliceCookie, sha('a'), 'bad-job'))).status, 400)
-    store.sqlite.prepare('DELETE FROM studio_schema_migrations WHERE version=4').run()
+    const baseline = store.sqlite.prepare('SELECT hash,created_at AS createdAt FROM __drizzle_migrations').get() as { hash: string; createdAt: number }
+    store.sqlite.prepare('DELETE FROM __drizzle_migrations').run()
     const unmigrated = await post(request())
     assert.equal(unmigrated.status, 503)
     assert.match((await unmigrated.json()).error, /migrations are pending/)
-    store.sqlite.prepare('INSERT INTO studio_schema_migrations (version) VALUES (4)').run()
+    store.sqlite.prepare('INSERT INTO __drizzle_migrations (hash,created_at) VALUES (?,?)').run(baseline.hash, baseline.createdAt)
 
     // Another user's job ID must never be adopted, even on a shared repository.
     const bobRepo = randomUUID(), bobStory = randomUUID()

@@ -162,20 +162,18 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     assert.deepEqual((await discovery.json()).stories, ['sample-story'])
 
     const base = { repositoryId: repoId, directory: 'sample-story', commit }
-    // Reproduce upgrading an existing Studio DB without running #43's
-    // migration: browsing succeeds but Story import must report the missing
-    // migration instead of blaming GitHub with a generic 502.
-    store.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
-    store.sqlite.prepare('DELETE FROM studio_schema_migrations WHERE version=3').run()
+    // Browsing may work without Studio migrations, but importing must fail
+    // closed instead of reporting an upstream GitHub error or changing the DB.
+    const baseline = store.sqlite.prepare('SELECT hash,created_at AS createdAt FROM __drizzle_migrations').get() as { hash: string; createdAt: number }
+    store.sqlite.prepare('DELETE FROM __drizzle_migrations').run()
     const outdated = await post(base)
     assert.equal(outdated.status, 503)
-    assert.match((await outdated.json()).error, /database.*migrat|run.*migrate/i)
-    store.sqlite.exec('ALTER TABLE stories ADD COLUMN source_commit_sha TEXT')
-    store.sqlite.prepare('INSERT INTO studio_schema_migrations (version) VALUES (3)').run()
+    assert.match((await outdated.json()).error, /migrations are pending/i)
+    store.sqlite.prepare('INSERT INTO __drizzle_migrations (hash,created_at) VALUES (?,?)').run(baseline.hash, baseline.createdAt)
     store.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
     const inconsistent = await post(base)
     assert.equal(inconsistent.status, 503)
-    assert.match((await inconsistent.json()).error, /journal.*schema|repair/i)
+    assert.match((await inconsistent.json()).error, /journal.*schema|reset/i)
     store.sqlite.exec('ALTER TABLE stories ADD COLUMN source_commit_sha TEXT')
     assert.equal((await post({ ...base, commit: null })).status, 400)
     assert.equal((await post(base, 'https://attacker.invalid')).status, 403)
