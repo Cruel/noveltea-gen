@@ -8,6 +8,7 @@ import { queueGeneration, queueRecord } from './generation-queue.server'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { GenerationRequest } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
+import { assertPinnedRevision, revisionFromSource, type PinnedRevision } from './story-revision.server'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 
@@ -182,7 +183,7 @@ export function enqueueThreadMessage(store: StudioDatabase, owner: string, threa
   })()
 }
 
-type Admission = { id: string; content: string; source: string; runOrder: number }
+type Admission = { id: string; content: string; source: string; runOrder: number; scopeJson: string | null }
 /** An atomic SQLite claim is the only path from queued user message to a new
  * worktree. A crash mid-preparation leaves an inspectable, non-replayed claim. */
 function claimMessage(store: StudioDatabase, owner: string, threadId: string): Admission | null {
@@ -192,9 +193,9 @@ function claimMessage(store: StudioDatabase, owner: string, threadId: string): A
     if (store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
       WHERE owner_user_id=? AND thread_id=? AND role='user'
       AND phase IN ('preparing','running','blocked') LIMIT 1`).get(owner, threadId)) return null
-    const next = store.sqlite.prepare(`SELECT id,body AS content FROM story_thread_messages
+    const next = store.sqlite.prepare(`SELECT id,body AS content,revision_scope_json AS scopeJson FROM story_thread_messages
       WHERE owner_user_id=? AND thread_id=? AND role='user' AND phase='queued'
-      ORDER BY sequence LIMIT 1`).get(owner, threadId) as { id: string; content: string } | undefined
+      ORDER BY sequence LIMIT 1`).get(owner, threadId) as { id: string; content: string; scopeJson: string | null } | undefined
     if (!next) return null
     const changed = store.sqlite.prepare(`UPDATE story_thread_messages SET phase='preparing',
       source_job_id=? WHERE id=? AND owner_user_id=? AND phase='queued'`)
@@ -219,6 +220,16 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
       throw new ThreadChatError(409, 'Previous run is not a clean, completed generation.')
     const head = await trustedHead(parent)
     if (head !== parent.headSha) throw new ThreadChatError(409, 'Previous Story HEAD changed.')
+    if (!claim.scopeJson) throw new ThreadChatError(409,
+      'This queued instruction has no reviewed revision scope. Inspect its Story targets before retrying.')
+    let scope: PinnedRevision
+    try { scope = JSON.parse(claim.scopeJson) as PinnedRevision }
+    catch { throw new ThreadChatError(409, 'Stored revision scope is corrupt; no writer was authorized.') }
+    if (scope.sourceJobId !== claim.source || scope.sourceSha !== head ||
+        !Array.isArray(scope.selectedTargets))
+      throw new ThreadChatError(409, 'Revision authorization is stale or incomplete; review the Story impact again.')
+    const refreshed = await revisionFromSource(store, owner, claim.source, claim.content, scope.selectedTargets)
+    assertPinnedRevision(scope, refreshed, claim.source, head)
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX'])
       delete env[key]
@@ -236,9 +247,9 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     if (model) await assertUserPiSelection(store, owner, model)
     verifyWebExecution(!model)
     const draft: GenerationDraft = { version: 1, headSha: head, task: claim.content,
-      contract: prior.contract, limits: oldDraft?.limits ?? {}, model }
+      contract: scope.contract, limits: oldDraft?.limits ?? {}, model }
     const pinned: GenerationRequest = { story: child.storyRoot, job: child.jobId,
-      task: claim.content, contract: prior.contract, fixture: !model,
+      task: claim.content, contract: scope.contract, fixture: !model,
       ...(prior.skillsSource ? { skillsSource: prior.skillsSource } : {}),
       ...(model ? { provider: model.provider, model: model.id } : {}) }
     await assertServerClaimPermitted(child, child.threadId + ':generation:web', pinned)

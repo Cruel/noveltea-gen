@@ -401,8 +401,6 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
   }
   return withStoryJobLock(job, "review-scope", async () => {
     await processAuthorUpdatesAtBoundary(job);
-    const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
-    await scheduleIdeasAtBoundary(job, "final-review");
     const file = fileFor(job);
     const archFile = join(job.stateDir, "architecture.json");
     if (!existsSync(archFile)) throw new Error("Narrative review requires an approved architecture plan.");
@@ -412,6 +410,11 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
       throw new Error("Narrative review requires a committed, versioned scope plan.");
     verifyPlanHistory(job, arch);
     const plan = arch.plan;
+    // A focused contract does not authorize unrelated deferred idea edits.
+    if (!isFocusedScope(plan.contract)) {
+      const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
+      await scheduleIdeasAtBoundary(job, "final-review");
+    }
     const contractDigest = digest(JSON.stringify(plan.contract));
     let state: Receipt | undefined = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) : undefined;
     if (state && (state.version !== 1 || state.jobId !== job.jobId ||

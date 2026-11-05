@@ -3,7 +3,8 @@ import { getRequestHeaders } from '@tanstack/react-start/server'
 import { auth, database } from './runtime.server'
 import { requireUser } from './access.server'
 import { assertStudioSchemaCurrent } from '../db/migrations'
-import { readThreadChat, enqueueThreadMessage, advanceThread } from './thread-chat.server'
+import { readThreadChat, advanceThread } from './thread-chat.server'
+import { previewThreadRevision, submitThreadRevision } from './story-revision.server'
 import {
   syncAppliedAuthorMessages, previewThreadMessageEdit, branchEditedThreadMessage,
 } from './thread-message-edit.server'
@@ -50,16 +51,32 @@ export const postThreadEditFork = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => branchEditedThreadMessage(database, await owner(), data))
 
+export const getThreadRevisionPreview = createServerFn({ method: 'POST' })
+  .validator((data: { threadId: string; content: string; selectedTargets?: string[] }) => {
+    if (!data || !ID.test(data.threadId) || typeof data.content !== 'string' || data.content.length > 4000 ||
+        data.selectedTargets !== undefined && (!Array.isArray(data.selectedTargets) ||
+          data.selectedTargets.length > 128 || data.selectedTargets.some(id => typeof id !== 'string')))
+      throw new Error('Invalid revision preview request.')
+    return data
+  })
+  .handler(async ({ data }) => previewThreadRevision(database, await owner(),
+    data.threadId, data.content, data.selectedTargets))
+
 export const postThreadMessage = createServerFn({ method: 'POST' })
-  .validator((data: { threadId: string; id: string; content: string }) => {
+  .validator((data: { threadId: string; id: string; content: string;
+    selectedTargets?: string[]; approvalDigest?: string }) => {
     if (!data || !ID.test(data.threadId) || typeof data.id !== 'string' ||
-        typeof data.content !== 'string' || data.content.length > 4000)
+        typeof data.content !== 'string' || data.content.length > 4000 ||
+        data.selectedTargets !== undefined && (!Array.isArray(data.selectedTargets) ||
+          data.selectedTargets.length > 128 || data.selectedTargets.some(id => typeof id !== 'string')) ||
+        data.approvalDigest !== undefined && !/^[a-f0-9]{64}$/.test(data.approvalDigest))
       throw new Error('Invalid Thread message.')
     return data
   })
   .handler(async ({ data }) => {
     const ownerId = await owner()
-    const message = enqueueThreadMessage(database, ownerId, data.threadId, data.id, data.content)
+    const message = await submitThreadRevision(database, ownerId, data.threadId, data.id,
+      data.content, data.selectedTargets, data.approvalDigest)
     await advanceThread(database, ownerId, data.threadId)
     return { message, chat: readThreadChat(database, ownerId, data.threadId) }
   })

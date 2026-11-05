@@ -1654,6 +1654,36 @@ Thread and its immutable prompt, subsequent statuses, and verified evidence
 remain visible on reconnect. Initial requests are idempotently pinned to their
 job UUID; edited payloads cannot repurpose a saved generation run.
 
+### Bounded conversational Story revisions (#84)
+
+After a completed, verified Thread run, chat follow-ups may request a revision
+of a **specific existing** Character, Event or Milestone. Studio resolves the
+request using canonical typed record IDs/titles and the pinned native validator.
+A focused Character or Event revision authorizes only that existing record's
+path. Milestone requests derive downstream Events from typed fulfillment links
+and their authored prose from `authored-content.events`. This larger impact is
+shown in an adjustable preview where the author can **narrow** the proposed
+record set before explicit approval. Unrelated Story files, upstream Milestones,
+Creative Direction, supporting Characters and other context are **read-only**.
+Ambiguous references, missing fulfillment, incompatible depths and proposed
+protected retcons stop with an explanation; approval of scope never supplies
+independent protected-decision authorization.
+
+The approved scope records its exact source SHA, canonical IDs, paths, context,
+contract and digest with the immutable queued Thread message (Studio DB schema
+v22). At admission, the controller **revalidates** the source and recomputes the
+scope before allocating a new child worktree. The existing focused specialists
+independently enforce exact path changes and protected Git validation. Selected
+Event edits precede their linked authored prose; final review waits for all
+selected specialists. Each new job has fresh work-item receipts and budgets;
+completed unrelated Story work is not rerun or silently adopted. Legacy queued
+messages without a reviewed scope do not inherit the former full-Story writer.
+The native validator and a completed verified source run are prerequisites,
+not optional best-effort context. A second dependent prompt must wait until the
+previous instruction is finished and verified: future Git HEAD and its affected
+scope cannot be safely preauthorized against the old Story. Fixture tests do
+not constitute live Pi literary-quality certification.
+
 The credential-free Story prompt, Studio/agent fixture, owner-isolation and
 chat-ordering tests run through `pnpm --filter @noveltea/studio test`. The opt-in
 real Pi rootless sandbox smoke test (`NT_TEST_WEB_REAL_PI=1`) also exercises a

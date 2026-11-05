@@ -381,6 +381,14 @@ const appMigrations = [
       `ALTER TABLE checkpoint_forks ADD COLUMN edited_body TEXT`,
     ],
   },
+  {
+    version: 22,
+    statements: [
+      // Only a controller-verified, source-pinned revision scope permits a
+      // queued Thread message to become a new writer generation job.
+      `ALTER TABLE story_thread_messages ADD COLUMN revision_scope_json TEXT`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -437,7 +445,8 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   const hasForks = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_forks'`).get()
   const hasMessages = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='story_thread_messages'`).get()
   const hasRestarts = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_restarts'`).get()
-  if (!hasRestarts || !hasForks || !hasMessages || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  const messageColumns = store.sqlite.pragma('table_info(story_thread_messages)') as Array<{ name: string }>
+  if (!messageColumns.some(column => column.name === 'revision_scope_json') || !hasRestarts || !hasForks || !hasMessages || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

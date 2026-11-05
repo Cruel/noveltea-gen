@@ -352,7 +352,11 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           clean(job);
           const next = await reconcile(s, job);
           const head = await trustedHead(job);
-          const scheduled = await scheduleIdeasAtBoundary(job, "parent-generation");
+          // An independently approved focused revision grants only its listed
+          // existing files. Do not dispatch unrelated deferred idea integrations
+          // merely because their work is pending at this Story boundary.
+          const scheduled = isFocusedScope(next.request?.contract ?? s.request.contract)
+            ? { tasks: [] } : await scheduleIdeasAtBoundary(job, "parent-generation");
           const selected = selectIdeaTask({ ...s, ...next } as State, head, scheduled.tasks,
             next.active ?? null);
           return { ...next, ideaTask: selected, escalation: null };

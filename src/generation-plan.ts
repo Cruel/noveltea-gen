@@ -61,7 +61,19 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
       // Existing-record revisions are not Milestone-wide realization requests.
       // The first target owns explicitly listed supporting-record edits; all
       // other targets remain independent work units.
-      for (const target of plan.contract.scope.targets) add("focus", ["architecture"], target);
+      const selected = new Set(plan.contract.scope.targets);
+      const records = (validation?.report as { records?: Array<{ metadata?: {
+        id?: string; type?: string; events?: string[] } }> } | undefined)?.records ?? [];
+      for (const target of plan.contract.scope.targets) {
+        const metadata = records.find(record => record.metadata?.id === target)?.metadata;
+        // Writing dependent prose before a selected Event can strand its
+        // dialogue against an obsolete scene. Only trusted typed links create
+        // these prerequisites; unselected context stays read-only.
+        const parents = metadata?.type === "authored-content" && Array.isArray(metadata.events)
+          ? metadata.events.filter(id => selected.has(id) && id.startsWith("event."))
+          : [];
+        add("focus", ["architecture", ...parents.map(id => "focus:" + id)], target);
+      }
       add("review", plan.contract.scope.targets.map(target => "focus:" + target));
     } else if (plan.contract.scope.depth !== "architecture") {
       add("foundations", ["architecture"]);
