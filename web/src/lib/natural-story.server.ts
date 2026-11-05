@@ -12,6 +12,7 @@ import { generationJobRequest, verifyWebExecution } from './fixture-jobs.server'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const SHA = /^[a-f0-9]{40}$/i
+const CONVERSATION_ID = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|legacy:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i
 type Limits = { steps?: number; modelCalls?: number; costUsd?: number }
 export type NaturalStoryInput = {
   conversationId: string
@@ -29,7 +30,7 @@ type SelectedConversation = {
   headSha: string | null
 }
 function selectedConversation(store: StudioDatabase, owner: string, conversationId: string): SelectedConversation {
-  if (!UUID.test(conversationId)) throw new Error('Invalid Conversation ID.')
+  if (!CONVERSATION_ID.test(conversationId)) throw new Error('Invalid Conversation ID.')
   const row = store.sqlite.prepare(`SELECT c.id,c.story_id AS storyId,
     s.source_commit_sha AS headSha,r.provider
     FROM story_conversations c JOIN stories s ON s.id=c.story_id

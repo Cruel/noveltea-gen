@@ -9,7 +9,7 @@ import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
-import { acquireCachedStory } from '../src/lib/git-cache.server'
+import { acquireCachedStory, continueCachedStory } from '../src/lib/git-cache.server'
 import { checkpointForkRequest } from '../src/lib/checkpoint-fork.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
 import { generationConfigurationRequest } from '../src/lib/generation-config.server'
@@ -21,6 +21,7 @@ import { sendAuthorUpdate } from '../../src/author-updates'
 import { previewThreadMessageEdit, branchEditedThreadMessage, syncAppliedAuthorMessages } from '../src/lib/thread-message-edit.server'
 import { startStoryJob } from '../../src/job'
 import { readRecoveryFork } from '../../src/recovery-fork-state'
+import { specialistAuthorInstruction } from '../../src/specialist-author-instruction'
 import { validateStoryJob } from '../../src/validator'
 
 const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../noveltea-skills')
@@ -348,6 +349,13 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.ok(character, 'the child publishes its own eligible character checkpoint')
       assert.equal(character.parentSha, world.commitSha)
       assert.equal(character.commitSha, advancedChild.headSha)
+      const characterReceipt = JSON.parse(readFileSync(join(child.stateDir, 'character-world.json'), 'utf8'))
+      assert.equal(characterReceipt.units[1].assignment.authorTask, childRequest.task,
+        'the actual Character assignment must carry the edited branch instruction')
+      assert.match(specialistAuthorInstruction(characterReceipt.units[1].assignment.authorTask),
+        /Focus on the witness and avoid new Character IDs/)
+      assert.match(specialistAuthorInstruction(characterReceipt.units[1].assignment.authorTask),
+        /not additional write authority/)
       assert.ok(character.completedWorkItems.includes('character-foundations'))
       assert.equal(character.validation.validatorSha256, child.validatorSha256,
         'a resumed child specialist must use the child’s independently pinned current validator')
@@ -535,6 +543,93 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.deepEqual(readFileSync(join(parent.stateDir, 'web-generation.sqlite')), before.database)
       assert.equal(readFileSync(join(parent.stateDir, '.story-job-running', 'owner.json'), 'utf8'), 'live parent lock evidence')
       assert.equal(readFileSync(join(parent.stateDir, 'pi-budget.json'), 'utf8'), 'parent budget evidence')
+
+      // #82/#84 regression: a corrected *sequential follow-up* is NOT the
+      // previous full/partial Story plan with already-verified stages. The
+      // preceding verified HEAD supplies content only; the edited instruction
+      // must receive a fresh focused execution contract and empty receipts.
+      const sourceGraph = openWebGenerationGraph(join(child.stateDir, 'web-generation.sqlite'))
+      try {
+        await sourceGraph.graph.updateState(childCfg, { status: 'completed', reason: null }, 'completion_decision')
+      } finally { sourceGraph.saver.db.close() }
+      store.sqlite.prepare("UPDATE studio_sessions SET status='completed' WHERE id=?").run(childId)
+      store.sqlite.prepare("UPDATE generation_run_queue SET phase='finished' WHERE job_id=?").run(childId)
+      assert.equal((await inspectRegisteredJob(store, selectedJob(store, user.id, childId), user.id)).status,
+        'completed', 'source must have a verified, settled run before follow-up scope inference')
+      const priorId = randomUUID()
+      const prior = await continueCachedStory(advancedChild, priorId, character.commitSha)
+      const previousInstruction = 'Make character.ada more confrontational'
+      const priorRequest = { story: prior.storyRoot, job: prior.jobId, task: previousInstruction,
+        contract: childRequest.contract, fixture: true, skillsSource: skills }
+      store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,
+        source_commit_sha,status,created_at,updated_at,generation_request_json,generation_thread_id)
+        VALUES (?,?,?,'Previous follow-up',?,'completed','now','now',?,?)`)
+        .run(priorId, user.id, selectedJob(store, user.id, childId).storyId,
+          character.commitSha, JSON.stringify(priorRequest),
+          prior.threadId + ':generation:web')
+      store.sqlite.prepare(`INSERT INTO story_thread_runs(job_id,owner_user_id,thread_id,run_order)
+        VALUES (?,?,?,1)`).run(priorId, user.id, 'fork:' + childId)
+      const originalEditMessage = randomUUID()
+      const nextSeq = (store.sqlite.prepare(`SELECT COALESCE(MAX(sequence),-1)+1 AS n
+        FROM story_thread_messages WHERE thread_id=?`).get('fork:' + childId) as { n: number }).n
+      store.sqlite.prepare(`INSERT INTO story_thread_messages(id,owner_user_id,thread_id,sequence,
+        role,status,body,phase,job_id,source_job_id,created_at)
+        VALUES (?,?,?,?,'user','delivered',?,'finished',?,?,'now')`)
+        .run(originalEditMessage, user.id, 'fork:' + childId, nextSeq,
+          previousInstruction, priorId, childId)
+      const better = 'Make character.ada less confrontational'
+      const focusedPreview = await previewThreadMessageEdit(store, user.id, 'fork:' + childId,
+        originalEditMessage, better)
+      assert.equal(focusedPreview.checkpoint?.commitSha, character.commitSha)
+      assert.deepEqual(focusedPreview.revision?.targets, ['character.ada'])
+      assert.equal(focusedPreview.revision?.reviewRequired, false)
+      const focusedChildId = randomUUID()
+      const focusedBranch = await branchEditedThreadMessage(store, user.id, {
+        threadId: 'fork:' + childId, messageId: originalEditMessage, edited: better,
+        childId: focusedChildId, commitSha: character.commitSha,
+        proofDigest: character.proofDigest,
+      })
+      assert.equal(focusedBranch.id, focusedChildId)
+      const focusedJob = await authorizedStoryJob(store, user.id, focusedChildId)
+      assert.equal(focusedJob.baseSha, character.commitSha)
+      assert.equal(readRecoveryFork(focusedJob), null, 'no prior plan/completed stages can be inherited')
+      assert.equal(existsSync(join(focusedJob.stateDir, 'character-world.json')), false)
+      assert.equal(existsSync(join(focusedJob.stateDir, 'architecture.json')), false)
+      const focusedConfig = JSON.parse(selectedJob(store, user.id, focusedChildId).configJson!)
+      assert.deepEqual(focusedConfig.contract.scope.targets, ['character.ada'])
+      assert.equal(focusedConfig.contract.scope.kind, 'partial')
+      assert.equal(focusedConfig.task, better)
+      const forbiddenExpansion = await generationConfigurationRequest(auth, store,
+        new Request(config.baseURL + '/jobs/' + focusedChildId + '/configuration', {
+          method: 'PUT', headers: { origin: config.baseURL, cookie,
+            'content-type': 'application/json' },
+          body: JSON.stringify({ ...focusedConfig, contract: childRequest.contract }),
+        }), focusedChildId, config.baseURL)
+      assert.equal(forbiddenExpansion.status, 409,
+        'an edited follow-up must not use pre-run settings to reauthorize the previous broad scope')
+      const focusedStart = await generationJobRequest(auth, store,
+        new Request(config.baseURL + '/jobs/' + focusedChildId, {
+          method: 'POST', headers: { origin: config.baseURL, cookie,
+            'content-type': 'application/json' },
+          body: JSON.stringify({ task: better, contract: focusedConfig.contract }),
+        }), focusedChildId, config.baseURL)
+      assert.equal(focusedStart.status, 202, JSON.stringify(await focusedStart.clone().json()))
+      const focusedRequest = JSON.parse(selectedJob(store, user.id, focusedChildId).requestJson!)
+      const focusedRuntime = openWebGenerationGraph(join(focusedJob.stateDir, 'web-generation.sqlite'))
+      try {
+        const cfg = { configurable: { thread_id: focusedJob.threadId + ':generation:web' },
+          recursionLimit: 1000 }
+        await focusedRuntime.graph.updateState(cfg, { request: focusedRequest, pauseAfter: 'focus' })
+        const result = await focusedRuntime.graph.invoke(null, cfg)
+        assert.equal(result.status, 'paused', result.reason ?? '')
+        assert.ok(result.completedStages.some((stage: { stage: string; milestone?: string }) =>
+          stage.stage === 'focus' && stage.milestone === 'character.ada'))
+      } finally { focusedRuntime.saver.db.close() }
+      assert.deepEqual(git(focusedJob.worktreeRoot, 'diff', '--name-only',
+        character.commitSha + '..HEAD').split('\n'), ['story/characters/ada.md'],
+        'only the independently authorized Character is rewritten')
+      assert.equal(readRecoveryFork(focusedJob), null)
+      assert.deepEqual(parentMessages(), editSourceMessages)
     } finally {
       store.sqlite.close()
       for (const key of keys) if (old[key] === undefined) delete process.env[key]; else process.env[key] = old[key]

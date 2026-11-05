@@ -1679,10 +1679,23 @@ selected specialists. Each new job has fresh work-item receipts and budgets;
 completed unrelated Story work is not rerun or silently adopted. Legacy queued
 messages without a reviewed scope do not inherit the former full-Story writer.
 The native validator and a completed verified source run are prerequisites,
-not optional best-effort context. A second dependent prompt must wait until the
-previous instruction is finished and verified: future Git HEAD and its affected
-scope cannot be safely preauthorized against the old Story. Fixture tests do
-not constitute live Pi literary-quality certification.
+not optional best-effort context. Multiple rapid Thread messages are immediately
+persisted in order, even while an earlier run is executing; however, their
+individual **write scopes are not preauthorized** against a future Git HEAD.
+After the preceding run completes with verified evidence, the next request is
+interpreted and either safely admitted or held in the queue for scope review.
+Later requests never overtake an unreviewed or interrupted predecessor.
+
+Corrective checkpoint-branch guidance is bound into each applicable specialist's
+actual Pi assignment/prompt without granting broader file or protected-decision
+authority. Editing an already delivered **sequential follow-up** creates a
+fresh focused generation job at the previous verified checkpoint, with its own
+completion contract, budget, receipts and write guards rather than inheriting
+the preceding run's completed stages. Any material scope expansion requires an
+exact author-approved plan digest; older/non-finalized checkpoints do not
+constitute authority. Editing an earlier message inside an in-flight run still
+uses the original proven checkpoint and remaining stages. Fixture tests do not
+constitute live Pi literary-quality certification.
 
 The credential-free Story prompt, Studio/agent fixture, owner-isolation and
 chat-ordering tests run through `pnpm --filter @noveltea/studio test`. The opt-in

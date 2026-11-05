@@ -63,7 +63,7 @@ interface ChoiceEvidence {
 interface PuzzleEvidence { id: string; solutions: Array<{ event: string; status: Status; clueAccess: Status; clueIds: string[] }> }
 export interface InteractiveOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
-  skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; thinking?: "low" | "medium" | "high";
+  skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; task?: string; thinking?: "low" | "medium" | "high";
 }
 const validMilestone = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -807,7 +807,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Interactive writer requires a clean Story boundary.");
       }
       const baseline = reportOf(await validate(before), before);
-      const assign = selectAssignment(architecture.plan!, baseline, state.milestoneId);
+      const assign = { ...selectAssignment(architecture.plan!, baseline, state.milestoneId),
+        ...(input.task ? { authorTask: input.task } : {}) };
       if (unit.phase === "pending") {
         await preflightPiAssignment(job, "interactive:" + assign.workItemId + ":" + unit.domain,
           state.worker === "pi" ? { provider: state.provider, model: state.model, thinking: state.thinking } : undefined);

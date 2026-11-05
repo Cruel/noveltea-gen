@@ -22,11 +22,12 @@ export function ThreadChat({ threadId }: { threadId: string }) {
   const [sendError, setSendError] = useState<string | null>(null)
   const [pendingRetry, setPendingRetry] = useState<{ id: string; content: string } | null>(null)
   const [review, setReview] = useState<RevisionPreview | null>(null)
+  const [reviewQueued, setReviewQueued] = useState<{ id: string; content: string } | null>(null)
   const [selectedTargets, setSelectedTargets] = useState<string[] | undefined>()
   const [proposedTargets, setProposedTargets] = useState<string[]>([])
   const submit = async (plan: RevisionPreview, approve = false) => {
-    const content = message.trim()
-    const id = pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID()
+    const content = reviewQueued?.content ?? message.trim()
+    const id = reviewQueued?.id ?? (pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID())
     setPendingRetry({ id, content })
     const result = await postThreadMessage({ data: { threadId, id, content,
       ...(selectedTargets ? { selectedTargets } : {}),
@@ -34,6 +35,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     client.setQueryData(key, result.chat)
     setPendingRetry(null)
     setReview(null)
+    setReviewQueued(null)
     setSelectedTargets(undefined)
     setMessage('')
   }
@@ -42,6 +44,19 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     setSending(true)
     setSendError(null)
     try {
+      const busy = data?.messages.some(m => m.role === 'user' &&
+        ['queued', 'preparing', 'running', 'blocked'].includes(m.phase)) ||
+        latest?.status !== 'completed' || latest.queuePhase !== 'finished'
+      if (busy) {
+        const content = message.trim()
+        const id = pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID()
+        setPendingRetry({ id, content })
+        const result = await postThreadMessage({ data: { threadId, id, content } })
+        client.setQueryData(key, result.chat)
+        setPendingRetry(null)
+        setMessage('')
+        return
+      }
       const plan = await getThreadRevisionPreview({ data: { threadId, content: message.trim() } })
       if (plan.reviewRequired || plan.clarification) {
         setReview(plan)
@@ -58,11 +73,27 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     setSendError(null)
     try {
       const plan = await getThreadRevisionPreview({ data: {
-        threadId, content: message.trim(), selectedTargets: targets } })
+        threadId, content: reviewQueued?.content ?? message.trim(), selectedTargets: targets,
+        ...(reviewQueued ? { messageId: reviewQueued.id } : {}) } })
       setSelectedTargets(targets)
       setReview(plan)
     } catch (cause) {
       setSendError(cause instanceof Error ? cause.message : 'Cannot narrow this Story scope.')
+    } finally { setSending(false) }
+  }
+  const reviewQueuedMessage = async (item: { id: string; content: string }) => {
+    if (sending) return
+    setSending(true)
+    setSendError(null)
+    try {
+      const plan = await getThreadRevisionPreview({ data: {
+        threadId, content: item.content, messageId: item.id } })
+      setReviewQueued(item)
+      setReview(plan)
+      setSelectedTargets(undefined)
+      setProposedTargets(plan.targets)
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : 'Queued scope cannot yet be reviewed.')
     } finally { setSending(false) }
   }
   const approve = async () => {
@@ -96,6 +127,11 @@ export function ThreadChat({ threadId }: { threadId: string }) {
             <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
         <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
+        {item.role === 'user' && item.phase === 'queued' && !item.hasRevisionScope &&
+          latest?.status === 'completed' && latest.queuePhase === 'finished' &&
+          item.id === data?.messages.find(m => m.role === 'user' && m.phase === 'queued')?.id &&
+          <Button type="button" size="sm" variant="outline" className="mt-2" disabled={sending}
+            onClick={() => void reviewQueuedMessage(item)}>Review queued scope</Button>}
         {data && item.role === 'user' && item.status === 'delivered' &&
           item.phase === 'finished' && !data.archived &&
           <ThreadMessageEdit key={item.id} threadId={threadId} storyId={data.storyId}
@@ -147,14 +183,14 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         <Button type="button" size="sm" disabled={sending || !!review.clarification || !review.targets.length}
           onClick={() => void approve()}>Approve scoped revision</Button>
         <Button type="button" size="sm" variant="outline" disabled={sending}
-          onClick={() => { setReview(null); setSelectedTargets(undefined) }}>Edit request</Button>
+          onClick={() => { setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }}>Edit request</Button>
       </div>
     </section>}
     {sendError && <p role="alert" className="text-sm text-destructive">{sendError}</p>}
     {data?.archived && <p className="text-xs text-muted-foreground">Restore this Thread to send a message.</p>}
     <form onSubmit={event => { event.preventDefault(); void send() }} className="flex min-w-0 items-end gap-2">
       <textarea aria-label="Follow-up message" rows={2} maxLength={4000} value={message}
-        onChange={event => { setMessage(event.target.value); setPendingRetry(null); setReview(null); setSelectedTargets(undefined) }} disabled={sending || data?.archived}
+        onChange={event => { setMessage(event.target.value); setPendingRetry(null); setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }} disabled={sending || data?.archived}
         placeholder="Describe a revision to an existing Character, Event, or Milestone…"
         className="min-w-0 flex-1 resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm" />
       <Button type="submit" size="sm" disabled={sending || !message.trim() || !data || data.archived}>

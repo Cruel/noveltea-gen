@@ -15,6 +15,7 @@ import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
+import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export type FoundationDomain = "world" | "character";
 export interface FoundationAssignment {
@@ -23,6 +24,7 @@ export interface FoundationAssignment {
   milestoneIds: string[];
   sourcePaths: string[];
   scope: CompletionContract;
+  authorTask?: string;
   decisionAuthority: {
     existingAuthorChoices: "protected-no-retcon";
     newSpecialistChoices: "agent-delegated";
@@ -123,6 +125,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
         "Do not run git add, commit, reset or checkout. Inspections with grep/rg/git diff/status are permitted. ") +
       selected.guidance + "\nAUTHORIZED WRITABLE PATHS: " + selected.owns.join(", ") +
       "\nBOUND ASSIGNMENT: " + JSON.stringify(assignment, null, 2) +
+      specialistAuthorInstruction(assignment.authorTask) +
       "\nWhen canonical authority does not resolve a consequential creative ambiguity and 2–4 genuinely viable solutions remain, ASK THE AUTHOR before deciding. Do not ask about routine validation mistakes, duplicate IDs, syntax, or missing references: repair those autonomously. " +
       "To request a decision, end with ONE SINGLE-LINE JSON object with authorDecisionRequest containing question, options (2–4 objects each with id/title/approach/benefits/tradeoffs), recommendedId (one of the option IDs) and recommendationReason, plus modifiedRecords listing all already modified files or []. The author may also give a custom answer. Do not modify protected decisions. " +
       "\nAt the END of a completed task, provide a JSON object on its own line with the exact Story-relative paths you changed: " +

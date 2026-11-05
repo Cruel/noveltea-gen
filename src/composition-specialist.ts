@@ -13,10 +13,12 @@ import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import { completedContextReads } from "./story-context.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
+import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export interface CompositionAssignment {
   milestoneId: string;
   workItemId: string;
+  authorTask?: string;
   authorContract: unknown;
   sourcePaths: string[];
   mandatoryReads: string[];
@@ -183,7 +185,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "Finally output ONE unfenced JSON object with the cumulative paths and precise obligations: " +
       '{"modifiedRecords":["authored-content/example.md"],"architecturalConflicts":[],"laterObligations":[]}. ' +
       "Graph will independently verify sources, actual Markdown, coverage and editorial review.\nASSIGNMENT:\n" +
-      JSON.stringify(assignment, null, 2);
+      JSON.stringify(assignment, null, 2) + specialistAuthorInstruction(assignment.authorTask);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);

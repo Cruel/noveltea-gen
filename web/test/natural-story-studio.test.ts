@@ -69,6 +69,11 @@ test('natural prompt preview and initial Thread registration are owner scoped an
       (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
       VALUES (?,?,?,'Story',?,'paused','now','now')`).run(jobId, alice, storyId, headSha)
     ensureRootThreads(db, alice, storyId)
+    // Existing-job Conversations retain their legacy:UUID identity. The
+    // composer must accept one of these while keeping the owner check.
+    const legacyPreview = await previewNaturalStory(db, alice, 'legacy:' + jobId, brief)
+    assert.equal(legacyPreview.storyId, storyId)
+    await assert.rejects(() => previewNaturalStory(db, bob, 'legacy:' + jobId, brief), /not found/)
     assert.equal(associateNaturalThread(db, alice, chosen.id, jobId, brief), 'root:' + jobId)
     assert.equal(associateNaturalThread(db, alice, chosen.id, jobId, brief), 'root:' + jobId)
     assert.throws(() => associateNaturalThread(db, bob, chosen.id, jobId, brief), /not found/)

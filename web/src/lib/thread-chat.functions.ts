@@ -29,38 +29,46 @@ export const getThreadChat = createServerFn({ method: 'GET' })
   })
 
 export const getThreadEditPreview = createServerFn({ method: 'GET' })
-  .validator((data: { threadId: string; messageId: string; edited: string }) => {
+  .validator((data: { threadId: string; messageId: string; edited: string; selectedTargets?: string[] }) => {
     if (!data || !ID.test(data.threadId) || !ID.test(data.messageId) ||
-        typeof data.edited !== 'string' || data.edited.length > 4000)
+        typeof data.edited !== 'string' || data.edited.length > 4000 ||
+        data.selectedTargets !== undefined && (!Array.isArray(data.selectedTargets) ||
+          data.selectedTargets.length > 128 || data.selectedTargets.some(id => typeof id !== 'string')))
       throw new Error('Invalid edited message.')
     return data
   })
   .handler(async ({ data }) =>
-    previewThreadMessageEdit(database, await owner(), data.threadId, data.messageId, data.edited))
+    previewThreadMessageEdit(database, await owner(), data.threadId, data.messageId, data.edited,
+      data.selectedTargets))
 
 export const postThreadEditFork = createServerFn({ method: 'POST' })
   .validator((data: {
     threadId: string; messageId: string; edited: string; childId: string;
-    commitSha: string; proofDigest: string
+    commitSha: string; proofDigest: string; selectedTargets?: string[]; approvalDigest?: string
   }) => {
     if (!data || !ID.test(data.threadId) || !ID.test(data.messageId) ||
         typeof data.edited !== 'string' || data.edited.length > 4000 ||
         typeof data.childId !== 'string' || typeof data.commitSha !== 'string' ||
-        typeof data.proofDigest !== 'string') throw new Error('Invalid message edit branch.')
+        typeof data.proofDigest !== 'string' ||
+        data.approvalDigest !== undefined && !/^[a-f0-9]{64}$/.test(data.approvalDigest) ||
+        data.selectedTargets !== undefined && (!Array.isArray(data.selectedTargets) ||
+          data.selectedTargets.length > 128 || data.selectedTargets.some(id => typeof id !== 'string')))
+      throw new Error('Invalid message edit branch.')
     return data
   })
   .handler(async ({ data }) => branchEditedThreadMessage(database, await owner(), data))
 
 export const getThreadRevisionPreview = createServerFn({ method: 'POST' })
-  .validator((data: { threadId: string; content: string; selectedTargets?: string[] }) => {
+  .validator((data: { threadId: string; content: string; selectedTargets?: string[]; messageId?: string }) => {
     if (!data || !ID.test(data.threadId) || typeof data.content !== 'string' || data.content.length > 4000 ||
+        data.messageId !== undefined && !ID.test(data.messageId) ||
         data.selectedTargets !== undefined && (!Array.isArray(data.selectedTargets) ||
           data.selectedTargets.length > 128 || data.selectedTargets.some(id => typeof id !== 'string')))
       throw new Error('Invalid revision preview request.')
     return data
   })
   .handler(async ({ data }) => previewThreadRevision(database, await owner(),
-    data.threadId, data.content, data.selectedTargets))
+    data.threadId, data.content, data.selectedTargets, data.messageId))
 
 export const postThreadMessage = createServerFn({ method: 'POST' })
   .validator((data: { threadId: string; id: string; content: string;

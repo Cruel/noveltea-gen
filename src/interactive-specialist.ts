@@ -12,10 +12,12 @@ import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
+import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
 export interface InteractiveAssignment {
   workItemId: string;
+  authorTask?: string;
   milestoneId: string;
   arcIds: string[];
   characterIds: string[];
@@ -134,7 +136,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       "At the end output ONE unfenced JSON object with the exact cumulative Story-relative file inventory: " +
       '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":["Review branch-specific prose before composition"]}. ' +
       "Call story_validate with no arguments after authoring, inspect Puzzle/Choice route coverage and protection, repair and revalidate before reporting. The graph independently checks all bytes, protection and progression.\nASSIGNMENT:\n" +
-      JSON.stringify(assignment, null, 2);
+      JSON.stringify(assignment, null, 2) + specialistAuthorInstruction(assignment.authorTask);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);

@@ -55,7 +55,7 @@ interface FoundationsReceipt {
 export interface EventOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean;
-  provider?: string; model?: string;
+  provider?: string; model?: string; task?: string;
 }
 const idPattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -467,7 +467,8 @@ export async function runEventWorkItem(input: EventOptions) {
         assertHead(job, receipt.expectedHead);
         if (dirty(job).length) throw new Error("Event specialist requires a clean work-item boundary.");
         const prior = reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
-        const assign = selectedAssignment(job, arch.plan!, prior, receipt.milestoneId, receipt.workItemId);
+        const assign = { ...selectedAssignment(job, arch.plan!, prior, receipt.milestoneId, receipt.workItemId),
+          ...(input.task ? { authorTask: input.task } : {}) };
         await preflightPiAssignment(job, "event:" + receipt.workItemId, receipt.worker === "pi"
           ? { provider: receipt.provider, model: receipt.model } : undefined);
         receipt.phase = "writing";

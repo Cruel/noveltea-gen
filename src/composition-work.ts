@@ -60,7 +60,7 @@ interface Receipt {
 export interface CompositionOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean;
-  provider?: string; model?: string; thinking?: "low" | "high";
+  provider?: string; model?: string; task?: string; thinking?: "low" | "high";
 }
 const milestonePattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
@@ -560,7 +560,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
           throw new Error("Composition writer requires clean Story boundary.");
       }
       const baseline = verified(await validate(base), base);
-      const assign = selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone);
+      const assign = { ...selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone),
+        ...(input.task ? { authorTask: input.task } : {}) };
       if (s.phase === "pending") {
         await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"
           ? { provider: s.provider, model: s.model, thinking: s.thinking } : undefined);

@@ -16,20 +16,27 @@ export function ThreadMessageEdit({ threadId, storyId, messageId, original, orig
   const [open, setOpen] = useState(false)
   const [edited, setEdited] = useState(original)
   const [preview, setPreview] = useState<Preview | null>(null)
+  const [selectedTargets, setSelectedTargets] = useState<string[] | undefined>(undefined)
+  const [candidateTargets, setCandidateTargets] = useState<string[]>([])
   const [childId, setChildId] = useState(() => crypto.randomUUID())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const revise = (text: string) => {
     setEdited(text)
     setPreview(null)
+    setSelectedTargets(undefined)
     setError(null)
     setChildId(crypto.randomUUID())
   }
-  const inspect = async () => {
+  const inspect = async (targets?: string[]) => {
     setBusy(true)
     setError(null)
     try {
-      setPreview(await getThreadEditPreview({ data: { threadId, messageId, edited } }))
+      const next = await getThreadEditPreview({ data: {
+        threadId, messageId, edited, ...(targets ? { selectedTargets: targets } : {}) } })
+      setPreview(next)
+      setSelectedTargets(targets)
+      if (!targets) setCandidateTargets(next.revision?.targets ?? [])
     } catch (cause) {
       setPreview(null)
       setError(cause instanceof Error ? cause.message : 'Unable to verify a causal checkpoint.')
@@ -43,6 +50,8 @@ export function ThreadMessageEdit({ threadId, storyId, messageId, original, orig
       const child = await postThreadEditFork({ data: {
         threadId, messageId, edited: preview.proposed, childId,
         commitSha: preview.checkpoint.commitSha, proofDigest: preview.checkpoint.proofDigest,
+        ...(selectedTargets ? { selectedTargets } : {}),
+        ...(preview.revision?.reviewRequired ? { approvalDigest: preview.revision.digest } : {}),
       } })
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: storyNavigationKey(storyId) }),
@@ -79,10 +88,28 @@ export function ThreadMessageEdit({ threadId, storyId, messageId, original, orig
           <p>Pre-application checkpoint: <code className="break-all">{preview.checkpoint.commitSha}</code></p>
           <p>Finalized work: {preview.checkpoint.workItem}.
             Later parent messages and commits are not copied into the child.</p>
+          {preview.revision ? <div className="space-y-1">
+            <p className="font-semibold">New independently executable revision scope</p>
+            <p>{preview.revision.clarification ??
+              'The edited follow-up gets a fresh execution plan, not the previous completed full-Story work.'}</p>
+            {candidateTargets.map(target => <label key={target} className="flex items-center gap-2">
+              <input type="checkbox" checked={(selectedTargets ?? candidateTargets).includes(target)}
+                disabled={busy} onChange={event => {
+                  const targets = event.target.checked
+                    ? [...(selectedTargets ?? candidateTargets), target]
+                    : (selectedTargets ?? candidateTargets).filter(id => id !== target)
+                  if (targets.length) void inspect(targets)
+                }} />{target}
+            </label>)}
+            <p>Writable files: {preview.revision.writePaths.join(', ')}</p>
+            <p>Other context remains read-only. Protected choices require separate authorization.</p>
+          </div> : null}
           <p>Child starts at this verified checkpoint with its own prepared run and fresh budget.
             Review its settings before selecting Run; the parent stays unchanged.</p>
-          <Button type="button" size="sm" disabled={busy} onClick={() => void fork()}>
-            {busy ? 'Preparing child…' : 'Create edited child Thread'}
+          <Button type="button" size="sm" disabled={busy || !!preview.revision?.clarification}
+            onClick={() => void fork()}>
+            {busy ? 'Preparing child…' : preview.revision?.reviewRequired
+              ? 'Approve scoped edit and create Thread' : 'Create edited child Thread'}
           </Button>
         </> : <div role="status" className="space-y-1 text-muted-foreground">
           <p>{preview.limitation}</p>

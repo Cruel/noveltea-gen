@@ -29,17 +29,21 @@ export function assertPinnedRevision(scope: PinnedRevision, refreshed: RevisionP
       JSON.stringify(refreshed.contract) !== JSON.stringify(scope.contract))
     throw new ThreadChatError(409, 'Story impact or protected scope changed since approval; no continuation was started.')
 }
-function assertReadyForRevision(store: StudioDatabase, owner: string, threadId: string) {
-  // A second dependent scope cannot be derived against a future, unverified
-  // HEAD while a previous instruction is still queued or executing.
-  // Reject before author approval rather than accepting an inevitably stale
-  // grant that would permanently block the ordered Thread after settlement.
-  if (store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
+function pendingInstruction(store: StudioDatabase, owner: string, threadId: string) {
+  return store.sqlite.prepare(`SELECT id,body AS content,phase FROM story_thread_messages
     WHERE owner_user_id=? AND thread_id=? AND role='user'
-      AND phase IN ('queued','preparing','running','blocked') LIMIT 1`).get(owner, threadId))
-    throw new ThreadChatError(409, 'Finish or reconcile the previous Thread instruction before reviewing another revision scope.')
+      AND phase IN ('queued','preparing','running','blocked')
+    ORDER BY sequence LIMIT 1`).get(owner, threadId) as
+    { id: string; content: string; phase: string } | undefined
 }
-function latestRun(store: StudioDatabase, owner: string, threadId: string): Source {
+function assertHeadOfQueue(store: StudioDatabase, owner: string, threadId: string,
+  messageId?: string) {
+  const pending = pendingInstruction(store, owner, threadId)
+  if (pending && (pending.phase !== 'queued' || pending.id !== messageId))
+    throw new ThreadChatError(409, 'Wait for the preceding Thread instruction to reach a verified boundary.')
+  return pending
+}
+function latestRunStatus(store: StudioDatabase, owner: string, threadId: string): Source {
   const row = store.sqlite.prepare(`SELECT r.job_id AS jobId,j.status,q.phase AS queuePhase
     FROM story_thread_runs r
     JOIN studio_sessions j ON j.id=r.job_id AND j.owner_user_id=r.owner_user_id
@@ -47,6 +51,10 @@ function latestRun(store: StudioDatabase, owner: string, threadId: string): Sour
     JOIN story_threads t ON t.id=r.thread_id AND t.owner_user_id=r.owner_user_id
     WHERE r.thread_id=? AND r.owner_user_id=? ORDER BY r.run_order DESC LIMIT 1`).get(threadId, owner) as Source | undefined
   if (!row) throw new ThreadChatError(404, 'Thread has no source generation run.')
+  return row
+}
+function latestRun(store: StudioDatabase, owner: string, threadId: string): Source {
+  const row = latestRunStatus(store, owner, threadId)
   if (row.status !== 'completed' || row.queuePhase !== 'finished')
     throw new ThreadChatError(409, 'Finish or reconcile the current Thread run before proposing a revision.')
   return row
@@ -81,8 +89,10 @@ export async function revisionFromSource(store: StudioDatabase, owner: string,
   return inferStoryRevision(prompt, report.records, headSha, pinned.contract, selectedTargets)
 }
 export async function previewThreadRevision(store: StudioDatabase, owner: string,
-  threadId: string, prompt: string, selectedTargets?: string[]) {
-  assertReadyForRevision(store, owner, threadId)
+  threadId: string, prompt: string, selectedTargets?: string[], messageId?: string) {
+  const pending = assertHeadOfQueue(store, owner, threadId, messageId)
+  if (pending && pending.content !== prompt.trim())
+    throw new ThreadChatError(409, 'Queued instruction changed; refresh the Thread before reviewing.')
   const run = latestRun(store, owner, threadId)
   return revisionFromSource(store, owner, run.jobId, prompt, selectedTargets)
 }
@@ -93,16 +103,26 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   const retry = store.sqlite.prepare(`SELECT id,owner_user_id AS owner,thread_id AS threadId,
     body,revision_scope_json AS scope FROM story_thread_messages WHERE id=?`).get(id) as
     { id: string; owner: string; threadId: string; body: string; scope: string | null } | undefined
-  if (retry) {
-    if (retry.owner !== owner || retry.threadId !== threadId || retry.body !== content.trim() || !retry.scope)
-      throw new ThreadChatError(409, 'Message UUID is already used for another instruction or scope.')
+  if (retry && (retry.owner !== owner || retry.threadId !== threadId || retry.body !== content.trim()))
+    throw new ThreadChatError(409, 'Message UUID is already used for another instruction.')
+  if (retry?.scope) {
     const pinned = JSON.parse(retry.scope) as PinnedRevision
     if (approvalDigest && approvalDigest !== pinned.digest ||
         selectedTargets && JSON.stringify([...selectedTargets].sort()) !== JSON.stringify(pinned.selectedTargets))
       throw new ThreadChatError(409, 'The retry differs from the saved approved revision scope.')
     return enqueueThreadMessage(store, owner, threadId, id, content)
   }
-  assertReadyForRevision(store, owner, threadId)
+  const pending = pendingInstruction(store, owner, threadId)
+  const live = latestRunStatus(store, owner, threadId)
+  // Rapid messages are recorded immediately, without inventing scope at a
+  // future HEAD. The first pending message is reviewed only after its source
+  // completes. Later queued messages cannot overtake it.
+  if ((!retry && (pending || live.status !== 'completed' || live.queuePhase !== 'finished')) ||
+      (retry && (pending?.id !== id || live.status !== 'completed' || live.queuePhase !== 'finished'))) {
+    if (approvalDigest || selectedTargets)
+      throw new ThreadChatError(409, 'A scoped approval cannot be applied before the preceding Story revision completes. Queue the instruction without an approval.')
+    return enqueueThreadMessage(store, owner, threadId, id, content)
+  }
   const source = latestRun(store, owner, threadId)
   const plan = await revisionFromSource(store, owner, source.jobId, content, selectedTargets)
   if (plan.clarification) throw new ThreadChatError(422, plan.clarification)
@@ -114,7 +134,7 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
     digest: plan.digest, selectedTargets: plan.targets, approved: !!approvalDigest,
     contract: plan.contract, writePaths: plan.writePaths, contextIds: plan.contextIds }
   return store.sqlite.transaction(() => {
-    assertReadyForRevision(store, owner, threadId)
+    assertHeadOfQueue(store, owner, threadId, retry ? id : undefined)
     const live = latestRun(store, owner, threadId)
     if (live.jobId !== source.jobId)
       throw new ThreadChatError(409, 'Thread source changed during scope review.')

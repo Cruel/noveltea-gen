@@ -7,6 +7,7 @@ import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
+import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
@@ -31,6 +32,7 @@ export interface EventAssignment {
   sourcePaths: string[];
   contract: CompletionContract;
   workItemId: string;
+  authorTask?: string;
   authority: { existingProtectedChoices: "no-retcon"; delegatedChoices: "draft"; signingRequiredForProtectedChanges: true };
 }
 export interface EventEvidence {
@@ -119,7 +121,8 @@ export async function authorEventCluster(
       '{"modifiedRecords":["events/example.md","milestones/example.md"],"architecturalConflicts":[],"laterObligations":["Future alternative requires Event design"]}. ' +
       "The modifiedRecords list MUST include every Story-relative file changed in this ENTIRE work item. " +
       "Call story_validate with no arguments after authoring, inspect diagnostic and reachability evidence, repair and revalidate before reporting. Your own claims are not sufficient evidence; the graph independently checks changes, protection and acceptance.\n" +
-      "AUTHORIZED ASSIGNMENT:\n" + JSON.stringify(assignment, null, 2);
+      "AUTHORIZED ASSIGNMENT:\n" + JSON.stringify(assignment, null, 2) +
+      specialistAuthorInstruction(assignment.authorTask);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);

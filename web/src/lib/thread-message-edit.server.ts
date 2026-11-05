@@ -6,7 +6,8 @@ import { inspectAuthorUpdates } from '../../../src/author-updates'
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from '../../../src/recovery-checkpoints'
 import { collectRecoveryFork } from '../../../src/recovery-fork'
 import { forkSourceSummary, type RecoveryForkBundle } from '../../../src/recovery-fork-state'
-import { forkCachedStory, GitCacheError } from './git-cache.server'
+import { forkCachedStory, continueCachedStory, GitCacheError } from './git-cache.server'
+import { revisionFromSource } from './story-revision.server'
 import { selectedJob, restoreJob, pinnedRequest } from './fixture-jobs.server'
 import { snapshotForkBoundaryHistory, recordForkBoundaryHistory, type ForkHistoryMessage } from './thread-fork-history.server'
 import type { GenerationDraft } from './generation-config.server'
@@ -158,12 +159,20 @@ export async function syncAppliedAuthorMessages(store: StudioDatabase, owner: st
   }
 }
 export async function previewThreadMessageEdit(store: StudioDatabase, owner: string, threadId: string,
-  messageId: string, edited: string) {
+  messageId: string, edited: string, selectedTargets?: string[]) {
   const message = messageRecord(store, owner, threadId, messageId)
   const proposed = textCheck(message.body, edited)
   const { sourceJob, sourceId, boundary } = await sourceOf(store, owner, message)
   const points = await inspectRecoveryCheckpoints(sourceJob)
   const point = selectCausalRecoveryPoint(sourceJob.worktreeRoot, points, boundary)
+  const original = resolveOriginal(store, owner, message)
+  const followup = !!original.sourceJobId && !original.origin?.startsWith('author-update:')
+  // A later instruction is NOT a continuation of the previous run's writing
+  // authorization. Only the already-verified source HEAD can be used to infer
+  // a fresh focused plan; never copy completed full-Story specialist receipts.
+  const eligible = !followup || point?.commitSha === sourceJob.headSha
+  const revision = followup && point && eligible
+    ? await revisionFromSource(store, owner, sourceId, proposed, selectedTargets) : null
   return {
     original: message.body, proposed, threadId, messageId,
     inheritedMessages: store.sqlite.prepare(`SELECT COUNT(*) AS n FROM story_thread_messages
@@ -171,10 +180,11 @@ export async function previewThreadMessageEdit(store: StudioDatabase, owner: str
       AND verified_commit_sha IS NOT NULL`).get(owner, threadId, message.sequence) as { n: number },
     sourceJobId: sourceId,
     appliedBeforeSha: boundary,
-    checkpoint: point ? { commitSha: point.commitSha, proofDigest: point.proofDigest,
+    revision,
+    checkpoint: point && eligible ? { commitSha: point.commitSha, proofDigest: point.proofDigest,
       workItem: point.workItem, completedWorkItems: point.completedWorkItems,
       nextWorkItem: point.nextWorkItem } : null,
-    limitation: point ? null : problem,
+    limitation: !eligible ? 'Editing this follow-up needs a finalized checkpoint at the previous run’s exact verified HEAD; older work cannot authorize a guessed revision scope.' : point ? null : problem,
   }
 }
 
@@ -182,11 +192,18 @@ export async function previewThreadMessageEdit(store: StudioDatabase, owner: str
  * Retries with the same child ID cannot change either the edit or source. */
 export async function branchEditedThreadMessage(store: StudioDatabase, owner: string,
   data: { threadId: string; messageId: string; edited: string; childId: string;
-    commitSha: string; proofDigest: string }) {
+    commitSha: string; proofDigest: string; selectedTargets?: string[]; approvalDigest?: string }) {
   if (!UUID.test(data.childId) || !SHA.test(data.commitSha) || !/^[a-f0-9]{64}$/.test(data.proofDigest))
     throw new ThreadEditError(400, 'Invalid branch identity or checkpoint proof.')
-  const preview = await previewThreadMessageEdit(store, owner, data.threadId, data.messageId, data.edited)
+  const preview = await previewThreadMessageEdit(store, owner, data.threadId, data.messageId,
+    data.edited, data.selectedTargets)
   const point = preview.checkpoint
+  const revision = preview.revision
+  if (revision?.clarification) throw new ThreadEditError(422, revision.clarification)
+  if (revision?.reviewRequired && data.approvalDigest !== revision.digest)
+    throw new ThreadEditError(409, 'Review the affected Story records and explicitly approve the exact revised write scope.')
+  if (data.approvalDigest && data.approvalDigest !== revision?.digest)
+    throw new ThreadEditError(409, 'Edit scope approval is stale or does not match this author instruction.')
   if (!point) throw new ThreadEditError(409, preview.limitation ?? problem)
   if (point.commitSha !== data.commitSha || point.proofDigest !== data.proofDigest)
     throw new ThreadEditError(409, 'Checkpoint application boundary changed; refresh the edit preview.')
@@ -209,18 +226,28 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
     edited_body AS editedBody,bundle_json AS bundle,draft_json AS draft,history_json AS history
     FROM checkpoint_forks WHERE child_id=?`).get(data.childId) as Intent | undefined
   let intent = readIntent()
+  const matchesMode = (saved: Intent) => {
+    try {
+      const bundle = JSON.parse(saved.bundle) as { mode?: string; digest?: string }
+      return revision ? bundle.mode === 'fresh-revision' && bundle.digest === revision.digest :
+        bundle.mode !== 'fresh-revision'
+    } catch { return false }
+  }
   const matches = (saved: Intent) => saved.owner === owner && saved.source === preview.sourceJobId &&
     saved.base === row.commitSha && saved.commitSha === point.commitSha &&
     saved.proofDigest === point.proofDigest && saved.sourceThreadId === data.threadId &&
-    saved.editedMessageId === data.messageId && saved.editedBody === preview.proposed
+    saved.editedMessageId === data.messageId && saved.editedBody === preview.proposed &&
+    matchesMode(saved)
   const existing = store.sqlite.prepare('SELECT owner_user_id FROM studio_sessions WHERE id=?')
     .get(data.childId)
   if (intent && !matches(intent) || existing && !intent)
     throw new ThreadEditError(409, 'Child identity is already reserved for a different operation.')
   if (!intent) {
-    const bundle = await collectRecoveryFork(source, data.childId, point.commitSha,
-      original.contract, original.skillsSource)
-    if (bundle.checkpoint.proofDigest !== point.proofDigest)
+    const bundle = revision ? { mode: 'fresh-revision' as const, digest: revision.digest,
+      sourceSha: revision.headSha, targets: revision.targets, paths: revision.writePaths } :
+      await collectRecoveryFork(source, data.childId, point.commitSha,
+        original.contract, original.skillsSource)
+    if (!revision && (bundle as RecoveryForkBundle).checkpoint.proofDigest !== point.proofDigest)
       throw new ThreadEditError(409, 'Finalized checkpoint proof changed.')
     const rowMessage = messageRecord(store, owner, data.threadId, data.messageId)
     const run = rowMessage.jobId ? store.sqlite.prepare(`SELECT run_order AS runOrder
@@ -230,7 +257,8 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
       original.task, row.createdAt, point.commitSha, rowMessage.sequence, run?.runOrder)
     const prior = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
     const draft: GenerationDraft = {
-      version: 1, headSha: point.commitSha, task: preview.proposed, contract: bundle.contract,
+      version: 1, headSha: point.commitSha, task: preview.proposed,
+      contract: revision?.contract ?? (bundle as RecoveryForkBundle).contract,
       model: prior?.model ?? null, limits: prior?.limits ?? {},
     }
     store.sqlite.transaction(() => {
@@ -248,7 +276,10 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
         throw new ThreadEditError(409, 'Child ID is bound to a different edit.')
     })()
   }
-  const child = await forkCachedStory(source, JSON.parse(intent!.bundle) as RecoveryForkBundle)
+  const savedBundle = JSON.parse(intent!.bundle) as RecoveryForkBundle | { mode: 'fresh-revision'; digest: string }
+  const fresh = 'mode' in savedBundle && savedBundle.mode === 'fresh-revision'
+  const child = fresh ? await continueCachedStory(source, data.childId, point.commitSha) :
+    await forkCachedStory(source, savedBundle as RecoveryForkBundle)
   const now = new Date().toISOString(), childThread = 'fork:' + child.jobId
   store.sqlite.transaction(() => {
     const inserted = store.sqlite.prepare(`INSERT INTO studio_sessions
@@ -276,8 +307,8 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
     } else {
       const saved = selectedJob(store, owner, child.jobId)
       const forkSource = forkSourceSummary(child)
-      if (saved.storyId !== row.storyId || forkSource?.jobId !== preview.sourceJobId ||
-          forkSource.commitSha !== point.commitSha)
+      if (saved.storyId !== row.storyId || child.baseSha !== point.commitSha ||
+          (!fresh && (forkSource?.jobId !== preview.sourceJobId || forkSource.commitSha !== point.commitSha)))
         throw new ThreadEditError(409, 'Previously prepared child differs from its saved source.')
     }
   })()

@@ -84,6 +84,7 @@ export interface CharacterWorldOptions {
   skillsSource?: string;
   validatorSource?: string;
   fixture?: boolean;
+  task?: string;
   provider?: string;
   model?: string;
 }
@@ -655,9 +656,10 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       }
       const assign = resumingChoice
         ? unit.assignment
-        : deriveFoundationAssignment(unit.domain, plan,
+        : { ...deriveFoundationAssignment(unit.domain, plan,
           reportOf(await validate(before), before),
-          state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
+          state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/"))),
+          ...(input.task ? { authorTask: input.task } : {}) };
       if (!assign || assign.domain !== unit.domain) throw Error("Saved specialist assignment missing or mismatched.");
       if (unit.phase === "pending" || resumingChoice) {
         if (!resumingChoice) {

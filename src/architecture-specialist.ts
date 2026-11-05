@@ -11,6 +11,7 @@ import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
+import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 
 const REQUIRED = [
@@ -30,6 +31,7 @@ export async function authorArchitecture(
   provider: string,
   modelId: string,
   onSession: (sessionId: string, path: string) => Promise<void>,
+  authorTask?: string,
 ): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[] }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = {
@@ -92,6 +94,7 @@ export async function authorArchitecture(
       "Frontmatter free-text YAML scalars must be quoted; avoid invalid colon-containing unquoted values. " +
       "Before finishing, call story_validate with no arguments, inspect diagnostics and coverage, repair problems and rerun validation; the graph independently decides acceptance. Explain downstream obligations.\n" +
       "AUTHORIZED PLAN AND SCOPE:\n" + JSON.stringify(plan, null, 2) +
+      specialistAuthorInstruction(authorTask) +
       "\nOnly implement the global architecture work item now, not the downstream realization or composition items.",
     );
     const assistant = [...session.messages].reverse().find(m => m.role === "assistant");

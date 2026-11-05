@@ -141,9 +141,13 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     await submitThreadRevision(store, owner, threadId, childId, task,
       undefined, kind === 'broad' ? plan.digest : undefined)
     await assert.rejects(previewThreadRevision(store, owner, threadId,
-      'Change character.nia again'), /previous Thread instruction/i)
-    await assert.rejects(submitThreadRevision(store, owner, threadId,
-      randomUUID(), 'Change character.nia again'), /previous Thread instruction/i)
+      'Change character.nia again'), /preceding Thread instruction/i)
+    const bufferedId = randomUUID()
+    const buffered = await submitThreadRevision(store, owner, threadId,
+      bufferedId, 'Change character.nia again')
+    assert.equal(buffered.phase, 'queued')
+    assert.equal((store.sqlite.prepare(`SELECT revision_scope_json AS scope
+      FROM story_thread_messages WHERE id=?`).get(bufferedId) as { scope: string | null }).scope, null)
     await assert.rejects(submitThreadRevision(store, owner, threadId, childId, 'Other task', undefined, plan.digest),
       /already used/)
     assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM story_thread_messages WHERE id=?')

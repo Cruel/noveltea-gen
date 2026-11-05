@@ -168,6 +168,22 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
     if (fork && JSON.stringify(draft.contract) !== JSON.stringify(fork.contract)) {
       throw new ConfigurationError(409, 'Forks retain the selected approved completion contract. Change the task, model or budget, or authorize a separate plan revision after starting.')
     }
+    // An edited sequential follow-up uses a fresh worktree, not a recovery
+    // bundle. Its approved revision scope remains immutable even though its
+    // budget/model can be adjusted before the new generation starts.
+    const edited = store.sqlite.prepare(`SELECT bundle_json AS bundle,draft_json AS original
+      FROM checkpoint_forks WHERE child_id=? AND owner_user_id=?`).get(id, user.id) as
+      { bundle: string; original: string } | undefined
+    if (edited) {
+      let marker: { mode?: string }, original: GenerationDraft
+      try {
+        marker = JSON.parse(edited.bundle) as { mode?: string }
+        original = JSON.parse(edited.original) as GenerationDraft
+      } catch { throw new ConfigurationError(409, 'Edited Thread scope provenance is corrupt.') }
+      if (marker.mode === 'fresh-revision' && (draft.task !== original.task ||
+          JSON.stringify(draft.contract) !== JSON.stringify(original.contract)))
+        throw new ConfigurationError(409, 'Edited follow-up task and bounded write scope are pinned to the approved revision. Change model or budget only.')
+    }
     if (draft.model) {
       try { await assertUserPiSelection(store, user.id, draft.model) }
       catch { throw new ConfigurationError(422, 'The selected user Pi model is unavailable. Reconnect the provider.') }

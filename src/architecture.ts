@@ -82,7 +82,7 @@ interface CatalogReport {
 }
 export interface ArchitectureOptions {
   story: string; job: string; action: "run" | "inspect" | "propose" | "approve" | "reconcile";
-  contract?: unknown; mode?: "autonomous" | "collaborative";
+  contract?: unknown; task?: string; mode?: "autonomous" | "collaborative";
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
   proposal?: string; approvalFile?: string; recoveryDigest?: string; carryForward?: string[];
 }
@@ -625,7 +625,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
               receipt.piSessionId = piSessionId;
               receipt.piSessionFile = piSessionFile;
               await persist(file, receipt);
-            }));
+            }, input.task));
         }
         assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         receipt.paths = await changedPaths(job);

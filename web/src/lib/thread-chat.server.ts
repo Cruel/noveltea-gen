@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import type { StudioDatabase } from '../db/connection'
 import { selectedJob, restoreJob, pinnedRequest, inspectRegisteredJob, verifyWebExecution } from './fixture-jobs.server'
 import { trustedHead } from '../../../src/revision'
@@ -8,7 +9,7 @@ import { queueGeneration, queueRecord } from './generation-queue.server'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { GenerationRequest } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
-import { assertPinnedRevision, revisionFromSource, type PinnedRevision } from './story-revision.server'
+import { assertPinnedRevision, revisionFromSource, submitThreadRevision, type PinnedRevision } from './story-revision.server'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 
@@ -18,7 +19,7 @@ export class ThreadChatError extends Error {
 export type ThreadMessage = {
   id: string; role: 'user' | 'assistant'; status: 'delivered' | 'queued'; content: string
   phase: 'queued' | 'preparing' | 'running' | 'finished' | 'blocked'
-  jobId: string | null; createdAt: string; sequence: number
+  jobId: string | null; createdAt: string; sequence: number; hasRevisionScope: number
 }
 type Run = { jobId: string; status: string; queuePhase: string | null; runOrder: number }
 const now = () => new Date().toISOString()
@@ -31,6 +32,7 @@ function nextSequence(store: StudioDatabase, threadId: string): number {
   return row.next
 }
 const messageColumns = `sequence,id,role,status,body AS content,
+  (revision_scope_json IS NOT NULL) AS hasRevisionScope,
   COALESCE(phase, CASE status WHEN 'queued' THEN 'queued' ELSE 'finished' END) AS phase,
   job_id AS jobId,created_at AS createdAt`
 
@@ -74,10 +76,23 @@ function jobSummary(store: StudioDatabase, owner: string, jobId: string): string
 }
 function insertAssistant(store: StudioDatabase, owner: string, threadId: string, jobId: string) {
   const content = jobSummary(store, owner, jobId)
+  const latest = store.sqlite.prepare(`SELECT id,body FROM story_thread_messages
+    WHERE owner_user_id=? AND thread_id=? AND role='assistant' AND job_id=?
+    ORDER BY sequence DESC LIMIT 1`).get(owner, threadId, jobId) as
+    { id: string; body: string } | undefined
+  // Keep the old immutable summary, but publish a new one when an author
+  // resumes a paused/blocked run and its independently settled outcome changes.
+  if (latest?.body === content) return latest.id
+  const event = store.sqlite.prepare(`SELECT id FROM generation_events
+    WHERE owner_user_id=? AND job_id=? AND kind IN ('finished','interrupted')
+    ORDER BY id DESC LIMIT 1`).get(owner, jobId) as { id: number } | undefined
+  const signature = createHash('sha256').update(content).digest('hex').slice(0, 12)
+  const id = latest ? `assistant:${jobId}:${event?.id ?? 'settlement'}:${signature}` : 'assistant:' + jobId
   store.sqlite.prepare(`INSERT OR IGNORE INTO story_thread_messages
     (id,owner_user_id,thread_id,sequence,role,status,body,phase,job_id,created_at)
     VALUES (?,?,?,?,'assistant','delivered',?,'finished',?,?)`)
-    .run('assistant:' + jobId, owner, threadId, nextSequence(store, threadId), content, jobId, now())
+    .run(id, owner, threadId, nextSequence(store, threadId), content, jobId, now())
+  return id
 }
 function seedExistingMessages(store: StudioDatabase, owner: string, threadId: string) {
   const runs = store.sqlite.prepare(`SELECT r.job_id AS jobId,j.generation_request_json AS requestJson,
@@ -196,7 +211,7 @@ function claimMessage(store: StudioDatabase, owner: string, threadId: string): A
     const next = store.sqlite.prepare(`SELECT id,body AS content,revision_scope_json AS scopeJson FROM story_thread_messages
       WHERE owner_user_id=? AND thread_id=? AND role='user' AND phase='queued'
       ORDER BY sequence LIMIT 1`).get(owner, threadId) as { id: string; content: string; scopeJson: string | null } | undefined
-    if (!next) return null
+    if (!next || !next.scopeJson) return null
     const changed = store.sqlite.prepare(`UPDATE story_thread_messages SET phase='preparing',
       source_job_id=? WHERE id=? AND owner_user_id=? AND phase='queued'`)
       .run(run.jobId, next.id, owner).changes
@@ -206,6 +221,19 @@ function claimMessage(store: StudioDatabase, owner: string, threadId: string): A
 }
 
 export async function advanceThread(store: StudioDatabase, owner: string, threadId: string): Promise<void> {
+  const candidate = store.sqlite.prepare(`SELECT id,body AS content,revision_scope_json AS scope
+    FROM story_thread_messages WHERE owner_user_id=? AND thread_id=?
+      AND role='user' AND phase='queued' ORDER BY sequence LIMIT 1`)
+    .get(owner, threadId) as { id: string; content: string; scope: string | null } | undefined
+  const source = currentRun(store, owner, threadId)
+  if (candidate && !candidate.scope && source?.status === 'completed' && source.queuePhase === 'finished') {
+    try { await submitThreadRevision(store, owner, threadId, candidate.id, candidate.content) }
+    catch {
+      // Keep the instruction durably queued for an explicit scope review;
+      // never treat the missing approval as a failed or interrupted writer.
+      return
+    }
+  }
   const claim = claimMessage(store, owner, threadId)
   if (!claim) return
   try {
@@ -343,10 +371,10 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
       WHERE owner_user_id=? AND job_id=? AND role='user' AND phase='running'`)
       .run(phase === 'finished' ? 'finished' : 'blocked',
         phase, verifiedCommit, verifiedCommit, owner, jobId)
-    insertAssistant(store, owner, record.threadId, jobId)
+    const assistantId = insertAssistant(store, owner, record.threadId, jobId)
     if (verifiedCommit) store.sqlite.prepare(`UPDATE story_thread_messages
       SET verified_commit_sha=? WHERE owner_user_id=? AND thread_id=? AND id=?`)
-      .run(verifiedCommit, owner, record.threadId, 'assistant:' + jobId)
+      .run(verifiedCommit, owner, record.threadId, assistantId)
     store.sqlite.prepare(`UPDATE story_threads SET activity_at=?
       WHERE id=? AND owner_user_id=?`).run(now(), record.threadId, owner)
   })()
