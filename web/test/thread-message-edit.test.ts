@@ -101,7 +101,7 @@ test('real author-update receipt pins a steering edit between commits; missing r
           version: 1, headSha: base, task: request.task, contract, limits: {}, model: null,
         }))
     ensureRootThreads(db, user, storyId)
-    const first = readThreadChat(db, user, threadId)
+    const first = (await readThreadChat(db, user, threadId))
     assert.equal(first.messages.length, 1)
     // The job's real author-update receipt captures the HEAD on application,
     // before any later specialist commit. Do not infer application from receipt
@@ -129,7 +129,7 @@ test('real author-update receipt pins a steering edit between commits; missing r
     const after = commit('later-specialist-work')
     await syncAppliedAuthorMessages(db, user, threadId)
     await syncAppliedAuthorMessages(db, user, threadId)
-    const chat = readThreadChat(db, user, threadId)
+    const chat = (await readThreadChat(db, user, threadId))
     assert.equal(chat.messages.length, 2)
     const steer = chat.messages[1]!
     assert.equal(steer.status, 'delivered')

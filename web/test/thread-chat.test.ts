@@ -61,22 +61,22 @@ test('Thread chat is immutable, ordered, owner-scoped, reconnectable and honest 
   const { db, alice, bob, id, job } = await setup()
   try {
     assertStudioSchemaCurrent(db)
-    const initial = readThreadChat(db, alice, id)
+    const initial = (await readThreadChat(db, alice, id))
     assert.deepEqual(initial.messages.map(message => message.role), ['user', 'assistant'])
     assert.equal(initial.messages[0]?.content, 'Original author request')
     assert.match(initial.messages[1]!.content, /not independently validated/)
     assert.deepEqual(initial.evidence.map(event => event.kind), ['finished'])
-    assert.throws(() => readThreadChat(db, bob, id), /not found/)
+    await assert.rejects(() => readThreadChat(db, bob, id), /not found/)
     const id1 = randomUUID(), id2 = randomUUID()
-    const sent1 = enqueueThreadMessage(db, alice, id, id1, 'Please expand the ending.')
-    const sent2 = enqueueThreadMessage(db, alice, id, id2, 'Then explore the aftermath.')
+    const sent1 = (await enqueueThreadMessage(db, alice, id, id1, 'Please expand the ending.'))
+    const sent2 = (await enqueueThreadMessage(db, alice, id, id2, 'Then explore the aftermath.'))
     assert.equal(sent1.phase, 'queued')
     assert.ok(sent1.sequence < sent2.sequence)
-    assert.deepEqual(enqueueThreadMessage(db, alice, id, id1, 'Please expand the ending.'), sent1)
-    assert.throws(() => enqueueThreadMessage(db, alice, id, id1, 'Different message'), /already in use/)
-    assert.throws(() => enqueueThreadMessage(db, bob, id, randomUUID(), 'Unauthorized'), /not found/)
-    assert.throws(() => enqueueThreadMessage(db, bob, id, id1, 'Please expand the ending.'), /not found/)
-    const reopened = readThreadChat(db, alice, id)
+    assert.deepEqual((await enqueueThreadMessage(db, alice, id, id1, 'Please expand the ending.')), sent1)
+    await assert.rejects(() => enqueueThreadMessage(db, alice, id, id1, 'Different message'), /already in use/)
+    await assert.rejects(() => enqueueThreadMessage(db, bob, id, randomUUID(), 'Unauthorized'), /not found/)
+    await assert.rejects(() => enqueueThreadMessage(db, bob, id, id1, 'Please expand the ending.'), /not found/)
+    const reopened = (await readThreadChat(db, alice, id))
     assert.deepEqual(reopened.messages.map(message => message.content),
       ['Original author request', initial.messages[1]!.content, sent1.content, sent2.content])
     assert.deepEqual(reopened.messages.filter(item => item.role === 'user').map(item => item.phase),
@@ -90,18 +90,18 @@ test('same-Thread messages cannot compete during admission or after unsafe prepa
   const { db, alice, id, job } = await setup()
   try {
     const first = randomUUID(), next = randomUUID()
-    enqueueThreadMessage(db, alice, id, first, 'First follow-up')
-    enqueueThreadMessage(db, alice, id, next, 'Second follow-up')
+    await enqueueThreadMessage(db, alice, id, first, 'First follow-up')
+    await enqueueThreadMessage(db, alice, id, next, 'Second follow-up')
     db.sqlite.prepare(`UPDATE story_thread_messages SET phase='preparing',source_job_id=?
       WHERE id=?`).run(job, first)
     await advanceThread(db, alice, id)
-    assert.deepEqual(readThreadChat(db, alice, id).messages.slice(-2).map(item => item.phase),
+    assert.deepEqual((await readThreadChat(db, alice, id)).messages.slice(-2).map(item => item.phase),
       ['preparing', 'queued'])
     db.sqlite.prepare(`UPDATE story_thread_messages SET phase='queued' WHERE id=?`).run(first)
     // An unscoped queued instruction remains durable and cannot be admitted
     // or leapfrogged until its exact source scope is reviewed.
     await advanceThread(db, alice, id)
-    const messages = readThreadChat(db, alice, id).messages
+    const messages = (await readThreadChat(db, alice, id)).messages
     assert.equal(messages.find(item => item.id === first)?.phase, 'queued')
     assert.equal(messages.find(item => item.id === next)?.phase, 'queued')
     assert.equal(messages.at(-1)?.content, 'Second follow-up')
@@ -134,7 +134,7 @@ test('public Thread submission durably queues rapid messages without authorizing
     assert.deepEqual(db.sqlite.prepare(`SELECT revision_scope_json AS scope FROM story_thread_messages
       WHERE id IN (?,?) ORDER BY sequence`).all(first, second), [{ scope: null }, { scope: null }])
     await advanceThread(db, alice, id)
-    assert.deepEqual(readThreadChat(db, alice, id).messages.filter(m => m.phase === 'queued')
+    assert.deepEqual((await readThreadChat(db, alice, id)).messages.filter(m => m.phase === 'queued')
       .map(m => m.content), ['Change character.nia', 'Then revise event.bell', 'Change character.nia'])
     assert.equal((db.sqlite.prepare('SELECT COUNT(*) AS total FROM story_thread_runs').get() as
       { total: number }).total, 1)
@@ -151,7 +151,7 @@ test('agent restart reconciles a terminal queue receipt without replaying its wr
       .run(message, alice, id, job)
     await recoverSettledThreadRuns(db)
     await recoverSettledThreadRuns(db)
-    const chat = readThreadChat(db, alice, id)
+    const chat = (await readThreadChat(db, alice, id))
     assert.equal(chat.messages.find(item => item.id === message)?.phase, 'finished')
     assert.equal(chat.messages.filter(item => item.id === 'assistant:' + job).length, 1)
     assert.equal(chat.runs.length, 1)
@@ -161,19 +161,19 @@ test('agent restart reconciles a terminal queue receipt without replaying its wr
 test('paused settlement remains immutable and a later completion appends a fresh assistant outcome', async () => {
   const { db, alice, id, job } = await setup()
   try {
-    const initial = readThreadChat(db, alice, id)
+    const initial = (await readThreadChat(db, alice, id))
     assert.equal(initial.messages.filter(m => m.role === 'assistant').length, 1)
     db.sqlite.prepare(`UPDATE studio_sessions SET status='paused' WHERE id=?`).run(job)
-    const paused = readThreadChat(db, alice, id)
+    const paused = (await readThreadChat(db, alice, id))
     assert.equal(paused.messages.filter(m => m.role === 'assistant').length, 2)
     assert.match(paused.messages.at(-1)?.content ?? '', /paused/i)
     db.sqlite.prepare(`UPDATE studio_sessions SET status='completed' WHERE id=?`).run(job)
-    const completed = readThreadChat(db, alice, id)
+    const completed = (await readThreadChat(db, alice, id))
     const summaries = completed.messages.filter(m => m.role === 'assistant')
     assert.equal(summaries.length, 3)
     assert.match(summaries.at(-1)?.content ?? '', /finished/i)
     assert.match(summaries.at(-2)?.content ?? '', /paused/i)
-    assert.equal(readThreadChat(db, alice, id).messages.filter(m => m.role === 'assistant').length, 3)
+    assert.equal((await readThreadChat(db, alice, id)).messages.filter(m => m.role === 'assistant').length, 3)
     assert.equal(new Set(summaries.map(m => m.id)).size, 3)
   } finally { db.sqlite.close() }
 })
@@ -182,11 +182,11 @@ test('settlement appends an assistant response on changed status; incomplete wor
   const { db, alice, id, job } = await setup()
   try {
     const messageId = randomUUID()
-    enqueueThreadMessage(db, alice, id, messageId, 'Follow-up while blocked')
+    await enqueueThreadMessage(db, alice, id, messageId, 'Follow-up while blocked')
     db.sqlite.prepare(`UPDATE studio_sessions SET status='blocked' WHERE id=?`).run(job)
     await settleThreadRun(db, alice, job)
     await settleThreadRun(db, alice, job)
-    const chat = readThreadChat(db, alice, id)
+    const chat = (await readThreadChat(db, alice, id))
     assert.equal(chat.messages.filter(m => m.role === 'assistant').length, 2)
     assert.match(chat.messages.filter(m => m.role === 'assistant').at(-1)?.content ?? '', /blocked/i)
     assert.equal(chat.messages.find(m => m.id === messageId)?.phase, 'queued')

@@ -138,7 +138,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     const plan = await previewThreadRevision(store, owner, threadId, task)
     if (kind === 'redirect') {
       const originalId = randomUUID()
-      const existing = readThreadChat(store, owner, threadId)
+      const existing = (await readThreadChat(store, owner, threadId))
       const sequence = Math.max(...existing.messages.map(m => m.sequence), -1) + 1
       store.sqlite.prepare(`INSERT INTO story_thread_messages
         (id,owner_user_id,thread_id,sequence,role,status,body,phase,job_id,created_at)
@@ -152,12 +152,12 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         sourceId, task, 'focus:character.nia')
       assert.equal(prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 1)
       assert.equal(prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 0)
-      const continuation = readThreadChat(store, owner, threadId)
+      const continuation = (await readThreadChat(store, owner, threadId))
         .messages.find(m => m.phase === 'queued')!
       assert.equal(continuation.hasRevisionScope, 0)
       assert.equal(continuation.content, task)
       await advanceThread(store, owner, threadId)
-      assert.equal(readThreadChat(store, owner, threadId)
+      assert.equal((await readThreadChat(store, owner, threadId))
         .messages.find(m => m.id === continuation.id)?.phase, 'queued')
       assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM story_thread_runs')
         .get() as { n: number }).n, 1,
@@ -169,7 +169,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       await submitThreadRevision(store, owner, threadId, continuation.id, task,
         undefined, reviewed.digest)
       await advanceThread(store, owner, threadId)
-      const after = readThreadChat(store, owner, threadId)
+      const after = (await readThreadChat(store, owner, threadId))
       assert.equal(after.messages.find(m => m.id === continuation.id)?.phase, 'running')
       assert.deepEqual(after.runs.map(r => r.jobId), [sourceId, continuation.id])
       assert.equal(after.steeringActivity.find(a => a.messageId === originalId)?.state, 'approved-run')
@@ -192,7 +192,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.equal(attributeApprovedReplanCheckpoint(store, owner,
         continuation.id, proof, ['events/confession.md']), 0,
       'recovery never duplicates verified checkpoint associations')
-      const activity = readThreadChat(store, owner, threadId).steeringActivity
+      const activity = (await readThreadChat(store, owner, threadId)).steeringActivity
         .find(item => item.messageId === originalId)!
       assert.equal(activity.implementationCount, 1)
       assert.equal(activity.implementationSha, proof.commitSha)
@@ -204,14 +204,14 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     if (kind === 'cancel-inflight') {
       const pendingId = randomUUID()
       const inFlight = submitThreadRevision(store, owner, threadId, pendingId, task)
-      const cancelled = cancelQueuedThreadMessage(store, owner, threadId, pendingId)
+      const cancelled = (await cancelQueuedThreadMessage(store, owner, threadId, pendingId))
       assert.equal(cancelled.phase, 'cancelled')
       const settled = await inFlight
       assert.equal(settled.phase, 'cancelled',
         'a scope inference completing after cancellation must not resurrect the instruction')
-      assert.equal(readThreadChat(store, owner, threadId).messages.find(m => m.id === pendingId)?.hasRevisionScope, 0)
+      assert.equal((await readThreadChat(store, owner, threadId)).messages.find(m => m.id === pendingId)?.hasRevisionScope, 0)
       await advanceThread(store, owner, threadId)
-      assert.deepEqual(readThreadChat(store, owner, threadId).runs.map(run => run.jobId), [sourceId])
+      assert.deepEqual((await readThreadChat(store, owner, threadId)).runs.map(run => run.jobId), [sourceId])
       assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
       return
     }
@@ -226,7 +226,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.equal(second.phase, 'queued')
       assert.ok(first.sequence < second.sequence,
         'concurrent calls reserve one stable queue order before validation')
-      const before = readThreadChat(store, owner, threadId)
+      const before = (await readThreadChat(store, owner, threadId))
       assert.deepEqual(before.messages.filter(item => new Set<string>([firstId, secondId]).has(item.id))
         .map(item => [item.id, item.hasRevisionScope]), [[firstId, 1], [secondId, 0]],
       'only the queue head receives an authorized scope')
@@ -234,7 +234,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         advanceThread(store, owner, threadId),
         advanceThread(store, owner, threadId),
       ])
-      const after = readThreadChat(store, owner, threadId)
+      const after = (await readThreadChat(store, owner, threadId))
       assert.equal(after.messages.find(item => item.id === firstId)?.phase, 'running')
       assert.equal(after.messages.find(item => item.id === secondId)?.phase, 'queued')
       assert.deepEqual(after.runs.map(run => run.jobId), [sourceId, firstId])
@@ -253,7 +253,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         'Make character.nia less confrontational')
       assert.ok(initial.sequence < later.sequence)
       await advanceThread(store, owner, threadId)
-      assert.equal(readThreadChat(store, owner, threadId).messages.find(m => m.id === nextId)?.phase,
+      assert.equal((await readThreadChat(store, owner, threadId)).messages.find(m => m.id === nextId)?.phase,
         'queued', 'ambiguous first instruction still blocks later authoring')
       const reviewed = await previewThreadRevision(store, owner, threadId, task,
         undefined, ambiguousId)
@@ -262,10 +262,10 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         ambiguousId), /not found/i)
       const original = store.sqlite.prepare(`SELECT id,body,sequence,phase FROM story_thread_messages
         WHERE id=?`).get(ambiguousId)
-      const cancelled = cancelQueuedThreadMessage(store, owner, threadId, ambiguousId)
+      const cancelled = (await cancelQueuedThreadMessage(store, owner, threadId, ambiguousId))
       assert.equal(cancelled.phase, 'cancelled')
       assert.ok(cancelled.cancelledAt)
-      assert.deepEqual(cancelQueuedThreadMessage(store, owner, threadId, ambiguousId), cancelled,
+      assert.deepEqual((await cancelQueuedThreadMessage(store, owner, threadId, ambiguousId)), cancelled,
         'cancellation is idempotent and preserves one receipt')
       assert.deepEqual(store.sqlite.prepare(`SELECT id,body,sequence,phase FROM story_thread_messages
         WHERE id=?`).get(ambiguousId), original, 'the original queued message remains immutable')
@@ -274,13 +274,13 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       await assert.rejects(submitThreadRevision(store, owner, threadId, ambiguousId, task),
         /cancelled.*new ID/i)
       await advanceThread(store, owner, threadId)
-      const settled = readThreadChat(store, owner, threadId)
+      const settled = (await readThreadChat(store, owner, threadId))
       assert.deepEqual(settled.messages.filter(m => new Set<string>([ambiguousId, nextId]).has(m.id))
         .map(m => m.phase), ['cancelled', 'running'])
       assert.equal(settled.messages.find(m => m.id === ambiguousId)?.content, task)
       assert.equal(settled.messages.find(m => m.id === nextId)?.hasRevisionScope, 1)
       assert.deepEqual(settled.runs.map(run => run.jobId), [sourceId, nextId])
-      assert.throws(() => cancelQueuedThreadMessage(store, owner, threadId, nextId),
+      await assert.rejects(() => cancelQueuedThreadMessage(store, owner, threadId, nextId),
         /entered execution/i)
       assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
       return
@@ -317,7 +317,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM story_thread_messages WHERE id=?')
       .get(childId) as { n: number }).n, 1)
     await advanceThread(store, owner, threadId)
-    const chat = readThreadChat(store, owner, threadId)
+    const chat = (await readThreadChat(store, owner, threadId))
     assert.equal(chat.messages.find(item => item.id === childId)?.phase, 'running')
     assert.deepEqual(chat.runs.map(run => run.jobId), [sourceId, childId])
     const child = await restoreJob(selectedJob(store, owner, childId), owner)

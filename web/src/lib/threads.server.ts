@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioDatabase } from '../db/connection'
+import type { NavigationThreadRecord } from '../persistence/conversation-contracts'
 import { compareActivity, latestActivity } from './thread-navigation'
 
 export type ThreadStatus = 'prepared' | 'queued' | 'running' | 'paused' | 'needs-author' |
@@ -29,9 +30,8 @@ function titleValue(value: string): string {
     throw new Error('Title must be 1–120 printable characters.')
   return title
 }
-function selectedStory(store: StudioDatabase, owner: string, storyId: string) {
-  const story = store.sqlite.prepare(`SELECT id,title FROM stories WHERE id=? AND owner_user_id=?`)
-    .get(storyId, owner) as { id: string; title: string } | undefined
+async function selectedStory(store: StudioDatabase, owner: string, storyId: string) {
+  const story = await store.persistence.conversations.story(owner, storyId)
   if (!story) throw new Error('Story not found.')
   return story
 }
@@ -39,37 +39,11 @@ function selectedStory(store: StudioDatabase, owner: string, storyId: string) {
 /** Backfill or reconcile jobs created before the Conversation registration hook.
  * Stable IDs and transactionally linked rows make GET idempotent across workers,
  * and never infer branchable historical checkpoints from those jobs. */
-export function ensureRootThreads(store: StudioDatabase, owner: string, storyId: string) {
-  store.sqlite.transaction(() => {
-    store.sqlite.prepare(`INSERT OR IGNORE INTO story_conversations
-      (id,owner_user_id,story_id,title,created_at,updated_at)
-      SELECT 'legacy:' || j.id,j.owner_user_id,j.story_id,j.title,j.created_at,j.created_at
-      FROM studio_sessions j
-      WHERE j.owner_user_id=? AND j.story_id=? AND NOT EXISTS
-        (SELECT 1 FROM story_thread_runs r WHERE r.job_id=j.id)`).run(owner, storyId)
-    store.sqlite.prepare(`INSERT OR IGNORE INTO story_threads
-      (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-      SELECT 'root:' || j.id,j.owner_user_id,'legacy:' || j.id,NULL,j.title,j.created_at,j.created_at
-      FROM studio_sessions j
-      WHERE j.owner_user_id=? AND j.story_id=? AND NOT EXISTS
-        (SELECT 1 FROM story_thread_runs r WHERE r.job_id=j.id)`).run(owner, storyId)
-    store.sqlite.prepare(`INSERT OR IGNORE INTO story_thread_runs
-      (job_id,owner_user_id,thread_id,run_order)
-      SELECT j.id,j.owner_user_id,'root:' || j.id,0
-      FROM studio_sessions j
-      WHERE j.owner_user_id=? AND j.story_id=? AND NOT EXISTS
-        (SELECT 1 FROM story_thread_runs r WHERE r.job_id=j.id)`).run(owner, storyId)
-  })()
+export async function ensureRootThreads(store: StudioDatabase, owner: string, storyId: string) {
+  await store.persistence.conversations.reconcileRoots(owner, storyId)
 }
 
-type ThreadRow = {
-  id: string; conversationId: string; parentThreadId: string | null; title: string
-  activityAt: string; archivedAt: string | null; createdAt: string
-  jobId: string | null; jobStatus: string | null; requestJson: string | null
-  queuePhase: string | null; queueAt: string | null; queueUpdatedAt: string | null
-  lastEventAt: string | null; workingStage: string | null; workingMilestone: string | null
-  needsAuthor: number | null
-}
+type ThreadRow = NavigationThreadRecord
 function threadStatus(row: ThreadRow): ThreadStatus {
   if (row.archivedAt) return 'archived'
   if (row.queuePhase === 'queued') return 'queued'
@@ -85,39 +59,10 @@ function threadStatus(row: ThreadRow): ThreadStatus {
 }
 
 export async function listStoryConversations(store: StudioDatabase, owner: string, storyId: string): Promise<StoryNavigation> {
-  const story = selectedStory(store, owner, storyId)
-  ensureRootThreads(store, owner, storyId)
-  const rows = store.sqlite.prepare(`SELECT id,title,created_at AS createdAt,updated_at AS updatedAt
-    FROM story_conversations WHERE owner_user_id=? AND story_id=?`).all(owner, storyId) as
-    Array<Omit<StoryConversation, 'threads' | 'activityAt'>>
-  const threadRows = store.sqlite.prepare(`SELECT
-    t.id,t.conversation_id AS conversationId,t.parent_thread_id AS parentThreadId,
-    t.title,t.activity_at AS activityAt,t.archived_at AS archivedAt,t.created_at AS createdAt,
-    run.job_id AS jobId,run.needs_author AS needsAuthor,
-    j.status AS jobStatus,j.generation_request_json AS requestJson,
-    q.phase AS queuePhase,q.created_at AS queueAt,q.updated_at AS queueUpdatedAt,
-    (SELECT MAX(e.created_at) FROM generation_events e
-      WHERE e.job_id=run.job_id AND e.owner_user_id=t.owner_user_id) AS lastEventAt,
-    (SELECT e.stage FROM generation_events e WHERE e.job_id=run.job_id
-      AND e.owner_user_id=t.owner_user_id AND e.kind='working'
-      AND e.id >= COALESCE((SELECT MAX(started.id) FROM generation_events started
-        WHERE started.job_id=run.job_id AND started.owner_user_id=t.owner_user_id
-          AND started.kind='started'), 0)
-      ORDER BY e.id DESC LIMIT 1) AS workingStage,
-    (SELECT e.milestone FROM generation_events e WHERE e.job_id=run.job_id
-      AND e.owner_user_id=t.owner_user_id AND e.kind='working'
-      AND e.id >= COALESCE((SELECT MAX(started.id) FROM generation_events started
-        WHERE started.job_id=run.job_id AND started.owner_user_id=t.owner_user_id
-          AND started.kind='started'), 0)
-      ORDER BY e.id DESC LIMIT 1) AS workingMilestone
-    FROM story_threads t
-    JOIN story_conversations c ON c.id=t.conversation_id AND c.owner_user_id=t.owner_user_id
-    LEFT JOIN story_thread_runs run ON run.thread_id=t.id AND run.owner_user_id=t.owner_user_id
-      AND run.run_order=(SELECT MAX(r2.run_order) FROM story_thread_runs r2
-        WHERE r2.thread_id=t.id AND r2.owner_user_id=t.owner_user_id)
-    LEFT JOIN studio_sessions j ON j.id=run.job_id AND j.owner_user_id=t.owner_user_id
-    LEFT JOIN generation_run_queue q ON q.job_id=run.job_id AND q.owner_user_id=t.owner_user_id
-    WHERE t.owner_user_id=? AND c.story_id=?`).all(owner, storyId) as ThreadRow[]
+  const story = await selectedStory(store, owner, storyId)
+  await ensureRootThreads(store, owner, storyId)
+  const { conversations: rows, threads: threadRows } =
+    await store.persistence.conversations.navigation(owner, storyId)
   const grouped = new Map<string, StoryThread[]>()
   for (const row of threadRows) {
     const status = threadStatus(row)
@@ -142,62 +87,37 @@ export async function listStoryConversations(store: StudioDatabase, owner: strin
   return { story, conversations, preferences: prefs ?? { view: 'tree', expandedIds: [] } }
 }
 
-export function createConversation(store: StudioDatabase, owner: string, storyId: string) {
-  selectedStory(store, owner, storyId)
-  const id = randomUUID(), now = new Date().toISOString()
-  const count = (store.sqlite.prepare(`SELECT count(*) AS total FROM story_conversations
-    WHERE owner_user_id=? AND story_id=?`).get(owner, storyId) as { total: number }).total
-  const title = 'New conversation' + (count ? ' ' + (count + 1) : '')
-  store.sqlite.prepare(`INSERT INTO story_conversations
-    (id,owner_user_id,story_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)`)
-    .run(id, owner, storyId, title, now, now)
-  return { id, title }
+export async function createConversation(store: StudioDatabase, owner: string, storyId: string) {
+  await selectedStory(store, owner, storyId)
+  return store.persistence.conversations.create(owner, storyId, randomUUID(), new Date().toISOString())
 }
-export function renameConversation(store: StudioDatabase, owner: string, conversationId: string, title: string) {
+export async function renameConversation(store: StudioDatabase, owner: string, conversationId: string, title: string) {
   const valid = titleValue(title)
-  if (store.sqlite.prepare(`UPDATE story_conversations SET title=?,updated_at=?
-    WHERE id=? AND owner_user_id=?`).run(valid, new Date().toISOString(), conversationId, owner).changes !== 1)
+  if (!await store.persistence.conversations.renameConversation(owner, conversationId, valid, new Date().toISOString()))
     throw new Error('Conversation not found.')
 }
-export function renameThread(store: StudioDatabase, owner: string, threadId: string, title: string) {
+export async function renameThread(store: StudioDatabase, owner: string, threadId: string, title: string) {
   const valid = titleValue(title)
-  if (store.sqlite.prepare(`UPDATE story_threads SET title=?
-    WHERE id=? AND owner_user_id=?`).run(valid, threadId, owner).changes !== 1)
+  if (!await store.persistence.conversations.renameThread(owner, threadId, valid))
     throw new Error('Thread not found.')
 }
-/** Archive is metadata only. Never stop a writer, mutate run status, touch
- * persisted receipts or remove a worktree: an archived Thread stays inspectable
- * and branchable via the same durable lineage and verified checkpoints.
- * Checking membership before mutation also distinguishes idempotent retries
- * from foreign or nonexistent Thread IDs without leaking tenant data. */
-function setThreadArchive(store: StudioDatabase, owner: string, id: string, archived: boolean): void {
-  store.sqlite.transaction(() => {
-    const row = store.sqlite.prepare(`SELECT 1 FROM story_threads
-      WHERE id=? AND owner_user_id=?`).get(id, owner)
-    if (!row) throw new Error('Thread not found.')
-    if (archived) {
-      store.sqlite.prepare(`UPDATE story_threads SET archived_at=?
-        WHERE id=? AND owner_user_id=? AND archived_at IS NULL`)
-        .run(new Date().toISOString(), id, owner)
-    } else {
-      store.sqlite.prepare(`UPDATE story_threads SET archived_at=NULL
-        WHERE id=? AND owner_user_id=? AND archived_at IS NOT NULL`)
-        .run(id, owner)
-    }
-  })()
+/** Archive remains only a reversible catalog flag: never touch writer state. */
+async function setThreadArchive(store: StudioDatabase, owner: string, id: string, archived: boolean): Promise<void> {
+  if (!await store.persistence.conversations.archiveThread(owner, id, archived, new Date().toISOString()))
+    throw new Error('Thread not found.')
 }
 
-export function archiveThread(store: StudioDatabase, owner: string, id: string): void {
-  setThreadArchive(store, owner, id, true)
+export async function archiveThread(store: StudioDatabase, owner: string, id: string): Promise<void> {
+  await setThreadArchive(store, owner, id, true)
 }
 
-export function restoreThread(store: StudioDatabase, owner: string, id: string): void {
-  setThreadArchive(store, owner, id, false)
+export async function restoreThread(store: StudioDatabase, owner: string, id: string): Promise<void> {
+  await setThreadArchive(store, owner, id, false)
 }
 
 export async function saveThreadPreferences(store: StudioDatabase, owner: string, storyId: string,
   view: 'tree' | 'flat', expandedIds: string[]) {
-  selectedStory(store, owner, storyId)
+  await selectedStory(store, owner, storyId)
   if (!['tree', 'flat'].includes(view) || !Array.isArray(expandedIds) || expandedIds.length > 200 ||
       expandedIds.some(id => typeof id !== 'string' || !ID.test(id)))
     throw new Error('Invalid Thread preferences.')

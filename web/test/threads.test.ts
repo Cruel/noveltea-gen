@@ -49,7 +49,7 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
     assert.equal(running?.status, 'running')
     assert.equal(running?.currentWork, 'Event · arc.one')
     assert.equal(running?.activityAt, '2026-11-02T03:00:00Z')
-    renameThread(db, alice, running!.id, 'Character branch')
+    await renameThread(db, alice, running!.id, 'Character branch')
     assert.equal((await listStoryConversations(db, alice, 'story-' + alice)).conversations
       .flatMap(c => c.threads).find(t => t.id === running!.id)?.title, 'Character branch')
     // An updated_at heartbeat must not move a job or silently generate new IDs.
@@ -78,8 +78,8 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
       .run('cross:' + randomUUID(), alice, first.conversations.find(c => c.id !== parentConversation)!.id,
         parent), /FOREIGN KEY/, 'a branch cannot cross Conversations')
     await assert.rejects(() => listStoryConversations(db, bob, 'story-' + alice), /not found/i)
-    assert.throws(() => renameThread(db, bob, running!.id, 'Stolen'), /not found/i)
-    assert.throws(() => renameConversation(db, bob, first.conversations[0]!.id, 'Stolen'), /not found/i)
+    await assert.rejects(() => renameThread(db, bob, running!.id, 'Stolen'), /not found/i)
+    await assert.rejects(() => renameConversation(db, bob, first.conversations[0]!.id, 'Stolen'), /not found/i)
     assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
   } finally { db.sqlite.close() }
 })
@@ -96,15 +96,15 @@ test('authors can create, rename and persist navigation preferences, with bounds
       VALUES (?,?,'github','repo','Repo','now')`).run(repo, alice)
     db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
       VALUES (?,?,?,'story','Story','now')`).run(story, alice, repo)
-    const conversation = createConversation(db, alice, story)
+    const conversation = await createConversation(db, alice, story)
     assert.match(conversation.title, /New conversation/)
     assert.equal((await listStoryConversations(db, alice, story)).conversations.length, 1)
-    renameConversation(db, alice, conversation.id, 'Character alternatives')
+    await renameConversation(db, alice, conversation.id, 'Character alternatives')
     assert.equal((await listStoryConversations(db, alice, story)).conversations[0]?.title, 'Character alternatives')
-    assert.throws(() => createConversation(db, bob, story), /not found/i)
+    await assert.rejects(() => createConversation(db, bob, story), /not found/i)
     await assert.rejects(() => saveThreadPreferences(db, bob, story, 'flat', []), /not found/i)
-    assert.throws(() => renameConversation(db, alice, conversation.id, ' '.repeat(5)), /title/i)
-    assert.throws(() => renameConversation(db, alice, conversation.id, 'X'.repeat(121)), /title/i)
+    await assert.rejects(() => renameConversation(db, alice, conversation.id, ' '.repeat(5)), /title/i)
+    await assert.rejects(() => renameConversation(db, alice, conversation.id, 'X'.repeat(121)), /title/i)
     await saveThreadPreferences(db, alice, story, 'flat', ['root-1', 'root-1', 'root-2'])
     assert.deepEqual((await listStoryConversations(db, alice, story)).preferences,
       { view: 'flat', expandedIds: ['root-1', 'root-2'] })

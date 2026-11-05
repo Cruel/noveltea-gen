@@ -37,7 +37,7 @@ export const setConversationTitle = createServerFn({ method: 'POST' })
     return data
   })
   .handler(async ({ data }) => {
-    renameConversation(database, await ownerId(), data.id, data.title)
+    await renameConversation(database, await ownerId(), data.id, data.title)
     return { success: true }
   })
 
@@ -48,7 +48,7 @@ export const setThreadTitle = createServerFn({ method: 'POST' })
     return data
   })
   .handler(async ({ data }) => {
-    renameThread(database, await ownerId(), data.id, data.title)
+    await renameThread(database, await ownerId(), data.id, data.title)
     return { success: true }
   })
 
@@ -61,8 +61,8 @@ export const changeThreadArchive = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => {
     const owner = await ownerId()
-    if (data.archived) archiveThread(database, owner, data.id)
-    else restoreThread(database, owner, data.id)
+    if (data.archived) await archiveThread(database, owner, data.id)
+    else await restoreThread(database, owner, data.id)
     return { success: true }
   })
 

@@ -82,7 +82,7 @@ test('steer reaches only active Pi session and is acknowledged after its tool/tu
     assert.equal(accepted.phase, 'queued')
     assert.equal(accepted.liveState, 'pending')
     assert.equal(accepted.hasRevisionScope, 0)
-    assert.throws(() => cancelQueuedThreadMessage(f.db, f.stranger, f.threadId, id), /not found/)
+    await assert.rejects(() => cancelQueuedThreadMessage(f.db, f.stranger, f.threadId, id), /not found/)
     await assert.rejects(submitThreadRevision(f.db, f.stranger, f.threadId,
       id, note, undefined, undefined, 'steer'), /not found|already in use/)
 
@@ -90,14 +90,14 @@ test('steer reaches only active Pi session and is acknowledged after its tool/tu
     assert.equal(pi.sent.length, 1)
     assert.match(pi.sent[0]!, /only within|existing assigned targets/i)
     assert.match(pi.sent[0]!, /THREAD_STEERING_MESSAGE_ID=/)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)?.liveState, 'sdk-queued')
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)?.liveState, 'sdk-queued')
     const reconnect = openStudioDatabase(join(f.root, 'studio.sqlite'))
     try {
-      assert.equal(readThreadChat(reconnect, f.owner, f.threadId)
+      assert.equal((await readThreadChat(reconnect, f.owner, f.threadId))
         .messages.find(m => m.id === id)?.liveState, 'sdk-queued',
       'a separate Studio connection sees active SDK receipt after reconnect')
     } finally { reconnect.sqlite.close() }
-    assert.throws(() => cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id), /entered execution/)
+    await assert.rejects(() => cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id), /entered execution/)
     await dispatchPendingPiSteering(f.db)
     assert.equal(pi.sent.length, 1, 'no duplicate dispatch while tool call is in progress')
 
@@ -106,18 +106,18 @@ test('steer reaches only active Pi session and is acknowledged after its tool/tu
     pi.messages.push({ role: 'user', content: pi.sent[0]! })
     pi.stop()
     await settlePiSteering(f.db, pi.turn, true)
-    const delivered = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)!
+    const delivered = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)!
     assert.equal(delivered.phase, 'finished')
     assert.equal(delivered.jobId, f.job)
     assert.equal(delivered.liveState, 'delivered')
     const resumed = openStudioDatabase(join(f.root, 'studio.sqlite'))
     try {
-      assert.equal(readThreadChat(resumed, f.owner, f.threadId)
+      assert.equal((await readThreadChat(resumed, f.owner, f.threadId))
         .messages.find(m => m.id === id)?.liveState, 'delivered',
       'delivery history persists across independent connections')
     } finally { resumed.sqlite.close() }
     await settlePiSteering(f.db, pi.turn, true)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)?.phase, 'finished')
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)?.phase, 'finished')
     assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
   } finally { release(); f.cleanup() }
 })
@@ -140,7 +140,7 @@ test('multiple rapid steers stay ordered and cannot be acknowledged by forged tr
     pi.messages.push({ role: 'user', content: pi.sent[0]! })
     pi.stop()
     await settlePiSteering(f.db, pi.turn, true)
-    const chat = readThreadChat(f.db, f.owner, f.threadId)
+    const chat = (await readThreadChat(f.db, f.owner, f.threadId))
     assert.equal(chat.messages.find(m => m.id === a)?.liveState, 'delivered')
     assert.equal(chat.messages.find(m => m.id === b)?.liveState, 'blocked',
       'the other marker inside the first message cannot count as a second delivery')
@@ -159,7 +159,7 @@ test('Follow up queues with SDK after current Pi task, without allowing later st
       'Keep the character motive consistent', undefined, undefined, 'steer')
     assert.equal(recorded.liveState, 'pending')
     await dispatchPendingPiSteering(f.db)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === pending)?.liveState, 'pending')
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === pending)?.liveState, 'pending')
     try {
       await dispatchPendingPiSteering(f.db)
       assert.equal(pi.followUps.length, 1, 'SDK followUp queues after the running Pi task')
@@ -169,12 +169,12 @@ test('Follow up queues with SDK after current Pi task, without allowing later st
       pi.messages.push({ role: 'user', content: pi.followUps[0]! })
       pi.stop()
       await settlePiSteering(f.db, pi.turn, true)
-      const chat = readThreadChat(f.db, f.owner, f.threadId)
+      const chat = (await readThreadChat(f.db, f.owner, f.threadId))
       assert.equal(chat.messages.find(m => m.id === follow)?.liveState, 'delivered')
       assert.equal(chat.messages.find(m => m.id === pending)?.liveState, 'deferred')
     } finally { release() }
     deferUndeliveredSteering(f.db, f.owner, f.job)
-    const chat = readThreadChat(f.db, f.owner, f.threadId)
+    const chat = (await readThreadChat(f.db, f.owner, f.threadId))
     assert.equal(chat.messages.find(m => m.id === pending)?.liveState, 'deferred')
     assert.equal(chat.messages.find(m => m.id === pending)?.phase, 'queued')
     assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
@@ -188,10 +188,10 @@ test('a pre-dispatch cancellation is durable and never reaches Pi', async () => 
     const id = randomUUID()
     await submitThreadRevision(f.db, f.owner, f.threadId, id,
       'Do not extend this Event', undefined, undefined, 'steer')
-    assert.equal(cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id).phase, 'cancelled')
+    assert.equal((await cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id)).phase, 'cancelled')
     await dispatchPendingPiSteering(f.db)
     assert.equal(pi.sent.length, 0)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.find(message => message.id === id)?.phase, 'cancelled')
   } finally { release(); f.cleanup() }
 })
@@ -205,11 +205,11 @@ test('non-Pi boundary settles pending input as deferred and restart never replay
     f.db.sqlite.prepare("UPDATE generation_run_queue SET phase='finished' WHERE job_id=?").run(f.job)
     f.db.sqlite.prepare("UPDATE studio_sessions SET status='completed' WHERE id=?").run(f.job)
     await settleThreadRun(f.db, f.owner, f.job)
-    const saved = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)
+    const saved = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)
     assert.equal(saved?.liveState, 'deferred')
     assert.equal(saved?.phase, 'queued')
     await recoverSettledThreadRuns(f.db)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.find(m => m.id === id)?.liveState, 'deferred')
     assert.equal((f.db.sqlite.prepare('SELECT COUNT(*) AS total FROM story_thread_runs')
       .get() as { total: number }).total, 1,
@@ -239,11 +239,11 @@ test('dispatch is pinned to the exact job and ambiguous SDK admission never repl
       await dispatchPendingPiSteering(f.db)
       assert.equal(unrelated.sent.length, 0, 'no cross-session routing')
     } finally { releaseCurrent() }
-    const blocked = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)!
+    const blocked = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)!
     assert.equal(blocked.liveState, 'blocked')
     assert.equal(blocked.phase, 'blocked')
     deferUndeliveredSteering(f.db, f.owner, f.job)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)?.phase, 'blocked')
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)?.phase, 'blocked')
   } finally { releaseUnrelated(); f.cleanup() }
 })
 
@@ -253,32 +253,32 @@ test('queued edits preserve provenance, revoke stale scopes, and reject duplicat
     const id = randomUUID(), requestId = randomUUID()
     await submitThreadRevision(f.db, f.owner, f.threadId, id,
       'Original character constraint', undefined, undefined, 'steer')
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)?.liveState,
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)?.liveState,
       'deferred', 'no active Pi means coordinator routing, not an arbitrary future Pi session')
-    assert.throws(() => editQueuedThreadMessage(f.db, f.stranger, f.threadId, id, requestId,
+    await assert.rejects(() => editQueuedThreadMessage(f.db, f.stranger, f.threadId, id, requestId,
       'Original character constraint', 'Edited constraint'), /not found/)
-    const edited = editQueuedThreadMessage(f.db, f.owner, f.threadId, id, requestId,
-      'Original character constraint', 'Edited constraint')
+    const edited = (await editQueuedThreadMessage(f.db, f.owner, f.threadId, id, requestId,
+      'Original character constraint', 'Edited constraint'))
     assert.equal(edited.content, 'Edited constraint')
     assert.equal(edited.editCount, 1)
     const replay = await submitThreadRevision(f.db, f.owner, f.threadId, id,
       'Original character constraint', undefined, undefined, 'steer')
     assert.equal(replay.content, 'Edited constraint', 'stale POST retry must not revert a subsequent edit')
-    const history = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)?.editHistory
+    const history = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)?.editHistory
     assert.deepEqual(history?.map(h => [h.old, h.replacement]),
       [['Original character constraint', 'Edited constraint']])
-    assert.equal(editQueuedThreadMessage(f.db, f.owner, f.threadId, id, requestId,
-      'Original character constraint', 'Edited constraint').editCount, 1,
+    assert.equal((await editQueuedThreadMessage(f.db, f.owner, f.threadId, id, requestId,
+      'Original character constraint', 'Edited constraint')).editCount, 1,
     'exactly the same edit request can be safely retried')
-    assert.throws(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, requestId,
+    await assert.rejects(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, requestId,
       'Original character constraint', 'Different content'), /already in use/)
-    assert.throws(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
+    await assert.rejects(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
       'Original character constraint', 'Another change'), /changed/)
     const audit = f.db.sqlite.prepare(`SELECT old_body AS before,new_body AS after
       FROM thread_queued_message_edits WHERE message_id=?`).all(id)
     assert.deepEqual(audit, [{ before: 'Original character constraint', after: 'Edited constraint' }])
-    assert.equal(cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id).phase, 'cancelled')
-    assert.throws(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
+    assert.equal((await cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id)).phase, 'cancelled')
+    await assert.rejects(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
       'Edited constraint', 'Unwithdraw'), /already admitted/)
   } finally { f.cleanup() }
 })
@@ -290,19 +290,19 @@ test('edit before Pi dispatch is used once; edit and withdrawal after SDK claim 
     const id = randomUUID()
     await submitThreadRevision(f.db, f.owner, f.threadId, id,
       'Keep the old alibi', undefined, undefined, 'steer')
-    editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
+    await editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
       'Keep the old alibi', 'Remove the old alibi')
     await dispatchPendingPiSteering(f.db)
     assert.equal(pi.sent.length, 1)
     assert.match(pi.sent[0]!, /Remove the old alibi/)
     assert.doesNotMatch(pi.sent[0]!, /Keep the old alibi/)
-    assert.throws(() => cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id), /entered execution/)
-    assert.throws(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
+    await assert.rejects(() => cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id), /entered execution/)
+    await assert.rejects(() => editQueuedThreadMessage(f.db, f.owner, f.threadId, id, randomUUID(),
       'Remove the old alibi', 'Unapproved edit'), /already admitted/)
     pi.messages.push({ role: 'user', content: pi.sent[0]! })
     pi.stop()
     await settlePiSteering(f.db, pi.turn, true)
-    const acknowledged = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)
+    const acknowledged = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)
     assert.equal(acknowledged?.liveState, 'delivered')
     assert.equal(acknowledged?.effectVerifiedAt, null, 'Pi delivery is not an independent effect proof')
     assert.equal(acknowledged?.livePiSessionId, pi.turn.session.sessionId)
@@ -318,7 +318,7 @@ test('edit before Pi dispatch is used once; edit and withdrawal after SDK claim 
       'independent-editor', 'Read and compared the committed Character')
     recordIndependentSteeringReview(f.db, f.owner, f.threadId, id,
       'independent-editor', 'Read and compared the committed Character')
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.find(m => m.id === id)?.effectReviewer, 'independent-editor')
     assert.throws(() => recordIndependentSteeringReview(f.db, f.owner, f.threadId, id,
       'other-reviewer', 'Different review'), /already exists/)
@@ -340,17 +340,17 @@ test('submit-versus-settle cannot leak a steer to a later specialist or lose coo
     try {
       await dispatchPendingPiSteering(f.db)
       assert.equal(later.sent.length, 0, 'never send a previous turn instruction to a different specialist')
-      const item = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.id === id)
+      const item = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)
       assert.equal(item?.liveState, 'deferred')
       assert.equal(item?.phase, 'queued')
       const reopened = openStudioDatabase(join(f.root, 'studio.sqlite'))
-      try { assert.equal(readThreadChat(reopened, f.owner, f.threadId)
+      try { assert.equal((await readThreadChat(reopened, f.owner, f.threadId))
         .messages.find(m => m.id === id)?.liveState, 'deferred') }
       finally { reopened.sqlite.close() }
     } finally { releaseLater() }
     recoverOrphanedPiTurns(f.db)
     await dispatchPendingPiSteering(f.db)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.filter(m => m.id === id).length, 1)
   } finally { releaseBefore(); f.cleanup() }
 })
@@ -368,16 +368,16 @@ test('withdrawal racing an in-flight SDK call is rejected; settlement waits for 
       return new Promise<'queued'>(resolve => { accept = resolve })
     }
     const dispatch = dispatchPendingPiSteering(f.db)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.find(m => m.id === id)?.liveState, 'dispatching')
-    assert.throws(() => cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id), /entered execution/)
+    await assert.rejects(() => cancelQueuedThreadMessage(f.db, f.owner, f.threadId, id), /entered execution/)
     // Pi may settle just after the tool call while the SDK call is unresolved.
     pi.messages.push({ role: 'user', content: pi.sent[0]! })
     pi.stop()
     const settlement = settlePiSteering(f.db, pi.turn, true)
     accept('queued')
     await Promise.all([dispatch, settlement])
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.find(m => m.id === id)?.liveState, 'delivered')
   } finally { release(); f.cleanup() }
 })
@@ -414,7 +414,7 @@ test('a Character specialist redirection becomes one separately reviewed Milesto
       'a'.repeat(40)), 1)
     assert.equal(prepareSteeringBoundaryReviews(f.db, f.owner, f.job, f.threadId,
       'a'.repeat(40)), 0, 'worker restart cannot duplicate the redirect')
-    const chat = readThreadChat(f.db, f.owner, f.threadId)
+    const chat = (await readThreadChat(f.db, f.owner, f.threadId))
     assert.equal(chat.messages.filter(m => m.role === 'user').length, 3)
     const queued = chat.messages.find(m => m.content === instruction && m.phase === 'queued')!
     const later = chat.messages.find(m => m.id === laterId)!
@@ -430,7 +430,7 @@ test('a Character specialist redirection becomes one separately reviewed Milesto
     assert.equal(activity.state, 'awaiting-review')
     assert.equal(chat.messages.find(m => m.id === id)?.phase, 'finished',
       'the consumed instruction remains immutable')
-    assert.throws(() => cancelQueuedThreadMessage(f.db, f.stranger, f.threadId, queued.id),
+    await assert.rejects(() => cancelQueuedThreadMessage(f.db, f.stranger, f.threadId, queued.id),
       /not found/)
   } finally { release(); f.cleanup() }
 })
@@ -480,7 +480,7 @@ test('protected redirection requires its own approval, not Pi acknowledgement or
     f.db.sqlite.prepare("UPDATE studio_sessions SET status='completed' WHERE id=?").run(f.job)
     assert.equal(prepareSteeringBoundaryReviews(f.db, f.owner, f.job, f.threadId,
       'b'.repeat(40)), 1)
-    const derived = readThreadChat(f.db, f.owner, f.threadId).messages.find(m => m.phase === 'queued')!
+    const derived = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.phase === 'queued')!
     assert.equal(derived.hasRevisionScope, 0)
     assert.equal((f.db.sqlite.prepare('SELECT COUNT(*) AS n FROM thread_protected_decisions')
       .get() as { n: number }).n, 0, 'Pi delivery is never author consent')
@@ -534,7 +534,7 @@ test('verified checkpoint provenance branches between two delivered steering mes
       eligible: true, commitSha: two, parentSha: one,
       proofDigest: 'b'.repeat(64), workItem: 'focus:character.mara',
     })
-    const messages = readThreadChat(f.db, f.owner, f.threadId).messages
+    const messages = (await readThreadChat(f.db, f.owner, f.threadId)).messages
     assert.equal(messages.find(m => m.id === first)?.effectVerifiedAt, null)
     assert.equal(messages.find(m => m.id === first)?.jobId, f.job)
     assert.equal((f.db.sqlite.prepare('SELECT verified_commit_sha AS sha FROM story_thread_messages WHERE id=?')
@@ -566,11 +566,11 @@ test('worker crash with an ambiguous SDK call fences replay and preserves owner 
     release()
     f.db.sqlite.prepare(`UPDATE generation_run_queue SET phase='interrupted' WHERE job_id=?`).run(f.job)
     recoverOrphanedPiTurns(f.db)
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.find(m => m.id === id)?.liveState, 'blocked')
-    assert.equal(readThreadChat(f.db, f.owner, f.threadId)
+    assert.equal((await readThreadChat(f.db, f.owner, f.threadId))
       .messages.find(m => m.id === id)?.phase, 'blocked')
-    assert.throws(() => editQueuedThreadMessage(f.db, f.stranger, f.threadId, id,
+    await assert.rejects(() => editQueuedThreadMessage(f.db, f.stranger, f.threadId, id,
       randomUUID(), 'Never broaden Story scope', 'New instructions'), /not found/)
     await dispatchPendingPiSteering(f.db)
     assert.equal(pi.sent.length, 0)

@@ -5,6 +5,8 @@ import { repositories, sessions, stories, storyThreadPreferences, userPreference
 import type { StudioPersistence } from './contracts'
 import { createGitSqlitePersistence } from './git-sqlite'
 import { createSqliteGenerationPersistence } from './generation-sqlite'
+import { createSqliteConversationCatalog } from './conversation-sqlite'
+import { createSqliteThreadMessages } from './thread-message-sqlite'
 
 type StudioDrizzle = BetterSQLite3Database<typeof schema>
 
@@ -21,6 +23,8 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
   return {
     ...createGitSqlitePersistence(db),
     generation: createSqliteGenerationPersistence(db),
+    conversations: createSqliteConversationCatalog(db),
+    messages: createSqliteThreadMessages(db),
     dashboard: {
       async forOwner(owner) {
         assertOwner(owner)

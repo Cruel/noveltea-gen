@@ -48,12 +48,12 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     const checkpoint = join(root, 'verified-recovery-receipt.json')
     writeFileSync(checkpoint, JSON.stringify({ job, workItem: 'foundation', verified: true }))
     const originalReceipt = readFileSync(checkpoint)
-    assert.throws(() => archiveThread(store, stranger, archiveId), /not found/i)
-    archiveThread(store, owner, archiveId)
+    await assert.rejects(() => archiveThread(store, stranger, archiveId), /not found/i)
+    await archiveThread(store, owner, archiveId)
     const archivedAt = store.sqlite.prepare('SELECT archived_at AS archivedAt FROM story_threads WHERE id=?')
       .get(archiveId) as { archivedAt: string | null }
     assert.ok(archivedAt.archivedAt)
-    archiveThread(store, owner, archiveId)
+    await archiveThread(store, owner, archiveId)
     assert.deepEqual(store.sqlite.prepare('SELECT archived_at AS archivedAt FROM story_threads WHERE id=?')
       .get(archiveId), archivedAt, 'retry never advances the archive timestamp')
     const after = await listStoryConversations(store, owner, story)
@@ -69,9 +69,9 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     store = openStudioDatabase(join(root, 'studio.sqlite'))
     await migrateStudio(store, config)
     assert.ok((await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]?.archivedAt)
-    assert.throws(() => restoreThread(store, stranger, archiveId), /not found/i)
-    restoreThread(store, owner, archiveId)
-    restoreThread(store, owner, archiveId)
+    await assert.rejects(() => restoreThread(store, stranger, archiveId), /not found/i)
+    await restoreThread(store, owner, archiveId)
+    await restoreThread(store, owner, archiveId)
     const restored = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
     assert.deepEqual(restored, { ...original }, 'restore preserves original status, title and activity')
     assert.deepEqual(store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job), beforeRun)
@@ -122,8 +122,8 @@ test('archiving an ancestor preserves active child navigation and archived desce
       VALUES (?,?,'start','running','2026-11-03T00:00:00Z','2026-11-03T00:00:00Z')`)
       .run(childJob, owner)
     const childQueue = store.sqlite.prepare('SELECT * FROM generation_run_queue WHERE job_id=?').get(childJob)
-    archiveThread(store, owner, parent.id)
-    archiveThread(store, owner, grandchildId)
+    await archiveThread(store, owner, parent.id)
+    await archiveThread(store, owner, grandchildId)
     const updated = await listStoryConversations(store, owner, story)
     const all = updated.conversations[0]!.threads
     const active = selectNavigationThreads(all, 'active')
@@ -139,7 +139,7 @@ test('archiving an ancestor preserves active child navigation and archived desce
     assert.equal(all.find(t => t.id === childId)?.jobId, childJob)
     assert.deepEqual(store.sqlite.prepare('SELECT * FROM generation_run_queue WHERE job_id=?').get(childJob),
       childQueue, 'archiving a parent does not interrupt an active child job')
-    restoreThread(store, owner, parent.id)
+    await restoreThread(store, owner, parent.id)
     assert.deepEqual(selectNavigationThreads(
       (await listStoryConversations(store, owner, story)).conversations[0]!.threads, 'active'
     ).map(t => t.id).sort(), [parent.id, childId].sort())

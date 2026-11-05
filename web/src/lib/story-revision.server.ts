@@ -7,6 +7,7 @@ import type { CanonicalScopeRecord } from '../../../src/focused-scope'
 import { inferStoryRevision, type RevisionPreview, type ProtectedDecisionChange } from './story-revision-plan'
 import { assertProtectedThreadApproval } from './thread-protected-decision.server'
 import { enqueueThreadMessage, type ThreadMessage, ThreadChatError } from './thread-chat.server'
+import { ownedThreadMessageSqlite } from '../persistence/thread-message-sqlite'
 
 type Source = { jobId: string; status: string; queuePhase: string | null }
 export type PinnedRevision = {
@@ -112,15 +113,18 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   // Reserve the UUID and its exact place in the queue *synchronously* before
   // any native validation, Git access or other asynchronous scope inference.
   // The second concurrent request therefore always has its own durable slot.
-  const saved = enqueueThreadMessage(store, owner, threadId, id, content, liveMode)
+  const saved = await enqueueThreadMessage(store, owner, threadId, id, content, liveMode)
+  // Admission is durable, but scope inference is asynchronous: retry/cancel
+  // may update the row before this request returns to the caller.
+  const latest = () => ownedThreadMessageSqlite(store.db, owner, threadId, id) ?? saved
   // A duplicate HTTP request may arrive after the author has edited the
   // queued message. Return the durable current version without inferring or
   // granting a new scope from the stale pre-edit text.
-  if (saved.content !== content.trim()) return saved
+  if (saved.content !== content.trim()) return latest()
   if (saved.liveMode && liveMode) {
     if (selectedTargets || approvalDigest)
       throw new ThreadChatError(409, 'Steering is not a new scope approval or a writer grant.')
-    return saved
+    return latest()
   }
   if (saved.phase === 'cancelled')
     throw new ThreadChatError(409, 'This instruction was cancelled. Send a new instruction with a new ID.')
@@ -132,27 +136,27 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
     if (approvalDigest && approvalDigest !== pinned.digest ||
         selectedTargets && JSON.stringify([...selectedTargets].sort()) !== JSON.stringify(pinned.selectedTargets))
       throw new ThreadChatError(409, 'The retry differs from the saved approved revision scope.')
-    return saved
+    return latest()
   }
   const pending = pendingInstruction(store, owner, threadId)
   const current = latestRunStatus(store, owner, threadId)
   // Later queued requests may carry a preview/approval for the old HEAD, but
   // none of it is applied to the as-yet-unverified future Story revision.
   if (saved.phase !== 'queued' || pending?.id !== id ||
-      current.status !== 'completed' || current.queuePhase !== 'finished') return saved
+      current.status !== 'completed' || current.queuePhase !== 'finished') return latest()
 
   const source = current
   const plan = await revisionFromSource(store, owner, source.jobId, content, selectedTargets)
   // Clarifications and unapproved material expansions stay durably queued for
   // review or cancellation, rather than consuming the head of the Thread.
-  if (plan.clarification) return saved
+  if (plan.clarification) return latest()
   // A delivered steer asking for additional scope must never auto-admit a
   // single-target replan. Author approval is required even if the inferred
   // new scope would normally be eligible for automatic continuation.
   const redirected = store.sqlite.prepare(`SELECT i.disposition FROM thread_steering_intents i
     WHERE i.review_message_id=? AND i.owner_user_id=? AND i.thread_id=?`)
     .get(id, owner, threadId) as { disposition: string } | undefined
-  if (redirected && !approvalDigest) return saved
+  if (redirected && !approvalDigest) return latest()
   if (approvalDigest && approvalDigest !== plan.digest)
     throw new ThreadChatError(409, 'Story scope changed since review. Inspect the updated proposal.')
   if (plan.protectedChange) {
@@ -160,16 +164,17 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
     // controller decision must exist in the owner-scoped immutable ledger.
     try { assertProtectedThreadApproval(store, owner, threadId, id, source.jobId, plan) }
     catch (error) {
-      if (error instanceof ThreadChatError && error.status === 409) return saved
+      if (error instanceof ThreadChatError && error.status === 409) return latest()
       throw error
     }
-  } else if (plan.reviewRequired && !approvalDigest) return saved
+  } else if (plan.reviewRequired && !approvalDigest) return latest()
   const receipt: PinnedRevision = { sourceJobId: source.jobId, sourceSha: plan.headSha,
     digest: plan.digest, selectedTargets: plan.targets, approved: !!approvalDigest || !!plan.protectedChange,
     contract: plan.contract, writePaths: plan.writePaths, contextIds: plan.contextIds,
     ...(plan.protectedChange ? { protectedChange: plan.protectedChange } : {}) }
   return store.sqlite.transaction(() => {
-    const currentMessage = enqueueThreadMessage(store, owner, threadId, id, content)
+    const currentMessage = ownedThreadMessageSqlite(store.db, owner, threadId, id)
+    if (!currentMessage) throw new ThreadChatError(409, 'Queued instruction is no longer available.')
     const live = latestRunStatus(store, owner, threadId)
     const head = pendingInstruction(store, owner, threadId)
     // A cancellation, concurrent claim or newly completed predecessor means
@@ -189,8 +194,8 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
           AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c
             WHERE c.message_id=story_thread_messages.id)`)
         .run(JSON.stringify(receipt), id, owner, threadId).changes
-      if (changes !== 1) return enqueueThreadMessage(store, owner, threadId, id, content)
+      if (changes !== 1) return ownedThreadMessageSqlite(store.db, owner, threadId, id) ?? saved
     }
-    return enqueueThreadMessage(store, owner, threadId, id, content)
+    return ownedThreadMessageSqlite(store.db, owner, threadId, id) ?? saved
   })()
 }

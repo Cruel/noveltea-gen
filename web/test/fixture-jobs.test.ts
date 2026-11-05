@@ -107,11 +107,11 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
       VALUES (?,?,?,'Private Story',?,'paused','2026-11-01','2026-11-01')`)
       .run(jobId, alice.id, storyId, pinned)
-    const conversation = createConversation(store, alice.id, storyId)
+    const conversation = await createConversation(store, alice.id, storyId)
     ensureRootThreads(store, alice.id, storyId)
     assert.equal(associateNaturalThread(store, alice.id, conversation.id, jobId, payload.task), 'root:' + jobId)
     assert.throws(() => associateNaturalThread(store, bob.id, conversation.id, jobId, payload.task), /not found/)
-    assert.deepEqual(readThreadChat(store, alice.id, 'root:' + jobId).messages, [])
+    assert.deepEqual((await readThreadChat(store, alice.id, 'root:' + jobId)).messages, [])
 
     const api = async (method: 'GET' | 'POST', body?: unknown, session?: string, origin = config.baseURL) => {
       const request = new Request(config.baseURL + '/api/jobs/' + jobId, {
@@ -252,7 +252,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(git(repo, 'rev-parse', 'HEAD'), pinned)
     assert.equal(started.body.job.threadId, acquired.threadId + ':generation:web')
     assert.equal(started.body.job.fixture, true)
-    const chat = readThreadChat(store, alice.id, 'root:' + jobId)
+    const chat = (await readThreadChat(store, alice.id, 'root:' + jobId))
     assert.equal(chat.messages[0]?.content, naturalPlan.task)
     assert.match(chat.messages.at(-1)?.content ?? '', /paused/i)
     assert.equal(chat.runs.length, 1)

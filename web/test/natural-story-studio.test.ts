@@ -30,8 +30,8 @@ test('natural prompt preview and initial Thread registration are owner scoped an
     db.sqlite.prepare(`INSERT INTO stories
       (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
       VALUES (?,?,?,'story','Story','now',?)`).run(storyId, alice, repo, headSha)
-    const chosen = createConversation(db, alice, storyId)
-    const other = createConversation(db, alice, storyId)
+    const chosen = await createConversation(db, alice, storyId)
+    const other = await createConversation(db, alice, storyId)
     const brief = 'Write a fantasy visual novel about a lost astronomer.'
     const preview = await previewNaturalStory(db, alice, chosen.id, brief)
     assert.equal(preview.plan.task, brief)
@@ -82,7 +82,7 @@ test('natural prompt preview and initial Thread registration are owner scoped an
     assert.equal(navigation.conversations.find(item => item.id === chosen.id)?.threads.length, 1)
     assert.equal(navigation.conversations.find(item => item.id === chosen.id)?.threads[0]?.title, brief)
     assert.equal(navigation.conversations.some(item => item.id === 'legacy:' + jobId), false)
-    assert.deepEqual(readThreadChat(db, alice, 'root:' + jobId).messages, [])
+    assert.deepEqual((await readThreadChat(db, alice, 'root:' + jobId)).messages, [])
     assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
   } finally { db.sqlite.close() }
 })

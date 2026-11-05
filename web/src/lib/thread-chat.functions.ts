@@ -27,7 +27,7 @@ export const getThreadChat = createServerFn({ method: 'GET' })
   .handler(async ({ data }) => {
     const ownerId = await owner()
     await syncAppliedAuthorMessages(database, ownerId, data)
-    return readThreadChat(database, ownerId, data)
+    return await readThreadChat(database, ownerId, data)
   })
 
 export const getThreadEditPreview = createServerFn({ method: 'GET' })
@@ -103,10 +103,10 @@ export const postThreadProtectedDecision = createServerFn({ method: 'POST' })
     } else {
       // A denial retains its immutable author receipt but must not leave an
       // unreviewable rejected queue head blocking later Thread instructions.
-      cancelQueuedThreadMessage(database, ownerId, data.threadId, data.messageId)
+      await cancelQueuedThreadMessage(database, ownerId, data.threadId, data.messageId)
     }
     await advanceThread(database, ownerId, data.threadId)
-    return { receipt, chat: readThreadChat(database, ownerId, data.threadId) }
+    return { receipt, chat: await readThreadChat(database, ownerId, data.threadId) }
   })
 
 /** Compare-and-swap edit; request ID survives duplicate HTTP submissions. */
@@ -121,10 +121,10 @@ export const editThreadQueuedMessage = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => {
     const ownerId = await owner()
-    const message = editQueuedThreadMessage(database, ownerId, data.threadId,
+    const message = await editQueuedThreadMessage(database, ownerId, data.threadId,
       data.messageId, data.requestId, data.expected, data.replacement)
     await advanceThread(database, ownerId, data.threadId)
-    return { message, chat: readThreadChat(database, ownerId, data.threadId) }
+    return { message, chat: await readThreadChat(database, ownerId, data.threadId) }
   })
 
 /** Idempotent owner-scoped cancellation. An admitted writer cannot be cancelled
@@ -137,9 +137,9 @@ export const cancelThreadMessage = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => {
     const ownerId = await owner()
-    const message = cancelQueuedThreadMessage(database, ownerId, data.threadId, data.messageId)
+    const message = await cancelQueuedThreadMessage(database, ownerId, data.threadId, data.messageId)
     await advanceThread(database, ownerId, data.threadId)
-    return { message, chat: readThreadChat(database, ownerId, data.threadId) }
+    return { message, chat: await readThreadChat(database, ownerId, data.threadId) }
   })
 
 export const postThreadMessage = createServerFn({ method: 'POST' })
@@ -160,5 +160,5 @@ export const postThreadMessage = createServerFn({ method: 'POST' })
     const message = await submitThreadRevision(database, ownerId, data.threadId, data.id,
       data.content, data.selectedTargets, data.approvalDigest, data.liveMode)
     await advanceThread(database, ownerId, data.threadId)
-    return { message, chat: readThreadChat(database, ownerId, data.threadId) }
+    return { message, chat: await readThreadChat(database, ownerId, data.threadId) }
   })

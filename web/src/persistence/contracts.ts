@@ -40,6 +40,8 @@ export interface SettingsPreferences {
 }
 import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding, PiCredentialVault } from './git-contracts'
 import type { GenerationPersistence } from './generation-contracts'
+import type { ConversationCatalog } from './conversation-contracts'
+import type { ThreadMessagePersistence } from './thread-message-contracts'
 
 export interface StudioPersistence {
   dashboard: DashboardCatalog
@@ -49,4 +51,6 @@ export interface StudioPersistence {
   onboarding: StoryOnboarding
   piCredentials: PiCredentialVault
   generation: GenerationPersistence
+  conversations: ConversationCatalog
+  messages: ThreadMessagePersistence
 }

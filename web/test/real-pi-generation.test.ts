@@ -233,7 +233,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     }
     assert.ok(finished, 'real generation must produce a durable terminal/pause event')
     if (liveSteeringIds.length) {
-      const chat = readThreadChat(store, user.id, 'root:' + jobId)
+      const chat = (await readThreadChat(store, user.id, 'root:' + jobId))
       for (const id of liveSteeringIds) {
         assert.equal(chat.messages.find(message => message.id === id)?.liveState,
           'delivered', 'Real Pi must consume and persist each exact live SDK message')
