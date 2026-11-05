@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "./git-read-cache.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -134,8 +134,13 @@ async function validateWorktree(manifest: JobManifest): Promise<string> {
   if (!entries.some(({ worktree, branch }) => worktree && resolve(worktree) === manifest.worktreeRoot && branch === expected)) {
     throw new Error("Saved job worktree/branch identity differs from the Git registry. Restore it before retrying.");
   }
-  if (resolve(git(manifest.worktreeRoot, "rev-parse", "--show-toplevel")) !== manifest.worktreeRoot ||
-      gitCommonDir(manifest.worktreeRoot) !== manifest.gitCommonDir ||
+  // Ask Git for the checkout root, common object directory and current HEAD
+  // in one invocation. These are mutable identity facts: never cache them.
+  const identity = git(manifest.worktreeRoot, "rev-parse", "--path-format=absolute",
+    "--show-toplevel", "--git-common-dir", "HEAD^{commit}").split("\n");
+  if (identity.length !== 3 || resolve(identity[0] ?? "") !== manifest.worktreeRoot ||
+      resolve(identity[1] ?? "") !== manifest.gitCommonDir ||
+      !/^[a-f0-9]{40,64}$/.test(identity[2] ?? "") ||
       git(manifest.worktreeRoot, "symbolic-ref", "HEAD") !== expected) {
     throw new Error("Saved job worktree points to an unexpected repository or branch.");
   }
@@ -148,7 +153,7 @@ async function validateWorktree(manifest: JobManifest): Promise<string> {
   } catch {
     throw new Error("Saved worktree Story root is missing or resolves outside the job. Restore it before retrying.");
   }
-  const head = git(manifest.worktreeRoot, "rev-parse", "--verify", "HEAD^{commit}");
+  const head = identity[2]!;
   try {
     git(manifest.worktreeRoot, "merge-base", "--is-ancestor", manifest.baseSha, head);
   } catch {

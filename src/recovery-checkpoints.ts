@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "./git-read-cache.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
@@ -291,7 +291,8 @@ function verifiedBaselineStages(job: JobStartResult,
   return files.some(path => path.startsWith(prefix + "creative-direction/") && path.endsWith(".md"))
     ? ["foundation", "global-architecture"] : [];
 }
-function verifyGit(job: JobStartResult, sha: string, parent: string, id: string) {
+function verifyGit(job: JobStartResult, sha: string, parent: string, id: string,
+  verifiedHead: string, checkedBranch = false) {
   if (!SHA.test(sha) || !SHA.test(parent) || !ITEM.test(id) ||
       git(job, "rev-parse", sha + "^{commit}") !== sha ||
       git(job, "rev-parse", sha + "^") !== parent) throw new Error("Recovery commit or parent SHA differs.");
@@ -299,8 +300,8 @@ function verifyGit(job: JobStartResult, sha: string, parent: string, id: string)
   if (!trailers.includes("NovelTea-Job: " + job.jobId) ||
       !trailers.includes("NovelTea-Work-Item: " + id))
     throw new Error("Git work-item commit provenance differs from the trusted receipt.");
-  if (git(job, "symbolic-ref", "--short", "HEAD") !== job.branch ||
-      !isAncestor(job, sha, "HEAD"))
+  if ((!checkedBranch && git(job, "symbolic-ref", "--short", "HEAD") !== job.branch) ||
+      !isAncestor(job, sha, verifiedHead))
     throw new Error("Recovery commit is not reachable on its original branch.");
   const changed = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
     .split("\n").filter(Boolean);
@@ -314,7 +315,8 @@ async function readFinal(job: JobStartResult, sha: string): Promise<RecoveryChec
   if (!stat.isFile() || stat.isSymbolicLink()) throw Error("Recovery record is not a regular file.");
   return JSON.parse(await readFile(path, "utf8")) as RecoveryCheckpoint;
 }
-async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
+async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
+  inspectionHead?: string) {
   if (point.version !== 1 || point.status !== "finalized" ||
       point.jobId !== job.jobId || point.repository !== job.gitRoot ||
       point.story !== job.storyRoot || point.storyRelativePath !== job.storyRelativePath ||
@@ -359,10 +361,11 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint) {
     if (digest(authorized) !== point.planDigest || digest(point.plan) !== digest(authorized))
       throw new Error("Checkpoint plan does not match original controller authorization.");
   }
-  verifyGit(job, point.commitSha, point.parentSha, point.workItem);
-  const verified = await trustedHead(job);
-  if (!isAncestor(job, point.commitSha, verified))
-    throw new Error("Checkpoint is outside the published verified-head boundary.");
+  // A multi-checkpoint inspection establishes the verified HEAD and branch
+  // before scanning, and rechecks both afterwards. Direct checks stay live.
+  const verified = inspectionHead ?? await trustedHead(job);
+  verifyGit(job, point.commitSha, point.parentSha, point.workItem, verified,
+    inspectionHead !== undefined);
   // The completed inventory must reflect real prior commits, never a future
   // specialist invented in the checkpoint JSON. Unknown revision/inbox commits
   // do not become completed narrative work items.
@@ -416,15 +419,42 @@ export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<R
   if (!existsSync(dir(job))) return [];
   const files = (await readdir(dir(job))).filter(name => /^[a-f0-9]{40}\.json$/.test(name)).sort();
   const results: RecoveryInspection[] = [];
+  // The sealed history may contain many immutable checkpoints. Check the
+  // mutable HEAD/branch at both boundaries of a multi-point scan instead of
+  // spawning two Git identity queries per checkpoint. Receipt and intent
+  // bytes are still read and authenticated individually on every inspection.
+  let head: string | undefined;
+  let boundaryError: unknown;
+  if (files.length > 2) {
+    try {
+      head = await trustedHead(job);
+      if (git(job, "symbolic-ref", "--short", "HEAD") !== job.branch)
+        throw new Error("Recovery inspection branch identity changed.");
+    } catch (error) {
+      boundaryError = error;
+    }
+  }
   for (const file of files) {
     try {
+      if (boundaryError) throw boundaryError;
       const point = await readFinal(job, file.slice(0, 40));
-      await verifyFinal(job, point);
+      await verifyFinal(job, point, head);
       results.push({ ...point, eligible: true, reason: null });
     } catch (error) {
       // Inspectable, never branchable. Do not repair or trust a corrupt record
       // during an owner-scoped read, including a currently dirty specialist.
       results.push(nonBranchable(job, file.slice(0, 40), error instanceof Error ? error.message : String(error)));
+    }
+  }
+  if (head !== undefined) {
+    try {
+      if (await trustedHead(job) !== head ||
+          git(job, "symbolic-ref", "--short", "HEAD") !== job.branch)
+        throw new Error("Recovery HEAD or branch moved during checkpoint inspection.");
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      for (let i = 0; i < results.length; i++)
+        results[i] = nonBranchable(job, results[i]!.commitSha, reason);
     }
   }
   for (const name of (await readdir(dir(job))).filter(n => /^[a-f0-9]{40}\.intent\.json$/.test(n))) {
@@ -447,7 +477,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   const verified = await trustedHead(job);
   if (!isAncestor(job, commitSha, verified))
     throw new Error("Specialist commit is not within the published verified-head chain.");
-  verifyGit(job, commitSha, parentSha, workItem);
+  verifyGit(job, commitSha, parentSha, workItem, verified);
   const pending = intentFile(job, commitSha);
   // After a crash an approved replan may have replaced Architecture\x27s mutable
   // receipt. Recover only the original intent\x27s plan and commit evidence.

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
