@@ -12,7 +12,7 @@ import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
-import { advanceThread, readThreadChat } from '../src/lib/thread-chat.server'
+import { advanceThread, readThreadChat, cancelQueuedThreadMessage } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
 
@@ -32,6 +32,9 @@ const catalog = [
   { path: 'events/confession.md', metadata: {
     type: 'event', id: 'event.confession', title: 'Confession event', status: 'draft',
     arcs: ['arc.trust'], characters: ['character.nia'] } },
+  { path: 'events/reckoning.md', metadata: {
+    type: 'event', id: 'event.reckoning', title: 'Reckoning event', status: 'draft',
+    arcs: ['arc.trust'], characters: ['character.nia'] } },
   { path: 'characters/nia.md', metadata: {
     type: 'character', id: 'character.nia', title: 'Nia', status: 'draft' } },
   { path: 'authored-content/confession.md', metadata: {
@@ -39,7 +42,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'concurrent' | 'cancel' | 'cancel-inflight') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
@@ -122,21 +125,109 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
 
     const task = kind === 'broad'
       ? 'Rewrite milestone.confession for better emotional pacing'
-      : 'Make character.nia less confrontational'
+      : kind === 'cancel' ? 'Change this Event' : 'Make character.nia less confrontational'
     await assert.rejects(previewThreadRevision(store, stranger, threadId, task), /no source generation|has no source|not found/i)
     const plan = await previewThreadRevision(store, owner, threadId, task)
+    if (kind === 'cancel-inflight') {
+      const pendingId = randomUUID()
+      const inFlight = submitThreadRevision(store, owner, threadId, pendingId, task)
+      const cancelled = cancelQueuedThreadMessage(store, owner, threadId, pendingId)
+      assert.equal(cancelled.phase, 'cancelled')
+      const settled = await inFlight
+      assert.equal(settled.phase, 'cancelled',
+        'a scope inference completing after cancellation must not resurrect the instruction')
+      assert.equal(readThreadChat(store, owner, threadId).messages.find(m => m.id === pendingId)?.hasRevisionScope, 0)
+      await advanceThread(store, owner, threadId)
+      assert.deepEqual(readThreadChat(store, owner, threadId).runs.map(run => run.jobId), [sourceId])
+      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      return
+    }
+    if (kind === 'concurrent') {
+      const firstId = randomUUID(), secondId = randomUUID()
+      const [first, second] = await Promise.all([
+        submitThreadRevision(store, owner, threadId, firstId, task),
+        submitThreadRevision(store, owner, threadId, secondId,
+          'Make character.nia more thoughtful'),
+      ])
+      assert.equal(first.phase, 'queued')
+      assert.equal(second.phase, 'queued')
+      assert.ok(first.sequence < second.sequence,
+        'concurrent calls reserve one stable queue order before validation')
+      const before = readThreadChat(store, owner, threadId)
+      assert.deepEqual(before.messages.filter(item => new Set<string>([firstId, secondId]).has(item.id))
+        .map(item => [item.id, item.hasRevisionScope]), [[firstId, 1], [secondId, 0]],
+      'only the queue head receives an authorized scope')
+      await Promise.all([
+        advanceThread(store, owner, threadId),
+        advanceThread(store, owner, threadId),
+      ])
+      const after = readThreadChat(store, owner, threadId)
+      assert.equal(after.messages.find(item => item.id === firstId)?.phase, 'running')
+      assert.equal(after.messages.find(item => item.id === secondId)?.phase, 'queued')
+      assert.deepEqual(after.runs.map(run => run.jobId), [sourceId, firstId])
+      assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM studio_sessions WHERE id=?')
+        .get(secondId) as { n: number }).n, 0)
+      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      return
+    }
+    if (kind === 'cancel') {
+      assert.ok(plan.clarification, 'unresolved Event reference requires clarification')
+      const ambiguousId = randomUUID(), nextId = randomUUID()
+      const initial = await submitThreadRevision(store, owner, threadId, ambiguousId, task)
+      assert.equal(initial.phase, 'queued')
+      assert.equal(initial.hasRevisionScope, 0)
+      const later = await submitThreadRevision(store, owner, threadId, nextId,
+        'Make character.nia less confrontational')
+      assert.ok(initial.sequence < later.sequence)
+      await advanceThread(store, owner, threadId)
+      assert.equal(readThreadChat(store, owner, threadId).messages.find(m => m.id === nextId)?.phase,
+        'queued', 'ambiguous first instruction still blocks later authoring')
+      const reviewed = await previewThreadRevision(store, owner, threadId, task,
+        undefined, ambiguousId)
+      assert.ok(reviewed.clarification)
+      await assert.rejects(async () => cancelQueuedThreadMessage(store, stranger, threadId,
+        ambiguousId), /not found/i)
+      const original = store.sqlite.prepare(`SELECT id,body,sequence,phase FROM story_thread_messages
+        WHERE id=?`).get(ambiguousId)
+      const cancelled = cancelQueuedThreadMessage(store, owner, threadId, ambiguousId)
+      assert.equal(cancelled.phase, 'cancelled')
+      assert.ok(cancelled.cancelledAt)
+      assert.deepEqual(cancelQueuedThreadMessage(store, owner, threadId, ambiguousId), cancelled,
+        'cancellation is idempotent and preserves one receipt')
+      assert.deepEqual(store.sqlite.prepare(`SELECT id,body,sequence,phase FROM story_thread_messages
+        WHERE id=?`).get(ambiguousId), original, 'the original queued message remains immutable')
+      assert.equal((store.sqlite.prepare(`SELECT COUNT(*) AS n FROM story_thread_message_cancellations
+        WHERE message_id=?`).get(ambiguousId) as { n: number }).n, 1)
+      await assert.rejects(submitThreadRevision(store, owner, threadId, ambiguousId, task),
+        /cancelled.*new ID/i)
+      await advanceThread(store, owner, threadId)
+      const settled = readThreadChat(store, owner, threadId)
+      assert.deepEqual(settled.messages.filter(m => new Set<string>([ambiguousId, nextId]).has(m.id))
+        .map(m => m.phase), ['cancelled', 'running'])
+      assert.equal(settled.messages.find(m => m.id === ambiguousId)?.content, task)
+      assert.equal(settled.messages.find(m => m.id === nextId)?.hasRevisionScope, 1)
+      assert.deepEqual(settled.runs.map(run => run.jobId), [sourceId, nextId])
+      assert.throws(() => cancelQueuedThreadMessage(store, owner, threadId, nextId),
+        /entered execution/i)
+      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      return
+    }
     assert.equal(plan.reviewRequired, kind === 'broad')
     assert.deepEqual(plan.writePaths, kind === 'broad'
       ? ['authored-content/confession.md', 'events/confession.md']
       : ['characters/nia.md'])
     assert.ok(plan.readOnlyIds.includes(kind === 'broad' ? 'milestone.confession' : 'arc.trust'))
     const childId = randomUUID()
-    if (kind === 'broad') await assert.rejects(
-      submitThreadRevision(store, owner, threadId, childId, task), /authorize.*write paths/i)
+    if (kind === 'broad') {
+      const held = await submitThreadRevision(store, owner, threadId, childId, task)
+      assert.equal(held.phase, 'queued', 'material expansion is retained but not authorized')
+      assert.equal(held.hasRevisionScope, 0)
+    }
     await assert.rejects(submitThreadRevision(store, owner, threadId, childId, task,
-      undefined, 'f'.repeat(64)), /authorize.*write paths|changed since review/i)
+      undefined, 'f'.repeat(64)), /changed since review/i)
     assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM story_thread_messages WHERE id=?')
-      .get(childId) as { n: number }).n, 0)
+      .get(childId) as { n: number }).n, 1,
+    'a rejected approval does not discard the earlier atomically reserved message')
 
     await submitThreadRevision(store, owner, threadId, childId, task,
       undefined, kind === 'broad' ? plan.digest : undefined)
@@ -149,7 +240,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     assert.equal((store.sqlite.prepare(`SELECT revision_scope_json AS scope
       FROM story_thread_messages WHERE id=?`).get(bufferedId) as { scope: string | null }).scope, null)
     await assert.rejects(submitThreadRevision(store, owner, threadId, childId, 'Other task', undefined, plan.digest),
-      /already used/)
+      /already.*use/)
     assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM story_thread_messages WHERE id=?')
       .get(childId) as { n: number }).n, 1)
     await advanceThread(store, owner, threadId)
@@ -181,3 +272,9 @@ test('reviewed Milestone expansion admits a scoped child and rejects changed app
   { timeout: 60_000 }, () => exerciseRevisionAdmission('broad'))
 test('unambiguous Character revision admits only its one focused path without a form',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('narrow'))
+test('simultaneous completed-Thread submissions both persist; only the first receives a scope',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('concurrent'))
+test('ambiguous queued instruction can be cancelled without rewriting its history or blocking the next',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('cancel'))
+test('cancellation racing with asynchronous inference cannot resurrect or authorize the message',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('cancel-inflight'))

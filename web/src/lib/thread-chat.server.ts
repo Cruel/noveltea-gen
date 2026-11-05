@@ -18,8 +18,9 @@ export class ThreadChatError extends Error {
 }
 export type ThreadMessage = {
   id: string; role: 'user' | 'assistant'; status: 'delivered' | 'queued'; content: string
-  phase: 'queued' | 'preparing' | 'running' | 'finished' | 'blocked'
+  phase: 'queued' | 'preparing' | 'running' | 'finished' | 'blocked' | 'cancelled'
   jobId: string | null; createdAt: string; sequence: number; hasRevisionScope: number
+  cancelledAt: string | null
 }
 type Run = { jobId: string; status: string; queuePhase: string | null; runOrder: number }
 const now = () => new Date().toISOString()
@@ -33,7 +34,11 @@ function nextSequence(store: StudioDatabase, threadId: string): number {
 }
 const messageColumns = `sequence,id,role,status,body AS content,
   (revision_scope_json IS NOT NULL) AS hasRevisionScope,
-  COALESCE(phase, CASE status WHEN 'queued' THEN 'queued' ELSE 'finished' END) AS phase,
+  (SELECT c.cancelled_at FROM story_thread_message_cancellations c
+    WHERE c.message_id=story_thread_messages.id) AS cancelledAt,
+  CASE WHEN EXISTS (SELECT 1 FROM story_thread_message_cancellations c
+      WHERE c.message_id=story_thread_messages.id) THEN 'cancelled'
+    ELSE COALESCE(phase, CASE status WHEN 'queued' THEN 'queued' ELSE 'finished' END) END AS phase,
   job_id AS jobId,created_at AS createdAt`
 
 function thread(store: StudioDatabase, owner: string, id: string) {
@@ -198,6 +203,35 @@ export function enqueueThreadMessage(store: StudioDatabase, owner: string, threa
   })()
 }
 
+/** Append-only cancellation receipt. The queued message and sequence are never
+ * edited or reused; only an unadmitted, owner-scoped instruction is cancelable.
+ * A concurrent writer claim and cancellation are serialized by SQLite. */
+export function cancelQueuedThreadMessage(store: StudioDatabase, owner: string,
+  threadId: string, id: string): ThreadMessage {
+  if (!UUID.test(id)) throw new ThreadChatError(400, 'Invalid queued message identity.')
+  return store.sqlite.transaction(() => {
+    thread(store, owner, threadId)
+    const read = () => store.sqlite.prepare(`SELECT ${messageColumns}
+      FROM story_thread_messages WHERE id=? AND thread_id=? AND owner_user_id=?`)
+      .get(id, threadId, owner) as ThreadMessage | undefined
+    const message = read()
+    if (!message) throw new ThreadChatError(404, 'Queued Thread instruction not found.')
+    if (message.role !== 'user') throw new ThreadChatError(409, 'Only author instructions can be cancelled.')
+    if (message.phase === 'cancelled') return message
+    if (message.phase !== 'queued' || message.jobId !== null ||
+        store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
+          WHERE id=? AND source_job_id IS NOT NULL`).get(id))
+      throw new ThreadChatError(409, 'The instruction has entered execution and cannot be cancelled.')
+    const time = now()
+    store.sqlite.prepare(`INSERT INTO story_thread_message_cancellations
+      (message_id,owner_user_id,thread_id,cancelled_at) VALUES (?,?,?,?)`)
+      .run(id, owner, threadId, time)
+    store.sqlite.prepare(`UPDATE story_threads SET activity_at=?
+      WHERE id=? AND owner_user_id=?`).run(time, threadId, owner)
+    return read()!
+  })()
+}
+
 type Admission = { id: string; content: string; source: string; runOrder: number; scopeJson: string | null }
 /** An atomic SQLite claim is the only path from queued user message to a new
  * worktree. A crash mid-preparation leaves an inspectable, non-replayed claim. */
@@ -208,12 +242,16 @@ function claimMessage(store: StudioDatabase, owner: string, threadId: string): A
     if (store.sqlite.prepare(`SELECT 1 FROM story_thread_messages
       WHERE owner_user_id=? AND thread_id=? AND role='user'
       AND phase IN ('preparing','running','blocked') LIMIT 1`).get(owner, threadId)) return null
-    const next = store.sqlite.prepare(`SELECT id,body AS content,revision_scope_json AS scopeJson FROM story_thread_messages
-      WHERE owner_user_id=? AND thread_id=? AND role='user' AND phase='queued'
-      ORDER BY sequence LIMIT 1`).get(owner, threadId) as { id: string; content: string; scopeJson: string | null } | undefined
+    const next = store.sqlite.prepare(`SELECT m.id,m.body AS content,m.revision_scope_json AS scopeJson
+      FROM story_thread_messages m WHERE m.owner_user_id=? AND m.thread_id=?
+        AND m.role='user' AND m.phase='queued'
+        AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id)
+      ORDER BY m.sequence LIMIT 1`).get(owner, threadId) as
+      { id: string; content: string; scopeJson: string | null } | undefined
     if (!next || !next.scopeJson) return null
     const changed = store.sqlite.prepare(`UPDATE story_thread_messages SET phase='preparing',
-      source_job_id=? WHERE id=? AND owner_user_id=? AND phase='queued'`)
+      source_job_id=? WHERE id=? AND owner_user_id=? AND phase='queued'
+        AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=story_thread_messages.id)`)
       .run(run.jobId, next.id, owner).changes
     if (changed !== 1) return null
     return { ...next, source: run.jobId, runOrder: run.runOrder + 1 }
@@ -221,9 +259,11 @@ function claimMessage(store: StudioDatabase, owner: string, threadId: string): A
 }
 
 export async function advanceThread(store: StudioDatabase, owner: string, threadId: string): Promise<void> {
-  const candidate = store.sqlite.prepare(`SELECT id,body AS content,revision_scope_json AS scope
-    FROM story_thread_messages WHERE owner_user_id=? AND thread_id=?
-      AND role='user' AND phase='queued' ORDER BY sequence LIMIT 1`)
+  const candidate = store.sqlite.prepare(`SELECT m.id,m.body AS content,m.revision_scope_json AS scope
+    FROM story_thread_messages m WHERE m.owner_user_id=? AND m.thread_id=?
+      AND m.role='user' AND m.phase='queued'
+      AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id)
+    ORDER BY m.sequence LIMIT 1`)
     .get(owner, threadId) as { id: string; content: string; scope: string | null } | undefined
   const source = currentRun(store, owner, threadId)
   if (candidate && !candidate.scope && source?.status === 'completed' && source.queuePhase === 'finished') {

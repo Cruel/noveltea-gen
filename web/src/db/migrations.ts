@@ -389,6 +389,21 @@ const appMigrations = [
       `ALTER TABLE story_thread_messages ADD COLUMN revision_scope_json TEXT`,
     ],
   },
+  {
+    version: 23,
+    statements: [
+      // A queued instruction is immutable, including after its author cancels
+      // it. This separate receipt preserves its original text and position.
+      `CREATE TABLE story_thread_message_cancellations (
+        message_id TEXT PRIMARY KEY NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        cancelled_at TEXT NOT NULL,
+        FOREIGN KEY (message_id) REFERENCES story_thread_messages(id) ON DELETE CASCADE,
+        FOREIGN KEY (thread_id,owner_user_id) REFERENCES story_threads(id,owner_user_id) ON DELETE CASCADE
+      )`,
+    ],
+  },
 ] as const
 
 const latestAppSchemaVersion = appMigrations[appMigrations.length - 1]!.version
@@ -444,9 +459,10 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
   const repoColumns = store.sqlite.pragma('table_info(repositories)') as Array<{ name: string }>
   const hasForks = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_forks'`).get()
   const hasMessages = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='story_thread_messages'`).get()
+  const hasMessageCancellations = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='story_thread_message_cancellations'`).get()
   const hasRestarts = !!store.sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_restarts'`).get()
   const messageColumns = store.sqlite.pragma('table_info(story_thread_messages)') as Array<{ name: string }>
-  if (!messageColumns.some(column => column.name === 'revision_scope_json') || !hasRestarts || !hasForks || !hasMessages || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
+  if (!messageColumns.some(column => column.name === 'revision_scope_json') || !hasMessageCancellations || !hasRestarts || !hasForks || !hasMessages || !hasThreads || !hasPrefs || !hasGitConnections || !hasGitFlows || !repoColumns.some(column => column.name === 'connection_id') || !hasGitlabPublication || !hasPublication || !hasQueue || !hasOnboarding || !hasPiCredentials || !hasEvents || !hasPiOnboarding || !columns.some(column => column.name === 'source_commit_sha') ||
       !columns.some(column => column.name === 'initial_content_sha256') ||
       !sessionColumns.some(column => column.name === 'source_commit_sha') ||
       !sessionColumns.some(column => column.name === 'generation_request_json') ||

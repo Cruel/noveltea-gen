@@ -30,10 +30,11 @@ export function assertPinnedRevision(scope: PinnedRevision, refreshed: RevisionP
     throw new ThreadChatError(409, 'Story impact or protected scope changed since approval; no continuation was started.')
 }
 function pendingInstruction(store: StudioDatabase, owner: string, threadId: string) {
-  return store.sqlite.prepare(`SELECT id,body AS content,phase FROM story_thread_messages
-    WHERE owner_user_id=? AND thread_id=? AND role='user'
-      AND phase IN ('queued','preparing','running','blocked')
-    ORDER BY sequence LIMIT 1`).get(owner, threadId) as
+  return store.sqlite.prepare(`SELECT m.id,m.body AS content,m.phase
+    FROM story_thread_messages m WHERE m.owner_user_id=? AND m.thread_id=? AND m.role='user'
+      AND m.phase IN ('queued','preparing','running','blocked')
+      AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id)
+    ORDER BY m.sequence LIMIT 1`).get(owner, threadId) as
     { id: string; content: string; phase: string } | undefined
 }
 function assertHeadOfQueue(store: StudioDatabase, owner: string, threadId: string,
@@ -100,45 +101,48 @@ export async function previewThreadRevision(store: StudioDatabase, owner: string
  * A retry with the same UUID cannot replace its earlier controller grant. */
 export async function submitThreadRevision(store: StudioDatabase, owner: string, threadId: string,
   id: string, content: string, selectedTargets?: string[], approvalDigest?: string): Promise<ThreadMessage> {
-  const retry = store.sqlite.prepare(`SELECT id,owner_user_id AS owner,thread_id AS threadId,
-    body,revision_scope_json AS scope FROM story_thread_messages WHERE id=?`).get(id) as
-    { id: string; owner: string; threadId: string; body: string; scope: string | null } | undefined
-  if (retry && (retry.owner !== owner || retry.threadId !== threadId || retry.body !== content.trim()))
-    throw new ThreadChatError(409, 'Message UUID is already used for another instruction.')
-  if (retry?.scope) {
-    const pinned = JSON.parse(retry.scope) as PinnedRevision
+  // Reserve the UUID and its exact place in the queue *synchronously* before
+  // any native validation, Git access or other asynchronous scope inference.
+  // The second concurrent request therefore always has its own durable slot.
+  const saved = enqueueThreadMessage(store, owner, threadId, id, content)
+  if (saved.phase === 'cancelled')
+    throw new ThreadChatError(409, 'This instruction was cancelled. Send a new instruction with a new ID.')
+  const pinnedRow = store.sqlite.prepare(`SELECT revision_scope_json AS scope
+    FROM story_thread_messages WHERE id=? AND owner_user_id=? AND thread_id=?`)
+    .get(id, owner, threadId) as { scope: string | null }
+  if (pinnedRow.scope) {
+    const pinned = JSON.parse(pinnedRow.scope) as PinnedRevision
     if (approvalDigest && approvalDigest !== pinned.digest ||
         selectedTargets && JSON.stringify([...selectedTargets].sort()) !== JSON.stringify(pinned.selectedTargets))
       throw new ThreadChatError(409, 'The retry differs from the saved approved revision scope.')
-    return enqueueThreadMessage(store, owner, threadId, id, content)
+    return saved
   }
   const pending = pendingInstruction(store, owner, threadId)
-  const live = latestRunStatus(store, owner, threadId)
-  // Rapid messages are recorded immediately, without inventing scope at a
-  // future HEAD. The first pending message is reviewed only after its source
-  // completes. Later queued messages cannot overtake it.
-  if ((!retry && (pending || live.status !== 'completed' || live.queuePhase !== 'finished')) ||
-      (retry && (pending?.id !== id || live.status !== 'completed' || live.queuePhase !== 'finished'))) {
-    if (approvalDigest || selectedTargets)
-      throw new ThreadChatError(409, 'A scoped approval cannot be applied before the preceding Story revision completes. Queue the instruction without an approval.')
-    return enqueueThreadMessage(store, owner, threadId, id, content)
-  }
-  const source = latestRun(store, owner, threadId)
+  const current = latestRunStatus(store, owner, threadId)
+  // Later queued requests may carry a preview/approval for the old HEAD, but
+  // none of it is applied to the as-yet-unverified future Story revision.
+  if (saved.phase !== 'queued' || pending?.id !== id ||
+      current.status !== 'completed' || current.queuePhase !== 'finished') return saved
+
+  const source = current
   const plan = await revisionFromSource(store, owner, source.jobId, content, selectedTargets)
-  if (plan.clarification) throw new ThreadChatError(422, plan.clarification)
-  if (plan.reviewRequired && approvalDigest !== plan.digest)
-    throw new ThreadChatError(409, 'Review the exact affected Story records and authorize the proposed write paths first.')
+  // Clarifications and unapproved material expansions stay durably queued for
+  // review or cancellation, rather than consuming the head of the Thread.
+  if (plan.clarification || plan.reviewRequired && !approvalDigest) return saved
   if (approvalDigest && approvalDigest !== plan.digest)
     throw new ThreadChatError(409, 'Story scope changed since review. Inspect the updated proposal.')
   const receipt: PinnedRevision = { sourceJobId: source.jobId, sourceSha: plan.headSha,
     digest: plan.digest, selectedTargets: plan.targets, approved: !!approvalDigest,
     contract: plan.contract, writePaths: plan.writePaths, contextIds: plan.contextIds }
   return store.sqlite.transaction(() => {
-    assertHeadOfQueue(store, owner, threadId, retry ? id : undefined)
-    const live = latestRun(store, owner, threadId)
-    if (live.jobId !== source.jobId)
-      throw new ThreadChatError(409, 'Thread source changed during scope review.')
-    const message = enqueueThreadMessage(store, owner, threadId, id, content)
+    const currentMessage = enqueueThreadMessage(store, owner, threadId, id, content)
+    const live = latestRunStatus(store, owner, threadId)
+    const head = pendingInstruction(store, owner, threadId)
+    // A cancellation, concurrent claim or newly completed predecessor means
+    // this preview is no longer a writer grant. Leave the original in history.
+    if (currentMessage.phase !== 'queued' || head?.id !== id ||
+        live.jobId !== source.jobId || live.status !== 'completed' || live.queuePhase !== 'finished')
+      return currentMessage
     const existing = store.sqlite.prepare(`SELECT revision_scope_json AS scope FROM story_thread_messages
       WHERE id=? AND owner_user_id=? AND thread_id=?`).get(id, owner, threadId) as
       { scope: string | null } | undefined
@@ -146,12 +150,13 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
       if (existing.scope !== JSON.stringify(receipt))
         throw new ThreadChatError(409, 'Message UUID already has a different scope authorization.')
     } else {
-      if (message.phase !== 'queued') throw new ThreadChatError(409, 'Revision scope cannot be added after execution began.')
       const changes = store.sqlite.prepare(`UPDATE story_thread_messages SET revision_scope_json=?
-        WHERE id=? AND owner_user_id=? AND thread_id=? AND phase='queued' AND revision_scope_json IS NULL`)
+        WHERE id=? AND owner_user_id=? AND thread_id=? AND phase='queued' AND revision_scope_json IS NULL
+          AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c
+            WHERE c.message_id=story_thread_messages.id)`)
         .run(JSON.stringify(receipt), id, owner, threadId).changes
-      if (changes !== 1) throw new ThreadChatError(409, 'Revision scope changed during admission.')
+      if (changes !== 1) return enqueueThreadMessage(store, owner, threadId, id, content)
     }
-    return message
+    return enqueueThreadMessage(store, owner, threadId, id, content)
   })()
 }

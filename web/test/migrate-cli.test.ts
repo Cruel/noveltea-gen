@@ -47,7 +47,7 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
       assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(), [
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 },
       ])
       for (const column of ['source_thread_id', 'proof_digest', 'guidance', 'history_json', 'edited_message_id', 'edited_body']) {
         assert.ok((store.sqlite.pragma('table_info(checkpoint_forks)') as Array<{ name: string }>)
@@ -57,6 +57,8 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
       assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'initial_content_sha256'))
       assert.ok((store.sqlite.pragma('table_info(story_thread_messages)') as Array<{ name: string }>)
         .some(column => column.name === 'revision_scope_json'))
+      assert.ok(tables.includes('story_thread_message_cancellations'),
+        'Cancellation audit table must be present after migration')
       const sessionColumns = (store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>).map(column => column.name)
       for (const column of ['source_commit_sha', 'generation_request_json', 'generation_thread_id', 'generation_config_json']) {
         assert.ok(sessionColumns.includes(column), 'Missing session column ' + column)
@@ -109,7 +111,7 @@ test('migration CLI loads the Vite development environment including local overr
     const store = openStudioDatabase(databasePath)
     try {
       assert.deepEqual(store.sqlite.prepare('SELECT version FROM studio_schema_migrations ORDER BY version').all(),
-        [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }])
+        [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }])
     } finally { store.sqlite.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

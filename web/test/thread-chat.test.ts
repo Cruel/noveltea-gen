@@ -123,15 +123,19 @@ test('public Thread submission durably queues rapid messages without authorizing
     assert.equal(a.phase, 'queued')
     assert.ok(a.sequence < b.sequence)
     assert.deepEqual(await submitThreadRevision(db, alice, id, first, 'Change character.nia'), a)
-    await assert.rejects(submitThreadRevision(db, alice, id, randomUUID(),
-      'Change character.nia', undefined, 'a'.repeat(64)), /scope.*preceding|scoped approval/i)
+    const staleApprovalId = randomUUID()
+    const stale = await submitThreadRevision(db, alice, id, staleApprovalId,
+      'Change character.nia', undefined, 'a'.repeat(64))
+    assert.equal(stale.phase, 'queued')
+    assert.equal(stale.hasRevisionScope, 0,
+      'a future-HEAD approval is never applied to a later queued request')
     await assert.rejects(submitThreadRevision(db, bob, id, randomUUID(),
       'Change character.nia'), /no source generation run|not found/)
     assert.deepEqual(db.sqlite.prepare(`SELECT revision_scope_json AS scope FROM story_thread_messages
       WHERE id IN (?,?) ORDER BY sequence`).all(first, second), [{ scope: null }, { scope: null }])
     await advanceThread(db, alice, id)
     assert.deepEqual(readThreadChat(db, alice, id).messages.filter(m => m.phase === 'queued')
-      .map(m => m.content), ['Change character.nia', 'Then revise event.bell'])
+      .map(m => m.content), ['Change character.nia', 'Then revise event.bell', 'Change character.nia'])
     assert.equal((db.sqlite.prepare('SELECT COUNT(*) AS total FROM story_thread_runs').get() as
       { total: number }).total, 1)
   } finally { db.sqlite.close() }

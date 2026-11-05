@@ -3,7 +3,7 @@ import { getRequestHeaders } from '@tanstack/react-start/server'
 import { auth, database } from './runtime.server'
 import { requireUser } from './access.server'
 import { assertStudioSchemaCurrent } from '../db/migrations'
-import { readThreadChat, advanceThread } from './thread-chat.server'
+import { readThreadChat, advanceThread, cancelQueuedThreadMessage } from './thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from './story-revision.server'
 import {
   syncAppliedAuthorMessages, previewThreadMessageEdit, branchEditedThreadMessage,
@@ -69,6 +69,21 @@ export const getThreadRevisionPreview = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => previewThreadRevision(database, await owner(),
     data.threadId, data.content, data.selectedTargets, data.messageId))
+
+/** Idempotent owner-scoped cancellation. An admitted writer cannot be cancelled
+ * through this path; the immutable queued text and its sequence remain visible. */
+export const cancelThreadMessage = createServerFn({ method: 'POST' })
+  .validator((data: { threadId: string; messageId: string }) => {
+    if (!data || !ID.test(data.threadId) || !ID.test(data.messageId))
+      throw new Error('Invalid queued Thread instruction.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    const ownerId = await owner()
+    const message = cancelQueuedThreadMessage(database, ownerId, data.threadId, data.messageId)
+    await advanceThread(database, ownerId, data.threadId)
+    return { message, chat: readThreadChat(database, ownerId, data.threadId) }
+  })
 
 export const postThreadMessage = createServerFn({ method: 'POST' })
   .validator((data: { threadId: string; id: string; content: string;

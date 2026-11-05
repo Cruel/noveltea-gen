@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { LoaderCircle, Send } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { getThreadChat, getThreadRevisionPreview, postThreadMessage } from '@/lib/thread-chat.functions'
+import { getThreadChat, getThreadRevisionPreview, postThreadMessage, cancelThreadMessage } from '@/lib/thread-chat.functions'
 import type { RevisionPreview } from '@/lib/story-revision-plan'
 import { ThreadMessageEdit } from './thread-message-edit'
 
@@ -44,27 +44,38 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     setSending(true)
     setSendError(null)
     try {
-      const busy = data?.messages.some(m => m.role === 'user' &&
-        ['queued', 'preparing', 'running', 'blocked'].includes(m.phase)) ||
-        latest?.status !== 'completed' || latest.queuePhase !== 'finished'
-      if (busy) {
-        const content = message.trim()
-        const id = pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID()
-        setPendingRetry({ id, content })
-        const result = await postThreadMessage({ data: { threadId, id, content } })
-        client.setQueryData(key, result.chat)
-        setPendingRetry(null)
-        setMessage('')
-        return
+      // Reserve on the server BEFORE any asynchronous Story scope preview.
+      // Two tabs can submit against a completed Thread without a stale preview
+      // rejecting the later message or granting it the earlier author's scope.
+      const content = message.trim()
+      const id = pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID()
+      setPendingRetry({ id, content })
+      const result = await postThreadMessage({ data: { threadId, id, content } })
+      client.setQueryData(key, result.chat)
+      setPendingRetry(null)
+      setMessage('')
+      const candidate = result.chat.messages.find(item => item.id === id)
+      const firstQueued = result.chat.messages.find(item => item.role === 'user' && item.phase === 'queued')
+      const currentRun = result.chat.runs.at(-1)
+      if (candidate?.phase === 'queued' && !candidate.hasRevisionScope &&
+          firstQueued?.id === id && currentRun?.status === 'completed' &&
+          currentRun.queuePhase === 'finished') {
+        // Material or ambiguous requests are already safely queued. Offer the
+        // preview immediately; if the source changes, normal queued review
+        // remains available instead of losing the author's instruction.
+        try {
+          const plan = await getThreadRevisionPreview({ data: { threadId, content, messageId: id } })
+          setReviewQueued({ id, content })
+          setReview(plan)
+          setSelectedTargets(undefined)
+          setProposedTargets(plan.targets)
+        } catch { /* The retained queue item remains reviewable after its predecessor settles. */ }
       }
-      const plan = await getThreadRevisionPreview({ data: { threadId, content: message.trim() } })
-      if (plan.reviewRequired || plan.clarification) {
-        setReview(plan)
-        setSelectedTargets(undefined)
-        setProposedTargets(plan.targets)
-      } else await submit(plan)
     } catch (cause) {
       setSendError(cause instanceof Error ? cause.message : 'Story impact could not be verified.')
+      // Admission may already have reserved an instruction before validation
+      // failed. Refresh so its cancellation/review controls remain visible.
+      await client.invalidateQueries({ queryKey: key })
     } finally { setSending(false) }
   }
   const narrow = async (targets: string[]) => {
@@ -96,6 +107,23 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       setSendError(cause instanceof Error ? cause.message : 'Queued scope cannot yet be reviewed.')
     } finally { setSending(false) }
   }
+  const cancelQueued = async (id: string) => {
+    if (sending) return
+    setSending(true)
+    setSendError(null)
+    try {
+      const result = await cancelThreadMessage({ data: { threadId, messageId: id } })
+      client.setQueryData(key, result.chat)
+      if (reviewQueued?.id === id) {
+        setReview(null)
+        setReviewQueued(null)
+        setSelectedTargets(undefined)
+      }
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : 'Queued instruction could not be cancelled.')
+      await client.invalidateQueries({ queryKey: key })
+    } finally { setSending(false) }
+  }
   const approve = async () => {
     if (!review || review.clarification || sending) return
     setSending(true)
@@ -103,6 +131,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     try { await submit(review, true) }
     catch (cause) {
       setSendError(cause instanceof Error ? cause.message : 'The approved scope could not be admitted.')
+      await client.invalidateQueries({ queryKey: key })
     } finally { setSending(false) }
   }
   const latest = data?.runs.at(-1)
@@ -127,11 +156,17 @@ export function ThreadChat({ threadId }: { threadId: string }) {
             <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
         <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
-        {item.role === 'user' && item.phase === 'queued' && !item.hasRevisionScope &&
-          latest?.status === 'completed' && latest.queuePhase === 'finished' &&
-          item.id === data?.messages.find(m => m.role === 'user' && m.phase === 'queued')?.id &&
-          <Button type="button" size="sm" variant="outline" className="mt-2" disabled={sending}
-            onClick={() => void reviewQueuedMessage(item)}>Review queued scope</Button>}
+        {item.role === 'user' && item.phase === 'queued' && !data?.archived &&
+          <div className="mt-2 flex flex-wrap gap-2">
+            {!item.hasRevisionScope && latest?.status === 'completed' && latest.queuePhase === 'finished' &&
+              item.id === data?.messages.find(m => m.role === 'user' && m.phase === 'queued')?.id &&
+              <Button type="button" size="sm" variant="outline" disabled={sending}
+                onClick={() => void reviewQueuedMessage(item)}>Review queued scope</Button>}
+            <Button type="button" size="sm" variant="ghost" disabled={sending}
+              onClick={() => void cancelQueued(item.id)}>Cancel queued instruction</Button>
+          </div>}
+        {item.phase === 'cancelled' && item.cancelledAt &&
+          <p className="mt-1 text-xs text-muted-foreground">Cancelled at {new Date(item.cancelledAt).toLocaleString()}. Original request retained for history.</p>}
         {data && item.role === 'user' && item.status === 'delivered' &&
           item.phase === 'finished' && !data.archived &&
           <ThreadMessageEdit key={item.id} threadId={threadId} storyId={data.storyId}
@@ -183,7 +218,11 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         <Button type="button" size="sm" disabled={sending || !!review.clarification || !review.targets.length}
           onClick={() => void approve()}>Approve scoped revision</Button>
         <Button type="button" size="sm" variant="outline" disabled={sending}
-          onClick={() => { setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }}>Edit request</Button>
+          onClick={() => { setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }}>
+          {reviewQueued ? 'Close review' : 'Edit request'}
+        </Button>
+        {reviewQueued && <Button type="button" size="sm" variant="ghost" disabled={sending}
+          onClick={() => void cancelQueued(reviewQueued.id)}>Cancel queued instruction</Button>}
       </div>
     </section>}
     {sendError && <p role="alert" className="text-sm text-destructive">{sendError}</p>}
@@ -201,6 +240,8 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     <p className="mt-2 text-xs text-muted-foreground">
       Every revision is checked against canonical Story relationships and the verified source commit.
       Material expansions require explicit scope review. Unrelated records stay read-only; each run has its own budget.
+      A queued request that cannot be clarified can be cancelled without deleting its audit history;
+      the next instruction will then be considered in order.
     </p>
   </section>
 }

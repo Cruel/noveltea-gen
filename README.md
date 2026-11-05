@@ -1682,9 +1682,21 @@ The native validator and a completed verified source run are prerequisites,
 not optional best-effort context. Multiple rapid Thread messages are immediately
 persisted in order, even while an earlier run is executing; however, their
 individual **write scopes are not preauthorized** against a future Git HEAD.
+Each submission first reserves a durable, immutable SQLite queue position
+synchronously before asynchronous canonical inference. Simultaneous submissions
+therefore cannot race to overwrite each other or reject the later instruction.
 After the preceding run completes with verified evidence, the next request is
 interpreted and either safely admitted or held in the queue for scope review.
 Later requests never overtake an unreviewed or interrupted predecessor.
+
+An ambiguous or unwanted **unadmitted queued** instruction can be cancelled
+from the Thread chat, including while awaiting scope clarification. Schema v23
+stores an append-only owner-scoped cancellation receipt with its timestamp;
+the original message, UUID, sequence and body are preserved for audit. A
+cancelled instruction cannot be resumed or reused and never authorizes a
+writer. The next active queued instruction is then considered against the
+current verified Story HEAD. Already preparing, running or blocked instructions
+cannot be cancelled through this queued-only operation.
 
 Corrective checkpoint-branch guidance is bound into each applicable specialist's
 actual Pi assignment/prompt without granting broader file or protected-decision
