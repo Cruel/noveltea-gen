@@ -386,6 +386,10 @@ pnpm --filter @noveltea/studio build
 pnpm --filter @noveltea/studio start
 ```
 
+For the repeatable fresh-database certification matrix, enforced source
+boundary and concrete PostgreSQL porting backlog, see
+[Studio persistence certification](../docs/studio-db-certification.md) (#101).
+
 Migrations have two deliberate schema owners, orchestrated by **one**
 `pnpm --filter @noveltea/studio migrate` command. Better Auth's supported
 Kysely migration planner owns `user`, `account`, `session`, `verification`,
