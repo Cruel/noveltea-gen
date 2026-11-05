@@ -216,6 +216,14 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         (review.protectedChange
           ? 'This changes author-protected Story canon. Scope approval or a prior Thread approval is insufficient; review the exact difference below.'
           : 'Only the selected existing files will be writable. Linked context remains read-only.')}</p>
+      {review.protectedConflict && <div className="mt-3 grid gap-2 text-sm">
+        <p className="m-0 text-xs text-muted-foreground">Possible protected contradiction · {review.protectedConflict.decision}</p>
+        <div><strong>Current protected statement</strong>
+          <p className="mt-1 whitespace-pre-wrap break-words">{review.protectedConflict.before}</p></div>
+        <div><strong>Requested direction (not approved canonical text)</strong>
+          <p className="mt-1 whitespace-pre-wrap break-words">{review.protectedConflict.requestedDirection}</p></div>
+        <p className="text-xs text-muted-foreground">A source-bound exact replacement is required. No writes or approvals are granted by this detection.</p>
+      </div>}
       {review.protectedChange && <div className="mt-3 grid gap-2 text-sm">
         <p className="m-0 text-xs text-muted-foreground">
           {review.protectedChange.decision} · {review.protectedChange.path} · source {review.headSha.slice(0, 12)}

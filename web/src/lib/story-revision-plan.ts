@@ -9,12 +9,16 @@ type RecordItem = CanonicalScopeRecord & { metadata: CanonicalScopeRecord['metad
 export type ProtectedDecisionChange = {
   decision: string; path: string; before: string; after: string
 }
+export type ProtectedConflictCandidate = {
+  decision: string; path: string; before: string; requestedDirection: string
+}
 export type RevisionPreview = {
   headSha: string; request: string; targets: string[]; writePaths: string[]
   contextIds: string[]; readOnlyIds: string[]; dependencies: Array<{ from: string; to: string; relation: string }>
   depth: CompletionContract['scope']['depth']; contract: CompletionContract
   rationale: string[]; reviewRequired: boolean; clarification: string | null
-  protectedChange: ProtectedDecisionChange | null; digest: string
+  protectedChange: ProtectedDecisionChange | null;
+  protectedConflict: ProtectedConflictCandidate | null; digest: string
 }
 const SHA = /^[a-f0-9]{40}$/
 const unsafe = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
@@ -27,6 +31,13 @@ const unique = <T>(values: T[]) => [...new Set(values)]
 const exactId = /\b(?:arc|milestone|character|relationship|world-entity|fact|revelation|event|authored-content|choice-point|puzzle)\.[a-z][a-z0-9-]*\b/gi
 const protectedEdit = /^(?:please\s+)?(?:change|replace|revise|update)\s+(?:the\s+)?(?:protected\s+)?(?:creative\s+)?decision\s+(creative-direction\.[a-z][a-z0-9-]*#[a-z][a-z0-9-]*)\s+(?:to|with)\s+("(?:[^"\\]|\\.)*")\s*\.?$/i
 const protectedIntent = /\b(?:protected\s+(?:creative\s+)?decision|creative[-\s]+direction|override\s+canon|retcon|change\s+(?:the\s+)?(?:genre|tone|premise|scope|foundation)|ignore\s+(?:the\s+)?(?:original|author|canon))\b/i
+const contrast = /\b(?:instead\s+of|rather\s+than|no\s+longer|opposite|reverse|replace|swap|contrary|never|not|over)\b/i
+const contentWords = (text: string): Set<string> => new Set(text.toLowerCase()
+  .match(/[a-z]{4,}/g)?.filter(word => !new Set([
+    'that', 'this', 'with', 'from', 'must', 'should', 'would', 'could',
+    'instead', 'rather', 'than', 'into', 'have', 'make', 'about', 'there',
+    'their', 'they', 'over', 'before', 'after', 'never', 'without',
+  ]).has(word)) ?? [])
 const includesName = (text: string, name: string) => name.length >= 2 &&
   new RegExp('(^|[^a-z0-9])' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-z0-9])', 'i').test(text)
 const depthFor = (targets: string[]): CompletionContract['scope']['depth'] =>
@@ -76,7 +87,67 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
       contextIds: [recordId!], readOnlyIds: [] as string[], dependencies: [] as RevisionPreview['dependencies'],
       depth: 'architecture' as const, contract,
       rationale: ['An existing author-protected decision would change. Review the exact before/after text; a prior Thread approval is not transferable.'],
-      reviewRequired: true, clarification: null, protectedChange: change }
+      reviewRequired: true, clarification: null, protectedChange: change,
+      protectedConflict: null }
+    return { ...data, digest: hash(data) }
+  }
+  // Detect bounded, language-level reversals against protected statements
+  // before ordinary scope inference. This is deliberately conservative: a
+  // suspicion pauses rather than inventing a replacement or author consent.
+  const protections = active.flatMap(record => record.metadata.type === 'creative-direction'
+    ? (record.metadata.decisions ?? []).filter(decision =>
+        decision.origin === 'user' && decision.authority === 'user-protected')
+      .map(decision => ({ decision: record.metadata.id + '#' + decision.id,
+        path: record.path, before: decision.statement })) : [])
+  const promptWords = contentWords(request)
+  const priority = /\b([a-z]{3,})\s+(?:rather than|instead of|over)\s+([a-z]{3,})\b/i
+  const contradictions = contrast.test(request) ? protections.filter(item => {
+    const shared = [...contentWords(item.before)].filter(word => promptWords.has(word))
+    const previousPreference = priority.exec(item.before)
+    const requestedPreference = priority.exec(request)
+    if (previousPreference && requestedPreference &&
+        previousPreference[1]!.toLowerCase() === requestedPreference[1]!.toLowerCase() &&
+        previousPreference[2]!.toLowerCase() === requestedPreference[2]!.toLowerCase())
+      return false // The author reaffirmed, rather than contradicted, canon.
+    return shared.length >= 2 || request.toLowerCase().includes(item.decision.toLowerCase())
+  }) : []
+  if (contradictions.length) {
+    const item = contradictions[0]!
+    const originalPreference = priority.exec(item.before)
+    const requestedPreference = priority.exec(request)
+    // A literal reversal of one unambiguous preference can produce a
+    // concrete, reviewable candidate without generating or asserting any
+    // canonical prose on the author's behalf. Nothing is written until the
+    // exact replacement passes the independent owner+Git approval workflow.
+    if (contradictions.length === 1 && originalPreference && requestedPreference &&
+        originalPreference[1]!.toLowerCase() === requestedPreference[2]!.toLowerCase() &&
+        originalPreference[2]!.toLowerCase() === requestedPreference[1]!.toLowerCase() &&
+        !/\b(?:don't|do not|never|avoid|without|reject|not)\b/i.test(request) &&
+        selectedTargets === undefined) {
+      const after = item.before.replace(originalPreference[0],
+        `${originalPreference[2]} rather than ${originalPreference[1]}`)
+      if (after !== item.before && after.length <= 1000) {
+        const change: ProtectedDecisionChange = { ...item, after }
+        const data = { headSha, request, targets: [] as string[], writePaths: [item.path],
+          contextIds: [item.decision.split('#')[0]!], readOnlyIds: [] as string[],
+          dependencies: [] as RevisionPreview['dependencies'], depth: 'architecture' as const,
+          contract: parseGenerationContract(previous),
+          rationale: ['Literal reversal of one existing protected preference; approve this exact candidate, not the instruction itself.'],
+          reviewRequired: true, clarification: null, protectedChange: change, protectedConflict: null }
+        return { ...data, digest: hash(data) }
+      }
+    }
+    const candidate: ProtectedConflictCandidate = { ...item, requestedDirection: request }
+    const data = { headSha, request, targets: [] as string[], writePaths: [] as string[],
+      contextIds: [item.decision.split('#')[0]!], readOnlyIds: [] as string[],
+      dependencies: [] as RevisionPreview['dependencies'],
+      depth: 'architecture' as const, contract: parseGenerationContract(previous),
+      rationale: ['Possible contradiction with a protected author statement; no Story write is authorized.'],
+      reviewRequired: true,
+      clarification: 'This instruction appears to conflict with ' + item.decision +
+        '. Review the existing statement and requested direction, then propose its exact replacement: ' +
+        'Change protected decision ' + item.decision + ' to "new statement".',
+      protectedChange: null, protectedConflict: candidate }
     return { ...data, digest: hash(data) }
   }
   const typed = unique([...request.matchAll(exactId)].map(m => m[0]!.toLowerCase()))
@@ -186,6 +257,6 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
   if (!rationale.length) rationale.push('A single existing canonical record is writable; its related Story records remain read-only.')
   const data = { headSha, request, targets, writePaths, contextIds, readOnlyIds,
     dependencies, depth, contract, rationale, reviewRequired, clarification,
-    protectedChange: null }
+    protectedChange: null, protectedConflict: null }
   return { ...data, digest: hash(data) }
 }

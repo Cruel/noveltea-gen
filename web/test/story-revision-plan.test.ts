@@ -133,6 +133,47 @@ test('controller admission checks the exact approved digest, source and path cei
   assert.throws(() => assertPinnedRevision(pinned, plan, 'other-job', sha), /scope changed/)
 })
 
+test('contradictory natural-language instruction identifies protected before/after review without write permission', () => {
+  const protectedCatalog = catalog.map(item => item.metadata.id === 'creative-direction.foundation'
+    ? { ...item, metadata: { ...item.metadata, decisions: [{
+        id: 'repair-not-revenge', statement: 'The investigation should invite repair rather than revenge.',
+        origin: 'user', authority: 'user-protected',
+      }] } } : item)
+  const review = inferStoryRevision('Make the investigation invite revenge rather than repair',
+    protectedCatalog, sha, previous)
+  assert.equal(review.clarification, null)
+  assert.deepEqual(review.protectedChange, {
+    decision: 'creative-direction.foundation#repair-not-revenge',
+    path: 'creative-direction/foundation.md',
+    before: 'The investigation should invite repair rather than revenge.',
+    after: 'The investigation should invite revenge rather than repair.',
+  })
+  assert.equal(review.protectedConflict, null)
+  assert.deepEqual(review.targets, [])
+  assert.deepEqual(review.writePaths, ['creative-direction/foundation.md'])
+  assert.equal(review.reviewRequired, true)
+  const scopeAttempt = inferStoryRevision('Make the investigation invite revenge rather than repair',
+    protectedCatalog, sha, previous, ['character.nia'])
+  assert.equal(scopeAttempt.protectedChange, null)
+  assert.deepEqual(scopeAttempt.writePaths, [])
+  const ambiguous = inferStoryRevision('Make the investigation invite retaliation rather than revenge',
+    protectedCatalog, sha, previous)
+  assert.match(ambiguous.clarification!, /conflict with creative-direction.foundation#repair-not-revenge/)
+  assert.equal(ambiguous.protectedChange, null)
+  assert.equal(ambiguous.protectedConflict?.before,
+    'The investigation should invite repair rather than revenge.')
+  assert.deepEqual(ambiguous.writePaths, [])
+  const reaffirm = inferStoryRevision('Keep the investigation inviting repair rather than revenge',
+    protectedCatalog, sha, previous)
+  assert.equal(reaffirm.protectedConflict, null)
+  const changed = inferStoryRevision(
+    'Change protected decision creative-direction.foundation#repair-not-revenge to "The investigation can now invite revenge."',
+    protectedCatalog, sha, previous)
+  assert.equal(changed.protectedChange?.before,
+    'The investigation should invite repair rather than revenge.')
+  assert.equal(changed.protectedChange?.after, 'The investigation can now invite revenge.')
+})
+
 test('ambiguous or protected requests fail closed without selecting unrelated Story records', () => {
   const ambiguous = inferStoryRevision('Change this Milestone', catalog, sha, previous)
   assert.equal(ambiguous.reviewRequired, true)

@@ -178,15 +178,27 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       assert.throws(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
         childId, f.sourceId, preview), /fresh|exact/i, 'approval cannot be replayed')
       const nextId = randomUUID()
-      const newerMessage = `Change protected decision ${decision} to "Repair must be optional."`
+      const newerMessage = 'Make the investigation invite revenge instead of forgiveness'
       const newerPlan = await previewThreadRevision(f.store, f.owner, f.threadId, newerMessage)
       assert.equal(newerPlan.protectedChange?.before, changed,
         'the next run inherits the actual canonical Story, not stale ancestor text')
+      assert.equal(newerPlan.protectedChange?.after,
+        'The investigation must invite revenge rather than forgiveness.')
       const notInherited = await submitThreadRevision(f.store, f.owner, f.threadId,
         nextId, newerMessage, undefined, newerPlan.digest)
       assert.equal(notInherited.hasRevisionScope, 0,
         'even an ancestor author approval cannot be reused for a new protected change')
-      cancelQueuedThreadMessage(f.store, f.owner, f.threadId, nextId)
+      recordProtectedThreadDecision(f.store, f.owner, f.threadId, nextId, childId,
+        newerPlan, 'approved')
+      await submitThreadRevision(f.store, f.owner, f.threadId,
+        nextId, newerMessage, undefined, newerPlan.digest)
+      await advanceThread(f.store, f.owner, f.threadId)
+      assert.equal(readThreadChat(f.store, f.owner, f.threadId)
+        .messages.find(m => m.id === nextId)?.phase, 'finished')
+      const nextJob = await restoreJob(selectedJob(f.store, f.owner, nextId), f.owner)
+      assert.notEqual(nextJob.headSha, child.headSha,
+        'natural-language proposal requires a distinct approved child commit')
+      assert.equal(git(f.source.worktreeRoot, 'rev-parse', 'HEAD'), f.sha)
       const ordinaryId = randomUUID()
       const ordinary = await submitThreadRevision(f.store, f.owner, f.threadId,
         ordinaryId, 'Make character.mara more assertive')
