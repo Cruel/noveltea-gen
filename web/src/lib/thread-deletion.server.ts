@@ -11,10 +11,12 @@ import type { StudioStore } from '../persistence/store'
 import { restoreJob } from './fixture-jobs.server'
 import { dequeueBeforeStart } from './generation-queue.server'
 import { withRepositoryLock } from './git-cache.server'
+import { snapshotJobUsage, type RunUsageSnapshot } from './thread-usage.server'
 
 type Resource = { job: JobStartResult; head: string; bytes: number }
 type Plan = { version: 1; threadId: string; owner: string; resources: Resource[];
-  preserveReceipts: boolean; bytes: number }
+  preserveReceipts: boolean; bytes: number;
+  usageSummaries: Record<string, RunUsageSnapshot> }
 export type DeletionOutcome =
   | { state: 'pending'; message: string }
   | { state: 'complete'; bytes: number; preservedReceipts: boolean }
@@ -176,6 +178,7 @@ export async function deleteThread(store: StudioStore, owner: string, threadId: 
     plan = JSON.parse(record.planJson) as Plan
   } else {
     const resources: Resource[] = []
+    const usageSummaries: Record<string, RunUsageSnapshot> = {}
     let requestedStop = false
     for (const run of record.runs) {
       const row = await store.persistence.generation.jobs.selected(owner, run.id)
@@ -190,13 +193,14 @@ export async function deleteThread(store: StudioStore, owner: string, threadId: 
       }
       if (run.queue === 'interrupted')
         throw new Error('Interrupted writer needs operator reconciliation before deleting its evidence.')
+      usageSummaries[run.id] = await snapshotJobUsage(row, job)
       resources.push({ job, head: job.headSha,
         bytes: await bytesOnDisk(job.worktreeRoot) +
           (record.children ? 0 : await bytesOnDisk(job.stateDir)) })
     }
     if (requestedStop) return { state: 'pending',
       message: 'Cancellation requested. Retry deletion after the active writer reaches a safe boundary.' }
-    plan = { version: 1, threadId, owner, resources,
+    plan = { version: 1, threadId, owner, resources, usageSummaries,
       preserveReceipts: record.children > 0,
       bytes: resources.reduce((sum, resource) => sum + resource.bytes, 0) }
     verifyPlan(plan, owner, threadId)

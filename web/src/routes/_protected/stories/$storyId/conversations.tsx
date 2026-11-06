@@ -6,8 +6,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ThreadList } from '@/components/thread-list'
 import { ThreadChat } from '@/components/thread-chat'
+import { ThreadUsage } from '@/components/thread-usage'
 import { NaturalStoryComposer } from '@/components/natural-story-composer'
-import { storyNavigationQuery, storyNavigationKey } from '@/lib/threads.queries'
+import { storyNavigationQuery, storyNavigationKey, storyUsageKey, storyUsageQuery } from '@/lib/threads.queries'
 import { addConversation, changeThreadArchive, deleteThreadResources,
   setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
 import { selectNavigationThreads } from '@/lib/thread-navigation'
@@ -64,13 +65,20 @@ function StoryConversations() {
       item.threads.some(thread => thread.status === 'running' || thread.status === 'queued'))
       ? 8000 : 30000,
   })
+  const usage = useQuery({
+    ...storyUsageQuery(storyId),
+    refetchInterval: 15000,
+  })
   const [creating, setCreating] = useState(false)
   const [creatingThread, setCreatingThread] = useState(false)
   const [changingArchive, setChangingArchive] = useState<string | null>(null)
   const [editing, setEditing] = useState<{ kind: 'conversation' | 'thread'; id: string } | null>(null)
   const [issue, setIssue] = useState<string | null>(null)
   const refresh = async () => {
-    await queryClient.invalidateQueries({ queryKey: storyNavigationKey(storyId) })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: storyNavigationKey(storyId) }),
+      queryClient.invalidateQueries({ queryKey: storyUsageKey(storyId) }),
+    ])
   }
   const conversation = data?.conversations.find(item => item.id === selectedId) ?? data?.conversations[0]
   const view = data?.preferences.view ?? 'tree'
@@ -221,6 +229,10 @@ function StoryConversations() {
                 await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
                   search: { conversation: conversation.id, thread: threadId } })
               }} />}
+          {usage.data && <ThreadUsage usage={usage.data} threadId={selectedThread?.id} />}
+          {usage.error && <p role="status" className="mb-3 text-xs text-muted-foreground">
+            Usage summaries unavailable: {usage.error.message}
+          </p>}
           {editing?.kind === 'thread' ? <TitleEditor key={editing.id}
             title={conversation.threads.find(thread => thread.id === editing.id)?.title ?? ''}
             label="Thread title" onSubmit={rename} onCancel={() => setEditing(null)} /> : null}

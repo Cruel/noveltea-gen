@@ -34,7 +34,10 @@ export type BudgetLimits = { steps?: number; modelCalls?: number; costUsd?: numb
 export type JobControls = {
   control: string; queue: string | null
   limits: BudgetLimits
-  budget: { steps: number; modelCalls: number; costUsd: number; pause?: { reason: string } }
+  budget: { steps: number; modelCalls: number; costUsd: number; unpricedCalls: number
+    unknownTokenCalls: number; tokens: { input: number; output: number;
+      cacheRead: number; cacheWrite: number; total: number }
+    pause?: { reason: string } }
 }
 export type JobControlAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget'
 

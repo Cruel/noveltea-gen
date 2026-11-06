@@ -41,6 +41,19 @@ interface BudgetState {
   sessions: string[];
   pause?: { reason: string; at: string };
 }
+/** Observed Pi transcript usage, not an estimate of uninstrumented direct-model calls.
+ * Missing prices/tokens remain explicit rather than silently being counted as free. */
+export type PiTokenUsage = {
+  input: number; output: number; cacheRead: number; cacheWrite: number; total: number;
+};
+export type PiBudgetUsage = {
+  steps: number; modelCalls: number; costUsd: number; unpricedCalls: number;
+  tokens: PiTokenUsage; unknownTokenCalls: number;
+  pause?: { reason: string; at: string };
+};
+const emptyTokens = (): PiTokenUsage =>
+  ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+
 
 const defaultProfile = { provider: "openai", model: "gpt-6-luna" };
 const defaultPolicy = (): PiPolicy => ({ version: 1, profile: { ...defaultProfile }, limits: {} });
@@ -210,41 +223,50 @@ async function loadedStoryPaths(file: string, root: string): Promise<string[]> {
   }
   return [...new Set(reads)].sort();
 }
-async function usageFromSession(file: string, seen = new Set<string>()) {
+async function usageFromSession(file: string, seen: Set<string>, summary: PiBudgetUsage) {
   const content = await readFile(file, "utf8");
-  let calls = 0, costUsd = 0, unpricedCalls = 0;
+  let index = 0;
   for (const line of content.split("\n").filter(Boolean)) {
     let entry: any;
     try { entry = JSON.parse(line); } catch { throw new Error("Corrupt Pi usage transcript: " + file); }
     const assistant = entry.type === "message" && entry.message?.role === "assistant" ? entry.message : undefined;
     const usage = assistant?.usage ?? (entry.type === "usage" ? entry.usage : undefined);
-    if (usage) {
-      // A fork carries previous Pi messages into the next scoped transcript.
-      // Only count each persisted usage entry once across all job sessions.
-      const key = typeof entry.id === "string" ? entry.id : file + ":" + calls;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      calls++;
-      if (!Number.isFinite(usage.cost?.total)) unpricedCalls++;
-      else costUsd += Number(usage.cost.total);
+    if (!usage) continue;
+    // A fork carries previous Pi messages into its scoped transcript. Stable
+    // IDs are the deduplication identity across parallel sessions in this run.
+    const key = typeof entry.id === "string" ? entry.id : file + ":" + index;
+    index++;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    summary.modelCalls++;
+    if (typeof usage.cost?.total !== "number" || !Number.isFinite(usage.cost.total) ||
+        usage.cost.total < 0) summary.unpricedCalls++;
+    else summary.costUsd += usage.cost.total;
+    const amount = (value: unknown): value is number =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+    for (const name of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+      if (amount(usage[name])) summary.tokens[name] += usage[name];
     }
+    if (amount(usage.totalTokens)) summary.tokens.total += usage.totalTokens;
+    else summary.unknownTokenCalls++;
   }
-  return { calls, costUsd, unpricedCalls };
 }
-async function budgetUsage(job: JobStartResult) {
-  const state = (await json<BudgetState>(budgetPath(job))) ??
-    { version: 1 as const, steps: [], sessions: [] };
-  let modelCalls = 0, costUsd = 0, unpricedCalls = 0;
+async function sessionUsage(job: JobStartResult, state: BudgetState): Promise<PiBudgetUsage> {
+  const summary: PiBudgetUsage = { steps: state.steps.length,
+    modelCalls: 0, costUsd: 0, unpricedCalls: 0, tokens: emptyTokens(),
+    unknownTokenCalls: 0, ...(state.pause ? { pause: state.pause } : {}) };
   const seen = new Set<string>();
   for (const file of new Set(state.sessions)) {
     if (!file.startsWith(stateDir(job) + sep) || !existsSync(file) ||
         await realpath(file) !== file) throw new Error("Unsafe Pi budget session path.");
-    const u = await usageFromSession(file, seen);
-    modelCalls += u.calls;
-    costUsd += u.costUsd;
-    unpricedCalls += u.unpricedCalls;
+    await usageFromSession(file, seen, summary);
   }
-  return { steps: state.steps.length, modelCalls, costUsd, unpricedCalls, pause: state.pause };
+  return summary;
+}
+async function budgetUsage(job: JobStartResult): Promise<PiBudgetUsage> {
+  const state = (await json<BudgetState>(budgetPath(job))) ??
+    { version: 1 as const, steps: [], sessions: [] };
+  return sessionUsage(job, state);
 }
 export class PiBudgetPause extends Error {
   constructor(readonly reason: string, readonly usage: Awaited<ReturnType<typeof budgetUsage>>) {
@@ -258,17 +280,10 @@ export async function guardPiBudget(job: JobStartResult, step: string, sessionFi
   const state: BudgetState = (await json<BudgetState>(budgetPath(job))) ??
     { version: 1, steps: [], sessions: [] };
   if (sessionFile && existsSync(sessionFile) && !state.sessions.includes(sessionFile)) state.sessions.push(sessionFile);
-  // Observe actual persisted Pi assistant usage; no parallel metrics service.
-  let modelCalls = 0, costUsd = 0, unpricedCalls = 0;
-  const seen = new Set<string>();
-  for (const file of new Set(state.sessions)) {
-    if (!file.startsWith(stateDir(job) + sep) || !existsSync(file) ||
-        await realpath(file) !== file) throw new Error("Unsafe Pi budget session path.");
-    const usage = await usageFromSession(file, seen);
-    modelCalls += usage.calls;
-    costUsd += usage.costUsd;
-    unpricedCalls += usage.unpricedCalls;
-  }
+  // The same transcript meter powers UI reports and admission; counters are
+  // scoped to the job, not its Story or parent Thread.
+  const observed = await sessionUsage(job, state);
+  const { modelCalls, costUsd, unpricedCalls } = observed;
   const freshStep = !state.steps.includes(step);
   const reason = freshStep && policy.limits.steps !== undefined && state.steps.length >= policy.limits.steps
     ? "steps" : policy.limits.modelCalls !== undefined && modelCalls >= policy.limits.modelCalls
@@ -278,8 +293,7 @@ export async function guardPiBudget(job: JobStartResult, step: string, sessionFi
   if (reason) {
     state.pause = { reason, at: new Date().toISOString() };
     await persist(budgetPath(job), state);
-    throw new PiBudgetPause(reason, { steps: state.steps.length, modelCalls, costUsd,
-      unpricedCalls, pause: state.pause });
+    throw new PiBudgetPause(reason, { ...observed, pause: state.pause });
   }
   if (freshStep) state.steps.push(step);
   delete state.pause;

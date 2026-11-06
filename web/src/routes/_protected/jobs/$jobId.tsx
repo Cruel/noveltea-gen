@@ -272,11 +272,23 @@ function JobOverviewPanel({ job, controls, jobId, onReview, onRefresh }: {
       <CardContent className="job-metric-grid">
         <div><span>Execution</span><strong>{job.status === 'prepared' ? 'Not started' : job.fixture ? 'Fixture' : 'Sandboxed Pi'}</strong></div>
         <div><span>Control</span><strong>{controls ? statusLabel(controls.control) : 'Unavailable'}</strong></div>
-        <div><span>Model calls</span><strong>{controls?.budget.modelCalls ?? '—'}</strong></div>
-        <div><span>Steps</span><strong>{controls?.budget.steps ?? '—'}</strong></div>
-        <div><span>Reported cost</span><strong>{controls ? '$' + controls.budget.costUsd.toFixed(3) : '—'}</strong></div>
+        <div><span>Pi model calls</span><strong>{controls
+          ? controls.budget.modelCalls + ' / ' + (controls.limits.modelCalls ?? 'no limit') : '—'}</strong></div>
+        <div><span>Steps</span><strong>{controls
+          ? controls.budget.steps + ' / ' + (controls.limits.steps ?? 'no limit') : '—'}</strong></div>
+        <div><span>Recorded tokens</span><strong>{controls
+          ? controls.budget.tokens.total.toLocaleString() : '—'}</strong></div>
+        <div><span>Recorded cost</span><strong>{controls
+          ? '$' + controls.budget.costUsd.toFixed(3) +
+            (controls.budget.unpricedCalls ? ' + unpriced' : '') : '—'}</strong></div>
         <div><span>Queue</span><strong>{controls?.queue ? statusLabel(controls.queue) : '—'}</strong></div>
       </CardContent>
+      {controls && <CardContent className="pt-0 text-xs text-muted-foreground">
+        Pi transcript usage only; direct-model calls are not included. {controls.budget.unpricedCalls
+          ? controls.budget.unpricedCalls + ' call(s) have no reported cost. ' : ''}
+        {controls.budget.unknownTokenCalls
+          ? controls.budget.unknownTokenCalls + ' call(s) lack a token total.' : ''}
+      </CardContent>}
       {controls?.budget.pause && <CardContent className="pt-0 text-sm text-amber-300">
         Budget stopped: {controls.budget.pause.reason}
       </CardContent>}

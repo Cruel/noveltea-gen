@@ -194,6 +194,29 @@ test("forked Pi transcripts do not double-charge already counted model calls", a
   assert.ok(Math.abs(result.costUsd - 0.2) < 0.001);
 });
 
+test("Pi usage exposes token breakdown and missing price provenance from one deduplicated transcript", async () => {
+  const { job } = await fixture();
+  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+  const manager = SessionManager.create(job.worktreeStoryRoot,
+    join(dirname(job.worktreeRoot), "event-sessions", "metered"));
+  const turn = (usage: object) => manager.appendMessage({ role: "assistant",
+    content: [{ type: "text", text: "Completed" }], api: "openai-completions",
+    provider: "example", model: "required", usage, stopReason: "stop",
+    timestamp: Date.now() } as Parameters<typeof manager.appendMessage>[0]);
+  turn({ input: 12, output: 6, cacheRead: 4, cacheWrite: 2,
+    totalTokens: 24, cost: { total: 0.25 } });
+  turn({ input: 2, output: 3, cacheRead: 0, cacheWrite: 0,
+    totalTokens: 5 });
+  await guardPiBudget(job, "first", manager.getSessionFile()!);
+  const summary = (await inspectPiPolicy(job)).budget;
+  assert.equal(summary.modelCalls, 2);
+  assert.equal(summary.costUsd, 0.25);
+  assert.equal(summary.unpricedCalls, 1);
+  assert.deepEqual(summary.tokens,
+    { input: 14, output: 9, cacheRead: 4, cacheWrite: 2, total: 29 });
+  assert.equal(summary.unknownTokenCalls, 0);
+});
+
 test("related Arc work reuses the cache-compatible prefix without sharing an unrelated Arc", async () => {
   const { job, project } = await fixture();
   const role = "event";

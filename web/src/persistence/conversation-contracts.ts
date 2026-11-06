@@ -40,8 +40,15 @@ export type ThreadDeletionRecord = {
   unsettledMessages: number
   runs: Array<{ id: string; status: string; queue: string | null }>
 }
+export type UsageRunRecord = {
+  jobId: string; threadId: string; runOrder: number; status: string;
+  requestJson: string | null; deletedAt: string | null; deletionPlanJson: string | null;
+};
 export interface ConversationCatalog {
   story(owner: string, storyId: string): Promise<{ id: string; title: string } | null>
+  /** One owner-scoped row per actual run, including archived/deleted history.
+   * Never flatten parent/child ancestry into model usage: only executions spend. */
+  usageRuns(owner: string, storyId: string): Promise<UsageRunRecord[]>
   /** Import historical root sessions once; never synthesize checkpoint provenance. */
   reconcileRoots(owner: string, storyId: string): Promise<void>
   navigation(owner: string, storyId: string): Promise<{

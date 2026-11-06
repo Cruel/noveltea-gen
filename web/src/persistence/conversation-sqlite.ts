@@ -75,6 +75,24 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
       return db.select({ id: stories.id, title: stories.title }).from(stories)
         .where(and(eq(stories.id, storyId), eq(stories.ownerUserId, owner))).get() ?? null
     },
+    async usageRuns(owner, storyId) {
+      ownerRequired(owner)
+      return db.select({
+        jobId: storyThreadRuns.jobId, threadId: storyThreadRuns.threadId,
+        runOrder: storyThreadRuns.runOrder, status: sessions.status,
+        requestJson: sessions.generationRequestJson,
+        deletedAt: storyThreads.deletedAt, deletionPlanJson: storyThreads.deletionPlanJson,
+      }).from(storyThreadRuns)
+        .innerJoin(storyThreads, and(eq(storyThreads.id, storyThreadRuns.threadId),
+          eq(storyThreads.ownerUserId, storyThreadRuns.ownerUserId)))
+        .innerJoin(storyConversations, and(eq(storyConversations.id, storyThreads.conversationId),
+          eq(storyConversations.ownerUserId, storyThreads.ownerUserId)))
+        .innerJoin(sessions, and(eq(sessions.id, storyThreadRuns.jobId),
+          eq(sessions.ownerUserId, storyThreadRuns.ownerUserId)))
+        .where(and(eq(storyThreadRuns.ownerUserId, owner),
+          eq(storyConversations.storyId, storyId)))
+        .orderBy(storyThreadRuns.threadId, storyThreadRuns.runOrder).all()
+    },
     async reconcileRoots(owner, storyId) {
       ownerRequired(owner)
       db.transaction(tx => {
@@ -207,9 +225,15 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
         const record = deletion(owner, id)
         if (!record?.deletedAt || !record.planJson) throw new Error('No reserved deletion.')
         if (record.completedAt) return
-        const { preserveReceipts } = JSON.parse(record.planJson) as { preserveReceipts?: boolean }
+        const { preserveReceipts, usageSummaries } = JSON.parse(record.planJson) as {
+          preserveReceipts?: boolean; usageSummaries?: Record<string, unknown>
+        }
+        // Discard filesystem targets and control metadata. Keep only aggregated
+        // metering snapshots (without transcripts, paths or credential material).
         db.update(storyThreads).set({ deletionCompleteAt: at,
-          deletionPlanJson: JSON.stringify({ preserveReceipts: preserveReceipts === true }),
+          deletionPlanJson: JSON.stringify({
+            preserveReceipts: preserveReceipts === true, usageSummaries: usageSummaries ?? {},
+          }),
           deletionBytes: bytes })
           .where(and(eq(storyThreads.id, id), eq(storyThreads.ownerUserId, owner))).run()
       }, { behavior: 'immediate' })
