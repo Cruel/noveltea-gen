@@ -60,7 +60,7 @@ if (existsSync(reportFile)) {
     const old = JSON.parse(readFileSync(reportFile, 'utf8'))
     if (old.schema === 1 && old.issue === 71 && old.revision === clean.revision) {
       for (const key of Object.keys(definitions)) {
-        if (old.gates?.[key]?.status === 'passed') clean.gates[key] = old.gates[key]
+        if (['passed', 'failed'].includes(old.gates?.[key]?.status)) clean.gates[key] = old.gates[key]
       }
     }
   } catch { /* an unreadable old report is not evidence */ }
