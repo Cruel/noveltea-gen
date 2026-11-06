@@ -3,7 +3,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoaderCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { getThreadRestartPreview, restartThread } from '@/lib/thread-restart.functions'
+import { getThreadRestartPreview, restartThread, restartAndDiscardThread } from '@/lib/thread-restart.functions'
 import { storyNavigationKey } from '@/lib/threads.queries'
 
 export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; onClose: () => void }) {
@@ -18,22 +18,35 @@ export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; 
   const [selectedNewer, setSelectedNewer] = useState<{ branch: string; sha: string } | null>(null)
   const [childId, setChildId] = useState(() => crypto.randomUUID())
   const [busy, setBusy] = useState(false)
+  const [discard, setDiscard] = useState(false)
   const [issue, setIssue] = useState<string | null>(null)
+  const [preparedCleanup, setPreparedCleanup] = useState(false)
+  const [preparedId, setPreparedId] = useState<string | null>(null)
   const newer = data?.upstream && data.upstream.sha !== data.originalSha ? data.upstream : null
   const run = async () => {
-    if (!data || busy || (mode === 'newer' && (!newer ||
+    if (!data || busy || (!preparedCleanup && mode === 'newer' && (!newer ||
       selectedNewer?.sha !== newer.sha || selectedNewer.branch !== newer.branch))) {
       setIssue('The upstream selection changed. Refresh and explicitly select the new revision.'); return
     }
     setBusy(true); setIssue(null)
     try {
-      const result = await restartThread({ data: {
+      const selection = {
         threadId, childId, sourceJobId: data.sourceJobId,
         originalSha: data.originalSha, mode,
         selectedSha: mode === 'newer' ? selectedNewer!.sha : data.originalSha,
         targetBranch: mode === 'newer' ? selectedNewer!.branch : null,
-      } })
+      }
+      const result = discard ? await restartAndDiscardThread({ data: selection })
+        : await restartThread({ data: selection })
       await client.invalidateQueries({ queryKey: storyNavigationKey(result.storyId) })
+      if (discard && 'cleanup' in result && result.cleanup && typeof result.cleanup === 'object' &&
+        'state' in result.cleanup && result.cleanup.state !== 'complete') {
+        const message = 'message' in result.cleanup ? String(result.cleanup.message) : 'Retry required.'
+        setPreparedCleanup(true)
+        setPreparedId(result.id)
+        setIssue('Replacement Thread ' + result.threadId + ' was prepared, but old Thread cleanup is ' + result.cleanup.state + ': ' + message + ' Retry here, or use Retry Thread cleanup in Conversations after the original writer has stopped.')
+        return
+      }
       await navigate({ to: '/jobs/$jobId', params: { jobId: result.id } })
     } catch (cause) {
       setIssue(cause instanceof Error ? cause.message : 'Restart preparation failed.')
@@ -51,7 +64,7 @@ export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; 
       <p className="mb-2 text-muted-foreground">Source: {data.provider} · {data.repository}. The existing Thread and its running work remain unchanged.</p>
       <label className="mb-2 flex cursor-pointer items-start gap-2">
         <input type="radio" name={'restart-mode-' + threadId} checked={mode === 'original'}
-          disabled={busy} onChange={() => { setMode('original'); setSelectedNewer(null); setChildId(crypto.randomUUID()); setIssue(null) }} />
+          disabled={busy || preparedCleanup} onChange={() => { setMode('original'); setSelectedNewer(null); setChildId(crypto.randomUUID()); setIssue(null) }} />
         <span><strong>Original Story revision (default)</strong>
           <code className="mt-0.5 block break-all">{data.originalSha}</code>
           <span className="text-muted-foreground">Replay the original author request from its pinned Story commit.</span>
@@ -59,7 +72,7 @@ export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; 
       </label>
       <label className="mb-2 flex cursor-pointer items-start gap-2">
         <input type="radio" name={'restart-mode-' + threadId} checked={mode === 'newer'}
-          disabled={busy || !newer} onChange={() => { setMode('newer'); setSelectedNewer(newer); setChildId(crypto.randomUUID()); setIssue(null) }} />
+          disabled={busy || preparedCleanup || !newer} onChange={() => { setMode('newer'); setSelectedNewer(newer); setChildId(crypto.randomUUID()); setIssue(null) }} />
         <span><strong>Explicitly select newer upstream revision</strong>
           {newer ? <>
             <span className="block text-muted-foreground">Branch: {newer.branch}</span>
@@ -68,19 +81,25 @@ export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; 
           </> : <span className="block text-muted-foreground">{data.upstreamError ?? 'No different upstream revision available.'}</span>}
         </span>
       </label>
+      <label className="mb-2 flex items-start gap-2 text-muted-foreground">
+        <input type="checkbox" checked={discard} disabled={busy || preparedCleanup}
+          onChange={event => setDiscard(event.target.checked)} />
+        <span><strong>Restart and discard old Thread</strong> — prepare and verify a replacement first, then permanently delete eligible old resources. Active writers must stop at a safe boundary; dirty work and unresolved dependencies are preserved. Cleanup can require a retry.</span>
+      </label>
       <div className="flex flex-wrap items-center gap-2">
-        <Button type="button" size="sm" disabled={busy || (mode === 'newer' && (!newer ||
+        <Button type="button" size="sm" disabled={busy || (!preparedCleanup && mode === 'newer' && (!newer ||
           selectedNewer?.sha !== newer.sha || selectedNewer.branch !== newer.branch))}
           onClick={() => void run()}>
-          {busy ? 'Preparing…' : 'Create prepared restart Thread'}
+          {busy ? 'Preparing…' : discard ? 'Restart and discard old Thread' : 'Create prepared restart Thread'}
         </Button>
-        <Button type="button" size="sm" variant="outline" disabled={busy || isFetching}
+        <Button type="button" size="sm" variant="outline" disabled={busy || isFetching || preparedCleanup}
           onClick={() => { setMode('original'); setSelectedNewer(null);
-            void refetch(); setChildId(crypto.randomUUID()); setIssue(null) }}>
+            setChildId(crypto.randomUUID()); void refetch(); setIssue(null) }}>
           Refresh upstream
         </Button>
       </div>
-      <p className="mt-2 text-muted-foreground">After preparation, review the task, model and budget, then explicitly Run. The old Thread is not deleted.</p>
+      {preparedCleanup && <p className="mt-2 text-muted-foreground">Replacement identity is pinned. Retry cleanup without refreshing or changing the selection. {preparedId && <a className="underline" href={'/jobs/' + encodeURIComponent(preparedId)}>Open prepared replacement</a>}</p>}
+      <p className="mt-2 text-muted-foreground">After preparation, review the task, model and budget, then explicitly Run. {discard ? 'Permanent cleanup is irreversible and may remain pending until the old writer stops.' : 'The old Thread is not deleted.'}</p>
       {issue && <p role="alert" className="mt-2 whitespace-pre-wrap text-destructive">{issue}</p>}
     </>}
   </div>

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { randomUUID, createHmac } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -26,7 +26,7 @@ const contract = { scope: { kind: 'full-story' as const, depth: 'composition' as
 const native = process.env.NT_NATIVE_CLI ?? '/home/thomas/dev/nt/build/cli/linux/noveltea'
 const git = (root: string, ...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
 
-async function setup(canonicalStory = false) {
+async function setup(canonicalStory = false, invalidStory = false) {
   const root = mkdtempSync(join(tmpdir(), 'nt-thread-restart-'))
   const old = Object.fromEntries(['NT_STATE_DIR','NT_GIT_CACHE_DIR','NT_CONFIG_FILE','NT_NATIVE_CLI']
     .map(key => [key, process.env[key]]))
@@ -54,7 +54,8 @@ async function setup(canonicalStory = false) {
     // upstream must not inherit a changed version without fresh approval.
     writeFileSync(foundation, original.replace('origin: agent\n    authority: delegated',
       'origin: user\n    authority: user-protected'))
-  } else writeFileSync(join(remote, 'story', 'creative-direction', 'foundation.md'), initialStoryDocument('Restart Story'))
+  } else writeFileSync(join(remote, 'story', 'creative-direction', 'foundation.md'),
+    invalidStory ? 'not a canonical Story record\n' : initialStoryDocument('Restart Story'))
   git(remote, 'init', '-q')
   git(remote, 'config', 'user.name', 'Author')
   git(remote, 'config', 'user.email', 'test@example.local')
@@ -91,12 +92,12 @@ async function setup(canonicalStory = false) {
   const lookup = async (): Promise<Upstream> => ({ branch: 'main', sha: git(remote, 'rev-parse', 'HEAD'),
     remoteUrl: 'file://' + remote, token: '' })
   const send = async (thread: string, method: 'POST' | 'GET', body?: unknown, actor = ownerCookie,
-    resolver = lookup) => {
+    resolver = lookup, discardOld = false) => {
     const response = await threadRestartRequest(auth, db, new Request(config.baseURL + '/api/restart', {
       method, headers: { cookie: actor, ...(method === 'POST' ?
         { origin: config.baseURL, 'content-type': 'application/json' } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }), thread, config.baseURL, resolver)
+    }), thread, config.baseURL, resolver, discardOld)
     return { status: response.status, body: await response.json() as any }
   }
   const cleanup = () => {
@@ -110,6 +111,84 @@ async function setup(canonicalStory = false) {
   return { root, remote, db, auth, owner, other, ownerCookie, otherCookie, parent, threadId, storyId,
     original, sourceId, later, send, cleanup }
 }
+
+
+test('restart-and-discard refuses an invalid original Story before touching the live source', async () => {
+  const f = await setup(false, true)
+  try {
+    const selected = { childId: randomUUID(), sourceJobId: f.sourceId, originalSha: f.original,
+      selectedSha: f.original, mode: 'original', targetBranch: null }
+    const failed = await f.send(f.threadId, 'POST', selected, f.ownerCookie, undefined, true)
+    assert.equal(failed.status, 409)
+    assert.equal(existsSync(f.parent.worktreeRoot), true)
+    assert.equal((await f.db.persistence.generation.jobs.selected(f.owner.id, f.sourceId))?.status, 'running')
+    assert.equal((await f.db.persistence.conversations.deletion(f.owner.id, f.threadId))?.deletedAt, null)
+    assert.equal(await f.db.persistence.advancedThreads.preparedRestart(f.owner.id, selected.childId,
+      'restart:' + selected.childId), false)
+    assert.deepEqual(await f.db.testing.foreignKeyViolations(), [])
+  } finally { f.cleanup() }
+})
+
+test('restart-and-discard prepares replacement before deleting old work and is retryable', async () => {
+  const f = await setup()
+  try {
+    const selected = { childId: randomUUID(), sourceJobId: f.sourceId, originalSha: f.original,
+      selectedSha: f.original, mode: 'original', targetBranch: null }
+    const invalid = await f.send(f.threadId, 'POST', { ...selected, sourceJobId: randomUUID() },
+      f.ownerCookie, undefined, true)
+    assert.equal(invalid.status, 409)
+    assert.equal(existsSync(f.parent.worktreeRoot), true)
+    assert.equal((await f.db.persistence.conversations.deletion(f.owner.id, f.threadId))?.deletedAt, null)
+    const messageId = randomUUID()
+    await f.db.testing.records.insert('story_thread_messages', { id: messageId,
+      ownerUserId: f.owner.id, threadId: f.threadId, sequence: 0, role: 'user',
+      status: 'queued', phase: 'running', body: 'Active author guidance', createdAt: 'now' })
+    const active = await f.send(f.threadId, 'POST', selected, f.ownerCookie, undefined, true)
+    assert.equal(active.status, 200, JSON.stringify(active.body))
+    assert.equal(active.body.cleanup.state, 'pending')
+    assert.equal(existsSync(f.parent.worktreeRoot), true)
+    const replacement = await restoreJob(await selectedJob(f.db, f.owner.id, selected.childId), f.owner.id)
+    assert.equal(existsSync(replacement.worktreeRoot), true)
+    await f.db.testing.records.update('studio_sessions', { id: f.sourceId }, { status: 'completed' })
+    const unsettled = await f.send(f.threadId, 'POST', selected, f.ownerCookie, undefined, true)
+    assert.equal(unsettled.body.cleanup.state, 'blocked', 'an unfinished author message blocks the purge')
+    await f.db.testing.records.update('story_thread_messages', { id: messageId }, { phase: 'finished' })
+    const extra = join(f.parent.worktreeStoryRoot, 'unfinished.txt')
+    writeFileSync(extra, 'unfinished author work')
+    const blocked = await f.send(f.threadId, 'POST', selected, f.ownerCookie, undefined, true)
+    assert.equal(blocked.status, 200)
+    assert.equal(blocked.body.cleanup.state, 'blocked')
+    assert.match(blocked.body.cleanup.message, /dirty/i)
+    assert.equal(existsSync(replacement.worktreeRoot), true)
+    assert.equal(existsSync(extra), true)
+    unlinkSync(extra)
+    const lock = join(f.parent.stateDir, '.story-job-running')
+    mkdirSync(lock)
+    const locked = await f.send(f.threadId, 'POST', selected, f.ownerCookie, undefined, true)
+    assert.equal(locked.body.cleanup.state, 'blocked')
+    assert.match(locked.body.cleanup.message, /lock/i)
+    assert.ok((await f.db.persistence.conversations.deletion(f.owner.id, f.threadId))?.deletedAt,
+      'the deletion reservation must survive failed physical cleanup')
+    rmSync(lock, { recursive: true })
+    // Emulate a crash after deleting the old linked worktree but before
+    // removing its branch/receipts. The next request must resume that plan.
+    git(f.parent.gitRoot, 'worktree', 'remove', '--', f.parent.worktreeRoot)
+    assert.equal(existsSync(f.parent.worktreeRoot), false)
+    assert.equal(existsSync(f.parent.stateDir), true)
+    const completed = await f.send(f.threadId, 'POST', selected, f.ownerCookie, undefined, true)
+    assert.equal(completed.status, 200, JSON.stringify(completed.body))
+    assert.equal(completed.body.cleanup.state, 'complete')
+    assert.equal(existsSync(f.parent.worktreeRoot), false)
+    assert.equal(existsSync(replacement.worktreeRoot), true)
+    assert.equal((await f.db.persistence.conversations.deletion(f.owner.id, f.threadId))?.completedAt != null, true)
+    const again = await f.send(f.threadId, 'POST', selected, f.ownerCookie, undefined, true)
+    assert.equal(again.status, 200)
+    assert.equal(again.body.cleanup.state, 'complete')
+    assert.equal((await f.send(f.threadId, 'POST', { ...selected, childId: randomUUID() },
+      f.ownerCookie, undefined, true)).status, 410)
+    assert.deepEqual(await f.db.testing.foreignKeyViolations(), [])
+  } finally { f.cleanup() }
+})
 
 test('owner restarts from the original SHA with new Thread/run while live parent and messages stay unchanged', async () => {
   const f = await setup()

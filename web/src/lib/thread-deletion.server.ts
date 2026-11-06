@@ -164,7 +164,11 @@ export async function deleteThread(store: StudioStore, owner: string, threadId: 
   if (record.pendingForks) throw new Error('Unfinished child fork/restart reservation requires reconciliation.')
   if (record.externalPublications)
     throw new Error('A published review branch still references this execution; reconcile the external publication first.')
-  if (record.unsettledMessages)
+  // A live author message may be unsettled precisely because the old writer is
+  // running. Request cancellation first; still refuse deletion until every
+  // message and Pi delivery settles at a safe boundary.
+  if (record.unsettledMessages && !record.runs.some(run =>
+    run.status === 'running' || ['running', 'queued'].includes(run.queue ?? '')))
     throw new Error('Unsettled Thread continuation or Pi delivery requires reconciliation before cleanup.')
   let plan: Plan
   if (record.deletedAt) {

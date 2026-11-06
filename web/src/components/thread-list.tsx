@@ -76,7 +76,7 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
           {onOpen && !thread.deletedAt ? <button type="button" onClick={() => onOpen(thread)}
             className="block max-w-full truncate text-left text-sm font-medium hover:underline"
             title={'Open chat for ' + thread.title}>{thread.title}</button>
-            : thread.jobId ? <a href={'/jobs/' + encodeURIComponent(thread.jobId)}
+            : thread.jobId && !thread.deletedAt ? <a href={'/jobs/' + encodeURIComponent(thread.jobId)}
               className="block truncate text-sm font-medium" title={thread.title}>{thread.title}</a>
               : <span className="block truncate text-sm font-medium">{thread.title}</span>}
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">

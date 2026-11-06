@@ -12,6 +12,7 @@ import { validateGenerationDraft, type GenerationDraft } from './generation-conf
 import { parseGenerationContract, type GenerationRequest } from '../../../src/generation'
 import { ensureRootThreads } from './threads.server'
 import { readJsonInput, JsonInputError } from './json-input.server'
+import { deleteThread, type DeletionOutcome } from './thread-deletion.server'
 
 const SHA = /^[a-f0-9]{40}$/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
@@ -39,6 +40,8 @@ export type RestartSelection = {
   childId: string; sourceJobId: string; originalSha: string
   mode: 'original' | 'newer'; selectedSha: string; targetBranch: string | null
 }
+export type DiscardRestartOutcome = { id: string; storyId: string; threadId: string;
+  cleanup: DeletionOutcome | { state: 'blocked'; message: string } }
 
 async function sourceFor(store: StudioDatabase, owner: string, threadId: string): Promise<Source> {
   let root: Awaited<ReturnType<typeof store.persistence.advancedThreads.ancestor>>
@@ -202,12 +205,7 @@ async function verifyNewerStory(child: Awaited<ReturnType<typeof acquireCachedSt
     }
   }
   if (!ancestor) throw new ThreadRestartError(409, 'Selected upstream is unrelated to the original Story revision.')
-  const validation = await validateStoryJob(child)
-  if (validation.status !== 'passed' || !validation.report ||
-      (validation.report.diagnostics as unknown[])?.length)
-    throw new ThreadRestartError(409, 'New upstream Story canon failed native validation. Preserve the old Thread.')
-  const index = canonicalExplorerIndex(validation.report, child.baseSha, child.headSha, validation.status)
-  validateGenerationDraft(draft, index, validation.report.records)
+  await verifyPreparedStory(child, draft)
   // Validate protected decisions against the *original* Story, not against
   // the selected commit itself (which would conceal upstream retcons).
   const protection = await validateStoryJob(child, undefined, {
@@ -225,16 +223,47 @@ async function verifyNewerStory(child: Awaited<ReturnType<typeof acquireCachedSt
       'New upstream changed or could not certify protected decisions against the original Story. Exact author review is required.')
 }
 
+/** Validate a fresh worktree and the inherited author request before allowing
+ * any destructive cleanup, including on the original pinned-SHA path. */
+async function verifyPreparedStory(child: Awaited<ReturnType<typeof acquireCachedStory>>,
+  draft: GenerationDraft): Promise<void> {
+  const validation = await validateStoryJob(child)
+  if (validation.status !== 'passed' || !validation.report ||
+      (validation.report.diagnostics as unknown[])?.length)
+    throw new ThreadRestartError(409, 'Replacement Story failed native validation. The old Thread is unchanged.')
+  const index = canonicalExplorerIndex(validation.report, child.baseSha, child.headSha, validation.status)
+  validateGenerationDraft(draft, index, validation.report.records)
+}
+
 export async function prepareThreadRestart(auth: StudioAuth, store: StudioDatabase, request: Request,
-  threadId: string, lookup = currentRestartUpstream): Promise<{ id: string; storyId: string; threadId: string }> {
+  threadId: string, lookup = currentRestartUpstream, discardOld = false): Promise<{
+    id: string; storyId: string; threadId: string
+  } | DiscardRestartOutcome> {
   await store.assertReady()
   const actor = await requireUser(auth, request.headers)
   if (!actor) throw new ThreadRestartError(401, 'Sign in required.')
   const input = requestBody(await readJsonInput(request, 2048))
   // Owner and Thread lookup precedes all resource acquisition. A repeated
   // child ID can only refer to this exact operation, never a foreign claim.
-  const source = await sourceFor(store, actor.id, threadId)
   const existing = () => store.persistence.advancedThreads.restartIntent(input.childId)
+  const saved = await existing()
+  // A deletion reservation makes the old Thread noninteractive. The exact
+  // already-prepared replacement may nevertheless finish its cleanup.
+  const deletion = discardOld ? await store.persistence.conversations.deletion(actor.id, threadId) : null
+  if (discardOld && deletion?.deletedAt) {
+    if (!saved?.preparedAt || saved.owner !== actor.id || saved.sourceThread !== threadId ||
+      saved.sourceJob !== input.sourceJobId || saved.original !== input.originalSha ||
+      saved.mode !== input.mode || saved.selected !== input.selectedSha ||
+      saved.branch !== input.targetBranch ||
+      !await store.persistence.advancedThreads.preparedRestart(actor.id, input.childId,
+        'restart:' + input.childId))
+      throw new ThreadRestartError(410, 'The old Thread is deleted; only its exact prepared replacement can retry cleanup.')
+    const registration = await selectedJob(store, actor.id, input.childId)
+    if (registration.commitSha !== saved.selected)
+      throw new ThreadRestartError(409, 'Prepared replacement changed; cleanup refused.')
+    return finishDiscardRestart(store, actor.id, threadId, input.childId, registration.storyId)
+  }
+  const source = await sourceFor(store, actor.id, threadId)
   const intentMatches = (saved: RestartIntent) => saved.owner === actor.id &&
     saved.sourceThread === threadId && saved.sourceJob === input.sourceJobId &&
     saved.rootJob === source.rootJobId && saved.original === input.originalSha &&
@@ -251,7 +280,8 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
         !await store.persistence.advancedThreads.preparedRestart(actor.id, input.childId,
           'restart:' + input.childId))
       throw new ThreadRestartError(409, 'Prepared restart registration differs from the saved intent.')
-    return { id: input.childId, storyId: source.storyId, threadId: 'restart:' + input.childId }
+    return discardOld ? finishDiscardRestart(store, actor.id, threadId, input.childId, source.storyId)
+      : { id: input.childId, storyId: source.storyId, threadId: 'restart:' + input.childId }
   }
   if (input.sourceJobId !== source.sourceJobId || input.originalSha !== source.originalSha)
     throw new ThreadRestartError(409, 'Source Thread or original Story revision changed. Refresh before restarting.')
@@ -297,6 +327,8 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
     const refreshed = await lookup(auth, store, request.headers, source)
     if (refreshed.sha !== input.selectedSha || refreshed.branch !== input.targetBranch)
       throw new ThreadRestartError(409, 'Upstream moved during restart preparation; no child was registered.')
+  } else {
+    await verifyPreparedStory(child, JSON.parse(intent!.draft) as GenerationDraft)
   }
   await store.persistence.advancedThreads.registerChild({
     childId: input.childId, owner: actor.id, storyId: source.storyId,
@@ -305,19 +337,31 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
     threadId: 'restart:' + input.childId, draft: intent!.draft,
     at: new Date().toISOString(), kind: 'restart',
   })
-  return { id: input.childId, storyId: source.storyId, threadId: 'restart:' + input.childId }
+  return discardOld ? finishDiscardRestart(store, actor.id, threadId, input.childId, source.storyId)
+    : { id: input.childId, storyId: source.storyId, threadId: 'restart:' + input.childId }
+}
+
+/** Attempt cleanup only after replacement registration. Preserve old resources
+ * on failure and retry with the same pinned child ID. */
+async function finishDiscardRestart(store: StudioDatabase, owner: string, sourceThread: string,
+  childId: string, storyId: string): Promise<DiscardRestartOutcome> {
+  const base = { id: childId, storyId, threadId: 'restart:' + childId }
+  try { return { ...base, cleanup: await deleteThread(store, owner, sourceThread) } }
+  catch (error) { return { ...base, cleanup: { state: 'blocked',
+    message: error instanceof Error ? error.message : 'Cleanup failed; retry after inspection.' } } }
 }
 
 /** Authenticated adapter shared with ordinary TanStack server functions. */
 export async function threadRestartRequest(auth: StudioAuth, store: StudioDatabase, request: Request,
-  threadId: string, baseURL: string, lookup = currentRestartUpstream): Promise<Response> {
+  threadId: string, baseURL: string, lookup = currentRestartUpstream,
+  discardOld = false): Promise<Response> {
   if (!ID.test(threadId)) return reply({ error: 'Invalid Thread ID.' }, 400)
   if (!['GET', 'POST'].includes(request.method)) return reply({ error: 'Method not allowed.' }, 405)
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
     return reply({ error: 'Cross-origin write refused.' }, 403)
   try {
     if (request.method === 'GET') return reply(await previewThreadRestart(auth, store, request, threadId, lookup))
-    return reply(await prepareThreadRestart(auth, store, request, threadId, lookup))
+    return reply(await prepareThreadRestart(auth, store, request, threadId, lookup, discardOld))
   } catch (error) {
     if (error instanceof ThreadRestartError)
       return reply({ error: error.message }, error.status)

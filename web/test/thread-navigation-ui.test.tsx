@@ -95,7 +95,6 @@ test('deleted parent remains a noninteractive lineage placeholder but a deleted 
   const parent = thread('parent', null, 'deleted', '2026-11-01T00:00:00Z')
   parent.deletedAt = '2026-11-05T00:00:00Z'
   parent.deletionCompleteAt = '2026-11-05T01:00:00Z'
-  parent.jobId = null
   const child = thread('child', parent.id, 'completed', '2026-11-06T00:00:00Z')
   const threads = selectNavigationThreads([parent, child], 'active')
   assert.deepEqual(threads.map(item => item.id), ['parent', 'child'])
