@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { NavigationThreadRecord } from '../persistence/conversation-contracts'
 import { compareActivity, latestActivity } from './thread-navigation'
 

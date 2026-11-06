@@ -1,7 +1,6 @@
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { PublicationStateConflict } from '../persistence/publication-contracts'
 import type { StudioAuth } from './auth'
-import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser, getRepositoryToken } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { github, matchingRepository, GithubError, errorResponse, json } from './github-repositories.server'
@@ -177,7 +176,7 @@ export async function githubPublicationRequest(auth: StudioAuth, store: StudioDa
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
     return json({ error: 'Cross-origin write refused' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const actor = await requireUser(auth, request.headers)
     if (!actor) return json({ error: 'Sign in required' }, 401)
     const row = await readRow(store, actor.id, id)

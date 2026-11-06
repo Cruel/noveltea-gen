@@ -8,7 +8,7 @@ import { insertThreadAssistantSqlite, nextThreadSequenceSqlite,
   seedThreadMessagesSqlite } from './thread-message-sqlite'
 import { consumeProtectedDecisionSqlite } from './approval-revision-sqlite'
 import { enqueueGenerationSqlite } from './generation-sqlite'
-import type { SteeringPersistence } from './steering-contracts'
+import type { SynchronousSteering } from './steering-sqlite'
 import type { ContinuationAdmission, ContinuationPersistence, ContinuationRun,
   ContinuationRequest, QueuedContinuation } from './continuation-contracts'
 type Db = BetterSQLite3Database<typeof schema>
@@ -19,7 +19,7 @@ const ordered = sql`COALESCE((SELECT original.sequence FROM thread_steering_inte
   WHERE intent.review_message_id=${messages.id}), ${messages.sequence})`
 
 export function createSqliteContinuationPersistence(db: Db,
-  steering: SteeringPersistence): ContinuationPersistence {
+  steering: SynchronousSteering): ContinuationPersistence {
   const current = (owner: string, threadId: string): ContinuationRun | null => {
     auth(owner)
     return db.select({

@@ -9,6 +9,7 @@ import { removeTestTree } from '../../test/helpers'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { enqueueThreadMessage, advanceThread, readThreadChat } from '../src/lib/thread-chat.server'
@@ -37,11 +38,10 @@ test('legacy unscoped Thread messages cannot inherit a full-Story writer on a co
     await migrateStudio(store, config)
     const user = randomUUID(), repoId = randomUUID(), storyId = randomUUID()
     const parentId = randomUUID(), threadId = 'root:' + parentId
-    store.sqlite.prepare(`INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt)
-      VALUES (?,'Author',?,1,0,0)`).run(user, user + '@example.test')
-    store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,
-      provider_repository_id,name,created_at) VALUES (?,?,'github','123','Repo','now')`)
-      .run(repoId, user)
+    const seed = studioSeed(store)
+    ;(await seed.user(user, 0))
+    ;(await seed.repository({ id: repoId, ownerUserId: user, provider: 'github',
+      providerRepositoryId: '123', name: 'Repo', createdAt: 'now' }))
     const remote = join(root, 'remote')
     mkdirSync(join(remote, 'story'), { recursive: true })
     writeFileSync(join(remote, 'story', 'story.md'), '# Previously committed Story\n')
@@ -51,24 +51,22 @@ test('legacy unscoped Thread messages cannot inherit a full-Story writer on a co
     git(remote, 'add', '.')
     git(remote, 'commit', '-qm', 'Story baseline')
     const sha = git(remote, 'rev-parse', 'HEAD')
-    store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,
-      created_at,source_commit_sha) VALUES (?,?,?,'story','Story','now',?)`)
-      .run(storyId, user, repoId, sha)
+    ;(await seed.story({ id: storyId, ownerUserId: user, repositoryId: repoId,
+      directory: 'story', title: 'Story', createdAt: 'now', sourceCommitSha: sha }))
     const parent = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
       ownerId: user, repositoryId: 'github:123', remoteUrl: 'file://' + remote,
       token: '', directory: 'story', commit: sha, jobId: parentId })
     const request = { story: parent.storyRoot, job: parent.jobId,
       task: 'Original generation request', contract, fixture: true }
-    store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,
-      source_commit_sha,status,created_at,updated_at,generation_request_json,
-      generation_thread_id,generation_config_json)
-      VALUES (?,?,?,'Story',?,'completed','now','now',?,?,?)`)
-      .run(parentId, user, storyId, sha, JSON.stringify(request),
-        parent.threadId + ':generation:web', JSON.stringify({
-          version: 1, headSha: sha, task: request.task, contract, limits: {}, model: null }))
-    store.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES (?,?,'start','finished','now','now')`).run(parentId, user)
+    ;(await seed.job({ id: parentId, ownerUserId: user, storyId, title: 'Story',
+      sourceCommitSha: sha, status: 'completed', createdAt: 'now', updatedAt: 'now',
+      generationRequestJson: JSON.stringify(request),
+      generationThreadId: parent.threadId + ':generation:web',
+      generationConfigJson: JSON.stringify({
+        version: 1, headSha: sha, task: request.task, contract, limits: {}, model: null,
+      }) }))
+    ;(await seed.queue({ jobId: parentId, ownerUserId: user, intent: 'start',
+      phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
     ensureRootThreads(store, user, storyId)
     await claimServerGeneration(parent, parent.threadId + ':generation:web', request)
     const graph = openWebGenerationGraph(join(parent.stateDir, 'web-generation.sqlite'))
@@ -87,9 +85,9 @@ test('legacy unscoped Thread messages cannot inherit a full-Story writer on a co
     assert.equal(chat.messages.at(-1)?.content, 'Then explore the aftermath')
     assert.deepEqual(chat.runs.map(run => run.jobId), [parentId])
     assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), sha)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
   } finally {
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of Object.entries(before)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value

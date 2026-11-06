@@ -1,7 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { getRepositoryToken, requireUser } from './access.server'
 import { selectedJob, restoreJob, pinnedRequest } from './fixture-jobs.server'
 import { acquireCachedStory, continueCachedStory, gitEnvironment, GitCacheError } from './git-cache.server'
@@ -134,7 +133,7 @@ export type RestartPreview = {
 }
 export async function previewThreadRestart(auth: StudioAuth, store: StudioDatabase,
   request: Request, threadId: string, lookup = currentRestartUpstream): Promise<RestartPreview> {
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   const actor = await requireUser(auth, request.headers)
   if (!actor) throw new ThreadRestartError(401, 'Sign in required.')
   const source = await sourceFor(store, actor.id, threadId)
@@ -223,7 +222,7 @@ async function verifyNewerStory(child: Awaited<ReturnType<typeof acquireCachedSt
 
 export async function prepareThreadRestart(auth: StudioAuth, store: StudioDatabase, request: Request,
   threadId: string, lookup = currentRestartUpstream): Promise<{ id: string; storyId: string; threadId: string }> {
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   const actor = await requireUser(auth, request.headers)
   if (!actor) throw new ThreadRestartError(401, 'Sign in required.')
   const input = requestBody(await readJsonInput(request, 2048))

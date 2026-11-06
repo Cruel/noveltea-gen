@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import type { PublicationReceipt, ProtectedDecisionGrant } from '../src/persistence/publication-contracts'
 
@@ -26,20 +27,18 @@ test('publication intents and links are owner/provider scoped, restart-safe and 
     await migrateStudio(a, config)
     const owner = randomUUID(), stranger = randomUUID()
     const githubJob = randomUUID(), gitlabJob = randomUUID()
-    for (const id of [owner, stranger])
-      a.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-        .run(id, id, id + '@example.test', 1, Date.now(), Date.now())
-    for (const [provider, jobId, remoteId] of [['github', githubJob, '123'], ['gitlab', gitlabJob, '456']]) {
+    const seed = studioSeed(a)
+    for (const id of [owner, stranger]) { await seed.user(id) }
+    for (const [provider, jobId, remoteId] of [
+      ['github', githubJob, '123'], ['gitlab', gitlabJob, '456'],
+    ] as const) {
       const repo = randomUUID(), story = randomUUID()
-      a.sqlite.prepare(`INSERT INTO repositories
-        (id,owner_user_id,provider,provider_repository_id,name,created_at)
-        VALUES (?,?,?,?,?,?)`).run(repo, owner, provider, remoteId, 'A/Story', t0)
-      a.sqlite.prepare(`INSERT INTO stories
-        (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-        VALUES (?,?,?,'story','Test Story',?,?)`).run(story, owner, repo, t0, sha)
-      a.sqlite.prepare(`INSERT INTO studio_sessions
-        (id,owner_user_id,story_id,title,status,source_commit_sha,created_at,updated_at)
-        VALUES (?,?,?,'Test Job','paused',?,?,?)`).run(jobId, owner, story, sha, t0, t0)
+      ;(await seed.repository({ id: repo, ownerUserId: owner, provider,
+        providerRepositoryId: remoteId, name: 'A/Story', createdAt: t0 }))
+      ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
+        directory: 'story', title: 'Test Story', createdAt: t0, sourceCommitSha: sha }))
+      ;(await seed.job({ id: jobId, ownerUserId: owner, storyId: story, title: 'Test Job',
+        status: 'paused', sourceCommitSha: sha, createdAt: t0, updatedAt: t0 }))
     }
     for (const [provider, jobId, number] of [
       ['github', githubJob, 15], ['gitlab', gitlabJob, 22],
@@ -58,7 +57,7 @@ test('publication intents and links are owner/provider scoped, restart-safe and 
       try {
         assert.deepEqual(await recovered.persistence.publications.get(owner, jobId, provider), pending,
           'interrupted push intent survives a fresh Studio process before provider reconciliation')
-      } finally { recovered.sqlite.close() }
+      } finally { recovered.close() }
       await portB.save(owner, jobId, provider, { ...pending, headSha: sha }, t0)
       assert.deepEqual(await portA.get(owner, jobId, provider), pending,
         'the verified pending HEAD remains pinned after ambiguous retries')
@@ -81,16 +80,16 @@ test('publication intents and links are owner/provider scoped, restart-safe and 
       await assert.rejects(portA.save(owner, jobId, provider,
         { ...linked, remoteBranch: 'other-branch' }, t0), /branch identity/)
     }
-    assert.deepEqual(a.sqlite.pragma('foreign_key_check'), [])
-    a.sqlite.close(); b.sqlite.close()
+    assert.deepEqual((await a.testing.foreignKeyViolations()), [])
+    a.close(); b.close()
     const reopened = openStudioDatabase(file)
     try {
       assert.equal((await reopened.persistence.publications.get(owner, githubJob, 'github'))?.number, 15)
       assert.equal((await reopened.persistence.publications.get(owner, gitlabJob, 'gitlab'))?.number, 22)
-    } finally { reopened.sqlite.close() }
+    } finally { reopened.close() }
   } finally {
-    if (a.sqlite.open) a.sqlite.close()
-    if (b.sqlite.open) b.sqlite.close()
+    a.close()
+    b.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -101,35 +100,27 @@ test('protected receipts and Story-scope grants enforce current owner, queue hea
     await migrateStudio(db, config)
     const owner = randomUUID(), outsider = randomUUID(), repo = randomUUID()
     const story = randomUUID(), job = randomUUID(), conversation = randomUUID(), thread = randomUUID()
-    for (const id of [owner, outsider])
-      db.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-        .run(id, id, id + '@test.invalid', 1, Date.now(), Date.now())
-    db.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','A/Story',?)`).run(repo, owner, t0)
-    db.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Story',?,?)`).run(story, owner, repo, t0, sha)
-    db.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,source_commit_sha,created_at,updated_at)
-      VALUES (?,?,?,'Job','completed',?,?,?)`).run(job, owner, story, sha, t0, t0)
-    db.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES (?,?,'start','finished',?,?)`).run(job, owner, t0, t0)
-    db.sqlite.prepare(`INSERT INTO story_conversations
-      (id,owner_user_id,story_id,title,created_at,updated_at)
-      VALUES (?,?,?,'Chat',?,?)`).run(conversation, owner, story, t0, t0)
-    db.sqlite.prepare(`INSERT INTO story_threads
-      (id,owner_user_id,conversation_id,title,activity_at,created_at)
-      VALUES (?,?,?,'Thread',?,?)`).run(thread, owner, conversation, t0, t0)
-    db.sqlite.prepare(`INSERT INTO story_thread_runs
-      (job_id,owner_user_id,thread_id,run_order) VALUES (?,?,?,0)`).run(job, owner, thread)
+    const seed = studioSeed(db)
+    for (const id of [owner, outsider]) { await seed.user(id) }
+    (await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: '123', name: 'A/Story', createdAt: t0 }))
+    ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
+      directory: 'story', title: 'Story', createdAt: t0, sourceCommitSha: sha }))
+    ;(await seed.job({ id: job, ownerUserId: owner, storyId: story, title: 'Job',
+      status: 'completed', sourceCommitSha: sha, createdAt: t0, updatedAt: t0 }))
+    ;(await seed.queue({ jobId: job, ownerUserId: owner, intent: 'start', phase: 'finished',
+      createdAt: t0, updatedAt: t0 }))
+    ;(await seed.conversation({ id: conversation, ownerUserId: owner, storyId: story,
+      title: 'Chat', createdAt: t0, updatedAt: t0 }))
+    ;(await seed.thread({ id: thread, ownerUserId: owner, conversationId: conversation,
+      title: 'Thread', activityAt: t0, createdAt: t0 }))
+    ;(await seed.threadRun({ jobId: job, ownerUserId: owner, threadId: thread, runOrder: 0 }))
     const [denialId, approvalId, futureId] = [randomUUID(), randomUUID(), randomUUID()]
-    for (const [sequence, id] of [denialId, approvalId, futureId].entries())
-      db.sqlite.prepare(`INSERT INTO story_thread_messages
-        (id,owner_user_id,thread_id,sequence,role,status,body,phase,created_at)
-        VALUES (?,?,?,?,'user','queued','Change the decision','queued',?)`)
-        .run(id, owner, thread, sequence, t0)
+    for (const [sequence, id] of [denialId, approvalId, futureId].entries()) {
+      (await seed.message({ id, ownerUserId: owner, threadId: thread, sequence,
+        role: 'user', status: 'queued', body: 'Change the decision',
+        phase: 'queued', createdAt: t0 }))
+    }
     assert.equal((await db.persistence.approvalJobs.job(owner, job))?.directory, 'story')
     assert.equal(await db.persistence.approvalJobs.job(outsider, job), null)
     const approved = (messageId: string, decision: 'approved' | 'rejected'): ProtectedDecisionGrant => ({
@@ -176,9 +167,9 @@ test('protected receipts and Story-scope grants enforce current owner, queue hea
     await db.persistence.messages.cancel(owner, thread, approvalId, t0)
     assert.equal(await revisions.grant(owner, thread, futureId, 'Change the decision',
       { jobId: job, status: 'completed', queuePhase: 'finished' }, '{"target":"future"}'), 'granted')
-    db.sqlite.prepare("UPDATE generation_run_queue SET phase='interrupted' WHERE job_id=?").run(job)
+    ;(await db.testing.records.update('generation_run_queue', { jobId: job }, { phase: 'interrupted' }))
     assert.equal(await revisions.grant(owner, thread, futureId, 'Change the decision',
       { jobId: job, status: 'completed', queuePhase: 'finished' }, '{"target":"future"}'), 'stale')
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
-  } finally { db.sqlite.close() }
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
+  } finally { db.close() }
 })

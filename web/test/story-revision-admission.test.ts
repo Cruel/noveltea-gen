@@ -9,6 +9,7 @@ import { removeTestTree } from '../../test/helpers'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
@@ -94,15 +95,12 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     const owner = randomUUID(), stranger = randomUUID()
     const repo = randomUUID(), storyId = randomUUID(), sourceId = randomUUID()
     const threadId = 'root:' + sourceId
-    for (const id of [owner, stranger]) store.sqlite.prepare(
-      'INSERT INTO user(id,name,email,emailVerified,createdAt,updatedAt) VALUES (?, ?, ?, 1, 0, 0)')
-      .run(id, 'Author', id + '@example.test')
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','124','Fixture','now')`).run(repo, owner)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Scope Story','now',?)`).run(storyId, owner, repo, sha)
+    const seed = studioSeed(store)
+    for (const id of [owner, stranger]) { await seed.user(id, 0) }
+    (await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: '124', name: 'Fixture', createdAt: 'now' }))
+    ;(await seed.story({ id: storyId, ownerUserId: owner, repositoryId: repo,
+      directory: 'story', title: 'Scope Story', createdAt: 'now', sourceCommitSha: sha }))
     const parent = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
       ownerId: owner, repositoryId: 'github:124', remoteUrl: 'file://' + remote,
       token: '', directory: 'story', commit: sha, jobId: sourceId })
@@ -111,17 +109,16 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
     const sourceRequest = { story: parent.storyRoot, job: parent.jobId,
       task: 'Build the story', contract: originalContract, fixture: true }
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,
-       generation_request_json,generation_thread_id,generation_config_json)
-      VALUES (?,?,?,'Source Story',?,'completed','now','now',?,?,?)`)
-      .run(sourceId, owner, storyId, sha, JSON.stringify(sourceRequest),
-        parent.threadId + ':generation:web', JSON.stringify({
-          version: 1, headSha: sha, task: sourceRequest.task, contract: originalContract,
-          limits: { steps: 6 }, model: null }))
-    store.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES (?,?,'start','finished','now','now')`).run(sourceId, owner)
+    ;(await seed.job({ id: sourceId, ownerUserId: owner, storyId, title: 'Source Story',
+      sourceCommitSha: sha, status: 'completed', createdAt: 'now', updatedAt: 'now',
+      generationRequestJson: JSON.stringify(sourceRequest),
+      generationThreadId: parent.threadId + ':generation:web',
+      generationConfigJson: JSON.stringify({
+        version: 1, headSha: sha, task: sourceRequest.task, contract: originalContract,
+        limits: { steps: 6 }, model: null,
+      }) }))
+    ;(await seed.queue({ jobId: sourceId, ownerUserId: owner, intent: 'start',
+      phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
     ensureRootThreads(store, owner, storyId)
     await claimServerGeneration(parent, parent.threadId + ':generation:web', sourceRequest)
     const sourceGraph = openWebGenerationGraph(join(parent.stateDir, 'web-generation.sqlite'))
@@ -140,18 +137,16 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       const originalId = randomUUID()
       const existing = (await readThreadChat(store, owner, threadId))
       const sequence = Math.max(...existing.messages.map(m => m.sequence), -1) + 1
-      store.sqlite.prepare(`INSERT INTO story_thread_messages
-        (id,owner_user_id,thread_id,sequence,role,status,body,phase,job_id,created_at)
-        VALUES (?,?,?,?,'user','delivered',?,'finished',?,'now')`)
-        .run(originalId, owner, threadId, sequence, task, sourceId)
-      store.sqlite.prepare(`INSERT INTO thread_live_inputs
-        (message_id,owner_user_id,thread_id,source_job_id,mode,state,created_at)
-        VALUES (?,?,?,?,'steer','delivered','now')`)
-        .run(originalId, owner, threadId, sourceId)
-      recordSteeringConsideration(store, originalId, owner, threadId,
+      ;(await store.testing.records.insert('story_thread_messages', { id: originalId,
+        ownerUserId: owner, threadId, sequence, role: 'user', status: 'delivered',
+        body: task, phase: 'finished', jobId: sourceId, createdAt: 'now' }))
+      ;(await store.testing.records.insert('thread_live_inputs', { messageId: originalId,
+        ownerUserId: owner, threadId, sourceJobId: sourceId,
+        mode: 'steer', state: 'delivered', createdAt: 'now' }))
+      await recordSteeringConsideration(store, originalId, owner, threadId,
         sourceId, task, 'focus:character.nia')
-      assert.equal(prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 1)
-      assert.equal(prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 0)
+      assert.equal(await prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 1)
+      assert.equal(await prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 0)
       const continuation = (await readThreadChat(store, owner, threadId))
         .messages.find(m => m.phase === 'queued')!
       assert.equal(continuation.hasRevisionScope, 0)
@@ -159,8 +154,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       await advanceThread(store, owner, threadId)
       assert.equal((await readThreadChat(store, owner, threadId))
         .messages.find(m => m.id === continuation.id)?.phase, 'queued')
-      assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM story_thread_runs')
-        .get() as { n: number }).n, 1,
+      assert.equal((await store.testing.records.count('story_thread_runs')), 1,
       'no automatic specialist for out-of-scope change')
       const reviewed = await previewThreadRevision(store, owner, threadId, task,
         undefined, continuation.id)
@@ -182,14 +176,14 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.equal(child.baseSha, sha, 'previous committed Story stays the new baseline')
       const proof = { eligible: true, parentSha: sha, commitSha: 'a'.repeat(40),
         proofDigest: 'b'.repeat(64), workItem: 'focus:event.confession' }
-      assert.equal(attributeApprovedReplanCheckpoint(store, stranger,
+      assert.equal(await attributeApprovedReplanCheckpoint(store, stranger,
         continuation.id, proof, ['events/confession.md']), 0)
-      assert.equal(attributeApprovedReplanCheckpoint(store, owner,
+      assert.equal(await attributeApprovedReplanCheckpoint(store, owner,
         continuation.id, proof, ['characters/nia.md']), 0,
       'a committed out-of-scope path cannot be misattributed as approved')
-      assert.equal(attributeApprovedReplanCheckpoint(store, owner,
+      assert.equal(await attributeApprovedReplanCheckpoint(store, owner,
         continuation.id, proof, ['events/confession.md']), 1)
-      assert.equal(attributeApprovedReplanCheckpoint(store, owner,
+      assert.equal(await attributeApprovedReplanCheckpoint(store, owner,
         continuation.id, proof, ['events/confession.md']), 0,
       'recovery never duplicates verified checkpoint associations')
       const activity = (await readThreadChat(store, owner, threadId)).steeringActivity
@@ -198,7 +192,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.equal(activity.implementationSha, proof.commitSha)
       assert.equal(activity.verifiedEffectAt, null,
         'verified scoped file change cannot claim narrative fulfillment')
-      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       return
     }
     if (kind === 'cancel-inflight') {
@@ -212,7 +206,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.equal((await readThreadChat(store, owner, threadId)).messages.find(m => m.id === pendingId)?.hasRevisionScope, 0)
       await advanceThread(store, owner, threadId)
       assert.deepEqual((await readThreadChat(store, owner, threadId)).runs.map(run => run.jobId), [sourceId])
-      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       return
     }
     if (kind === 'concurrent') {
@@ -238,9 +232,8 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.equal(after.messages.find(item => item.id === firstId)?.phase, 'running')
       assert.equal(after.messages.find(item => item.id === secondId)?.phase, 'queued')
       assert.deepEqual(after.runs.map(run => run.jobId), [sourceId, firstId])
-      assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM studio_sessions WHERE id=?')
-        .get(secondId) as { n: number }).n, 0)
-      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      assert.equal((await store.testing.records.count('studio_sessions', { id: secondId })), 0)
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       return
     }
     if (kind === 'cancel') {
@@ -260,17 +253,15 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.ok(reviewed.clarification)
       await assert.rejects(async () => cancelQueuedThreadMessage(store, stranger, threadId,
         ambiguousId), /not found/i)
-      const original = store.sqlite.prepare(`SELECT id,body,sequence,phase FROM story_thread_messages
-        WHERE id=?`).get(ambiguousId)
+      const original = (await store.testing.records.first('story_thread_messages', { id: ambiguousId }))
       const cancelled = (await cancelQueuedThreadMessage(store, owner, threadId, ambiguousId))
       assert.equal(cancelled.phase, 'cancelled')
       assert.ok(cancelled.cancelledAt)
       assert.deepEqual((await cancelQueuedThreadMessage(store, owner, threadId, ambiguousId)), cancelled,
         'cancellation is idempotent and preserves one receipt')
-      assert.deepEqual(store.sqlite.prepare(`SELECT id,body,sequence,phase FROM story_thread_messages
-        WHERE id=?`).get(ambiguousId), original, 'the original queued message remains immutable')
-      assert.equal((store.sqlite.prepare(`SELECT COUNT(*) AS n FROM story_thread_message_cancellations
-        WHERE message_id=?`).get(ambiguousId) as { n: number }).n, 1)
+      assert.deepEqual((await store.testing.records.first('story_thread_messages', { id: ambiguousId })),
+        original, 'the original queued message remains immutable')
+      assert.equal((await store.testing.records.count('story_thread_message_cancellations', { messageId: ambiguousId })), 1)
       await assert.rejects(submitThreadRevision(store, owner, threadId, ambiguousId, task),
         /cancelled.*new ID/i)
       await advanceThread(store, owner, threadId)
@@ -282,7 +273,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.deepEqual(settled.runs.map(run => run.jobId), [sourceId, nextId])
       await assert.rejects(() => cancelQueuedThreadMessage(store, owner, threadId, nextId),
         /entered execution/i)
-      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       return
     }
     assert.equal(plan.reviewRequired, kind === 'broad')
@@ -298,8 +289,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     }
     await assert.rejects(submitThreadRevision(store, owner, threadId, childId, task,
       undefined, 'f'.repeat(64)), /changed since review/i)
-    assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM story_thread_messages WHERE id=?')
-      .get(childId) as { n: number }).n, 1,
+    assert.equal((await store.testing.records.count('story_thread_messages', { id: childId })), 1,
     'a rejected approval does not discard the earlier atomically reserved message')
 
     await submitThreadRevision(store, owner, threadId, childId, task,
@@ -310,12 +300,11 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     const buffered = await submitThreadRevision(store, owner, threadId,
       bufferedId, 'Change character.nia again')
     assert.equal(buffered.phase, 'queued')
-    assert.equal((store.sqlite.prepare(`SELECT revision_scope_json AS scope
-      FROM story_thread_messages WHERE id=?`).get(bufferedId) as { scope: string | null }).scope, null)
+    assert.equal((await store.testing.records.first<{ revisionScopeJson: string | null }>('story_thread_messages',
+      { id: bufferedId }))?.revisionScopeJson, null)
     await assert.rejects(submitThreadRevision(store, owner, threadId, childId, 'Other task', undefined, plan.digest),
       /already.*use/)
-    assert.equal((store.sqlite.prepare('SELECT count(*) AS n FROM story_thread_messages WHERE id=?')
-      .get(childId) as { n: number }).n, 1)
+    assert.equal((await store.testing.records.count('story_thread_messages', { id: childId })), 1)
     await advanceThread(store, owner, threadId)
     const chat = (await readThreadChat(store, owner, threadId))
     assert.equal(chat.messages.find(item => item.id === childId)?.phase, 'running')
@@ -330,9 +319,9 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     assert.equal(child.baseSha, sha)
     assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
     assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), sha)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
   } finally {
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value

@@ -109,22 +109,21 @@ test('two Studio users may authorize the same Git integration without linking lo
       /Choose which github account/)
     assert.equal(await getRepositoryToken(auth, store, aliceHeaders, 'github', undefined, second.id, config),
       'connected-secret')
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM account').get() as { n: number }).n, 0,
+    assert.equal((await store.testing.auth.accountCount()), 0,
       'Git connections never create Better Auth login accounts')
-    assert.doesNotMatch(JSON.stringify(store.sqlite.prepare('SELECT credentials FROM git_connections').all()),
+    assert.doesNotMatch(JSON.stringify((await store.testing.records.all('git_connections'))),
       /connected-secret|initial-refresh-secret/, 'credentials must be encrypted')
 
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at,connection_id)
-      VALUES ('alice-repo',?,'github','111','shared-github/repo','now',?)`)
-      .run(alice.id, a.id)
+    ;(await store.testing.records.insert('repositories', { id: 'alice-repo', ownerUserId: alice.id,
+      provider: 'github', providerRepositoryId: '111', name: 'shared-github/repo',
+      createdAt: 'now', connectionId: a.id }))
     assert.equal(await getRepositoryToken(auth, store, aliceHeaders, 'github', 'alice-repo', undefined, config), 'connected-secret')
     await assert.rejects(() => getRepositoryToken(auth, store, bobHeaders, 'github', 'alice-repo', undefined, config),
       /Repository does not belong/)
     assert.equal(await tokenForGitConnection(store, bob.id, b.id, config), 'connected-secret')
     await assert.rejects(() => tokenForGitConnection(store, alice.id, b.id, config), /not found/)
 
-    store.sqlite.prepare('UPDATE git_connections SET access_expires_at=? WHERE id=?').run(Date.now() - 100, a.id)
+    ;(await store.testing.records.update('git_connections', { id: a.id }, { accessExpiresAt: Date.now() - 100 }))
     assert.equal(await tokenForGitConnection(store, alice.id, a.id, config), 'refreshed-secret')
     assert.equal(await tokenForGitConnection(store, alice.id, a.id, config), 'refreshed-secret')
     assert.equal(calls.filter(url => url.includes('login/oauth/access_token')).length, 4,
@@ -146,7 +145,7 @@ test('two Studio users may authorize the same Git integration without linking lo
     assert.doesNotMatch(body, /connected-secret|initial-refresh-secret|bob@example/)
   } finally {
     globalThis.fetch = originalFetch
-    store.sqlite.close()
+    store.close()
     rmSync(folder, { recursive: true, force: true })
   }
 })

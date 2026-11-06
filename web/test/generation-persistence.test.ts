@@ -5,6 +5,7 @@ import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { fenceAbandonedRuns } from '../src/lib/generation-queue.server'
 
@@ -24,32 +25,29 @@ async function setup() {
   const owners = [randomUUID(), randomUUID()]
   const repos = owners.map(() => randomUUID())
   const stories = owners.map(() => randomUUID())
+  const seed = studioSeed(a)
   for (let i = 0; i < owners.length; i++) {
-    a.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-      .run(owners[i], 'Test ' + i, 'worker-' + i + '@example.test', 1, Date.now(), Date.now())
-    a.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github',?,?,?)`).run(repos[i], owners[i], String(i), 'repo-' + i, stamp)
-    a.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Demo',?,?)`).run(stories[i], owners[i], repos[i], stamp, 'a'.repeat(40))
+    (await seed.user(owners[i]!))
+    ;(await seed.repository({ id: repos[i]!, ownerUserId: owners[i]!, provider: 'github',
+      providerRepositoryId: String(i), name: 'repo-' + i, createdAt: stamp }))
+    ;(await seed.story({ id: stories[i]!, ownerUserId: owners[i]!, repositoryId: repos[i]!,
+      directory: 'story', title: 'Demo', createdAt: stamp, sourceCommitSha: 'a'.repeat(40) }))
   }
-  function job(ownerIndex = 0) {
+  async function job(ownerIndex = 0) {
     const id = randomUUID()
-    a.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES (?,?,?,'Job','paused',?,?)`).run(id, owners[ownerIndex], stories[ownerIndex], stamp, stamp)
+    ;(await seed.job({ id, ownerUserId: owners[ownerIndex]!, storyId: stories[ownerIndex]!,
+      title: 'Job', status: 'paused', createdAt: stamp, updatedAt: stamp }))
     return id
   }
   return { a, b, owners, repos, stories, job, cleanup() {
-    a.sqlite.close(); b.sqlite.close(); rmSync(directory, { recursive: true, force: true })
+    a.close(); b.close(); rmSync(directory, { recursive: true, force: true })
   } }
 }
 
 test('two WAL connections claim one FIFO queue without duplicate slots or excess concurrency', async () => {
   const f = await setup()
   try {
-    const ids = Array.from({ length: 7 }, () => f.job())
+    const ids = await Promise.all(Array.from({ length: 7 }, () => f.job()))
     for (const id of ids) await f.a.persistence.generation.queue.enqueue(
       f.owners[0]!, id, 'start', 'prepared', stamp, '{"task":"test"}', 'thread-' + id)
     const queueA = f.a.persistence.generation.queue
@@ -70,14 +68,14 @@ test('two WAL connections claim one FIFO queue without duplicate slots or excess
     assert.equal(await queueB.dequeue(f.owners[0]!, ids[3]!), true)
     assert.equal(await queueA.record(ids[3]!), null)
     assert.equal(await queueA.claim('host:100:worker-1', 2, stamp), null)
-    assert.deepEqual(f.b.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await f.b.testing.foreignKeyViolations()), [])
   } finally { f.cleanup() }
 })
 
 test('admission is owner-bound, pins request atomically, and idempotent work cannot be claimed twice', async () => {
   const f = await setup()
   try {
-    const id = f.job()
+    const id = await f.job()
     const a = f.a.persistence.generation.queue, b = f.b.persistence.generation.queue
     await assert.rejects(a.enqueue(f.owners[1]!, id, 'start', 'prepared', stamp, '{}', 'thread'),
       /state changed/i)
@@ -107,7 +105,7 @@ test('admission is owner-bound, pins request atomically, and idempotent work can
 test('recovery must fence a dead writer; changed state never partially clears its interrupted receipt', async () => {
   const f = await setup()
   try {
-    const id = f.job()
+    const id = await f.job()
     const q = f.a.persistence.generation.queue
     const owner = f.owners[0]!
     await q.enqueue(owner, id, 'start', 'prepared', stamp, '{"task":"run"}', 'thread')
@@ -134,7 +132,7 @@ test('recovery must fence a dead writer; changed state never partially clears it
 test('a fenced worker cannot publish a successful job outcome after interruption', async () => {
   const f = await setup()
   try {
-    const jobId = f.job()
+    const jobId = await f.job()
     const owner = f.owners[0]!
     const queue = f.a.persistence.generation.queue
     const jobs = f.b.persistence.generation.jobs
@@ -153,7 +151,7 @@ test('a fenced worker cannot publish a successful job outcome after interruption
 test('job configuration CAS and bounded event history share the raw SQLite schema', async () => {
   const f = await setup()
   try {
-    const id = f.job()
+    const id = await f.job()
     const jobs = f.a.persistence.generation.jobs
     const other = f.b.persistence.generation.jobs
     assert.equal(await jobs.saveConfiguration(f.owners[1]!, id, '{"draft":1}', stamp), false)
@@ -172,9 +170,7 @@ test('job configuration CAS and bounded event history share the raw SQLite schem
     assert.deepEqual(await f.b.persistence.generation.events.after(f.owners[1]!, id, 0, 100), [])
     assert.equal(await events.hasAfter(f.owners[0]!, id, 105), false)
     assert.equal(await events.hasAfter(f.owners[0]!, id, 104), true)
-    assert.equal((f.a.sqlite.prepare('SELECT count(*) AS total FROM generation_events').get() as {
-      total: number
-    }).total, 105)
-    assert.deepEqual(f.a.sqlite.pragma('foreign_key_check'), [])
+    assert.equal((await f.a.testing.records.count('generation_events')), 105)
+    assert.deepEqual((await f.a.testing.foreignKeyViolations()), [])
   } finally { f.cleanup() }
 })

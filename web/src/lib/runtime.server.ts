@@ -1,5 +1,4 @@
 import { openStudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
 import { createStudioAuth, readAuthConfig } from './auth'
 
 // A hosted specialist may NEVER silently use local Pi auth or host API keys
@@ -11,6 +10,6 @@ process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
 const store = openStudioDatabase()
 // Fail at process startup, before serving even login/OAuth requests. A schema
 // reset or migration is always a deliberate operator action, never runtime IO.
-assertStudioSchemaCurrent(store)
+await store.assertReady()
 export const auth = createStudioAuth(store, readAuthConfig())
 export const database = store

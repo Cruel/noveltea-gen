@@ -169,7 +169,7 @@ test('authenticated GitHub draft publication previews canonical validation, push
     assert.equal((await api('POST', aliceCookie, payload)).code, 409)
     assert.equal(created, 0)
     assert.equal(git(bare, 'branch', '--list', 'noveltea-gen/*'), '')
-    assert.equal((store.sqlite.prepare('SELECT phase FROM github_publications WHERE job_id=?').get(jobId) as any).phase, 'pending')
+    assert.equal((await store.testing.records.first<{ phase: string }>('github_publications', { jobId }))?.phase, 'pending')
     unlinkSync(rejectHook)
     const published = await api('POST', aliceCookie, payload)
     assert.equal(published.code, 200, JSON.stringify(published.data))
@@ -178,18 +178,18 @@ test('authenticated GitHub draft publication previews canonical validation, push
     assert.equal(git(bare, 'rev-parse', 'refs/heads/main'), remoteTarget)
     // A new server process must use the durable PR linkage rather than create
     // another review for this same job branch.
-    store.sqlite.close()
+    store.close()
     store = openStudioDatabase(join(root, 'studio.sqlite'))
     await migrateStudio(store, config)
     auth = createStudioAuth(store, config)
     assert.equal((await api('POST', aliceCookie, payload)).code, 200)
     assert.equal(created, 1)
     assert.equal(updated, 1)
-    assert.equal((store.sqlite.prepare('SELECT pr_number AS number FROM github_publications').get() as any).number, 17)
+    assert.equal((await store.testing.records.first<{ prNumber: number }>('github_publications'))?.prNumber, 17)
     // Simulate loss of the database linkage after a successful remote create;
     // retry must discover the existing PR, not create a duplicate.
-    store.sqlite.prepare("UPDATE github_publications SET phase='pending',pr_number=NULL,pr_url=NULL WHERE job_id=?")
-      .run(jobId)
+    ;(await store.testing.records.update('github_publications', { jobId },
+      { phase: 'pending', prNumber: null, prUrl: null }))
     assert.equal((await api('POST', aliceCookie, payload)).code, 200)
     assert.equal(created, 1)
     assert.equal(updated, 2)
@@ -219,7 +219,7 @@ test('authenticated GitHub draft publication previews canonical validation, push
     assert.equal((await api('GET', aliceCookie)).code, 409)
   } finally {
     globalThis.fetch = originalFetch
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of Object.entries(originals)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value

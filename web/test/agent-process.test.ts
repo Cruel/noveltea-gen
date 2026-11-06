@@ -38,7 +38,7 @@ test('dedicated agent is a real independent process with private authenticated c
     const path = join(root, 'studio.sqlite')
     const database = openStudioDatabase(path)
     try { await migrateStudio(database, config) }
-    finally { database.sqlite.close() }
+    finally { database.close() }
 
     const port = await unusedPort()
     const token = randomBytes(48).toString('hex')

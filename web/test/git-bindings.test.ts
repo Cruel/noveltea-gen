@@ -97,9 +97,9 @@ test('repository identities persist across imports, verified rebinding and login
         make('GET', '/api/integrations/git/callback/' + provider + '?state=' + state + '&code=test'),
         provider, config)
       assert.match(callback.headers.get('location')!, /integration_connected/)
-      const record = store.sqlite.prepare('SELECT id FROM git_connections WHERE owner_user_id=? AND provider=?')
-        .get(alice.id, provider) as { id: string }
-      return record.id
+      const record = (await store.testing.records.first<{ id: string }>('git_connections',
+        { ownerUserId: alice.id, provider }))
+      return record!.id
     }
     const tooLarge = await gitConnectionRequest(auth, store,
       make('POST', '/api/integrations/git', { provider: 'github', padding: 'x'.repeat(10000) }), config)
@@ -121,8 +121,9 @@ test('repository identities persist across imports, verified rebinding and login
       make('POST', '/api/gitlab/repositories', { projectId: 20 }))
     assert.equal(glAdded.status, 200)
     const glRepoId = (await glAdded.json() as { repository: { id: string } }).repository.id
-    const bound = store.sqlite.prepare('SELECT connection_id AS binding FROM repositories WHERE id=?')
-    assert.deepEqual([bound.get(ghRepoId), bound.get(glRepoId)], [
+    const bound = async (id: string) => ({ binding:
+      (await store.testing.records.first<{ connectionId: string | null }>('repositories', { id }))?.connectionId ?? null })
+    assert.deepEqual(await Promise.all([bound(ghRepoId), bound(glRepoId)]), [
       { binding: githubId }, { binding: gitlabId },
     ], 'implicit single integration must be persisted, not downgraded to login-linked access')
     assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'github', ghRepoId),
@@ -130,15 +131,15 @@ test('repository identities persist across imports, verified rebinding and login
     assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'gitlab', glRepoId),
       'gl-integrated')
     const legacy = uuid(1)
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at,connection_id)
-      VALUES (?,?,'github','101','Acme/Legacy','now',NULL)`).run(legacy, alice.id)
+    ;(await store.testing.records.insert('repositories', { id: legacy, ownerUserId: alice.id,
+      provider: 'github', providerRepositoryId: '101', name: 'Acme/Legacy',
+      createdAt: 'now', connectionId: null }))
     assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'github', legacy), 'legacy-gh')
     const reimport = await githubRepositoryRequest(auth, store,
       make('POST', '/api/github/repositories', { fullName: 'Acme/Legacy' }),
       { baseURL: origin, appSlug: 'test' })
     assert.equal(reimport.status, 200)
-    assert.deepEqual(bound.get(legacy), { binding: null },
+    assert.deepEqual(await bound(legacy), { binding: null },
       'reimporting a legacy repository must never implicitly switch its authorization identity')
     assert.equal((await settingsRequest(auth, store,
       make('DELETE', '/api/settings', { provider: 'github', accountRecordId: ghLogin.id }), origin)).status, 409,
@@ -149,21 +150,21 @@ test('repository identities persist across imports, verified rebinding and login
     const wrongProvider = await gitConnectionRequest(auth, store,
       make('PUT', '/api/integrations/git', { repositoryId: legacy, connectionId: gitlabId }), config)
     assert.equal(wrongProvider.status, 409)
-    assert.deepEqual(bound.get(legacy), { binding: null })
+    assert.deepEqual(await bound(legacy), { binding: null })
     const inaccessible = uuid(2)
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at,connection_id)
-      VALUES (?,?,'github','777','Acme/Inaccessible','now',NULL)`).run(inaccessible, alice.id)
+    ;(await store.testing.records.insert('repositories', { id: inaccessible, ownerUserId: alice.id,
+      provider: 'github', providerRepositoryId: '777', name: 'Acme/Inaccessible',
+      createdAt: 'now', connectionId: null }))
     const rejected = await gitConnectionRequest(auth, store,
       make('PUT', '/api/integrations/git', { repositoryId: inaccessible, connectionId: githubId }), config)
     assert.equal(rejected.status, 404, 'remote permission checks must block unauthorized rebinding')
-    assert.deepEqual(bound.get(inaccessible), { binding: null })
+    assert.deepEqual(await bound(inaccessible), { binding: null })
     // Remove this intentionally unbindable fixture before testing the login-unlink guard.
-    store.sqlite.prepare('DELETE FROM repositories WHERE id=?').run(inaccessible)
+    ;(await store.testing.records.delete('repositories', { id: inaccessible }))
     const boundResponse = await gitConnectionRequest(auth, store,
       make('PUT', '/api/integrations/git', { repositoryId: legacy, connectionId: githubId }), config)
     assert.equal(boundResponse.status, 200, JSON.stringify(await boundResponse.clone().json()))
-    assert.deepEqual(bound.get(legacy), { binding: githubId })
+    assert.deepEqual(await bound(legacy), { binding: githubId })
     const unauthorised = await gitConnectionRequest(auth, store,
       make('PUT', '/api/integrations/git', { repositoryId: legacy, connectionId: githubId }, aliceCookie, 'https://attacker.invalid'), config)
     assert.equal(unauthorised.status, 403)
@@ -175,12 +176,12 @@ test('repository identities persist across imports, verified rebinding and login
     const disconnected = await gitConnectionRequest(auth, store,
       make('DELETE', '/api/integrations/git', { connectionId: githubId }), config)
     assert.equal(disconnected.status, 200)
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS n FROM repositories').get() as { n: number }).n, 3)
+    assert.equal((await store.testing.records.count('repositories')), 3)
     await assert.rejects(() => getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }),
       'github', legacy), /reauthorization/)
   } finally {
     globalThis.fetch = originalFetch
-    store.sqlite.close()
+    store.close()
     rmSync(directory, { recursive: true, force: true })
     for (const key of env) {
       if (saved[key] === undefined) delete process.env[key]

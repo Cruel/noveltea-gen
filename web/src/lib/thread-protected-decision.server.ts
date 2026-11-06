@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { lstat, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { JobStartResult } from '../../../src/job'
 import { runRevisionAction } from '../../../src/revision'
 import { requestTrustedApproval, recordTrustedControllerDecision } from '../../../src/trusted-approval'

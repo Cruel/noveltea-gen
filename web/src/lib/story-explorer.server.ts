@@ -4,8 +4,7 @@ import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { validateStoryJob } from '../../../src/validator'
@@ -256,7 +255,7 @@ function json(body: unknown, status = 200) {
 
 export async function validatedExplorer(auth: StudioAuth, store: StudioDatabase,
   request: Request, jobId: string): Promise<{ job: JobStartResult; result: ValidationResult; index: ExplorerIndex }> {
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   const user = await requireUser(auth, request.headers)
   if (!user) throw new ExplorerError(401, 'Sign in required.')
   if (!uuid.test(jobId)) throw new ExplorerError(400, 'Invalid job ID.')

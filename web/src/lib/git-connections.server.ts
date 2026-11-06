@@ -1,8 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import { readAuthConfig, type StudioAuthConfig } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './session.server'
 import { JsonInputError, readJsonInput } from './json-input.server'
 import type { GitConnectionRecord, GitProvider } from '../persistence/git-contracts'
@@ -105,7 +104,7 @@ async function profile(provider: GitProvider, token: string): Promise<{ id: stri
 export async function gitConnectionRequest(auth: StudioAuth, store: StudioDatabase, request: Request,
   config: StudioAuthConfig = readAuthConfig()): Promise<Response> {
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const actor = await requireUser(auth, request.headers)
     if (!actor) throw new GitConnectionError(401, 'Sign in required.')
     if (request.method === 'GET') return response({ connections: await listGitConnections(store, actor.id) })
@@ -193,7 +192,7 @@ export async function gitConnectionCallback(auth: StudioAuth, store: StudioDatab
   const row = await store.persistence.git.consumeFlow(digest(state), provider, Date.now())
   if (!row) return success('integration_error=expired')
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const actor = await requireUser(auth, request.headers)
     if (!actor || actor.id !== row.owner)
       return success('integration_error=session_mismatch')

@@ -9,7 +9,7 @@ import { createSqliteGenerationPersistence } from './generation-sqlite'
 import { createSqliteConversationCatalog } from './conversation-sqlite'
 import { createSqliteThreadMessages } from './thread-message-sqlite'
 import { createSqliteAdvancedThreads } from './advanced-thread-sqlite'
-import { createSqliteSteeringPersistence } from './steering-sqlite'
+import { createSqliteSteeringPersistence, createSqliteSteeringSync } from './steering-sqlite'
 import { createSqliteContinuationPersistence } from './continuation-sqlite'
 import { createSqlitePublicationRecords } from './publication-sqlite'
 import { createSqliteApprovalJobCatalog, createSqliteProtectedDecisionRecords,
@@ -28,7 +28,8 @@ function assertOwner(owner: string): void {
  */
 export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
   const generation = createSqliteGenerationPersistence(db)
-  const steering = createSqliteSteeringPersistence(db)
+  const steeringSync = createSqliteSteeringSync(db)
+  const steering = createSqliteSteeringPersistence(steeringSync)
   const protectedDecisions = createSqliteProtectedDecisionRecords(db)
   return {
     ...createGitSqlitePersistence(db),
@@ -38,7 +39,7 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
     messages: createSqliteThreadMessages(db),
     advancedThreads: createSqliteAdvancedThreads(db),
     steering,
-    continuation: createSqliteContinuationPersistence(db, steering),
+    continuation: createSqliteContinuationPersistence(db, steeringSync),
     publications: createSqlitePublicationRecords(db),
     approvalJobs: createSqliteApprovalJobCatalog(db),
     protectedDecisions,

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
+import { StudioSchemaError } from '../db/schema-error'
 import { actor, eligible, failure, gitlab, page, ProviderFailure, reply } from './gitlab-repositories.server'
 import { verifyGitlabStorySelection } from './gitlab-stories.server'
 import { storyContentDirectory } from './story-discovery.shared'
@@ -120,7 +120,7 @@ export async function gitlabInitializeRequest(
       return reply({ empty, defaultBranch: project.default_branch || null,
         commit: snapshot, repositoryId: data.repositoryId })
     }
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const input = data as Initialization
     const path = storyContentDirectory(directory(input.directory))
     const existing = await store.persistence.onboarding.story(current.id, data.repositoryId, path)

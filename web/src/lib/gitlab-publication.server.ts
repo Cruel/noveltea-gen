@@ -1,8 +1,8 @@
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { PublicationStateConflict } from '../persistence/publication-contracts'
 import type { StudioAuth } from './auth'
 import type { JobStartResult } from '../../../src/job'
-import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
+import { StudioSchemaError } from '../db/schema-error'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { actor, eligible, failure, gitlab, page, ProviderFailure, reply } from './gitlab-repositories.server'
 import { requireUser } from './access.server'
@@ -199,7 +199,7 @@ export async function gitlabPublicationRequest(auth: StudioAuth, store: StudioDa
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
     return reply({ error: 'Cross-origin write refused' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const user = await requireUser(auth, request.headers)
     if (!user) return reply({ error: 'Sign in required.' }, 401)
     const row = await catalogRow(store, user.id, id)

@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { request } from 'node:http'
 import { afterEach, test } from 'node:test'
-import Database from 'better-sqlite3'
+import { createControllerFixtureDatabase } from './support/sqlite-controller-fixture'
 import { SandboxClient } from '../../src/sandbox-client'
 import {
   createControllerServer, loadControllerConfig, resolveTrustedJob,
@@ -34,14 +34,7 @@ function fixture(directory = 'story', jobId = ID) {
     containerState: '/var/lib/noveltea/state',
     containerCache: '/var/lib/noveltea/cache',
   }
-  const db = new Database(join(appVolume, 'studio.sqlite'))
-  db.exec(`CREATE TABLE studio_sessions (id TEXT, owner_user_id TEXT, story_id TEXT, source_commit_sha TEXT);
-    CREATE TABLE stories (id TEXT, owner_user_id TEXT, repository_id TEXT, directory TEXT);
-    CREATE TABLE repositories (id TEXT, owner_user_id TEXT, provider TEXT, provider_repository_id TEXT);`)
-  db.prepare('INSERT INTO repositories VALUES (?,?,?,?)').run('repo-id', 'owner-1', 'github', '987')
-  db.prepare('INSERT INTO stories VALUES (?,?,?,?)').run('story-id', 'owner-1', 'repo-id', directory)
-  db.prepare('INSERT INTO studio_sessions VALUES (?,?,?,?)').run(jobId, 'owner-1', 'story-id', 'a'.repeat(40))
-  db.close()
+  createControllerFixtureDatabase(appVolume, jobId, directory)
   const scoped = join(sha('owner-1'), sha('github:987'))
   const gitRoot = join(config.containerCache, scoped, 'base')
   const identity = sha(JSON.stringify([gitRoot, directory, jobId]))

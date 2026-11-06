@@ -1,6 +1,6 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
+import { StudioSchemaError } from '../db/schema-error'
 import { requireUser } from './access.server'
 import { storyContentDirectory } from './story-discovery.shared'
 import { parseGenerationContract } from '../../../src/generation'
@@ -90,7 +90,7 @@ export async function onboardingRequest(auth: StudioAuth, store: StudioDatabase,
   if (request.method !== 'GET' && request.headers.get('origin') !== baseURL)
     return response({ error: 'Cross-origin write refused.' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const user = await requireUser(auth, request.headers)
     if (!user) throw new OnboardingError(401, 'Sign in required.')
     const params = new URL(request.url).searchParams

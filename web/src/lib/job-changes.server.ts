@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { join, relative } from 'node:path'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { committedStoryFiles } from './generation-progress.server'
@@ -14,7 +13,7 @@ export async function jobChangesRequest(auth: StudioAuth, store: StudioDatabase,
   request: Request, id: string): Promise<Response> {
   try {
     if (request.method !== 'GET') return Response.json({ error: 'Method not allowed' }, { status: 405 })
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const user = await requireUser(auth, request.headers)
     if (!user) return Response.json({ error: 'Sign in required' }, { status: 401 })
     const job = await authorizedStoryJob(store, user.id, id)

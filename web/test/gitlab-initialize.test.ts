@@ -199,7 +199,9 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
 
     // Emulate a separate newly created, genuinely empty GitLab project.
     // Only this case can create the initial default-branch commit.
-    store.sqlite.prepare('DELETE FROM stories').run()
+    for (const row of (await store.testing.records.all<{ id: string }>('stories'))) {
+      (await store.testing.records.delete('stories', { id: row.id }))
+    }
     empty = true
     // Real GitLab returns empty_repo=true with an unborn default_branch=main.
     // This must not trigger a fetch for a commit that does not exist.
@@ -243,7 +245,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
       new Request(origin + '/api/gitlab/stories?repositoryId=' + repositoryId +
         '&directory=story&commit=' + committed, { headers: { cookie: alice } }))).status, 200)
   } finally {
-    store.sqlite.close()
+    store.close()
     globalThis.fetch = oldFetch
     if (oldNative === undefined) delete process.env.NT_NATIVE_CLI
     else process.env.NT_NATIVE_CLI = oldNative

@@ -16,6 +16,7 @@ test('Studio application source cannot import or access the raw SQLite driver', 
     "import { ownedThreadMessageSqlite } from '../persistence/thread-message-sqlite'",
     "studioSqliteDriver(store)",
     "studioDrizzleForMigrations(store)",
+    "import { assertStudioSchemaCurrent } from '../db/migrations'",
     "store.persistence.generation.queue.sqliteTransactionBridge.claim('id', 1, 'now')",
     "store.persistence.generation.events.sqliteBridge.after(owner, jobId, 0, 1)",
   ]) {
@@ -23,6 +24,6 @@ test('Studio application source cannot import or access the raw SQLite driver', 
   }
   assert.deepEqual(sourceViolations('lib/application.server.ts',
     'await store.persistence.messages.owned(owner, threadId, id)'), [])
-  assert.deepEqual(sourceViolations('lib/auth.ts',
-    'database: studioSqliteDriver(store)'), [])
+  assert.ok(sourceViolations('lib/auth.ts',
+    'database: studioSqliteDriver(store)').length > 0)
 })

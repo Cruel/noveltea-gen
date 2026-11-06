@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
@@ -80,15 +81,13 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       ownerId: author.id, repositoryId: 'github:111', remoteUrl: 'file://' + source,
       token: '', directory: 'story', commit: sha, jobId: id,
       verifiedSizeBytes: 0, verifiedBlobCount: 1 })
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','111','Source','now')`).run(repoId, author.id)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Story','now',?)`).run(storyId, author.id, repoId, sha)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-      VALUES (?,?,?,'Job',?,'paused','now','now')`).run(id, author.id, storyId, sha)
+    const seed = studioSeed(store)
+    ;(await seed.repository({ id: repoId, ownerUserId: author.id, provider: 'github',
+      providerRepositoryId: '111', name: 'Source', createdAt: 'now' }))
+    ;(await seed.story({ id: storyId, ownerUserId: author.id, repositoryId: repoId,
+      directory: 'story', title: 'Story', createdAt: 'now', sourceCommitSha: sha }))
+    ;(await seed.job({ id, ownerUserId: author.id, storyId, title: 'Job',
+      sourceCommitSha: sha, status: 'paused', createdAt: 'now', updatedAt: 'now' }))
     const pinned = { story: job.storyRoot, job: id,
       task: 'Write a mystery foundation', contract, fixture: true, skillsSource: skills }
     await queueGeneration(store, author.id, id, 'start', 'prepared', JSON.stringify(pinned),
@@ -137,9 +136,8 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       'fixture execution cannot impersonate a pinned Pi budget')
     // A crash left files dirty. Merely asking to Retry must not delete files,
     // silently trust the edited HEAD, or replay a possibly interrupted writer.
-    store.sqlite.prepare("UPDATE generation_run_queue SET phase='interrupted' WHERE job_id=?")
-      .run(id)
-    store.sqlite.prepare("UPDATE studio_sessions SET status='running' WHERE id=?").run(id)
+    ;(await store.testing.records.update('generation_run_queue', { jobId: id }, { phase: 'interrupted' }))
+    ;(await store.testing.records.update('studio_sessions', { id }, { status: 'running' }))
     writeFileSync(join(job.worktreeStoryRoot, 'unverified.md'), 'Unfinished specialist edit')
     const unsafe = await control('POST', authorCookie, { action: 'retry' })
     assert.equal(unsafe.status, 409, JSON.stringify(unsafe.body))
@@ -168,12 +166,12 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       provider: 'openai', model: 'gpt-6-luna' }
     const draft = { version: 1, headSha: piJob.headSha, task: piTask.task,
       contract, model: { provider: 'openai', id: 'gpt-6-luna' }, limits: { steps: 2 } }
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,
-       generation_thread_id,generation_request_json,generation_config_json)
-      VALUES (?,?,?,'Pi Job',?,'paused','now','now',?,?,?)`)
-      .run(piJobId, author.id, storyId, sha, piJob.threadId + ':generation:web',
-        JSON.stringify(piTask), JSON.stringify(draft))
+    ;(await store.testing.records.insert('studio_sessions', {
+      id: piJobId, ownerUserId: author.id, storyId, title: 'Pi Job', sourceCommitSha: sha,
+      status: 'paused', createdAt: 'now', updatedAt: 'now',
+      generationThreadId: piJob.threadId + ':generation:web',
+      generationRequestJson: JSON.stringify(piTask), generationConfigJson: JSON.stringify(draft),
+    }))
     await configurePiPolicy(piJob, { version: 1,
       profile: { provider: 'openai', model: 'gpt-6-luna' }, limits: { steps: 2 } })
     const piControl = async (cookieHeader: string, body: unknown) => {
@@ -191,12 +189,12 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
     assert.equal(higher.status, 200, JSON.stringify(higher.body))
     assert.deepEqual(higher.body.limits, { steps: 4, modelCalls: 10 })
     assert.deepEqual((await inspectPiPolicy(piJob)).policy.limits, { steps: 4, modelCalls: 10 })
-    assert.deepEqual(JSON.parse((store.sqlite.prepare(`SELECT generation_config_json AS draft
-      FROM studio_sessions WHERE id=?`).get(piJobId) as { draft: string }).draft).limits,
+    assert.deepEqual(JSON.parse((await store.testing.records.first<{ generationConfigJson: string }>('studio_sessions',
+      { id: piJobId }))!.generationConfigJson).limits,
       { steps: 4, modelCalls: 10 })
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
   } finally {
-    store.sqlite.close()
+    store.close()
     for (const key of keys) {
       if (env[key] === undefined) delete process.env[key]
       else process.env[key] = env[key]

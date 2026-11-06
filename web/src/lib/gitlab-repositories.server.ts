@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser, getRepositoryToken, selectGitConnection } from './access.server'
 import { GitConnectionError } from './git-connections.server'
 

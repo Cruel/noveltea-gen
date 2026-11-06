@@ -22,18 +22,20 @@ const driverPatterns = [
     reason: 'raw SQLite statement or PRAGMA' },
   { pattern: /\b(?:sqliteBridge|sqliteTransactionBridge|studioDrizzleForMigrations)\b/,
     reason: 'Drizzle migration handle outside infrastructure' },
+  { pattern: /from\s*['"][^'"]*\/db\/migrations['"]/, reason: 'schema maintenance import outside database adapter' },
   { pattern: /from\s*['"][^'"]*\/persistence\/[^'"]+-sqlite['"]/,
     reason: 'direct SQLite persistence implementation import' },
 ]
 
 /** Run on every Studio source file, including routes and server functions.
- * The only auth exception is its required Better Auth embedded-driver config.
- * App logic must use StudioDatabase.persistence ports instead.
+ * Auth storage, schema verification and driver access stay behind backend
+ * infrastructure. App logic must use StudioStore persistence ports and its
+ * asynchronous schema-readiness method.
  */
 export function sourceViolations(path, source) {
   if ((path.startsWith('persistence/') && (path.endsWith('-sqlite.ts') || path === 'persistence/sqlite.ts')) || driverExempt.has(path)) return []
   const errors = driverPatterns.filter(({ pattern }) => pattern.test(source)).map(x => x.reason)
-  if (path !== 'lib/auth.ts' && /\bstudioSqliteDriver\b/.test(source)) {
+  if (/\bstudioSqliteDriver\b/.test(source)) {
     errors.push('raw SQLite accessor outside Better Auth adapter')
   }
   if (/from\s*['"][^'"]*\/db\/trusted-catalog['"]/.test(source) &&

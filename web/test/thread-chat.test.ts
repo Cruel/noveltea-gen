@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { submitThreadRevision } from '../src/lib/story-revision.server'
 import { migrateStudio, assertStudioSchemaCurrent } from '../src/db/migrations'
 import {
@@ -20,40 +21,28 @@ async function setup() {
   await migrateStudio(db, config)
   const [alice, bob] = [randomUUID(), randomUUID()]
   const story = randomUUID(), repo = randomUUID()
-  for (const owner of [alice, bob]) {
-    db.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-      .run(owner, 'Author', owner + '@example.test', 1, Date.now(), Date.now())
-  }
-  db.sqlite.prepare(`INSERT INTO repositories
-    (id,owner_user_id,provider,provider_repository_id,name,created_at)
-    VALUES (?,?,'github','123','Repo','2026-11-01T00:00:00Z')`).run(repo, alice)
-  db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
-    VALUES (?,?,?,'story','Story','2026-11-01T00:00:00Z')`).run(story, alice, repo)
+  const seed = studioSeed(db)
+  for (const owner of [alice, bob]) (await seed.user(owner))
+  const at = '2026-11-01T00:00:00Z'
+  ;(await seed.repository({ id: repo, ownerUserId: alice, provider: 'github',
+    providerRepositoryId: '123', name: 'Repo', createdAt: at }))
+  ;(await seed.story({ id: story, ownerUserId: alice, repositoryId: repo,
+    directory: 'story', title: 'Story', createdAt: at }))
   const conversation = randomUUID(), id = randomUUID(), job = randomUUID()
-  db.sqlite.prepare(`INSERT INTO story_conversations
-    (id,owner_user_id,story_id,title,created_at,updated_at)
-    VALUES (?,?,?,'Story chat','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')`)
-    .run(conversation, alice, story)
-  db.sqlite.prepare(`INSERT INTO story_threads
-    (id,owner_user_id,conversation_id,title,activity_at,created_at)
-    VALUES (?,?,?,'Thread','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')`)
-    .run(id, alice, conversation)
-  db.sqlite.prepare(`INSERT INTO studio_sessions
-    (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,generation_request_json)
-    VALUES (?,?,?,'Root',?,'completed','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z',?)`)
-    .run(job, alice, story, 'a'.repeat(40), JSON.stringify({
+  ;(await seed.conversation({ id: conversation, ownerUserId: alice, storyId: story,
+    title: 'Story chat', createdAt: at, updatedAt: at }))
+  ;(await seed.thread({ id, ownerUserId: alice, conversationId: conversation,
+    title: 'Thread', activityAt: at, createdAt: at }))
+  ;(await seed.job({ id: job, ownerUserId: alice, storyId: story, title: 'Root',
+    sourceCommitSha: 'a'.repeat(40), status: 'completed', createdAt: at,
+    updatedAt: at, generationRequestJson: JSON.stringify({
       task: 'Original author request', fixture: true,
-    }))
-  db.sqlite.prepare(`INSERT INTO story_thread_runs
-    (job_id,owner_user_id,thread_id,run_order) VALUES (?,?,?,0)`).run(job, alice, id)
-  db.sqlite.prepare(`INSERT INTO generation_run_queue
-    (job_id,owner_user_id,intent,phase,created_at,updated_at)
-    VALUES (?,?,'start','finished','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')`)
-    .run(job, alice)
-  db.sqlite.prepare(`INSERT INTO generation_events
-    (job_id,owner_user_id,kind,stage,milestone,files_json,status,created_at)
-    VALUES (?,?,'finished',NULL,NULL,'[]','completed','2026-11-01T00:00:00Z')`)
-    .run(job, alice)
+    }) }))
+  ;(await seed.threadRun({ jobId: job, ownerUserId: alice, threadId: id, runOrder: 0 }))
+  ;(await seed.queue({ jobId: job, ownerUserId: alice, intent: 'start', phase: 'finished',
+    createdAt: at, updatedAt: at }))
+  ;(await seed.event({ jobId: job, ownerUserId: alice, kind: 'finished',
+    stage: null, milestone: null, filesJson: '[]', status: 'completed', createdAt: at }))
   return { db, alice, bob, id, story, conversation, job }
 }
 
@@ -81,9 +70,9 @@ test('Thread chat is immutable, ordered, owner-scoped, reconnectable and honest 
       ['Original author request', initial.messages[1]!.content, sent1.content, sent2.content])
     assert.deepEqual(reopened.messages.filter(item => item.role === 'user').map(item => item.phase),
       ['finished', 'queued', 'queued'])
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
     assert.equal(reopened.runs[0]?.jobId, job)
-  } finally { db.sqlite.close() }
+  } finally { db.close() }
 })
 
 test('same-Thread messages cannot compete during admission or after unsafe preparation', async () => {
@@ -92,12 +81,12 @@ test('same-Thread messages cannot compete during admission or after unsafe prepa
     const first = randomUUID(), next = randomUUID()
     await enqueueThreadMessage(db, alice, id, first, 'First follow-up')
     await enqueueThreadMessage(db, alice, id, next, 'Second follow-up')
-    db.sqlite.prepare(`UPDATE story_thread_messages SET phase='preparing',source_job_id=?
-      WHERE id=?`).run(job, first)
+    ;(await db.testing.records.update('story_thread_messages', { id: first },
+      { phase: 'preparing', sourceJobId: job }))
     await advanceThread(db, alice, id)
     assert.deepEqual((await readThreadChat(db, alice, id)).messages.slice(-2).map(item => item.phase),
       ['preparing', 'queued'])
-    db.sqlite.prepare(`UPDATE story_thread_messages SET phase='queued' WHERE id=?`).run(first)
+    ;(await db.testing.records.update('story_thread_messages', { id: first }, { phase: 'queued' }))
     // An unscoped queued instruction remains durable and cannot be admitted
     // or leapfrogged until its exact source scope is reviewed.
     await advanceThread(db, alice, id)
@@ -106,17 +95,16 @@ test('same-Thread messages cannot compete during admission or after unsafe prepa
     assert.equal(messages.find(item => item.id === next)?.phase, 'queued')
     assert.equal(messages.at(-1)?.content, 'Second follow-up')
     await advanceThread(db, alice, id)
-    assert.equal((db.sqlite.prepare(`SELECT count(*) AS total FROM story_thread_runs
-      WHERE thread_id=?`).get(id) as { total: number }).total, 1)
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
-  } finally { db.sqlite.close() }
+    assert.equal((await db.testing.records.count('story_thread_runs', { threadId: id })), 1)
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
+  } finally { db.close() }
 })
 
 test('public Thread submission durably queues rapid messages without authorizing a future HEAD', async () => {
   const { db, alice, bob, id, job } = await setup()
   try {
-    db.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('running', job)
-    db.sqlite.prepare('UPDATE generation_run_queue SET phase=? WHERE job_id=?').run('running', job)
+    ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'running' }))
+    ;(await db.testing.records.update('generation_run_queue', { jobId: job }, { phase: 'running' }))
     const first = randomUUID(), second = randomUUID()
     const a = await submitThreadRevision(db, alice, id, first, 'Change character.nia')
     const b = await submitThreadRevision(db, alice, id, second, 'Then revise event.bell')
@@ -131,31 +119,30 @@ test('public Thread submission durably queues rapid messages without authorizing
       'a future-HEAD approval is never applied to a later queued request')
     await assert.rejects(submitThreadRevision(db, bob, id, randomUUID(),
       'Change character.nia'), /no source generation run|not found/)
-    assert.deepEqual(db.sqlite.prepare(`SELECT revision_scope_json AS scope FROM story_thread_messages
-      WHERE id IN (?,?) ORDER BY sequence`).all(first, second), [{ scope: null }, { scope: null }])
+    assert.deepEqual(await Promise.all([first, second].map(async id => ({ scope:
+      (await db.testing.records.first<{ revisionScopeJson: string | null }>('story_thread_messages', { id }))?.revisionScopeJson,
+    }))), [{ scope: null }, { scope: null }])
     await advanceThread(db, alice, id)
     assert.deepEqual((await readThreadChat(db, alice, id)).messages.filter(m => m.phase === 'queued')
       .map(m => m.content), ['Change character.nia', 'Then revise event.bell', 'Change character.nia'])
-    assert.equal((db.sqlite.prepare('SELECT COUNT(*) AS total FROM story_thread_runs').get() as
-      { total: number }).total, 1)
-  } finally { db.sqlite.close() }
+    assert.equal((await db.testing.records.count('story_thread_runs')), 1)
+  } finally { db.close() }
 })
 
 test('agent restart reconciles a terminal queue receipt without replaying its writer', async () => {
   const { db, alice, id, job } = await setup()
   try {
     const message = randomUUID()
-    db.sqlite.prepare(`INSERT INTO story_thread_messages
-      (id,owner_user_id,thread_id,sequence,role,status,body,phase,job_id,created_at)
-      VALUES (?,?,?,2,'user','queued','Sent before the crash','running',?,'now')`)
-      .run(message, alice, id, job)
+    ;(await db.testing.records.insert('story_thread_messages', { id: message, ownerUserId: alice,
+      threadId: id, sequence: 2, role: 'user', status: 'queued',
+      body: 'Sent before the crash', phase: 'running', jobId: job, createdAt: 'now' }))
     await recoverSettledThreadRuns(db)
     await recoverSettledThreadRuns(db)
     const chat = (await readThreadChat(db, alice, id))
     assert.equal(chat.messages.find(item => item.id === message)?.phase, 'finished')
     assert.equal(chat.messages.filter(item => item.id === 'assistant:' + job).length, 1)
     assert.equal(chat.runs.length, 1)
-  } finally { db.sqlite.close() }
+  } finally { db.close() }
 })
 
 test('paused settlement remains immutable and a later completion appends a fresh assistant outcome', async () => {
@@ -163,11 +150,11 @@ test('paused settlement remains immutable and a later completion appends a fresh
   try {
     const initial = (await readThreadChat(db, alice, id))
     assert.equal(initial.messages.filter(m => m.role === 'assistant').length, 1)
-    db.sqlite.prepare(`UPDATE studio_sessions SET status='paused' WHERE id=?`).run(job)
+    ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'paused' }))
     const paused = (await readThreadChat(db, alice, id))
     assert.equal(paused.messages.filter(m => m.role === 'assistant').length, 2)
     assert.match(paused.messages.at(-1)?.content ?? '', /paused/i)
-    db.sqlite.prepare(`UPDATE studio_sessions SET status='completed' WHERE id=?`).run(job)
+    ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'completed' }))
     const completed = (await readThreadChat(db, alice, id))
     const summaries = completed.messages.filter(m => m.role === 'assistant')
     assert.equal(summaries.length, 3)
@@ -175,7 +162,7 @@ test('paused settlement remains immutable and a later completion appends a fresh
     assert.match(summaries.at(-2)?.content ?? '', /paused/i)
     assert.equal((await readThreadChat(db, alice, id)).messages.filter(m => m.role === 'assistant').length, 3)
     assert.equal(new Set(summaries.map(m => m.id)).size, 3)
-  } finally { db.sqlite.close() }
+  } finally { db.close() }
 })
 
 test('settlement appends an assistant response on changed status; incomplete work cannot admit the queued follow-up', async () => {
@@ -183,7 +170,7 @@ test('settlement appends an assistant response on changed status; incomplete wor
   try {
     const messageId = randomUUID()
     await enqueueThreadMessage(db, alice, id, messageId, 'Follow-up while blocked')
-    db.sqlite.prepare(`UPDATE studio_sessions SET status='blocked' WHERE id=?`).run(job)
+    ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'blocked' }))
     await settleThreadRun(db, alice, job)
     await settleThreadRun(db, alice, job)
     const chat = (await readThreadChat(db, alice, id))
@@ -191,6 +178,6 @@ test('settlement appends an assistant response on changed status; incomplete wor
     assert.match(chat.messages.filter(m => m.role === 'assistant').at(-1)?.content ?? '', /blocked/i)
     assert.equal(chat.messages.find(m => m.id === messageId)?.phase, 'queued')
     assert.equal(chat.runs.at(-1)?.status, 'blocked')
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
-  } finally { db.sqlite.close() }
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
+  } finally { db.close() }
 })

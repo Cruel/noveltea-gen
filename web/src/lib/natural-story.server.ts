@@ -1,6 +1,5 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { interpretNaturalStoryPrompt, type PlanEdits } from './natural-story-plan'
 import { availableUserPiModels, assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
@@ -44,7 +43,7 @@ async function modelOptions(store: StudioDatabase, owner: string) {
 }
 export async function previewNaturalStory(store: StudioDatabase, owner: string,
   conversationId: string, prompt: string, edits?: PlanEdits) {
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   const conversation = await selectedConversation(store, owner, conversationId)
   const plan = interpretNaturalStoryPrompt(prompt, edits)
   return { plan, storyId: conversation.storyId, headSha: conversation.headSha!,
@@ -91,7 +90,7 @@ export async function associateNaturalThread(store: StudioDatabase, owner: strin
  * The browser supplies a creative brief, never a Graph/Pi write grant. */
 export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase,
   headers: Headers, baseURL: string, input: NaturalStoryInput) {
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   const actor = await requireUser(auth, headers)
   if (!actor) throw new Error('Sign in required.')
   const origin = headers.get('origin')

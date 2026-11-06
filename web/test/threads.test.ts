@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import {
   createConversation, listStoryConversations, renameConversation, renameThread,
@@ -21,27 +22,25 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
   try {
     await migrateStudio(db, config)
     const [alice, bob] = [randomUUID(), randomUUID()]
+    const seed = studioSeed(db)
+    const at = '2026-11-01T00:00:00Z'
     for (const owner of [alice, bob]) {
-      db.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-        .run(owner, 'Author', owner + '@example.test', 1, Date.now(), Date.now())
-      db.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-        VALUES (?,?,'github',?,'Repo','2026-11-01T00:00:00Z')`).run('repo-' + owner, owner, owner)
-      db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
-        VALUES (?,?,?,'story','The Story','2026-11-01T00:00:00Z')`).run('story-' + owner, owner, 'repo-' + owner)
+      (await seed.user(owner))
+      ;(await seed.repository({ id: 'repo-' + owner, ownerUserId: owner, provider: 'github',
+        providerRepositoryId: owner, name: 'Repo', createdAt: at }))
+      ;(await seed.story({ id: 'story-' + owner, ownerUserId: owner, repositoryId: 'repo-' + owner,
+        directory: 'story', title: 'The Story', createdAt: at }))
     }
     const ids = [randomUUID(), randomUUID(), randomUUID()]
     for (const [index, id] of ids.entries()) {
-      db.sqlite.prepare(`INSERT INTO studio_sessions
-        (id,owner_user_id,story_id,title,status,created_at,updated_at)
-        VALUES (?,?,?,'Chapter work',?,'2026-11-01T00:00:00Z','2026-11-04T00:00:00Z')`)
-        .run(id, alice, 'story-' + alice, index === 0 ? 'running' : index === 1 ? 'paused' : 'completed')
+      (await seed.job({ id, ownerUserId: alice, storyId: 'story-' + alice,
+        title: 'Chapter work', status: index === 0 ? 'running' : index === 1 ? 'paused' : 'completed',
+        createdAt: at, updatedAt: '2026-11-04T00:00:00Z' }))
     }
-    db.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES (?,?,'start','running','2026-11-02T02:00:00Z','2026-11-02T02:00:00Z')`).run(ids[0], alice)
-    db.sqlite.prepare(`INSERT INTO generation_events
-      (job_id,owner_user_id,kind,stage,milestone,files_json,status,created_at)
-      VALUES (?,?,'working','event','arc.one','[]',NULL,'2026-11-02T03:00:00Z')`).run(ids[0], alice)
+    ;(await seed.queue({ jobId: ids[0]!, ownerUserId: alice, intent: 'start',
+      phase: 'running', createdAt: '2026-11-02T02:00:00Z', updatedAt: '2026-11-02T02:00:00Z' }))
+    ;(await seed.event({ jobId: ids[0]!, ownerUserId: alice, kind: 'working', stage: 'event',
+      milestone: 'arc.one', filesJson: '[]', status: null, createdAt: '2026-11-02T03:00:00Z' }))
     const first = await listStoryConversations(db, alice, 'story-' + alice)
     assert.equal(first.conversations.length, 3)
     assert.equal(first.conversations.every(item => item.threads.length === 1), true)
@@ -53,35 +52,35 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
     assert.equal((await listStoryConversations(db, alice, 'story-' + alice)).conversations
       .flatMap(c => c.threads).find(t => t.id === running!.id)?.title, 'Character branch')
     // An updated_at heartbeat must not move a job or silently generate new IDs.
-    db.sqlite.prepare("UPDATE studio_sessions SET updated_at='2099-01-01T00:00:00Z' WHERE id=?").run(ids[1])
+    ;(await db.testing.records.update('studio_sessions', { id: ids[1] }, { updatedAt: '2099-01-01T00:00:00Z' }))
     const second = await listStoryConversations(db, alice, 'story-' + alice)
     assert.deepEqual(second.conversations.map(c => c.id), first.conversations.map(c => c.id))
     assert.equal(second.conversations.flatMap(c => c.threads).find(t => t.jobId === ids[1])?.activityAt,
       '2026-11-01T00:00:00Z')
-    db.sqlite.prepare("UPDATE studio_sessions SET generation_request_json='{}' WHERE id=?").run(ids[1])
-    db.sqlite.prepare('UPDATE story_thread_runs SET needs_author=1 WHERE job_id=?').run(ids[1])
+    ;(await db.testing.records.update('studio_sessions', { id: ids[1] }, { generationRequestJson: '{}' }))
+    ;(await db.testing.records.update('story_thread_runs', { jobId: ids[1] }, { needsAuthor: 1 }))
     assert.equal((await listStoryConversations(db, alice, 'story-' + alice)).conversations
       .flatMap(c => c.threads).find(t => t.jobId === ids[1])?.status, 'needs-author')
     const branchId = 'branch:' + randomUUID(), parent = running!.id
     const parentConversation = first.conversations.find(c => c.threads.some(t => t.id === parent))!.id
-    db.sqlite.prepare(`INSERT INTO story_threads
-      (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-      VALUES (?,?,?,?,'Alternative','2026-11-04T00:00:00Z','2026-11-04T00:00:00Z')`)
-      .run(branchId, alice, parentConversation, parent)
+    ;(await db.testing.records.insert('story_threads', { id: branchId, ownerUserId: alice,
+      conversationId: parentConversation, parentThreadId: parent, title: 'Alternative',
+      activityAt: '2026-11-04T00:00:00Z', createdAt: '2026-11-04T00:00:00Z' }))
     const nested = (await listStoryConversations(db, alice, 'story-' + alice))
       .conversations.find(c => c.id === parentConversation)!.threads
     assert.deepEqual(orderThreads(nested, 'tree').map(row => [row.id, row.depth]),
       [[parent, 0], [branchId, 1]])
-    assert.throws(() => db.sqlite.prepare(`INSERT INTO story_threads
-      (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-      VALUES (?,?,?,?,'Crossed','2026-11-04T00:00:00Z','2026-11-04T00:00:00Z')`)
-      .run('cross:' + randomUUID(), alice, first.conversations.find(c => c.id !== parentConversation)!.id,
-        parent), /FOREIGN KEY/, 'a branch cannot cross Conversations')
+    await assert.rejects(async () => (await db.testing.records.insert('story_threads', {
+      id: 'cross:' + randomUUID(), ownerUserId: alice,
+      conversationId: first.conversations.find(c => c.id !== parentConversation)!.id,
+      parentThreadId: parent, title: 'Crossed', activityAt: '2026-11-04T00:00:00Z',
+      createdAt: '2026-11-04T00:00:00Z',
+    })), /FOREIGN KEY/, 'a branch cannot cross Conversations')
     await assert.rejects(() => listStoryConversations(db, bob, 'story-' + alice), /not found/i)
     await assert.rejects(() => renameThread(db, bob, running!.id, 'Stolen'), /not found/i)
     await assert.rejects(() => renameConversation(db, bob, first.conversations[0]!.id, 'Stolen'), /not found/i)
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
-  } finally { db.sqlite.close() }
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
+  } finally { db.close() }
 })
 
 test('authors can create, rename and persist navigation preferences, with bounds and cross-tenant refusal', async () => {
@@ -89,13 +88,12 @@ test('authors can create, rename and persist navigation preferences, with bounds
   try {
     await migrateStudio(db, config)
     const alice = randomUUID(), bob = randomUUID(), story = randomUUID(), repo = randomUUID()
-    for (const id of [alice, bob]) db.sqlite.prepare(
-      'INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-      .run(id, id, id + '@test.local', 1, Date.now(), Date.now())
-    db.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','repo','Repo','now')`).run(repo, alice)
-    db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
-      VALUES (?,?,?,'story','Story','now')`).run(story, alice, repo)
+    const seed = studioSeed(db)
+    for (const id of [alice, bob]) { await seed.user(id) }
+    (await seed.repository({ id: repo, ownerUserId: alice, provider: 'github',
+      providerRepositoryId: 'repo', name: 'Repo', createdAt: 'now' }))
+    ;(await seed.story({ id: story, ownerUserId: alice, repositoryId: repo,
+      directory: 'story', title: 'Story', createdAt: 'now' }))
     const conversation = await createConversation(db, alice, story)
     assert.match(conversation.title, /New conversation/)
     assert.equal((await listStoryConversations(db, alice, story)).conversations.length, 1)
@@ -108,8 +106,8 @@ test('authors can create, rename and persist navigation preferences, with bounds
     await saveThreadPreferences(db, alice, story, 'flat', ['root-1', 'root-1', 'root-2'])
     assert.deepEqual((await listStoryConversations(db, alice, story)).preferences,
       { view: 'flat', expandedIds: ['root-1', 'root-2'] })
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
-  } finally { db.sqlite.close() }
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
+  } finally { db.close() }
 })
 
 test('Thread tree promotes active descendants while flat view globally sorts by own activity', () => {

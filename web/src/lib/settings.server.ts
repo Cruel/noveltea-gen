@@ -1,6 +1,5 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './session.server'
 import { availableUserPiModels, validPiSelection, type PiSelection } from './pi-credentials.server'
 import { listGitConnections } from './git-connections.server'
@@ -18,7 +17,7 @@ export async function readDefaultModel(preferences: SettingsPreferences, user: s
 export async function settingsRequest(auth: StudioAuth, store: StudioDatabase, request: Request, baseURL: string,
   preferences: SettingsPreferences = store.persistence.settings) {
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const actor = await requireUser(auth, request.headers)
     if (!actor) return json({ error: 'Sign in required.' }, 401)
     if (request.method === 'GET') {

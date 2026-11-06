@@ -3,8 +3,7 @@ import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsMana
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { onboardingWorkspace } from './onboarding.server'
 import { createUserPiRuntime, assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
@@ -189,7 +188,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
     return reply({ error: 'Cross-origin write refused' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const actor = await requireUser(auth, request.headers)
     if (!actor) throw new DiscoveryError(401, 'Sign in required')
     const params = new URL(request.url).searchParams

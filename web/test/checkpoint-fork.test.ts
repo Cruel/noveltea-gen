@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory, continueCachedStory } from '../src/lib/git-cache.server'
@@ -59,15 +60,20 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const initial = git(repo, 'rev-parse', 'HEAD')
       let parent = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!, ownerId: user.id,
         repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story', commit: initial, jobId: parentId })
-      store.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-        VALUES (?,?,'github','123','Acme/Private','2026-01-01')`).run(repoId, user.id)
-      store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-        VALUES (?,?,?,'story','Fork Story','2026-01-01',?)`).run(storyId, user.id, repoId, initial)
+      const seed = studioSeed(store)
+      ;(await seed.repository({ id: repoId, ownerUserId: user.id, provider: 'github',
+        providerRepositoryId: '123', name: 'Acme/Private', createdAt: '2026-01-01' }))
+      ;(await seed.story({ id: storyId, ownerUserId: user.id, repositoryId: repoId,
+        directory: 'story', title: 'Fork Story', createdAt: '2026-01-01',
+        sourceCommitSha: initial }))
       const request = { story: parent.storyRoot, job: parentId, task: 'A missing archive witness; invent unspecified details', contract, fixture: true, skillsSource: skills }
       const draft = { version: 1, headSha: initial, task: request.task, contract, limits: { steps: 100 }, model: null }
-      store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,generation_request_json,generation_thread_id,generation_config_json)
-        VALUES (?,?,?,'Fork Story',?,'running','2026-01-01','2026-01-01',?,?,?)`).run(parentId, user.id, storyId, initial,
-        JSON.stringify(request), parent.threadId + ':generation:web', JSON.stringify(draft))
+      ;(await seed.job({ id: parentId, ownerUserId: user.id, storyId, title: 'Fork Story',
+        sourceCommitSha: initial, status: 'running',
+        createdAt: '2026-01-01', updatedAt: '2026-01-01',
+        generationRequestJson: JSON.stringify(request),
+        generationThreadId: parent.threadId + ':generation:web',
+        generationConfigJson: JSON.stringify(draft) }))
       const runtime = openWebGenerationGraph(join(parent.stateDir, 'web-generation.sqlite'))
       process.env.NT_FOUNDATIONS_FIXTURE_CASE = 'dangling'
       try {
@@ -99,15 +105,19 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       writeFileSync(join(parent.stateDir, 'pi-budget.json'), 'parent budget evidence')
       ensureRootThreads(store, user.id, storyId)
       const sourceThreadId = 'root:' + parentId
-      const insertMessage = store.sqlite.prepare(`INSERT INTO story_thread_messages
-        (id,owner_user_id,thread_id,sequence,role,status,body,verified_commit_sha,created_at)
-        VALUES (?,?,?,?,'user',?,?,?,'2026-01-01')`)
-      insertMessage.run(randomUUID(), user.id, sourceThreadId, 0, 'delivered', 'Keep the witness uncertain', initial)
-      insertMessage.run(randomUUID(), user.id, sourceThreadId, 1, 'delivered', 'Future change after World', 'f'.repeat(40))
-      insertMessage.run(randomUUID(), user.id, sourceThreadId, 2, 'queued', 'Do not inherit active steering', null)
-      const parentMessages = () => store.sqlite.prepare(`SELECT body,status,verified_commit_sha FROM story_thread_messages
-        WHERE thread_id=? ORDER BY sequence`).all(sourceThreadId)
-      const originalMessages = parentMessages()
+      const insertMessage = async (id: string, ownerUserId: string, threadId: string,
+        sequence: number, status: string, body: string, verifiedCommitSha: string | null) => {
+        ;(await store.testing.records.insert('story_thread_messages', { id, ownerUserId, threadId,
+          sequence, role: 'user', status, body, verifiedCommitSha, createdAt: '2026-01-01' }))
+      }
+      await insertMessage(randomUUID(), user.id, sourceThreadId, 0, 'delivered', 'Keep the witness uncertain', initial)
+      await insertMessage(randomUUID(), user.id, sourceThreadId, 1, 'delivered', 'Future change after World', 'f'.repeat(40))
+      await insertMessage(randomUUID(), user.id, sourceThreadId, 2, 'queued', 'Do not inherit active steering', null)
+      const parentMessages = async () => (await store.testing.records.all<{
+        body: string; status: string; verifiedCommitSha: string | null
+      }>('story_thread_messages', { threadId: sourceThreadId }, { by: 'sequence' }))
+        .map(row => ({ body: row.body, status: row.status, verifiedCommitSha: row.verifiedCommitSha }))
+      const originalMessages = await parentMessages()
       const before = { head: git(parent.worktreeRoot, 'rev-parse', 'HEAD'), dirty: git(parent.worktreeRoot, 'status', '--porcelain'),
         database: readFileSync(join(parent.stateDir, 'web-generation.sqlite')) }
       const fork = async (body: unknown, authenticated = true) => {
@@ -119,14 +129,14 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       }
       const input = { childId, commitSha: world.commitSha, sourceBaseSha: initial,
         sourceThreadId, proofDigest: world.proofDigest, guidance: 'Focus on the witness and avoid new Character IDs.' }
-      const forkCount = () => (store.sqlite.prepare('SELECT COUNT(*) AS n FROM checkpoint_forks').get() as { n: number }).n
-      assert.equal(forkCount(), 0)
+      const forkCount = async () => (await store.testing.records.count('checkpoint_forks'))
+      assert.equal(await forkCount(), 0)
       assert.equal((await fork(input, false)).status, 401)
       assert.equal((await fork({ ...input, sourceBaseSha: world.commitSha })).status, 409)
       assert.equal((await fork({ ...input, sourceThreadId: 'root:invalid' })).status, 409)
       assert.equal((await fork({ ...input, proofDigest: 'a'.repeat(64) })).status, 409)
       assert.equal((await fork({ ...input, commitSha: initial })).status, 409)
-      assert.equal(forkCount(), 0)
+      assert.equal(await forkCount(), 0)
       const checkpointPath = join(parent.stateDir, 'recovery-checkpoints', world.commitSha + '.json')
       const authentic = readFileSync(checkpointPath, 'utf8')
       try {
@@ -134,7 +144,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         forged.completedWorkItems.push('event-fabricated')
         writeFileSync(checkpointPath, JSON.stringify(forged))
         assert.equal((await fork({ ...input, childId: randomUUID() })).status, 409)
-        assert.equal(forkCount(), 0)
+        assert.equal(await forkCount(), 0)
       } finally { writeFileSync(checkpointPath, authentic) }
       try {
         const obsolete = JSON.parse(authentic)
@@ -154,19 +164,28 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         const failed = await fork({ ...input, childId: randomUUID() })
         assert.equal(failed.status, 409)
         assert.equal(failed.body.code, 'obsolete-checkpoint')
-        assert.equal(forkCount(), 0)
+        assert.equal(await forkCount(), 0)
       } finally { writeFileSync(worldReceiptPath, originalWorldReceipt) }
+      const originalValidator = join(parent.stateDir, 'validator.json')
+      renameSync(originalValidator, originalValidator + '.missing')
+      try {
+        const failure = await fork({ ...input, childId: randomUUID() })
+        assert.equal(failure.status, 409)
+        assert.equal(failure.body.code, 'missing-tooling')
+        assert.ok(failure.body.nextSteps.some((s: string) => s.includes('Install')))
+        assert.equal(await forkCount(), 0)
+      } finally { renameSync(originalValidator + '.missing', originalValidator) }
       process.env.NT_STUDIO_SKILLS_SOURCE = join(root, 'missing-skills')
       try {
         const failure = await fork({ ...input, childId: randomUUID() })
         assert.equal(failure.status, 409)
         assert.equal(failure.body.code, 'missing-tooling')
-        assert.equal(forkCount(), 0)
+        assert.equal(await forkCount(), 0)
       } finally { process.env.NT_STUDIO_SKILLS_SOURCE = skills }
       process.env.NT_NATIVE_CLI = join(root, 'missing-native-validator')
       try {
         assert.equal((await fork({ ...input, childId: randomUUID() })).status, 409)
-        assert.equal(forkCount(), 0)
+        assert.equal(await forkCount(), 0)
       } finally { process.env.NT_NATIVE_CLI = native }
       const stranger = await ctx.internalAdapter.createUser({ name: 'Other', email: 'fork-other@example.test', emailVerified: true }, { method: 'test' })
       const strangerSession = await ctx.internalAdapter.createSession(stranger.id)
@@ -175,9 +194,9 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         method: 'POST', headers: { origin: config.baseURL, cookie: strangerCookie, 'content-type': 'application/json' }, body: JSON.stringify(input),
       }), parentId, config.baseURL)
       assert.equal(foreign.status, 404)
-      assert.equal(forkCount(), 0)
-      // A different installed CLI version is pinned independently for the
-      // child. The parent retains the original version as source evidence.
+      assert.equal(await forkCount(), 0)
+      // A newly installed, byte-different but protocol-compatible executable
+      // must be re-pinned for the child. The source's original pin stays intact.
       const upgraded = join(root, 'compatible-current-noveltea')
       writeFileSync(upgraded, '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "1.0.1\\n"; else exec "' +
         native + '" "$@"; fi\n')
@@ -231,11 +250,11 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(inspected.storyThreadId, 'fork:' + childId)
       assert.deepEqual(inspected.threadMessages.map(message => message.body),
         ['Keep the witness uncertain', input.guidance], 'the child displays only inherited and new guidance history')
-      const childMessages = store.sqlite.prepare(`SELECT role,status,body,origin_message_id AS origin,
-        verified_commit_sha AS verifiedSha FROM story_thread_messages
-        WHERE thread_id=? ORDER BY sequence`).all('fork:' + childId) as Array<{
-          role: string; status: string; body: string; origin: string | null; verifiedSha: string | null
-        }>
+      const childMessages = (await store.testing.records.all<{
+        role: string; status: string; body: string; originMessageId: string | null;
+        verifiedCommitSha: string | null
+      }>('story_thread_messages', { threadId: 'fork:' + childId }, { by: 'sequence' }))
+        .map(row => ({ ...row, origin: row.originMessageId, verifiedSha: row.verifiedCommitSha }))
       assert.equal(childMessages.length, 2)
       assert.equal(childMessages[0]?.body, 'Keep the witness uncertain')
       assert.equal(childMessages[0]?.verifiedSha, initial)
@@ -243,7 +262,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(childMessages[1]?.status, 'queued')
       assert.equal(childMessages[1]?.body, input.guidance)
       assert.equal(childMessages[1]?.verifiedSha, null)
-      assert.deepEqual(parentMessages(), originalMessages,
+      assert.deepEqual(await parentMessages(), originalMessages,
         'a live parent\'s delivered, future and queued messages must remain untouched')
       assert.match((await selectedJob(store, user.id, childId)).configJson!, /Focus on the witness/)
       assert.equal(inspected.forkSource?.nextWorkItem, 'character-foundations')
@@ -285,9 +304,9 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       }), childId, config.baseURL)
       assert.equal(started.status, 202, JSON.stringify(await started.clone().json()))
       const childRequest = JSON.parse((await selectedJob(store, user.id, childId)).requestJson!)
-      const delivered = store.sqlite.prepare(`SELECT status FROM story_thread_messages
-        WHERE owner_user_id=? AND thread_id=? AND body=?`).get(user.id, 'fork:' + childId, input.guidance) as
-        { status: string } | undefined
+      const delivered = (await store.testing.records.first<{ status: string }>('story_thread_messages', {
+        ownerUserId: user.id, threadId: 'fork:' + childId, body: input.guidance,
+      }))
       assert.equal(delivered?.status, 'delivered', 'queued branch guidance is delivered with the admitted run')
       // A sibling retry from the exact same World point must reject duplicate
       // Character IDs during native validation, with no fabricated commit.
@@ -475,9 +494,10 @@ test('authenticated finalized World fork is isolated from a running dirty parent
           planVersion: null, skillSnapshot: null, piSessions: {},
         } }))
       await syncAppliedAuthorMessages(store, user.id, sourceThreadId)
-      const steeringMessage = store.sqlite.prepare(`SELECT id FROM story_thread_messages
-        WHERE owner_user_id=? AND thread_id=? AND origin_message_id=?`)
-        .get(user.id, sourceThreadId, 'author-update:' + steeringId) as { id: string }
+      const steeringMessage = (await store.testing.records.first<{ id: string }>('story_thread_messages', {
+        ownerUserId: user.id, threadId: sourceThreadId,
+        originMessageId: 'author-update:' + steeringId,
+      }))!
       assert.ok(steeringMessage?.id)
       const editedTask = 'The witness has a truthful alibi instead'
       const editPreview = await previewThreadMessageEdit(store, user.id, sourceThreadId,
@@ -485,7 +505,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(editPreview.appliedBeforeSha, world.commitSha)
       assert.equal(editPreview.checkpoint?.commitSha, world.commitSha)
       assert.equal(editPreview.checkpoint?.workItem, 'world-foundations')
-      const editSourceMessages = parentMessages()
+      const editSourceMessages = await parentMessages()
       const editChildId = randomUUID()
       const edited = await branchEditedThreadMessage(store, user.id, {
         threadId: sourceThreadId, messageId: steeringMessage.id, edited: editedTask,
@@ -502,12 +522,11 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       }), /already reserved|different edit|different operation/i)
       const editedJob = await authorizedStoryJob(store, user.id, editChildId)
       assert.equal(editedJob.baseSha, world.commitSha)
-      const savedEdit = store.sqlite.prepare('SELECT generation_config_json AS draft FROM studio_sessions WHERE id=?')
-        .get(editChildId) as { draft: string }
-      assert.equal(JSON.parse(savedEdit.draft).task, editedTask)
-      const editedHistory = store.sqlite.prepare(`SELECT body,status FROM story_thread_messages
-        WHERE owner_user_id=? AND thread_id=? ORDER BY sequence`)
-        .all(user.id, 'fork:' + editChildId) as Array<{ body: string; status: string }>
+      const savedEdit = (await store.testing.records.first<{ generationConfigJson: string }>(
+        'studio_sessions', { id: editChildId }))!
+      assert.equal(JSON.parse(savedEdit.generationConfigJson).task, editedTask)
+      const editedHistory = (await store.testing.records.all<{ body: string; status: string }>(
+        'story_thread_messages', { ownerUserId: user.id, threadId: 'fork:' + editChildId }, { by: 'sequence' }))
       assert.deepEqual(editedHistory.map(message => message.body),
         ['Keep the witness uncertain', editedTask])
       assert.deepEqual(editedHistory.map(message => message.status), ['delivered', 'queued'])
@@ -518,7 +537,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         const cfg = { configurable: { thread_id: editedJob.threadId + ':generation:web' }, recursionLimit: 1000 }
         await editedRuntime.graph.updateState(cfg, { request: {
           story: editedJob.storyRoot, job: editChildId, task: editedTask,
-          contract: JSON.parse(savedEdit.draft).contract, fixture: true, skillsSource: skills,
+          contract: JSON.parse(savedEdit.generationConfigJson).contract, fixture: true, skillsSource: skills,
         }, pauseAfter: 'foundations' })
         const result = await editedRuntime.graph.invoke(null, cfg)
         assert.equal(result.status, 'paused', result.reason ?? '')
@@ -528,7 +547,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         .find(point => point.eligible && point.workItem === 'character-foundations')
       assert.ok(editedCharacter, 'edited child independently verifies its continuation')
       assert.equal(editedCharacter.parentSha, world.commitSha)
-      assert.deepEqual(parentMessages(), editSourceMessages)
+      assert.deepEqual(await parentMessages(), editSourceMessages)
       assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), before.head)
       assert.equal(git(parent.worktreeRoot, 'status', '--porcelain'), before.dirty)
       assert.deepEqual(readFileSync(join(parent.stateDir, 'web-generation.sqlite')), before.database)
@@ -543,8 +562,8 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       try {
         await sourceGraph.graph.updateState(childCfg, { status: 'completed', reason: null }, 'completion_decision')
       } finally { sourceGraph.saver.db.close() }
-      store.sqlite.prepare("UPDATE studio_sessions SET status='completed' WHERE id=?").run(childId)
-      store.sqlite.prepare("UPDATE generation_run_queue SET phase='finished' WHERE job_id=?").run(childId)
+      ;(await store.testing.records.update('studio_sessions', { id: childId }, { status: 'completed' }))
+      ;(await store.testing.records.update('generation_run_queue', { jobId: childId }, { phase: 'finished' }))
       assert.equal((await inspectRegisteredJob(store, await selectedJob(store, user.id, childId), user.id)).status,
         'completed', 'source must have a verified, settled run before follow-up scope inference')
       const priorId = randomUUID()
@@ -552,22 +571,20 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       const previousInstruction = 'Make character.ada more confrontational'
       const priorRequest = { story: prior.storyRoot, job: prior.jobId, task: previousInstruction,
         contract: childRequest.contract, fixture: true, skillsSource: skills }
-      store.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,
-        source_commit_sha,status,created_at,updated_at,generation_request_json,generation_thread_id)
-        VALUES (?,?,?,'Previous follow-up',?,'completed','now','now',?,?)`)
-        .run(priorId, user.id, (await selectedJob(store, user.id, childId)).storyId,
-          character.commitSha, JSON.stringify(priorRequest),
-          prior.threadId + ':generation:web')
-      store.sqlite.prepare(`INSERT INTO story_thread_runs(job_id,owner_user_id,thread_id,run_order)
-        VALUES (?,?,?,1)`).run(priorId, user.id, 'fork:' + childId)
+      ;(await store.testing.records.insert('studio_sessions', { id: priorId, ownerUserId: user.id,
+        storyId: (await selectedJob(store, user.id, childId)).storyId,
+        title: 'Previous follow-up', sourceCommitSha: character.commitSha, status: 'completed',
+        createdAt: 'now', updatedAt: 'now', generationRequestJson: JSON.stringify(priorRequest),
+        generationThreadId: prior.threadId + ':generation:web' }))
+      ;(await store.testing.records.insert('story_thread_runs', { jobId: priorId,
+        ownerUserId: user.id, threadId: 'fork:' + childId, runOrder: 1 }))
       const originalEditMessage = randomUUID()
-      const nextSeq = (store.sqlite.prepare(`SELECT COALESCE(MAX(sequence),-1)+1 AS n
-        FROM story_thread_messages WHERE thread_id=?`).get('fork:' + childId) as { n: number }).n
-      store.sqlite.prepare(`INSERT INTO story_thread_messages(id,owner_user_id,thread_id,sequence,
-        role,status,body,phase,job_id,source_job_id,created_at)
-        VALUES (?,?,?,?,'user','delivered',?,'finished',?,?,'now')`)
-        .run(originalEditMessage, user.id, 'fork:' + childId, nextSeq,
-          previousInstruction, priorId, childId)
+      const nextSeq = Math.max(-1, ...(await store.testing.records.all<{ sequence: number }>(
+        'story_thread_messages', { threadId: 'fork:' + childId })).map(row => row.sequence)) + 1
+      ;(await store.testing.records.insert('story_thread_messages', { id: originalEditMessage,
+        ownerUserId: user.id, threadId: 'fork:' + childId, sequence: nextSeq,
+        role: 'user', status: 'delivered', body: previousInstruction,
+        phase: 'finished', jobId: priorId, sourceJobId: childId, createdAt: 'now' }))
       const better = 'Make character.ada less confrontational'
       const focusedPreview = await previewThreadMessageEdit(store, user.id, 'fork:' + childId,
         originalEditMessage, better)
@@ -620,9 +637,9 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         character.commitSha + '..HEAD').split('\n'), ['story/characters/ada.md'],
         'only the independently authorized Character is rewritten')
       assert.equal(readRecoveryFork(focusedJob), null)
-      assert.deepEqual(parentMessages(), editSourceMessages)
+      assert.deepEqual(await parentMessages(), editSourceMessages)
     } finally {
-      store.sqlite.close()
+      store.close()
       for (const key of keys) if (old[key] === undefined) delete process.env[key]; else process.env[key] = old[key]
       removeTestTree(root)
     }

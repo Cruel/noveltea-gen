@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { directoryPath, inspectGithubStoryInitialization } from './github-stories.server'
 import { storyContentDirectory } from './story-discovery.shared'
@@ -49,7 +48,7 @@ export async function githubInitializationRequest(
     const inspected = await inspectGithubStoryInitialization(actor.token, row.name, directory)
     if (request.method === 'GET') return json(inspected)
 
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const title = input?.title
     if (typeof title !== 'string' || !title.trim() || title.trim().length > 120 ||
         /[\x00-\x1f\x7f]/.test(title)) {

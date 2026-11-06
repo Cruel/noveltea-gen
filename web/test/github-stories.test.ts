@@ -164,17 +164,18 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     const base = { repositoryId: repoId, directory: 'sample-story', commit }
     // Browsing may work without Studio migrations, but importing must fail
     // closed instead of reporting an upstream GitHub error or changing the DB.
-    const baseline = store.sqlite.prepare('SELECT hash,created_at AS createdAt FROM __drizzle_migrations').get() as { hash: string; createdAt: number }
-    store.sqlite.prepare('DELETE FROM __drizzle_migrations').run()
+    const baseline = (await store.testing.schema.migrationHistory())[0]!
+    ;(await store.testing.schema.removeMigrationHistory())
     const outdated = await post(base)
     assert.equal(outdated.status, 503)
     assert.match((await outdated.json()).error, /migrations are pending/i)
-    store.sqlite.prepare('INSERT INTO __drizzle_migrations (hash,created_at) VALUES (?,?)').run(baseline.hash, baseline.createdAt)
-    store.sqlite.exec('ALTER TABLE stories DROP COLUMN source_commit_sha')
+    ;(await store.testing.schema.appendMigration(baseline.hash, baseline.createdAt))
+    // Restore exact DDL with a savepoint: DROP + ADD changes the generated schema.
+    ;(await store.testing.schema.beginTemporaryColumnDrop('stories', 'source_commit_sha'))
     const inconsistent = await post(base)
     assert.equal(inconsistent.status, 503)
     assert.match((await inconsistent.json()).error, /journal.*schema|reset/i)
-    store.sqlite.exec('ALTER TABLE stories ADD COLUMN source_commit_sha TEXT')
+    ;(await store.testing.schema.rollbackTemporaryColumnDrop())
     assert.equal((await post({ ...base, commit: null })).status, 400)
     assert.equal((await post(base, 'https://attacker.invalid')).status, 403)
     assert.equal((await post({ ...base, directory: '../elsewhere' })).status, 400)
@@ -232,7 +233,7 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 1)
   } finally {
     globalThis.fetch = originalFetch
-    store.sqlite.close()
+    store.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

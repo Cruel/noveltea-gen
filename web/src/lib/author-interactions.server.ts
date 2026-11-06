@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { inspectAuthorUpdates } from '../../../src/author-updates'
@@ -88,7 +87,7 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
     return json({ error: 'Cross-origin write refused' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const user = await requireUser(auth, request.headers)
     if (!user) return json({ error: 'Sign in required' }, 401)
     const job = await authorizedStoryJob(store, user.id, jobId)

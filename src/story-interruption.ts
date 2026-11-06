@@ -112,7 +112,16 @@ export async function runCancellableStoryTurn<T>(
     ? { jobId: job.jobId, token: receipt.token, workItem,
         expectedHead: receipt.expectedHead,
         session: session as LivePiSession } : null;
-  const unregister = piTurn ? registerPiTurn(piTurn) : () => {};
+  // A remote persistence adapter may fail while registering the durable
+  // ownership fence. The running receipt is already written, so a failed
+  // registration is ambiguous: retain the Story writer lease for inspection.
+  let unregister: () => Promise<void> = async () => {};
+  try {
+    if (piTurn) unregister = await registerPiTurn(piTurn);
+  } catch (error) {
+    writer.retainLease = true;
+    throw new Error("Cannot register Pi turn durably; writer lock retained for reconciliation: " + String(error));
+  }
   const initialMessageCount = session.messages?.length ?? 0;
   let finished = false, cancelSeen = false, abortError: unknown;
   let checking: Promise<void> | undefined;
@@ -168,7 +177,7 @@ export async function runCancellableStoryTurn<T>(
     receipt.dirtyFiles = git(job, "status", "--porcelain=v1", "--untracked-files=all").split("\n").filter(Boolean);
     await persist(job, receipt);
   } catch (error) {
-    unregister();
+    await unregister();
     throw new Error("Cannot record Story interruption safely; writer lock retained: " + String(error));
   }
   // An unrecorded Pi-steering acknowledgement is ambiguous execution, not
@@ -184,7 +193,16 @@ export async function runCancellableStoryTurn<T>(
     receipt.error = "Pi steering acknowledgement could not be persisted; writer lock retained for reconciliation.";
     await persist(job, receipt).catch(() => {});
     throw new Error(receipt.error);
-  } finally { unregister(); }
+  } finally {
+    try { await unregister(); }
+    catch {
+      // A failed durable close is not evidence that the turn has ended.
+      // Retain its writer lease for reconciliation instead of starting a
+      // competing specialist against a stale ownership record.
+      writer.retainLease = true;
+      throw new Error("Pi turn closure could not be persisted; writer lease retained for reconciliation.");
+    }
+  }
   if (abortError) throw new Error("Pi abort unavailable or provider unresponsive for " + workItem +
     "; writer lock retained for inspection: " + String(abortError));
   if (cancelled) throw new StoryCancelledError(workItem);

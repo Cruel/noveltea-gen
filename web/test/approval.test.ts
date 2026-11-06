@@ -90,7 +90,7 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     assert.equal(existsSync(join(job.stateDir, 'pi-policy.json')), false,
       'failed sandbox admission must not lock a draft to an unstarted model')
     assert.equal(existsSync(join(job.stateDir, 'pi-resolution.json')), false)
-    store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=NULL WHERE id=?').run(jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, { generationConfigJson: null }))
     const plan = { version: 1, contract: firstContract, items: [] }
     const digest = createHash('sha256').update(JSON.stringify({ plan, head: commit, contract })).digest('hex')
     writeFileSync(join(job.stateDir, 'architecture.json'), JSON.stringify({ format: 1,
@@ -257,7 +257,7 @@ test('authenticated owner records an exact durable decision; foreign users, inli
       unicode, 'split UTF-8 must preserve the exact author message')
   } finally {
     if (agent) await agent.close()
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of [['NT_STATE_DIR', previous.state], ['NT_GIT_CACHE_DIR', previous.cache],
       ['NT_PI_CREDENTIAL_KEY', previous.key], ['NT_REQUIRE_USER_PI_RUNTIME', previous.strict],
       ['NT_SANDBOX_SOCKET', previous.socket], ['NT_SANDBOX_TOKEN_FILE', previous.token],

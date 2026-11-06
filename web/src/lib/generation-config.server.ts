@@ -1,6 +1,5 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { validatedExplorer, type ExplorerIndex } from './story-explorer.server'
 import { parseGenerationContract } from '../../../src/generation'
@@ -132,7 +131,7 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
   if (request.method === 'PUT' && request.headers.get('origin') !== baseURL)
     return reply({ error: 'Cross-origin write refused.' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const user = await requireUser(auth, request.headers)
     if (!user) throw new ConfigurationError(401, 'Sign in required.')
     if (!uuid.test(id)) throw new ConfigurationError(400, 'Invalid job ID.')

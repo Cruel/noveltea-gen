@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { archiveThread, listStoryConversations, restoreThread } from '../src/lib/threads.server'
 import { cancelQueuedThreadMessage, editQueuedThreadMessage,
@@ -28,22 +29,17 @@ test('Conversation and Thread writes serialize across Studio connections and sur
     await migrateStudio(a, config)
     const owner = randomUUID(), stranger = randomUUID()
     const repo = randomUUID(), story = randomUUID(), job = randomUUID()
-    for (const id of [owner, stranger])
-      a.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-        .run(id, 'Author', id + '@example.test', 1, Date.now(), Date.now())
-    a.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','repo','Repository','2026-11-01T00:00:00Z')`).run(repo, owner)
-    a.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
-      VALUES (?,?,?,'story','Story','2026-11-01T00:00:00Z')`).run(story, owner, repo)
-    a.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,generation_request_json,created_at,updated_at)
-      VALUES (?,?,?,'Initial run','completed',?,'2026-11-02T00:00:00Z','2026-11-03T00:00:00Z')`)
-      .run(job, owner, story, JSON.stringify({ task: 'Opening request', fixture: true }))
-    a.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES (?,?,'start','finished','2026-11-02T00:00:00Z','2026-11-03T00:00:00Z')`)
-      .run(job, owner)
+    const seed = studioSeed(a)
+    for (const id of [owner, stranger]) { await seed.user(id) }
+    (await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: 'repo', name: 'Repository', createdAt: '2026-11-01T00:00:00Z' }))
+    ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
+      directory: 'story', title: 'Story', createdAt: '2026-11-01T00:00:00Z' }))
+    ;(await seed.job({ id: job, ownerUserId: owner, storyId: story, title: 'Initial run',
+      status: 'completed', generationRequestJson: JSON.stringify({ task: 'Opening request', fixture: true }),
+      createdAt: '2026-11-02T00:00:00Z', updatedAt: '2026-11-03T00:00:00Z' }))
+    ;(await seed.queue({ jobId: job, ownerUserId: owner, intent: 'start', phase: 'finished',
+      createdAt: '2026-11-02T00:00:00Z', updatedAt: '2026-11-03T00:00:00Z' }))
 
     // Independent requests reconcile the same legacy root exactly once.
     const [firstNav, secondNav] = await Promise.all([
@@ -93,8 +89,8 @@ test('Conversation and Thread writes serialize across Studio connections and sur
     assert.equal((await cancelQueuedThreadMessage(a, owner, threadId, two)).cancelledAt,
       cancelled.cancelledAt)
 
-    a.sqlite.close()
-    b.sqlite.close()
+    a.close()
+    b.close()
     const reopened = openStudioDatabase(file)
     try {
       const result = await readThreadChat(reopened, owner, threadId)
@@ -109,11 +105,11 @@ test('Conversation and Thread writes serialize across Studio connections and sur
       assert.match(history[0]?.editedAt ?? '', /^\d{4}-\d{2}-\d{2}T/)
       assert.equal(result.messages.find(message => message.id === two)?.phase, 'cancelled')
       assert.equal(result.archived, false)
-      assert.deepEqual(reopened.sqlite.pragma('foreign_key_check'), [])
-    } finally { reopened.sqlite.close() }
+      assert.deepEqual((await reopened.testing.foreignKeyViolations()), [])
+    } finally { reopened.close() }
   } finally {
-    if (a.sqlite.open) a.sqlite.close()
-    if (b.sqlite.open) b.sqlite.close()
+    a.close()
+    b.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

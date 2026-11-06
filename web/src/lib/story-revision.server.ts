@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { selectedJob, restoreJob, pinnedRequest, inspectRegisteredJob } from './fixture-jobs.server'
 import { trustedHead } from '../../../src/revision'
 import { validateStoryJob } from '../../../src/validator'

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { QueueIntent, QueueRecord } from '../persistence/generation-contracts'
 
 export type { QueueIntent, QueuePhase, QueueRecord } from '../persistence/generation-contracts'

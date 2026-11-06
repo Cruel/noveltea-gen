@@ -1,4 +1,4 @@
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { SteeringActivity, SteeringCheckpoint } from '../persistence/steering-contracts'
 export type { SteeringActivity } from '../persistence/steering-contracts'
 
@@ -34,33 +34,33 @@ export function classifySteeringIntent(text: string, workItem: string | null): D
 
 /** Only the exact acknowledged SDK receipt can register considered guidance.
  * This is influence metadata, not proof that the story change was fulfilled. */
-export function recordSteeringConsideration(store: StudioDatabase, id: string, owner: string,
+export async function recordSteeringConsideration(store: StudioDatabase, id: string, owner: string,
   threadId: string, jobId: string, content: string, workItem: string | null) {
-  store.persistence.steering.consider(id, owner, threadId, jobId, content,
+  await store.persistence.steering.consider(id, owner, threadId, jobId, content,
     workItem, classifySteeringIntent(content, workItem), now())
 }
 
 /** A verified specialist checkpoint is the earliest safe branch origin for
  * a delivered steering instruction; pending inputs remain unresolved. */
-export function attributeSteeringCheckpoint(store: StudioDatabase, owner: string,
-  jobId: string, point: SteeringCheckpoint): number {
+export async function attributeSteeringCheckpoint(store: StudioDatabase, owner: string,
+  jobId: string, point: SteeringCheckpoint): Promise<number> {
   return store.persistence.steering.attribute(owner, jobId, point, now())
 }
 
 /** Evidence of verified file changes, never semantic or editorial acceptance. */
-export function attributeApprovedReplanCheckpoint(store: StudioDatabase, owner: string,
-  jobId: string, point: SteeringCheckpoint, files: string[]): number {
+export async function attributeApprovedReplanCheckpoint(store: StudioDatabase, owner: string,
+  jobId: string, point: SteeringCheckpoint, files: string[]): Promise<number> {
   return store.persistence.steering.approvedReplan(owner, jobId, point, files, now())
 }
 
 /** Create at most one independently reviewable proposal for each delivered
  * out-of-scope steer when the original run completes. */
-export function prepareSteeringBoundaryReviews(store: StudioDatabase, owner: string,
-  jobId: string, threadId: string, verifiedHead: string | null): number {
+export async function prepareSteeringBoundaryReviews(store: StudioDatabase, owner: string,
+  jobId: string, threadId: string, verifiedHead: string | null): Promise<number> {
   if (!verifiedHead) return 0
   return store.persistence.steering.boundaryReviews(owner, jobId, threadId, verifiedHead, now())
 }
 
-export function steeringActivity(store: StudioDatabase, owner: string, threadId: string): SteeringActivity[] {
+export async function steeringActivity(store: StudioDatabase, owner: string, threadId: string): Promise<SteeringActivity[]> {
   return store.persistence.steering.activity(owner, threadId)
 }

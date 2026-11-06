@@ -186,7 +186,7 @@ test('GitLab draft MR publication retains verified work, enforces author review 
     assert.equal((await api('POST', aliceCookie, payload)).status, 409)
     assert.equal(created, 0)
     assert.equal(git(bare, 'branch', '--list', 'noveltea-gen/*'), '')
-    assert.equal((store.sqlite.prepare('SELECT phase FROM gitlab_publications WHERE job_id=?').get(jobId) as any).phase, 'pending')
+    assert.equal((await store.testing.records.first<{ phase: string }>('gitlab_publications', { jobId }))?.phase, 'pending')
     unlinkSync(hook)
     const createdResponse = await api('POST', aliceCookie, payload)
     assert.equal(createdResponse.status, 200, JSON.stringify(createdResponse.data))
@@ -194,14 +194,15 @@ test('GitLab draft MR publication retains verified work, enforces author review 
     assert.equal(created, 1)
     assert.equal(git(bare, 'rev-parse', 'refs/heads/main'), upstream)
     assert.equal(git(bare, 'rev-parse', 'refs/heads/' + job.branch), head)
-    store.sqlite.close()
+    store.close()
     store = openStudioDatabase(join(root, 'studio.sqlite'))
     await migrateStudio(store, config)
     auth = createStudioAuth(store, config)
     assert.equal((await api('POST', aliceCookie, payload)).status, 200)
     assert.equal(updated, 1)
     // Lost local linkage after remote CREATE must reconcile the one existing MR.
-    store.sqlite.prepare("UPDATE gitlab_publications SET phase='pending', mr_iid=NULL, mr_url=NULL WHERE job_id=?").run(jobId)
+    ;(await store.testing.records.update('gitlab_publications', { jobId },
+      { phase: 'pending', mrIid: null, mrUrl: null }))
     assert.equal((await api('POST', aliceCookie, payload)).status, 200)
     assert.equal(created, 1)
     assert.equal(updated, 2)
@@ -226,7 +227,7 @@ test('GitLab draft MR publication retains verified work, enforces author review 
     assert.equal((await api('POST', aliceCookie, payload)).status, 409)
   } finally {
     globalThis.fetch = oldFetch
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value

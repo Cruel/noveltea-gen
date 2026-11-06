@@ -1,5 +1,5 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './session.server'
 import { listGitConnections } from './git-connections.server'
 import { githubRepositoryRequest, readGithubAppOptions } from './github-repositories.server'

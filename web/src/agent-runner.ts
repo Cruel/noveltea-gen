@@ -1,7 +1,7 @@
 import { assertNativeVersion } from '../../src/native-cli-version';
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
-import type { StudioDatabase } from './db/connection'
+import type { StudioStore as StudioDatabase } from './persistence/store'
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
 import type { GenerationEvidence } from '../../src/generation'
 import { readJobControl } from '../../src/job-control'
@@ -118,8 +118,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
             // terminal settlement reconciles the same proof idempotently.
             const points = await inspectRecoveryCheckpoints(job)
             for (const point of points.filter(p => p.commitSha === evidence.headSha)) {
-              attributeSteeringCheckpoint(store, item.ownerId, row.id, point)
-              attributeApprovedReplanCheckpoint(store, item.ownerId, row.id, point, files)
+              await attributeSteeringCheckpoint(store, item.ownerId, row.id, point)
+              await attributeApprovedReplanCheckpoint(store, item.ownerId, row.id, point, files)
             }
             previousHead = evidence.headSha
           }

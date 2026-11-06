@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { ModelRuntime, type CreateModelRuntimeOptions } from '@earendil-works/pi-coding-agent'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 
 type Credentials = NonNullable<CreateModelRuntimeOptions['credentials']>
 type Credential = NonNullable<Awaited<ReturnType<Credentials['read']>>>

@@ -1,7 +1,6 @@
 import { createServerFn } from '@tanstack/react-start'
 import { getRequestHeaders } from '@tanstack/react-start/server'
 import { auth, database } from './runtime.server'
-import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { recentGenerationEvents } from './generation-progress.server'
@@ -18,7 +17,7 @@ export const getJobEventHistory = createServerFn({ method: 'GET' })
     return input
   })
   .handler(async ({ data }) => {
-    assertStudioSchemaCurrent(database)
+    await database.assertReady()
     const user = await requireUser(auth, getRequestHeaders())
     if (!user) throw new Error('Sign in required.')
     await authorizedStoryJob(database, user.id, data.jobId)

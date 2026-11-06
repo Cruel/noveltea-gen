@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
@@ -72,10 +73,10 @@ test('real author-update receipt pins a steering edit between commits; missing r
     await migrateStudio(db, config)
     const user = randomUUID(), repoId = randomUUID(), storyId = randomUUID()
     const jobId = randomUUID(), threadId = 'root:' + jobId
-    db.sqlite.prepare(`INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt)
-      VALUES (?,'Author',?,1,0,0)`).run(user, user + '@example.test')
-    db.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,
-      provider_repository_id,name,created_at) VALUES (?,?,'github','123','Repo','now')`).run(repoId, user)
+    const seed = studioSeed(db)
+    ;(await seed.user(user, 0))
+    ;(await seed.repository({ id: repoId, ownerUserId: user, provider: 'github',
+      providerRepositoryId: '123', name: 'Repo', createdAt: 'now' }))
     const remote = join(root, 'remote')
     mkdirSync(join(remote, 'story'), { recursive: true })
     writeFileSync(join(remote, 'story', 'story.md'), 'initial')
@@ -85,21 +86,19 @@ test('real author-update receipt pins a steering edit between commits; missing r
     git(remote, 'add', '.')
     git(remote, 'commit', '-qm', 'initial')
     const base = git(remote, 'rev-parse', 'HEAD')
-    db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,
-      created_at,source_commit_sha) VALUES (?,?,?,'story','Story','now',?)`)
-      .run(storyId, user, repoId, base)
+    ;(await seed.story({ id: storyId, ownerUserId: user, repositoryId: repoId,
+      directory: 'story', title: 'Story', createdAt: 'now', sourceCommitSha: base }))
     const parent = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
       ownerId: user, repositoryId: 'github:123', remoteUrl: 'file://' + remote,
       token: '', directory: 'story', commit: base, jobId })
     const request = { story: parent.storyRoot, job: jobId, task: 'Original request', contract, fixture: true }
-    db.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,
-      generation_request_json,generation_thread_id,generation_config_json)
-      VALUES (?,?,?,'Story',?,'running','now','now',?,?,?)`)
-      .run(jobId, user, storyId, base, JSON.stringify(request),
-        parent.threadId + ':generation:web', JSON.stringify({
-          version: 1, headSha: base, task: request.task, contract, limits: {}, model: null,
-        }))
+    ;(await seed.job({ id: jobId, ownerUserId: user, storyId, title: 'Story',
+      sourceCommitSha: base, status: 'running', createdAt: 'now', updatedAt: 'now',
+      generationRequestJson: JSON.stringify(request),
+      generationThreadId: parent.threadId + ':generation:web',
+      generationConfigJson: JSON.stringify({
+        version: 1, headSha: base, task: request.task, contract, limits: {}, model: null,
+      }) }))
     ensureRootThreads(db, user, storyId)
     const first = (await readThreadChat(db, user, threadId))
     assert.equal(first.messages.length, 1)
@@ -148,11 +147,11 @@ test('real author-update receipt pins a steering edit between commits; missing r
       steer.id, 'Give the witness a false alibi'), /not found/)
     await assert.rejects(() => previewThreadMessageEdit(db, user, threadId, steer.id,
       steer.content), /changed/)
-    assert.equal((db.sqlite.prepare('SELECT COUNT(*) AS n FROM checkpoint_forks').get() as { n: number }).n, 0)
+    assert.equal((await db.testing.records.count('checkpoint_forks')), 0)
     assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), after)
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
   } finally {
-    db.sqlite.close()
+    db.close()
     if (oldState === undefined) delete process.env.NT_STATE_DIR
     else process.env.NT_STATE_DIR = oldState
     if (oldCache === undefined) delete process.env.NT_GIT_CACHE_DIR

@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { actorFor, errorResponse, github, GithubError, json, matchingRepository } from './github-repositories.server'
 import { CANONICAL_RECORD_DIRS, STORY_LIMIT_BYTES } from './story-discovery.shared'
 export { STORY_LIMIT_BYTES } from './story-discovery.shared'
@@ -413,7 +412,7 @@ export async function githubStoryRequest(
     }
     const row = await store.persistence.repositories.get(actor.id, repositoryId, 'github')
     if (!row) throw new GithubError(404, 'GitHub repository not connected.')
-    if (request.method === 'POST') assertStudioSchemaCurrent(store)
+    if (request.method === 'POST') await store.assertReady()
     // A catalog row alone is not current authorization: GitHub installation
     // selection, membership or push rights may have been revoked.
     await matchingRepository(actor.token, row.name)

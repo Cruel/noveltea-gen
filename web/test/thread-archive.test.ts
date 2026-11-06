@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { appendGenerationEvent, listGenerationEvents } from '../src/lib/generation-progress.server'
 import { archiveThread, listStoryConversations, restoreThread } from '../src/lib/threads.server'
@@ -24,48 +25,44 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     await migrateStudio(store, config)
     const owner = randomUUID(), stranger = randomUUID(), repo = randomUUID()
     const story = randomUUID(), job = randomUUID()
-    for (const id of [owner, stranger]) store.sqlite.prepare(
-      'INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-      .run(id, id, id + '@example.test', 1, Date.now(), Date.now())
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','repo','Repository','2026-11-01T00:00:00Z')`).run(repo, owner)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at)
-      VALUES (?,?,?,'story','Story','2026-11-01T00:00:00Z')`).run(story, owner, repo)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,generation_request_json,generation_thread_id,created_at,updated_at)
-      VALUES (?,?,?,'Work on finale','paused','{"task":"finale"}','graph:execution','2026-11-01T00:00:00Z','2026-11-03T00:00:00Z')`)
-      .run(job, owner, story)
+    const seed = studioSeed(store)
+    for (const id of [owner, stranger]) (await seed.user(id))
+    const at = '2026-11-01T00:00:00Z'
+    ;(await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: 'repo', name: 'Repository', createdAt: at }))
+    ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
+      directory: 'story', title: 'Story', createdAt: at }))
+    ;(await seed.job({ id: job, ownerUserId: owner, storyId: story, title: 'Work on finale',
+      status: 'paused', generationRequestJson: '{"task":"finale"}',
+      generationThreadId: 'graph:execution', createdAt: at,
+      updatedAt: '2026-11-03T00:00:00Z' }))
     await appendGenerationEvent(store, owner, job, {
       kind: 'verified', stage: 'foundation', files: ['creative-direction/foundation.md'],
     })
     const original = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
     const archiveId = original.id
-    const beforeRun = store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job)
-    const beforeJob = store.sqlite.prepare('SELECT * FROM studio_sessions WHERE id=?').get(job)
+    const beforeRun = (await store.testing.records.first('story_thread_runs', { jobId: job }))
+    const beforeJob = (await store.testing.records.first('studio_sessions', { id: job }))
     const beforeEvents = (await listGenerationEvents(store, owner, job, 0))
     const checkpoint = join(root, 'verified-recovery-receipt.json')
     writeFileSync(checkpoint, JSON.stringify({ job, workItem: 'foundation', verified: true }))
     const originalReceipt = readFileSync(checkpoint)
     await assert.rejects(() => archiveThread(store, stranger, archiveId), /not found/i)
     await archiveThread(store, owner, archiveId)
-    const archivedAt = store.sqlite.prepare('SELECT archived_at AS archivedAt FROM story_threads WHERE id=?')
-      .get(archiveId) as { archivedAt: string | null }
+    const archivedAt = (await store.testing.records.first<{ archivedAt: string | null }>('story_threads', { id: archiveId }))!
     assert.ok(archivedAt.archivedAt)
     await archiveThread(store, owner, archiveId)
-    assert.deepEqual(store.sqlite.prepare('SELECT archived_at AS archivedAt FROM story_threads WHERE id=?')
-      .get(archiveId), archivedAt, 'retry never advances the archive timestamp')
+    assert.deepEqual((await store.testing.records.first<{ archivedAt: string | null }>('story_threads', { id: archiveId })), archivedAt, 'retry never advances the archive timestamp')
     const after = await listStoryConversations(store, owner, story)
     assert.deepEqual(selectNavigationThreads(after.conversations[0]!.threads, 'active'), [])
     assert.equal(selectNavigationThreads(after.conversations[0]!.threads, 'archived')[0]?.id, archiveId)
     assert.equal(after.conversations[0]!.threads[0]?.status, 'archived')
-    assert.deepEqual(store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job), beforeRun)
-    assert.deepEqual(store.sqlite.prepare('SELECT * FROM studio_sessions WHERE id=?').get(job), beforeJob)
+    assert.deepEqual((await store.testing.records.first('story_thread_runs', { jobId: job })), beforeRun)
+    assert.deepEqual((await store.testing.records.first('studio_sessions', { id: job })), beforeJob)
     assert.deepEqual((await listGenerationEvents(store, owner, job, 0)), beforeEvents)
     assert.deepEqual(readFileSync(checkpoint), originalReceipt)
 
-    store.sqlite.close()
+    store.close()
     store = openStudioDatabase(join(root, 'studio.sqlite'))
     await migrateStudio(store, config)
     assert.ok((await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]?.archivedAt)
@@ -74,12 +71,12 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     await restoreThread(store, owner, archiveId)
     const restored = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
     assert.deepEqual(restored, { ...original }, 'restore preserves original status, title and activity')
-    assert.deepEqual(store.sqlite.prepare('SELECT * FROM story_thread_runs WHERE job_id=?').get(job), beforeRun)
+    assert.deepEqual((await store.testing.records.first('story_thread_runs', { jobId: job })), beforeRun)
     assert.deepEqual((await listGenerationEvents(store, owner, job, 0)), beforeEvents)
     assert.deepEqual(readFileSync(checkpoint), originalReceipt)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
   } finally {
-    if (store.sqlite.open) store.sqlite.close()
+    store.close()
     rmSync(root, { recursive: true, force: true })
   }
 })
@@ -89,39 +86,34 @@ test('archiving an ancestor preserves active child navigation and archived desce
   try {
     await migrateStudio(store, config)
     const owner = randomUUID(), repo = randomUUID(), story = randomUUID(), job = randomUUID()
-    store.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-      .run(owner, 'A', 'author@example.test', 1, Date.now(), Date.now())
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','repo','Repository','2026-11-01T00:00:00Z')`).run(repo, owner)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at)
-      VALUES (?,?,?,'story','Story','2026-11-01T00:00:00Z')`).run(story, owner, repo)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES (?,?,?,'Job','completed','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')`).run(job, owner, story)
+    const seed = studioSeed(store)
+    ;(await seed.user(owner))
+    const at = '2026-11-01T00:00:00Z'
+    ;(await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: 'repo', name: 'Repository', createdAt: at }))
+    ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
+      directory: 'story', title: 'Story', createdAt: at }))
+    ;(await seed.job({ id: job, ownerUserId: owner, storyId: story, title: 'Job',
+      status: 'completed', createdAt: at, updatedAt: at }))
     const nav = await listStoryConversations(store, owner, story)
     const parent = nav.conversations[0]!.threads[0]!
     const childId = 'child:' + randomUUID(), grandchildId = 'child:' + randomUUID()
     const childJob = randomUUID()
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES (?,?,?,'Child work','running','2026-11-02T00:00:00Z','2026-11-02T00:00:00Z')`)
-      .run(childJob, owner, story)
+    ;(await seed.job({ id: childJob, ownerUserId: owner, storyId: story, title: 'Child work',
+      status: 'running', createdAt: '2026-11-02T00:00:00Z',
+      updatedAt: '2026-11-02T00:00:00Z' }))
     for (const [id, parentThreadId, title] of [
       [childId, parent.id, 'Active child'], [grandchildId, childId, 'Archived grandchild'],
-    ]) store.sqlite.prepare(`INSERT INTO story_threads
-      (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-      VALUES (?,?,?,?,?,'2026-11-04T00:00:00Z','2026-11-04T00:00:00Z')`)
-      .run(id, owner, parent.conversationId, parentThreadId, title)
-    store.sqlite.prepare(`INSERT INTO story_thread_runs
-      (job_id,owner_user_id,thread_id,run_order) VALUES (?,?,?,0)`)
-      .run(childJob, owner, childId)
-    store.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES (?,?,'start','running','2026-11-03T00:00:00Z','2026-11-03T00:00:00Z')`)
-      .run(childJob, owner)
-    const childQueue = store.sqlite.prepare('SELECT * FROM generation_run_queue WHERE job_id=?').get(childJob)
+    ] as const) {
+      ;(await seed.thread({ id, ownerUserId: owner, conversationId: parent.conversationId,
+        parentThreadId, title, activityAt: '2026-11-04T00:00:00Z',
+        createdAt: '2026-11-04T00:00:00Z' }))
+    }
+    ;(await seed.threadRun({ jobId: childJob, ownerUserId: owner, threadId: childId, runOrder: 0 }))
+    ;(await seed.queue({ jobId: childJob, ownerUserId: owner, intent: 'start',
+      phase: 'running', createdAt: '2026-11-03T00:00:00Z',
+      updatedAt: '2026-11-03T00:00:00Z' }))
+    const childQueue = (await store.testing.records.first('generation_run_queue', { jobId: childJob }))
     await archiveThread(store, owner, parent.id)
     await archiveThread(store, owner, grandchildId)
     const updated = await listStoryConversations(store, owner, story)
@@ -137,12 +129,12 @@ test('archiving an ancestor preserves active child navigation and archived desce
     assert.equal(all.find(t => t.id === childId)?.archivedAt, null)
     assert.equal(all.find(t => t.id === childId)?.status, 'running')
     assert.equal(all.find(t => t.id === childId)?.jobId, childJob)
-    assert.deepEqual(store.sqlite.prepare('SELECT * FROM generation_run_queue WHERE job_id=?').get(childJob),
+    assert.deepEqual((await store.testing.records.first('generation_run_queue', { jobId: childJob })),
       childQueue, 'archiving a parent does not interrupt an active child job')
     await restoreThread(store, owner, parent.id)
     assert.deepEqual(selectNavigationThreads(
       (await listStoryConversations(store, owner, story)).conversations[0]!.threads, 'active'
     ).map(t => t.id).sort(), [parent.id, childId].sort())
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
-  } finally { store.sqlite.close() }
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+  } finally { store.close() }
 })

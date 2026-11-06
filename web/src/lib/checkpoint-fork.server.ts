@@ -1,6 +1,5 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { selectedJob, restoreJob, pinnedRequest } from './fixture-jobs.server'
 import { readJsonInput, JsonInputError } from './json-input.server'
@@ -25,7 +24,7 @@ export async function checkpointForkRequest(auth: StudioAuth, store: StudioDatab
   if (request.method !== 'POST') return reply({ error: 'Method not allowed' }, 405)
   if (request.headers.get('origin') !== baseURL) return reply({ error: 'Cross-origin write refused' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const user = await requireUser(auth, request.headers)
     if (!user) return reply({ error: 'Sign in required' }, 401)
     const input = await readJsonInput(request, 4096) as Record<string, unknown>

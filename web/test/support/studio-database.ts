@@ -1,10 +1,14 @@
-import { openStudioDatabase as openRuntimeDatabase, studioDrizzleForMigrations, studioSqliteDriver } from '../../src/db/connection'
+import { openStudioDatabase as openRuntimeDatabase } from '../../src/db/connection'
+import { createSqliteTestRecords } from './sqlite-test-records'
 
-/** Isolated test-only raw SQLite fixture hook. Never export this from runtime
- * types. Keep direct SQL only for historical/schema corruption fixtures and
- * low-level adapter assertions; normal behavior should use persistence ports.
+/** Test-facing Studio database. Runtime services and feature tests share the
+ * same StudioPersistence contract; fixture and inspection operations use an
+ * additional backend-neutral testing port.
+ *
+ * No SQLite driver or dialect-specific Drizzle handle escapes this factory.
  */
 export function openStudioDatabase(path?: string) {
   const store = openRuntimeDatabase(path)
-  return Object.assign(store, { sqlite: studioSqliteDriver(store), db: studioDrizzleForMigrations(store) })
+  return Object.assign(store, { testing: createSqliteTestRecords(store) })
 }
+export type TestStudioDatabase = ReturnType<typeof openStudioDatabase>

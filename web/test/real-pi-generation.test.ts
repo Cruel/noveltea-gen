@@ -339,7 +339,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     // A test timeout must not strand an executing rootless sandbox after
     // shutting down its agent. The trusted test controller is still alive.
     if (acquiredJob) await new SandboxClient().dispose(acquiredJob.jobId).catch(() => {})
-    store.sqlite.close()
+    store.close()
     if (server.listening) {
       server.close()
       await once(server, 'close')

@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory, continueCachedStory } from '../src/lib/git-cache.server'
@@ -60,10 +61,12 @@ async function setup(canonicalStory = false) {
   git(remote, 'commit', '-qm', 'Original Story')
   const original = git(remote, 'rev-parse', 'HEAD')
   const repoId = randomUUID(), storyId = randomUUID(), sourceId = randomUUID()
-  db.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-    VALUES (?,?,'github','123','Acme/Private','2026-01-01')`).run(repoId, owner.id)
-  db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-    VALUES (?,?,?,'story','Restart Story','2026-01-01',?)`).run(storyId, owner.id, repoId, original)
+  const seed = studioSeed(db)
+  ;(await seed.repository({ id: repoId, ownerUserId: owner.id, provider: 'github',
+    providerRepositoryId: '123', name: 'Acme/Private', createdAt: '2026-01-01' }))
+  ;(await seed.story({ id: storyId, ownerUserId: owner.id, repositoryId: repoId,
+    directory: 'story', title: 'Restart Story', createdAt: '2026-01-01',
+    sourceCommitSha: original }))
   const parent = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
     ownerId: owner.id, repositoryId: 'github:123', remoteUrl: 'file://' + remote,
     token: '', directory: 'story', commit: original, jobId: sourceId })
@@ -71,11 +74,12 @@ async function setup(canonicalStory = false) {
     contract, limits: { steps: 7 }, model: null }
   const request = { story: parent.storyRoot, job: sourceId, task: draft.task, contract,
     fixture: true }
-  db.sqlite.prepare(`INSERT INTO studio_sessions (id,owner_user_id,story_id,title,source_commit_sha,status,
-    created_at,updated_at,generation_request_json,generation_thread_id,generation_config_json)
-    VALUES (?,?,?,'Original Thread',?,'running','2026-01-01','2026-01-01',?,?,?)`)
-    .run(sourceId, owner.id, storyId, original, JSON.stringify(request),
-      parent.threadId + ':generation:web', JSON.stringify(draft))
+  ;(await seed.job({ id: sourceId, ownerUserId: owner.id, storyId, title: 'Original Thread',
+    sourceCommitSha: original, status: 'running',
+    createdAt: '2026-01-01', updatedAt: '2026-01-01',
+    generationRequestJson: JSON.stringify(request),
+    generationThreadId: parent.threadId + ':generation:web',
+    generationConfigJson: JSON.stringify(draft) }))
   ensureRootThreads(db, owner.id, storyId)
   const threadId = 'root:' + sourceId
   const later = () => {
@@ -95,7 +99,7 @@ async function setup(canonicalStory = false) {
     return { status: response.status, body: await response.json() as any }
   }
   const cleanup = () => {
-    db.sqlite.close()
+    db.close()
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
@@ -118,11 +122,10 @@ test('owner restarts from the original SHA with new Thread/run while live parent
       selectedSha: f.original, mode: 'original', targetBranch: null }
     const parentDirty = join(f.parent.worktreeStoryRoot, 'uncommitted.txt')
     writeFileSync(parentDirty, 'In-flight parent writer')
-    const originalMessages = f.db.sqlite.prepare(`INSERT INTO story_thread_messages
-      (id,owner_user_id,thread_id,sequence,role,status,body,phase,created_at)
-      VALUES (?,?,?,0,'user','queued','parent steering','queued','now')`)
-      .run(randomUUID(), f.owner.id, f.threadId)
-    assert.equal(originalMessages.changes, 1)
+    ;(await f.db.testing.records.insert('story_thread_messages', { id: randomUUID(),
+      ownerUserId: f.owner.id, threadId: f.threadId, sequence: 0, role: 'user',
+      status: 'queued', body: 'parent steering', phase: 'queued', createdAt: 'now' }))
+    assert.equal((await f.db.testing.records.count('story_thread_messages', { threadId: f.threadId })), 1)
     const before = git(f.parent.worktreeRoot, 'status', '--porcelain')
     const prepared = await f.send(f.threadId, 'POST', selected)
     assert.equal(prepared.status, 200, JSON.stringify(prepared.body))
@@ -145,15 +148,15 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     const restart = all.find(t => t.id === 'restart:' + selected.childId)
     assert.equal(restart?.parentThreadId, f.threadId)
     assert.equal(restart?.status, 'prepared')
-    assert.equal(f.db.sqlite.prepare(`SELECT 1 FROM story_thread_messages
-      WHERE thread_id=?`).get('restart:' + selected.childId), undefined,
+    assert.equal((await f.db.testing.records.count('story_thread_messages', { threadId: 'restart:' + selected.childId })), 0,
     'parent future conversation and queued messages are not copied')
-    const intent = f.db.sqlite.prepare(`SELECT mode,original_sha AS original,selected_sha AS selected,prepared_at AS ready
-      FROM thread_restarts WHERE child_id=?`).get(selected.childId) as any
+    const intent = (await f.db.testing.records.first<{
+      mode: string; originalSha: string; selectedSha: string; preparedAt: string | null
+    }>('thread_restarts', { childId: selected.childId }))!
     assert.equal(intent.mode, 'original')
-    assert.equal(intent.original, f.original)
-    assert.equal(intent.selected, f.original)
-    assert.ok(intent.ready)
+    assert.equal(intent.originalSha, f.original)
+    assert.equal(intent.selectedSha, f.original)
+    assert.ok(intent.preparedAt)
     const retry = await f.send(f.threadId, 'POST', selected)
     assert.equal(retry.status, 200)
     assert.equal((await f.send(f.threadId, 'POST', { ...selected, selectedSha: newer, mode: 'newer', targetBranch: 'main' })).status, 409)
@@ -161,7 +164,7 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     assert.equal((await f.send(f.threadId, 'POST', { ...selected, childId: randomUUID() }, f.otherCookie)).status, 404)
     assert.equal((await f.send(f.threadId, 'POST', { ...selected, childId: randomUUID() }, '')).status, 401)
     assert.equal(git(f.parent.worktreeRoot, 'status', '--porcelain'), before)
-    assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
   } finally { f.cleanup() }
 })
 
@@ -176,12 +179,12 @@ test('newer revision requires explicit exact provider SHA and refuses a moving u
     const invalid = await f.send(f.threadId, 'POST', input)
     assert.equal(invalid.status, 409)
     assert.match(invalid.body.error, /moved/i)
-    assert.equal((f.db.sqlite.prepare('SELECT COUNT(*) AS n FROM thread_restarts').get() as { n: number }).n, 0)
-    assert.equal(f.db.sqlite.prepare('SELECT 1 FROM studio_sessions WHERE id=?').get(input.childId), undefined)
+    assert.equal((await f.db.testing.records.count('thread_restarts')), 0)
+    assert.equal((await f.db.testing.records.first('studio_sessions', { id: input.childId })), undefined)
     assert.equal(git(f.parent.worktreeRoot, 'rev-parse', 'HEAD'), f.original)
     // Even a maliciously selected foreign Thread must not disclose its original SHA.
     assert.equal((await f.send('root:' + randomUUID(), 'GET', undefined, f.otherCookie)).status, 404)
-    assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
   } finally { f.cleanup() }
 })
 
@@ -236,9 +239,9 @@ test('newer restart revalidates canonical Story, protected decisions, exact remo
       const changed = { ...newer, childId: randomUUID(), selectedSha: git(f.remote, 'rev-parse', 'HEAD') }
       const refused = await f.send(f.threadId, 'POST', changed)
       assert.equal(refused.status, 409, JSON.stringify(refused.body))
-      assert.equal(f.db.sqlite.prepare('SELECT 1 FROM studio_sessions WHERE id=?').get(changed.childId), undefined)
+      assert.equal((await f.db.testing.records.first('studio_sessions', { id: changed.childId })), undefined)
       assert.equal(git(f.parent.worktreeRoot, 'rev-parse', 'HEAD'), f.original)
-      assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
+      assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
     } finally {
       if (previousNative === undefined) delete process.env.NT_NATIVE_CLI
       else process.env.NT_NATIVE_CLI = previousNative
@@ -253,16 +256,14 @@ test('a sequential Thread run still restarts from its first pinned Story SHA and
     const follow = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
       ownerId: f.owner.id, repositoryId: 'github:123', remoteUrl: 'file://' + f.remote,
       token: '', directory: 'story', commit: newer, jobId: followId })
-    f.db.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,generation_config_json)
-      VALUES (?,?,?,'Follow-up',?,'paused','now','now',?)`)
-      .run(followId, f.owner.id, f.storyId, newer, JSON.stringify({
-        version: 1, headSha: newer, task: 'Second unrelated message', contract,
-        model: null, limits: { steps: 12 },
-      }))
-    f.db.sqlite.prepare(`INSERT INTO story_thread_runs
-      (job_id,owner_user_id,thread_id,run_order) VALUES (?,?,?,1)`)
-      .run(followId, f.owner.id, f.threadId)
+    ;(await f.db.testing.records.insert('studio_sessions', {
+      id: followId, ownerUserId: f.owner.id, storyId: f.storyId, title: 'Follow-up',
+      sourceCommitSha: newer, status: 'paused', createdAt: 'now', updatedAt: 'now',
+      generationConfigJson: JSON.stringify({ version: 1, headSha: newer,
+        task: 'Second unrelated message', contract, model: null, limits: { steps: 12 } }),
+    }))
+    ;(await f.db.testing.records.insert('story_thread_runs', { jobId: followId,
+      ownerUserId: f.owner.id, threadId: f.threadId, runOrder: 1 }))
     const preview = await f.send(f.threadId, 'GET')
     assert.equal(preview.status, 200)
     assert.equal(preview.body.originalSha, f.original)
@@ -277,7 +278,7 @@ test('a sequential Thread run still restarts from its first pinned Story SHA and
       'Original creative goal')
     assert.equal(JSON.parse((await selectedJob(f.db, f.owner.id, input.childId)).configJson!).limits.steps, 12)
     assert.equal(git(follow.worktreeRoot, 'rev-parse', 'HEAD'), newer)
-    assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
   } finally { f.cleanup() }
 })
 
@@ -301,10 +302,10 @@ test('upstream moving during native preflight preserves the source and registers
       assert.equal(refused.status, 409)
       assert.match(refused.body.error, /moved/i)
       assert.equal(lookups, 2)
-      assert.equal(f.db.sqlite.prepare('SELECT 1 FROM studio_sessions WHERE id=?').get(input.childId), undefined)
+      assert.equal((await f.db.testing.records.first('studio_sessions', { id: input.childId })), undefined)
       assert.equal(git(f.parent.worktreeRoot, 'rev-parse', 'HEAD'), f.original)
       assert.equal(git(f.parent.worktreeRoot, 'status', '--porcelain'), '')
-      assert.deepEqual(f.db.sqlite.pragma('foreign_key_check'), [])
+      assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
     } finally {
       if (oldNative === undefined) delete process.env.NT_NATIVE_CLI
       else process.env.NT_NATIVE_CLI = oldNative
@@ -358,6 +359,6 @@ test('GitHub restart preview requires an authorized installation and exact repos
     assert.equal(preview.upstream.sha, revision)
     assert.equal(preview.upstream.branch, 'main')
     assert.equal(preview.originalSha, f.original)
-    assert.equal((f.db.sqlite.prepare('SELECT count(*) AS n FROM thread_restarts').get() as { n: number }).n, 0)
+    assert.equal((await f.db.testing.records.count('thread_restarts')), 0)
   } finally { globalThis.fetch = originalFetch; f.cleanup() }
 })

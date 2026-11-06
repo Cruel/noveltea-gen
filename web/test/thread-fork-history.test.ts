@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import type { JobStartResult } from '../../src/job'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { snapshotForkBoundaryHistory, recordForkBoundaryHistory } from '../src/lib/thread-fork-history.server'
 
@@ -39,57 +40,60 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     const owner = randomUUID(), story = randomUUID(), repo = randomUUID()
     const parentThread = randomUUID(), childThread = randomUUID()
     const conversation = randomUUID(), jobId = randomUUID()
-    db.sqlite.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
-      .run(owner, 'Author', 'author@local.test', 1, Date.now(), Date.now())
-    db.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','provider','Repo','now')`).run(repo, owner)
-    db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
-      VALUES (?,?,?,'story','Story','now')`).run(story, owner, repo)
-    db.sqlite.prepare(`INSERT INTO story_conversations (id,owner_user_id,story_id,title,created_at,updated_at)
-      VALUES (?,?,?,'Character exploration','now','now')`).run(conversation, owner, story)
+    const seed = studioSeed(db)
+    ;(await seed.user(owner))
+    ;(await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: 'provider', name: 'Repo', createdAt: 'now' }))
+    ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
+      directory: 'story', title: 'Story', createdAt: 'now' }))
+    ;(await seed.conversation({ id: conversation, ownerUserId: owner, storyId: story,
+      title: 'Character exploration', createdAt: 'now', updatedAt: 'now' }))
     for (const [id, parent] of [[parentThread, null], [childThread, parentThread]] as const) {
-      db.sqlite.prepare(`INSERT INTO story_threads
-        (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-        VALUES (?,?,?,?,'Branch','now','now')`).run(id, owner, conversation, parent)
+      (await seed.thread({ id, ownerUserId: owner, conversationId: conversation,
+        parentThreadId: parent, title: 'Branch', activityAt: 'now', createdAt: 'now' }))
     }
-    const messages = db.sqlite.prepare(`INSERT INTO story_thread_messages
-      (id,owner_user_id,thread_id,sequence,role,status,body,verified_commit_sha,created_at)
-      VALUES (?,?,?,?,'user',?,?,?,'now')`)
-    messages.run(randomUUID(), owner, parentThread, 0, 'delivered', 'Initial direction', initial)
-    messages.run(randomUUID(), owner, parentThread, 1, 'delivered', 'World feedback', forkSha)
-    messages.run(randomUUID(), owner, parentThread, 2, 'delivered', 'Character feedback', futureSha)
-    messages.run(randomUUID(), owner, parentThread, 3, 'queued', 'In-flight steering', null)
+    const addMessage = async (id: string, ownerUserId: string, threadId: string,
+      sequence: number, status: string, body: string, verifiedCommitSha: string | null) => {
+      ;(await db.testing.records.insert('story_thread_messages', { id, ownerUserId, threadId,
+        sequence, role: 'user', status, body, verifiedCommitSha, createdAt: 'now' }))
+    }
+    await addMessage(randomUUID(), owner, parentThread, 0, 'delivered', 'Initial direction', initial)
+    await addMessage(randomUUID(), owner, parentThread, 1, 'delivered', 'World feedback', forkSha)
+    await addMessage(randomUUID(), owner, parentThread, 2, 'delivered', 'Character feedback', futureSha)
+    await addMessage(randomUUID(), owner, parentThread, 3, 'queued', 'In-flight steering', null)
     const source = { worktreeRoot: root, baseSha: initial, jobId } as JobStartResult
     // A #81 chat read may seed a legacy pinned request without a separate
     // verification receipt. It must not suppress the #79 baseline fallback.
     const seededThread = randomUUID()
-    db.sqlite.prepare(`INSERT INTO story_threads
-      (id,owner_user_id,conversation_id,title,activity_at,created_at)
-      VALUES (?,?,?,'Chat seeded','now','now')`).run(seededThread, owner, conversation)
-    messages.run(randomUUID(), owner, seededThread, 0, 'delivered', 'Rendered unverified chat', null)
+    ;(await db.testing.records.insert('story_threads', { id: seededThread, ownerUserId: owner,
+      conversationId: conversation, title: 'Chat seeded', activityAt: 'now', createdAt: 'now' }))
+    await addMessage(randomUUID(), owner, seededThread, 0, 'delivered', 'Rendered unverified chat', null)
     assert.deepEqual((await snapshotForkBoundaryHistory(db, owner, seededThread, source,
       'Pinned author task', 'now', forkSha)).map(m => m.body), ['Pinned author task'])
     const frozen = await snapshotForkBoundaryHistory(db, owner, parentThread, source,
       'Pinned author task', 'now', forkSha)
     assert.deepEqual(frozen.map(m => m.body), ['Initial direction', 'World feedback'])
-    const parentRows = () => db.sqlite.prepare(`SELECT body,status,verified_commit_sha FROM story_thread_messages
-      WHERE thread_id=? ORDER BY sequence`).all(parentThread)
-    const original = parentRows()
-    messages.run(randomUUID(), owner, parentThread, 4, 'delivered', 'New live parent update', forkSha)
+    const parentRows = async () => (await db.testing.records.all<{
+      body: string; status: string; verifiedCommitSha: string | null
+    }>('story_thread_messages', { threadId: parentThread }, { by: 'sequence' }))
+      .map(({ body, status, verifiedCommitSha }) => ({ body, status, verifiedCommitSha }))
+    const original = await parentRows()
+    await addMessage(randomUUID(), owner, parentThread, 4, 'delivered', 'New live parent update', forkSha)
     await recordForkBoundaryHistory(db, owner, childThread, frozen, 'Keep the new branch focused', 'later')
-    const child = db.sqlite.prepare(`SELECT role,status,body,origin_message_id AS origin,verified_commit_sha AS sha
-      FROM story_thread_messages WHERE thread_id=? ORDER BY sequence`).all(childThread) as Array<{
-        role: string; status: string; body: string; origin: string | null; sha: string | null
-      }>
+    const child = (await db.testing.records.all<{
+      role: string; status: string; body: string; originMessageId: string | null;
+      verifiedCommitSha: string | null
+    }>('story_thread_messages', { threadId: childThread }, { by: 'sequence' }))
+      .map(row => ({ ...row, origin: row.originMessageId, sha: row.verifiedCommitSha }))
     assert.deepEqual(child.map(m => m.body),
       ['Initial direction', 'World feedback', 'Keep the new branch focused'])
     assert.deepEqual(child.map(m => m.status), ['delivered', 'delivered', 'queued'])
     assert.deepEqual(child.map(m => m.sha), [initial, forkSha, null])
     assert.equal(child[0]?.role, 'user')
     assert.ok(child[0]?.origin)
-    assert.equal(parentRows().length, original.length + 1)
-    assert.deepEqual(parentRows().slice(0, original.length), original)
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
+    assert.equal((await parentRows()).length, original.length + 1)
+    assert.deepEqual((await parentRows()).slice(0, original.length), original)
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
     assert.deepEqual((await snapshotForkBoundaryHistory(db, owner, parentThread, source,
       'Pinned author task', 'now', initial)).map(m => m.body), ['Initial direction'],
       'a branch from before World excludes World and later messages')
@@ -97,14 +101,14 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     // has completed. Message sequence alone must not inherit that newer run,
     // even if it happened to produce the same verified Story commit.
     const laterJob = randomUUID()
-    db.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-      VALUES (?,?,?,'Later follow-up',?,'completed','now','now')`).run(laterJob, owner, story, forkSha)
-    db.sqlite.prepare(`INSERT INTO story_thread_runs (job_id,owner_user_id,thread_id,run_order)
-      VALUES (?,?,?,1)`).run(laterJob, owner, parentThread)
+    ;(await db.testing.records.insert('studio_sessions', { id: laterJob, ownerUserId: owner,
+      storyId: story, title: 'Later follow-up', sourceCommitSha: forkSha,
+      status: 'completed', createdAt: 'now', updatedAt: 'now' }))
+    ;(await db.testing.records.insert('story_thread_runs', { jobId: laterJob, ownerUserId: owner,
+      threadId: parentThread, runOrder: 1 }))
     const lateId = randomUUID()
-    messages.run(lateId, owner, parentThread, 5, 'delivered', 'Newer follow-up', forkSha)
-    db.sqlite.prepare('UPDATE story_thread_messages SET job_id=? WHERE id=?').run(laterJob, lateId)
+    await addMessage(lateId, owner, parentThread, 5, 'delivered', 'Newer follow-up', forkSha)
+    ;(await db.testing.records.update('story_thread_messages', { id: lateId }, { jobId: laterJob }))
     assert.ok((await snapshotForkBoundaryHistory(db, owner, parentThread, source,
       'Pinned author task', 'now', forkSha, 6)).some(row => row.body === 'Newer follow-up'))
     const causal = await snapshotForkBoundaryHistory(db, owner, parentThread, source,
@@ -112,7 +116,7 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     assert.ok(!causal.some(row => row.body === 'Newer follow-up'),
       'a later run is excluded independently of message timestamp and selected SHA')
   } finally {
-    db.sqlite.close()
+    db.close()
     removeTestTree(root)
   }
 })
@@ -133,9 +137,9 @@ test('legacy generation request is inherited without modifying the source Thread
       source, 'Original request', '2026-11-01T00:00:00Z', sha)
     assert.deepEqual(snapshot.map(m => m.body), ['Original request'])
     assert.equal(snapshot[0]?.verifiedSha, sha)
-    assert.equal((db.sqlite.prepare('SELECT COUNT(*) AS n FROM story_thread_messages').get() as { n: number }).n, 0)
+    assert.equal((await db.testing.records.count('story_thread_messages')), 0)
   } finally {
-    db.sqlite.close()
+    db.close()
     removeTestTree(root)
   }
 })

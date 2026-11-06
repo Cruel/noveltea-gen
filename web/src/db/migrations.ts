@@ -1,3 +1,7 @@
+import Database from 'better-sqlite3'
+import { StudioSchemaError } from './schema-error'
+export { StudioSchemaError } from './schema-error'
+import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -39,12 +43,45 @@ const appTables = Object.values(schema).map(table => {
 const inspected = new WeakMap<StudioDatabase, number>()
 // Migration files are immutable deployment assets, not per-request inputs.
 const migrationCache = new Map<string, ReturnType<typeof readMigrationFiles>>()
+type SchemaSql = { type: 'table' | 'index'; name: string; sql: string }
+const schemaSqlCache = new Map<string, Map<string, SchemaSql>>()
 
-export class StudioSchemaError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'StudioSchemaError'
+/** Recreate the generated application schema in an isolated database once per
+ * deployed migration set. Compare SQLite's stored DDL to detect changes to
+ * types, nullability, defaults, CHECK/FK/UNIQUE constraints and partial-index
+ * predicates, not just the presence of columns and index names.
+ */
+function expectedSchemaSql(): Map<string, SchemaSql> {
+  const folder = migrationDirectory()
+  const cached = schemaSqlCache.get(folder)
+  if (cached) return cached
+  const reference = new Database(':memory:')
+  try {
+    // Drizzle owns app tables, while Better Auth owns the referenced user table.
+    reference.exec('CREATE TABLE user (id TEXT PRIMARY KEY NOT NULL)')
+    migrate(drizzle(reference), { migrationsFolder: folder })
+    const names = new Set<string>(appTables.map(table => table.name))
+    const indexes = new Set<string>(appTables.flatMap(table => table.indexes))
+    const rows = reference.prepare(
+      "SELECT type, name, sql FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL",
+    ).all() as SchemaSql[]
+    const expected = new Map(rows.filter(row =>
+      (row.type === 'table' && names.has(row.name)) ||
+      (row.type === 'index' && indexes.has(row.name))).map(row => [row.type + ':' + row.name, row]))
+    if (expected.size !== names.size + indexes.size)
+      throw new StudioSchemaError('Generated Studio migration does not contain every declared table and index')
+    schemaSqlCache.set(folder, expected)
+    return expected
+  } finally {
+    reference.close()
   }
+}
+
+function schemaDefinition(store: StudioDatabase, type: 'table' | 'index', name: string): string | undefined {
+  const row = studioSqliteDriver(store).prepare(
+    'SELECT sql FROM sqlite_master WHERE type=? AND name=?',
+  ).get(type, name) as { sql: string | null } | undefined
+  return row?.sql ?? undefined
 }
 
 function hasTable(store: StudioDatabase, table: string) {
@@ -117,6 +154,7 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
       throw new StudioSchemaError(`Better Auth schema is incomplete (missing ${table}). Stop Studio and run the explicit migration command.`)
     }
   }
+  const definitions = expectedSchemaSql()
   for (const table of appTables) {
     if (!hasTable(store, table.name)) {
       throw new StudioSchemaError(`Studio database migration journal does not match its schema (missing ${table.name}). Restore or explicitly reset Studio.`)
@@ -126,6 +164,13 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
     if (columns.length !== table.columns.length || columns.some((column, i) => column !== table.columns[i])
       || table.indexes.some(index => !indexes.has(index))) {
       throw new StudioSchemaError(`Studio database migration journal does not match its schema (${table.name}). Restore or explicitly reset Studio.`)
+    }
+    for (const [type, name] of [['table', table.name], ...table.indexes.map(index =>
+      ['index', index])] as Array<['table' | 'index', string]>) {
+      const expectedSql = definitions.get(type + ':' + name)?.sql
+      if (!expectedSql || schemaDefinition(store, type, name) !== expectedSql) {
+        throw new StudioSchemaError(`Studio database schema definition drift (${name}). Restore or explicitly reset Studio.`)
+      }
     }
   }
   inspected.set(store, schemaVersion)

@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { StudioSchemaError } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
+import { StudioSchemaError } from '../db/schema-error'
 import { getRepositoryToken, requireUser, selectGitConnection } from './access.server'
 import { GitConnectionError } from './git-connections.server'
 

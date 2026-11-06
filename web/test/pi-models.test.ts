@@ -76,9 +76,8 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.doesNotMatch(JSON.stringify(added.body), /ALICE-PRIVATE-MODEL-KEY|HOST-PRIVATE/)
     assert.deepEqual((await request('GET', bobCookie)).body.models, [], 'Bob cannot enumerate Alice models')
     assert.deepEqual((await request('GET', bobCookie)).body.connected, [])
-    const row = store.sqlite.prepare('SELECT owner_user_id AS owner, ciphertext FROM pi_credentials')
-      .get() as { owner: string; ciphertext: string }
-    assert.equal(row.owner, alice.id)
+    const row = (await store.testing.records.first<{ ownerUserId: string; ciphertext: string }>('pi_credentials'))!
+    assert.equal(row.ownerUserId, alice.id)
     assert.doesNotMatch(row.ciphertext, /ALICE-PRIVATE-MODEL-KEY|HOST-PRIVATE|api_key/)
     assert.equal((await userPiCredentials(store, alice.id).read('openai'))?.type, 'api_key')
     assert.equal(await userPiCredentials(store, bob.id).read('openai'), undefined)
@@ -143,7 +142,7 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
         const wrong = userPiCredentials(anotherStore, alice.id, { NT_PI_CREDENTIAL_KEY: randomBytes(32).toString('base64') })
         await wrong.read('openai')
       })
-    } finally { anotherStore.sqlite.close() }
+    } finally { anotherStore.close() }
     assert.equal((await request('DELETE', bobCookie, { provider: 'openai' })).status, 200)
     assert.ok(await userPiCredentials(store, alice.id).read('openai'), 'foreign delete must not affect Alice')
     assert.equal((await request('DELETE', aliceCookie, { provider: 'openai' })).status, 200)
@@ -154,7 +153,7 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.equal(anon.status, 401)
     assert.match(anon.response.headers.get('cache-control') ?? '', /no-store/)
   } finally {
-    store.sqlite.close()
+    store.close()
     if (saved.key === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
     else process.env.NT_PI_CREDENTIAL_KEY = saved.key
     if (saved.host === undefined) delete process.env.OPENAI_API_KEY

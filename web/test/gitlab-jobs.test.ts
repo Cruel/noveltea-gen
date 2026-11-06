@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { prepareCachedJob } from '../src/lib/cached-jobs.server'
 import { allowedGitRemote, gitEnvironment } from '../src/lib/git-cache.server'
@@ -54,12 +55,11 @@ async function setupDatabase(root: string) {
   const repositoryId = randomUUID()
   const storyId = randomUUID()
   const now = new Date().toISOString()
-  store.sqlite.prepare(`INSERT INTO repositories
-    (id,owner_user_id,provider,provider_repository_id,name,created_at)
-    VALUES (?,?,'gitlab','11','Acme/Subgroup/Project',?)`).run(repositoryId, alice.id, now)
-  store.sqlite.prepare(`INSERT INTO stories
-    (id,owner_user_id,repository_id,directory,title,source_commit_sha,created_at)
-    VALUES (?,?,?,'story','Story',?,?)`).run(storyId, alice.id, repositoryId, sha('a'), now)
+  const seed = studioSeed(store)
+  ;(await seed.repository({ id: repositoryId, ownerUserId: alice.id, provider: 'gitlab',
+    providerRepositoryId: '11', name: 'Acme/Subgroup/Project', createdAt: now }))
+  ;(await seed.story({ id: storyId, ownerUserId: alice.id, repositoryId,
+    directory: 'story', title: 'Story', sourceCommitSha: sha('a'), createdAt: now }))
   return { store, auth, alice, bob, repositoryId, storyId, session }
 }
 test('GitLab job API rejects foreign jobs and revoked or mismatched revisions before cloning', async () => {
@@ -132,27 +132,26 @@ test('GitLab job API rejects foreign jobs and revoked or mismatched revisions be
     assert.equal((await post(badOrigin)).status, 403)
     assert.equal((await post(request(aliceCookie, sha('b')))).status, 409)
     assert.equal((await post(request(aliceCookie, sha('a'), 'bad-job'))).status, 400)
-    const baseline = store.sqlite.prepare('SELECT hash,created_at AS createdAt FROM __drizzle_migrations').get() as { hash: string; createdAt: number }
-    store.sqlite.prepare('DELETE FROM __drizzle_migrations').run()
+    const baseline = (await store.testing.schema.migrationHistory())[0]!
+    ;(await store.testing.schema.removeMigrationHistory())
     const unmigrated = await post(request())
     assert.equal(unmigrated.status, 503)
     assert.match((await unmigrated.json()).error, /migrations are pending/)
-    store.sqlite.prepare('INSERT INTO __drizzle_migrations (hash,created_at) VALUES (?,?)').run(baseline.hash, baseline.createdAt)
+    ;(await store.testing.schema.appendMigration(baseline.hash, baseline.createdAt))
 
     // Another user's job ID must never be adopted, even on a shared repository.
     const bobRepo = randomUUID(), bobStory = randomUUID()
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'gitlab','12','Other/Project','2026-10-31')`).run(bobRepo, setup.bob.id)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,source_commit_sha,created_at)
-      VALUES (?,?,?,'story','Other Story',?,'2026-10-31')`).run(bobStory, setup.bob.id, bobRepo, sha('a'))
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES (?,?,?,'Foreign','paused','2026-10-31','2026-10-31')`)
-      .run(jobId, setup.bob.id, bobStory)
+    const seed = studioSeed(store)
+    ;(await seed.repository({ id: bobRepo, ownerUserId: setup.bob.id, provider: 'gitlab',
+      providerRepositoryId: '12', name: 'Other/Project', createdAt: '2026-10-31' }))
+    ;(await seed.story({ id: bobStory, ownerUserId: setup.bob.id, repositoryId: bobRepo,
+      directory: 'story', title: 'Other Story', sourceCommitSha: sha('a'),
+      createdAt: '2026-10-31' }))
+    ;(await seed.job({ id: jobId, ownerUserId: setup.bob.id, storyId: bobStory,
+      title: 'Foreign', status: 'paused', createdAt: '2026-10-31',
+      updatedAt: '2026-10-31' }))
     assert.equal((await post(request())).status, 409)
-    store.sqlite.prepare('DELETE FROM studio_sessions WHERE id=?').run(jobId)
+    ;(await store.testing.records.delete('studio_sessions', { id: jobId }))
 
     revoked = true
     assert.equal((await post(request())).status, 409)
@@ -168,14 +167,13 @@ test('GitLab job API rejects foreign jobs and revoked or mismatched revisions be
     assert.match((await verified.json()).error, /NT_GIT_CACHE_DIR/)
     assert.ok(tracked.some(url => url.endsWith('/api/graphql')))
     assert.ok(tracked.some(url => url.includes('/repository/files/')))
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS total FROM studio_sessions').get() as { total: number }).total, 0)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES (?,?,?,'Unpinned','paused','2026-10-31','2026-10-31')`)
-      .run(jobId, setup.alice.id, setup.storyId)
+    assert.equal((await store.testing.records.count('studio_sessions')), 0)
+    ;(await store.testing.records.insert('studio_sessions', { id: jobId,
+      ownerUserId: setup.alice.id, storyId: setup.storyId, title: 'Unpinned',
+      status: 'paused', createdAt: '2026-10-31', updatedAt: '2026-10-31' }))
     assert.equal((await post(request())).status, 409)
   } finally {
-    store?.sqlite.close()
+    store?.close()
     globalThis.fetch = oldFetch
     if (oldCache === undefined) delete process.env.NT_GIT_CACHE_DIR
     else process.env.NT_GIT_CACHE_DIR = oldCache
@@ -235,7 +233,7 @@ test('shared GitLab job registration creates isolated sparse worktrees and reope
     const baseline = git(remote, 'rev-parse', 'HEAD')
     const setup = await setupDatabase(root)
     store = setup.store
-    setup.store.sqlite.prepare('UPDATE stories SET source_commit_sha=? WHERE id=?').run(baseline, setup.storyId)
+    ;(await setup.store.testing.records.update('stories', { id: setup.storyId }, { sourceCommitSha: baseline }))
     const fileUrl = 'file://' + remote
     const verify = async (row: { repository: string; directory: string; providerId: string }, commit: string) => {
       assert.equal(row.repository, 'Acme/Subgroup/Project')
@@ -290,13 +288,13 @@ test('shared GitLab job registration creates isolated sparse worktrees and reope
     writeFileSync(join(remote, 'story', 'creative-direction', 'later.md'), 'Later\n')
     git(remote, 'add', '.'); git(remote, 'commit', '-qm', 'Later story')
     nextSha = git(remote, 'rev-parse', 'HEAD')
-    setup.store.sqlite.prepare('UPDATE stories SET source_commit_sha=? WHERE id=?').run(nextSha, setup.storyId)
+    ;(await setup.store.testing.records.update('stories', { id: setup.storyId }, { sourceCommitSha: nextSha }))
     assert.equal((await run(jobA, baseline)).baseSha, baseline)
     await assert.rejects(run(jobA, nextSha), /revision changed/)
     const newJob = await run(randomUUID(), nextSha)
     assert.equal(newJob.baseSha, nextSha)
     assert.equal(readFileSync(join(pathA, 'story', 'creative-direction', 'foundation.md'), 'utf8'), 'Draft A\n')
-    assert.equal((setup.store.sqlite.prepare('SELECT COUNT(*) AS total FROM studio_sessions').get() as { total: number }).total, 3)
+    assert.equal((await setup.store.testing.records.count('studio_sessions')), 3)
     await assert.rejects(run(randomUUID(), '1'.repeat(40)), /revision changed/)
 
     // Reproduce a concurrent request claiming the same UUID while the first
@@ -306,18 +304,18 @@ test('shared GitLab job registration creates isolated sparse worktrees and reope
     await assert.rejects(
       prepareCachedJob(setup.store, setup.alice.id, 'test-token', 'gitlab',
         makeRequest(setup.storyId, racedJobId, nextSha), async (row, commit) => {
-          setup.store.sqlite.prepare(`INSERT INTO studio_sessions
-            (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-            VALUES (?,?,?,'Raced job',?,'paused','2026-10-31','2026-10-31')`)
-            .run(racedJobId, setup.alice.id, setup.storyId, baseline)
+          ;(await setup.store.testing.records.insert('studio_sessions', { id: racedJobId,
+            ownerUserId: setup.alice.id, storyId: setup.storyId, title: 'Raced job',
+            sourceCommitSha: baseline, status: 'paused',
+            createdAt: '2026-10-31', updatedAt: '2026-10-31' }))
           return verify(row, commit)
         }),
       /assigned concurrently/,
     )
-    assert.equal((setup.store.sqlite.prepare('SELECT source_commit_sha AS sha FROM studio_sessions WHERE id=?')
-      .get(racedJobId) as { sha: string }).sha, baseline)
+    assert.equal((await setup.store.testing.records.first<{ sourceCommitSha: string }>('studio_sessions',
+      { id: racedJobId }))?.sourceCommitSha, baseline)
   } finally {
-    store?.sqlite.close()
+    store?.close()
     if (oldState === undefined) delete process.env.NT_STATE_DIR
     else process.env.NT_STATE_DIR = oldState
     if (oldCache === undefined) delete process.env.NT_GIT_CACHE_DIR

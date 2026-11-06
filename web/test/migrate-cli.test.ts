@@ -9,7 +9,7 @@ import { openStudioDatabase } from './support/studio-database'
 
 const webRoot = fileURLToPath(new URL('..', import.meta.url))
 
-test('migration command initializes, verifies and repeats on a durable SQLite database without background schema errors', () => {
+test('migration command initializes, verifies and repeats on a durable SQLite database without background schema errors', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'noveltea-migrate-'))
   const filename = join(directory, 'studio.sqlite')
   const env = {
@@ -24,7 +24,7 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
   }
   try {
     for (let run = 0; run < 3; run++) {
-      const result = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate-cli.ts'], {
+      const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/db/migrate-cli.ts'], {
         cwd: webRoot, encoding: 'utf8', env, timeout: 20_000,
       })
       assert.equal(result.status, 0, `Migration run ${run + 1} failed: ${result.stderr}`)
@@ -33,37 +33,35 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
     }
     const store = openStudioDatabase(filename)
     try {
-      const tables = (store.sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name: string}>).map(row => row.name)
+      const tables = (await store.testing.schema.tables())
       for (const name of ['user', 'session', 'account', 'verification', 'rateLimit', 'repositories', 'stories', 'studio_sessions', 'github_install_flows', 'story_onboarding_drafts', 'story_onboarding_conversations', 'pi_credentials', 'generation_events', 'generation_run_queue', 'github_publications', 'gitlab_publications', 'user_preferences', 'git_connections', 'git_connection_flows', 'story_conversations', 'story_threads', 'story_thread_runs', 'story_thread_preferences', 'story_thread_messages', 'checkpoint_forks', 'thread_restarts', 'thread_protected_decisions', 'thread_live_inputs', 'thread_active_pi_turns',
         'thread_queued_message_edits', 'thread_live_effect_reviews',
         'thread_steering_intents', 'thread_steering_checkpoint_links']) {
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
-      const history = store.sqlite.prepare('SELECT hash,created_at AS createdAt FROM __drizzle_migrations').all() as Array<{ hash: string; createdAt: number }>
+      const history = (await store.testing.schema.migrationHistory())
       assert.equal(history.length, 1, 'Fresh Studio database has one generated Drizzle baseline')
       assert.match(history[0]!.hash, /^[a-f0-9]{64}$/)
       assert.ok(history[0]!.createdAt > 0)
       for (const column of ['source_thread_id', 'proof_digest', 'guidance', 'history_json', 'edited_message_id', 'edited_body']) {
-        assert.ok((store.sqlite.pragma('table_info(checkpoint_forks)') as Array<{ name: string }>)
-          .some(entry => entry.name === column), 'Missing fork column ' + column)
+        assert.ok((await store.testing.schema.columns('checkpoint_forks')).includes(column), 'Missing fork column ' + column)
       }
-      assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'source_commit_sha'))
-      assert.ok((store.sqlite.pragma('table_info(stories)') as Array<{ name: string }>).some(column => column.name === 'initial_content_sha256'))
-      assert.ok((store.sqlite.pragma('table_info(story_thread_messages)') as Array<{ name: string }>)
-        .some(column => column.name === 'revision_scope_json'))
+      assert.ok((await store.testing.schema.columns('stories')).includes('source_commit_sha'))
+      assert.ok((await store.testing.schema.columns('stories')).includes('initial_content_sha256'))
+      assert.ok((await store.testing.schema.columns('story_thread_messages')).includes('revision_scope_json'))
       assert.ok(tables.includes('story_thread_message_cancellations'),
         'Cancellation audit table must be present after migration')
-      const sessionColumns = (store.sqlite.pragma('table_info(studio_sessions)') as Array<{ name: string }>).map(column => column.name)
+      const sessionColumns = (await store.testing.schema.columns('studio_sessions'))
       for (const column of ['source_commit_sha', 'generation_request_json', 'generation_thread_id', 'generation_config_json']) {
         assert.ok(sessionColumns.includes(column), 'Missing session column ' + column)
       }
-      assert.deepEqual(store.sqlite.pragma('integrity_check'), [{ integrity_check: 'ok' }])
-      assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+      assert.equal((await store.testing.integrityHealthy()), true)
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       // Simulate an upgrade to a future Studio version: downgrades must fail,
       // never claim success or rewrite a schema owned by newer code.
-      store.sqlite.prepare("INSERT INTO __drizzle_migrations (hash,created_at) VALUES ('future-version', 9999999999999)").run()
-    } finally { store.sqlite.close() }
-    const rejected = spawnSync('pnpm', ['exec', 'tsx', 'src/db/migrate-cli.ts'], {
+      ;(await store.testing.schema.appendMigration('future-version', 9999999999999))
+    } finally { store.close() }
+    const rejected = spawnSync(process.execPath, ['--import', 'tsx', 'src/db/migrate-cli.ts'], {
       cwd: webRoot, encoding: 'utf8', env, timeout: 20_000,
     })
     assert.notEqual(rejected.status, 0)
@@ -72,7 +70,7 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('migration CLI loads the Vite development environment including local overrides', () => {
+test('migration CLI loads the Vite development environment including local overrides', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'noveltea-migrate-env-'))
   const ignoredPath = join(directory, 'ignored.sqlite')
   const databasePath = join(directory, 'from-env-local.sqlite')
@@ -104,7 +102,7 @@ test('migration CLI loads the Vite development environment including local overr
     assert.equal(existsSync(ignoredPath), false, 'Base .env DB path unexpectedly won')
     const store = openStudioDatabase(databasePath)
     try {
-      assert.equal((store.sqlite.prepare('SELECT count(*) AS count FROM __drizzle_migrations').get() as { count: number }).count, 1)
-    } finally { store.sqlite.close() }
+      assert.equal((await store.testing.schema.migrationHistory()).length, 1)
+    } finally { store.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

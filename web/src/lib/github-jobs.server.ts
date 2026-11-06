@@ -1,5 +1,5 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { verifyGithubStorySelection } from './github-stories.server'
 import { prepareCachedJob } from './cached-jobs.server'

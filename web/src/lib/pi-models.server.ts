@@ -1,8 +1,7 @@
 import type { AuthEvent, AuthPrompt } from '@earendil-works/pi-ai'
 import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { availableUserPiModels, createUserPiRuntime, userPiCredentials } from './pi-credentials.server'
 import { randomUUID } from 'node:crypto'
@@ -157,7 +156,7 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
   if (request.method !== 'GET' && request.headers.get('origin') !== baseURL)
     return reply({ error: 'Cross-origin write refused' }, 403)
   try {
-    assertStudioSchemaCurrent(store)
+    await store.assertReady()
     const actor = await requireUser(auth, request.headers)
     if (!actor) return reply({ error: 'Sign in required' }, 401)
     const credentials = userPiCredentials(store, actor.id)

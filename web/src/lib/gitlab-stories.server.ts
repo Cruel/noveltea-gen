@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent, StudioSchemaError } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
+import { StudioSchemaError } from '../db/schema-error'
 import { actor, eligible, failure, gitlab, page, ProviderFailure, reply } from './gitlab-repositories.server'
 import { CANONICAL_RECORD_DIRS, STORY_LIMIT_BYTES } from './story-discovery.shared'
 
@@ -335,7 +335,7 @@ export async function gitlabStoryRequest(auth: StudioAuth, store: StudioDatabase
     if (!row) throw new ProviderFailure(404, 'GitLab project is not connected.')
     const projectId = Number(row.providerId)
     if (!Number.isSafeInteger(projectId) || projectId <= 0) invalid('GitLab catalog has invalid project metadata.')
-    if (request.method === 'POST') assertStudioSchemaCurrent(store)
+    if (request.method === 'POST') await store.assertReady()
     const authorized = await authorizedProject(current.token, projectId)
     if (authorized.path_with_namespace !== row.name) {
       invalid('GitLab project identity changed since connection; reconnect it before browsing.')

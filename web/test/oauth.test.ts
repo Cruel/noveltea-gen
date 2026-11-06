@@ -126,20 +126,18 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     if (linkedCallback.status !== 302) assert.fail(`GitLab callback: ${linkedCallback.status} ${await linkedCallback.text()}`)
     assert.doesNotMatch(linkedCallback.headers.get('location') || '', /error=/)
 
-    const accounts = store.sqlite.prepare('SELECT providerId, accessToken, refreshToken FROM account ORDER BY providerId').all() as Array<{
-      providerId: string, accessToken: string, refreshToken: string
-    }>
+    const accounts = (await store.testing.auth.accounts())
     assert.deepEqual(accounts.map(row => row.providerId), ['github', 'gitlab'])
     for (const account of accounts) {
       assert.notEqual(account.accessToken, providerResponses[account.providerId as 'github' | 'gitlab'].token.access_token)
-      assert.doesNotMatch(account.accessToken, /sensitive/)
-      assert.doesNotMatch(account.refreshToken, /sensitive/)
+      assert.doesNotMatch(account.accessToken ?? '', /sensitive/)
+      assert.doesNotMatch(account.refreshToken ?? '', /sensitive/)
     }
-    assert.equal((store.sqlite.prepare('SELECT COUNT(*) AS count FROM user').get() as { count: number }).count, 1)
+    assert.equal((await store.testing.auth.userCount()), 1)
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-access-sensitive')
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-access-sensitive')
     assert.equal(await getRepositoryToken(auth, store, new Headers(), 'github'), null)
-    store.sqlite.close()
+    store.close()
     store = openStudioDatabase(join(directory, 'studio.sqlite'))
     await migrateStudio(store, config)
     auth = createStudioAuth(store, config)
@@ -148,15 +146,14 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-access-sensitive')
     // Force both encrypted accounts to expire in the persisted store, then
     // exercise refresh through the same public server-side repository adapter.
-    store.sqlite.prepare('UPDATE account SET accessTokenExpiresAt = ? WHERE providerId IN (?, ?)')
-      .run(1, 'github', 'gitlab')
+    ;(await store.testing.auth.expireAccounts(['github', 'gitlab'], 1))
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-refreshed-sensitive')
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-refreshed-sensitive')
     assert.equal(refreshes.length, 2)
     // Refreshed tokens remain encrypted and are reused without another OAuth
     // request when a second repository operation follows.
-    const refreshedRows = store.sqlite.prepare('SELECT accessToken FROM account').all() as Array<{ accessToken: string }>
-    assert.ok(refreshedRows.every(row => !row.accessToken.includes('refreshed-sensitive')))
+    const refreshedRows = (await store.testing.auth.accounts())
+    assert.ok(refreshedRows.every(row => !(row.accessToken ?? '').includes('refreshed-sensitive')))
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'github'), 'github-refreshed-sensitive')
     assert.equal(await getRepositoryToken(auth, store, ghCookies, 'gitlab'), 'gitlab-refreshed-sensitive')
     assert.equal(refreshes.length, 2)
@@ -177,7 +174,7 @@ test('OAuth callback persists encrypted GitHub token, explicit GitLab link and s
     assert.ok(calls.some(url => url.includes('gitlab.com/oauth/token')))
   } finally {
     globalThis.fetch = originalFetch
-    if (store.sqlite.open) store.sqlite.close()
+    store.close()
     rmSync(directory, { recursive: true, force: true })
   }
 })

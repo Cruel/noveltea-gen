@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { activeLimit, claimNext, finishAttempt, queueGeneration, queueRecord,
   fenceAbandonedRuns, dequeueBeforeStart } from '../src/lib/generation-queue.server'
@@ -21,17 +22,16 @@ test('SQLite queue reserves two concurrent slots, is FIFO, preserves interrupted
   try {
     await migrateStudio(db, config)
     const owner = randomUUID(), repo = randomUUID(), story = randomUUID()
-    db.sqlite.prepare("INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)")
-      .run(owner, 'Author', 'queue@example.test', 1, Date.now(), Date.now())
-    db.sqlite.prepare(`INSERT INTO repositories (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','repo','Repo','now')`).run(repo, owner)
-    db.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
-      VALUES (?,?,?,'story','Story','now')`).run(story, owner, repo)
+    const seed = studioSeed(db)
+    ;(await seed.user(owner))
+    ;(await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: 'repo', name: 'Repo', createdAt: 'now' }))
+    ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
+      directory: 'story', title: 'Story', createdAt: 'now' }))
     const ids = Array.from({ length: 4 }, () => randomUUID())
     for (const id of ids) {
-      db.sqlite.prepare(`INSERT INTO studio_sessions
-        (id,owner_user_id,story_id,title,status,created_at,updated_at)
-        VALUES (?,?,?,'Job','paused','now','now')`).run(id, owner, story)
+      (await seed.job({ id, ownerUserId: owner, storyId: story, title: 'Job',
+        status: 'paused', createdAt: 'now', updatedAt: 'now' }))
       await queueGeneration(db, owner, id, 'start', 'prepared', '{"task":"example"}', 'thread-' + id)
     }
     assert.equal(activeLimit(), 2)
@@ -46,29 +46,29 @@ test('SQLite queue reserves two concurrent slots, is FIFO, preserves interrupted
     assert.equal((await queueRecord(db, ids[3]!)), undefined)
     assert.equal((await claimNext(db)), null)
     // Interrupted attempts are not requeued, and they do not consume capacity.
-    db.sqlite.prepare("UPDATE generation_run_queue SET worker_id='other-host:4242:alive' WHERE job_id=?")
-      .run(ids[1])
+    ;(await db.testing.records.update('generation_run_queue', { jobId: ids[1] },
+      { workerId: 'other-host:4242:alive' }))
     assert.equal((await fenceAbandonedRuns(db)), 0, 'do not steal another host owner')
-    db.sqlite.prepare('UPDATE generation_run_queue SET worker_id=? WHERE job_id=?')
-      .run(`${hostname()}:999999999:dead`, ids[1])
+    ;(await db.testing.records.update('generation_run_queue', { jobId: ids[1] },
+      { workerId: `${hostname()}:999999999:dead` }))
     assert.equal((await fenceAbandonedRuns(db)), 1)
     assert.equal((await queueRecord(db, ids[1]!))?.phase, 'interrupted')
     await assert.rejects(() => queueGeneration(db, owner, ids[1]!, 'resume', 'paused'), /reconciliation/)
     // A Compose restart may assign the same process PID (often PID 1).
     // The distinct incarnation still must be fenced, never automatically rerun.
-    db.sqlite.prepare('UPDATE generation_run_queue SET worker_id=? WHERE job_id=?')
-      .run(`${hostname()}:${process.pid}:previous-container`, ids[2])
+    ;(await db.testing.records.update('generation_run_queue', { jobId: ids[2] },
+      { workerId: `${hostname()}:${process.pid}:previous-container` }))
     assert.equal((await fenceAbandonedRuns(db)), 1)
     assert.equal((await queueRecord(db, ids[2]!))?.phase, 'interrupted')
     process.env.NT_STUDIO_MAX_ACTIVE_JOBS = '1'
     assert.equal((await claimNext(db)), null)
     process.env.NT_STUDIO_MAX_ACTIVE_JOBS = 'bogus'
     assert.throws(activeLimit, /integer/)
-    assert.deepEqual(db.sqlite.pragma('foreign_key_check'), [])
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
   } finally {
     if (prior === undefined) delete process.env.NT_STUDIO_MAX_ACTIVE_JOBS
     else process.env.NT_STUDIO_MAX_ACTIVE_JOBS = prior
-    db.sqlite.close()
+    db.close()
     rmSync(root, { recursive: true, force: true })
   }
 })

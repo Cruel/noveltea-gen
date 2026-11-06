@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
@@ -97,16 +98,15 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       commit: pinned, directory: 'story', jobId,
       verifiedSizeBytes: 0, verifiedBlobCount: 1,
     })
-    store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES (?,?,'github','123','Acme/Private','2026-11-01')`).run(repoId, alice.id)
-    store.sqlite.prepare(`INSERT INTO stories
-      (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-      VALUES (?,?,?,'story','Private Story','2026-11-01',?)`).run(storyId, alice.id, repoId, pinned)
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at)
-      VALUES (?,?,?,'Private Story',?,'paused','2026-11-01','2026-11-01')`)
-      .run(jobId, alice.id, storyId, pinned)
+    const seed = studioSeed(store)
+    ;(await seed.repository({ id: repoId, ownerUserId: alice.id, provider: 'github',
+      providerRepositoryId: '123', name: 'Acme/Private', createdAt: '2026-11-01' }))
+    ;(await seed.story({ id: storyId, ownerUserId: alice.id, repositoryId: repoId,
+      directory: 'story', title: 'Private Story', createdAt: '2026-11-01',
+      sourceCommitSha: pinned }))
+    ;(await seed.job({ id: jobId, ownerUserId: alice.id, storyId, title: 'Private Story',
+      sourceCommitSha: pinned, status: 'paused',
+      createdAt: '2026-11-01', updatedAt: '2026-11-01' }))
     const conversation = await createConversation(store, alice.id, storyId)
     ensureRootThreads(store, alice.id, storyId)
     assert.equal(associateNaturalThread(store, alice.id, conversation.id, jobId, payload.task), 'root:' + jobId)
@@ -128,19 +128,19 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal((await api('POST', { ...payload, contract: {} }, aliceCookie)).status, 422)
     assert.equal((await api('POST', { ...payload, task: 'x'.repeat(70 * 1024) }, aliceCookie)).status, 413)
     assert.equal((await api('POST', { ...payload, task: '€'.repeat(30 * 1024) }, aliceCookie)).status, 413)
-    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('cancelled', jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, { status: 'cancelled' }))
     assert.equal((await api('GET', undefined, aliceCookie)).body.job.status, 'cancelled')
     assert.equal((await api('POST', payload, aliceCookie)).status, 409)
-    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('blocked', jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, { status: 'blocked' }))
     assert.equal((await api('GET', undefined, aliceCookie)).body.job.status, 'blocked')
     assert.equal((await api('POST', payload, aliceCookie)).status, 409)
-    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('running', jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, { status: 'running' }))
     const orphan = await api('GET', undefined, aliceCookie)
     assert.equal(orphan.body.job.status, 'interrupted')
     assert.match(orphan.body.job.reason, /without a pinned request/)
-    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('completed', jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, { status: 'completed' }))
     assert.equal((await api('GET', undefined, aliceCookie)).status, 409)
-    store.sqlite.prepare('UPDATE studio_sessions SET status=? WHERE id=?').run('paused', jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, { status: 'paused' }))
     assert.equal((await api('GET', undefined, aliceCookie)).body.job.status, 'prepared')
     // An unpublished initialization draft can be inspected, but an unverified
     // commit is not accepted as the generator's trusted starting revision.
@@ -160,18 +160,19 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     writeFileSync(cliCheckpoint, 'foreign CLI checkpoint')
     const conflictBeforeClaim = await api('POST', payload, aliceCookie)
     assert.equal(conflictBeforeClaim.status, 409)
-    const unclaimed = store.sqlite.prepare(`SELECT status, generation_request_json AS request
-      FROM studio_sessions WHERE id=?`).get(jobId) as { status: string; request: string | null }
+    const unclaimed = (await store.testing.records.first<{ status: string;
+      generationRequestJson: string | null }>('studio_sessions', { id: jobId }))!
     assert.equal(unclaimed.status, 'paused')
-    assert.equal(unclaimed.request, null)
+    assert.equal(unclaimed.generationRequestJson, null)
     assert.equal(existsSync(join(acquired.stateDir, 'generation-server-owner.json')), false)
     unlinkSync(cliCheckpoint)
     // A verified saved scope must bind the eventual fixture start, even if
     // an attacker calls the older start endpoint directly with a new body.
-    store.sqlite.prepare('UPDATE studio_sessions SET generation_config_json=? WHERE id=?')
-      .run(JSON.stringify({ version: 1, headSha: acquired.headSha,
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, {
+      generationConfigJson: JSON.stringify({ version: 1, headSha: acquired.headSha,
         task: payload.task, contract: parseGenerationContract(contract),
-        limits: { steps: 30 }, model: null }), jobId)
+        limits: { steps: 30 }, model: null }),
+    }))
     assert.equal((await api('POST', { ...payload, task: 'Widen the task' }, aliceCookie)).status, 409)
     assert.equal((await api('POST', { ...payload, contract: { ...contract,
       constraints: ['Override author intent'] } }, aliceCookie)).status, 409)
@@ -187,8 +188,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(orphaned.body.job.status, 'interrupted')
     assert.match(orphaned.body.job.reason, /without a saved request/)
     assert.equal((await api('POST', { ...payload, task: 'Different task' }, aliceCookie)).status, 409)
-    assert.equal((store.sqlite.prepare(`SELECT generation_request_json AS request
-      FROM studio_sessions WHERE id=?`).get(jobId) as { request: string | null }).request, null)
+    assert.equal((await store.testing.records.first<{ generationRequestJson: string | null }>('studio_sessions',
+      { id: jobId }))?.generationRequestJson, null)
     // Subscribe before generation begins: events must arrive on the live SSE
     // connection rather than only being synthesized from a completed POST.
     const liveStream = await generationEventsRequest(auth, store,
@@ -329,7 +330,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal((await api('POST', { ...payload, task: 'Changed task' }, aliceCookie)).status, 409)
 
     // Simulate a new application process using the same on-disk catalog and graph checkpoint.
-    store.sqlite.close()
+    store.close()
     store = openStudioDatabase(join(root, 'studio.sqlite'))
     // A reconnect must use the saved request and immutable skill snapshot;
     // the current deployment's optional checkout path is not an authority.
@@ -366,8 +367,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     })
     const sanitized = await listGenerationEvents(store, alice.id, jobId, events.at(-1)!.id)
     assert.deepEqual(sanitized[0]?.files, ['creative-direction/foundation.md'])
-    const pinnedRequest = JSON.parse((store.sqlite.prepare(
-      'SELECT generation_request_json AS request FROM studio_sessions WHERE id=?').get(jobId) as { request: string }).request)
+    const pinnedRequest = JSON.parse((await store.testing.records.first<{ generationRequestJson: string }>(
+      'studio_sessions', { id: jobId }))!.generationRequestJson)
     assert.equal(pinnedRequest.fixture, true)
     assert.equal(pinnedRequest.story, acquired.storyRoot)
     assert.equal(pinnedRequest.model, undefined)
@@ -450,7 +451,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     mkdirSync(join(acquired.worktreeStoryRoot, 'characters'), { recursive: true })
     const dirtyFile = join(acquired.worktreeStoryRoot, 'characters', 'new-duplicate.md')
     writeFileSync(dirtyFile, 'unfinished candidate must remain preserved')
-    store.sqlite.prepare("UPDATE studio_sessions SET status='blocked' WHERE id=?").run(jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, { status: 'blocked' }))
     const failed = await fixtureJobRequest(restoredAuth, store,
       new Request(config.baseURL + '/api/jobs/' + jobId, { headers: { cookie: aliceCookie } }),
       jobId, config.baseURL)
@@ -469,8 +470,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       jobId, config.baseURL)
     assert.equal(stillPending.status, 404, 'foreign users never see failure details')
 
-    store.sqlite.prepare('UPDATE studio_sessions SET generation_thread_id=? WHERE id=?')
-      .run('unrelated-thread', jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId },
+      { generationThreadId: 'unrelated-thread' }))
     const conflict = await fixtureJobRequest(restoredAuth, store, new Request(config.baseURL + '/api/jobs/' + jobId, {
       headers: { cookie: aliceCookie },
     }), jobId, config.baseURL)
@@ -493,7 +494,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       worker.kill('SIGKILL')
       await once(worker, 'exit')
     }
-    store.sqlite.close()
+    store.close()
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value

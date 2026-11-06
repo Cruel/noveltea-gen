@@ -17,9 +17,14 @@ const stateFor = (disposition: SteeringDisposition) =>
   disposition === 'scope-review' || disposition === 'protected-review'
     ? 'pending-boundary' as const : disposition === 'unresolved' ? 'unresolved' as const : 'considered' as const
 
-export function createSqliteSteeringPersistence(db: Db): SteeringPersistence {
-  const consider: SteeringPersistence['consider'] =
-    (messageId, owner, threadId, jobId, content, workItem, disposition, at) => {
+export type SynchronousSteering = { [K in keyof SteeringPersistence]:
+  (...args: Parameters<SteeringPersistence[K]>) => Awaited<ReturnType<SteeringPersistence[K]>> }
+
+/** Kept private to the SQLite adapter so continuation can compose a single
+ * synchronous SQLite transaction, without awaiting a Promise inside it. */
+export function createSqliteSteeringSync(db: Db): SynchronousSteering {
+  const consider = (messageId: string, owner: string, threadId: string, jobId: string,
+    content: string, workItem: string | null, disposition: SteeringDisposition, at: string): void => {
       ownerCheck(owner)
       const eligible = db.select({ id: inputs.messageId }).from(inputs)
         .innerJoin(messages, and(eq(messages.id, inputs.messageId),
@@ -352,5 +357,30 @@ export function createSqliteSteeringPersistence(db: Db): SteeringPersistence {
         ORDER BY l.created_at,l.message_id`) as SteeringActivity[]
       return [...considered, ...pending]
     },
+  }
+}
+
+/** Public async contract; SQLite's atomic mutation bodies stay synchronous. */
+export function createSqliteSteeringPersistence(sync: SynchronousSteering): SteeringPersistence {
+  return {
+    registerTurn: async (...args) => sync.registerTurn(...args),
+    closeTurn: async (...args) => sync.closeTurn(...args),
+    recoverOrphaned: async (...args) => sync.recoverOrphaned(...args),
+    dispatchable: async (...args) => sync.dispatchable(...args),
+    turn: async (...args) => sync.turn(...args),
+    claim: async (...args) => sync.claim(...args),
+    deferUnsent: async (...args) => sync.deferUnsent(...args),
+    accepted: async (...args) => sync.accepted(...args),
+    blocked: async (...args) => sync.blocked(...args),
+    settling: async (...args) => sync.settling(...args),
+    settle: async (...args) => sync.settle(...args),
+    deferTurn: async (...args) => sync.deferTurn(...args),
+    review: async (...args) => sync.review(...args),
+    deferUndelivered: async (...args) => sync.deferUndelivered(...args),
+    consider: async (...args) => sync.consider(...args),
+    attribute: async (...args) => sync.attribute(...args),
+    approvedReplan: async (...args) => sync.approvedReplan(...args),
+    boundaryReviews: async (...args) => sync.boundaryReviews(...args),
+    activity: async (...args) => sync.activity(...args),
   }
 }

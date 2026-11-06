@@ -11,6 +11,9 @@
     "dev": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "node scripts/check-source-quality.mjs && pnpm --filter @noveltea/studio persistence:boundary",
+    "format": "prettier --write src test web/src web/test scripts",
+    "format:check": "prettier --check .prettierrc.json scripts/check-source-quality.mjs web/test/support/studio-seed.ts",
     "test": "tsx --test test/*.test.ts",
     "test:offline": "tsx --test test/cli.test.ts test/demo.test.ts test/graph.test.ts test/langsmith-config.test.ts test/local-trace.test.ts test/pi-delegation.test.ts test/pinned-skill-reads.test.ts test/project.test.ts test/recovery-compatibility.test.ts test/resources.test.ts test/sandbox-pi-tools.test.ts test/skills.test.ts test/snapshot.test.ts test/specialist-author-instruction.test.ts test/tracing.test.ts",
     "certify": "tsx --test test/certification.test.ts",
@@ -22,7 +25,7 @@
     "studio:trace": "NT_STUDIO_TRACE=1 LANGSMITH_TRACING=true LANGCHAIN_TRACING_V2=true TRACE_TO_LANGSMITH=true langgraphjs dev --no-browser --n-jobs-per-worker 1",
     "studio:input": "tsx src/studio-input.ts",
     "trace:show": "tsx src/trace-show.ts",
-    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm --filter @noveltea/studio check"
+    "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm build && pnpm --filter @noveltea/studio check"
   },
   "engines": {
     "node": ">=22"
@@ -43,6 +46,7 @@
   "devDependencies": {
     "@langchain/langgraph-cli": "1.5.5",
     "@types/node": "^24.0.0",
+    "prettier": "3.9.10",
     "tsx": "4.23.15",
     "typescript": "~5.9.3"
   }

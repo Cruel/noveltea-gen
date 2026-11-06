@@ -6,6 +6,10 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from './schema'
 import { createSqlitePersistence } from '../persistence/sqlite'
+import { registerStudioAuthStorage } from './auth-storage'
+import type { StudioStore } from '../persistence/store'
+export type { StudioStore } from '../persistence/store'
+export type StudioDatabase = StudioStore
 
 export function defaultStudioPath(env: NodeJS.ProcessEnv = process.env): string {
   if (env.NT_STUDIO_DB_PATH) {
@@ -27,7 +31,7 @@ const handles = new WeakMap<object, {
   db: BetterSQLite3Database<typeof schema>
 }>()
 
-export function openStudioDatabase(path = defaultStudioPath()) {
+export function openStudioDatabase(path = defaultStudioPath()): StudioStore {
   if (path !== ':memory:') {
     if (!isAbsolute(path)) throw new Error('Studio database path must be absolute')
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -40,8 +44,14 @@ export function openStudioDatabase(path = defaultStudioPath()) {
     }
     sqlite.pragma('foreign_keys = ON')
     const db = drizzle(sqlite, { schema })
-    const store = { persistence: createSqlitePersistence(db), close: () => sqlite.close() }
+    const store: StudioStore = { persistence: createSqlitePersistence(db),
+      async assertReady() {
+        const { assertStudioSchemaCurrent } = await import('./migrations')
+        assertStudioSchemaCurrent(store)
+      },
+      close: () => { if (sqlite.open) sqlite.close() } }
     handles.set(store, { sqlite, db })
+    registerStudioAuthStorage(store, sqlite)
     return store
   } catch (error) {
     sqlite.close()
@@ -49,10 +59,11 @@ export function openStudioDatabase(path = defaultStudioPath()) {
   }
 }
 
-export type StudioDatabase = ReturnType<typeof openStudioDatabase>
 
-/** Internal exception: Better Auth's embedded SQLite driver, migration/schema
- * maintenance and explicit low-level tests. Never import in route or service code. */
+
+
+/** Internal exception: SQLite migration/schema maintenance and isolated
+ * low-level backend tests. Never import in routes or business services. */
 export function studioSqliteDriver(store: StudioDatabase): Database.Database {
   const handle = handles.get(store)
   if (!handle) throw new Error('Invalid Studio database handle')

@@ -1,6 +1,6 @@
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
-import { StudioSchemaError } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
+import { StudioSchemaError } from '../db/schema-error'
 import { prepareCachedJob } from './cached-jobs.server'
 import { GitCacheError } from './git-cache.server'
 import { actor, failure, ProviderFailure, reply } from './gitlab-repositories.server'

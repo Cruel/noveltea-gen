@@ -126,14 +126,14 @@ test('Studio uses upstream Pi device codes, stores encrypted credentials, and ne
     assert.equal(credential?.type, 'oauth')
     if (credential?.type === 'oauth') assert.equal(credential.access, 'ALICE-OAUTH-ACCESS')
     assert.equal(await userPiCredentials(store, users[1]!.user.id).read('xai'), undefined)
-    const row = store.sqlite.prepare('SELECT ciphertext FROM pi_credentials WHERE owner_user_id=?')
-      .get(users[0]!.user.id) as { ciphertext: string }
+    const row = (await store.testing.records.first<{ ciphertext: string }>('pi_credentials',
+      { ownerUserId: users[0]!.user.id }))!
     assert.doesNotMatch(row.ciphertext, /ALICE-OAUTH-ACCESS|ALICE-OAUTH-REFRESH/)
     assert.equal(boundPort, false)
   } finally {
     Server.prototype.listen = originalListen
     globalThis.fetch = originalFetch
-    store.sqlite.close()
+    store.close()
     if (oldKey === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
     else process.env.NT_PI_CREDENTIAL_KEY = oldKey
     rmSync(dir, { recursive: true, force: true })
@@ -198,7 +198,7 @@ test('legacy Codex login selects device code rather than opening localhost:1455'
   } finally {
     globalThis.fetch = originalFetch
     Server.prototype.listen = originalListen
-    store.sqlite.close()
+    store.close()
     if (oldKey === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
     else process.env.NT_PI_CREDENTIAL_KEY = oldKey
     rmSync(dir, { recursive: true, force: true })

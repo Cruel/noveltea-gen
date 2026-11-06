@@ -281,14 +281,17 @@ process.exit(exit);
     const savedRow = await store.persistence.generation.jobs.state(alice.id, jobId)
     assert.deepEqual(JSON.parse(savedRow!.configJson!), stored.body.saved)
     // Once a job is pinned to execution, configuration is immutable.
-    store.sqlite.prepare('UPDATE studio_sessions SET generation_request_json=?, generation_thread_id=? WHERE id=?')
-      .run('{"pinned":true}', acquired.threadId + ':generation:web', jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, {
+      generationRequestJson: '{"pinned":true}', generationThreadId: acquired.threadId + ':generation:web',
+    }))
     assert.equal((await configuration('PUT', focused, aliceCookie)).status, 409)
     const readOnly = await configuration('GET', undefined, aliceCookie)
     assert.equal(readOnly.status, 200)
     assert.equal(readOnly.body.editable, false)
     assert.deepEqual(readOnly.body.saved, stored.body.saved)
-    store.sqlite.prepare('UPDATE studio_sessions SET generation_request_json=NULL, generation_thread_id=NULL WHERE id=?').run(jobId)
+    ;(await store.testing.records.update('studio_sessions', { id: jobId }, {
+      generationRequestJson: null, generationThreadId: null,
+    }))
 
     // Full Git overlay: baseline -> verified commit and verified HEAD -> dirty
     // worktree are independent. Deleted records never become navigable IDs.
@@ -345,7 +348,7 @@ process.exit(exit);
     assert.equal((await api('?id=event.bell', aliceCookie)).response.status, 409)
     assert.equal((await relationships('?id=event.bell', aliceCookie)).response.status, 409)
   } finally {
-    store.sqlite.close()
+    store.close()
     for (const key of envKeys) {
       const value = previous[key]
       if (value === undefined) delete process.env[key]

@@ -8,7 +8,7 @@ import { removeTestTree } from "./helpers.js";
 import { startStoryJob } from "../src/job.js";
 import { withStoryJobLock } from "../src/job-lock.js";
 import { runCancellableStoryTurn } from "../src/story-interruption.js";
-import { observePiTurnSettlement } from "../src/live-pi-registry.js";
+import { observePiTurnSettlement, observePiTurnLifecycle } from "../src/live-pi-registry.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-interrupt-"));
 after(() => removeTestTree(root));
@@ -221,6 +221,40 @@ test("failed durable Pi steering acknowledgement retains writer lease and report
     observePiTurnSettlement(undefined);
     if (originalStateDir === undefined) delete process.env.NT_STATE_DIR;
     else process.env.NT_STATE_DIR = originalStateDir;
+  }
+});
+
+test("failed asynchronous Pi registration retains the writer lease before running the SDK", async () => {
+  const x = setup("steering-registration-failure");
+  const priorStateDir = process.env.NT_STATE_DIR;
+  process.env.NT_STATE_DIR = x.state;
+  let attempted = false;
+  try {
+    const job = await startStoryJob({ story: x.story, job: "draft" }, false);
+    observePiTurnLifecycle(async (_, phase) => {
+      if (phase === "registered") throw new Error("durable turn registration unavailable");
+    });
+    await assert.rejects(withStoryJobLock(job, "steering-registration-failure", async () => {
+      const session = {
+        sessionId: "registration-failure-session",
+        sessionManager: { getSessionFile: () => undefined },
+        messages: [],
+        isStreaming: false,
+        async steer() { return "queued" as const; },
+        async followUp() { return "queued" as const; },
+        async abort() {}, async waitForIdle() {},
+      };
+      await runCancellableStoryTurn(session, async () => { attempted = true; });
+    }), /Cannot register Pi turn durably; writer lock retained/);
+    assert.equal(attempted, false, "never start an SDK turn without a durable ownership fence");
+    assert.equal(existsSync(join(job.stateDir, ".story-job-running")), true,
+      "registration failure must preserve the exclusive writer lease");
+    const inspection = json(x.run("author", "inspect")).activeSpecialist;
+    assert.equal(inspection.phase, "running", "unsettled Pi receipt remains available for inspection");
+  } finally {
+    observePiTurnLifecycle(undefined);
+    if (priorStateDir === undefined) delete process.env.NT_STATE_DIR;
+    else process.env.NT_STATE_DIR = priorStateDir;
   }
 });
 

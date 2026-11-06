@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { ThreadMessageConflict as ThreadChatError } from '../persistence/thread-message-contracts'
 export { ThreadMessageConflict as ThreadChatError } from '../persistence/thread-message-contracts'
 import { selectedJob, restoreJob, pinnedRequest, inspectRegisteredJob, verifyWebExecution } from './fixture-jobs.server'
@@ -49,7 +49,7 @@ export async function readThreadChat(store: StudioDatabase, owner: string, threa
   const membership = await store.persistence.messages.membership(owner, threadId)
   return { threadId, storyId: membership.storyId,
     archived: !!membership.archivedAt,
-    messages: data.messages, steeringActivity: steeringActivity(store, owner, threadId),
+    messages: data.messages, steeringActivity: await steeringActivity(store, owner, threadId),
     runs: data.runs.map(({ requestJson, ...run }) => ({
       ...run, status: run.queuePhase === 'interrupted' ? 'interrupted'
         : run.queuePhase === 'queued' ? 'queued'
@@ -224,8 +224,8 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
   try {
     const job = await restoreJob(await selectedJob(store, owner, jobId), owner)
     for (const point of await inspectRecoveryCheckpoints(job)) {
-      attributeSteeringCheckpoint(store, owner, jobId, point)
-      if (point.eligible) attributeApprovedReplanCheckpoint(store, owner, jobId, point,
+      await attributeSteeringCheckpoint(store, owner, jobId, point)
+      if (point.eligible) await attributeApprovedReplanCheckpoint(store, owner, jobId, point,
         committedStoryFiles(job, point.parentSha, point.commitSha))
     }
   } catch { /* No fabricated checkpoint or effect assertion on recovery failure. */ }

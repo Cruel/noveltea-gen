@@ -33,15 +33,15 @@ async function fixture() {
     return new Headers({ cookie: 'better-auth.session_token=' + session.token + '.' +
       createHmac('sha256', secret).update(session.token).digest('base64') })
   }
-  const repositories = store.sqlite.prepare(`INSERT INTO repositories
-    (id,owner_user_id,provider,provider_repository_id,name,created_at)
-    VALUES (?,?,?,?,?,'now')`)
-  const stories = store.sqlite.prepare(`INSERT INTO stories
-    (id,owner_user_id,repository_id,directory,title,created_at)
-    VALUES (?,?,?,'story',?,'now')`)
   for (const [owner, label] of [[alice.id, 'alice'], [bob.id, 'bob']]) {
-    repositories.run('repo-' + label, owner, 'github', label, 'Repo ' + label)
-    stories.run('story-' + label, owner, 'repo-' + label, 'Story ' + label)
+    (await store.testing.records.insert('repositories', {
+      id: 'repo-' + label, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: label, name: 'Repo ' + label, createdAt: 'now',
+    }))
+    ;(await store.testing.records.insert('stories', {
+      id: 'story-' + label, ownerUserId: owner, repositoryId: 'repo-' + label,
+      directory: 'story', title: 'Story ' + label, createdAt: 'now',
+    }))
   }
   return { store, auth, alice: alice.id, bob: bob.id, headers }
 }
@@ -50,15 +50,18 @@ test('dashboard and preferences ports share fresh SQLite schema with unconverted
   const f = await fixture()
   const { store, alice, bob } = f
   try {
-    // Seed with the old raw SQL path, then read through the new Drizzle port.
-    for (let i = 0; i < 23; i++) store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,'now',?)`).run('job-' + i, alice, 'story-alice', 'Job ' + i,
-      i % 3 === 0 ? 'running' : i % 3 === 1 ? 'paused' : 'completed',
-      new Date(Date.UTC(2026, 10, 1, 0, 0, i)).toISOString())
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES ('job-bob',?,'story-bob','Bob job','running','now','now')`).run(bob)
+    // Test fixture records use the backend-neutral interface.
+    for (let i = 0; i < 23; i++) {
+      (await store.testing.records.insert('studio_sessions', {
+        id: 'job-' + i, ownerUserId: alice, storyId: 'story-alice',
+        title: 'Job ' + i, status: i % 3 === 0 ? 'running' : i % 3 === 1 ? 'paused' : 'completed',
+        createdAt: 'now', updatedAt: new Date(Date.UTC(2026, 10, 1, 0, 0, i)).toISOString(),
+      }))
+    }
+    ;(await store.testing.records.insert('studio_sessions', {
+      id: 'job-bob', ownerUserId: bob, storyId: 'story-bob',
+      title: 'Bob job', status: 'running', createdAt: 'now', updatedAt: 'now',
+    }))
     const result = await readUserDashboard(store.persistence.dashboard, alice)
     assert.deepEqual(result.repositories.map(r => r.id), ['repo-alice'])
     assert.deepEqual(result.stories.map(s => s.id), ['story-alice'])
@@ -75,11 +78,11 @@ test('dashboard and preferences ports share fresh SQLite schema with unconverted
     assert.deepEqual(await readDefaultModel(prefs, alice),
       { provider: 'openai', id: 'model-a', thinking: 'medium' })
     assert.equal(await prefs.getDefaultModel(bob), null)
-    assert.equal((store.sqlite.prepare('SELECT owner_user_id AS owner FROM user_preferences').get() as { owner: string }).owner,
-      alice, 'raw SQLite sees the Drizzle upsert in the same database')
+    assert.equal((await store.testing.records.first<{ ownerUserId: string }>('user_preferences'))?.ownerUserId,
+      alice, 'test reader observes the persisted Drizzle upsert')
     await prefs.putDefaultModel(alice, null, '2026-11-06')
     assert.equal(await readDefaultModel(prefs, alice), null)
-    assert.equal((store.sqlite.prepare('SELECT default_model_json AS model FROM user_preferences').get() as { model: string | null }).model,
+    assert.equal((await store.testing.records.first<{ defaultModelJson: string | null }>('user_preferences'))?.defaultModelJson,
       null)
     await prefs.putThreadPreferences(alice, 'story-alice', 'flat', ['branch-1'], '2026-11-05')
     assert.deepEqual(await prefs.getThreadPreferences(alice, 'story-alice'),
@@ -93,8 +96,8 @@ test('dashboard and preferences ports share fresh SQLite schema with unconverted
     assert.equal(await prefs.hasLegacyRepositories(alice, 'github'), true)
     assert.equal(await prefs.hasLegacyRepositories(alice, 'gitlab'), false)
     assert.equal(await prefs.hasLegacyRepositories(bob, 'github'), true)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
-  } finally { store.sqlite.close() }
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+  } finally { store.close() }
 })
 
 test('dashboard and Settings preserve auth, owner scope, validation, CSRF, and response contracts', async () => {
@@ -132,13 +135,12 @@ test('dashboard and Settings preserve auth, owner scope, validation, CSRF, and r
       { provider: 'openai', id: 'saved' })
     assert.equal((await (await get(bobHeaders)).json() as { defaultModel: unknown }).defaultModel, null)
     for (const corrupt of ['{"invalid":true}', 'null', '{not-json']) {
-      store.sqlite.prepare('UPDATE user_preferences SET default_model_json=? WHERE owner_user_id=?')
-        .run(corrupt, alice)
+      (await store.testing.records.update('user_preferences', { ownerUserId: alice }, { defaultModelJson: corrupt }))
       const invalid = await get(aliceHeaders)
       assert.equal(invalid.status, 409)
       assert.deepEqual(await invalid.json(), { error: 'Settings could not be updated. Refresh and retry.' })
     }
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })
 
 test('persistence consumers accept async-only injected adapters without needing a SQLite driver', async () => {
@@ -198,5 +200,5 @@ test('persistence consumers accept async-only injected adapters without needing 
       'injected writes must not silently fall back to the real database')
     assert.deepEqual((await readUserDashboard(store.persistence.dashboard, alice)).stories.map(s => s.id),
       ['story-alice'])
-  } finally { store.sqlite.close() }
+  } finally { store.close() }
 })

@@ -8,7 +8,7 @@ import { trustedHead } from '../../../src/revision'
 import { validateStoryJob } from '../../../src/validator'
 import { gitEnvironment } from './git-cache.server'
 import { queueRecord } from './generation-queue.server'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 
 const SHA = /^[a-f0-9]{40}$/i
 export class PublicationFailure extends Error {

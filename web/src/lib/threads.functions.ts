@@ -1,7 +1,6 @@
 import { createServerFn } from '@tanstack/react-start'
 import { getRequestHeaders } from '@tanstack/react-start/server'
 import { auth, database } from './runtime.server'
-import { assertStudioSchemaCurrent } from '../db/migrations'
 import { requireUser } from './access.server'
 import {
   archiveThread, createConversation, listStoryConversations, renameConversation, renameThread,
@@ -11,7 +10,7 @@ import {
 const isId = (id: unknown): id is string =>
   typeof id === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(id)
 async function ownerId() {
-  assertStudioSchemaCurrent(database)
+  await database.assertReady()
   const actor = await requireUser(auth, getRequestHeaders())
   if (!actor) throw new Error('Sign in required.')
   return actor.id

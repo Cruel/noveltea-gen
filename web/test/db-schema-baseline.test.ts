@@ -5,11 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { eq } from 'drizzle-orm'
 import { openStudioDatabase } from './support/studio-database'
 import { assertStudioSchemaCurrent, migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
-import { repositories, stories } from '../src/db/schema'
 
 const config = {
   baseURL: 'http://localhost:3000',
@@ -20,85 +18,82 @@ const config = {
 const stamp = '2026-11-05T00:00:00Z'
 const webRoot = fileURLToPath(new URL('..', import.meta.url))
 
-test('fresh baseline makes raw SQL and Drizzle observe the same complete, constrained Studio schema', async () => {
+test('fresh Drizzle baseline initializes the complete, constrained Studio schema', async () => {
   const store = openStudioDatabase(':memory:')
   try {
     assert.throws(() => assertStudioSchemaCurrent(store), /migrations are pending/)
-    assert.equal(store.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE name='__drizzle_migrations'").get(), undefined)
+    await assert.rejects(store.assertReady(), /migrations are pending/)
+    assert.equal((await store.testing.schema.hasMigrationJournal()), false)
     await migrateStudio(store, config)
     await migrateStudio(store, config)
     assertStudioSchemaCurrent(store)
+    await store.assertReady()
 
-    const appNames = (store.sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table'
-      AND name NOT LIKE 'sqlite_%' AND name NOT IN ('user','session','account','verification','rateLimit','__drizzle_migrations')`)
-      .all() as Array<{ name: string }>).map(r => r.name).sort()
+    const appNames = (await store.testing.schema.tables()).filter(name =>
+      !name.startsWith('sqlite_') &&
+      !['user', 'session', 'account', 'verification', 'rateLimit', '__drizzle_migrations'].includes(name))
     assert.equal(appNames.length, 29)
-    assert.ok(appNames.includes('thread_steering_checkpoint_links'))
-    assert.ok(appNames.includes('github_install_flows'))
-    assert.ok(appNames.includes('story_onboarding_conversations'))
-    assert.equal(store.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE name='studio_schema_migrations'").get(), undefined)
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
+    for (const name of ['thread_steering_checkpoint_links', 'github_install_flows',
+      'story_onboarding_conversations']) assert.ok(appNames.includes(name))
+    assert.equal((await store.testing.schema.hasTable('studio_schema_migrations')), false)
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
 
     const ctx = await createStudioAuth(store, config).$context
-    const alice = await ctx.internalAdapter.createUser({ name: 'Alice', email: 'alice@baseline.test', emailVerified: true }, { method: 'test' })
-    const bob = await ctx.internalAdapter.createUser({ name: 'Bob', email: 'bob@baseline.test', emailVerified: true }, { method: 'test' })
+    const alice = await ctx.internalAdapter.createUser({
+      name: 'Alice', email: 'alice@baseline.test', emailVerified: true,
+    }, { method: 'test' })
+    const bob = await ctx.internalAdapter.createUser({
+      name: 'Bob', email: 'bob@baseline.test', emailVerified: true,
+    }, { method: 'test' })
+    const data = store.testing.records
 
-    store.db.insert(repositories).values({
-      id: 'repository', ownerUserId: alice.id, provider: 'github', providerRepositoryId: '123',
-      name: 'alice/repository', createdAt: stamp,
-    }).run()
-    assert.equal((store.sqlite.prepare('SELECT name FROM repositories WHERE id=?').get('repository') as { name: string }).name, 'alice/repository')
-    store.sqlite.prepare(`INSERT INTO stories (id,owner_user_id,repository_id,directory,title,created_at)
-      VALUES ('story',?,'repository','story','A Story',?)`).run(alice.id, stamp)
-    assert.equal(store.db.select().from(stories).where(eq(stories.id, 'story')).get()?.title, 'A Story')
+    await data.insert('repositories', { id: 'repository', ownerUserId: alice.id,
+      provider: 'github', providerRepositoryId: '123', name: 'alice/repository', createdAt: stamp })
+    assert.equal((await data.first<{ name: string }>('repositories', { id: 'repository' }))?.name, 'alice/repository')
+    await data.insert('stories', { id: 'story', ownerUserId: alice.id, repositoryId: 'repository',
+      directory: 'story', title: 'A Story', createdAt: stamp })
+    assert.equal((await data.first<{ title: string }>('stories', { id: 'story' }))?.title, 'A Story')
 
-    assert.throws(() => store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES ('invalid',?,'other','123','Invalid',?)`).run(alice.id,stamp), /CHECK constraint/)
-    assert.throws(() => store.sqlite.prepare(`INSERT INTO repositories
-      (id,owner_user_id,provider,provider_repository_id,name,created_at)
-      VALUES ('duplicate',?,'github','123','Duplicate',?)`).run(alice.id,stamp), /UNIQUE constraint/)
-    assert.throws(() => store.db.insert(stories).values({
-      id: 'foreign-story', ownerUserId: bob.id, repositoryId: 'repository',
-      directory: 'bad', title: 'Bad', createdAt: stamp,
-    }).run(), /FOREIGN KEY constraint/)
+    await assert.rejects(() => data.insert('repositories', { id: 'invalid', ownerUserId: alice.id,
+      provider: 'other', providerRepositoryId: '123', name: 'Invalid', createdAt: stamp }), /CHECK constraint/)
+    await assert.rejects(() => data.insert('repositories', { id: 'duplicate', ownerUserId: alice.id,
+      provider: 'github', providerRepositoryId: '123', name: 'Duplicate', createdAt: stamp }), /UNIQUE constraint/)
+    await assert.rejects(() => data.insert('stories', { id: 'foreign-story', ownerUserId: bob.id,
+      repositoryId: 'repository', directory: 'bad', title: 'Bad', createdAt: stamp }), /FOREIGN KEY constraint/)
 
-    store.sqlite.prepare(`INSERT INTO studio_sessions
-      (id,owner_user_id,story_id,title,status,created_at,updated_at)
-      VALUES ('job',?,'story','Job','running',?,?)`).run(alice.id,stamp,stamp)
-    store.sqlite.prepare(`INSERT INTO story_conversations
-      (id,owner_user_id,story_id,title,created_at,updated_at)
-      VALUES ('conversation',?,'story','Conversation',?,?)`).run(alice.id,stamp,stamp)
-    store.sqlite.prepare(`INSERT INTO story_threads
-      (id,owner_user_id,conversation_id,title,activity_at,created_at)
-      VALUES ('thread',?,'conversation','Thread',?,?)`).run(alice.id,stamp,stamp)
-    assert.throws(() => store.sqlite.prepare(`INSERT INTO story_threads
-      (id,owner_user_id,conversation_id,parent_thread_id,title,activity_at,created_at)
-      VALUES ('self',?,'conversation','self','Broken',?,?)`).run(alice.id,stamp,stamp), /CHECK constraint/)
-    const message = store.sqlite.prepare(`INSERT INTO story_thread_messages
-      (id,owner_user_id,thread_id,sequence,role,status,body,phase,created_at)
-      VALUES (?,?,'thread',?,'user','queued','Hello','preparing',?)`)
-    message.run('one',alice.id,1,stamp)
-    assert.throws(() => message.run('two',alice.id,2,stamp), /UNIQUE constraint/)
-    store.sqlite.prepare(`INSERT INTO story_thread_messages
-      (id,owner_user_id,thread_id,sequence,role,status,body,phase,created_at)
-      VALUES ('assistant',?,'thread',2,'assistant','delivered','Reply','preparing',?)`).run(alice.id,stamp)
-    assert.throws(() => store.sqlite.prepare(`INSERT INTO generation_run_queue
-      (job_id,owner_user_id,intent,phase,created_at,updated_at)
-      VALUES ('job',?,'unknown','queued',?,?)`).run(alice.id,stamp,stamp), /CHECK constraint/)
+    await data.insert('studio_sessions', { id: 'job', ownerUserId: alice.id, storyId: 'story',
+      title: 'Job', status: 'running', createdAt: stamp, updatedAt: stamp })
+    await data.insert('story_conversations', { id: 'conversation', ownerUserId: alice.id,
+      storyId: 'story', title: 'Conversation', createdAt: stamp, updatedAt: stamp })
+    await data.insert('story_threads', { id: 'thread', ownerUserId: alice.id,
+      conversationId: 'conversation', title: 'Thread', activityAt: stamp, createdAt: stamp })
+    await assert.rejects(() => data.insert('story_threads', { id: 'self', ownerUserId: alice.id,
+      conversationId: 'conversation', parentThreadId: 'self', title: 'Broken',
+      activityAt: stamp, createdAt: stamp }), /CHECK constraint/)
 
-    store.sqlite.prepare(`INSERT INTO pi_credentials (owner_user_id,provider,ciphertext) VALUES (?,'openai','encrypted')`).run(alice.id)
-    assert.equal((store.sqlite.prepare(`SELECT revision FROM pi_credentials WHERE owner_user_id=?`).get(alice.id) as { revision: number }).revision, 1)
-    store.sqlite.prepare(`INSERT INTO thread_active_pi_turns
-      (job_id,pi_token,pi_session_id,work_item,created_at) VALUES ('job','token','session','work',?)`).run(stamp)
+    await data.insert('story_thread_messages', { id: 'one', ownerUserId: alice.id,
+      threadId: 'thread', sequence: 1, role: 'user', status: 'queued',
+      body: 'Hello', phase: 'preparing', createdAt: stamp })
+    await assert.rejects(() => data.insert('story_thread_messages', { id: 'two', ownerUserId: alice.id,
+      threadId: 'thread', sequence: 2, role: 'user', status: 'queued',
+      body: 'Hello', phase: 'preparing', createdAt: stamp }), /UNIQUE constraint/)
+    await data.insert('story_thread_messages', { id: 'assistant', ownerUserId: alice.id,
+      threadId: 'thread', sequence: 2, role: 'assistant', status: 'delivered',
+      body: 'Reply', phase: 'preparing', createdAt: stamp })
+    await assert.rejects(() => data.insert('generation_run_queue', { jobId: 'job', ownerUserId: alice.id,
+      intent: 'unknown', phase: 'queued', createdAt: stamp, updatedAt: stamp }), /CHECK constraint/)
+    await data.insert('pi_credentials', { ownerUserId: alice.id, provider: 'openai', ciphertext: 'encrypted' })
+    assert.equal((await data.first<{ revision: number }>('pi_credentials', { ownerUserId: alice.id }))?.revision, 1)
+    await data.insert('thread_active_pi_turns', { jobId: 'job', piToken: 'token',
+      piSessionId: 'session', workItem: 'work', createdAt: stamp })
 
-    store.sqlite.prepare("DELETE FROM repositories WHERE id='repository'").run()
-    for (const table of ['stories','studio_sessions','story_conversations','story_threads',
-      'story_thread_messages','thread_active_pi_turns']) {
-      assert.equal((store.sqlite.prepare(`SELECT count(*) AS total FROM ${table}`).get() as {total:number}).total,0, `cascade into ${table}`)
+    await data.delete('repositories', { id: 'repository' })
+    for (const table of ['stories', 'studio_sessions', 'story_conversations', 'story_threads',
+      'story_thread_messages', 'thread_active_pi_turns']) {
+      assert.equal(await data.count(table), 0, 'cascade into ' + table)
     }
-    assert.deepEqual(store.sqlite.pragma('foreign_key_check'), [])
-  } finally { store.sqlite.close() }
+    assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+  } finally { store.close() }
 })
 
 test('Studio web startup rejects pending migrations before initializing auth or touching application data', async () => {
@@ -114,44 +109,75 @@ test('Studio web startup rejects pending migrations before initializing auth or 
     assert.match(initial.stderr, /migrations are pending/)
     const store = openStudioDatabase(path)
     try {
-      assert.equal(store.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='__drizzle_migrations'").get(), undefined)
-      assert.equal(store.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user'").get(), undefined)
+      assert.equal((await store.testing.schema.hasMigrationJournal()), false)
+      assert.equal((await store.testing.schema.hasTable('user')), false)
       await migrateStudio(store, config)
-    } finally { store.sqlite.close() }
+    } finally { store.close() }
     const after = checkStartup()
     assert.equal(after.status, 1)
     assert.match(after.stderr, /BETTER_AUTH_URL/)
     assert.doesNotMatch(after.stderr, /migrations are pending/)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
 test('legacy Studio data and incompatible Drizzle histories are refused without rewriting databases', async () => {
   const legacy = openStudioDatabase(':memory:')
   try {
-    legacy.sqlite.exec('CREATE TABLE studio_schema_migrations (version integer primary key); INSERT INTO studio_schema_migrations (version) VALUES (27)')
+    ;(await legacy.testing.schema.createLegacyJournal(27))
     await assert.rejects(migrateStudio(legacy, config), /Incompatible legacy Studio database/)
-    assert.equal(legacy.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE name='user'").get(), undefined)
-    assert.equal((legacy.sqlite.prepare('SELECT version FROM studio_schema_migrations').get() as { version: number }).version, 27)
-  } finally { legacy.sqlite.close() }
+    assert.equal((await legacy.testing.schema.hasTable('user')), false)
+    assert.equal((await legacy.testing.schema.legacyVersion()), 27)
+  } finally { legacy.close() }
 
   const mismatched = openStudioDatabase(':memory:')
   try {
     await migrateStudio(mismatched, config)
-    mismatched.sqlite.exec("UPDATE __drizzle_migrations SET hash='wrong'")
+    ;(await mismatched.testing.schema.tamperMigrationHash('wrong'))
     assert.throws(() => assertStudioSchemaCurrent(mismatched), /incompatible/)
     await assert.rejects(migrateStudio(mismatched, config), /incompatible/)
-    assert.equal((mismatched.sqlite.prepare('SELECT hash FROM __drizzle_migrations').get() as { hash: string }).hash, 'wrong')
-  } finally { mismatched.sqlite.close() }
+    assert.equal((await mismatched.testing.schema.migrationHistory())[0]?.hash, 'wrong')
+  } finally { mismatched.close() }
 
   const drifted = openStudioDatabase(':memory:')
   try {
     await migrateStudio(drifted, config)
-    drifted.sqlite.exec('DROP INDEX story_thread_messages_one_preparing')
+    ;(await drifted.testing.schema.dropIndex('story_thread_messages_one_preparing'))
     assert.throws(() => assertStudioSchemaCurrent(drifted), /does not match its schema/)
-    assert.equal(drifted.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE name='story_thread_messages_one_preparing'").get(), undefined)
-    drifted.sqlite.exec('DROP TABLE rateLimit')
+    assert.equal((await drifted.testing.schema.definition('index', 'story_thread_messages_one_preparing')), undefined)
+    ;(await drifted.testing.schema.dropTable('rateLimit'))
     assert.throws(() => assertStudioSchemaCurrent(drifted), /Better Auth schema is incomplete/)
-  } finally { drifted.sqlite.close() }
+  } finally { drifted.close() }
+})
+
+test('runtime rejects type, nullability, default, foreign-key and CHECK drift with a valid migration journal', async () => {
+  const variants = [
+    ['repositories', '`name` text NOT NULL', '`name` integer NOT NULL'],
+    ['repositories', '`name` text NOT NULL', '`name` text'],
+    ['git_connections', '`revision` integer DEFAULT 1 NOT NULL', '`revision` integer DEFAULT 2 NOT NULL'],
+    ['repositories', 'FOREIGN KEY (`owner_user_id`) REFERENCES `user`(`id`)', 'FOREIGN KEY (`owner_user_id`) REFERENCES `account`(`id`)'],
+    ['repositories', "in ('github', 'gitlab')", "in ('github')"],
+  ] as const
+  for (const [table, original, replacement] of variants) {
+    const store = openStudioDatabase(':memory:')
+    try {
+      await migrateStudio(store, config)
+      assert.ok((await store.testing.schema.replaceTableFragment(table, original, replacement)),
+        table + ': original schema fragment missing')
+      assert.throws(() => assertStudioSchemaCurrent(store), /schema definition drift/, table)
+    } finally { store.close() }
+  }
+})
+
+test('runtime rejects altered index uniqueness and partial-index predicates', async () => {
+  for (const [index, original, replacement] of [
+    ['repositories_identity', 'CREATE UNIQUE INDEX', 'CREATE INDEX'],
+    ['story_thread_messages_one_preparing', "='preparing'", "='queued'"],
+  ] as const) {
+    const store = openStudioDatabase(':memory:')
+    try {
+      await migrateStudio(store, config)
+      assert.ok((await store.testing.schema.replaceIndexFragment(index, original, replacement)))
+      assert.throws(() => assertStudioSchemaCurrent(store), /schema definition drift/, index)
+    } finally { store.close() }
+  }
 })

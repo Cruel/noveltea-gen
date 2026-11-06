@@ -1,4 +1,4 @@
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { activePiTurn, type ActivePiTurn } from '../../../src/live-pi-registry'
 import { classifySteeringIntent } from './thread-steering-replan.server'
 
@@ -11,20 +11,20 @@ type Pending = {
 // dispatching receipt rather than replaying an ambiguous call.
 const sdkCalls = new Map<string, Set<Promise<void>>>()
 
-/** Synchronous cross-process turn ownership fence. The web process admits
- * against this SQLite snapshot, never an arbitrary later active specialist. */
-export function recordPiTurnLifecycle(store: StudioDatabase, turn: ActivePiTurn,
+/** Durable cross-process turn fence. Registration is awaited before the SDK
+ * exposes this turn to any queued steering dispatch. */
+export async function recordPiTurnLifecycle(store: StudioDatabase, turn: ActivePiTurn,
   phase: 'registered' | 'closed') {
   const db = store.persistence.steering
-  if (phase === 'registered') db.registerTurn(turn.jobId, turn.token, turn.session.sessionId,
+  if (phase === 'registered') await db.registerTurn(turn.jobId, turn.token, turn.session.sessionId,
     turn.workItem, turn.expectedHead ?? null, new Date().toISOString())
-  else db.closeTurn(turn.jobId, turn.token)
+  else await db.closeTurn(turn.jobId, turn.token)
 }
 
 /** On worker restart, old in-memory Pi turns cannot exist. Unsent messages
  * must be reconciled by the graph coordinator, never rebound to a new turn. */
-export function recoverOrphanedPiTurns(store: StudioDatabase) {
-  store.persistence.steering.recoverOrphaned()
+export async function recoverOrphanedPiTurns(store: StudioDatabase) {
+  await store.persistence.steering.recoverOrphaned()
 }
 const marker = (id: string) => 'THREAD_STEERING_MESSAGE_ID=' + id
 const boundedInstruction = (item: Pending) =>
@@ -44,19 +44,19 @@ const boundedInstruction = (item: Pending) =>
  * exclusive Story writer lease. This cannot start a Pi session or an agent
  * graph, and the model cannot choose the target session. */
 export async function dispatchPendingPiSteering(store: StudioDatabase) {
-  const pending = store.persistence.steering.dispatchable()
+  const pending = await store.persistence.steering.dispatchable()
   for (const item of pending) {
     const turn = activePiTurn(item.jobId)
     if (!turn) continue
-    const ownerTurn = store.persistence.steering.turn(item.jobId, turn.token)
+    const ownerTurn = await store.persistence.steering.turn(item.jobId, turn.token)
     if (!ownerTurn || ownerTurn.sessionId !== turn.session.sessionId) continue
-    const claimed = store.persistence.steering.claim(item, turn.token, turn.session.sessionId)
+    const claimed = await store.persistence.steering.claim(item, turn.token, turn.session.sessionId)
     if (!claimed) continue
     let attempted = false
     const call = (async () => {
       try {
         if (!turn.session.isStreaming || activePiTurn(item.jobId)?.token !== turn.token) {
-          store.persistence.steering.deferUnsent(item.id, turn.token)
+          await store.persistence.steering.deferUnsent(item.id, turn.token)
           return
         }
         // The SDK enforces the current tool/turn boundary. Its acceptance is
@@ -66,9 +66,9 @@ export async function dispatchPendingPiSteering(store: StudioDatabase) {
           ? await turn.session.steer(boundedInstruction(item))
           : await turn.session.followUp(boundedInstruction(item))
         if (result !== 'queued') throw new Error('SDK did not accept instruction')
-        store.persistence.steering.accepted(item.id, turn.token)
+        await store.persistence.steering.accepted(item.id, turn.token)
       } catch {
-        store.persistence.steering.blocked(item.id, item.owner, turn.token, attempted)
+        await store.persistence.steering.blocked(item.id, item.owner, turn.token, attempted)
       }
     })()
     const calls = sdkCalls.get(turn.token) ?? new Set<Promise<void>>()
@@ -88,7 +88,7 @@ export async function settlePiSteering(store: StudioDatabase, turn: ActivePiTurn
   // Settlement must not race an SDK call that was claimed immediately before
   // the specialist's last tool completed.
   await Promise.allSettled([...(sdkCalls.get(turn.token) ?? [])])
-  const rows = store.persistence.steering.settling(turn.jobId, turn.token)
+  const rows = await store.persistence.steering.settling(turn.jobId, turn.token)
   for (const row of rows) {
     const expected = boundedInstruction(row)
     const seen = turn.session.messages.some(message => {
@@ -99,29 +99,29 @@ export async function settlePiSteering(store: StudioDatabase, turn: ActivePiTurn
           .map(part => part.text).join('') === expected
     })
     const delivered = succeeded && seen && row.delivery === 'sdk-queued'
-    store.persistence.steering.settle(row, turn.token, delivered, turn.workItem,
+    await store.persistence.steering.settle(row, turn.token, delivered, turn.workItem,
       classifySteeringIntent(row.content, turn.workItem), new Date().toISOString())
   }
   // A pending instruction explicitly owned by this settled turn was never
   // sent. Keep it actionable for coordinator scope routing after the graph
   // settles, rather than delivering it to the next specialist session.
-  store.persistence.steering.deferTurn(turn.jobId, turn.token)
+  await store.persistence.steering.deferTurn(turn.jobId, turn.token)
 }
 
 /** Record a separately reviewed effect only when a verified source commit is
  * already saved and a non-Pi reviewer supplies explicit supporting evidence.
  * This is intentionally not exposed as a model tool or HTTP mutation. */
-export function recordIndependentSteeringReview(store: StudioDatabase, owner: string,
+export async function recordIndependentSteeringReview(store: StudioDatabase, owner: string,
   threadId: string, messageId: string, reviewer: string, evidence: string) {
   if (!reviewer.trim() || reviewer.length > 128 || !evidence.trim() || evidence.length > 2000)
     throw new Error('Independent effect review requires reviewer and evidence')
-  store.persistence.steering.review(owner, threadId, messageId,
+  await store.persistence.steering.review(owner, threadId, messageId,
     reviewer, evidence, new Date().toISOString())
 }
 
 /** When the original graph finishes, no late steering may leak into a new job.
  * Undelivered (not sent to SDK) messages remain ordinary next-run follow-ups.
  * Ambiguous SDK dispatches block instead of being sent a second time. */
-export function deferUndeliveredSteering(store: StudioDatabase, owner: string, jobId: string) {
-  store.persistence.steering.deferUndelivered(owner, jobId)
+export async function deferUndeliveredSteering(store: StudioDatabase, owner: string, jobId: string) {
+  await store.persistence.steering.deferUndelivered(owner, jobId)
 }

@@ -9,6 +9,7 @@ import { removeTestTree } from '../../test/helpers'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { openStudioDatabase } from './support/studio-database'
+import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, inspectRegisteredJob } from '../src/lib/fixture-jobs.server'
@@ -58,15 +59,12 @@ async function setup() {
   await migrateStudio(store, config)
   const owner = randomUUID(), stranger = randomUUID(), repoId = randomUUID(),
     storyId = randomUUID(), sourceId = randomUUID(), threadId = 'root:' + sourceId
-  for (const id of [owner,stranger]) store.sqlite.prepare(
-    'INSERT INTO user(id,name,email,emailVerified,createdAt,updatedAt) VALUES (?, ?, ?, 1, 0, 0)')
-    .run(id, 'Author', id + '@example.test')
-  store.sqlite.prepare(`INSERT INTO repositories
-    (id,owner_user_id,provider,provider_repository_id,name,created_at)
-    VALUES (?,?,'github','934','Fixture','now')`).run(repoId, owner)
-  store.sqlite.prepare(`INSERT INTO stories
-    (id,owner_user_id,repository_id,directory,title,created_at,source_commit_sha)
-    VALUES (?,?,?,'story','Protected Story','now',?)`).run(storyId, owner, repoId, sha)
+  const seed = studioSeed(store)
+  for (const id of [owner, stranger]) { await seed.user(id, 0) }
+  (await seed.repository({ id: repoId, ownerUserId: owner, provider: 'github',
+    providerRepositoryId: '934', name: 'Fixture', createdAt: 'now' }))
+  ;(await seed.story({ id: storyId, ownerUserId: owner, repositoryId: repoId,
+    directory: 'story', title: 'Protected Story', createdAt: 'now', sourceCommitSha: sha }))
   const source = await acquireCachedStory({
     cacheDirectory: process.env.NT_GIT_CACHE_DIR!, ownerId: owner,
     repositoryId: 'github:934', remoteUrl: 'file://' + remote, token: '',
@@ -74,16 +72,15 @@ async function setup() {
   })
   const request = { story: source.storyRoot, job: source.jobId,
     task: 'Explore the mystery', contract, fixture: true }
-  store.sqlite.prepare(`INSERT INTO studio_sessions
-    (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at,
-     generation_request_json,generation_thread_id,generation_config_json)
-    VALUES (?,?,?,'Parent',?,'completed','now','now',?,?,?)`)
-    .run(sourceId, owner, storyId, sha, JSON.stringify(request),
-      source.threadId + ':generation:web', JSON.stringify({
-        version: 1, headSha: sha, task: request.task, contract, limits: {}, model: null }))
-  store.sqlite.prepare(`INSERT INTO generation_run_queue
-    (job_id,owner_user_id,intent,phase,created_at,updated_at)
-    VALUES (?,?,'start','finished','now','now')`).run(sourceId, owner)
+  ;(await seed.job({ id: sourceId, ownerUserId: owner, storyId, title: 'Parent',
+    sourceCommitSha: sha, status: 'completed', createdAt: 'now', updatedAt: 'now',
+    generationRequestJson: JSON.stringify(request),
+    generationThreadId: source.threadId + ':generation:web',
+    generationConfigJson: JSON.stringify({
+      version: 1, headSha: sha, task: request.task, contract, limits: {}, model: null,
+    }) }))
+  ;(await seed.queue({ jobId: sourceId, ownerUserId: owner, intent: 'start',
+    phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
   ensureRootThreads(store, owner, storyId)
   await claimServerGeneration(source, source.threadId + ':generation:web', request)
   const graph = openWebGenerationGraph(join(source.stateDir, 'web-generation.sqlite'))
@@ -93,7 +90,7 @@ async function setup() {
     { status: 'completed' }, 'completion_decision')
   graph.saver.db.close()
   function cleanup() {
-    store.sqlite.close()
+    store.close()
     for (const [key,value] of Object.entries(oldEnv)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
@@ -126,8 +123,7 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       assert.deepEqual((await readThreadChat(f.store, f.owner, f.threadId)).runs.map(r => r.jobId), [f.sourceId])
       assert.equal(git(f.source.worktreeRoot, 'rev-parse', 'HEAD'), f.sha)
       assert.equal(git(f.source.worktreeRoot, 'status', '--porcelain'), '')
-      assert.equal((f.store.sqlite.prepare('SELECT COUNT(*) AS n FROM studio_sessions')
-        .get() as { n: number }).n, 1)
+      assert.equal((await f.store.testing.records.count('studio_sessions')), 1)
       await assert.rejects(() => recordProtectedThreadDecision(f.store, f.stranger, f.threadId,
         firstId, f.sourceId, plan, 'approved'), /queued|source|review|not found/i)
       const denied = await recordProtectedThreadDecision(f.store, f.owner, f.threadId,
@@ -204,7 +200,7 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
         ordinaryId, 'Make character.mara more assertive')
       assert.equal(ordinary.hasRevisionScope, 1,
         'nonprotected follow-up edits continue normally after the exact protected amendment')
-      assert.deepEqual(f.store.sqlite.pragma('foreign_key_check'), [])
+      assert.deepEqual((await f.store.testing.foreignKeyViolations()), [])
     } finally { f.cleanup() }
   })
 

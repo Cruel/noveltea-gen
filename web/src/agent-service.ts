@@ -1,8 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { StudioDatabase } from './db/connection'
-import { assertStudioSchemaCurrent } from './db/migrations'
+import type { StudioStore as StudioDatabase } from './persistence/store'
 import { authorizedStoryJob } from './lib/fixture-jobs.server'
 import { appendGenerationEvent } from './lib/generation-progress.server'
 import { claimNext, finishAttempt, fenceAbandonedRuns, queueRecord } from './lib/generation-queue.server'
@@ -40,7 +39,7 @@ export function pumpAgentQueue(store: StudioDatabase): Promise<void> {
     if (!initialized.has(store)) {
       // Never re-enter an unfinished writer from a previous server lifetime.
       await fenceAbandonedRuns(store)
-      recoverOrphanedPiTurns(store)
+      await recoverOrphanedPiTurns(store)
       initialized.add(store)
       // Crash-safe chat catch-up only; this never replays the writer.
       void recoverSettledThreadRuns(store).catch(() => {
@@ -82,9 +81,9 @@ export function pumpAgentQueue(store: StudioDatabase): Promise<void> {
 /** A private, explicitly authenticated application-to-agent command surface.
  * Neither browser requests nor arbitrary Agent Protocol commands reach here.
  * The job identity is resolved from the durable catalog, not caller paths. */
-export function createAgentCommandServer(store: StudioDatabase, secret: string): Server {
+export async function createAgentCommandServer(store: StudioDatabase, secret: string): Promise<Server> {
   if (secret.length < 32) throw new Error('NT_AGENT_RPC_TOKEN must contain at least 32 characters.')
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   return createServer(async (request, response) => {
     const send = (status: number, body: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
@@ -139,10 +138,10 @@ export function createAgentCommandServer(store: StudioDatabase, secret: string):
 }
 
 /** Polls independently of HTTP requests and browser sessions. */
-export function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
+export async function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
   if (!Number.isSafeInteger(intervalMs) || intervalMs < 10)
     throw new Error('Invalid agent polling interval.')
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   stopping = false
   observePiTurnSettlement((turn, succeeded) => settlePiSteering(store, turn, succeeded))
   observePiTurnLifecycle((turn, phase) => recordPiTurnLifecycle(store, turn, phase))
@@ -165,12 +164,12 @@ export function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
 
 export async function startAgentServer(store: StudioDatabase, secret: string,
   port = 7001, host = '0.0.0.0') {
-  const server = createAgentCommandServer(store, secret)
+  const server = await createAgentCommandServer(store, secret)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => { server.off('error', reject); resolve() })
   })
-  const stopQueue = startAgentQueue(store)
+  const stopQueue = await startAgentQueue(store)
   const address = server.address() as AddressInfo
   return {
     port: address.port,

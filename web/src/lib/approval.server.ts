@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, relative } from 'node:path'
 import type { StudioAuth } from './auth'
-import type { StudioDatabase } from '../db/connection'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { startStoryJob } from '../../../src/job'
 import { inspectTrustedApproval, requestTrustedApproval, recordTrustedControllerDecision } from '../../../src/trusted-approval'

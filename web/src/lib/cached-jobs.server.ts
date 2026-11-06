@@ -1,5 +1,4 @@
-import type { StudioDatabase } from '../db/connection'
-import { assertStudioSchemaCurrent } from '../db/migrations'
+import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { acquireCachedStory, GitCacheError, initializeStoryBranch } from './git-cache.server'
 import { ensureRootThreads } from './threads.server'
 
@@ -23,7 +22,7 @@ export async function prepareCachedJob(
   store: StudioDatabase, ownerId: string, token: string, provider: Provider, request: Request,
   verifySource: (row: CachedCatalogStory, commit: string, existingJob: boolean) => Promise<VerifiedSource>,
 ) {
-  assertStudioSchemaCurrent(store)
+  await store.assertReady()
   const input = await request.json().catch(() => null)
   const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
   if (typeof input?.storyId !== 'string' || !uuid.test(input.storyId) ||
