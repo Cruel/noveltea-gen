@@ -27,7 +27,8 @@ export function nextThreadSequenceSqlite(db: Db, threadId: string): number {
 function membership(db: Db, owner: string, threadId: string) {
   ownerRequired(owner)
   const row = db.select({
-    id: storyThreads.id, archivedAt: storyThreads.archivedAt,
+    id: storyThreads.id,
+    archivedAt: sql<string | null>`COALESCE(${storyThreads.deletedAt}, ${storyThreads.archivedAt})`,
     storyId: storyConversations.storyId,
   }).from(storyThreads).innerJoin(storyConversations, and(
     eq(storyConversations.id, storyThreads.conversationId),

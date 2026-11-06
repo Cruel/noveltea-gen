@@ -8,7 +8,8 @@ import { ThreadList } from '@/components/thread-list'
 import { ThreadChat } from '@/components/thread-chat'
 import { NaturalStoryComposer } from '@/components/natural-story-composer'
 import { storyNavigationQuery, storyNavigationKey } from '@/lib/threads.queries'
-import { addConversation, changeThreadArchive, setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
+import { addConversation, changeThreadArchive, deleteThreadResources,
+  setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
 import { selectNavigationThreads } from '@/lib/thread-navigation'
 import type { StoryThread } from '@/lib/threads.server'
 import { useJobEventStream } from '@/hooks/use-job-event-stream'
@@ -76,7 +77,10 @@ function StoryConversations() {
   const expandedIds = data?.preferences.expandedIds ?? []
   const visibleThreads = conversation ? selectNavigationThreads(conversation.threads,
     archivedView ? 'archived' : 'active') : []
-  const archivedCount = conversation?.threads.filter(thread => !!thread.archivedAt).length ?? 0
+  const archivedCount = conversation?.threads.filter(thread =>
+    !!thread.archivedAt && !thread.deletionCompleteAt).length ?? 0
+  const activeCount = conversation?.threads.filter(thread =>
+    !thread.archivedAt && (!thread.deletedAt || !thread.deletionCompleteAt)).length ?? 0
   const selectedThread = visibleThreads.find(thread => thread.id === selectedThreadId)
   const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds) => {
     setIssue(null)
@@ -91,6 +95,19 @@ function StoryConversations() {
       await changeThreadArchive({ data: { id: thread.id, archived: archive } })
       await refresh()
     } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Unable to change Thread archive') }
+    finally { setChangingArchive(null) }
+  }
+  const deleteExecution = async (thread: StoryThread) => {
+    if (!thread.deletedAt && !window.confirm(
+      'Permanently delete execution resources for "' + thread.title + '"?\\n\\n' +
+      'This removes its disposable Git branch, worktree and unreferenced private receipts. ' +
+      'Verified checkpoints will no longer be branchable. Archive is reversible; deletion is not.')) return
+    setChangingArchive(thread.id); setIssue(null)
+    try {
+      const outcome = await deleteThreadResources({ data: thread.id })
+      await refresh()
+      if (outcome.state === 'pending') setIssue(outcome.message)
+    } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Deletion was not completed; retry after inspection.') }
     finally { setChangingArchive(null) }
   }
   const rename = async (value: string) => {
@@ -176,7 +193,7 @@ function StoryConversations() {
               aria-current={!archivedView ? 'page' : undefined}
               className={'rounded-md px-3 py-1.5 no-underline hover:bg-muted ' +
                 (!archivedView ? 'bg-secondary text-foreground font-medium' : 'text-muted-foreground')}>
-              Active ({conversation.threads.length - archivedCount})
+              Active ({activeCount})
             </Link>
             <Link to="/stories/$storyId/conversations" params={{ storyId }}
               search={{ conversation: conversation.id, archived: true }}
@@ -211,6 +228,7 @@ function StoryConversations() {
             <ThreadList threads={visibleThreads} view={view} expandedIds={expandedIds}
               archivedView={archivedView} busyThreadId={changingArchive}
               onArchiveChange={(thread, archive) => void changeArchive(thread, archive)}
+              onDelete={(thread) => void deleteExecution(thread)}
               onExpand={id => void savePreferences(view,
                 expandedIds.includes(id) ? expandedIds.filter(item => item !== id) : [...expandedIds, id])}
               onRename={(thread: StoryThread) => setEditing({ kind: 'thread', id: thread.id })}

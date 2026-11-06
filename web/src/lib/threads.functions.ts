@@ -2,6 +2,7 @@ import { createServerFn } from '@tanstack/react-start'
 import { getRequestHeaders } from '@tanstack/react-start/server'
 import { auth, database } from './runtime.server'
 import { requireUser } from './access.server'
+import { deleteThread } from './thread-deletion.server'
 import {
   archiveThread, createConversation, listStoryConversations, renameConversation, renameThread,
   restoreThread, saveThreadPreferences,
@@ -64,6 +65,14 @@ export const changeThreadArchive = createServerFn({ method: 'POST' })
     else await restoreThread(database, owner, data.id)
     return { success: true }
   })
+
+/** Explicit, irreversible deletion: no client-controlled filesystem paths. */
+export const deleteThreadResources = createServerFn({ method: 'POST' })
+  .validator((id: string) => {
+    if (!isId(id)) throw new Error('Invalid Thread ID.')
+    return id
+  })
+  .handler(async ({ data }) => deleteThread(database, await ownerId(), data))
 
 export const setThreadPreferences = createServerFn({ method: 'POST' })
   .validator((data: { storyId: string; view: 'tree' | 'flat'; expandedIds: string[] }) => {

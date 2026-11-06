@@ -43,7 +43,13 @@ export function createSqliteContinuationPersistence(db: Db,
           .where(eq(cancellations.messageId, messages.id)),
       ))).orderBy(ordered, asc(messages.sequence)).limit(1).get() ?? null
   }
+  const requireLive = (owner: string, threadId: string) => {
+    const row = db.select({ deletedAt: threads.deletedAt }).from(threads)
+      .where(and(eq(threads.id, threadId), eq(threads.ownerUserId, owner))).get()
+    if (!row || row.deletedAt) throw new Error('This Thread was deleted during admission.')
+  }
   const verifyClaim = (data: ContinuationRequest, message: string) => {
+    requireLive(data.owner, data.threadId)
     const row = db.select({ phase: messages.phase, source: messages.sourceJobId })
       .from(messages).where(and(eq(messages.id, data.claim.id),
         eq(messages.ownerUserId, data.owner),
@@ -88,6 +94,7 @@ export function createSqliteContinuationPersistence(db: Db,
     claim(owner, threadId) {
       auth(owner)
       return db.transaction(() => {
+        requireLive(owner, threadId)
         const run = current(owner, threadId)
         if (!run || run.status !== 'completed' || run.queuePhase !== 'finished') return null
         if (db.select({ id: messages.id }).from(messages).where(and(

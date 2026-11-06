@@ -71,7 +71,7 @@ export function gitEnvironment(url: string, token: string): NodeJS.ProcessEnv {
   return env
 }
 
-async function withRepositoryLock<T>(root: string, action: () => Promise<T>): Promise<T> {
+export async function withRepositoryLock<T>(root: string, action: () => Promise<T>): Promise<T> {
   await mkdir(root, { recursive: true, mode: 0o700 })
   const lock = join(root, '.acquire-lock')
   for (let attempt = 0; ; attempt++) {

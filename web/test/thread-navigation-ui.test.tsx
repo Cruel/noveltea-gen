@@ -90,3 +90,24 @@ test('archive navigation shows only active Threads by default and retains an arc
   assert.match(activeAfterParentArchive, /Parent archived/)
   assert.doesNotMatch(activeAfterParentArchive, /parent-job/)
 })
+
+test('deleted parent remains a noninteractive lineage placeholder but a deleted leaf is hidden', () => {
+  const parent = thread('parent', null, 'deleted', '2026-11-01T00:00:00Z')
+  parent.deletedAt = '2026-11-05T00:00:00Z'
+  parent.deletionCompleteAt = '2026-11-05T01:00:00Z'
+  parent.jobId = null
+  const child = thread('child', parent.id, 'completed', '2026-11-06T00:00:00Z')
+  const threads = selectNavigationThreads([parent, child], 'active')
+  assert.deepEqual(threads.map(item => item.id), ['parent', 'child'])
+  const view = renderToStaticMarkup(createElement(ThreadList, {
+    threads, view: 'tree', expandedIds: [], onExpand: () => {},
+    onRename: () => {}, onArchiveChange: () => {}, onDelete: () => {},
+  }))
+  assert.match(view, /Deleted ancestor/)
+  assert.match(view, /child-job/)
+  assert.doesNotMatch(view, /parent-job/)
+  assert.doesNotMatch(view, /Permanently delete Thread parent/)
+  assert.doesNotMatch(view, /Rename Thread parent/)
+  assert.match(view, /Permanently delete Thread child/)
+  assert.deepEqual(selectNavigationThreads([parent], 'active'), [])
+})

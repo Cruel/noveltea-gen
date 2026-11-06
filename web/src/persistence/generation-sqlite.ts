@@ -1,8 +1,8 @@
-import { and, asc, count, desc, eq, exists, gt, lt, ne, isNull, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, exists, gt, lt, ne, isNotNull, isNull, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { generationRunQueue as runs, generationEvents as events, sessions, stories,
-  repositories, storyThreadRuns } from '../db/schema'
+  repositories, storyThreadRuns, storyThreads } from '../db/schema'
 import type { GenerationPersistence, GenerationProgress, GenerationQueueStore,
   QueueIntent, QueueRecord } from './generation-contracts'
 
@@ -11,6 +11,15 @@ function assertOwner(owner: string) {
   if (!owner) throw new Error('Authenticated owner is required')
 }
 const changed = (result: { changes: number }) => result.changes === 1
+function assertNotDeleted(db: StudioDrizzle, owner: string, jobId: string) {
+  const blocked = db.select({ id: storyThreads.id }).from(storyThreadRuns)
+    .innerJoin(storyThreads, and(eq(storyThreadRuns.threadId, storyThreads.id),
+      eq(storyThreadRuns.ownerUserId, storyThreads.ownerUserId)))
+    .where(and(eq(storyThreadRuns.jobId, jobId), eq(storyThreadRuns.ownerUserId, owner),
+      isNotNull(storyThreads.deletedAt))).get()
+  if (blocked) throw new Error('Deleted Thread cannot start or resume generation.')
+}
+
 const queueFields = {
   jobId: runs.jobId, ownerId: runs.ownerUserId, intent: runs.intent,
   phase: runs.phase, workerId: runs.workerId, sequence: runs.sequence,
@@ -33,6 +42,7 @@ export function enqueueGenerationSqlite(db: StudioDrizzle, owner: string,
   now: string, requestJson?: string, threadId?: string): void {
   assertOwner(owner)
   db.transaction(tx => {
+    assertNotDeleted(tx, owner, jobId)
     const row = tx.select(stateFields).from(sessions).where(and(
       eq(sessions.id, jobId), eq(sessions.ownerUserId, owner))).get()
     if (!row || row.status !== 'paused' ||
@@ -122,6 +132,7 @@ export function createSqliteGenerationPersistence(db: StudioDrizzle): Generation
       // The queue change and paused-session reconciliation must commit as one
       // transaction. A stale worker claim cannot be silently converted to retry.
       db.transaction(tx => {
+        assertNotDeleted(tx, owner, jobId)
         const live = tx.select(stateFields).from(sessions).where(and(
           eq(sessions.id, jobId), eq(sessions.ownerUserId, owner))).get()
         if (!live || live.status !== saved.status ||

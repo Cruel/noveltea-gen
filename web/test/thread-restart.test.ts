@@ -15,6 +15,7 @@ import { selectedJob, restoreJob, inspectRegisteredJob, generationJobRequest } f
 import { generationConfigurationRequest } from '../src/lib/generation-config.server'
 import { ensureRootThreads, listStoryConversations } from '../src/lib/threads.server'
 import { threadRestartRequest, type Upstream } from '../src/lib/thread-restart.server'
+import { deleteThread } from '../src/lib/thread-deletion.server'
 import { initialStoryDocument } from '../src/lib/git-cache.server'
 
 const config = { baseURL: 'http://localhost:3000',
@@ -165,6 +166,32 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     assert.equal((await f.send(f.threadId, 'POST', { ...selected, childId: randomUUID() }, '')).status, 401)
     assert.equal(git(f.parent.worktreeRoot, 'status', '--porcelain'), before)
     assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
+  } finally { f.cleanup() }
+})
+
+test('surviving child can restart at original pinned SHA after its root Thread was permanently deleted', async () => {
+  const f = await setup()
+  try {
+    const first = { childId: randomUUID(), sourceJobId: f.sourceId, originalSha: f.original,
+      selectedSha: f.original, mode: 'original', targetBranch: null }
+    const prepared = await f.send(f.threadId, 'POST', first)
+    assert.equal(prepared.status, 200, JSON.stringify(prepared.body))
+    const childThread = 'restart:' + first.childId
+    await f.db.testing.records.update('studio_sessions', { id: f.sourceId }, { status: 'completed' })
+    const deleted = await deleteThread(f.db, f.owner.id, f.threadId)
+    assert.equal(deleted.state, 'complete')
+    assert.equal(existsSync(f.parent.worktreeRoot), false)
+    assert.equal(existsSync(f.parent.stateDir), true)
+    assert.equal((await f.send(f.threadId, 'GET')).status, 410)
+    const preview = await f.send(childThread, 'GET')
+    assert.equal(preview.status, 200, JSON.stringify(preview.body))
+    assert.equal(preview.body.originalSha, f.original)
+    const next = { childId: randomUUID(), sourceJobId: first.childId, originalSha: f.original,
+      selectedSha: f.original, mode: 'original', targetBranch: null }
+    const restarted = await f.send(childThread, 'POST', next)
+    assert.equal(restarted.status, 200, JSON.stringify(restarted.body))
+    assert.equal((await restoreJob(await selectedJob(f.db, f.owner.id, next.childId), f.owner.id)).baseSha, f.original)
+    assert.deepEqual(await f.db.testing.foreignKeyViolations(), [])
   } finally { f.cleanup() }
 })
 

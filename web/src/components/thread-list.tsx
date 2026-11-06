@@ -1,4 +1,4 @@
-import { AlertCircle, Archive, ArchiveRestore, CheckCircle2, ChevronDown, ChevronRight, Clock3, GitBranch, LoaderCircle, Pencil } from 'lucide-react'
+import { AlertCircle, Archive, ArchiveRestore, CheckCircle2, ChevronDown, ChevronRight, Clock3, GitBranch, LoaderCircle, Pencil, Trash2 } from 'lucide-react'
 import { orderThreads } from '@/lib/thread-navigation'
 import { ThreadExecutionTimeline } from '@/components/thread-execution-timeline'
 import { ThreadRestartControl } from '@/components/thread-restart-control'
@@ -8,9 +8,12 @@ const statusText = (status: StoryThread['status']) => ({
   'needs-author': 'Needs author', 'prepared': 'Prepared', 'queued': 'Queued',
   'running': 'Running', 'paused': 'Paused', 'blocked': 'Blocked',
   'completed': 'Completed', 'cancelled': 'Cancelled', 'archived': 'Archived',
+  'deleting': 'Deletion pending', 'deleted': 'Deleted ancestor',
 })[status]
 
 function StatusIcon({ status }: { status: StoryThread['status'] }) {
+  if (status === 'deleted' || status === 'deleting')
+    return <Trash2 aria-hidden="true" className="size-3" />
   if (status === 'archived') return <Archive aria-hidden="true" className="size-3" />
   if (status === 'running') return <LoaderCircle aria-hidden="true"
     className="size-3 animate-spin motion-reduce:animate-none" />
@@ -23,11 +26,12 @@ function StatusIcon({ status }: { status: StoryThread['status'] }) {
 }
 
 export function ThreadList({ threads, view, expandedIds, archivedView = false,
-  busyThreadId, onExpand, onRename, onArchiveChange, onOpen }: {
+  busyThreadId, onExpand, onRename, onArchiveChange, onDelete, onOpen }: {
   threads: StoryThread[]; view: 'tree' | 'flat'; expandedIds: string[]
   archivedView?: boolean; busyThreadId?: string | null
   onExpand: (id: string) => void; onRename: (thread: StoryThread) => void
   onArchiveChange: (thread: StoryThread, archived: boolean) => void
+  onDelete?: (thread: StoryThread) => void
   onOpen?: (thread: StoryThread) => void
 }) {
   const rows = orderThreads(threads, view)
@@ -36,7 +40,8 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
   const hasChildren = new Set(threads.map(thread => thread.parentThreadId).filter(Boolean))
   // A dedicated archive view always reveals the full context chain: archived
   // descendants must never be hidden by the active view's collapse preference.
-  const expanded = archivedView ? new Set(threads.map(thread => thread.id)) : new Set(expandedIds)
+  const expanded = archivedView ? new Set(threads.map(thread => thread.id)) :
+    new Set([...expandedIds, ...threads.filter(thread => !!thread.deletedAt).map(thread => thread.id)])
   const visible = rows.filter(thread => {
     if (view === 'flat') return true
     let parent = thread.parentThreadId
@@ -68,7 +73,7 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
             </button>
           : <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
         <div className="min-w-0 flex-1">
-          {onOpen ? <button type="button" onClick={() => onOpen(thread)}
+          {onOpen && !thread.deletedAt ? <button type="button" onClick={() => onOpen(thread)}
             className="block max-w-full truncate text-left text-sm font-medium hover:underline"
             title={'Open chat for ' + thread.title}>{thread.title}</button>
             : thread.jobId ? <a href={'/jobs/' + encodeURIComponent(thread.jobId)}
@@ -87,11 +92,11 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
               {thread.activityAt.slice(0, 10)}</time>
           </div>
         </div>
-        {thread.jobId && <ThreadRestartControl threadId={thread.id} />}
-        <button type="button" title={'Rename ' + thread.title} aria-label={'Rename Thread ' + thread.title}
+        {thread.jobId && !thread.deletedAt && <ThreadRestartControl threadId={thread.id} />}
+        {!thread.deletedAt && <button type="button" title={'Rename ' + thread.title} aria-label={'Rename Thread ' + thread.title}
           className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2"
-          onClick={() => onRename(thread)}><Pencil className="size-3.5" /></button>
-        {(!archivedView || thread.archivedAt) && <button type="button"
+          onClick={() => onRename(thread)}><Pencil className="size-3.5" /></button>}
+        {!thread.deletedAt && (!archivedView || thread.archivedAt) && <button type="button"
           title={(thread.archivedAt ? 'Restore ' : 'Archive ') + thread.title}
           aria-label={(thread.archivedAt ? 'Restore Thread ' : 'Archive Thread ') + thread.title}
           disabled={busyThreadId === thread.id}
@@ -99,8 +104,14 @@ export function ThreadList({ threads, view, expandedIds, archivedView = false,
           onClick={() => onArchiveChange(thread, !thread.archivedAt)}>
           {thread.archivedAt ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
         </button>}
+        {onDelete && (!thread.deletedAt || !thread.deletionCompleteAt) && <button type="button"
+          title={thread.deletedAt ? 'Retry Thread cleanup' : 'Permanently delete Thread'}
+          aria-label={(thread.deletedAt ? 'Retry deletion of ' : 'Permanently delete Thread ') + thread.title}
+          disabled={busyThreadId === thread.id}
+          className="rounded p-1 text-destructive hover:bg-muted focus-visible:outline-2 disabled:opacity-50"
+          onClick={() => onDelete(thread)}><Trash2 className="size-3.5" /></button>}
       </div>
-      {thread.jobId && <ThreadExecutionTimeline jobId={thread.jobId} />}
+      {thread.jobId && !thread.deletedAt && <ThreadExecutionTimeline jobId={thread.jobId} />}
     </li>)}
   </ul>
 }

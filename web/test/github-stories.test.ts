@@ -164,12 +164,13 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     const base = { repositoryId: repoId, directory: 'sample-story', commit }
     // Browsing may work without Studio migrations, but importing must fail
     // closed instead of reporting an upstream GitHub error or changing the DB.
-    const baseline = (await store.testing.schema.migrationHistory())[0]!
+    const migrations = await store.testing.schema.migrationHistory()
     ;(await store.testing.schema.removeMigrationHistory())
     const outdated = await post(base)
     assert.equal(outdated.status, 503)
     assert.match((await outdated.json()).error, /migrations are pending/i)
-    ;(await store.testing.schema.appendMigration(baseline.hash, baseline.createdAt))
+    for (const migration of migrations)
+      await store.testing.schema.appendMigration(migration.hash, migration.createdAt)
     // Restore exact DDL with a savepoint: DROP + ADD changes the generated schema.
     ;(await store.testing.schema.beginTemporaryColumnDrop('stories', 'source_commit_sha'))
     const inconsistent = await post(base)

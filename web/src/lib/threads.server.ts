@@ -4,10 +4,11 @@ import type { NavigationThreadRecord } from '../persistence/conversation-contrac
 import { compareActivity, latestActivity } from './thread-navigation'
 
 export type ThreadStatus = 'prepared' | 'queued' | 'running' | 'paused' | 'needs-author' |
-  'blocked' | 'completed' | 'cancelled' | 'archived'
+  'blocked' | 'completed' | 'cancelled' | 'archived' | 'deleting' | 'deleted'
 export type StoryThread = {
   id: string; conversationId: string; parentThreadId: string | null; title: string
   activityAt: string; createdAt: string; archivedAt: string | null
+  deletedAt?: string | null; deletionCompleteAt?: string | null
   status: ThreadStatus; currentWork: string | null; jobId: string | null
 }
 export type StoryConversation = {
@@ -45,6 +46,7 @@ export async function ensureRootThreads(store: StudioDatabase, owner: string, st
 
 type ThreadRow = NavigationThreadRecord
 function threadStatus(row: ThreadRow): ThreadStatus {
+  if (row.deletedAt) return row.deletionCompleteAt ? 'deleted' : 'deleting'
   if (row.archivedAt) return 'archived'
   if (row.queuePhase === 'queued') return 'queued'
   if (row.queuePhase === 'running') return 'running'
@@ -74,8 +76,9 @@ export async function listStoryConversations(store: StudioDatabase, owner: strin
     const threads = grouped.get(row.conversationId) ?? []
     threads.push({ id: row.id, conversationId: row.conversationId,
       parentThreadId: row.parentThreadId, title: row.title, activityAt,
-      createdAt: row.createdAt, archivedAt: row.archivedAt, status,
-      currentWork: work, jobId: row.jobId })
+      createdAt: row.createdAt, archivedAt: row.archivedAt,
+      deletedAt: row.deletedAt, deletionCompleteAt: row.deletionCompleteAt, status,
+      currentWork: work, jobId: row.deletedAt ? null : row.jobId })
     grouped.set(row.conversationId, threads)
   }
   const conversations = rows.map(row => {

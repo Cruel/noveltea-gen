@@ -40,9 +40,16 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
       const history = (await store.testing.schema.migrationHistory())
-      assert.equal(history.length, 1, 'Fresh Studio database has one generated Drizzle baseline')
-      assert.match(history[0]!.hash, /^[a-f0-9]{64}$/)
-      assert.ok(history[0]!.createdAt > 0)
+      assert.equal(history.length, 2, 'Studio requires the generated baseline and Thread deletion migration')
+      for (const migration of history) {
+        assert.match(migration.hash, /^[a-f0-9]{64}$/)
+        assert.ok(migration.createdAt > 0)
+      }
+      for (const column of ['deleted_at', 'deletion_complete_at',
+        'deletion_plan_json', 'deletion_bytes']) {
+        assert.ok((await store.testing.schema.columns('story_threads')).includes(column),
+          'Missing Thread deletion column ' + column)
+      }
       for (const column of ['source_thread_id', 'proof_digest', 'guidance', 'history_json', 'edited_message_id', 'edited_body']) {
         assert.ok((await store.testing.schema.columns('checkpoint_forks')).includes(column), 'Missing fork column ' + column)
       }
@@ -102,7 +109,7 @@ test('migration CLI loads the Vite development environment including local overr
     assert.equal(existsSync(ignoredPath), false, 'Base .env DB path unexpectedly won')
     const store = openStudioDatabase(databasePath)
     try {
-      assert.equal((await store.testing.schema.migrationHistory()).length, 1)
+      assert.equal((await store.testing.schema.migrationHistory()).length, 2)
     } finally { store.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

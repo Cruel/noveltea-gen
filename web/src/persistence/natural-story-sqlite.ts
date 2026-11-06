@@ -52,6 +52,7 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
         const row = tx.select({
           conversationId: storyThreads.conversationId,
           parentId: storyThreads.parentThreadId,
+          deletedAt: storyThreads.deletedAt,
         }).from(storyThreads).innerJoin(storyThreadRuns, and(
           eq(storyThreadRuns.threadId, storyThreads.id),
           eq(storyThreadRuns.ownerUserId, storyThreads.ownerUserId),
@@ -61,7 +62,7 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
         )).where(and(eq(storyThreads.id, threadId),
           eq(storyThreads.ownerUserId, owner), eq(storyThreadRuns.jobId, jobId),
           eq(storyThreadRuns.runOrder, 0), eq(sessions.storyId, member.storyId))).get()
-        if (!row || row.parentId ||
+        if (!row || row.deletedAt || row.parentId ||
             (row.conversationId !== conversationId && row.conversationId !== 'legacy:' + jobId))
           throw new Error('Generation job already belongs to another Thread or Conversation.')
         tx.update(storyThreads).set({

@@ -13,16 +13,33 @@ export function latestActivity(values: readonly string[]): string {
  * (including active ancestors for context) without altering the stored tree. */
 export function selectNavigationThreads<T extends {
   id: string; parentThreadId: string | null; archivedAt: string | null
+  deletedAt?: string | null; deletionCompleteAt?: string | null
 }>(threads: readonly T[], view: 'active' | 'archived'): T[] {
-  if (view === 'active') return threads.filter(thread => !thread.archivedAt)
   const byId = new Map(threads.map(thread => [thread.id, thread]))
   const visible = new Set<string>()
   for (const thread of threads) {
-    if (!thread.archivedAt) continue
-    let current: T | undefined = thread
-    while (current && !visible.has(current.id)) {
-      visible.add(current.id)
-      current = current.parentThreadId ? byId.get(current.parentThreadId) : undefined
+    const included = view === 'active'
+      ? !thread.archivedAt && (!thread.deletedAt || !thread.deletionCompleteAt)
+      : !!thread.archivedAt && !thread.deletionCompleteAt
+    if (!included) continue
+    visible.add(thread.id)
+    if (view === 'active' && !thread.deletedAt) {
+      // Archived parents stay hidden, but a deleted parent must remain a
+      // minimal lineage placeholder while its live descendant is visible.
+      let parent = thread.parentThreadId ? byId.get(thread.parentThreadId) : undefined
+      const seen = new Set([thread.id])
+      while (parent?.deletedAt && !seen.has(parent.id)) {
+        visible.add(parent.id)
+        seen.add(parent.id)
+        parent = parent.parentThreadId ? byId.get(parent.parentThreadId) : undefined
+      }
+    }
+    if (view === 'archived') {
+      let parent = thread.parentThreadId ? byId.get(thread.parentThreadId) : undefined
+      while (parent && !visible.has(parent.id)) {
+        visible.add(parent.id)
+        parent = parent.parentThreadId ? byId.get(parent.parentThreadId) : undefined
+      }
     }
   }
   return threads.filter(thread => visible.has(thread.id))

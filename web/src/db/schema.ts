@@ -173,6 +173,10 @@ export const storyThreads = sqliteTable('story_threads', {
   title: text('title').notNull(),
   activityAt: text('activity_at').notNull(),
   archivedAt: text('archived_at'),
+  deletedAt: text('deleted_at'),
+  deletionCompleteAt: text('deletion_complete_at'),
+  deletionPlanJson: text('deletion_plan_json'),
+  deletionBytes: integer('deletion_bytes'),
   createdAt: text('created_at').notNull(),
 }, table => [
   foreignKey({ columns: [table.conversationId, table.ownerUserId],

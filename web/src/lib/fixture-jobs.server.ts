@@ -30,6 +30,8 @@ export async function selectedJob(store: StudioDatabase, owner: string, id: stri
   if (!UUID.test(id)) throw new JobError(400, 'Invalid job ID.')
   const row = await store.persistence.generation.jobs.selected(owner, id) ?? undefined
   if (!row) throw new JobError(404, 'Job is not connected to this account.')
+  if (await store.persistence.conversations.deletedJob(owner, id))
+    throw new JobError(410, 'This Thread was permanently deleted; its checkpoints cannot be reused.')
   if (!row.commitSha || !SHA.test(row.commitSha) || !['github', 'gitlab'].includes(row.provider) ||
       (row.requestJson === null) !== (row.threadId === null)) {
     throw new JobError(409, 'Saved job metadata is incomplete or inconsistent. Operator inspection required.')

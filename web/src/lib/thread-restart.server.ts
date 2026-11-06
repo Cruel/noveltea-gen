@@ -51,12 +51,17 @@ async function sourceFor(store: StudioDatabase, owner: string, threadId: string)
   const member = await store.persistence.advancedThreads.identity(owner, threadId)
   if (!member || member.conversation !== root.conversation || member.story !== root.story)
     throw new ThreadRestartError(409, 'Thread belongs to a different Story or Conversation.')
+  if ((await store.persistence.conversations.deletion(owner, threadId))?.deletedAt)
+    throw new ThreadRestartError(410, 'A permanently deleted Thread cannot be restarted.')
   const latest = await store.persistence.advancedThreads.run(owner, threadId, 'last')
   const first = await store.persistence.advancedThreads.run(owner, root.id, 'first')
   if (!first || !latest) throw new ThreadRestartError(409, 'Thread has no pinned generation run.')
-  const original = await selectedJob(store, owner, first.jobId)
+  // The original root may be a deleted ancestor. Its owner-scoped metadata
+  // stays as immutable provenance, but its old worktree is not recoverable.
+  // Never use that historical row to authorize a writer or restore its job.
+  const original = await store.persistence.generation.jobs.selected(owner, first.jobId)
   const current = await selectedJob(store, owner, latest.jobId)
-  if (original.storyId !== member.story || current.storyId !== member.story)
+  if (!original || original.storyId !== member.story || current.storyId !== member.story)
     throw new ThreadRestartError(409, 'Run Story identity differs.')
   if (!original.commitSha || !SHA.test(original.commitSha))
     throw new ThreadRestartError(409, 'Original Story SHA is missing.')
@@ -250,10 +255,13 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
   }
   if (input.sourceJobId !== source.sourceJobId || input.originalSha !== source.originalSha)
     throw new ThreadRestartError(409, 'Source Thread or original Story revision changed. Refresh before restarting.')
-  // Verify that both saved execution identities remain recoverable. Do not
-  // acquire a writer lock or touch either source worktree.
-  await restoreJob(await selectedJob(store, actor.id, source.sourceJobId), actor.id)
-  const original = await restoreJob(await selectedJob(store, actor.id, source.rootJobId), actor.id)
+  // Only the selected surviving Thread needs a live worktree. The original
+  // ancestor may have been permanently deleted: its pinned source SHA and
+  // authored request remain owner-scoped historical catalog metadata, while
+  // the child's independent Git repository supplies the original commit.
+  const currentJob = await restoreJob(await selectedJob(store, actor.id, source.sourceJobId), actor.id)
+  const original = await store.persistence.conversations.deletedJob(actor.id, source.rootJobId)
+    ? currentJob : await restoreJob(await selectedJob(store, actor.id, source.rootJobId), actor.id)
   const currentDraft: GenerationDraft = { version: 1, headSha: input.selectedSha,
     task: source.task, contract: source.contract, model: source.model, limits: source.limits }
   let upstream: Upstream | null = null

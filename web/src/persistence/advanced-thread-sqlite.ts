@@ -54,6 +54,11 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
     }
     throw new Error('Thread ancestry is too deep.')
   }
+  const requireNotDeleted = (owner: string, id: string) => {
+    const row = db.select({ deletedAt: threads.deletedAt }).from(threads)
+      .where(and(eq(threads.id, id), eq(threads.ownerUserId, owner))).get()
+    if (!row || row.deletedAt) conflict('Source Thread is deleted or no longer accessible.')
+  }
   const forkIntent = (id: string): ForkIntent | null =>
     db.select(forkFields).from(forks).where(eq(forks.childId, id)).get() ?? null
   const restartIntent = (id: string): RestartIntent | null =>
@@ -159,6 +164,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
           .from(sessions).where(and(eq(sessions.id, data.sourceJobId),
             eq(sessions.ownerUserId, data.owner))).get()
         const parent = identity(data.owner, data.sourceThreadId)
+        requireNotDeleted(data.owner, data.sourceThreadId)
         if (!source || source.sha !== data.sourceBaseSha ||
             !parent || parent.story !== source.storyId)
           conflict('Checkpoint source Story, owner, or pinned baseline changed.')
@@ -190,6 +196,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
         if (jobClaimed(data.childId) || forkIntent(data.childId))
           conflict('Child ID is already assigned to another operation.')
         const parent = identity(data.owner, data.sourceThread)
+        requireNotDeleted(data.owner, data.sourceThread)
         const current = db.select({ storyId: sessions.storyId }).from(sessions).where(and(
           eq(sessions.id, data.sourceJob), eq(sessions.ownerUserId, data.owner))).get()
         const original = db.select({ storyId: sessions.storyId, sha: sessions.sourceCommitSha })
@@ -235,6 +242,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
       requireOwner(data.owner)
       return db.transaction(() => {
         const parent = identity(data.owner, data.parentThreadId)
+        requireNotDeleted(data.owner, data.parentThreadId)
         if (!parent || parent.story !== data.storyId || parent.conversation !== data.conversationId)
           conflict('Child parent Story or Conversation identity changed.')
         const current = db.select({ storyId: sessions.storyId, owner: sessions.ownerUserId,
