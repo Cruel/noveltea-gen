@@ -14,6 +14,14 @@ import { withRepositoryLock } from './git-cache.server'
 import { snapshotJobUsage, type RunUsageSnapshot } from './thread-usage.server'
 
 type Resource = { job: JobStartResult; head: string; bytes: number }
+/** Only immutable Story provenance survives a deleted ancestor. Never retain
+ * session transcripts, LangGraph databases, credentials or mutable controls. */
+const ancestryEvidence = new Set([
+  'job.json', 'foundation.json', 'architecture.json', 'character-world.json',
+  'narrative-review.json', 'recovery-fork.json', 'recovery-fork-ready',
+  'recovery-checkpoints', 'revisions', 'event-items', 'interactive-items',
+  'composition-items', 'focused-items',
+])
 type Plan = { version: 1; threadId: string; owner: string; resources: Resource[];
   preserveReceipts: boolean; bytes: number;
   usageSummaries: Record<string, RunUsageSnapshot> }
@@ -55,6 +63,17 @@ async function bytesOnDisk(path: string): Promise<number> {
   let size = entry.size
   for (const name of await readdir(path)) size += await bytesOnDisk(join(path, name))
   return size
+}
+
+async function reclaimedStateBytes(path: string, preserveEvidence: boolean): Promise<number> {
+  if (!preserveEvidence) return bytesOnDisk(path)
+  if (!existsSync(path)) return 0
+  let bytes = 0
+  for (const name of await readdir(path)) {
+    const size = await bytesOnDisk(join(path, name))
+    if (!ancestryEvidence.has(name)) bytes += size
+  }
+  return bytes
 }
 
 function verifyPlan(plan: Plan, owner: string, threadId: string) {
@@ -146,11 +165,24 @@ async function removeResource(resource: Resource, preserveReceipts: boolean): Pr
   // update-ref uses the captured object ID as a compare-and-delete guard.
   // Never run gc: descendants and external refs may still own shared objects.
   if (ref) git(base, 'update-ref', '-d', branch, head)
-  if (!preserveReceipts && statePresent) {
+  if (statePresent) {
     const names = await readdir(job.stateDir)
     if (names.some(name => name.startsWith('.story-') || name === '.control-update'))
       throw new Error('Job lock reappeared before state cleanup.')
-    await rm(job.stateDir, { recursive: true })
+    if (!preserveReceipts) await rm(job.stateDir, { recursive: true })
+    else {
+      for (const name of names) {
+        const path = join(job.stateDir, name)
+        if (ancestryEvidence.has(name)) {
+          // A retained receipt must not become a symlink after reservation.
+          await bytesOnDisk(path)
+        } else {
+          if ((await lstat(path)).isSymbolicLink())
+            throw new Error('Unexpected symlink in deletion resource.')
+          await rm(path, { recursive: true })
+        }
+      }
+    }
   }
 }
 
@@ -196,7 +228,7 @@ export async function deleteThread(store: StudioStore, owner: string, threadId: 
       usageSummaries[run.id] = await snapshotJobUsage(row, job)
       resources.push({ job, head: job.headSha,
         bytes: await bytesOnDisk(job.worktreeRoot) +
-          (record.children ? 0 : await bytesOnDisk(job.stateDir)) })
+          await reclaimedStateBytes(job.stateDir, record.children > 0) })
     }
     if (requestedStop) return { state: 'pending',
       message: 'Cancellation requested. Retry deletion after the active writer reaches a safe boundary.' }

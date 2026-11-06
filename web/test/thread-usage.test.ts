@@ -13,7 +13,7 @@ import { configurePiPolicy, guardPiBudget, inspectPiPolicy, PiBudgetPause } from
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
-import { inspectStoryUsage, aggregateUsage } from '../src/lib/thread-usage.server'
+import { inspectStoryUsage, aggregateUsage, snapshotJobUsage } from '../src/lib/thread-usage.server'
 import { deleteThread } from '../src/lib/thread-deletion.server'
 import { archiveThread } from '../src/lib/threads.server'
 import type { RunUsage } from '../src/lib/thread-usage.server'
@@ -148,6 +148,23 @@ test('run budgets are independent; Story, Thread and deleted-history usage survi
     if (previousState === undefined) delete process.env.NT_STATE_DIR
     else process.env.NT_STATE_DIR = previousState
     rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('missing Pi budget evidence is unknown, not a confirmed zero-cost run', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'nt-missing-usage-'))
+  try {
+    const job = { stateDir: root } as JobStartResult
+    const real = await snapshotJobUsage({ requestJson: JSON.stringify({ fixture: false }) }, job)
+    assert.deepEqual(real, { version: 1, origin: 'unavailable', limits: null, spent: null })
+    const fixture = await snapshotJobUsage({ requestJson: JSON.stringify({ fixture: true }) }, job)
+    assert.equal(fixture.origin, 'fixture')
+    assert.equal(fixture.spent?.modelCalls, 0, 'fixture can legitimately report no Pi calls')
+    const prepared = await snapshotJobUsage({ requestJson: null }, job)
+    assert.equal(prepared.origin, 'prepared')
+    assert.equal(prepared.spent?.modelCalls, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

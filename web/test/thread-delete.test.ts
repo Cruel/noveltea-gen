@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -125,12 +125,38 @@ test('completed parent deletion retains child lineage, independent Git checkout 
       title: 'Independent child', activityAt: at, createdAt: at })
     await f.seed.threadRun({ jobId: child.jobId, ownerUserId: f.owner, threadId: id, runOrder: 0 })
     const originalChildHead = git(child.worktreeRoot, 'rev-parse', 'HEAD')
+    const retainedReceipt = join(parent.stateDir, 'architecture.json')
+    const retainedCheckpoint = join(parent.stateDir, 'recovery-checkpoints', 'source.json')
+    mkdirSync(join(parent.stateDir, 'recovery-checkpoints'))
+    writeFileSync(retainedReceipt, '{"phase":"committed","plan":{"version":1}}')
+    writeFileSync(retainedCheckpoint, '{"status":"finalized"}')
+    const sessionDir = join(parent.stateDir, 'character-world-sessions')
+    const privateTranscript = join(sessionDir, 'session.jsonl')
+    const privateGraph = join(parent.stateDir, 'web-generation.sqlite')
+    const privateBudget = join(parent.stateDir, 'pi-budget.json')
+    mkdirSync(sessionDir)
+    writeFileSync(privateTranscript, 'private Pi model conversation')
+    writeFileSync(privateGraph, 'private graph checkpoint')
+    writeFileSync(privateBudget, 'private model accounting')
+    const expectedReclaimed = physicalBytes(parent.worktreeRoot) + physicalBytes(sessionDir) +
+      physicalBytes(privateGraph) + physicalBytes(privateBudget)
+    const originalStateBytes = physicalBytes(parent.stateDir)
     const result = await deleteThread(f.store, f.owner, parentThread.id)
     assert.equal(result.state, 'complete')
     if (result.state !== 'complete') return
     assert.equal(result.preservedReceipts, true)
+    assert.equal(result.bytes, expectedReclaimed, 'reports worktree and disposable-state reclamation')
     assert.equal(existsSync(parent.worktreeRoot), false)
     assert.equal(existsSync(parent.stateDir), true, 'source evidence retained for child provenance')
+    assert.equal(existsSync(join(parent.stateDir, 'job.json')), true)
+    assert.equal(existsSync(retainedReceipt), true)
+    assert.equal(existsSync(retainedCheckpoint), true)
+    assert.equal(existsSync(privateTranscript), false, 'source Pi transcript must not survive deletion')
+    assert.equal(existsSync(privateGraph), false, 'source graph state must not survive deletion')
+    assert.equal(existsSync(privateBudget), false, 'source runtime accounting must not survive deletion')
+    assert.ok(physicalBytes(parent.stateDir) < originalStateBytes)
+    assert.deepEqual(await deleteThread(f.store, f.owner, parentThread.id), result,
+      'repeat deletion reports the same reclaimed bytes without reprocessing evidence')
     assert.equal(existsSync(child.worktreeRoot), true)
     assert.equal(git(child.worktreeRoot, 'rev-parse', 'HEAD'), originalChildHead)
     assert.equal((await restoreJob((await f.store.persistence.generation.jobs.selected(f.owner, child.jobId))!, f.owner)).jobId, child.jobId)
@@ -139,6 +165,24 @@ test('completed parent deletion retains child lineage, independent Git checkout 
     assert.equal(threads.find(row => row.id === id)?.status, 'completed')
     assert.equal(threads.find(row => row.id === parentThread.id)?.status, 'deleted')
     assert.deepEqual(await f.store.testing.foreignKeyViolations(), [])
+  } finally { await f.dispose() }
+})
+
+test('a symlink disguised as retained ancestry evidence blocks cleanup before Git removal', async () => {
+  const f = await fixture()
+  try {
+    const parent = await f.job()
+    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const child = await f.job()
+    await f.seed.thread({ id: 'fork:' + child.jobId, ownerUserId: f.owner,
+      conversationId: thread.conversationId, parentThreadId: thread.id,
+      title: 'Child', activityAt: at, createdAt: at })
+    await f.seed.threadRun({ jobId: child.jobId, ownerUserId: f.owner,
+      threadId: 'fork:' + child.jobId, runOrder: 0 })
+    symlinkSync('job.json', join(parent.stateDir, 'architecture.json'))
+    await assert.rejects(deleteThread(f.store, f.owner, thread.id), /symlink/i)
+    assert.equal(existsSync(parent.worktreeRoot), true)
+    assert.equal(existsSync(child.worktreeRoot), true)
   } finally { await f.dispose() }
 })
 

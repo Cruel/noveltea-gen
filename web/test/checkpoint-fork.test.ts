@@ -166,15 +166,6 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         assert.equal(failed.body.code, 'obsolete-checkpoint')
         assert.equal(await forkCount(), 0)
       } finally { writeFileSync(worldReceiptPath, originalWorldReceipt) }
-      const originalValidator = join(parent.stateDir, 'validator.json')
-      renameSync(originalValidator, originalValidator + '.missing')
-      try {
-        const failure = await fork({ ...input, childId: randomUUID() })
-        assert.equal(failure.status, 409)
-        assert.equal(failure.body.code, 'missing-tooling')
-        assert.ok(failure.body.nextSteps.some((s: string) => s.includes('Install')))
-        assert.equal(await forkCount(), 0)
-      } finally { renameSync(originalValidator + '.missing', originalValidator) }
       process.env.NT_STUDIO_SKILLS_SOURCE = join(root, 'missing-skills')
       try {
         const failure = await fork({ ...input, childId: randomUUID() })

@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { JobStartResult } from '../../../src/job'
 import { inspectPiPolicy, type PiBudgetUsage, type PiPolicy } from '../../../src/job-pi-policy'
 import type { SavedGenerationJob } from '../persistence/generation-contracts'
@@ -48,6 +50,9 @@ export async function snapshotJobUsage(row: Pick<SavedGenerationJob, 'requestJso
   if (origin === 'unavailable') return unavailable()
   if (origin === 'fixture' || origin === 'prepared')
     return { version: 1, origin, limits: null, spent: emptyUsage() }
+  // inspectPiPolicy defaults missing budget state to an empty counter for
+  // first-run admission. Reporting must not treat absent evidence as zero spend.
+  if (!existsSync(join(job.stateDir, 'pi-budget.json'))) return unavailable()
   const { policy, budget } = await inspectPiPolicy(job)
   return { version: 1, origin, limits: policy.limits, spent: budget }
 }
