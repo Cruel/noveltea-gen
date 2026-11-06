@@ -14,6 +14,7 @@ import { validateStoryJob } from '../../../src/validator'
 import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { inspectPiPolicy, configurePiPolicy, type PiPolicy } from '../../../src/job-pi-policy'
+import { parseJobLimits } from '../../../src/job-limits'
 
 async function readSmallCommand(request: Request): Promise<string> {
   const reader = request.body?.getReader()
@@ -135,14 +136,11 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       const value = command.limits
       if (!value || typeof value !== 'object' || Array.isArray(value) ||
           Object.keys(value).length === 0 ||
-          Object.keys(value).some(key => !['steps', 'modelCalls', 'costUsd'].includes(key)))
+          Object.keys(value).some(key => !['steps', 'modelCalls', 'costUsd', 'activeSeconds'].includes(key)))
         return reply({ error: 'Provide one or more supported budget limits.' }, 400)
       const requested = value as Record<string, unknown>
-      for (const [key, amount] of Object.entries(requested)) {
-        if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 || amount > 1_000_000 ||
-            (key !== 'costUsd' && !Number.isSafeInteger(amount)))
-          return reply({ error: 'Invalid budget limit.' }, 400)
-      }
+      try { parseJobLimits(requested) }
+      catch { return reply({ error: 'Invalid budget limit.' }, 400) }
       const update = await withStoryJobLock(job, 'studio-budget-increase', async () => {
         const current = await store.persistence.generation.jobs.state(user.id, id)
         if (!current) throw new Error('Job not found')

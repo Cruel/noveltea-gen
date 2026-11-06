@@ -10,6 +10,8 @@ import { withStoryJobLock } from '../../src/job-lock'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { reconcileRecoveryCheckpoints, inspectRecoveryCheckpoints } from '../../src/recovery-checkpoints'
 import { configurePiPolicy, resolvePiModel, type PiPolicy } from '../../src/job-pi-policy'
+import { withActiveExecutionTime } from '../../src/job-active-time'
+import { parseJobLimits } from '../../src/job-limits'
 import { withJobModelRuntime } from '../../src/model-runtime'
 import { SandboxClient } from '../../src/sandbox-client'
 import { assertUserPiSelection, createUserPiRuntime, validPiSelection, type PiSelection } from './lib/pi-credentials.server'
@@ -29,6 +31,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   const config = row.configJson ? JSON.parse(row.configJson) as {
     model?: PiSelection | null; limits?: PiPolicy['limits']; pauseAfter?: 'foundation'
   } : null
+  const limits = parseJobLimits(config?.limits ?? {})
   if (config?.pauseAfter !== undefined && config.pauseAfter !== 'foundation')
     throw new Error('Unsupported pinned generation stage pause.')
   const selected = config?.model ?? null
@@ -64,7 +67,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         await configurePiPolicy(job, { version: 1, profile: {
           provider: selected.provider, model: selected.id,
           ...(selected.thinking ? { thinking: selected.thinking } : {}),
-        }, limits: config?.limits ?? {} })
+        }, limits })
         await resolvePiModel(job, runtime, selected.provider, selected.id, selected.thinking)
       }
       await claimServerGeneration(job, threadId, pinned)
@@ -146,8 +149,10 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     } finally { saver.db.close() }
   }
   try {
-    if (runtime) await withJobModelRuntime(runtime, execute)
-    else await execute()
+    await withActiveExecutionTime(job, async () => {
+      if (runtime) await withJobModelRuntime(runtime, execute)
+      else await execute()
+    })
   } finally {
     if (selected) await new SandboxClient().dispose(job.jobId).catch(() => {})
   }

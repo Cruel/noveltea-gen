@@ -21,7 +21,8 @@ const allowedTypes = new Set(['arc', 'milestone', 'event', 'character', 'world-e
 const lines = (text: string) => text.split(/\r?\n/).map(x => x.trim()).filter(Boolean)
 const lineText = (items: string[]) => items.join('\n')
 const label = (name: string) => name.replaceAll('-', ' ').replace(/^./, first => first.toUpperCase())
-const max = { steps: 1_000_000, modelCalls: 1_000_000, costUsd: 1_000_000 }
+const max = { steps: 1_000_000, modelCalls: 1_000_000, costUsd: 1_000_000,
+  activeSeconds: 1_000_000, cpu: 64, memoryMiB: 65_536, pids: 4_096 }
 
 type Load = {
   index: ExplorerIndex; saved: GenerationDraft | null; editable: boolean
@@ -47,6 +48,10 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
   const [stepLimit, setStepLimit] = useState('')
   const [callLimit, setCallLimit] = useState('')
   const [costLimit, setCostLimit] = useState('')
+  const [timeLimit, setTimeLimit] = useState('')
+  const [cpuLimit, setCpuLimit] = useState('')
+  const [memoryLimit, setMemoryLimit] = useState('')
+  const [pidsLimit, setPidsLimit] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [thinking, setThinking] = useState('')
   const [rawEditor, setRawEditor] = useState(false)
@@ -71,6 +76,10 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
           setStepLimit(result.saved.limits.steps?.toString() ?? '')
           setCallLimit(result.saved.limits.modelCalls?.toString() ?? '')
           setCostLimit(result.saved.limits.costUsd?.toString() ?? '')
+          setTimeLimit(result.saved.limits.activeSeconds?.toString() ?? '')
+          setCpuLimit(result.saved.limits.cpu?.toString() ?? '')
+          setMemoryLimit(result.saved.limits.memoryMiB?.toString() ?? '')
+          setPidsLimit(result.saved.limits.pids?.toString() ?? '')
           setSelectedModel(result.saved.model ? result.saved.model.provider + '/' + result.saved.model.id : '')
           setThinking(result.saved.model?.thinking ?? '')
           setSaved(true)
@@ -110,10 +119,16 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
       ...(stepLimit.trim() !== '' ? { steps: Number(stepLimit) } : {}),
       ...(callLimit.trim() !== '' ? { modelCalls: Number(callLimit) } : {}),
       ...(costLimit.trim() !== '' ? { costUsd: Number(costLimit) } : {}),
+      ...(timeLimit.trim() !== '' ? { activeSeconds: Number(timeLimit) } : {}),
+      ...(cpuLimit.trim() !== '' ? { cpu: Number(cpuLimit) } : {}),
+      ...(memoryLimit.trim() !== '' ? { memoryMiB: Number(memoryLimit) } : {}),
+      ...(pidsLimit.trim() !== '' ? { pids: Number(pidsLimit) } : {}),
     }
     for (const [key, value] of Object.entries(limits)) {
       if (!Number.isFinite(value) || value < 0 || value > max[key as keyof typeof max] ||
-          (key !== 'costUsd' && !Number.isSafeInteger(value))) {
+          ((key !== 'costUsd' && key !== 'cpu' && key !== 'activeSeconds') && !Number.isSafeInteger(value)) ||
+          (key === 'cpu' && value < 0.1) ||
+          (key === 'memoryMiB' && value < 64) || (key === 'pids' && value < 16)) {
         throw new Error('Budget limits must be bounded, nonnegative numbers.')
       }
     }
@@ -287,8 +302,31 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
           onChange={e => { setCostLimit(e.target.value); setSaved(false) }} />
       </label>
     </div>
-    <p className="muted">Pi budget limits are enforced at safe work-item boundaries;
-      the rootless sandbox controller separately limits execution resources.
+    <div className="generation-controls">
+      <label>Maximum active execution (seconds)
+        <Input aria-label="Maximum active execution seconds" type="number" min={0} max={1000000} step={0.1}
+          value={timeLimit} disabled={busy}
+          onChange={e => { setTimeLimit(e.target.value); setSaved(false) }} />
+      </label>
+      <label>Sandbox CPU cores
+        <Input aria-label="Sandbox CPU cores" type="number" min={0.1} max={64} step={0.1}
+          placeholder="1 (default)" value={cpuLimit} disabled={busy}
+          onChange={e => { setCpuLimit(e.target.value); setSaved(false) }} />
+      </label>
+      <label>Sandbox RAM (MiB)
+        <Input aria-label="Sandbox RAM MiB" type="number" min={64} max={65536}
+          placeholder="512 (default)" value={memoryLimit} disabled={busy}
+          onChange={e => { setMemoryLimit(e.target.value); setSaved(false) }} />
+      </label>
+      <label>Sandbox processes
+        <Input aria-label="Sandbox process limit" type="number" min={16} max={4096}
+          placeholder="128 (default)" value={pidsLimit} disabled={busy}
+          onChange={e => { setPidsLimit(e.target.value); setSaved(false) }} />
+      </label>
+    </div>
+    <p className="muted">Active execution time excludes waits for author approval and survives worker restarts.
+      Pi budgets pause at safe boundaries. Sandbox CPU, RAM and process requests are capped
+      by the trusted host operator; leaving them blank preserves the existing defaults.
       Fixture jobs never make model requests.</p>
     {error && <p role="alert" className="error">{error}</p>}
     {saved && <p role="status">Configuration saved and verified for this pinned Story revision.</p>}

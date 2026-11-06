@@ -30,11 +30,11 @@ export type JobOverview = {
     candidateDigest: string | null; guidance: string
   } | null
 }
-export type BudgetLimits = { steps?: number; modelCalls?: number; costUsd?: number }
+export type BudgetLimits = { steps?: number; modelCalls?: number; costUsd?: number; activeSeconds?: number }
 export type JobControls = {
   control: string; queue: string | null
   limits: BudgetLimits
-  budget: { steps: number; modelCalls: number; costUsd: number; unpricedCalls: number
+  budget: { steps: number; modelCalls: number; costUsd: number; activeSeconds: number; unpricedCalls: number
     unknownTokenCalls: number; tokens: { input: number; output: number;
       cacheRead: number; cacheWrite: number; total: number }
     pause?: { reason: string } }

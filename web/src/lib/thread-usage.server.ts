@@ -18,7 +18,7 @@ export type RunUsage = RunUsageSnapshot & {
   jobId: string; threadId: string; runOrder: number; status: string; deleted: boolean
 }
 export type UsageAggregate = {
-  runs: number; unavailableRuns: number; modelCalls: number; steps: number;
+  runs: number; unavailableRuns: number; modelCalls: number; steps: number; activeSeconds: number;
   costUsd: number; unpricedCalls: number; unknownTokenCalls: number;
   tokens: PiBudgetUsage['tokens'];
 }
@@ -26,11 +26,11 @@ export type StoryUsage = { storyId: string; total: UsageAggregate;
   threads: Array<{ threadId: string; total: UsageAggregate; runs: RunUsage[] }> }
 
 const emptyUsage = (): PiBudgetUsage => ({
-  steps: 0, modelCalls: 0, costUsd: 0, unpricedCalls: 0,
+  steps: 0, modelCalls: 0, costUsd: 0, activeSeconds: 0, unpricedCalls: 0,
   unknownTokenCalls: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 })
 const emptyAggregate = (): UsageAggregate => ({
-  runs: 0, unavailableRuns: 0, steps: 0, modelCalls: 0, costUsd: 0,
+  runs: 0, unavailableRuns: 0, steps: 0, modelCalls: 0, costUsd: 0, activeSeconds: 0,
   unpricedCalls: 0, unknownTokenCalls: 0,
   tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 })
@@ -66,7 +66,8 @@ function validMeter(value: unknown): value is PiBudgetUsage {
   if (!value || typeof value !== 'object') return false
   const spent = value as Partial<PiBudgetUsage>
   return validCount(spent.steps) && validCount(spent.modelCalls) &&
-    validUsageNumber(spent.costUsd) && validCount(spent.unpricedCalls) &&
+    validUsageNumber(spent.costUsd) && (spent.activeSeconds === undefined || validUsageNumber(spent.activeSeconds)) &&
+    validCount(spent.unpricedCalls) &&
     validCount(spent.unknownTokenCalls) && !!spent.tokens &&
     (['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const)
       .every(name => validCount(spent.tokens?.[name]))
@@ -82,7 +83,10 @@ function retainedSnapshot(row: UsageRunRecord): RunUsageSnapshot | null {
     if (snapshot?.version !== 1 ||
         !['pi-transcript', 'fixture', 'prepared', 'unavailable'].includes(snapshot.origin) ||
         (snapshot.spent !== null && !validMeter(snapshot.spent))) return null
-    return snapshot
+    // Historical retained summaries predate active-time accounting. Preserve
+    // their existing cost/call totals instead of treating them as corrupt.
+    return snapshot.spent && snapshot.spent.activeSeconds === undefined
+      ? { ...snapshot, spent: { ...snapshot.spent, activeSeconds: 0 } } : snapshot
   } catch { return null }
 }
 
@@ -102,6 +106,7 @@ export function aggregateUsage(runs: readonly RunUsage[]): UsageAggregate {
     if (!run.spent) { total.unavailableRuns++; continue }
     const u = run.spent
     total.steps += u.steps
+    total.activeSeconds += u.activeSeconds
     total.modelCalls += u.modelCalls
     total.costUsd += u.costUsd
     total.unpricedCalls += u.unpricedCalls

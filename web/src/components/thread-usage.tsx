@@ -1,3 +1,4 @@
+import * as React from 'react'
 import type { StoryUsage, UsageAggregate, RunUsage } from '@/lib/thread-usage.server'
 
 const integer = (value: number) => value.toLocaleString('en-US')
@@ -15,6 +16,8 @@ function Totals({ label, usage }: { label: string; usage: UsageAggregate }) {
         <dd className="font-semibold">{integer(usage.tokens.total)}</dd></div>
       <div><dt className="text-muted-foreground">Recorded cost</dt>
         <dd className="font-semibold">{dollars(usage.costUsd)}{usage.unpricedCalls > 0 ? ' +' : ''}</dd></div>
+      <div><dt className="text-muted-foreground">Active execution</dt>
+        <dd className="font-semibold">{usage.activeSeconds.toFixed(1)}s</dd></div>
     </dl>
     {(usage.unavailableRuns > 0 || usage.unpricedCalls > 0 || usage.unknownTokenCalls > 0) &&
       <p className="mt-2 text-xs text-amber-500">
@@ -49,7 +52,7 @@ function Run({ run }: { run: RunUsage }) {
     <div className="text-muted-foreground">
       {observed
         ? <>{limit(observed.steps, run.limits?.steps)} steps · {limit(observed.modelCalls, run.limits?.modelCalls)} calls
-          {' · '}{integer(observed.tokens.total)} tokens · {dollars(observed.costUsd)}
+          {' · '}{integer(observed.tokens.total)} tokens · {observed.activeSeconds.toFixed(1)}s active · {dollars(observed.costUsd)}
           {run.limits?.costUsd !== undefined ? ' / ' + dollars(run.limits.costUsd) : ''}
           {observed.unpricedCalls ? ' + unpriced' : ''}</>
         : 'Counters unavailable'}
@@ -73,8 +76,9 @@ export function ThreadUsage({ usage, threadId }: { usage: StoryUsage; threadId?:
       </details>
     </>}
     <p className="text-xs text-muted-foreground">
-      Observed Pi transcript usage only; direct-model calls and missing provider reports are not
-      included. Tokens and costs are recorded amounts, not estimates or guaranteed full spend.
+      Token and cost totals reflect observed Pi transcripts only; direct-model calls and missing
+      provider reports are not included. Active-time totals exclude pauses and downtime.
+      Tokens and costs are recorded amounts, not estimates or guaranteed full spend.
       Child Threads and inherited messages are not charged again.
     </p>
   </div>

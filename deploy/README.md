@@ -39,6 +39,20 @@ command endpoint; never expose port 7001 or enable unsandboxed Pi tools.
   hosted acquisition; the controller fails closed rather than exposing them.
   See [Story content layout](../docs/story-content-layout.md).
 
+**Per-job execution ceilings:** Studio exposes active execution seconds, CPU cores,
+memory MiB, and process counts alongside step/call/cost budgets. Active time
+accumulates only while the trusted agent is executing a run and is saved across
+worker restarts; author-approval pauses do not consume it. The controller
+independently reads the owner's saved, pinned generation configuration and
+clamps resource requests to **operator-controlled** defaults of 4 CPUs,
+2048 MiB RAM and 512 processes. Change these ceilings through the trusted
+Compose environment variables `NT_SANDBOX_MAX_CPUS`,
+`NT_SANDBOX_MAX_MEMORY_MIB`, and `NT_SANDBOX_MAX_PIDS` (in the root `.env`
+or the operator's Compose shell), then recreate the controller. Unspecified
+jobs keep 1 CPU, 512 MiB and 128 PIDs; no swap is allowed. Changing a limit
+does not permit reusing a container with stale Docker resource settings.
+The sandbox HTTP API cannot set or raise these limits.
+
 **UID note:** Containers run as namespace UID 0 to give the rootless daemon's
 unprivileged host owner write access to shared cache mounts. This is not host
 root. All capabilities are dropped. Non-root *container* user IDs require

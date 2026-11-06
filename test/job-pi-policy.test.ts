@@ -3,6 +3,9 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { withActiveExecutionTime } from "../src/job-active-time.js";
+import { parseJobLimits } from "../src/job-limits.js";
 import { after, test } from "node:test";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { startStoryJob } from "../src/job.js";
@@ -283,4 +286,49 @@ test("model-call and cost limits use persisted Pi transcript usage and resume wi
   await guardPiBudget(job, "step:second");
   assert.equal((await inspectPiPolicy(job)).budget.steps, 2);
   assert.equal(new PiBudgetPause("steps", inspected.budget).name, "PiBudgetPause");
+});
+
+test("active generation time is cumulative across runs but excludes author-approval waiting", async () => {
+  const { job } = await fixture();
+  await configurePiPolicy(job, policy({ limits: { activeSeconds: 0.2 } }));
+  // A first real execution segment runs normally and is durably accounted.
+  await withActiveExecutionTime(job, async () => {
+    await guardPiBudget(job, "step:one");
+    await delay(80);
+  });
+  const first = (await inspectPiPolicy(job)).budget.activeSeconds;
+  assert.ok(first >= 0.07 && first < 0.2, String(first));
+  const before = readFileSync(join(job.stateDir, "pi-active-time.json"), "utf8");
+  assert.ok(JSON.parse(before).elapsedMs > 0);
+  // The worker has returned to an author decision and is no longer running.
+  await delay(270);
+  assert.ok(Math.abs((await inspectPiPolicy(job)).budget.activeSeconds - first) < 0.01,
+    "approval waiting must not consume an active-time budget");
+  // A subsequent worker invocation (possibly after process restart) reads the
+  // accumulated durable meter rather than resetting the job's budget.
+  await withActiveExecutionTime(job, async () => {
+    await delay(165);
+    await assert.rejects(guardPiBudget(job, "step:two"),
+      (error: unknown) => error instanceof PiBudgetPause && error.reason === "activeSeconds");
+  });
+  const exhausted = await inspectPiPolicy(job);
+  assert.equal(exhausted.budget.pause?.reason, "activeSeconds");
+  assert.ok(exhausted.budget.activeSeconds >= 0.2);
+  await configurePiPolicy(job, policy({ limits: { activeSeconds: 2 } }));
+  await guardPiBudget(job, "step:two");
+  assert.ok((await inspectPiPolicy(job)).budget.activeSeconds >= exhausted.budget.activeSeconds);
+});
+
+test("job ceilings reject invalid, injected or nonfinite resource authority", async () => {
+  assert.deepEqual(parseJobLimits({ cpu: 1.5, memoryMiB: 1024, pids: 256,
+    activeSeconds: 10 }), { cpu: 1.5, memoryMiB: 1024, pids: 256, activeSeconds: 10 });
+  for (const limits of [{ cpu: 0 }, { memoryMiB: 1 }, { pids: 2 }, { activeSeconds: -1 },
+    { activeSeconds: NaN }, { cpu: Infinity }, { cpu: 65 }, { memoryMiB: "512" },
+    { pids: 200, privileged: true }]) {
+    assert.throws(() => parseJobLimits(limits), /Budget limit|Unsupported job budget/);
+  }
+  const { job } = await fixture();
+  await assert.rejects(configurePiPolicy(job,
+    policy({ limits: { pids: 200, privileged: true } as PiPolicy["limits"] })),
+    /Unsupported job budget/);
 });

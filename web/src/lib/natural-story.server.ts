@@ -8,11 +8,12 @@ import { githubJobRequest } from './github-jobs.server'
 import { gitlabJobRequest } from './gitlab-jobs.server'
 import { generationConfigurationRequest } from './generation-config.server'
 import { generationJobRequest, verifyWebExecution } from './fixture-jobs.server'
+import { parseJobLimits, type JobLimits } from '../../../src/job-limits'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const SHA = /^[a-f0-9]{40}$/i
 const CONVERSATION_ID = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|legacy:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i
-type Limits = { steps?: number; modelCalls?: number; costUsd?: number }
+type Limits = JobLimits
 export type NaturalStoryInput = {
   conversationId: string
   jobId: string
@@ -50,17 +51,7 @@ export async function previewNaturalStory(store: StudioDatabase, owner: string,
     ...await modelOptions(store, owner) }
 }
 function checkLimits(limits: unknown): Limits {
-  if (limits === undefined) return {}
-  if (!limits || typeof limits !== 'object' || Array.isArray(limits) ||
-      Object.keys(limits).some(key => !['steps', 'modelCalls', 'costUsd'].includes(key)))
-    throw new Error('Invalid budget settings.')
-  const value = limits as Record<string, unknown>
-  for (const [key, amount] of Object.entries(value)) {
-    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 ||
-        amount > 1_000_000 || (key !== 'costUsd' && !Number.isSafeInteger(amount)))
-      throw new Error('Budget limits must be bounded nonnegative numbers.')
-  }
-  return value as Limits
+  return parseJobLimits(limits ?? {})
 }
 function asRequest(baseURL: string, headers: Headers, path: string, method: 'POST' | 'PUT', body: unknown) {
   const forwarded = new Headers(headers)

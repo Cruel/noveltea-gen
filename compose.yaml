@@ -74,6 +74,9 @@ services:
       DOCKER_HOST: unix:///run/rootless-docker/docker.sock
       NT_SANDBOX_SOCKET: /run/noveltea-controller/controller.sock
       NT_SANDBOX_TOKEN_FILE: /run/noveltea-controller/token
+      NT_SANDBOX_MAX_CPUS: ${NT_SANDBOX_MAX_CPUS:-4}
+      NT_SANDBOX_MAX_MEMORY_MIB: ${NT_SANDBOX_MAX_MEMORY_MIB:-2048}
+      NT_SANDBOX_MAX_PIDS: ${NT_SANDBOX_MAX_PIDS:-512}
     volumes:
       # SQLite's readonly catalog connection still needs writable WAL/SHM
       # coordination files when it is the first live reader.

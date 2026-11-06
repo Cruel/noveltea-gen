@@ -13,6 +13,7 @@ import { mkdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { readTrustedControllerJob, type TrustedControllerJobRow } from './db/trusted-catalog'
+import { parseJobLimits } from '../../src/job-limits'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SHA = /^[0-9a-f]{40}$/i
@@ -36,6 +37,8 @@ export interface ControllerConfig {
   /** The paths Studio/graph see for Compose-managed volumes, never HTTP inputs. */
   containerState: string
   containerCache: string
+  /** Trusted environment only; HTTP and agent commands never set these. */
+  maximums?: { cpu: number; memoryMiB: number; pids: number }
 }
 
 export type CommandResult = { stdout: string; stderr: string; status: number }
@@ -109,7 +112,31 @@ function checkRecordTree(root: string) {
   inspect(root)
 }
 
-type TrustedJob = { id: string; storyRoot: string; volumeSubpath: string; identity: string; imageId: string }
+type Resources = { cpu: number; memoryMiB: number; pids: number }
+type TrustedJob = { id: string; storyRoot: string; volumeSubpath: string; identity: string; imageId: string
+  resources: Resources; resourceHash: string }
+const defaults: Resources = { cpu: 1, memoryMiB: 512, pids: 128 }
+const defaultMaximums: Resources = { cpu: 4, memoryMiB: 2048, pids: 512 }
+
+/** Only a user-owned, pinned Studio draft supplies preferences. Enforce the
+ * host operator's upper bound independently, including on reconnection. */
+function trustedResources(row: JobRow, config: ControllerConfig): Resources {
+  let requested: ReturnType<typeof parseJobLimits> = {}
+  if (row.configJson !== null) {
+    try {
+      const draft = JSON.parse(row.configJson) as Record<string, unknown>
+      if (!draft || draft.version !== 1 || draft.headSha !== row.pin)
+        throw new Error('Invalid pinned generation config')
+      requested = parseJobLimits(draft.limits)
+    } catch { throw new SandboxError(409, 'Trusted job resource configuration is invalid or unpinned.') }
+  }
+  const maxima = config.maximums ?? defaultMaximums
+  return {
+    cpu: Math.min(requested.cpu ?? defaults.cpu, maxima.cpu),
+    memoryMiB: Math.min(requested.memoryMiB ?? defaults.memoryMiB, maxima.memoryMiB),
+    pids: Math.min(requested.pids ?? defaults.pids, maxima.pids),
+  }
+}
 type JobRow = TrustedControllerJobRow
 type Manifest = {
   version: number; jobId: string; gitRoot: string; gitCommonDir: string;
@@ -188,9 +215,10 @@ export function resolveTrustedJob(config: ControllerConfig, jobId: string, image
     if (error instanceof SandboxError) throw error
     throw new SandboxError(409, 'Saved job worktree is missing or has an unsafe filesystem identity.')
   }
+  const resources = trustedResources(row, config)
   return { id: jobId, storyRoot: hostStory,
     volumeSubpath: hostStory.slice(config.cacheVolume.length + 1).split(sep).join('/'),
-    identity: stateHash, imageId }
+    identity: stateHash, imageId, resources, resourceHash: hash(JSON.stringify(resources)) }
 }
 
 function dockerRequired(run: CommandRunner, args: string[]): string {
@@ -245,6 +273,15 @@ export function loadControllerConfig(env: NodeJS.ProcessEnv = process.env, run: 
     for (const mount of ['/var/lib/noveltea/app', '/var/lib/noveltea/state', '/var/lib/noveltea/cache'])
       requirePlainDirectory(mount)
   }
+  const maximum = (key: string, fallback: number, lower: number, upper: number, integer: boolean) => {
+    const raw = env[key]
+    if (raw === undefined || raw === '') return fallback
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value < lower || value > upper ||
+        (integer && !Number.isSafeInteger(value)))
+      throw new Error('Invalid operator sandbox maximum: ' + key)
+    return value
+  }
   return {
     socket, token,
     appVolume: inCompose ? '/var/lib/noveltea/app' : hostApp,
@@ -254,6 +291,11 @@ export function loadControllerConfig(env: NodeJS.ProcessEnv = process.env, run: 
     image: env.NT_SANDBOX_IMAGE || 'noveltea-sandbox:local',
     containerState: '/var/lib/noveltea/state',
     containerCache: '/var/lib/noveltea/cache',
+    maximums: {
+      cpu: maximum('NT_SANDBOX_MAX_CPUS', defaultMaximums.cpu, 0.1, 64, false),
+      memoryMiB: maximum('NT_SANDBOX_MAX_MEMORY_MIB', defaultMaximums.memoryMiB, 64, 65_536, true),
+      pids: maximum('NT_SANDBOX_MAX_PIDS', defaultMaximums.pids, 16, 4096, true),
+    },
   }
 }
 
@@ -293,7 +335,8 @@ export class SandboxController {
         existing['dev.noveltea.identity'] !== job.identity ||
         (requireCurrentLayout && existing['dev.noveltea.layout'] !== 'story-content-v2') ||
         !/^sha256:[a-f0-9]{64}$/.test(existing['dev.noveltea.image'] ?? '') ||
-        (requireCurrentImage && existing['dev.noveltea.image'] !== job.imageId)) {
+        (requireCurrentImage && existing['dev.noveltea.image'] !== job.imageId) ||
+        (requireCurrentImage && existing['dev.noveltea.resources'] !== job.resourceHash)) {
       throw new SandboxError(409, 'Sandbox container name is occupied by another identity; inspect it manually.')
     }
     return true
@@ -320,9 +363,11 @@ export class SandboxController {
           '--label', 'dev.noveltea.identity=' + job.identity,
           '--label', 'dev.noveltea.layout=story-content-v2',
           '--label', 'dev.noveltea.image=' + job.imageId,
+          '--label', 'dev.noveltea.resources=' + job.resourceHash,
           '--network', 'none', '--read-only', '--cap-drop', 'ALL',
-          '--security-opt', 'no-new-privileges', '--pids-limit', '128',
-          '--memory', '512m', '--memory-swap', '512m', '--cpus', '1',
+          '--security-opt', 'no-new-privileges', '--pids-limit', String(job.resources.pids),
+          '--memory', job.resources.memoryMiB + 'm', '--memory-swap', job.resources.memoryMiB + 'm',
+          '--cpus', String(job.resources.cpu),
           '--user', '0:0', // root IN rootless userns, mapped to unprivileged host UID
           '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=32m',
           '--log-driver', 'none', ...mounts,
@@ -472,7 +517,9 @@ export function createControllerServer(controller: SandboxController) {
         return send(res, 200, { status: 'ok' })
       if (req.method === 'POST' && url.pathname === '/v1/sandboxes') {
         const payload = await body(req) as { jobId?: unknown } | null
-        if (!payload || typeof payload.jobId !== 'string') throw new SandboxError(400, 'Job UUID required.')
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+            Object.keys(payload).some(key => key !== 'jobId') || typeof payload.jobId !== 'string')
+          throw new SandboxError(400, 'Only a registered job UUID is accepted.')
         return send(res, 201, await controller.acquire(payload.jobId))
       }
       const match = /^\/v1\/sandboxes\/([a-f0-9-]+)(?:\/(exec))?$/i.exec(url.pathname)
@@ -482,7 +529,9 @@ export function createControllerServer(controller: SandboxController) {
       if (req.method === 'DELETE' && !match[2]) return send(res, 200, controller.dispose(id))
       if (req.method === 'POST' && match[2] === 'exec') {
         const payload = await body(req) as { argv?: unknown } | null
-        if (!payload || !Array.isArray(payload.argv)) throw new SandboxError(400, 'Command argv required.')
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+            Object.keys(payload).some(key => key !== 'argv') || !Array.isArray(payload.argv))
+          throw new SandboxError(400, 'Only sandbox command argv is accepted.')
         // Validate before writing any streaming headers.
         if (!payload.argv.length || payload.argv.length > 64 ||
             payload.argv.some(v => typeof v !== 'string' || v.length > 4096 || v.includes('\0'))) {

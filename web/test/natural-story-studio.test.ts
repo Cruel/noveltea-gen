@@ -59,6 +59,11 @@ test('natural prompt preview and initial Thread registration are owner scoped an
       { ...candidate, headSha: 'b'.repeat(40) }), /revision changed/)
     await assert.rejects(() => launchNaturalStory(auth, db, headers, config.baseURL,
       { ...candidate, limits: { modelCalls: -1 } }), /Budget limits/)
+    for (const limits of [{ activeSeconds: -1 }, { cpu: 0 }, { memoryMiB: 4 },
+      { pids: 2 }, { cpu: 2, dockerOptions: '--privileged' }]) {
+      await assert.rejects(() => launchNaturalStory(auth, db, headers, config.baseURL,
+        { ...candidate, limits: limits as typeof candidate & { cpu?: number } }), /Budget limit|Unsupported job budget/)
+    }
     await assert.rejects(() => launchNaturalStory(auth, db, headers, config.baseURL,
       { ...candidate, prompt: 'Only brainstorm plot ideas' }), /outline or ideation/)
     await assert.rejects(() => launchNaturalStory(auth, db, headers, config.baseURL,

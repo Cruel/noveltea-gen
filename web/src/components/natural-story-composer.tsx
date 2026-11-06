@@ -29,6 +29,10 @@ export function NaturalStoryComposer({ conversationId, onStarted }: {
   const [stepLimit, setStepLimit] = useState('')
   const [callLimit, setCallLimit] = useState('')
   const [costLimit, setCostLimit] = useState('')
+  const [timeLimit, setTimeLimit] = useState('')
+  const [cpuLimit, setCpuLimit] = useState('')
+  const [memoryLimit, setMemoryLimit] = useState('')
+  const [pidsLimit, setPidsLimit] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Reuse the same ID after transport errors; the backend rejects changed
@@ -52,13 +56,18 @@ export function NaturalStoryComposer({ conversationId, onStarted }: {
     return { provider: chosen.provider, id: chosen.id }
   }
   const limits = () => {
-    const result: { steps?: number; modelCalls?: number; costUsd?: number } = {}
+    const result: { steps?: number; modelCalls?: number; costUsd?: number;
+      activeSeconds?: number; cpu?: number; memoryMiB?: number; pids?: number } = {}
     for (const [key, value] of [['steps', stepLimit], ['modelCalls', callLimit],
-      ['costUsd', costLimit]] as const) {
+      ['costUsd', costLimit], ['activeSeconds', timeLimit], ['cpu', cpuLimit],
+      ['memoryMiB', memoryLimit], ['pids', pidsLimit]] as const) {
       if (!value.trim()) continue
       const number = Number(value)
-      if (!Number.isFinite(number) || number < 0 || number > 1_000_000 ||
-          (key !== 'costUsd' && !Number.isSafeInteger(number)))
+      if (!Number.isFinite(number) || number < 0 ||
+          number > (key === 'cpu' ? 64 : key === 'memoryMiB' ? 65536 : key === 'pids' ? 4096 : 1_000_000) ||
+          (key !== 'costUsd' && key !== 'cpu' && key !== 'activeSeconds' && !Number.isSafeInteger(number)) ||
+          (key === 'cpu' && number < 0.1) || (key === 'memoryMiB' && number < 64) ||
+          (key === 'pids' && number < 16))
         throw new Error('Budget limits must be bounded, nonnegative numbers.')
       result[key] = number
     }
@@ -194,8 +203,23 @@ export function NaturalStoryComposer({ conversationId, onStarted }: {
           min={0} max={1000000} step="0.01" value={costLimit} disabled={busy}
           onChange={event => { setCostLimit(event.target.value); setPendingId(null) }} /></label>
       </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label>Maximum active execution (seconds)<Input aria-label="Maximum active seconds" type="number"
+          min={0} max={1000000} step={0.1} value={timeLimit} disabled={busy}
+          onChange={event => { setTimeLimit(event.target.value); setPendingId(null) }} /></label>
+        <label>Sandbox CPU cores<Input aria-label="Sandbox CPU cores" type="number"
+          min={0.1} max={64} step={0.1} placeholder="1 (default)" value={cpuLimit} disabled={busy}
+          onChange={event => { setCpuLimit(event.target.value); setPendingId(null) }} /></label>
+        <label>Sandbox memory (MiB)<Input aria-label="Sandbox memory MiB" type="number"
+          min={64} max={65536} placeholder="512 (default)" value={memoryLimit} disabled={busy}
+          onChange={event => { setMemoryLimit(event.target.value); setPendingId(null) }} /></label>
+        <label>Sandbox process limit<Input aria-label="Sandbox process limit" type="number"
+          min={16} max={4096} placeholder="128 (default)" value={pidsLimit} disabled={busy}
+          onChange={event => { setPidsLimit(event.target.value); setPendingId(null) }} /></label>
+      </div>
       <p className="m-0 text-xs text-muted-foreground">Manage model credentials in <a href="/settings#ai-models">Settings</a>.
-        Budgets are enforced at trusted work boundaries; fixture output is not independently verified editorial completion.</p>
+        Active time excludes author-approval waits; sandbox limits are clamped by operator maximums.
+        Budgets pause at safe boundaries; fixture output is not independently verified editorial completion.</p>
     </div>}
     {preview && <div className="flex items-center gap-2">
       <Button type="button" size="sm" disabled={busy} onClick={() => { setApproved(true); void approve() }}>

@@ -135,6 +135,16 @@ test('run budgets are independent; Story, Thread and deleted-history usage survi
     assert.deepEqual(afterDelete.total, first.total, 'deleted run keeps only the aggregated meter')
     assert.equal(afterDelete.threads.find(item => item.threadId === childThread)?.runs[0]?.origin,
       'retained-summary')
+    // Pre-upgrade deletion summaries did not contain activeSeconds. They must
+    // retain historic recorded calls and costs after this budget addition.
+    const historical = JSON.parse(deletion.deletionPlanJson) as {
+      usageSummaries: Record<string, { spent?: { activeSeconds?: number } | null }>
+    }
+    for (const summary of Object.values(historical.usageSummaries))
+      if (summary.spent) delete summary.spent.activeSeconds
+    await db.testing.records.update('story_threads', { id: childThread },
+      { deletionPlanJson: JSON.stringify(historical) })
+    assert.deepEqual((await inspectStoryUsage(db, owner, storyId)).total, first.total)
 
     db.close()
     db = openStudioDatabase(join(tmp, 'studio.sqlite'))
@@ -169,7 +179,7 @@ test('missing Pi budget evidence is unknown, not a confirmed zero-cost run', asy
 })
 
 test('deleted run summaries remain readable without dead job links', () => {
-  const spent = { steps: 1, modelCalls: 2, costUsd: 0.1, unpricedCalls: 0,
+  const spent = { steps: 1, modelCalls: 2, costUsd: 0.1, activeSeconds: 0, unpricedCalls: 0,
     unknownTokenCalls: 0, tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 } }
   const run: RunUsage = {
     version: 1, jobId: 'deleted-job', threadId: 'child', runOrder: 0,
@@ -186,14 +196,14 @@ test('deleted run summaries remain readable without dead job links', () => {
 })
 
 test('aggregates deduplicate run IDs and keep unavailable usage explicitly unknown', () => {
-  const meter = { steps: 1, modelCalls: 1, costUsd: 0.5, unpricedCalls: 1,
+  const meter = { steps: 1, modelCalls: 1, costUsd: 0.5, activeSeconds: 0, unpricedCalls: 1,
     unknownTokenCalls: 0, tokens: { input: 10, output: 5, cacheRead: 2, cacheWrite: 0, total: 17 } }
   const one: RunUsage = { version: 1, jobId: 'one', threadId: 'thread', runOrder: 0,
     status: 'completed', origin: 'pi-transcript', limits: { modelCalls: 2 }, spent: meter,
     deleted: false }
   const missing: RunUsage = { ...one, jobId: 'missing', origin: 'unavailable', spent: null }
   assert.deepEqual(aggregateUsage([one, one, missing]), {
-    runs: 2, unavailableRuns: 1, steps: 1, modelCalls: 1, costUsd: 0.5,
+    runs: 2, unavailableRuns: 1, steps: 1, modelCalls: 1, costUsd: 0.5, activeSeconds: 0,
     unpricedCalls: 1, unknownTokenCalls: 0, tokens: meter.tokens,
   })
 })

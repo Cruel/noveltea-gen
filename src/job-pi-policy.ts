@@ -10,13 +10,15 @@ import type { JobStartResult } from "./job.js";
 import type { StoryProject } from "./project.js";
 import { createStoryContextTool, StoryContextReader, type StoryContextRequest } from "./story-context.js";
 import { readSandboxContextFile, sandboxToolsRequired } from "./sandbox-pi-tools.js";
+import { parseJobLimits, type JobLimits } from "./job-limits.js";
+import { observedActiveSeconds } from "./job-active-time.js";
 
 /** Private, job-local Pi optimization state. The Git Story remains authoritative. */
 export interface PiPolicy {
   version: 1;
   profile: { provider: string; model: string; thinking?: "low" | "medium" | "high";
     optionalFallback?: { provider: string; model: string } };
-  limits: { steps?: number; modelCalls?: number; costUsd?: number };
+  limits: JobLimits;
 }
 interface Resolution {
   version: 1;
@@ -48,6 +50,7 @@ export type PiTokenUsage = {
 };
 export type PiBudgetUsage = {
   steps: number; modelCalls: number; costUsd: number; unpricedCalls: number;
+  activeSeconds: number;
   tokens: PiTokenUsage; unknownTokenCalls: number;
   pause?: { reason: string; at: string };
 };
@@ -77,16 +80,12 @@ async function persist(file: string, data: unknown): Promise<void> {
   await writeFile(temp, JSON.stringify(data, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   await rename(temp, file);
 }
-function positiveNumber(n: number | undefined, integer: boolean): boolean {
-  return n === undefined || (Number.isFinite(n) && n >= 0 && (!integer || Number.isInteger(n)));
-}
 function checkPolicy(policy: PiPolicy): void {
   if (policy.version !== 1 || !policy.profile.provider || !policy.profile.model ||
-      !positiveNumber(policy.limits.steps, true) ||
-      !positiveNumber(policy.limits.modelCalls, true) ||
-      !positiveNumber(policy.limits.costUsd, false) ||
+      !policy.limits ||
       (policy.profile.optionalFallback && (!policy.profile.optionalFallback.provider ||
         !policy.profile.optionalFallback.model))) throw new Error("Invalid Pi job profile or budget.");
+  parseJobLimits(policy.limits);
 }
 export async function inspectPiPolicy(job: JobStartResult) {
   const resolved = await json<Resolution>(resolutionPath(job));
@@ -253,7 +252,7 @@ async function usageFromSession(file: string, seen: Set<string>, summary: PiBudg
 }
 async function sessionUsage(job: JobStartResult, state: BudgetState): Promise<PiBudgetUsage> {
   const summary: PiBudgetUsage = { steps: state.steps.length,
-    modelCalls: 0, costUsd: 0, unpricedCalls: 0, tokens: emptyTokens(),
+    modelCalls: 0, costUsd: 0, unpricedCalls: 0, activeSeconds: 0, tokens: emptyTokens(),
     unknownTokenCalls: 0, ...(state.pause ? { pause: state.pause } : {}) };
   const seen = new Set<string>();
   for (const file of new Set(state.sessions)) {
@@ -266,7 +265,7 @@ async function sessionUsage(job: JobStartResult, state: BudgetState): Promise<Pi
 async function budgetUsage(job: JobStartResult): Promise<PiBudgetUsage> {
   const state = (await json<BudgetState>(budgetPath(job))) ??
     { version: 1 as const, steps: [], sessions: [] };
-  return sessionUsage(job, state);
+  return { ...await sessionUsage(job, state), activeSeconds: await observedActiveSeconds(job) };
 }
 export class PiBudgetPause extends Error {
   constructor(readonly reason: string, readonly usage: Awaited<ReturnType<typeof budgetUsage>>) {
@@ -284,16 +283,18 @@ export async function guardPiBudget(job: JobStartResult, step: string, sessionFi
   // scoped to the job, not its Story or parent Thread.
   const observed = await sessionUsage(job, state);
   const { modelCalls, costUsd, unpricedCalls } = observed;
+  const activeSeconds = await observedActiveSeconds(job);
   const freshStep = !state.steps.includes(step);
   const reason = freshStep && policy.limits.steps !== undefined && state.steps.length >= policy.limits.steps
     ? "steps" : policy.limits.modelCalls !== undefined && modelCalls >= policy.limits.modelCalls
     ? "modelCalls" : policy.limits.costUsd !== undefined && unpricedCalls > 0
     ? "cost-unavailable" : policy.limits.costUsd !== undefined && costUsd >= policy.limits.costUsd
-    ? "costUsd" : undefined;
+    ? "costUsd" : policy.limits.activeSeconds !== undefined &&
+      activeSeconds >= policy.limits.activeSeconds ? "activeSeconds" : undefined;
   if (reason) {
     state.pause = { reason, at: new Date().toISOString() };
     await persist(budgetPath(job), state);
-    throw new PiBudgetPause(reason, { ...observed, pause: state.pause });
+    throw new PiBudgetPause(reason, { ...observed, activeSeconds, pause: state.pause });
   }
   if (freshStep) state.steps.push(step);
   delete state.pause;

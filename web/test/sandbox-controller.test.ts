@@ -23,7 +23,7 @@ function sha(s: string) { return createHash('sha256').update(s).digest('hex') }
 const ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 const IMAGE = 'sha256:' + 'e'.repeat(64)
 
-function fixture(directory = 'story', jobId = ID) {
+function fixture(directory = 'story', jobId = ID, configJson: string | null = null) {
   const root = mkdtempSync(join(tmpdir(), 'noveltea-sandbox-'))
   roots.push(root)
   const appVolume = join(root, 'app'), stateVolume = join(root, 'state'), cacheVolume = join(root, 'cache')
@@ -34,7 +34,7 @@ function fixture(directory = 'story', jobId = ID) {
     containerState: '/var/lib/noveltea/state',
     containerCache: '/var/lib/noveltea/cache',
   }
-  createControllerFixtureDatabase(appVolume, jobId, directory)
+  createControllerFixtureDatabase(appVolume, jobId, directory, configJson)
   const scoped = join(sha('owner-1'), sha('github:987'))
   const gitRoot = join(config.containerCache, scoped, 'base')
   const identity = sha(JSON.stringify([gitRoot, directory, jobId]))
@@ -116,6 +116,68 @@ test('registered Story job derives one trusted worktree and never mounts git or 
   await controller.acquire(ID)
   assert.deepEqual(controller.inspect(ID), { jobId: ID, status: 'running' })
   assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+})
+
+const pinnedDraft = (limits: unknown, headSha = 'a'.repeat(40)) =>
+  JSON.stringify({ version: 1, headSha, task: 'Story generation', limits, model: null })
+
+test('controller derives per-job Docker ceilings only from pinned owner records, bounded by operator maxima', async () => {
+  const { config } = fixture('story', ID,
+    pinnedDraft({ cpu: 6, memoryMiB: 4096, pids: 900, activeSeconds: 30 }))
+  config.maximums = { cpu: 2, memoryMiB: 768, pids: 200 }
+  const resolved = resolveTrustedJob(config, ID, IMAGE)
+  assert.deepEqual(resolved.resources, { cpu: 2, memoryMiB: 768, pids: 200 })
+  const { calls, run } = docker()
+  const controller = new SandboxController(config, run)
+  await controller.acquire(ID)
+  const created = calls.find(args => args[0] === 'create')!
+  const flag = (key: string) => created[created.indexOf(key) + 1]
+  assert.equal(flag('--cpus'), '2')
+  assert.equal(flag('--memory'), '768m')
+  assert.equal(flag('--memory-swap'), '768m')
+  assert.equal(flag('--pids-limit'), '200')
+  assert.ok(created.includes('dev.noveltea.resources=' + resolved.resourceHash))
+  await controller.acquire(ID)
+  assert.equal(calls.filter(args => args[0] === 'create').length, 1)
+
+  // Operator policy tightened after restart. Existing containers may be
+  // disposed, but never reused with stale, excessive cgroup allowances.
+  const tightened: ControllerConfig = { ...config,
+    maximums: { cpu: 1, memoryMiB: 512, pids: 128 } }
+  const restarted = new SandboxController(tightened, run)
+  await assert.rejects(restarted.acquire(ID), /occupied by another identity/)
+  assert.equal(restarted.dispose(ID).status, 'disposed')
+  await restarted.acquire(ID)
+  const second = calls.filter(args => args[0] === 'create').at(-1)!
+  assert.equal(second[second.indexOf('--cpus') + 1], '1')
+  assert.equal(second[second.indexOf('--memory') + 1], '512m')
+})
+
+test('missing, invalid and cross-job resource evidence never expands sandbox authority', async () => {
+  const normal = fixture()
+  const { calls, run } = docker()
+  await new SandboxController(normal.config, run).acquire(ID)
+  const defaults = calls.find(args => args[0] === 'create')!
+  assert.equal(defaults[defaults.indexOf('--cpus') + 1], '1')
+  assert.equal(defaults[defaults.indexOf('--memory') + 1], '512m')
+  assert.equal(defaults[defaults.indexOf('--pids-limit') + 1], '128')
+
+  for (const payload of [
+    pinnedDraft({ cpu: -5 }),
+    pinnedDraft({ cpu: 0 }),
+    pinnedDraft({ cpu: '64' }),
+    pinnedDraft({ memoryMiB: 7 }),
+    pinnedDraft({ pids: 1.5 }),
+    pinnedDraft({ cpu: 4, attackerSuppliedDockerFlags: ['--privileged'] }),
+    pinnedDraft({ cpu: 4 }, 'b'.repeat(40)),
+    '{invalid',
+  ]) {
+    const other = fixture('story', ID, payload)
+    const dockerMock = docker()
+    await assert.rejects(new SandboxController(other.config, dockerMock.run).acquire(ID),
+      /resource configuration is invalid or unpinned/)
+    assert.equal(dockerMock.calls.filter(args => args[0] === 'create').length, 0)
+  }
 })
 
 test('Compose controller mounts only the vetted Story subpath of its named rootless volume', async () => {
@@ -230,6 +292,38 @@ test('rootless precondition rejects regular Docker before reading host storage',
     stdout: args[0] === 'info' ? JSON.stringify(['name=seccomp,profile=builtin']) : '/tmp',
     stderr: '', status: 0,
   })), /ROOTLESS Docker/)
+})
+
+test('operator-only rootless controller settings validate resource maximums before startup', () => {
+  const { config } = fixture()
+  const tokenFile = join(config.appVolume, 'controller-secret')
+  writeFileSync(tokenFile, config.token, { mode: 0o600 })
+  const env = {
+    NT_SANDBOX_SOCKET: config.socket, NT_SANDBOX_TOKEN_FILE: tokenFile,
+    NT_SANDBOX_APP_VOLUME: 'app-operator-test',
+    NT_SANDBOX_STATE_VOLUME: 'state-operator-test',
+    NT_SANDBOX_CACHE_VOLUME: 'cache-operator-test',
+    NT_SANDBOX_MAX_CPUS: '1.25',
+    NT_SANDBOX_MAX_MEMORY_MIB: '640',
+    NT_SANDBOX_MAX_PIDS: '96',
+  }
+  const run: CommandRunner = args => {
+    if (args[0] === 'info') return { status: 0, stderr: '', stdout: args[2]?.includes('SecurityOptions')
+      ? '["name=rootless"]' : '2/systemd' }
+    if (args[0] === 'volume') return { status: 0, stderr: '',
+      stdout: args[2] === 'app-operator-test' ? config.appVolume :
+        args[2] === 'state-operator-test' ? config.stateVolume : config.cacheVolume }
+    return { status: 1, stdout: '', stderr: 'Unexpected Docker call' }
+  }
+  assert.deepEqual(loadControllerConfig(env, run).maximums,
+    { cpu: 1.25, memoryMiB: 640, pids: 96 })
+  for (const setting of [
+    { NT_SANDBOX_MAX_CPUS: '0' }, { NT_SANDBOX_MAX_CPUS: '64.01' },
+    { NT_SANDBOX_MAX_MEMORY_MIB: '1.5' }, { NT_SANDBOX_MAX_PIDS: '0' },
+  ]) {
+    assert.throws(() => loadControllerConfig({ ...env, ...setting }, run),
+      /Invalid operator sandbox maximum/)
+  }
 })
 
 test('trusted agent client acquires and streams execution through the private Unix socket', async () => {
@@ -529,8 +623,10 @@ test('controller HTTP rejects missing bearer, only accepts registered opaque job
   try {
     assert.equal((await send(false, { jobId: ID })).status, 401)
     assert.equal((await send(true, { jobId: '../../other-worktree' })).status, 400)
-    assert.equal((await send(true, { jobId: ID, mount: '/etc' })).status, 201)
+    assert.equal((await send(true, { jobId: ID, mount: '/etc' })).status, 400)
+    assert.equal((await send(true, { jobId: ID, ownerId: 'other-user', cpu: 64, memoryMiB: 65536 })).status, 400)
+    assert.equal((await send(true, { jobId: ID })).status, 201)
     assert.equal(calls.filter(v => v[0] === 'create').length, 1)
-    assert.ok(!calls.some(v => v.includes('/etc')))
+    assert.ok(!calls.some(v => v.includes('/etc') || v.includes('65536')))
   } finally { server.close(); await once(server, 'close') }
 })

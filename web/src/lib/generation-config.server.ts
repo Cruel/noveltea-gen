@@ -9,8 +9,9 @@ import { isFocusedScope, resolveFocusedScope } from '../../../src/focused-scope'
 import type { CompletionContract } from '../../../src/architecture'
 import { availableUserPiModels, assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import { readDefaultModel } from './settings.server'
+import { parseJobLimits, type JobLimits } from '../../../src/job-limits'
 
-type Limits = { steps?: number; modelCalls?: number; costUsd?: number }
+type Limits = JobLimits
 export type GenerationDraft = {
   version: 1; headSha: string; task: string; contract: CompletionContract
   limits: Limits; model: PiSelection | null
@@ -36,19 +37,12 @@ export function validateGenerationDraft(value: unknown, index: ExplorerIndex,
       value.version !== 1 || value.headSha !== index.headSha ||
       typeof value.task !== 'string' || !value.task.trim() || value.task.length > 4000 ||
       (value.model !== null && !validPiSelection(value.model)) || !object(value.limits) ||
-      !keys(value.limits, ['steps', 'modelCalls', 'costUsd'])) {
+      !keys(value.limits, ['steps', 'modelCalls', 'costUsd', 'activeSeconds', 'cpu', 'memoryMiB', 'pids'])) {
     throw new ConfigurationError(422, 'Invalid or stale generation configuration. Refresh the pinned Story before saving.')
   }
-  const limits: Limits = {}
-  for (const key of ['steps', 'modelCalls', 'costUsd'] as const) {
-    const n = value.limits[key]
-    if (n === undefined) continue
-    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 1_000_000 ||
-        (key !== 'costUsd' && !Number.isSafeInteger(n))) {
-      throw new ConfigurationError(422, 'Budget limits must be bounded, nonnegative numbers.')
-    }
-    limits[key] = n
-  }
+  let limits: Limits
+  try { limits = parseJobLimits(value.limits) }
+  catch { throw new ConfigurationError(422, 'Budget limits must be bounded, valid numbers.') }
   // Check duplicates before the authoritative parser normalizes and deduplicates IDs.
   const originalScope = object(value.contract) && object(value.contract.scope) ? value.contract.scope : null
   for (const key of ['targets', 'branches', 'supportingTargets'] as const) {

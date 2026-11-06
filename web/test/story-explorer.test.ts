@@ -228,6 +228,18 @@ process.exit(exit);
     }
     assert.equal((await configuration('PUT', full, aliceCookie, 'https://evil.test')).status, 403)
     assert.equal((await configuration('PUT', full, bobCookie)).status, 404)
+    const requested = { ...full, limits: { ...full.limits, activeSeconds: 0,
+      cpu: 1.5, memoryMiB: 1024, pids: 256 } }
+    assert.equal((await configuration('PUT', requested, bobCookie)).status, 404,
+      'other users cannot alter resource budgets')
+    assert.equal((await configuration('PUT', requested, aliceCookie)).status, 200)
+    assert.deepEqual((await configuration('GET', undefined, aliceCookie)).body.saved.limits,
+      requested.limits)
+    for (const limits of [{ activeSeconds: -1 }, { activeSeconds: NaN }, { cpu: 0 },
+      { memoryMiB: 32 }, { pids: 10 }, { cpu: 65 }, { memoryMiB: Infinity },
+      { privileged: true }]) {
+      assert.equal((await configuration('PUT', { ...full, limits }, aliceCookie)).status, 422)
+    }
     assert.equal((await configuration('PUT', { ...full, model: { provider: 'openai', id: 'host' } }, aliceCookie)).status, 422)
     const personal = userPiCredentials(store, alice.id)
     await personal.modify('openai', async () => ({ type: 'api_key', key: 'ALICE-STORY-KEY' }))

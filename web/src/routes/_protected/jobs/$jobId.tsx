@@ -276,6 +276,9 @@ function JobOverviewPanel({ job, controls, jobId, onReview, onRefresh }: {
           ? controls.budget.modelCalls + ' / ' + (controls.limits.modelCalls ?? 'no limit') : '—'}</strong></div>
         <div><span>Steps</span><strong>{controls
           ? controls.budget.steps + ' / ' + (controls.limits.steps ?? 'no limit') : '—'}</strong></div>
+        <div><span>Active execution</span><strong>{controls
+          ? controls.budget.activeSeconds.toFixed(1) + 's / ' +
+            (controls.limits.activeSeconds === undefined ? 'no limit' : controls.limits.activeSeconds + 's') : '—'}</strong></div>
         <div><span>Recorded tokens</span><strong>{controls
           ? controls.budget.tokens.total.toLocaleString() : '—'}</strong></div>
         <div><span>Recorded cost</span><strong>{controls
@@ -372,6 +375,7 @@ function BudgetEditor({ jobId, limits, onChanged }: {
   const [steps, setSteps] = useState(String(limits.steps ?? ''))
   const [calls, setCalls] = useState(String(limits.modelCalls ?? ''))
   const [cost, setCost] = useState(String(limits.costUsd ?? ''))
+  const [time, setTime] = useState(String(limits.activeSeconds ?? ''))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const save = async () => {
@@ -381,6 +385,7 @@ function BudgetEditor({ jobId, limits, onChanged }: {
         ...(steps.trim() ? { steps: Number(steps) } : {}),
         ...(calls.trim() ? { modelCalls: Number(calls) } : {}),
         ...(cost.trim() ? { costUsd: Number(cost) } : {}),
+        ...(time.trim() ? { activeSeconds: Number(time) } : {}),
       }
       if (!Object.keys(next).length || Object.values(next).some(v => !Number.isFinite(v) || v! < 0))
         throw new Error('Supply an increased budget limit.')
@@ -392,13 +397,15 @@ function BudgetEditor({ jobId, limits, onChanged }: {
   return <div className="border-t border-border pt-4">
     <h3 className="text-sm font-medium">Increase Pi budgets</h3>
     <p className="mt-1 text-xs text-muted-foreground">Limits can only increase. Existing usage is retained.</p>
-    <div className="mt-3 grid gap-3 sm:grid-cols-3">
+    <div className="mt-3 grid gap-3 sm:grid-cols-4">
       <label className="grid gap-1 text-xs">Steps <Input type="number" min={0} max={1000000} disabled={saving}
         value={steps} onChange={e => setSteps(e.target.value)} /></label>
       <label className="grid gap-1 text-xs">Model calls <Input type="number" min={0} max={1000000} disabled={saving}
         value={calls} onChange={e => setCalls(e.target.value)} /></label>
       <label className="grid gap-1 text-xs">Cost limit (USD) <Input type="number" min={0} max={1000000} step="0.01"
         disabled={saving} value={cost} onChange={e => setCost(e.target.value)} /></label>
+      <label className="grid gap-1 text-xs">Active seconds <Input type="number" min={0} max={1000000} step={0.1}
+        disabled={saving} value={time} onChange={e => setTime(e.target.value)} /></label>
     </div>
     {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
     <Button size="sm" className="mt-3" disabled={saving} onClick={() => void save()}>

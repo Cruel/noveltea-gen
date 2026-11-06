@@ -769,13 +769,24 @@ survive restarts. Reconnect if the web worker restarts during authorization
 or if provider access is revoked. An API key being
 present does not prove the remote vendor will accept it until a real API call.
 
-Job-level specialist-step, model-call and reported-cost budgets are enforced by the
-real Pi controller at specialist boundaries, using persisted Pi session usage.
-A budget stop pauses generation without invalidating independently verified
-commits. Fixture runs do not make model requests. The rootless Docker controller
-separately enforces sandbox resource ceilings; wall-clock enforcement requires
-an additional deployment policy. The authenticated start endpoint refuses
-client-supplied provider/model/tool settings.
+Job-level specialist-step, model-call, reported-cost and **active execution
+time** budgets are enforced at safe specialist boundaries. Pi transcript usage
+and cumulative active time are durable per job, including across worker restarts.
+Time spent waiting for an author decision, or while a worker is stopped, is not
+charged. A budget stop pauses generation without invalidating independently
+verified commits; limits can be raised without resetting usage. Fixture runs
+never make model requests.
+
+The owner-scoped generation draft also accepts requested sandbox CPU cores,
+memory (MiB), and process counts. The read-only trusted controller derives
+Docker limits from the saved, pinned Studio job—not HTTP, prompts or sandbox
+tool arguments. Its operator maximums clamp requests; absent requests preserve
+1 CPU, 512 MiB RAM without swap, and 128 PIDs. The operator's default hard
+maximums are 4 CPUs, 2048 MiB and 512 PIDs, adjustable only through controller
+environment variables `NT_SANDBOX_MAX_CPUS`, `NT_SANDBOX_MAX_MEMORY_MIB`
+and `NT_SANDBOX_MAX_PIDS`. Changed limits cannot silently reuse an existing
+container with a different resource label. Docker commands continue to have
+a separate hard 30-second timeout and bounded output.
 
 The native catalog/owner-scoped integration cases are covered in
 `web/test/story-explorer.test.ts`, with fixture-start binding covered in
@@ -803,7 +814,7 @@ cannot be undone. Resume only admits an unchanged pinned job at a clean,
 trusted, idle graph checkpoint (or an unstarted, paused job). A budget-stopped
 specialist may also resume from its recorded preflight boundary, with no
 unverified Git edits or prior specialist result. Studio permits an increase
-to step, model-call, or reported-cost limits while paused, but never a decrease,
+to step, model-call, reported-cost, or active-time limits while paused, but never a decrease,
 usage reset, provider swap, or scope change.
 
 Interrupted execution is **never automatically replayed**. The queue retains
