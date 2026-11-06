@@ -108,9 +108,9 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       sourceCommitSha: pinned, status: 'paused',
       createdAt: '2026-11-01', updatedAt: '2026-11-01' }))
     const conversation = await createConversation(store, alice.id, storyId)
-    ensureRootThreads(store, alice.id, storyId)
-    assert.equal(associateNaturalThread(store, alice.id, conversation.id, jobId, payload.task), 'root:' + jobId)
-    assert.throws(() => associateNaturalThread(store, bob.id, conversation.id, jobId, payload.task), /not found/)
+    await ensureRootThreads(store, alice.id, storyId)
+    assert.equal(await associateNaturalThread(store, alice.id, conversation.id, jobId, payload.task), 'root:' + jobId)
+    await assert.rejects(() => associateNaturalThread(store, bob.id, conversation.id, jobId, payload.task), /not found/)
     assert.deepEqual((await readThreadChat(store, alice.id, 'root:' + jobId)).messages, [])
 
     const api = async (method: 'GET' | 'POST', body?: unknown, session?: string, origin = config.baseURL) => {

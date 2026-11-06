@@ -199,7 +199,7 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     // in its persisted transcript; tests without live credentials stay off.
     let liveSteeringIds: string[] = []
     if (process.env.NT_TEST_WEB_PI_STEERING === '1') {
-      ensureRootThreads(store, user.id, storyId)
+      await ensureRootThreads(store, user.id, storyId)
       const turnPath = join(job.stateDir, 'active-specialist.json')
       const turnDeadline = Date.now() + 90_000
       let active = false

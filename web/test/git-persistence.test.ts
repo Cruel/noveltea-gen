@@ -93,14 +93,22 @@ test('repository import never changes an existing Git binding without verified r
       'conn-gitlab', 'repo-gl', now)
     assert.equal(differentProvider.id, 'repo-gl')
     assert.deepEqual((await catalog.identities(alice)).map(r => r.provider).sort(), ['github', 'gitlab'])
+    const digest = 'c'.repeat(64)
     const story = { id: 'story-a', owner: alice, repositoryId: original.id,
-      directory: 'story', title: 'Story A', createdAt: now, commitSha: 'a'.repeat(40) }
+      directory: 'story', title: 'Story A', createdAt: now, commitSha: 'a'.repeat(40),
+      contentSha256: digest }
     assert.equal((await onboarding.importStory(story)).id, 'story-a')
+    assert.equal((await onboarding.story(alice, original.id, story.directory))?.contentSha256, digest)
     const replay = await onboarding.importStory({ ...story, id: 'story-replay',
-      title: 'Story updated', commitSha: 'b'.repeat(40) })
+      title: 'Story updated', commitSha: 'b'.repeat(40), contentSha256: undefined })
     assert.equal(replay.id, story.id)
     assert.equal(replay.title, 'Story updated')
     assert.equal(replay.commitSha, 'b'.repeat(40))
+    assert.equal((await onboarding.story(alice, original.id, story.directory))?.contentSha256, digest,
+      'reimport without a digest must not erase initial draft verification')
+    await onboarding.importStory({ ...story, contentSha256: 'd'.repeat(64) })
+    assert.equal((await onboarding.story(alice, original.id, story.directory))?.contentSha256, digest,
+      'reimport must not replace an existing trusted initialization digest')
     assert.equal(await catalog.repositoryForStory(bob, story.id, 'github'), null)
     assert.equal(await catalog.repositoryForStory(alice, story.id, 'gitlab'), null)
     assert.equal(await catalog.repositoryForStory(alice, story.id, 'github'), original.id)

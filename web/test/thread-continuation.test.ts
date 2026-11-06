@@ -67,7 +67,7 @@ test('legacy unscoped Thread messages cannot inherit a full-Story writer on a co
       }) }))
     ;(await seed.queue({ jobId: parentId, ownerUserId: user, intent: 'start',
       phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
-    ensureRootThreads(store, user, storyId)
+    await ensureRootThreads(store, user, storyId)
     await claimServerGeneration(parent, parent.threadId + ':generation:web', request)
     const graph = openWebGenerationGraph(join(parent.stateDir, 'web-generation.sqlite'))
     await graph.graph.updateState({ configurable: { thread_id: parent.threadId + ':generation:web' } },

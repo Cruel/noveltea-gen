@@ -115,7 +115,7 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
         headers: { cookie: authorCookie },
       }), id, config.baseURL)).status, 200)
     assert.equal((await control('POST', authorCookie, { action: 'resume' })).status, 202)
-    pumpAgentQueue(store)
+    await pumpAgentQueue(store)
     await waitForAgentJob(store, id)
     const deadline = Date.now() + 45_000
     let visible = ''

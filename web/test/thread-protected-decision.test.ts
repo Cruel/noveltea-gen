@@ -81,7 +81,7 @@ async function setup() {
     }) }))
   ;(await seed.queue({ jobId: sourceId, ownerUserId: owner, intent: 'start',
     phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
-  ensureRootThreads(store, owner, storyId)
+  await ensureRootThreads(store, owner, storyId)
   await claimServerGeneration(source, source.threadId + ':generation:web', request)
   const graph = openWebGenerationGraph(join(source.stateDir, 'web-generation.sqlite'))
   await graph.graph.updateState({ configurable: { thread_id: source.threadId + ':generation:web' } },

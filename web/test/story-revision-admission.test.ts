@@ -119,7 +119,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       }) }))
     ;(await seed.queue({ jobId: sourceId, ownerUserId: owner, intent: 'start',
       phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
-    ensureRootThreads(store, owner, storyId)
+    await ensureRootThreads(store, owner, storyId)
     await claimServerGeneration(parent, parent.threadId + ':generation:web', sourceRequest)
     const sourceGraph = openWebGenerationGraph(join(parent.stateDir, 'web-generation.sqlite'))
     await sourceGraph.graph.updateState({ configurable: { thread_id: parent.threadId + ':generation:web' } },

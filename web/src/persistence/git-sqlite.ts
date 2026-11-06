@@ -341,10 +341,14 @@ export function createGitSqlitePersistence(db: StudioDrizzle): {
         const saved = tx.insert(stories).values({
           id: story.id, ownerUserId: story.owner, repositoryId: story.repositoryId,
           directory: story.directory, title: story.title, createdAt: story.createdAt,
-          sourceCommitSha: story.commitSha,
+          sourceCommitSha: story.commitSha, initialContentSha256: story.contentSha256 ?? null,
         }).onConflictDoUpdate({
           target: [stories.repositoryId, stories.directory],
-          set: { title: story.title, sourceCommitSha: story.commitSha },
+          set: { title: story.title, sourceCommitSha: story.commitSha,
+            ...(story.contentSha256 ? {
+              initialContentSha256: sql`coalesce(${stories.initialContentSha256}, ${story.contentSha256})`,
+            } : {}),
+          },
           setWhere: eq(stories.ownerUserId, story.owner),
         }).run()
         if (!one(saved)) throw new Error('Story import conflicts with another owner')

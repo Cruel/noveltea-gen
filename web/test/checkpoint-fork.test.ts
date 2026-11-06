@@ -103,7 +103,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       mkdirSync(join(parent.stateDir, '.story-job-running'))
       writeFileSync(join(parent.stateDir, '.story-job-running', 'owner.json'), 'live parent lock evidence')
       writeFileSync(join(parent.stateDir, 'pi-budget.json'), 'parent budget evidence')
-      ensureRootThreads(store, user.id, storyId)
+      await ensureRootThreads(store, user.id, storyId)
       const sourceThreadId = 'root:' + parentId
       const insertMessage = async (id: string, ownerUserId: string, threadId: string,
         sequence: number, status: string, body: string, verifiedCommitSha: string | null) => {

@@ -99,7 +99,7 @@ test('real author-update receipt pins a steering edit between commits; missing r
       generationConfigJson: JSON.stringify({
         version: 1, headSha: base, task: request.task, contract, limits: {}, model: null,
       }) }))
-    ensureRootThreads(db, user, storyId)
+    await ensureRootThreads(db, user, storyId)
     const first = (await readThreadChat(db, user, threadId))
     assert.equal(first.messages.length, 1)
     // The job's real author-update receipt captures the HEAD on application,

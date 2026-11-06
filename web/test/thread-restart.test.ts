@@ -82,7 +82,7 @@ async function setup(canonicalStory = false, invalidStory = false) {
     generationRequestJson: JSON.stringify(request),
     generationThreadId: parent.threadId + ':generation:web',
     generationConfigJson: JSON.stringify(draft) }))
-  ensureRootThreads(db, owner.id, storyId)
+  await ensureRootThreads(db, owner.id, storyId)
   const threadId = 'root:' + sourceId
   const later = () => {
     writeFileSync(join(remote, 'story', 'notes.txt'), 'New upstream notes ' + randomUUID() + '\n')

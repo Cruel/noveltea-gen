@@ -67,7 +67,7 @@ test('natural prompt preview and initial Thread registration are owner scoped an
       'rejected plans and missing credentials must not create jobs')
 
     await db.persistence.generation.jobs.register(alice, jobId, storyId, 'Story', headSha, 'now')
-    ensureRootThreads(db, alice, storyId)
+    await ensureRootThreads(db, alice, storyId)
     // Existing-job Conversations retain their legacy:UUID identity. The
     // composer must accept one of these while keeping the owner check.
     const legacyPreview = await previewNaturalStory(db, alice, 'legacy:' + jobId, brief)

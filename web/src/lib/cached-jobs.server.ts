@@ -73,7 +73,7 @@ export async function prepareCachedJob(
   if (!saved) {
     throw new GitCacheError(409, 'Job ID was assigned concurrently to another Story or revision.')
   }
-  ensureRootThreads(store, ownerId, row.id)
+  await ensureRootThreads(store, ownerId, row.id)
   return { id: input.jobId, storyId: row.id, status: 'paused' as const,
     baseSha: job.baseSha, headSha: job.headSha }
 }
