@@ -35,7 +35,6 @@ test('fresh Drizzle baseline initializes the complete, constrained Studio schema
     assert.equal(appNames.length, 29)
     for (const name of ['thread_steering_checkpoint_links', 'github_install_flows',
       'story_onboarding_conversations']) assert.ok(appNames.includes(name))
-    assert.equal((await store.testing.schema.hasTable('studio_schema_migrations')), false)
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])
 
     const ctx = await createStudioAuth(store, config).$context
@@ -120,14 +119,15 @@ test('Studio web startup rejects pending migrations before initializing auth or 
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('legacy Studio data and incompatible Drizzle histories are refused without rewriting databases', async () => {
-  const legacy = openStudioDatabase(':memory:')
+test('untracked application tables and incompatible Drizzle histories are refused without rewriting databases', async () => {
+  const untracked = openStudioDatabase(':memory:')
   try {
-    ;(await legacy.testing.schema.createLegacyJournal(27))
-    await assert.rejects(migrateStudio(legacy, config), /Incompatible legacy Studio database/)
-    assert.equal((await legacy.testing.schema.hasTable('user')), false)
-    assert.equal((await legacy.testing.schema.legacyVersion()), 27)
-  } finally { legacy.close() }
+    await migrateStudio(untracked, config)
+    await untracked.testing.schema.dropTable('__drizzle_migrations')
+    await assert.rejects(migrateStudio(untracked, config), /tables exist without Drizzle migration history/)
+    assert.equal(await untracked.testing.schema.hasTable('repositories'), true)
+    assert.equal(await untracked.testing.schema.hasMigrationJournal(), false)
+  } finally { untracked.close() }
 
   const mismatched = openStudioDatabase(':memory:')
   try {

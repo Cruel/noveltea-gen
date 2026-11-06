@@ -119,14 +119,6 @@ function createSynchronousSqliteTestRecords(store: StudioDatabase) {
         return this.tables().includes(name)
       },
       /** SQLite-only schema fault injections stay in the backend test adapter. */
-      createLegacyJournal(version: number) {
-        sqlite.exec('CREATE TABLE studio_schema_migrations (version integer primary key)')
-        sqlite.prepare('INSERT INTO studio_schema_migrations(version) VALUES (?)').run(version)
-      },
-      legacyVersion(): number | undefined {
-        return (sqlite.prepare('SELECT version FROM studio_schema_migrations').get() as
-          { version: number } | undefined)?.version
-      },
       tamperMigrationHash(hash: string) {
         sqlite.prepare('UPDATE __drizzle_migrations SET hash = ?').run(hash)
       },

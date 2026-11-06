@@ -477,13 +477,13 @@ Always stop Studio writers and run `migrate` as a separate deployment step.
 Keep Better Auth pinned, and use the same stable secret and database path
 on migration and runtime.
 
-**Breaking cutover (#93): existing Studio databases are not compatible.**
-The 27 handwritten application migrations have been replaced by a fresh
-baseline. The migration command refuses legacy journals and will not
-automatically erase or retrofit an existing database. Back up any data you
-wish to keep; this reset intentionally discards existing Studio users,
-connections, repositories, Stories, jobs, and credentials. The independent
-LangGraph/agent/checkpointer SQLite databases are **not** affected.
+**Development schema reset:** The Studio application now uses a fresh
+Drizzle migration baseline. Existing application tables without a Drizzle
+migration journal cannot be adopted automatically. Back up any data you
+wish to keep before resetting; this reset intentionally discards Studio
+users, connections, repositories, Stories, jobs, and credentials. The
+independent LangGraph/agent/checkpointer SQLite databases are **not**
+affected.
 
 To reset deliberately, stop Studio and any agent/worker processes first.
 Set `NT_STUDIO_DB_PATH` to the **absolute path** of the Studio SQLite file

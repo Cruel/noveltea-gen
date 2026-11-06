@@ -122,8 +122,8 @@ file and its `-wal` and `-shm` companions at the configured absolute path.
 Run `migrate` and restart. See [the Studio setup and reset guide](../web/README.md)
 for the exact guarded command and Docker Compose procedure. Do **not**
 remove the parent `NT_STATE_DIR`, job directories, graph checkpoints or
-Pi session transcripts; do not run `docker compose down -v`. Legacy handwritten
-Studio migration histories and incompatible Drizzle journals are deliberately
+Pi session transcripts; do not run `docker compose down -v`. Application
+tables without Drizzle history and incompatible Drizzle journals are deliberately
 refused, not adopted or automatically erased.
 
 When changing the schema, modify `web/src/db/schema.ts`, run

@@ -30,8 +30,6 @@ export interface TestPersistence {
     hasMigrationJournal(): Promise<boolean>
     migrationHistory(): Promise<Array<{ hash: string; createdAt: number }>>
     hasTable(name: string): Promise<boolean>
-    createLegacyJournal(version: number): Promise<void>
-    legacyVersion(): Promise<number | undefined>
     tamperMigrationHash(hash: string): Promise<void>
     dropIndex(index: string): Promise<void>
     dropTable(table: string): Promise<void>

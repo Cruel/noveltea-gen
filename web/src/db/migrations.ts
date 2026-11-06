@@ -99,15 +99,9 @@ function expectedMigrations() {
   return list
 }
 
-// Detect old Studio databases BEFORE modifying anything (including Better
-// Auth tables). This baseline is deliberately NOT an upgrade of the 27 old
-// handwritten migrations; reset is an operator decision, never automatic.
-function assertNotLegacy(store: StudioDatabase) {
-  if (hasTable(store, 'studio_schema_migrations')) {
-    throw new StudioSchemaError(
-      'Incompatible legacy Studio database (27 handwritten migrations). Back up and explicitly reset NT_STUDIO_DB_PATH; this build does not upgrade existing Studio data.',
-    )
-  }
+// Never adopt application tables that lack a Drizzle migration journal.
+// Check before either migration system modifies the database.
+function assertNoUntrackedApplicationTables(store: StudioDatabase) {
   if (!hasTable(store, '__drizzle_migrations') && appTables.some(table => hasTable(store, table.name))) {
     throw new StudioSchemaError(
       'Studio application tables exist without Drizzle migration history. Back up and explicitly reset NT_STUDIO_DB_PATH; automatic adoption is forbidden.',
@@ -136,7 +130,7 @@ function compatibleMigrationCount(store: StudioDatabase, expected: ReturnType<ty
 // tables, columns and named indexes. Cache the expensive structural check only
 // while SQLite's schema_version is unchanged; the journal is ALWAYS checked.
 export function assertStudioSchemaCurrent(store: StudioDatabase) {
-  assertNotLegacy(store)
+  assertNoUntrackedApplicationTables(store)
   const expected = expectedMigrations()
   const applied = compatibleMigrationCount(store, expected)
   if (applied < expected.length) {
@@ -177,7 +171,7 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
 }
 
 export async function migrateStudio(store: StudioDatabase, config: StudioAuthConfig) {
-  assertNotLegacy(store)
+  assertNoUntrackedApplicationTables(store)
   compatibleMigrationCount(store, expectedMigrations())
 
   // Only the explicit migration command is allowed to write either schema.
