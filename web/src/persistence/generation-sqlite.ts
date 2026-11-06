@@ -2,7 +2,7 @@ import { and, asc, count, desc, eq, exists, gt, lt, ne, isNotNull, isNull, sql }
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { generationRunQueue as runs, generationEvents as events, sessions, stories,
-  repositories, storyThreadRuns, storyThreads } from '../db/schema'
+  repositories, storyThreadRuns, storyThreads, githubPublications, gitlabPublications } from '../db/schema'
 import type { GenerationPersistence, GenerationProgress, GenerationQueueStore,
   QueueIntent, QueueRecord } from './generation-contracts'
 
@@ -220,6 +220,42 @@ export function createSqliteGenerationPersistence(db: StudioDrizzle): Generation
       async hasAfter(owner, jobId, after) { return progressBridge.hasAfter(owner, jobId, after) },
     },
     jobs: {
+      async finalizedTranscriptCandidates(limit, offset, owner, jobId) {
+        const rows = db.select({
+          owner: sessions.ownerUserId, jobId: sessions.id, threadId: storyThreadRuns.threadId,
+          completedAt: sessions.updatedAt, githubAt: githubPublications.updatedAt,
+          githubHead: githubPublications.headSha, githubPhase: githubPublications.phase,
+          gitlabAt: gitlabPublications.updatedAt, gitlabHead: gitlabPublications.headSha,
+          gitlabPhase: gitlabPublications.phase,
+        }).from(sessions)
+          .innerJoin(runs, and(eq(runs.jobId, sessions.id), eq(runs.ownerUserId, sessions.ownerUserId)))
+          .innerJoin(storyThreadRuns, and(eq(storyThreadRuns.jobId, sessions.id),
+            eq(storyThreadRuns.ownerUserId, sessions.ownerUserId)))
+          .innerJoin(storyThreads, and(eq(storyThreads.id, storyThreadRuns.threadId),
+            eq(storyThreads.ownerUserId, sessions.ownerUserId)))
+          .leftJoin(githubPublications, and(eq(githubPublications.jobId, sessions.id),
+            eq(githubPublications.ownerUserId, sessions.ownerUserId)))
+          .leftJoin(gitlabPublications, and(eq(gitlabPublications.jobId, sessions.id),
+            eq(gitlabPublications.ownerUserId, sessions.ownerUserId)))
+          .where(and(eq(sessions.status, 'completed'), eq(runs.phase, 'finished'),
+            isNull(storyThreads.deletedAt), eq(storyThreadRuns.needsAuthor, false),
+            sql`(${githubPublications.phase} = 'linked' OR ${gitlabPublications.phase} = 'linked')`,
+            owner ? eq(sessions.ownerUserId, owner) : undefined,
+            jobId ? eq(sessions.id, jobId) : undefined))
+          .orderBy(asc(sessions.updatedAt), asc(sessions.id)).limit(limit).offset(offset).all()
+        return rows.flatMap(row => {
+          const linked = row.githubPhase === 'linked' && row.githubAt && row.githubHead
+            ? { publishedAt: row.githubAt, publishedHead: row.githubHead }
+            : row.gitlabPhase === 'linked' && row.gitlabAt && row.gitlabHead
+            ? { publishedAt: row.gitlabAt, publishedHead: row.gitlabHead } : null
+          return linked ? [{ owner: row.owner, jobId: row.jobId, threadId: row.threadId,
+            completedAt: row.completedAt, ...linked }] : []
+        })
+      },
+      async finalizedTranscriptCandidate(owner, jobId) {
+        assertOwner(owner)
+        return (await this.finalizedTranscriptCandidates(1, 0, owner, jobId))[0] ?? null
+      },
       async selected(owner, jobId) {
           assertOwner(owner)
           return db.select({

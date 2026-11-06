@@ -588,6 +588,44 @@ receives the sandbox controller token or executes a generation graph. Live Pi
 still requires a certified rootless controller and explicit per-user credentials;
 fixture success does not establish literary/editorial approval.
 
+**Finalized Pi transcript retention (spec #38).** Set
+`NT_FINALIZED_TRANSCRIPT_RETENTION_DAYS` in the trusted agent environment (or
+`web/.env` for Compose). The default is **30 days**, measured from the *later*
+of completed execution and a verified linked GitHub PR/GitLab MR publication.
+Use a positive integer (up to 36500), or `off` to disable automatic expiry;
+invalid values prevent agent startup. The existing agent queue runs private
+maintenance at startup and at most once per six hours, without another daemon,
+public endpoint, migration, or separate scheduler. Failures leave files intact
+and log no job paths or transcript contents.
+
+Expiry is **not** based on JSONL modification time or job status alone. Only
+completed, queue-settled, remotely linked jobs with the exact published Git
+HEAD, clean worktree and stable owner-scoped catalog identity qualify. Any
+active/paused/blocked/cancelled/interrupted, unlinked/unpublished or otherwise
+unverified job remains protected, as do Threads with pending author messages,
+unsettled Pi steering, active descendants or fork/restart reservations. Jobs
+with foundation-conflict or specialist-choice session-hash evidence are
+**categorically exempt**, even when completed and published: their approvals
+and reconciliation checks still depend on exact original session bytes.
+Complete jobs whose worktree, locks, state directory, usage evidence or
+publication identity cannot be verified are also exempt, rather than silently
+becoming nonrecoverable. Completed job checkpoints can be branched from their
+independent immutable Git/stage proof; they never replay a removed Pi session.
+
+Maintenance removes only job-local `sessions/` and `*-sessions/` JSONL files,
+never LangGraph checkpoint SQLite, `job.json`, worktree, receipt JSON, trusted
+approval records, review/fork proofs, or author-update evidence. Before the
+first removal it atomically records a private `transcript-retention.json`
+containing **only numeric usage and finalized publication provenance**, so
+usage reports and permanent Thread deletion continue to work after restart.
+The receipt contains no prompts, model output, credentials, raw transcript
+paths or tool invocations. Repeated/partially interrupted sweeps are safe to
+retry. Standalone CLI/demo Pi sessions, local traces, and sessions outside
+these trusted job-local directories have no verifiable Studio finalization
+proof and are **not** automatically deleted; they require separate operator
+retention and backup policies. Raw transcripts remain sensitive until expiry:
+do not publish or log them, and do not treat this policy as in-place redaction.
+
 Run the authenticated fixture integration test with an existing
 `noveltea-skills` checkout:
 

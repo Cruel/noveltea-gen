@@ -40,7 +40,15 @@ export interface GenerationQueueStore {
     saved: { status: string; request: string; thread: string },
     interrupted: boolean, now: string): Promise<void>
 }
+export type FinalizedTranscriptCandidate = {
+  owner: string; jobId: string; threadId: string; completedAt: string;
+  publishedAt: string; publishedHead: string
+}
 export interface GenerationJobs {
+  /** Trusted maintenance inventory; never expose tenant-wide records in public routes. */
+  finalizedTranscriptCandidates(limit: number, offset: number, owner?: string, jobId?: string):
+    Promise<FinalizedTranscriptCandidate[]>
+  finalizedTranscriptCandidate(owner: string, jobId: string): Promise<FinalizedTranscriptCandidate | null>
   selected(owner: string, jobId: string): Promise<SavedGenerationJob | null>
   state(owner: string, jobId: string): Promise<JobState | null>
   catalogStory(owner: string, storyId: string, provider: 'github' | 'gitlab'):

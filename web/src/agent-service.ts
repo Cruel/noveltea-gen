@@ -6,6 +6,7 @@ import { authorizedStoryJob } from './lib/fixture-jobs.server'
 import { appendGenerationEvent } from './lib/generation-progress.server'
 import { claimNext, finishAttempt, fenceAbandonedRuns, queueRecord } from './lib/generation-queue.server'
 import { runPersistedGeneration } from './agent-runner'
+import { cleanFinalizedTranscripts, transcriptRetentionDays } from './lib/transcript-retention.server'
 import { recoverSettledThreadRuns, settleThreadRun } from './lib/thread-chat.server'
 import { executeAuthorCommand } from './lib/agent-author-command.server'
 import { validAuthorCommand } from './lib/agent-author-validation'
@@ -142,7 +143,17 @@ export async function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
   if (!Number.isSafeInteger(intervalMs) || intervalMs < 10)
     throw new Error('Invalid agent polling interval.')
   await store.assertReady()
+  transcriptRetentionDays() // Fail startup on unsafe/invalid operator configuration.
   stopping = false
+  let lastRetentionSweep = 0
+  let retentionPass: Promise<void> | undefined
+  const sweepRetention = () => {
+    if (retentionPass || Date.now() - lastRetentionSweep < 6 * 60 * 60 * 1000) return
+    lastRetentionSweep = Date.now()
+    retentionPass = cleanFinalizedTranscripts(store).then(() => {}).catch(() => {
+      console.error('[Studio] Finalized transcript maintenance failed; files were retained')
+    }).finally(() => { retentionPass = undefined })
+  }
   observePiTurnSettlement((turn, succeeded) => settlePiSteering(store, turn, succeeded))
   observePiTurnLifecycle((turn, phase) => recordPiTurnLifecycle(store, turn, phase))
   // Detect prior dead workers before taking new jobs. Never replay their
@@ -151,6 +162,7 @@ export async function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
     console.error('[Studio] Unable to initialize the generation queue')
   })
   const tick = () => {
+    sweepRetention()
     void pumpAgentQueue(store).catch(() => {
       console.error('[Studio] Unable to inspect the generation queue')
     })
@@ -158,8 +170,13 @@ export async function startAgentQueue(store: StudioDatabase, intervalMs = 250) {
       console.error('[Studio] Could not dispatch queued Pi steering; messages remain in their recorded state')
     })
   }
+  tick()
   const timer = setInterval(tick, intervalMs)
-  return async () => { stopping = true; clearInterval(timer); await pumping.get(store) }
+  return async () => {
+    stopping = true
+    clearInterval(timer)
+    await Promise.all([pumping.get(store), retentionPass])
+  }
 }
 
 export async function startAgentServer(store: StudioDatabase, secret: string,

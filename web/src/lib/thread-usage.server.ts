@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { JobStartResult } from '../../../src/job'
 import { inspectPiPolicy, type PiBudgetUsage, type PiPolicy } from '../../../src/job-pi-policy'
@@ -50,6 +51,21 @@ export async function snapshotJobUsage(row: Pick<SavedGenerationJob, 'requestJso
   if (origin === 'unavailable') return unavailable()
   if (origin === 'fixture' || origin === 'prepared')
     return { version: 1, origin, limits: null, spent: emptyUsage() }
+  // Once completed, published Pi transcripts have expired, numerical usage
+  // remains durable in the job state independently of the deleted JSONL.
+  const retention = join(job.stateDir, 'transcript-retention.json')
+  if (existsSync(retention)) {
+    try {
+      const saved = JSON.parse(await readFile(retention, 'utf8')) as {
+        version?: number; usage?: RunUsageSnapshot
+      }
+      if (saved.version === 1 && saved.usage?.version === 1 &&
+          saved.usage.origin === 'pi-transcript' && saved.usage.spent &&
+          validMeter(saved.usage.spent))
+        return { ...saved.usage, origin: 'retained-summary' }
+    } catch { /* Corrupt independent accounting is unknown, never zero. */ }
+    return unavailable()
+  }
   // inspectPiPolicy defaults missing budget state to an empty counter for
   // first-run admission. Reporting must not treat absent evidence as zero spend.
   if (!existsSync(join(job.stateDir, 'pi-budget.json'))) return unavailable()
