@@ -113,12 +113,12 @@ test("registered rootless Docker controller supports Foundation through Event st
     if (!resumeDir) {
       const db = new DatabaseSync(join(app, "studio.sqlite"));
       try {
-        db.exec(`CREATE TABLE studio_sessions (id TEXT, owner_user_id TEXT, story_id TEXT, source_commit_sha TEXT);
+        db.exec(`CREATE TABLE studio_sessions (id TEXT, owner_user_id TEXT, story_id TEXT, source_commit_sha TEXT, generation_config_json TEXT);
           CREATE TABLE stories (id TEXT, owner_user_id TEXT, repository_id TEXT, directory TEXT);
           CREATE TABLE repositories (id TEXT, owner_user_id TEXT, provider TEXT, provider_repository_id TEXT);`);
         db.prepare("INSERT INTO repositories VALUES (?,?,?,?)").run("repo-id", owner, "github", providerRepo);
         db.prepare("INSERT INTO stories VALUES (?,?,?,?)").run("story-id", owner, "repo-id", "story");
-        db.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?)").run(id, owner, "story-id", base);
+        db.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)").run(id, owner, "story-id", base, null);
       } finally { db.close(); }
     }
 
