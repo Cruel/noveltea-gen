@@ -1,5 +1,7 @@
 import { Button } from '@/components/ui/button'
 import { StudioSelect } from '@/components/studio-select'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Info } from 'lucide-react'
 import { siGithub, siGitlab } from 'simple-icons'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
@@ -27,12 +29,21 @@ const accountLabel = (login: string | null | undefined, id: string) =>
   login ? '@' + login : 'Account ' + id
 function GitProviderIcon({ provider }: { provider: 'github' | 'gitlab' }) {
   const icon = provider === 'github' ? siGithub : siGitlab
-  return <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="size-5 fill-current"
+  return <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="size-4 fill-current"
       style={provider === 'gitlab' ? { color: '#FC6D26' } : undefined}>
       <path d={icon.path} />
     </svg>
   </span>
+}
+function HelpTip({ label, text }: { label: string; text: string }) {
+  return <Tooltip>
+    <TooltipTrigger render={<button type="button" aria-label={label}
+      className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring" />}>
+      <Info aria-hidden="true" className="size-3.5" />
+    </TooltipTrigger>
+    <TooltipContent>{text}</TooltipContent>
+  </Tooltip>
 }
 function noticeFor(query: URLSearchParams) {
   if (query.has('integration_connected')) return 'Repository identity connected successfully.'
@@ -104,6 +115,14 @@ function SettingsPage() {
     const result = await beginGitConnection({ data: provider })
     window.location.assign(result.authorizationUrl)
   })
+  const cancelRepositoryEdit = (repositoryId: string) => {
+    setEditingRepository(null)
+    setBindings(previous => {
+      const next = { ...previous }
+      delete next[repositoryId]
+      return next
+    })
+  }
   const rebindRepository = (repositoryId: string, connectionId: string | null) => run(async () => {
     await rebindGitRepository({ data: { repositoryId, connectionId } })
     await refresh()
@@ -158,47 +177,55 @@ function SettingsPage() {
         <Button type="button" disabled={busy} onClick={() => void save()}>Save model defaults</Button>
         </CardContent>
       </Card>
-      <Card id="integrations" className="mt-6">
-        <CardHeader><CardTitle>Git accounts</CardTitle></CardHeader><CardContent>
-        <p>Accounts available for repository access, including accounts linked for Studio login.</p>
-        <ul>{accounts.map(account => {
+      <Card id="integrations" size="sm" className="mt-6">
+        <CardHeader className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Git accounts</CardTitle>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" size="sm" variant="outline" disabled={busy}
+              onClick={() => void connectGit('github')}>Add GitHub</Button>
+            <Button type="button" size="sm" variant="outline" disabled={busy}
+              onClick={() => void connectGit('gitlab')}>Add GitLab</Button>
+          </div>
+        </CardHeader><CardContent>
+        <ul className="m-0">{accounts.map(account => {
           const connection = account.connection
           const loginCount = settings.loginMethods.filter(login => login.provider === account.provider).length
           const used = settings.repositories.filter(repo => repo.provider === account.provider &&
             (repo.connectionId ? repo.connectionId === connection?.id : account.loginMethod && loginCount === 1)).length
+          const status = connection?.status
+          const accessDetails = [
+            account.loginMethod ? 'Can sign in to Studio and access repositories through the login.'
+              : 'Authorized for repositories only; not a Studio login method.',
+            status === 'connected' ? 'Separate repository authorization is connected.'
+              : status === 'reauthorize' ? 'Separate authorization requires reconnection.'
+                : status === 'disconnected' ? 'Separate authorization is disconnected.' : '',
+            !account.login ? 'The provider username could not be retrieved.' : '',
+          ].filter(Boolean).join(' ')
           return <li key={account.key} className="settings-connection">
-            <div className="flex min-w-0 items-center gap-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               <GitProviderIcon provider={account.provider} />
-              <div className="min-w-0">
-                <strong>{names[account.provider]} · {accountLabel(account.login, account.accountId)}</strong>
-                <small>{account.loginMethod ? 'Studio login · Repository access' : 'Repository access'}</small>
-                {connection?.status === 'reauthorize' && <small>Reauthorization required</small>}
-                {connection?.status === 'disconnected' && <small>Separate authorization disconnected</small>}
-                {!account.login && <small>Username unavailable</small>}
-                <small>{used} {used === 1 ? 'repository' : 'repositories'}</small>
-              </div>
+              <strong>{names[account.provider]} · {accountLabel(account.login, account.accountId)}</strong>
+              <HelpTip label={'Access details for ' + names[account.provider] + ' account'} text={accessDetails} />
+              <span className="text-xs text-muted-foreground">{used} {used === 1 ? 'repository' : 'repositories'}</span>
+              {status === 'reauthorize' && <span className="text-xs text-muted-foreground">Reauthorization required</span>}
+              {status === 'disconnected' && <span className="text-xs text-muted-foreground">Disconnected</span>}
             </div>
             {connection && (connection.status === 'connected'
-              ? <Button type="button" variant="outline" disabled={busy}
+              ? <Button type="button" size="sm" variant="outline" disabled={busy}
                   onClick={() => void disconnectGit(connection)}>
                   {account.loginMethod ? 'Disconnect separate access' : 'Disconnect'}
                 </Button>
-              : <Button type="button" variant="outline" disabled={busy}
+              : <Button type="button" size="sm" variant="outline" disabled={busy}
                   onClick={() => void connectGit(account.provider)}>Reconnect</Button>)}
           </li>
         })}</ul>
-        {!accounts.length && <p>No Git accounts linked yet. Link a login method or connect a repository account.</p>}
-        <div className="actions settings-actions">
-          <Button type="button" variant="outline" disabled={busy}
-            onClick={() => void connectGit('github')}>Add GitHub account</Button>
-          <Button type="button" variant="outline" disabled={busy}
-            onClick={() => void connectGit('gitlab')}>Add GitLab account</Button>
-        </div>
-        {settings.repositories.length > 0 && <>
-          <h3>Repository access</h3>
-          <p>Each repository uses the account shown below. To change it, Studio checks repository identity and
-            push permissions before saving. Existing Stories and jobs are preserved.</p>
-          <ul>{settings.repositories.map(repo => {
+        {!accounts.length && <p className="text-sm text-muted-foreground">No Git accounts linked.</p>}
+        {settings.repositories.length > 0 && <div className="mt-4">
+          <div className="flex items-center gap-1">
+            <h3 className="text-sm font-semibold">Repository access</h3>
+            <HelpTip label="About repository access" text="Choose which Git account each repository uses. Studio verifies repository identity and push permissions before saving. Existing Stories and jobs are preserved." />
+          </div>
+          <ul className="m-0">{settings.repositories.map(repo => {
             const current = accountForRepository(repo, accounts)
             const eligibleAccounts = accounts.filter(account => account.provider === repo.provider)
             const loginCount = settings.loginMethods.filter(login => login.provider === repo.provider).length
@@ -211,16 +238,20 @@ function SettingsPage() {
               : repo.connectionId ? 'Authorization unavailable' : 'Studio login unavailable or ambiguous'
             return <li key={repo.id} className="settings-repository">
               <div className="settings-connection">
-                <div><strong>{repo.name}</strong>
-                  <small>{names[repo.provider]} · {currentDescription}</small>
-                  {!repo.connectionId && <small>Using Studio login</small>}
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <strong>{repo.name}</strong>
+                  <span className="text-xs text-muted-foreground">{names[repo.provider]} · {currentDescription}</span>
+                  <HelpTip label={'Access details for ' + repo.name + ' on ' + names[repo.provider]}
+                    text={repo.connectionId ? 'This repository uses a separate Git authorization.'
+                      : 'This repository uses your Studio login credentials for Git access.'} />
                 </div>
-                <Button type="button" variant="outline" disabled={busy}
-                  onClick={() => setEditingRepository(previous => previous === repo.id ? null : repo.id)}>
-                  {editingRepository === repo.id ? 'Hide options' : 'Change account'}
+                <Button type="button" size="sm" variant="outline" disabled={busy}
+                  onClick={() => editingRepository === repo.id
+                    ? cancelRepositoryEdit(repo.id) : setEditingRepository(repo.id)}>
+                  {editingRepository === repo.id ? 'Cancel change' : 'Change'}
                 </Button>
               </div>
-              {editingRepository === repo.id && <div className="actions settings-actions">
+              {editingRepository === repo.id && <div className="flex flex-wrap items-center gap-2 pt-2">
                 <StudioSelect aria-label={'Git account for ' + repo.name} value={selected}
                   disabled={busy} placeholder="Choose a Git account"
                   onValueChange={value => setBindings(previous => ({ ...previous, [repo.id]: value }))}
@@ -228,38 +259,45 @@ function SettingsPage() {
                     value: account.key, label: accountLabel(account.login, account.accountId),
                     disabled: credentialForAccount(account, loginCount) === undefined,
                   }))} />
-                <Button type="button" disabled={busy || credential === undefined ||
+                <Button type="button" size="sm" disabled={busy || credential === undefined ||
                   !selected || (selected === currentKey && credential === repo.connectionId)}
                   onClick={() => void rebindRepository(repo.id, credential!)}>Save account</Button>
-                <Button type="button" variant="ghost" disabled={busy}
-                  onClick={() => { setEditingRepository(null); setBindings(previous => {
-                    const next = { ...previous }; delete next[repo.id]; return next
-                  }) }}>Cancel</Button>
+                <Button type="button" size="sm" variant="ghost" disabled={busy}
+                  onClick={() => cancelRepositoryEdit(repo.id)}>Cancel</Button>
               </div>}
             </li>
           })}</ul>
-        </>}
+        </div>}
         </CardContent>
       </Card>
-      <Card id="account" className="mt-6">
+      <Card id="account" size="sm" className="mt-6">
         <CardHeader><CardTitle>Account &amp; security</CardTitle></CardHeader><CardContent>
-        <h3>Login methods</h3>
-        <p>These accounts can sign into Studio. Adding a Git repository account does not add a login method.
-          Removing a login method never silently changes a repository's authorization.</p>
-        <ul>{settings.loginMethods.map(login => <li key={login.provider + login.accountId} className="settings-connection">
-          <div className="flex min-w-0 items-center gap-3">
-            <GitProviderIcon provider={login.provider} />
-            <div><strong>{names[login.provider]} · {accountLabel(login.login, login.accountId)}</strong>
-              <small>Studio login</small></div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1">
+            <h3 className="text-sm font-semibold">Login methods</h3>
+            <HelpTip label="About login methods"
+              text="These accounts can sign in to Studio. Connecting a repository account does not add a login method. Removing a login method never silently changes repository authorization." />
           </div>
-          <Button type="button" disabled={busy || settings.loginMethods.length < 2}
-            title={settings.loginMethods.length < 2 ? 'Keep at least one login method' : undefined}
-            onClick={() => void unlinkLogin(login.provider, login.id)}>Remove login</Button>
-        </li>)}</ul>
-        <div className="actions settings-actions">
-          {(['github', 'gitlab'] as const).map(provider => <Button key={provider} type="button"
-            disabled={busy} onClick={() => void linkLogin(provider)}>Link {names[provider]} login</Button>)}
+          <div className="flex flex-wrap gap-2">
+            {(['github', 'gitlab'] as const).map(provider => <Button key={provider}
+              type="button" size="sm" variant="outline" disabled={busy}
+              onClick={() => void linkLogin(provider)}>Link {names[provider]}</Button>)}
+          </div>
         </div>
+        <ul className="m-0">{settings.loginMethods.map(login =>
+          <li key={login.provider + login.accountId} className="settings-connection">
+            <div className="flex min-w-0 items-center gap-2">
+              <GitProviderIcon provider={login.provider} />
+              <strong>{names[login.provider]} · {accountLabel(login.login, login.accountId)}</strong>
+              <HelpTip label={'Login details for ' + names[login.provider]}
+                text="This account is a Studio login method. Removing it does not remove separate Git repository authorizations." />
+            </div>
+            <Button type="button" size="sm" variant="outline"
+              disabled={busy || settings.loginMethods.length < 2}
+              title={settings.loginMethods.length < 2 ? 'Keep at least one login method' : undefined}
+              onClick={() => void unlinkLogin(login.provider, login.id)}>Remove login</Button>
+          </li>
+        )}</ul>
         </CardContent>
       </Card>
     </>
