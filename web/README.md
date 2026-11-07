@@ -92,6 +92,16 @@ GitHub repositories appear in the same **Add repository** dialog alongside GitLa
 
 ## GitHub Story discovery and size preflight (#43)
 
+**Shared repository browser:** Both GitHub and GitLab use the same
+`-RepositoryStoryBrowser.tsx` component, with common pinned `directory` and
+`commit` URL parameters and matching discovery, selection, and job actions.
+The dashboard always offers **Browse repository** for an imported Story when
+its repository exists, using the Story's pinned source commit if available.
+`story-workflows.functions.ts` dispatches to provider-specific server
+handlers, which continue enforcing provider ownership, access, size/LFS limits,
+and safe initialization. Empty repositories use the same onboarding interface;
+GitLab supplies an empty-project flag while GitHub reports an unborn HEAD.
+
 Once connected, a GitHub repository has a **Browse Stories** link on the
 dashboard. The browser resolves the default branch to an immutable 40-hex
 commit SHA; all directory navigation, discovery and Story selection thereafter

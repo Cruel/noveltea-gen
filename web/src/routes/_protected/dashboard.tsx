@@ -4,6 +4,8 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { dashboardQuery } from '../../lib/dashboard.queries'
 import { AddRepositoryDialog } from '@/components/add-repository-dialog'
+import { GitProviderIcon } from '@/components/git-provider-icon'
+import { repositoryBrowseHref } from '../../lib/repository-story-navigation'
 
 export const Route = createFileRoute('/_protected/dashboard')({
   loader: ({ context }) => context.queryClient.ensureQueryData(dashboardQuery()),
@@ -16,13 +18,15 @@ function Dashboard() {
     <div className="dashboard-grid">
       <Card><CardHeader><CardTitle>Stories</CardTitle></CardHeader><CardContent>
         {dashboard.stories.length ? <ul>{dashboard.stories.map(story => {
-          const provider = dashboard.repositories.find(repo => repo.id === story.repositoryId)?.provider
-          const href = provider === 'gitlab' && story.commitSha
-            ? '/repositories/gitlab/' + story.repositoryId + '?' +
-              new URLSearchParams({ directory: story.directory, commit: story.commitSha })
+          const repository = dashboard.repositories.find(repo => repo.id === story.repositoryId)
+          const href = repository
+            ? repositoryBrowseHref(repository.provider, repository.id, story.directory, story.commitSha)
             : null
-          return <li key={story.id}><a href={'/stories/' + encodeURIComponent(story.id) + '/conversations'}>{story.title}</a>
-            {href && <> · <a href={href} className="text-xs text-muted-foreground">Browse repository</a></>}
+          return <li key={story.id} className="flex flex-wrap items-center gap-2">
+            {repository && <GitProviderIcon provider={repository.provider} />}
+            <a href={'/stories/' + encodeURIComponent(story.id) + '/conversations'}>{story.title}</a>
+            {repository && <span className="text-xs text-muted-foreground">{repository.name}</span>}
+            {href && <a href={href} className="text-xs text-muted-foreground">Browse repository</a>}
           </li>
         })}</ul> : <p>No Stories imported yet.</p>}
       </CardContent></Card>
@@ -36,7 +40,12 @@ function Dashboard() {
     <Card className="mt-5"><CardHeader className="flex flex-row items-center justify-between gap-3">
       <CardTitle>Repositories</CardTitle><AddRepositoryDialog />
     </CardHeader><CardContent>
-      {dashboard.repositories.length ? <ul>{dashboard.repositories.map(repo => <li key={repo.id}>{repo.name} <Badge variant="outline">{repo.provider}</Badge>{' '}<a href={'/repositories/' + repo.provider + '/' + repo.id}>Browse Stories</a></li>)}</ul> : <p>No repositories connected yet.</p>}
+      {dashboard.repositories.length ? <ul>{dashboard.repositories.map(repo =>
+        <li key={repo.id} className="flex flex-wrap items-center gap-2">
+          <GitProviderIcon provider={repo.provider} />{repo.name}
+          <a href={repositoryBrowseHref(repo.provider, repo.id)}>Browse Stories</a>
+        </li>
+      )}</ul> : <p>No repositories connected yet.</p>}
     </CardContent></Card>
   </main>
 }

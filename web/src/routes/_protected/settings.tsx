@@ -2,7 +2,7 @@ import { Button } from '@/components/ui/button'
 import { StudioSelect } from '@/components/studio-select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Info, UserRoundCheck } from 'lucide-react'
-import { siGithub, siGitlab } from 'simple-icons'
+import { GitProviderIcon } from '@/components/git-provider-icon'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
@@ -27,16 +27,6 @@ export const Route = createFileRoute('/_protected/settings')({
 const names = { github: 'GitHub', gitlab: 'GitLab' }
 const accountLabel = (login: string | null | undefined, id: string) =>
   login || 'Account ' + id
-function GitProviderIcon({ provider }: { provider: 'github' | 'gitlab' }) {
-  const icon = provider === 'github' ? siGithub : siGitlab
-  return <span role="img" aria-label={names[provider]}
-    className="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="size-4 fill-current"
-      style={provider === 'gitlab' ? { color: '#FC6D26' } : undefined}>
-      <path d={icon.path} />
-    </svg>
-  </span>
-}
 function HelpTip({ label, text }: { label: string; text: string }) {
   return <Tooltip>
     <TooltipTrigger render={<button type="button" aria-label={label}
