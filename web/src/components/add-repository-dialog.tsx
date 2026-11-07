@@ -102,12 +102,12 @@ export function AddRepositoryDialog() {
       if (repo.provider === 'github') {
         await importGitHubRepository({ data: {
           fullName: repo.name,
-          ...(repo.connectionId ? { connectionId: repo.connectionId } : {}),
+          connectionId: repo.connectionId,
         } })
       } else {
         await importGitLabProject({ data: {
           projectId: Number(repo.providerRepositoryId),
-          ...(repo.connectionId ? { connectionId: repo.connectionId } : {}),
+          connectionId: repo.connectionId,
         } })
       }
       setAddedIds(previous => new Set([...previous, key]))
@@ -127,7 +127,7 @@ export function AddRepositoryDialog() {
     try {
       const result = await importGitHubRepository({ data: {
         fullName: manualName.trim(),
-        ...(selectedAccount.connectionId ? { connectionId: selectedAccount.connectionId } : {}),
+        connectionId: selectedAccount.connectionId,
       } })
       setNotice('Added ' + result.repository.name + '. It is now available on your dashboard.')
       setManualName('')
@@ -151,7 +151,7 @@ export function AddRepositoryDialog() {
       const response = await fetch('/api/github/install', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          ...(selectedAccount.connectionId ? { connectionId: selectedAccount.connectionId } : {}),
+          connectionId: selectedAccount.connectionId,
           ...(manualName.trim() ? { fullName: manualName.trim() } : {}),
         }),
       })

@@ -29,7 +29,6 @@ export interface GitIdentities {
   read(owner: string, id: string): Promise<GitConnectionRecord | null>
   hasActive(owner: string, provider: GitProvider): Promise<boolean>
   legacyAccounts(owner: string, provider: GitProvider): Promise<string[]>
-  legacyProviders(owner: string): Promise<GitProvider[]>
   startFlow(owner: string, provider: GitProvider, stateHash: string, verifier: string, expiresAt: number, now: number): Promise<void>
   consumeFlow(stateHash: string, provider: GitProvider, now: number): Promise<{ owner: string; verifier: string } | null>
   connect(record: {
@@ -50,7 +49,7 @@ export interface RepositoryCatalogWrites {
   identities(owner: string): Promise<Array<{ provider: GitProvider; id: string }>>
   upsert(owner: string, provider: GitProvider, providerId: string, name: string,
     connectionId: string | null, id: string, now: string): Promise<RepositoryRecord>
-  rebind(owner: string, repository: RepositoryRecord, connectionId: string): Promise<boolean>
+  rebind(owner: string, repository: RepositoryRecord, connectionId: string | null): Promise<boolean>
   repositoryForStory(owner: string, storyId: string, provider: GitProvider): Promise<string | null>
   pendingInstallNames(owner: string, now: number): Promise<string[]>
   beginInstall(flow: {

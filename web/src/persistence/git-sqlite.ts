@@ -5,7 +5,7 @@ import * as schema from '../db/schema'
 import { gitConnections, gitConnectionFlows, githubInstallFlows, piCredentials,
   repositories, sessions, stories, storyOnboardingDrafts, storyOnboardingConversations } from '../db/schema'
 import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding,
-  PiCredentialVault, GitProvider } from './git-contracts'
+  PiCredentialVault } from './git-contracts'
 
 type StudioDrizzle = BetterSQLite3Database<typeof schema>
 // Better Auth owns this table's migration. This is a read-only query projection.
@@ -60,13 +60,6 @@ export function createGitSqlitePersistence(db: StudioDrizzle): {
       return db.select({ id: loginAccounts.id }).from(loginAccounts).where(and(
         eq(loginAccounts.userId, owner), eq(loginAccounts.providerId, provider),
       )).all().map(row => row.id)
-    },
-    async legacyProviders(owner) {
-      ownerScope(owner)
-      return db.selectDistinct({ provider: loginAccounts.providerId }).from(loginAccounts)
-        .where(and(eq(loginAccounts.userId, owner),
-          or(eq(loginAccounts.providerId, 'github'), eq(loginAccounts.providerId, 'gitlab'))))
-        .all().map(row => row.provider as GitProvider)
     },
     async startFlow(owner, provider, stateHash, verifier, expiresAt, now) {
       ownerScope(owner)
@@ -187,15 +180,27 @@ export function createGitSqlitePersistence(db: StudioDrizzle): {
     },
     async rebind(owner, repository, connectionId) {
       ownerScope(owner)
-      const authorized = db.select({ id: gitConnections.id }).from(gitConnections).where(and(
-        eq(gitConnections.id, connectionId), eq(gitConnections.ownerUserId, owner),
-        eq(gitConnections.provider, repository.provider), eq(gitConnections.status, 'connected'),
-      ))
-      return one(db.update(repositories).set({ connectionId }).where(and(
-        eq(repositories.id, repository.id), eq(repositories.ownerUserId, owner),
-        eq(repositories.provider, repository.provider), eq(repositories.name, repository.name),
-        eq(repositories.providerRepositoryId, repository.providerId), exists(authorized),
-      )).run())
+      return db.transaction(tx => {
+        if (connectionId === null) {
+          // A null binding deliberately uses the sole login identity for this provider.
+          // Do not make an ambiguous or no-longer-present login the authority.
+          const logins = tx.select({ id: loginAccounts.id }).from(loginAccounts).where(and(
+            eq(loginAccounts.userId, owner), eq(loginAccounts.providerId, repository.provider),
+          )).all()
+          if (logins.length !== 1) return false
+        }
+        const authorized = connectionId === null ? undefined
+          : tx.select({ id: gitConnections.id }).from(gitConnections).where(and(
+            eq(gitConnections.id, connectionId), eq(gitConnections.ownerUserId, owner),
+            eq(gitConnections.provider, repository.provider), eq(gitConnections.status, 'connected'),
+          ))
+        return one(tx.update(repositories).set({ connectionId }).where(and(
+          eq(repositories.id, repository.id), eq(repositories.ownerUserId, owner),
+          eq(repositories.provider, repository.provider), eq(repositories.name, repository.name),
+          eq(repositories.providerRepositoryId, repository.providerId),
+          ...(authorized ? [exists(authorized)] : []),
+        )).run())
+      })
     },
     async repositoryForStory(owner, storyId, provider) {
       ownerScope(owner)

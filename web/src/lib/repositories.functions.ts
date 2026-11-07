@@ -46,7 +46,7 @@ export const listGitHubRepositories = createServerFn({ method: 'GET' })
       request(query('/api/github/repositories', data)), readGithubAppOptions())))
 
 export const importGitHubRepository = createServerFn({ method: 'POST' })
-  .validator((data: { fullName: string; connectionId?: string }) => data)
+  .validator((data: { fullName: string; connectionId?: string | null }) => data)
   .handler(async ({ data }) => result<{ repository: { id: string; name: string } }>(
     await githubRepositoryRequest(auth, database,
       request('/api/github/repositories', data), readGithubAppOptions())))
@@ -64,7 +64,7 @@ export const listGitLabProjects = createServerFn({ method: 'GET' })
       request(query('/api/gitlab/repositories', data)))))
 
 export const importGitLabProject = createServerFn({ method: 'POST' })
-  .validator((data: { projectId: number; connectionId?: string }) => data)
+  .validator((data: { projectId: number; connectionId?: string | null }) => data)
   .handler(async ({ data }) => result<{ repository: { id: string; name: string } }>(
     await gitlabRepositoryRequest(auth, database,
       request('/api/gitlab/repositories', data))))

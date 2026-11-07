@@ -55,7 +55,7 @@ export async function settingsRequest(auth: StudioAuth, store: StudioDatabase, r
     if (accounts.length < 2) return json({ error: 'Connect another login method before removing the last one.' }, 409)
     if (!accounts.some(row => row.providerId === input.provider && row.id === input.accountRecordId))
       return json({ error: 'Login method does not belong to this user.' }, 404)
-    if (await preferences.hasLegacyRepositories(actor.id, input.provider)) return json({ error: 'Rebind legacy repositories to a Git connection before removing this login method.' }, 409)
+    if (await preferences.hasLegacyRepositories(actor.id, input.provider)) return json({ error: 'Change repositories using this Studio login to another Git account before removing the login method.' }, 409)
     await auth.api.unlinkAccount({ headers: request.headers, body: {
       accountId: input.accountRecordId,
     } })

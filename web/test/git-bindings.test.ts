@@ -11,6 +11,7 @@ import { getRepositoryToken } from '../src/lib/access.server'
 import { githubRepositoryRequest } from '../src/lib/github-repositories.server'
 import { gitlabRepositoryRequest } from '../src/lib/gitlab-repositories.server'
 import { gitConnectionCallback, gitConnectionRequest } from '../src/lib/git-connections.server'
+import { discoverRepositoryCatalog } from '../src/lib/repository-candidates.server'
 import { settingsRequest } from '../src/lib/settings.server'
 
 const origin = 'http://localhost:3000'
@@ -26,12 +27,13 @@ test('repository identities persist across imports, verified rebinding and login
   const store = openStudioDatabase(join(directory, 'studio.sqlite'))
   const originalFetch = globalThis.fetch
   const env = ['BETTER_AUTH_URL', 'BETTER_AUTH_SECRET', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET',
-    'GITLAB_CLIENT_ID', 'GITLAB_CLIENT_SECRET'] as const
+    'GITLAB_CLIENT_ID', 'GITLAB_CLIENT_SECRET', 'GITHUB_APP_SLUG'] as const
   const saved = Object.fromEntries(env.map(key => [key, process.env[key]])) as Record<string, string | undefined>
   Object.assign(process.env, {
     BETTER_AUTH_URL: config.baseURL, BETTER_AUTH_SECRET: config.secret,
     GITHUB_CLIENT_ID: config.github.clientId, GITHUB_CLIENT_SECRET: config.github.clientSecret,
     GITLAB_CLIENT_ID: config.gitlab.clientId, GITLAB_CLIENT_SECRET: config.gitlab.clientSecret,
+    GITHUB_APP_SLUG: 'test',
   })
   globalThis.fetch = async (input, init) => {
     const url = String(input)
@@ -56,6 +58,8 @@ test('repository identities persist across imports, verified rebinding and login
     if (url.startsWith('https://gitlab.com/api/v4/projects?')) {
       return Response.json([
         { id: 20, path_with_namespace: 'Acme/GL', name_with_namespace: 'Acme / GL',
+          visibility: 'private', archived: false },
+        { id: 21, path_with_namespace: 'Acme/LoginGL', name_with_namespace: 'Acme / LoginGL',
           visibility: 'private', archived: false },
       ], { headers: { 'x-next-page': '' } })
     }
@@ -112,6 +116,17 @@ test('repository identities persist across imports, verified rebinding and login
     assert.equal(malformedSettings.status, 400)
     const githubId = await connect('github')
     const gitlabId = await connect('gitlab')
+    const catalog = await discoverRepositoryCatalog(auth, store,
+      new Headers({ cookie: aliceCookie }), origin)
+    for (const [provider, connectionId] of [
+      ['github', githubId], ['gitlab', gitlabId],
+    ] as const) {
+      const sources = catalog.sources.filter(source => source.provider === provider)
+      assert.ok(sources.some(source => source.connectionId === null),
+        provider + ' login source must remain available alongside separate credentials')
+      assert.ok(sources.some(source => source.connectionId === connectionId),
+        provider + ' separate authorization must also remain available')
+    }
     const ghAdded = await githubRepositoryRequest(auth, store,
       make('POST', '/api/github/repositories', { fullName: 'Acme/Story' }),
       { baseURL: origin, appSlug: 'test' })
@@ -130,11 +145,41 @@ test('repository identities persist across imports, verified rebinding and login
       'gh-integrated')
     assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'gitlab', glRepoId),
       'gl-integrated')
-    const legacy = uuid(1)
-    ;(await store.testing.records.insert('repositories', { id: legacy, ownerUserId: alice.id,
-      provider: 'github', providerRepositoryId: '101', name: 'Acme/Legacy',
-      createdAt: 'now', connectionId: null }))
-    assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'github', legacy), 'legacy-gh')
+    // Login credentials remain a first-class, explicitly selectable repository authority
+    // even when a separate authorization also exists for that provider.
+    for (const [provider, repositoryId, separateId, loginToken, separateToken] of [
+      ['github', ghRepoId, githubId, 'legacy-gh', 'gh-integrated'],
+      ['gitlab', glRepoId, gitlabId, 'legacy-gl', 'gl-integrated'],
+    ] as const) {
+      const useLogin = await gitConnectionRequest(auth, store,
+        make('PUT', '/api/integrations/git', { repositoryId, connectionId: null }), config)
+      assert.equal(useLogin.status, 200, JSON.stringify(await useLogin.clone().json()))
+      assert.deepEqual(await bound(repositoryId), { binding: null })
+      assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), provider, repositoryId),
+        loginToken)
+      const useSeparate = await gitConnectionRequest(auth, store,
+        make('PUT', '/api/integrations/git', { repositoryId, connectionId: separateId }), config)
+      assert.equal(useSeparate.status, 200, JSON.stringify(await useSeparate.clone().json()))
+      assert.deepEqual(await bound(repositoryId), { binding: separateId })
+      assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), provider, repositoryId),
+        separateToken)
+    }
+    const importedGitlabLogin = await gitlabRepositoryRequest(auth, store,
+      make('POST', '/api/gitlab/repositories', { projectId: 21, connectionId: null }))
+    assert.equal(importedGitlabLogin.status, 200, JSON.stringify(await importedGitlabLogin.clone().json()))
+    const loginGlId = (await importedGitlabLogin.json() as { repository: { id: string } }).repository.id
+    assert.deepEqual(await bound(loginGlId), { binding: null })
+    assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'gitlab', loginGlId),
+      'legacy-gl', 'explicit GitLab login import must not fall back to separate authorization')
+    ;(await store.testing.records.delete('repositories', { id: loginGlId }))
+    const importedLogin = await githubRepositoryRequest(auth, store,
+      make('POST', '/api/github/repositories', { fullName: 'Acme/Legacy', connectionId: null }),
+      { baseURL: origin, appSlug: 'test' })
+    assert.equal(importedLogin.status, 200, JSON.stringify(await importedLogin.clone().json()))
+    const legacy = (await importedLogin.json() as { repository: { id: string } }).repository.id
+    assert.deepEqual(await bound(legacy), { binding: null })
+    assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'github', legacy),
+      'legacy-gh', 'explicit login import must never switch to the available separate connection')
     const reimport = await githubRepositoryRequest(auth, store,
       make('POST', '/api/github/repositories', { fullName: 'Acme/Legacy' }),
       { baseURL: origin, appSlug: 'test' })
@@ -158,6 +203,9 @@ test('repository identities persist across imports, verified rebinding and login
     const rejected = await gitConnectionRequest(auth, store,
       make('PUT', '/api/integrations/git', { repositoryId: inaccessible, connectionId: githubId }), config)
     assert.equal(rejected.status, 404, 'remote permission checks must block unauthorized rebinding')
+    const rejectedLogin = await gitConnectionRequest(auth, store,
+      make('PUT', '/api/integrations/git', { repositoryId: inaccessible, connectionId: null }), config)
+    assert.equal(rejectedLogin.status, 404, 'login-backed rebinding also requires verified push access')
     assert.deepEqual(await bound(inaccessible), { binding: null })
     // Remove this intentionally unbindable fixture before testing the login-unlink guard.
     ;(await store.testing.records.delete('repositories', { id: inaccessible }))
@@ -173,6 +221,10 @@ test('repository identities persist across imports, verified rebinding and login
     assert.equal(unlinked.status, 200, JSON.stringify(await unlinked.clone().json()))
     assert.equal(await getRepositoryToken(auth, store, new Headers({ cookie: aliceCookie }), 'github', legacy),
       'gh-integrated', 'repository works after the login provider is removed')
+    const noLogin = await gitConnectionRequest(auth, store,
+      make('PUT', '/api/integrations/git', { repositoryId: legacy, connectionId: null }), config)
+    assert.equal(noLogin.status, 409, 'a repository cannot be rebound to an absent login')
+    assert.deepEqual(await bound(legacy), { binding: githubId })
     const disconnected = await gitConnectionRequest(auth, store,
       make('DELETE', '/api/integrations/git', { connectionId: githubId }), config)
     assert.equal(disconnected.status, 200)

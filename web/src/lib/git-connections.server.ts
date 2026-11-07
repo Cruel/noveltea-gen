@@ -114,16 +114,31 @@ export async function gitConnectionRequest(auth: StudioAuth, store: StudioDataba
       throw new GitConnectionError(403, 'Cross-origin request refused.')
     const body = await readJsonInput(request) as { provider?: unknown; connectionId?: unknown; repositoryId?: unknown } | null
     if (request.method === 'PUT') {
-      if (typeof body?.connectionId !== 'string' || typeof body.repositoryId !== 'string' ||
-          !/^[0-9a-f-]{36}$/i.test(body.connectionId) || !/^[0-9a-f-]{36}$/i.test(body.repositoryId))
-        throw new GitConnectionError(422, 'Choose a repository and Git connection.')
+      if (!body || (body.connectionId !== null && (typeof body.connectionId !== 'string' ||
+          !/^[0-9a-f-]{36}$/i.test(body.connectionId))) || typeof body.repositoryId !== 'string' ||
+          !/^[0-9a-f-]{36}$/i.test(body.repositoryId))
+        throw new GitConnectionError(422, 'Choose a repository and Git account.')
       const repository = await store.persistence.repositories.get(actor.id, body.repositoryId)
       if (!repository) throw new GitConnectionError(404, 'Repository not found for this Studio user.')
-      const connection = await readConnection(store, actor.id, body.connectionId)
-      if (connection.provider !== repository.provider || connection.status !== 'connected')
-        throw new GitConnectionError(409, 'Select an active connection for this repository provider.')
-      const token = await tokenForGitConnection(store, actor.id, connection.id, config)
-      if (connection.provider === 'github') {
+      let token: string
+      if (body.connectionId === null) {
+        const logins = await store.persistence.git.legacyAccounts(actor.id, repository.provider)
+        if (logins.length !== 1) throw new GitConnectionError(409,
+          'Exactly one Studio login for this provider is required to use login-based repository access.')
+        try {
+          const credential = await auth.api.getAccessToken({ headers: request.headers, body: { accountId: logins[0]! } })
+          if (!credential.accessToken) throw new Error('No access token')
+          token = credential.accessToken
+        } catch {
+          throw new GitConnectionError(409, 'Studio login authorization is unavailable. Reconnect the login method.')
+        }
+      } else {
+        const connection = await readConnection(store, actor.id, body.connectionId)
+        if (connection.provider !== repository.provider || connection.status !== 'connected')
+          throw new GitConnectionError(409, 'Select an active account for this repository provider.')
+        token = await tokenForGitConnection(store, actor.id, connection.id, config)
+      }
+      if (repository.provider === 'github') {
         const { matchingRepository, GithubError } = await import('./github-repositories.server')
         try {
           const remote = await matchingRepository(token, repository.name)
@@ -149,9 +164,9 @@ export async function gitConnectionRequest(auth: StudioAuth, store: StudioDataba
           throw error
         }
       }
-      const updated = await store.persistence.repositories.rebind(actor.id, repository, connection.id)
-      if (!updated) throw new GitConnectionError(409, 'Repository or connection changed during verification. Retry.')
-      return response({ rebound: true, repositoryId: repository.id, connectionId: connection.id })
+      const updated = await store.persistence.repositories.rebind(actor.id, repository, body.connectionId)
+      if (!updated) throw new GitConnectionError(409, 'Repository or account changed during verification. Retry.')
+      return response({ rebound: true, repositoryId: repository.id, connectionId: body.connectionId })
     }
     if (request.method === 'DELETE') {
       if (!body || typeof body.connectionId !== 'string') throw new GitConnectionError(422, 'Connection ID required.')

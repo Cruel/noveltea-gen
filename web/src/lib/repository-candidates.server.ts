@@ -54,11 +54,11 @@ async function installed(store: StudioDatabase, userId: string): Promise<Set<str
   return new Set(rows.map(row => row.provider + ':' + row.id))
 }
 
-export async function discoverAccounts(store: StudioDatabase, userId: string): Promise<{
-  accounts: RepositoryAccount[]; warnings: string[]
-}> {
+export async function discoverAccounts(auth: StudioAuth, store: StudioDatabase, headers: Headers,
+  userId: string): Promise<{ accounts: RepositoryAccount[]; warnings: string[] }> {
   const connections = await listGitConnections(store, userId)
-  const legacy = await store.persistence.git.legacyProviders(userId)
+  const logins = (await auth.api.listUserAccounts({ headers }))
+    .filter(item => item.providerId === 'github' || item.providerId === 'gitlab')
   const accounts: RepositoryAccount[] = []
   const warnings: string[] = []
   for (const provider of ['github', 'gitlab'] as const) {
@@ -70,12 +70,14 @@ export async function discoverAccounts(store: StudioDatabase, userId: string): P
         warnings.push(providerLabel(provider) + ' account ' + connection.login + ' needs reconnection in Settings.')
       }
     }
-    // Never silently fall back to a login credential when a dedicated account
-    // is connected or awaiting reauthorization. The existing provider handlers
-    // remain authoritative for token and permission verification.
-    if (!forProvider.some(connection => connection.status !== 'disconnected') &&
-        legacy.includes(provider)) {
-      accounts.push({ provider, connectionId: null, label: providerLabel(provider) + ' login' })
+    // Login access is independent. Hide duplicate identities when a working
+    // separate connection exists, but retain distinct login accounts as choices.
+    // Ambiguous multiple login methods cannot resolve a single legacy credential.
+    const providerLogins = logins.filter(login => login.providerId === provider)
+    if (providerLogins.length === 1 &&
+        !forProvider.some(connection => connection.accountId === providerLogins[0]!.accountId &&
+          connection.status === 'connected')) {
+      accounts.push({ provider, connectionId: null, label: providerLabel(provider) + ' · Studio login' })
     }
   }
   return { accounts, warnings }
@@ -103,7 +105,7 @@ async function githubPage(auth: StudioAuth, store: StudioDatabase, headers: Head
   baseURL: string, account: RepositoryAccount, installationId?: number, page = 1): Promise<GitHubListing> {
   return unwrap<GitHubListing>(await githubRepositoryRequest(auth, store,
     encodeRequest(baseURL, '/api/github/repositories', headers, {
-      connectionId: account.connectionId, installationId: installationId ?? null, page,
+      connectionId: account.connectionId ?? 'login', installationId: installationId ?? null, page,
     }), readGithubAppOptions()))
 }
 
@@ -111,7 +113,7 @@ async function gitlabPage(auth: StudioAuth, store: StudioDatabase, headers: Head
   baseURL: string, account: RepositoryAccount, page = 1): Promise<GitLabListing> {
   return unwrap<GitLabListing>(await gitlabRepositoryRequest(auth, store,
     encodeRequest(baseURL, '/api/gitlab/repositories', headers, {
-      connectionId: account.connectionId, page,
+      connectionId: account.connectionId ?? 'login', page,
     })))
 }
 
@@ -142,7 +144,7 @@ export async function discoverRepositoryCatalog(auth: StudioAuth, store: StudioD
   headers: Headers, baseURL: string): Promise<RepositoryCatalog> {
   const viewer = await requireUser(auth, headers)
   if (!viewer) throw new Error('Sign in required.')
-  const { accounts, warnings } = await discoverAccounts(store, viewer.id)
+  const { accounts, warnings } = await discoverAccounts(auth, store, headers, viewer.id)
   const known = await installed(store, viewer.id)
   const catalog: RepositoryCatalog = { accounts, warnings, repositories: [], sources: [], pendingGitHub: [] }
   const results = await forAccounts(accounts, async account => {
@@ -210,7 +212,7 @@ export async function loadRepositorySourcePage(auth: StudioAuth, store: StudioDa
   headers: Headers, baseURL: string, source: RepositorySource): Promise<RepositoryPage> {
   const viewer = await requireUser(auth, headers)
   if (!viewer) throw new Error('Sign in required.')
-  const available = (await discoverAccounts(store, viewer.id)).accounts
+  const available = (await discoverAccounts(auth, store, headers, viewer.id)).accounts
   const account = available.find(item => item.provider === source.provider &&
     item.connectionId === source.connectionId)
   if (!account) throw new Error('Repository identity is no longer connected.')

@@ -57,7 +57,7 @@ export const disconnectGitConnection = createServerFn({ method: 'POST' })
       internalRequest('/api/integrations/git', 'DELETE', { connectionId: data }))))
 
 export const rebindGitRepository = createServerFn({ method: 'POST' })
-  .validator((data: { repositoryId: string; connectionId: string }) => data)
+  .validator((data: { repositoryId: string; connectionId: string | null }) => data)
   .handler(async ({ data }) => unwrap<{ rebound: boolean }>(
     await gitConnectionRequest(auth, database,
       internalRequest('/api/integrations/git', 'PUT', data))))

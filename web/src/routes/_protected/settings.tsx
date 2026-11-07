@@ -11,17 +11,11 @@ import { beginGitConnection, disconnectGitConnection, rebindGitRepository,
 import { authClient } from '../../lib/auth-client'
 import { PiConnections } from './jobs/-PiConnections'
 import { getPiCatalog } from '../../lib/pi.functions'
+import { accountForRepository, credentialForAccount, gitAccounts } from '../../lib/git-accounts'
+import type { StudioSettings } from '../../lib/settings.functions'
 
 type Model = { provider: string; id: string; reasoning: boolean }
-type Selection = { provider: string; id: string; thinking?: 'low' | 'medium' | 'high' } | null
-type Connection = { id: string; provider: 'github' | 'gitlab'; accountId: string; login: string;
-  status: 'connected' | 'reauthorize' | 'disconnected'; accessExpiresAt: number | null }
-type Settings = {
-  defaultModel: Selection
-  loginMethods: Array<{ id: string; provider: 'github' | 'gitlab'; accountId: string }>
-  gitConnections: Connection[]
-  repositories: Array<{ id: string; provider: 'github' | 'gitlab'; name: string; connectionId: string | null }>
-}
+type Connection = StudioSettings['gitConnections'][number]
 export const Route = createFileRoute('/_protected/settings')({
   loader: ({ context }) => context.queryClient.ensureQueryData(settingsQuery()),
   component: SettingsPage,
@@ -58,6 +52,8 @@ function SettingsPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [oauthNotice, setOauthNotice] = useState<string | null>(null)
   const [bindings, setBindings] = useState<Record<string, string>>({})
+  const [editingRepository, setEditingRepository] = useState<string | null>(null)
+  const accounts = gitAccounts(settings)
   useEffect(() => { setOauthNotice(noticeFor(new URLSearchParams(window.location.search))) }, [])
   useEffect(() => {
     setSelected(settings.defaultModel ? settings.defaultModel.provider + '/' + settings.defaultModel.id : '')
@@ -96,10 +92,11 @@ function SettingsPage() {
     const result = await beginGitConnection({ data: provider })
     window.location.assign(result.authorizationUrl)
   })
-  const rebindRepository = (repositoryId: string, connectionId: string) => run(async () => {
+  const rebindRepository = (repositoryId: string, connectionId: string | null) => run(async () => {
     await rebindGitRepository({ data: { repositoryId, connectionId } })
     await refresh()
-    setNotice('Repository access verified and bound to the selected Git identity.')
+    setEditingRepository(null)
+    setNotice('Repository access verified and assigned to the selected Git account.')
   })
   const disconnectGit = (entry: Connection) => run(async () => {
     if (!window.confirm('Disconnect ' + entry.provider + '/' + entry.login +
@@ -146,53 +143,90 @@ function SettingsPage() {
         </CardContent>
       </Card>
       <Card id="integrations" className="mt-6">
-        <CardHeader><CardTitle>Git integrations</CardTitle></CardHeader><CardContent>
-        <p>Repository authorization is independent of login. You can connect multiple accounts from either provider,
-          even an identity used to sign into another Studio user.</p>
-        <ul>{settings.gitConnections.map(entry => <li key={entry.id} className="settings-connection">
-          <div><strong>{names[entry.provider]} / {entry.login}</strong>
-            <small>{entry.status === 'connected' ? 'Connected' : entry.status === 'reauthorize'
-              ? 'Reauthorization required' : 'Disconnected'}</small></div>
-          {entry.status === 'connected'
-            ? <Button type="button" disabled={busy} onClick={() => void disconnectGit(entry)}>Disconnect</Button>
-            : <Button type="button" disabled={busy} onClick={() => void connectGit(entry.provider)}>Reconnect</Button>}
-        </li>)}</ul>
-        {!settings.gitConnections.length && <p>No independent Git repository connections yet.
-          Existing repositories may still use their historical login-linked access until rebound.</p>}
+        <CardHeader><CardTitle>Git accounts</CardTitle></CardHeader><CardContent>
+        <p>Use GitHub and GitLab accounts to access repositories. Accounts linked for Studio login work here too;
+          additional repository accounts can be connected separately.</p>
+        <ul>{accounts.map(account => {
+          const connection = account.connection
+          const loginCount = settings.loginMethods.filter(login => login.provider === account.provider).length
+          const used = settings.repositories.filter(repo => repo.provider === account.provider &&
+            (repo.connectionId ? repo.connectionId === connection?.id : account.loginMethod && loginCount === 1)).length
+          return <li key={account.key} className="settings-connection">
+            <div>
+              <strong>{names[account.provider]} · {account.login ?? 'Account ' + account.accountId}</strong>
+              {account.loginMethod && <small>Studio login</small>}
+              {connection
+                ? <small>Separate repository authorization · {connection.status === 'connected'
+                  ? 'Connected' : connection.status === 'reauthorize' ? 'Reauthorization required' : 'Disconnected'}</small>
+                : account.loginMethod && <small>Repository access via Studio login</small>}
+              {used > 0 && <small>Used by {used} {used === 1 ? 'repository' : 'repositories'}</small>}
+            </div>
+            {connection && (connection.status === 'connected'
+              ? <Button type="button" variant="outline" disabled={busy}
+                  onClick={() => void disconnectGit(connection)}>Disconnect authorization</Button>
+              : <Button type="button" variant="outline" disabled={busy}
+                  onClick={() => void connectGit(account.provider)}>Authorize again</Button>)}
+          </li>
+        })}</ul>
+        {!accounts.length && <p>No Git accounts linked yet. Link a login method or connect a repository account.</p>}
         <div className="actions settings-actions">
-          <Button type="button" disabled={busy} onClick={() => void connectGit('github')}>Connect GitHub account</Button>
-          <Button type="button" disabled={busy} onClick={() => void connectGit('gitlab')}>Connect GitLab account</Button>
+          <Button type="button" variant="outline" disabled={busy}
+            onClick={() => void connectGit('github')}>Add GitHub account</Button>
+          <Button type="button" variant="outline" disabled={busy}
+            onClick={() => void connectGit('gitlab')}>Add GitLab account</Button>
         </div>
         {settings.repositories.length > 0 && <>
-          <h3>Repository access bindings</h3>
-          <p>Choose the Git identity to use for each repository. Studio verifies push access and repository identity before changing a binding. Existing work is preserved.</p>
+          <h3>Repository access</h3>
+          <p>Each repository uses the account shown below. To change it, Studio checks repository identity and
+            push permissions before saving. Existing Stories and jobs are preserved.</p>
           <ul>{settings.repositories.map(repo => {
-            const selected = bindings[repo.id] ?? repo.connectionId ?? ''
-            const available = settings.gitConnections.filter(connection => connection.provider === repo.provider && connection.status === 'connected')
-            return <li className="settings-connection" key={repo.id}>
-              <div><strong>{repo.name}</strong><small>{names[repo.provider]}{repo.connectionId ? '' : ' · Historical login-linked access'}</small></div>
-              <div className="actions settings-actions">
-                <StudioSelect aria-label={'Git identity for ' + repo.name} value={selected} disabled={busy}
-                  placeholder="Choose a connection"
-                  onValueChange={value => setBindings(previous => ({ ...previous, [repo.id]: value }))}
-                  options={settings.gitConnections.filter(connection => connection.provider === repo.provider)
-                    .map(connection => ({ value: connection.id,
-                      label: connection.login + (connection.status === 'connected' ? '' : ' (reconnect first)'),
-                      disabled: connection.status !== 'connected',
-                    }))} />
-                <Button type="button" disabled={busy || !selected || selected === repo.connectionId ||
-                  !available.some(connection => connection.id === selected)}
-                  onClick={() => void rebindRepository(repo.id, selected)}>Save binding</Button>
+            const current = accountForRepository(repo, accounts)
+            const eligibleAccounts = accounts.filter(account => account.provider === repo.provider)
+            const loginCount = settings.loginMethods.filter(login => login.provider === repo.provider).length
+            const currentKey = current?.key ?? ''
+            const selected = bindings[repo.id] ?? currentKey
+            const selectedAccount = eligibleAccounts.find(account => account.key === selected)
+            const credential = selectedAccount ? credentialForAccount(selectedAccount, loginCount) : undefined
+            const currentDescription = current
+              ? (current.login ?? 'Account ' + current.accountId)
+              : repo.connectionId ? 'Authorization unavailable' : 'Studio login unavailable or ambiguous'
+            return <li key={repo.id} className="settings-repository">
+              <div className="settings-connection">
+                <div><strong>{repo.name}</strong>
+                  <small>{names[repo.provider]} · {currentDescription}</small>
+                  {!repo.connectionId && <small>Using Studio login</small>}
+                </div>
+                <Button type="button" variant="outline" disabled={busy}
+                  onClick={() => setEditingRepository(previous => previous === repo.id ? null : repo.id)}>
+                  {editingRepository === repo.id ? 'Hide options' : 'Change account'}
+                </Button>
               </div>
+              {editingRepository === repo.id && <div className="actions settings-actions">
+                <StudioSelect aria-label={'Git account for ' + repo.name} value={selected}
+                  disabled={busy} placeholder="Choose a Git account"
+                  onValueChange={value => setBindings(previous => ({ ...previous, [repo.id]: value }))}
+                  options={eligibleAccounts.map(account => ({
+                    value: account.key, label: account.login ?? 'Account ' + account.accountId,
+                    disabled: credentialForAccount(account, loginCount) === undefined,
+                  }))} />
+                <Button type="button" disabled={busy || credential === undefined ||
+                  !selected || (selected === currentKey && credential === repo.connectionId)}
+                  onClick={() => void rebindRepository(repo.id, credential!)}>Save account</Button>
+                <Button type="button" variant="ghost" disabled={busy}
+                  onClick={() => { setEditingRepository(null); setBindings(previous => {
+                    const next = { ...previous }; delete next[repo.id]; return next
+                  }) }}>Cancel</Button>
+              </div>}
             </li>
           })}</ul>
         </>}
         </CardContent>
       </Card>
       <Card id="account" className="mt-6">
-        <CardHeader><CardTitle>Account · login methods</CardTitle></CardHeader><CardContent>
-        <p>These identities can sign into this Studio user. Linking an identity already used by another Studio
-          user is not permitted. Adding a repository connection does not add a login method.</p>
+        <CardHeader><CardTitle>Account &amp; security</CardTitle></CardHeader><CardContent>
+        <h3>Login methods</h3>
+        <p>These accounts can sign into Studio. Adding a Git repository account does not add a login method.
+          Removing a login method never silently changes a repository's authorization.</p>
         <ul>{settings.loginMethods.map(login => <li key={login.provider + login.accountId} className="settings-connection">
           <div><strong>{names[login.provider]}</strong><small>Account ID: {login.accountId}</small></div>
           <Button type="button" disabled={busy || settings.loginMethods.length < 2}

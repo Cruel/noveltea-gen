@@ -16,16 +16,18 @@ export async function getDashboardData(auth: StudioAuth, store: StudioDatabase, 
 }
 
 // A repository's connection always wins over the user's other provider accounts.
-// Historical repositories (connection_id=NULL) continue using the original login-backed
-// credential until the owner explicitly rebinds them. Never select an arbitrary account.
+// Login-backed repositories (connection_id=NULL) continue using the Studio login
+// until the owner explicitly chooses another account. Never select an arbitrary account.
 export async function getRepositoryToken(
   auth: StudioAuth, store: StudioDatabase, headers: Headers, provider: 'github' | 'gitlab',
-  repositoryId?: string, selectedConnectionId?: string, config?: StudioAuthConfig,
+  repositoryId?: string, selectedConnectionId?: string | null, config?: StudioAuthConfig,
 ): Promise<string | null> {
   const actor = await requireUser(auth, headers)
   if (!actor) return null
-  let connectionId = selectedConnectionId
-  let historical = false
+  let connectionId = selectedConnectionId ?? undefined
+  // An explicit null selects the provider's Studio login rather than implicitly
+  // preferring a separately authorized connection. Undefined retains auto-selection.
+  let historical = selectedConnectionId === null
   if (repositoryId) {
     // Preserve the existing disconnected-provider behavior before checking the
     // caller's catalog. Never disclose whether a foreign repository exists.
@@ -36,11 +38,12 @@ export async function getRepositoryToken(
     if (!repo) throw new GitConnectionError(404, 'Repository does not belong to this user.')
     if (!repo.connectionId && !hasLogin) {
       if (hasIntegration) throw new GitConnectionError(409,
-        'This legacy repository needs a Git connection. Rebind it in Settings.')
+        'This repository uses Studio login, but that login is unavailable. Change the Git account in Settings.')
       return null
     }
-    if (selectedConnectionId && repo.connectionId !== selectedConnectionId)
-      throw new GitConnectionError(409, 'Repository uses a different Git connection.')
+    if ((selectedConnectionId === null && repo.connectionId !== null) ||
+        (selectedConnectionId && repo.connectionId !== selectedConnectionId))
+      throw new GitConnectionError(409, 'Repository uses a different Git account.')
     connectionId = repo.connectionId ?? undefined
     historical = !connectionId
   }

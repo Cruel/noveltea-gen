@@ -45,7 +45,7 @@ export async function gitlab<T>(token: string, path: string): Promise<{ data: T;
   return { data, next }
 }
 export async function actor(auth: StudioAuth, store: StudioDatabase, headers: Headers,
-  repositoryId?: string, connectionId?: string) {
+  repositoryId?: string, connectionId?: string | null) {
   const user = await requireUser(auth, headers)
   if (!user) throw new ProviderFailure(401, 'Sign in required')
   let token: string | null
@@ -75,12 +75,15 @@ export async function gitlabRepositoryRequest(auth: StudioAuth, store: StudioDat
   }
   try {
     const submitted = request.method === 'POST' ? await request.clone().json().catch(() => null) : null
-    const selected = request.method === 'GET' ? new URL(request.url).searchParams.get('connectionId') : submitted?.connectionId
-    const requestedConnection = typeof selected === 'string' && selected ? selected : undefined
+    const query = new URL(request.url).searchParams
+    const selected = request.method === 'GET'
+      ? query.has('connectionId') ? query.get('connectionId') : undefined : submitted?.connectionId
+    const useLogin = selected === null || selected === 'login'
+    const requestedConnection = typeof selected === 'string' && selected !== 'login' ? selected : undefined
     const viewer = await requireUser(auth, request.headers)
     if (!viewer) return reply({ error: 'Sign in required.' }, 401)
-    const connectionId = await selectGitConnection(store, viewer.id, 'gitlab', requestedConnection)
-    const user = await actor(auth, store, request.headers, undefined, connectionId)
+    const connectionId = useLogin ? undefined : await selectGitConnection(store, viewer.id, 'gitlab', requestedConnection)
+    const user = await actor(auth, store, request.headers, undefined, useLogin ? null : connectionId)
     if (request.method === 'GET') {
       const raw = new URL(request.url).searchParams.get('page') || '1'
       if (!/^[1-9]\d*$/.test(raw) || Number(raw) > 100) return reply({ error: 'Invalid page' }, 400)

@@ -74,7 +74,7 @@ function normalizeFullName(raw: unknown): string {
 }
 
 export async function actorFor(auth: StudioAuth, store: StudioDatabase, headers: Headers,
-  repositoryId?: string, connectionId?: string): Promise<Actor | Response> {
+  repositoryId?: string, connectionId?: string | null): Promise<Actor | Response> {
   const user = await requireUser(auth, headers)
   if (!user) return json({ error: 'Sign in required' }, 401)
   const token = await getRepositoryToken(auth, store, headers, 'github', repositoryId, connectionId)
@@ -175,12 +175,15 @@ export async function githubRepositoryRequest(auth: StudioAuth, store: StudioDat
   try {
     const query = new URL(request.url).searchParams
     const submitted = request.method === 'POST' ? await request.clone().json().catch(() => null) : null
-    const connectionId = (request.method === 'POST' ? submitted?.connectionId : query.get('connectionId'))
-    const requestedConnection = typeof connectionId === 'string' && connectionId ? connectionId : undefined
+    const requested = request.method === 'POST' ? submitted?.connectionId
+      : query.has('connectionId') ? query.get('connectionId') : undefined
+    const useLogin = requested === null || requested === 'login'
+    const requestedConnection = typeof requested === 'string' && requested !== 'login' ? requested : undefined
     const viewer = await requireUser(auth, request.headers)
     if (!viewer) return json({ error: 'Sign in required' }, 401)
-    const selectedConnection = await selectGitConnection(store, viewer.id, 'github', requestedConnection)
-    const actor = await actorFor(auth, store, request.headers, undefined, selectedConnection)
+    const selectedConnection = useLogin ? undefined
+      : await selectGitConnection(store, viewer.id, 'github', requestedConnection)
+    const actor = await actorFor(auth, store, request.headers, undefined, useLogin ? null : selectedConnection)
     if (actor instanceof Response) return actor
     if (request.method === 'POST') {
       const body = await request.json().catch(() => null)
@@ -220,11 +223,12 @@ export async function githubInstallStart(auth: StudioAuth, store: StudioDatabase
   if (!sameOrigin(request, options)) return json({ error: 'Cross-origin write refused' }, 403)
   try {
     const body = await request.json().catch(() => null)
+    const useLogin = body?.connectionId === null
     const requested = typeof body?.connectionId === 'string' ? body.connectionId : undefined
     const viewer = await requireUser(auth, request.headers)
     if (!viewer) return json({ error: 'Sign in required' }, 401)
-    const connectionId = await selectGitConnection(store, viewer.id, 'github', requested)
-    const actor = await actorFor(auth, store, request.headers, undefined, connectionId)
+    const connectionId = useLogin ? undefined : await selectGitConnection(store, viewer.id, 'github', requested)
+    const actor = await actorFor(auth, store, request.headers, undefined, useLogin ? null : connectionId)
     if (actor instanceof Response) return actor
     const desired = body?.fullName ? normalizeFullName(body.fullName) : null
     const state = randomBytes(32).toString('base64url')
@@ -265,7 +269,7 @@ export async function githubInstallCallback(auth: StudioAuth, store: StudioDatab
     // Consume atomically, bound to this authenticated actor and single use.
     const row = await store.persistence.repositories.consumeInstall(user.id, digest, Date.now())
     if (!row) return redirect('invalid')
-    const actor = await actorFor(auth, store, request.headers, undefined, row.connectionId ?? undefined)
+    const actor = await actorFor(auth, store, request.headers, undefined, row.connectionId ?? null)
     if (actor instanceof Response) return redirect('invalid')
     const installId = params.get('installation_id')
     if (!installId || !/^[1-9]\d*$/.test(installId)) {
