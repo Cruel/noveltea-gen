@@ -26,7 +26,7 @@ export const Route = createFileRoute('/_protected/settings')({
 
 const names = { github: 'GitHub', gitlab: 'GitLab' }
 const accountLabel = (login: string | null | undefined, id: string) =>
-  login ? '@' + login : 'Account ' + id
+  login || 'Account ' + id
 function GitProviderIcon({ provider }: { provider: 'github' | 'gitlab' }) {
   const icon = provider === 'github' ? siGithub : siGitlab
   return <span role="img" aria-label={names[provider]}
@@ -134,7 +134,7 @@ function SettingsPage() {
     const alsoLogin = settings.loginMethods.some(login =>
       login.provider === entry.provider && login.accountId === entry.accountId)
     if (!window.confirm('Disconnect separate repository authorization for ' +
-      names[entry.provider] + ' · @' + entry.login + '? Stories and jobs are preserved. ' +
+      names[entry.provider] + ' · ' + entry.login + '? Stories and jobs are preserved. ' +
       (alsoLogin ? 'Studio login and login-backed repository access remain available.'
         : 'Remote operations using this connection will stop until it is reconnected.'))) return
     await disconnectGitConnection({ data: entry.id })
