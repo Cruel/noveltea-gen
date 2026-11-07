@@ -29,7 +29,8 @@ const accountLabel = (login: string | null | undefined, id: string) =>
   login ? '@' + login : 'Account ' + id
 function GitProviderIcon({ provider }: { provider: 'github' | 'gitlab' }) {
   const icon = provider === 'github' ? siGithub : siGitlab
-  return <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+  return <span role="img" aria-label={names[provider]}
+    className="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
     <svg aria-hidden="true" viewBox="0 0 24 24" className="size-4 fill-current"
       style={provider === 'gitlab' ? { color: '#FC6D26' } : undefined}>
       <path d={icon.path} />
@@ -204,7 +205,7 @@ function SettingsPage() {
           return <li key={account.key} className="settings-connection">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <GitProviderIcon provider={account.provider} />
-              <strong>{names[account.provider]} · {accountLabel(account.login, account.accountId)}</strong>
+              <strong>{accountLabel(account.login, account.accountId)}</strong>
               <HelpTip label={'Access details for ' + names[account.provider] + ' account'} text={accessDetails} />
               <span className="text-xs text-muted-foreground">{used} {used === 1 ? 'repository' : 'repositories'}</span>
               {status === 'reauthorize' && <span className="text-xs text-muted-foreground">Reauthorization required</span>}
@@ -239,8 +240,9 @@ function SettingsPage() {
             return <li key={repo.id} className="settings-repository">
               <div className="settings-connection">
                 <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <GitProviderIcon provider={repo.provider} />
                   <strong>{repo.name}</strong>
-                  <span className="text-xs text-muted-foreground">{names[repo.provider]} · {currentDescription}</span>
+                  <span className="text-xs text-muted-foreground">{currentDescription}</span>
                   <HelpTip label={'Access details for ' + repo.name + ' on ' + names[repo.provider]}
                     text={repo.connectionId ? 'This repository uses a separate Git authorization.'
                       : 'This repository uses your Studio login credentials for Git access.'} />
@@ -288,7 +290,7 @@ function SettingsPage() {
           <li key={login.provider + login.accountId} className="settings-connection">
             <div className="flex min-w-0 items-center gap-2">
               <GitProviderIcon provider={login.provider} />
-              <strong>{names[login.provider]} · {accountLabel(login.login, login.accountId)}</strong>
+              <strong>{accountLabel(login.login, login.accountId)}</strong>
               <HelpTip label={'Login details for ' + names[login.provider]}
                 text="This account is a Studio login method. Removing it does not remove separate Git repository authorizations." />
             </div>
