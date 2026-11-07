@@ -1,19 +1,14 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { RepositoryStoryBrowser } from '../-RepositoryStoryBrowser'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 import { validateRepositoryBrowseSearch } from '../../../../lib/repository-story-navigation'
 
+/** Preserve existing provider-qualified bookmarks; the destination resolves
+ * the actual provider from the signed-in user's repository catalog. */
 export const Route = createFileRoute('/_protected/repositories/github/$repositoryId')({
   validateSearch: validateRepositoryBrowseSearch,
-  component: GithubStories,
+  beforeLoad: ({ params, search }) => {
+    throw redirect({
+      to: '/repositories/$repositoryId', params: { repositoryId: params.repositoryId },
+      search, replace: true,
+    })
+  },
 })
-
-function GithubStories() {
-  const { repositoryId } = Route.useParams()
-  const location = Route.useSearch()
-  const navigate = useNavigate({ from: '/repositories/github/$repositoryId' })
-  return <RepositoryStoryBrowser key={repositoryId} provider="github" repositoryId={repositoryId}
-    location={location}
-    onNavigate={(search, replace = false) => {
-      void navigate({ search, replace })
-    }} />
-}

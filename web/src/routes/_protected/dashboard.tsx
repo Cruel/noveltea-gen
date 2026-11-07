@@ -20,7 +20,7 @@ function Dashboard() {
         {dashboard.stories.length ? <ul>{dashboard.stories.map(story => {
           const repository = dashboard.repositories.find(repo => repo.id === story.repositoryId)
           const href = repository
-            ? repositoryBrowseHref(repository.provider, repository.id, story.directory, story.commitSha)
+            ? repositoryBrowseHref(repository.id, story.directory, story.commitSha)
             : null
           return <li key={story.id} className="flex flex-wrap items-center gap-2">
             {repository && <GitProviderIcon provider={repository.provider} />}
@@ -43,7 +43,7 @@ function Dashboard() {
       {dashboard.repositories.length ? <ul>{dashboard.repositories.map(repo =>
         <li key={repo.id} className="flex flex-wrap items-center gap-2">
           <GitProviderIcon provider={repo.provider} />{repo.name}
-          <a href={repositoryBrowseHref(repo.provider, repo.id)}>Browse Stories</a>
+          <a href={repositoryBrowseHref(repo.id)}>Browse Stories</a>
         </li>
       )}</ul> : <p>No repositories connected yet.</p>}
     </CardContent></Card>
