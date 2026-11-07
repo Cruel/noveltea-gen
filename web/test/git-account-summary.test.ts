@@ -40,11 +40,13 @@ test('login-only accounts are first-class and ambiguous login bindings remain un
     loginMethods: [
       { id: 'a', provider: 'github' as const, accountId: '11' },
       { id: 'b', provider: 'github' as const, accountId: '12' },
-      { id: 'c', provider: 'gitlab' as const, accountId: '13' },
+      { id: 'c', provider: 'gitlab' as const, accountId: '13', login: 'cruel' },
     ],
     gitConnections: [],
   }
   const accounts = gitAccounts(settings)
+  assert.equal(accounts.find(a => a.key === 'gitlab:13')?.login, 'cruel',
+    'verified names from login-backed accounts appear in the unified account list')
   assert.equal(credentialForAccount(accounts.find(a => a.key === 'gitlab:13')!, 1), null,
     'login authorization is a valid repository selection')
   assert.equal(credentialForAccount(accounts.find(a => a.key === 'github:11')!, 2), undefined,

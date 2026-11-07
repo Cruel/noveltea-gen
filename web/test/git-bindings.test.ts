@@ -26,6 +26,8 @@ test('repository identities persist across imports, verified rebinding and login
   const directory = mkdtempSync(join(tmpdir(), 'nt-bindings-'))
   const store = openStudioDatabase(join(directory, 'studio.sqlite'))
   const originalFetch = globalThis.fetch
+  let githubProfileId = 42
+  let githubProfileUnavailable = false
   const env = ['BETTER_AUTH_URL', 'BETTER_AUTH_SECRET', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET',
     'GITLAB_CLIENT_ID', 'GITLAB_CLIENT_SECRET', 'GITHUB_APP_SLUG'] as const
   const saved = Object.fromEntries(env.map(key => [key, process.env[key]])) as Record<string, string | undefined>
@@ -41,7 +43,9 @@ test('repository identities persist across imports, verified rebinding and login
       return Response.json({ access_token: 'gh-integrated', refresh_token: 'gh-refresh', expires_in: 3600 })
     if (url === 'https://gitlab.com/oauth/token')
       return Response.json({ access_token: 'gl-integrated', refresh_token: 'gl-refresh', expires_in: 3600 })
-    if (url === 'https://api.github.com/user') return Response.json({ id: 42, login: 'alice' })
+    if (url === 'https://api.github.com/user') return githubProfileUnavailable
+      ? Response.json({ error: 'unavailable' }, { status: 503 })
+      : Response.json({ id: githubProfileId, login: 'alice' })
     if (url === 'https://gitlab.com/api/v4/user') return Response.json({ id: 43, username: 'alice' })
     if (url.startsWith('https://api.github.com/user/installations/12/repositories')) {
       return Response.json({ total_count: 2, repositories: [
@@ -76,10 +80,10 @@ test('repository identities persist across imports, verified rebinding and login
       name: 'Bob', email: 'bob@demo.test', emailVerified: true,
     }, { method: 'test' })
     const ghLogin = await ctx.internalAdapter.createAccount({
-      userId: alice.id, providerId: 'github', accountId: 'alice-login', accessToken: 'legacy-gh',
+      userId: alice.id, providerId: 'github', accountId: '42', accessToken: 'legacy-gh',
     })
     await ctx.internalAdapter.createAccount({
-      userId: alice.id, providerId: 'gitlab', accountId: 'alice-login', accessToken: 'legacy-gl',
+      userId: alice.id, providerId: 'gitlab', accountId: '43', accessToken: 'legacy-gl',
     })
     const cookie = async (user: string) => {
       const session = await ctx.internalAdapter.createSession(user)
@@ -88,6 +92,31 @@ test('repository identities persist across imports, verified rebinding and login
     }
     const aliceCookie = await cookie(alice.id)
     const bobCookie = await cookie(bob.id)
+    const getLoginMethods = async () => {
+      const result = await settingsRequest(auth, store, new Request(origin + '/api/settings', {
+        headers: { cookie: aliceCookie },
+      }), origin)
+      assert.equal(result.status, 200)
+      const body = await result.json() as { loginMethods: Array<{
+        provider: 'github' | 'gitlab'; accountId: string; login: string | null }> }
+      return body.loginMethods
+    }
+    assert.deepEqual((await getLoginMethods()).map(login => [login.provider, login.login]),
+      [['github', 'alice'], ['gitlab', 'alice']],
+      'login-backed GitHub and GitLab should expose their verified usernames')
+    githubProfileId = 999
+    assert.equal((await getLoginMethods()).find(item => item.provider === 'github')?.login, null,
+      'a mismatched provider identity must not be presented as the login owner')
+    githubProfileId = 42
+    githubProfileUnavailable = true
+    assert.equal((await getLoginMethods()).find(item => item.provider === 'github')?.login, null,
+      'provider failures must not block settings or invent usernames')
+    githubProfileUnavailable = false
+    const bobLoginMethods = await settingsRequest(auth, store, new Request(origin + '/api/settings', {
+      headers: { cookie: bobCookie },
+    }), origin)
+    assert.deepEqual((await bobLoginMethods.json() as { loginMethods: unknown[] }).loginMethods, [],
+      'login account names remain owner-scoped')
     const make = (method: string, path: string, data?: object, authCookie = aliceCookie, requestOrigin = origin) =>
       new Request(origin + path, { method,
         headers: { cookie: authCookie, origin: requestOrigin, 'content-type': 'application/json' },
@@ -122,10 +151,10 @@ test('repository identities persist across imports, verified rebinding and login
       ['github', githubId], ['gitlab', gitlabId],
     ] as const) {
       const sources = catalog.sources.filter(source => source.provider === provider)
-      assert.ok(sources.some(source => source.connectionId === null),
-        provider + ' login source must remain available alongside separate credentials')
+      assert.equal(sources.some(source => source.connectionId === null), false,
+        provider + ' shows one account when login and repository authorization share an identity')
       assert.ok(sources.some(source => source.connectionId === connectionId),
-        provider + ' separate authorization must also remain available')
+        provider + ' separate authorization must remain available')
     }
     const ghAdded = await githubRepositoryRequest(auth, store,
       make('POST', '/api/github/repositories', { fullName: 'Acme/Story' }),

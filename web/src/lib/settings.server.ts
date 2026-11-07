@@ -2,7 +2,7 @@ import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './session.server'
 import { availableUserPiModels, validPiSelection, type PiSelection } from './pi-credentials.server'
-import { listGitConnections } from './git-connections.server'
+import { listGitConnections, readGitAccountProfile } from './git-connections.server'
 import { JsonInputError, readJsonInput } from './json-input.server'
 import type { SettingsPreferences } from '../persistence/contracts'
 
@@ -22,11 +22,35 @@ export async function settingsRequest(auth: StudioAuth, store: StudioDatabase, r
     if (!actor) return json({ error: 'Sign in required.' }, 401)
     if (request.method === 'GET') {
       const accounts = await auth.api.listUserAccounts({ headers: request.headers })
+      const gitConnections = await listGitConnections(store, actor.id)
+      const loginMethods = await Promise.all(accounts
+        .filter(row => row.providerId === 'github' || row.providerId === 'gitlab')
+        .map(async row => {
+          const provider = row.providerId as 'github' | 'gitlab'
+          const known = gitConnections.find(connection =>
+            connection.provider === provider && connection.accountId === row.accountId)
+          let login: string | null = known?.login ?? null
+          if (!login) {
+            try {
+              const token = await auth.api.getAccessToken({
+                headers: request.headers, body: { accountId: row.id },
+              })
+              if (token.accessToken) {
+                const profile = await readGitAccountProfile(provider, token.accessToken, 3000)
+                // Never attribute another identity's username to this login method.
+                if (profile.id === row.accountId) login = profile.login
+              }
+            } catch {
+              // Profile lookup is best-effort: settings and login management must
+              // remain available when a provider is offline or a token has expired.
+            }
+          }
+          return { id: row.id, provider, accountId: row.accountId, login }
+        }))
       return json({
         defaultModel: await readDefaultModel(preferences, actor.id),
-        loginMethods: accounts.filter(row => row.providerId === 'github' || row.providerId === 'gitlab')
-          .map(row => ({ id: row.id, provider: row.providerId, accountId: row.accountId })),
-        gitConnections: await listGitConnections(store, actor.id),
+        loginMethods,
+        gitConnections,
         repositories: await preferences.listRepositories(actor.id),
       })
     }

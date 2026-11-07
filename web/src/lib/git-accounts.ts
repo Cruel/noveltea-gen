@@ -17,7 +17,7 @@ export function gitAccounts(settings: Pick<StudioSettings, 'loginMethods' | 'git
   for (const login of settings.loginMethods) {
     const key = keyFor(login.provider, login.accountId)
     accounts.set(key, { key, provider: login.provider, accountId: login.accountId,
-      login: null, loginMethod: true, connection: null })
+      login: login.login ?? null, loginMethod: true, connection: null })
   }
   for (const connection of settings.gitConnections) {
     const key = keyFor(connection.provider, connection.accountId)

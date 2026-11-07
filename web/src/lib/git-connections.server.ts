@@ -84,13 +84,14 @@ async function exchange(provider: GitProvider, params: URLSearchParams) {
     throw new GitConnectionError(409, 'Git provider rejected authorization. Reconnect.')
   return credentialsResponse(value)
 }
-async function profile(provider: GitProvider, token: string): Promise<{ id: string; login: string }> {
+export async function readGitAccountProfile(provider: GitProvider, token: string,
+  timeoutMs = 10000): Promise<{ id: string; login: string }> {
   const endpoint = provider === 'github' ? 'https://api.github.com/user' : 'https://gitlab.com/api/v4/user'
   let result: Response
   try {
     result = await fetch(endpoint, { headers: {
       Authorization: 'Bearer ' + token, Accept: 'application/json', 'User-Agent': 'NovelTea-Studio',
-    }, redirect: 'error', signal: AbortSignal.timeout(10000) })
+    }, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) })
   } catch { throw new GitConnectionError(503, 'Git provider identity verification is unavailable.') }
   if (!result.ok) throw new GitConnectionError(409, 'Git provider could not verify the authorized identity.')
   const data = await result.json().catch(() => null) as { id?: unknown; login?: unknown; username?: unknown } | null
@@ -220,7 +221,7 @@ export async function gitConnectionCallback(auth: StudioAuth, store: StudioDatab
       code, redirect_uri: oauthRedirect(config.baseURL, provider), code_verifier: row.verifier,
     })
     const tokens = await exchange(provider, params)
-    const identity = await profile(provider, tokens.access)
+    const identity = await readGitAccountProfile(provider, tokens.access)
     const sealed = seal(actor.id, provider, identity.id, { access: tokens.access, refresh: tokens.refresh }, config)
     const now = new Date().toISOString()
     await store.persistence.git.connect({

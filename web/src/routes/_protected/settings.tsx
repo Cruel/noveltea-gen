@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { StudioSelect } from '@/components/studio-select'
+import { siGithub, siGitlab } from 'simple-icons'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
@@ -21,7 +22,18 @@ export const Route = createFileRoute('/_protected/settings')({
   component: SettingsPage,
 })
 
-const names = { github: 'GitHub', gitlab: 'GitLab.com' }
+const names = { github: 'GitHub', gitlab: 'GitLab' }
+const accountLabel = (login: string | null | undefined, id: string) =>
+  login ? '@' + login : 'Account ' + id
+function GitProviderIcon({ provider }: { provider: 'github' | 'gitlab' }) {
+  const icon = provider === 'github' ? siGithub : siGitlab
+  return <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="size-5 fill-current"
+      style={provider === 'gitlab' ? { color: '#FC6D26' } : undefined}>
+      <path d={icon.path} />
+    </svg>
+  </span>
+}
 function noticeFor(query: URLSearchParams) {
   if (query.has('integration_connected')) return 'Repository identity connected successfully.'
   const errors: Record<string, string> = {
@@ -99,8 +111,12 @@ function SettingsPage() {
     setNotice('Repository access verified and assigned to the selected Git account.')
   })
   const disconnectGit = (entry: Connection) => run(async () => {
-    if (!window.confirm('Disconnect ' + entry.provider + '/' + entry.login +
-      '? Repositories and jobs are kept, but remote operations using this identity will stop until it is reconnected.')) return
+    const alsoLogin = settings.loginMethods.some(login =>
+      login.provider === entry.provider && login.accountId === entry.accountId)
+    if (!window.confirm('Disconnect separate repository authorization for ' +
+      names[entry.provider] + ' · @' + entry.login + '? Stories and jobs are preserved. ' +
+      (alsoLogin ? 'Studio login and login-backed repository access remain available.'
+        : 'Remote operations using this connection will stop until it is reconnected.'))) return
     await disconnectGitConnection({ data: entry.id })
     await refresh()
     setNotice('Repository connection disconnected. Stories and jobs were preserved.')
@@ -144,28 +160,31 @@ function SettingsPage() {
       </Card>
       <Card id="integrations" className="mt-6">
         <CardHeader><CardTitle>Git accounts</CardTitle></CardHeader><CardContent>
-        <p>Use GitHub and GitLab accounts to access repositories. Accounts linked for Studio login work here too;
-          additional repository accounts can be connected separately.</p>
+        <p>Accounts available for repository access, including accounts linked for Studio login.</p>
         <ul>{accounts.map(account => {
           const connection = account.connection
           const loginCount = settings.loginMethods.filter(login => login.provider === account.provider).length
           const used = settings.repositories.filter(repo => repo.provider === account.provider &&
             (repo.connectionId ? repo.connectionId === connection?.id : account.loginMethod && loginCount === 1)).length
           return <li key={account.key} className="settings-connection">
-            <div>
-              <strong>{names[account.provider]} · {account.login ?? 'Account ' + account.accountId}</strong>
-              {account.loginMethod && <small>Studio login</small>}
-              {connection
-                ? <small>Separate repository authorization · {connection.status === 'connected'
-                  ? 'Connected' : connection.status === 'reauthorize' ? 'Reauthorization required' : 'Disconnected'}</small>
-                : account.loginMethod && <small>Repository access via Studio login</small>}
-              {used > 0 && <small>Used by {used} {used === 1 ? 'repository' : 'repositories'}</small>}
+            <div className="flex min-w-0 items-center gap-3">
+              <GitProviderIcon provider={account.provider} />
+              <div className="min-w-0">
+                <strong>{names[account.provider]} · {accountLabel(account.login, account.accountId)}</strong>
+                <small>{account.loginMethod ? 'Studio login · Repository access' : 'Repository access'}</small>
+                {connection?.status === 'reauthorize' && <small>Reauthorization required</small>}
+                {connection?.status === 'disconnected' && <small>Separate authorization disconnected</small>}
+                {!account.login && <small>Username unavailable</small>}
+                <small>{used} {used === 1 ? 'repository' : 'repositories'}</small>
+              </div>
             </div>
             {connection && (connection.status === 'connected'
               ? <Button type="button" variant="outline" disabled={busy}
-                  onClick={() => void disconnectGit(connection)}>Disconnect authorization</Button>
+                  onClick={() => void disconnectGit(connection)}>
+                  {account.loginMethod ? 'Disconnect separate access' : 'Disconnect'}
+                </Button>
               : <Button type="button" variant="outline" disabled={busy}
-                  onClick={() => void connectGit(account.provider)}>Authorize again</Button>)}
+                  onClick={() => void connectGit(account.provider)}>Reconnect</Button>)}
           </li>
         })}</ul>
         {!accounts.length && <p>No Git accounts linked yet. Link a login method or connect a repository account.</p>}
@@ -188,7 +207,7 @@ function SettingsPage() {
             const selectedAccount = eligibleAccounts.find(account => account.key === selected)
             const credential = selectedAccount ? credentialForAccount(selectedAccount, loginCount) : undefined
             const currentDescription = current
-              ? (current.login ?? 'Account ' + current.accountId)
+              ? accountLabel(current.login, current.accountId)
               : repo.connectionId ? 'Authorization unavailable' : 'Studio login unavailable or ambiguous'
             return <li key={repo.id} className="settings-repository">
               <div className="settings-connection">
@@ -206,7 +225,7 @@ function SettingsPage() {
                   disabled={busy} placeholder="Choose a Git account"
                   onValueChange={value => setBindings(previous => ({ ...previous, [repo.id]: value }))}
                   options={eligibleAccounts.map(account => ({
-                    value: account.key, label: account.login ?? 'Account ' + account.accountId,
+                    value: account.key, label: accountLabel(account.login, account.accountId),
                     disabled: credentialForAccount(account, loginCount) === undefined,
                   }))} />
                 <Button type="button" disabled={busy || credential === undefined ||
@@ -228,7 +247,11 @@ function SettingsPage() {
         <p>These accounts can sign into Studio. Adding a Git repository account does not add a login method.
           Removing a login method never silently changes a repository's authorization.</p>
         <ul>{settings.loginMethods.map(login => <li key={login.provider + login.accountId} className="settings-connection">
-          <div><strong>{names[login.provider]}</strong><small>Account ID: {login.accountId}</small></div>
+          <div className="flex min-w-0 items-center gap-3">
+            <GitProviderIcon provider={login.provider} />
+            <div><strong>{names[login.provider]} · {accountLabel(login.login, login.accountId)}</strong>
+              <small>Studio login</small></div>
+          </div>
           <Button type="button" disabled={busy || settings.loginMethods.length < 2}
             title={settings.loginMethods.length < 2 ? 'Keep at least one login method' : undefined}
             onClick={() => void unlinkLogin(login.provider, login.id)}>Remove login</Button>

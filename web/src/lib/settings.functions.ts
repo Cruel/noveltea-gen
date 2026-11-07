@@ -9,7 +9,7 @@ export type GitProvider = 'github' | 'gitlab'
 export type SavedModel = { provider: string; id: string; thinking?: 'low' | 'medium' | 'high' } | null
 export type StudioSettings = {
   defaultModel: SavedModel
-  loginMethods: Array<{ id: string; provider: GitProvider; accountId: string }>
+  loginMethods: Array<{ id: string; provider: GitProvider; accountId: string; login?: string | null }>
   gitConnections: Array<{ id: string; provider: GitProvider; accountId: string; login: string;
     status: 'connected' | 'reauthorize' | 'disconnected'; accessExpiresAt: number | null }>
   repositories: Array<{ id: string; provider: GitProvider; name: string; connectionId: string | null }>
