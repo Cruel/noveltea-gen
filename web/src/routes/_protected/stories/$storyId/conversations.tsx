@@ -8,7 +8,7 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/s
 import { ThreadList } from '@/components/thread-list'
 import { ThreadChat } from '@/components/thread-chat'
 import { ThreadUsage } from '@/components/thread-usage'
-import { NaturalStoryComposer } from '@/components/natural-story-composer'
+import { StoryFirstChat } from '@/components/story-first-chat'
 import { storyNavigationQuery, storyNavigationKey, storyUsageKey, storyUsageQuery } from '@/lib/threads.queries'
 import { changeThreadArchive, deleteThreadResources,
   setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
@@ -220,18 +220,17 @@ function StoryConversations() {
               {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
             </h2>
           </header>
-          {creatingThread || !data.threads.length
-            ? <div className="mx-auto w-full max-w-2xl flex-1 overflow-y-auto px-4 py-6">
-              <p className="mb-3 text-sm text-muted-foreground">Describe what you want to create in this Story.</p>
-              <NaturalStoryComposer key={storyId} storyId={storyId}
-                onStarted={async threadId => {
-                  setCreatingThread(false); await refresh()
-                  await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
-                    search: { thread: threadId } })
-                }} />
-              {data.threads.length > 0 && <Button variant="ghost" size="sm"
-                className="mt-3" onClick={() => setCreatingThread(false)}>Cancel</Button>}
-            </div>
+          {creatingThread || !data.threads.length ||
+            (selectedThread && selectedThread.status === 'prepared' && selectedThread.id.startsWith('root:'))
+            ? <StoryFirstChat key={creatingThread || !data.threads.length ? 'new:' + storyId : selectedThread!.id}
+              storyId={storyId}
+              threadId={!creatingThread && data.threads.length > 0 && selectedThread?.id.startsWith('root:')
+                ? selectedThread.id : undefined}
+              onSubmitted={async threadId => {
+                setCreatingThread(false); await refresh()
+                await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
+                  search: { thread: threadId } })
+              }} />
             : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />
               : <p className="p-5 text-sm text-muted-foreground">Select a Thread or create a new one.</p>}
         </> : <p className="p-5 text-sm text-muted-foreground">
