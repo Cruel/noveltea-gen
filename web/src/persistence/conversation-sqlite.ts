@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull, notExists, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { checkpointForks, generationRunQueue, githubPublications, gitlabPublications,
-  sessions, stories, storyThreadMessages,
+  sessions, stories, storyCollectionMemberships, storyThreadMessages,
   storyThreadRuns, storyThreads, threadLiveInputs, threadRestarts } from '../db/schema'
 import type { ConversationCatalog, ThreadDeletionRecord } from './conversation-contracts'
 
@@ -118,7 +118,8 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
       ownerRequired(owner)
       const threads = db.select({
         id: storyThreads.id, storyId: storyThreads.storyId,
-        parentThreadId: storyThreads.parentThreadId, title: storyThreads.title,
+        parentThreadId: storyThreads.parentThreadId,
+        collectionId: storyCollectionMemberships.collectionId, title: storyThreads.title,
         activityAt: storyThreads.activityAt, archivedAt: storyThreads.archivedAt,
         deletedAt: storyThreads.deletedAt,
         deletionCompleteAt: storyThreads.deletionCompleteAt, createdAt: storyThreads.createdAt,
@@ -145,6 +146,10 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
                 AND started.kind = 'started'), 0)
           ORDER BY e.id DESC LIMIT 1)`,
       }).from(storyThreads)
+        .leftJoin(storyCollectionMemberships, and(
+          eq(storyCollectionMemberships.threadId, storyThreads.id),
+          eq(storyCollectionMemberships.ownerUserId, storyThreads.ownerUserId),
+          eq(storyCollectionMemberships.storyId, storyThreads.storyId)))
         .leftJoin(storyThreadRuns, and(eq(storyThreadRuns.threadId, storyThreads.id),
           eq(storyThreadRuns.ownerUserId, storyThreads.ownerUserId),
           eq(storyThreadRuns.runOrder, sql<number>`(SELECT MAX(r2.run_order)

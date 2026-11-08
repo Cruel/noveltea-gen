@@ -32,10 +32,12 @@ test('fresh Drizzle baseline initializes the complete, constrained Studio schema
     const appNames = (await store.testing.schema.tables()).filter(name =>
       !name.startsWith('sqlite_') &&
       !['user', 'session', 'account', 'verification', 'rateLimit', '__drizzle_migrations'].includes(name))
-    assert.equal(appNames.length, 30)
+    assert.equal(appNames.length, 33)
     assert.ok(!appNames.includes('story_conversations'))
     assert.ok(appNames.includes('story_turns'))
     assert.ok(appNames.includes('story_turn_executions'))
+    for (const table of ['story_collections', 'story_collection_memberships', 'user_story_selection'])
+      assert.ok(appNames.includes(table))
     for (const name of ['thread_steering_checkpoint_links', 'github_install_flows',
       'story_onboarding_conversations']) assert.ok(appNames.includes(name))
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])
@@ -82,6 +84,30 @@ test('fresh Drizzle baseline initializes the complete, constrained Studio schema
       createdAt: stamp }), /FOREIGN KEY/)
     await data.insert('story_thread_runs', { jobId: 'job', ownerUserId: alice.id,
       threadId: 'thread', runOrder: 0 })
+
+    // Collection membership cannot cross Story or owner, and removing the
+    // Collection cannot delete a Thread or rewrite its fork provenance.
+    await data.insert('story_collections', { id: 'collection', ownerUserId: alice.id,
+      storyId: 'story', name: 'Drafts', createdAt: stamp, updatedAt: stamp })
+    await data.insert('story_collection_memberships', { threadId: 'thread',
+      ownerUserId: alice.id, storyId: 'story', collectionId: 'collection' })
+    await assert.rejects(() => data.insert('story_collection_memberships', {
+      threadId: 'other-thread', ownerUserId: alice.id, storyId: 'other-story',
+      collectionId: 'collection',
+    }), /FOREIGN KEY constraint/)
+    await assert.rejects(() => data.insert('story_collection_memberships', {
+      threadId: 'other-thread', ownerUserId: bob.id, storyId: 'story',
+      collectionId: 'collection',
+    }), /FOREIGN KEY constraint/)
+    await assert.rejects(() => data.insert('user_story_selection', {
+      ownerUserId: bob.id, storyId: 'story', updatedAt: stamp,
+    }), /FOREIGN KEY constraint/)
+    await data.insert('user_story_selection', { ownerUserId: alice.id,
+      storyId: 'story', updatedAt: stamp })
+    await data.delete('story_collections', { id: 'collection' })
+    assert.equal(await data.count('story_collection_memberships'), 0)
+    assert.equal(await data.count('story_threads'), 2)
+    assert.equal(await data.count('story_thread_runs'), 1)
 
     await data.insert('story_thread_messages', { id: 'one', ownerUserId: alice.id,
       threadId: 'thread', sequence: 1, role: 'user', status: 'queued',

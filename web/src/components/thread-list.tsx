@@ -2,7 +2,8 @@ import { AlertCircle, Archive, ArchiveRestore, CheckCircle2, ChevronDown, Chevro
 import { orderThreads } from '@/lib/thread-navigation'
 import { ThreadRestartControl } from '@/components/thread-restart-control'
 import type { StoryThread } from '@/lib/threads.server'
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
+import type { StoryCollection } from '@/persistence/collection-contracts'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '@/components/ui/dropdown-menu'
 
 const statusText = (status: StoryThread['status']) => ({
   'needs-author': 'Needs author', 'prepared': 'Prepared', 'queued': 'Queued',
@@ -26,16 +27,20 @@ function StatusIcon({ status }: { status: StoryThread['status'] }) {
 }
 
 export function ThreadList({ threads, view, expandedIds, selectedThreadId, archivedView = false,
-  busyThreadId, onExpand, onRename, onArchiveChange, onDelete, onOpen }: {
+  busyThreadId, onExpand, onRename, onArchiveChange, onDelete, onOpen,
+  collections = [], allThreads, onMoveCollection }: {
   threads: StoryThread[]; view: 'tree' | 'flat'; expandedIds: string[]
   selectedThreadId?: string; archivedView?: boolean; busyThreadId?: string | null
   onExpand: (id: string) => void; onRename: (thread: StoryThread) => void
   onArchiveChange: (thread: StoryThread, archived: boolean) => void
   onDelete?: (thread: StoryThread) => void
   onOpen?: (thread: StoryThread) => void
+  collections?: StoryCollection[]; allThreads?: StoryThread[]
+  onMoveCollection?: (thread: StoryThread, id: string | null) => void
 }) {
   const rows = orderThreads(threads, view)
   const threadsById = new Map(threads.map(thread => [thread.id, thread]))
+  const allById = new Map((allThreads ?? threads).map(thread => [thread.id, thread]))
   const parents = new Map(threads.map(thread => [thread.id, thread.parentThreadId]))
   const hasChildren = new Set(threads.map(thread => thread.parentThreadId).filter(Boolean))
   // A dedicated archive view always reveals the full context chain: archived
@@ -95,8 +100,10 @@ export function ThreadList({ threads, view, expandedIds, selectedThreadId, archi
             <span className={thread.status === 'needs-author' ? 'text-amber-400' : ''}>
               <span className="inline-flex items-center gap-1"><StatusIcon status={thread.status} />
                 {archivedView && !thread.archivedAt ? 'Ancestor · ' : ''}{statusText(thread.status)}</span></span>
-            {!archivedView && thread.parentThreadId && !parents.has(thread.parentThreadId) &&
-              <span>Parent archived</span>}
+            {thread.parentThreadId && !parents.has(thread.parentThreadId) &&
+              <span>{allById.has(thread.parentThreadId)
+                ? 'Forked from ' + allById.get(thread.parentThreadId)!.title
+                : 'Parent archived'}</span>}
             {view === 'flat' && thread.parentThreadId && threadsById.has(thread.parentThreadId) &&
               <span>From {threadsById.get(thread.parentThreadId)!.title}</span>}
             {thread.currentWork && <span className="truncate" title={thread.currentWork}>· {thread.currentWork}</span>}
@@ -109,6 +116,24 @@ export function ThreadList({ threads, view, expandedIds, selectedThreadId, archi
           <DropdownMenuContent align="end" className="min-w-40">
             {!thread.deletedAt && <DropdownMenuItem aria-label={'Rename Thread ' + thread.title}
               onClick={() => onRename(thread)}><Pencil className="size-3.5" />Rename</DropdownMenuItem>}
+            {!thread.deletedAt && onMoveCollection && <DropdownMenuSub>
+              <DropdownMenuSubTrigger aria-label={'Move Thread ' + thread.title + ' to Collection'}>
+                Collection
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="min-w-40">
+                <DropdownMenuItem disabled={busyThreadId === thread.id || !thread.collectionId}
+                  aria-label={'Unassign Collection for ' + thread.title}
+                  onClick={() => onMoveCollection(thread, null)}>
+                  Ungrouped
+                </DropdownMenuItem>
+                {collections.map(collection => <DropdownMenuItem key={collection.id}
+                  disabled={busyThreadId === thread.id || thread.collectionId === collection.id}
+                  aria-label={'Move ' + thread.title + ' to ' + collection.name}
+                  onClick={() => onMoveCollection(thread, collection.id)}>
+                  {collection.name}
+                </DropdownMenuItem>)}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>}
             {!thread.deletedAt && (!archivedView || thread.archivedAt) &&
               <DropdownMenuItem disabled={busyThreadId === thread.id}
                 aria-label={(thread.archivedAt ? 'Restore Thread ' : 'Archive Thread ') + thread.title}

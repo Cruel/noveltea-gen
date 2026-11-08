@@ -21,7 +21,14 @@ function threadHref(job: DashboardJob): string {
 
 function Dashboard() {
   const { data: dashboard } = useSuspenseQuery(dashboardQuery())
+  const savedStory = dashboard.stories.find(story => story.id === dashboard.selectedStoryId)
   return <main className="page">
+    {savedStory && <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+      <span className="text-muted-foreground">Selected Story</span>
+      <a className="font-semibold" href={'/stories/' + encodeURIComponent(savedStory.id) + '/conversations'}>
+        {savedStory.title}
+      </a>
+    </div>}
     <div className="dashboard-grid">
       <Card><CardHeader><CardTitle>Stories</CardTitle></CardHeader><CardContent>
         {dashboard.stories.length ? <ul>{dashboard.stories.map(story => {

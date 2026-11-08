@@ -1,20 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { NavigationThreadRecord } from '../persistence/conversation-contracts'
+import type { StoryCollection } from '../persistence/collection-contracts'
 import { latestActivity } from './thread-navigation'
 
 export type ThreadStatus = 'prepared' | 'queued' | 'running' | 'paused' | 'needs-author' |
   'blocked' | 'completed' | 'cancelled' | 'archived' | 'deleting' | 'deleted'
 export type StoryThread = {
-  id: string; storyId: string; parentThreadId: string | null; title: string
+  id: string; storyId: string; parentThreadId: string | null; collectionId: string | null; title: string
   activityAt: string; createdAt: string; archivedAt: string | null
   deletedAt?: string | null; deletionCompleteAt?: string | null
   status: ThreadStatus; currentWork: string | null; jobId: string | null
 }
-export type ThreadPreferences = { view: 'tree' | 'flat'; expandedIds: string[] }
+export type ThreadPreferences = { view: 'tree' | 'flat'; expandedIds: string[]; collapsedCollectionIds: string[] }
 export type StoryNavigation = {
   story: { id: string; title: string }
   threads: StoryThread[]
+  collections: StoryCollection[]
   preferences: ThreadPreferences
 }
 
@@ -59,6 +61,7 @@ export async function listStoryNavigation(store: StudioDatabase, owner: string, 
   const story = await selectedStory(store, owner, storyId)
   await ensureRootThreads(store, owner, storyId)
   const { threads: threadRows } = await store.persistence.conversations.navigation(owner, storyId)
+  const collections = await store.persistence.collections.list(owner, storyId)
   const threads: StoryThread[] = []
   for (const row of threadRows) {
     const status = threadStatus(row)
@@ -67,14 +70,46 @@ export async function listStoryNavigation(store: StudioDatabase, owner: string, 
     const work = status === 'running' && row.workingStage
       ? row.workingStage.replaceAll('-', ' ').replace(/\b\w/g, char => char.toUpperCase()) +
         (row.workingMilestone ? ' · ' + row.workingMilestone : '') : null
-    threads.push({ id: row.id, storyId: row.storyId,
+    threads.push({ id: row.id, storyId: row.storyId, collectionId: row.collectionId,
       parentThreadId: row.parentThreadId, title: row.title, activityAt,
       createdAt: row.createdAt, archivedAt: row.archivedAt,
       deletedAt: row.deletedAt, deletionCompleteAt: row.deletionCompleteAt, status,
       currentWork: work, jobId: row.deletedAt ? null : row.jobId })
   }
   const prefs = await store.persistence.settings.getThreadPreferences(owner, storyId)
-  return { story, threads, preferences: prefs ?? { view: 'tree', expandedIds: [] } }
+  return { story, threads, collections, preferences: prefs ?? { view: 'tree', expandedIds: [], collapsedCollectionIds: [] } }
+}
+
+export async function createCollection(store: StudioDatabase, owner: string, storyId: string, name: string) {
+  await selectedStory(store, owner, storyId)
+  return store.persistence.collections.create(owner, storyId, randomUUID(), collectionName(name), new Date().toISOString())
+}
+export async function renameCollection(store: StudioDatabase, owner: string, storyId: string,
+  collectionId: string, name: string) {
+  await selectedStory(store, owner, storyId)
+  if (!await store.persistence.collections.rename(owner, storyId, collectionId, collectionName(name), new Date().toISOString()))
+    throw new Error('Collection not found.')
+}
+export async function removeCollection(store: StudioDatabase, owner: string, storyId: string, collectionId: string) {
+  await selectedStory(store, owner, storyId)
+  if (!await store.persistence.collections.remove(owner, storyId, collectionId))
+    throw new Error('Collection not found.')
+}
+export async function assignThreadCollection(store: StudioDatabase, owner: string, storyId: string,
+  threadId: string, collectionId: string | null) {
+  await selectedStory(store, owner, storyId)
+  if (!await store.persistence.collections.assign(owner, storyId, threadId, collectionId))
+    throw new Error('Thread or Collection not found.')
+}
+export async function chooseStory(store: StudioDatabase, owner: string, storyId: string) {
+  await selectedStory(store, owner, storyId)
+  await store.persistence.collections.chooseStory(owner, storyId, new Date().toISOString())
+}
+function collectionName(value: string) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 80 ||
+      /[\u0000-\u001f\u007f]/.test(value))
+    throw new Error('Collection name must be 1–80 printable characters.')
+  return value.trim()
 }
 
 export async function createThread(store: StudioDatabase, owner: string, storyId: string) {
@@ -101,11 +136,20 @@ export async function restoreThread(store: StudioDatabase, owner: string, id: st
 }
 
 export async function saveThreadPreferences(store: StudioDatabase, owner: string, storyId: string,
-  view: 'tree' | 'flat', expandedIds: string[]) {
+  view: 'tree' | 'flat', expandedIds: string[], collapsedCollectionIds?: string[]) {
   await selectedStory(store, owner, storyId)
   if (!['tree', 'flat'].includes(view) || !Array.isArray(expandedIds) || expandedIds.length > 200 ||
       expandedIds.some(id => typeof id !== 'string' || !ID.test(id)))
     throw new Error('Invalid Thread preferences.')
+  if (collapsedCollectionIds !== undefined &&
+      (!Array.isArray(collapsedCollectionIds) || collapsedCollectionIds.length > 100 ||
+        collapsedCollectionIds.some(id => typeof id !== 'string' || !ID.test(id))))
+    throw new Error('Invalid Collection preferences.')
   const unique = [...new Set(expandedIds)]
-  await store.persistence.settings.putThreadPreferences(owner, storyId, view, unique, new Date().toISOString())
+  const collapsed = collapsedCollectionIds && [...new Set(collapsedCollectionIds)]
+  if (collapsed) {
+    const ids = new Set((await store.persistence.collections.list(owner, storyId)).map(c => c.id))
+    if (collapsed.some(id => id !== 'ungrouped' && !ids.has(id))) throw new Error('Collection not found.')
+  }
+  await store.persistence.settings.putThreadPreferences(owner, storyId, view, unique, new Date().toISOString(), collapsed)
 }

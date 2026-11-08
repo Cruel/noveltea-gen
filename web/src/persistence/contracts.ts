@@ -12,6 +12,7 @@ export type DashboardSnapshot = {
   repositories: Array<{ id: string; name: string; provider: CatalogProvider }>
   stories: Array<{ id: string; title: string; repositoryId: string;
     directory: string; commitSha: string | null }>
+  selectedStoryId: string | null
   activeJobs: DashboardJob[]
   recentSessions: DashboardJob[]
 }
@@ -33,12 +34,13 @@ export interface SettingsPreferences {
   }>>
   hasLegacyRepositories(ownerUserId: string, provider: CatalogProvider): Promise<boolean>
   getThreadPreferences(ownerUserId: string, storyId: string): Promise<{
-    view: 'tree' | 'flat'; expandedIds: string[]
+    view: 'tree' | 'flat'; expandedIds: string[]; collapsedCollectionIds: string[]
   } | null>
   putThreadPreferences(ownerUserId: string, storyId: string, view: 'tree' | 'flat',
-    expandedIds: string[], updatedAt: string): Promise<void>
+    expandedIds: string[], updatedAt: string, collapsedCollectionIds?: string[]): Promise<void>
 }
 import type { NaturalStoryPersistence } from './natural-story-contracts'
+import type { CollectionCatalog } from './collection-contracts'
 import type { GitIdentities, RepositoryCatalogWrites, StoryOnboarding, PiCredentialVault } from './git-contracts'
 import type { GenerationPersistence } from './generation-contracts'
 import type { ConversationCatalog } from './conversation-contracts'
@@ -51,6 +53,7 @@ import type { ApprovalJobCatalog, ProtectedDecisionRecords, PublicationRecords,
 
 export interface StudioPersistence {
   naturalStory: NaturalStoryPersistence
+  collections: CollectionCatalog
   dashboard: DashboardCatalog
   settings: SettingsPreferences
   git: GitIdentities

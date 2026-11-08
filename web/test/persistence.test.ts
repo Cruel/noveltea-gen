@@ -86,12 +86,12 @@ test('dashboard and preferences ports share fresh SQLite schema with unconverted
       null)
     await prefs.putThreadPreferences(alice, 'story-alice', 'flat', ['branch-1'], '2026-11-05')
     assert.deepEqual(await prefs.getThreadPreferences(alice, 'story-alice'),
-      { view: 'flat', expandedIds: ['branch-1'] })
+      { view: 'flat', expandedIds: ['branch-1'], collapsedCollectionIds: [] })
     assert.equal(await prefs.getThreadPreferences(bob, 'story-alice'), null)
     await assert.rejects(() => prefs.putThreadPreferences(bob, 'story-alice', 'tree', [], 'now'), /FOREIGN KEY/)
     await prefs.putThreadPreferences(alice, 'story-alice', 'tree', [], '2026-11-06')
     assert.deepEqual(await prefs.getThreadPreferences(alice, 'story-alice'),
-      { view: 'tree', expandedIds: [] })
+      { view: 'tree', expandedIds: [], collapsedCollectionIds: [] })
     assert.deepEqual((await prefs.listRepositories(alice)).map(r => r.id), ['repo-alice'])
     assert.equal(await prefs.hasLegacyRepositories(alice, 'github'), true)
     assert.equal(await prefs.hasLegacyRepositories(alice, 'gitlab'), false)
@@ -152,11 +152,11 @@ test('persistence consumers accept async-only injected adapters without needing 
     const injectedCatalog: DashboardCatalog = {
       async forOwner(owner) {
         queriedOwner = owner
-        return { repositories: [], stories: [], activeJobs: [], recentSessions: [] }
+        return { repositories: [], stories: [], selectedStoryId: null, activeJobs: [], recentSessions: [] }
       },
     }
     assert.deepEqual(await readUserDashboard(injectedCatalog, alice),
-      { repositories: [], stories: [], activeJobs: [], recentSessions: [] })
+      { repositories: [], stories: [], selectedStoryId: null, activeJobs: [], recentSessions: [] })
     assert.equal(queriedOwner, alice)
     const original = store.persistence.dashboard
     store.persistence.dashboard = injectedCatalog

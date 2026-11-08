@@ -6,6 +6,7 @@ export type NavigationThreadRecord = {
   id: string
   storyId: string
   parentThreadId: string | null
+  collectionId: string | null
   title: string
   activityAt: string
   archivedAt: string | null

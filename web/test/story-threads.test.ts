@@ -10,7 +10,8 @@ import {
   listStoryThreads,
   resolveStoryThreadAncestry,
 } from '../src/lib/story-threads.server'
-import { saveThreadPreferences, archiveThread, renameThread } from '../src/lib/threads.server'
+import { saveThreadPreferences, archiveThread, renameThread,
+  createCollection, assignThreadCollection } from '../src/lib/threads.server'
 import { enqueueThreadMessage } from '../src/lib/thread-chat.server'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
@@ -210,7 +211,10 @@ test('Story gateway preserves fork checkpoint identity, chat, navigation and res
       history: JSON.parse(fork.history),
       guidance: fork.guidance,
     })
+    const alternatives = await createCollection(a, owner, story, 'Alternatives')
+    await assignThreadCollection(a, owner, story, childId, alternatives.id)
     const selected = await openStoryThread(b, owner, story, childId)
+    assert.equal(selected.thread.collectionId, alternatives.id)
     assert.equal(selected.story.id, story)
     assert.equal(selected.thread.id, childId)
     assert.deepEqual(
@@ -222,6 +226,14 @@ test('Story gateway preserves fork checkpoint identity, chat, navigation and res
       commitSha: checkpoint,
       proofDigest: proof,
     })
+    const drafts = await createCollection(a, owner, story, 'Drafts')
+    await assignThreadCollection(a, owner, story, childId, drafts.id)
+    const moved = await openStoryThread(b, owner, story, childId)
+    assert.equal(moved.thread.collectionId, drafts.id)
+    assert.deepEqual(moved.ancestry, selected.ancestry,
+      'Collection moves cannot rewrite checkpoint SHA, proof or fork parent')
+    await assignThreadCollection(a, owner, story, childId, null)
+    assert.deepEqual((await openStoryThread(b, owner, story, childId)).ancestry, selected.ancestry)
     assert.equal(selected.ancestry[0]?.forkPoint, null)
     assert.deepEqual(
       selected.state.messages.map((m) => m.content),

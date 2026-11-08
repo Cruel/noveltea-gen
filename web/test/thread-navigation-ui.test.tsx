@@ -8,7 +8,7 @@ import type { StoryThread } from '../src/lib/threads.server'
 
 const thread = (id: string, parentThreadId: string | null, status: StoryThread['status'],
   activityAt: string): StoryThread => ({
-  id, parentThreadId, storyId: 'story', title: id,
+  id, parentThreadId, collectionId: null, storyId: 'story', title: id,
   activityAt, createdAt: '2026-11-01T00:00:00Z', archivedAt: null,
   status, currentWork: status === 'running' ? 'Event · arc.one' : null,
   jobId: id + '-job',

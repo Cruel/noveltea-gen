@@ -100,7 +100,7 @@ test('authors can create, rename and persist navigation preferences, with bounds
     await assert.rejects(() => renameThread(db, alice, thread.id, 'X'.repeat(121)), /title/i)
     await saveThreadPreferences(db, alice, story, 'flat', ['root-1', 'root-1', 'root-2'])
     assert.deepEqual((await listStoryNavigation(db, alice, story)).preferences,
-      { view: 'flat', expandedIds: ['root-1', 'root-2'] })
+      { view: 'flat', expandedIds: ['root-1', 'root-2'], collapsedCollectionIds: [] })
     assert.deepEqual((await db.testing.foreignKeyViolations()), [])
   } finally { db.close() }
 })

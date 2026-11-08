@@ -36,11 +36,12 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
       const tables = (await store.testing.schema.tables())
       for (const name of ['user', 'session', 'account', 'verification', 'rateLimit', 'repositories', 'stories', 'studio_sessions', 'github_install_flows', 'story_onboarding_drafts', 'story_onboarding_conversations', 'pi_credentials', 'generation_events', 'generation_run_queue', 'github_publications', 'gitlab_publications', 'user_preferences', 'git_connections', 'git_connection_flows', 'story_threads', 'story_thread_runs', 'story_thread_preferences', 'story_thread_messages', 'checkpoint_forks', 'thread_restarts', 'thread_protected_decisions', 'thread_live_inputs', 'thread_active_pi_turns',
         'thread_queued_message_edits', 'thread_live_effect_reviews',
-        'thread_steering_intents', 'thread_steering_checkpoint_links']) {
+        'thread_steering_intents', 'thread_steering_checkpoint_links',
+        'story_collections', 'story_collection_memberships', 'user_story_selection']) {
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
       const history = (await store.testing.schema.migrationHistory())
-      assert.equal(history.length, 2, 'Studio requires the generated baseline and Thread deletion migration')
+      assert.equal(history.length, 3, 'Studio requires baseline, Thread invariants and Collection migrations')
       for (const migration of history) {
         assert.match(migration.hash, /^[a-f0-9]{64}$/)
         assert.ok(migration.createdAt > 0)
@@ -109,7 +110,7 @@ test('migration CLI loads the Vite development environment including local overr
     assert.equal(existsSync(ignoredPath), false, 'Base .env DB path unexpectedly won')
     const store = openStudioDatabase(databasePath)
     try {
-      assert.equal((await store.testing.schema.migrationHistory()).length, 2)
+      assert.equal((await store.testing.schema.migrationHistory()).length, 3)
     } finally { store.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

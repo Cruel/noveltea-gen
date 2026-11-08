@@ -87,6 +87,17 @@ export const stories = sqliteTable('stories', {
   index('stories_owner_idx').on(table.ownerUserId),
 ])
 
+/** Last visited Story is an owner-scoped navigational preference, not
+ * ownership of a Thread or a reason to read another user's Story. */
+export const userStorySelection = sqliteTable('user_story_selection', {
+  ownerUserId: text('owner_user_id').primaryKey(),
+  storyId: text('story_id').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.storyId, table.ownerUserId],
+    foreignColumns: [stories.id, stories.ownerUserId] }).onDelete('cascade'),
+])
+
 export const generationEvents = sqliteTable('generation_events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   jobId: text('job_id').notNull(),
@@ -174,6 +185,37 @@ export const storyThreads = sqliteTable('story_threads', {
   uniqueIndex('story_threads_owner_pair').on(table.id, table.ownerUserId),
   uniqueIndex('story_threads_owner_story').on(table.id, table.ownerUserId, table.storyId),
   index('story_threads_story_idx').on(table.ownerUserId, table.storyId),
+])
+
+/** Optional Collection metadata is separate from immutable fork ancestry. */
+export const storyCollections = sqliteTable('story_collections', {
+  id: text('id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  storyId: text('story_id').notNull(),
+  name: text('name').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.storyId, table.ownerUserId],
+    foreignColumns: [stories.id, stories.ownerUserId] }).onDelete('cascade'),
+  uniqueIndex('story_collections_identity').on(table.id, table.ownerUserId, table.storyId),
+  uniqueIndex('story_collections_name').on(table.ownerUserId, table.storyId, table.name),
+  index('story_collections_story').on(table.ownerUserId, table.storyId),
+])
+
+/** At most one optional Collection per Thread. Removing a Collection deletes
+ * only membership rows, never the Thread, run, approval, Git or fork record. */
+export const storyCollectionMemberships = sqliteTable('story_collection_memberships', {
+  threadId: text('thread_id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  storyId: text('story_id').notNull(),
+  collectionId: text('collection_id').notNull(),
+}, table => [
+  foreignKey({ columns: [table.threadId, table.ownerUserId, table.storyId],
+    foreignColumns: [storyThreads.id, storyThreads.ownerUserId, storyThreads.storyId] }).onDelete('cascade'),
+  foreignKey({ columns: [table.collectionId, table.ownerUserId, table.storyId],
+    foreignColumns: [storyCollections.id, storyCollections.ownerUserId, storyCollections.storyId] }).onDelete('cascade'),
+  index('story_collection_memberships_collection').on(table.ownerUserId, table.storyId, table.collectionId),
 ])
 
 export const storyThreadRuns = sqliteTable('story_thread_runs', {
@@ -278,6 +320,7 @@ export const storyThreadPreferences = sqliteTable('story_thread_preferences', {
   storyId: text('story_id').notNull(),
   viewMode: text('view_mode', { enum: ['tree', 'flat'] }).notNull(),
   expandedIdsJson: text('expanded_ids_json').notNull(),
+  collapsedCollectionIdsJson: text('collapsed_collection_ids_json').notNull().default('[]'),
   updatedAt: text('updated_at').notNull(),
 }, table => [
   primaryKey({ columns: [table.ownerUserId, table.storyId] }),

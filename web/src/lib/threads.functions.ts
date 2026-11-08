@@ -8,6 +8,7 @@ import { listStoryThreads, openStoryThread } from './story-threads.server'
 import {
   archiveThread,
   createThread,
+  createCollection, renameCollection, removeCollection, assignThreadCollection, chooseStory,
   listStoryNavigation,
   renameThread,
   restoreThread,
@@ -58,6 +59,57 @@ export const addThread = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => createThread(database, await ownerId(), data))
 
+export const addCollection = createServerFn({ method: 'POST' })
+  .validator((data: { storyId: string; name: string }) => {
+    if (!data || !isId(data.storyId) || typeof data.name !== 'string' || data.name.length > 80)
+      throw new Error('Invalid Collection request.')
+    return data
+  })
+  .handler(async ({ data }) => createCollection(database, await ownerId(), data.storyId, data.name))
+
+export const setCollectionName = createServerFn({ method: 'POST' })
+  .validator((data: { storyId: string; id: string; name: string }) => {
+    if (!data || !isId(data.storyId) || !isId(data.id) || typeof data.name !== 'string' || data.name.length > 80)
+      throw new Error('Invalid Collection request.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    await renameCollection(database, await ownerId(), data.storyId, data.id, data.name)
+    return { success: true }
+  })
+
+export const deleteCollection = createServerFn({ method: 'POST' })
+  .validator((data: { storyId: string; id: string }) => {
+    if (!data || !isId(data.storyId) || !isId(data.id)) throw new Error('Invalid Collection request.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    await removeCollection(database, await ownerId(), data.storyId, data.id)
+    return { success: true }
+  })
+
+export const moveThreadToCollection = createServerFn({ method: 'POST' })
+  .validator((data: { storyId: string; threadId: string; collectionId: string | null }) => {
+    if (!data || !isId(data.storyId) || !isId(data.threadId) ||
+        (data.collectionId !== null && !isId(data.collectionId)))
+      throw new Error('Invalid Collection assignment.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    await assignThreadCollection(database, await ownerId(), data.storyId, data.threadId, data.collectionId)
+    return { success: true }
+  })
+
+export const saveSelectedStory = createServerFn({ method: 'POST' })
+  .validator((storyId: string) => {
+    if (!isId(storyId)) throw new Error('Invalid Story ID.')
+    return storyId
+  })
+  .handler(async ({ data }) => {
+    await chooseStory(database, await ownerId(), data)
+    return { success: true }
+  })
+
 export const setThreadTitle = createServerFn({ method: 'POST' })
   .validator((data: { id: string; title: string }) => {
     if (!data || !isId(data.id) || typeof data.title !== 'string' || data.title.length > 120)
@@ -92,19 +144,23 @@ export const deleteThreadResources = createServerFn({ method: 'POST' })
   .handler(async ({ data }) => deleteThread(database, await ownerId(), data))
 
 export const setThreadPreferences = createServerFn({ method: 'POST' })
-  .validator((data: { storyId: string; view: 'tree' | 'flat'; expandedIds: string[] }) => {
+  .validator((data: { storyId: string; view: 'tree' | 'flat'; expandedIds: string[]; collapsedCollectionIds?: string[] }) => {
     if (
       !data ||
       !isId(data.storyId) ||
       !['tree', 'flat'].includes(data.view) ||
       !Array.isArray(data.expandedIds) ||
       data.expandedIds.length > 200 ||
-      data.expandedIds.some((id) => !isId(id))
+      data.expandedIds.some((id) => !isId(id)) ||
+      (data.collapsedCollectionIds !== undefined &&
+        (!Array.isArray(data.collapsedCollectionIds) || data.collapsedCollectionIds.length > 100 ||
+          data.collapsedCollectionIds.some(id => id !== 'ungrouped' && !isId(id))))
     )
       throw new Error('Invalid Thread preferences.')
     return data
   })
   .handler(async ({ data }) => {
-    await saveThreadPreferences(database, await ownerId(), data.storyId, data.view, data.expandedIds)
+    await saveThreadPreferences(database, await ownerId(), data.storyId, data.view,
+      data.expandedIds, data.collapsedCollectionIds)
     return { success: true }
   })

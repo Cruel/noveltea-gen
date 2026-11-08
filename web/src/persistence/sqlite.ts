@@ -5,6 +5,7 @@ import { repositories, sessions, stories, storyThreadRuns, storyThreads, storyTh
 import type { StudioPersistence } from './contracts'
 import { createGitSqlitePersistence } from './git-sqlite'
 import { createSqliteNaturalStoryPersistence } from './natural-story-sqlite'
+import { createSqliteCollectionCatalog } from './collection-sqlite'
 import { createSqliteGenerationPersistence } from './generation-sqlite'
 import { createSqliteConversationCatalog } from './conversation-sqlite'
 import { createSqliteThreadMessages } from './thread-message-sqlite'
@@ -28,12 +29,14 @@ function assertOwner(owner: string): void {
  */
 export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
   const generation = createSqliteGenerationPersistence(db)
+  const collections = createSqliteCollectionCatalog(db)
   const steeringSync = createSqliteSteeringSync(db)
   const steering = createSqliteSteeringPersistence(steeringSync)
   const protectedDecisions = createSqliteProtectedDecisionRecords(db)
   return {
     ...createGitSqlitePersistence(db),
     naturalStory: createSqliteNaturalStoryPersistence(db),
+    collections,
     generation,
     conversations: createSqliteConversationCatalog(db),
     messages: createSqliteThreadMessages(db),
@@ -80,6 +83,7 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
         return {
           repositories: repoRows,
           stories: storyRows,
+          selectedStoryId: await collections.selectedStory(owner),
           activeJobs: recentSessions.filter(row =>
             row.status === 'running' || row.status === 'paused' || row.status === 'blocked'),
           recentSessions,
@@ -121,18 +125,26 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
         assertOwner(owner)
         const row = db.select({
           view: storyThreadPreferences.viewMode, expanded: storyThreadPreferences.expandedIdsJson,
+          collapsed: storyThreadPreferences.collapsedCollectionIdsJson,
         }).from(storyThreadPreferences).where(and(eq(storyThreadPreferences.ownerUserId, owner),
           eq(storyThreadPreferences.storyId, storyId))).get()
-        return row ? { view: row.view, expandedIds: JSON.parse(row.expanded) as string[] } : null
+        if (!row) return null
+        const collectionIds = new Set((await collections.list(owner, storyId)).map(c => c.id))
+        const collapsed = JSON.parse(row.collapsed) as string[]
+        return { view: row.view, expandedIds: JSON.parse(row.expanded) as string[],
+          collapsedCollectionIds: collapsed.filter(id => id === 'ungrouped' || collectionIds.has(id)) }
       },
-      async putThreadPreferences(owner, storyId, view, expandedIds, updatedAt) {
+      async putThreadPreferences(owner, storyId, view, expandedIds, updatedAt, collapsedCollectionIds) {
         assertOwner(owner)
         const expandedIdsJson = JSON.stringify(expandedIds)
+        const collapsed = collapsedCollectionIds === undefined ? undefined : JSON.stringify(collapsedCollectionIds)
         db.insert(storyThreadPreferences).values({
-          ownerUserId: owner, storyId, viewMode: view, expandedIdsJson, updatedAt,
+          ownerUserId: owner, storyId, viewMode: view, expandedIdsJson,
+          collapsedCollectionIdsJson: collapsed ?? '[]', updatedAt,
         }).onConflictDoUpdate({
           target: [storyThreadPreferences.ownerUserId, storyThreadPreferences.storyId],
-          set: { viewMode: view, expandedIdsJson, updatedAt },
+          set: { viewMode: view, expandedIdsJson, updatedAt,
+            ...(collapsed === undefined ? {} : { collapsedCollectionIdsJson: collapsed }) },
         }).run()
       },
     },

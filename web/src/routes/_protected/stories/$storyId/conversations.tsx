@@ -5,15 +5,19 @@ import { Archive, ArrowLeft, ChevronDown, LoaderCircle, MoreHorizontal, PanelLef
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
-import { ThreadList } from '@/components/thread-list'
+import { StoryCollectionsPanel } from '@/components/story-collections-panel'
+import { StudioSelect } from '@/components/studio-select'
 import { ThreadChat } from '@/components/thread-chat'
 import { ThreadUsage } from '@/components/thread-usage'
 import { StoryFirstChat } from '@/components/story-first-chat'
+import { dashboardQuery } from '@/lib/dashboard.queries'
 import { storyNavigationQuery, storyNavigationKey, storyUsageKey, storyUsageQuery } from '@/lib/threads.queries'
-import { changeThreadArchive, deleteThreadResources,
+import { addCollection, setCollectionName, deleteCollection, moveThreadToCollection,
+  saveSelectedStory, changeThreadArchive, deleteThreadResources,
   setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
 import { selectNavigationThreads } from '@/lib/thread-navigation'
 import type { StoryThread } from '@/lib/threads.server'
+import type { StoryCollection } from '@/persistence/collection-contracts'
 
 export const Route = createFileRoute('/_protected/stories/$storyId/conversations')({
   validateSearch: (search: Record<string, unknown>): { thread?: string; archived?: boolean } => ({
@@ -53,6 +57,8 @@ function StoryConversations() {
   const archivedView = archived === true
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { data: dashboard } = useQuery(dashboardQuery())
+  const [showAll, setShowAll] = useState(false)
   const { data, error, isFetching } = useQuery({
     ...storyNavigationQuery(storyId),
     refetchInterval: query => query.state.data?.threads.some(thread => thread.status === 'running' || thread.status === 'queued')
@@ -65,6 +71,14 @@ function StoryConversations() {
     desktop.addEventListener('change', closeOnDesktop)
     return () => desktop.removeEventListener('change', closeOnDesktop)
   }, [])
+  useEffect(() => {
+    setShowAll(false)
+    setCreatingThread(false)
+    // A saved Story selection is per-user navigation only. The server
+    // verifies ownership before updating it; never trust a client-supplied ID.
+    void saveSelectedStory({ data: storyId }).then(() =>
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })).catch(() => {})
+  }, [storyId, queryClient])
   const [usageOpen, setUsageOpen] = useState(false)
   const usage = useQuery({ ...storyUsageQuery(storyId), enabled: usageOpen, refetchInterval: usageOpen ? 15000 : false })
   const [creatingThread, setCreatingThread] = useState(false)
@@ -79,17 +93,47 @@ function StoryConversations() {
   }
   const view = data?.preferences.view ?? 'tree'
   const expandedIds = data?.preferences.expandedIds ?? []
+  const collapsedCollectionIds = data?.preferences.collapsedCollectionIds ?? []
   const visibleThreads = selectNavigationThreads(data?.threads ?? [],
     archivedView ? 'archived' : 'active')
   const archivedCount = data?.threads.filter(thread =>
     !!thread.archivedAt && !thread.deletionCompleteAt).length ?? 0
-  const selectedThread = visibleThreads.find(thread => thread.id === selectedThreadId) ?? visibleThreads[0]
-  const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds) => {
+  const selectedThread = visibleThreads.find(thread => thread.id === selectedThreadId && !thread.deletedAt) ??
+    visibleThreads.find(thread => !thread.deletedAt && (archivedView ? !!thread.archivedAt : !thread.archivedAt)) ??
+    visibleThreads.find(thread => !thread.deletedAt)
+  const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds,
+    nextCollapsed = collapsedCollectionIds) => {
     setIssue(null)
     try {
-      await setThreadPreferences({ data: { storyId, view: nextView, expandedIds: nextExpanded } })
+      await setThreadPreferences({ data: { storyId, view: nextView, expandedIds: nextExpanded,
+        collapsedCollectionIds: nextCollapsed } })
       await refresh()
     } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Unable to save preferences') }
+  }
+  const createGroup = async (name: string) => {
+    await addCollection({ data: { storyId, name } })
+    await refresh()
+  }
+  const renameGroup = async (collection: StoryCollection, name: string) => {
+    await setCollectionName({ data: { storyId, id: collection.id, name } })
+    await refresh()
+  }
+  const removeGroup = async (collection: StoryCollection) => {
+    if (!window.confirm('Remove Collection "' + collection.name +
+      '"? Its Threads will become ungrouped. Fork lineage and saved work are unchanged.')) return
+    setIssue(null)
+    try {
+      await deleteCollection({ data: { storyId, id: collection.id } })
+      await refresh()
+    } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Could not remove Collection.') }
+  }
+  const moveToGroup = async (thread: StoryThread, collectionId: string | null) => {
+    setChangingArchive(thread.id); setIssue(null)
+    try {
+      await moveThreadToCollection({ data: { storyId, threadId: thread.id, collectionId } })
+      await refresh()
+    } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Could not move Thread.') }
+    finally { setChangingArchive(null) }
   }
   const changeArchive = async (thread: StoryThread, archive: boolean) => {
     setChangingArchive(thread.id); setIssue(null)
@@ -165,16 +209,23 @@ function StoryConversations() {
             {editing?.kind === 'thread' && <TitleEditor key={editing.id}
               title={data.threads.find(thread => thread.id === editing.id)?.title ?? ''}
               label="Thread title" onSubmit={rename} onCancel={() => setEditing(null)} />}
-            {visibleThreads.length ? <ThreadList threads={visibleThreads} view={view} expandedIds={expandedIds}
+            <StoryCollectionsPanel threads={visibleThreads} collections={data.collections}
+              view={view} expandedIds={expandedIds} collapsedCollectionIds={collapsedCollectionIds}
               selectedThreadId={selectedThread?.id} archivedView={archivedView} busyThreadId={changingArchive}
+              showAll={showAll} onShowAll={setShowAll}
+              onCreateCollection={createGroup} onRenameCollection={renameGroup}
+              onRemoveCollection={collection => void removeGroup(collection)}
+              onMoveThread={(thread, collectionId) => void moveToGroup(thread, collectionId)}
+              onToggleCollection={id => void savePreferences(view, expandedIds,
+                collapsedCollectionIds.includes(id)
+                  ? collapsedCollectionIds.filter(item => item !== id)
+                  : [...collapsedCollectionIds, id])}
               onArchiveChange={(thread, archive) => void changeArchive(thread, archive)}
               onDelete={deleteExecution}
               onExpand={id => void savePreferences(view,
                 expandedIds.includes(id) ? expandedIds.filter(item => item !== id) : [...expandedIds, id])}
-              onRename={(thread: StoryThread) => setEditing({ kind: 'thread', id: thread.id })}
+              onRenameThread={(thread: StoryThread) => setEditing({ kind: 'thread', id: thread.id })}
               onOpen={openThread} />
-              : <p className="px-2 text-xs text-muted-foreground">
-                {archivedView ? 'No archived Threads.' : 'No Threads yet.'}</p>}
           </div>
         </>}
         <details className="border-t border-border/50 px-2 pt-2" open={usageOpen}
@@ -193,7 +244,20 @@ function StoryConversations() {
         className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
         <ArrowLeft className="size-4" />
       </Link>
-      <h1 className="m-0 min-w-0 flex-1 truncate text-lg font-semibold">{data?.story.title ?? 'Story'}</h1>
+      <h1 className="sr-only">{data?.story.title ?? 'Story'}</h1>
+      {dashboard?.stories.length ? <div className="min-w-0 flex-1">
+        <StudioSelect aria-label="Selected Story" value={storyId}
+          onValueChange={next => {
+            if (next !== storyId) void navigate({ to: '/stories/$storyId/conversations',
+              params: { storyId: next }, search: {} })
+          }}
+          options={dashboard.stories.map(story => ({
+            value: story.id, label: story.title + ' · ' +
+              (dashboard.repositories.find(repo => repo.id === story.repositoryId)?.name ?? 'Story'),
+          }))} />
+      </div> : <div className="min-w-0 flex-1 truncate text-lg font-semibold">
+        {data?.story.title ?? 'Story'}
+      </div>}
       <span className="hidden text-xs text-muted-foreground lg:inline">Threads</span>
       <Sheet open={navigationOpen} onOpenChange={setNavigationOpen}>
         <SheetTrigger aria-label="Open Story Threads"
