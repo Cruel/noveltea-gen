@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { and, asc, count, desc, eq, isNotNull, lt, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
-import { checkpointForks as forks, repositories, sessions, stories, storyConversations as conversations,
+import { checkpointForks as forks, generationEvents, generationRunQueue as queue, repositories, sessions, stories, storyConversations as conversations,
   storyThreadMessages as messages, storyThreadRuns as runs, storyThreads as threads,
   threadRestarts as restarts } from '../db/schema'
 import type { AdvancedThreadPersistence, ForkInheritedMessage, ForkIntent,
-  ForkReservation, NewThreadChild, RestartIntent, RestartReservation, ThreadIdentity } from './advanced-thread-contracts'
+  ForkReservation, NewThreadChild, RecoveryContinuationRegistration, RestartIntent, RestartReservation, ThreadIdentity } from './advanced-thread-contracts'
 type Db = BetterSQLite3Database<typeof schema>
 const conflict = (message: string): never => { throw new Error(message) }
 const requireOwner = (owner: string) => {
@@ -325,6 +325,102 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
         if (data.kind === 'restart') db.update(restarts).set({ preparedAt: data.at })
           .where(and(eq(restarts.childId, data.childId), eq(restarts.ownerUserId, data.owner),
             sql`${restarts.preparedAt} IS NULL`)).run()
+        return { inserted: true, storyId: data.storyId, commitSha: data.baseSha }
+      }, { behavior: 'immediate' })
+    },
+    async registerRecoveryContinuation(data: RecoveryContinuationRegistration) {
+      requireOwner(data.owner)
+      return db.transaction(() => {
+        const sourceThread = identity(data.owner, data.sourceThreadId)
+        requireNotDeleted(data.owner, data.sourceThreadId)
+        const archived = db.select({ at: threads.archivedAt }).from(threads)
+          .where(and(eq(threads.id, data.sourceThreadId),
+            eq(threads.ownerUserId, data.owner))).get()
+        if (archived?.at) conflict('Restore the archived Thread before continuing.')
+        if (!sourceThread || sourceThread.story !== data.storyId)
+          conflict('Recovery Thread identity has changed.')
+        const intent = forkIntent(data.childId)
+        if (!intent || intent.owner !== data.owner || intent.source !== data.sourceJobId ||
+            intent.sourceThreadId !== data.sourceThreadId || intent.commitSha !== data.checkpointSha ||
+            intent.draft !== data.draft || intent.guidance !== data.guidance)
+          conflict('Recovery intent does not match the verified source.')
+        const existing = db.select({
+          owner: sessions.ownerUserId, story: sessions.storyId, base: sessions.sourceCommitSha,
+        }).from(sessions).where(eq(sessions.id, data.childId)).get()
+        if (existing) {
+          const registration = db.select({ id: runs.jobId }).from(runs)
+            .where(and(eq(runs.jobId, data.childId), eq(runs.ownerUserId, data.owner),
+              eq(runs.threadId, data.sourceThreadId))).get()
+          if (!registration || existing.owner !== data.owner ||
+              existing.story !== data.storyId || existing.base !== data.baseSha)
+            conflict('Prepared recovery was registered under a different Thread.')
+          return { inserted: false, storyId: data.storyId, commitSha: data.baseSha }
+        }
+        const current = db.select({
+          jobId: runs.jobId, runOrder: runs.runOrder,
+          status: sessions.status, queuePhase: queue.phase,
+        }).from(runs)
+          .innerJoin(sessions, and(eq(sessions.id, runs.jobId),
+            eq(sessions.ownerUserId, runs.ownerUserId)))
+          .leftJoin(queue, and(eq(queue.jobId, runs.jobId),
+            eq(queue.ownerUserId, runs.ownerUserId)))
+          .where(and(eq(runs.ownerUserId, data.owner), eq(runs.threadId, data.sourceThreadId)))
+          .orderBy(desc(runs.runOrder)).limit(1).get()
+        const expectedCurrent = data.expectedLatestJobId ?? data.sourceJobId
+        let reusedGuidance = false
+        if (!current || current.jobId !== expectedCurrent ||
+            current.status !== 'blocked' ||
+            !['finished', 'interrupted'].includes(current.queuePhase ?? ''))
+          conflict('The Thread has advanced or its failure is not safely recoverable.')
+        if (expectedCurrent !== data.sourceJobId) {
+          // A failed continuation can be replaced from its ORIGINAL verified
+          // checkpoint, but only when it never verified any new work. Do not
+          // silently discard progress or switch to an unrelated source.
+          const failedIntent = forkIntent(expectedCurrent)
+          if (!failedIntent || failedIntent.owner !== data.owner ||
+              failedIntent.source !== data.sourceJobId ||
+              failedIntent.sourceThreadId !== data.sourceThreadId ||
+              failedIntent.commitSha !== data.checkpointSha)
+            conflict('Failed continuation does not match the reviewed source checkpoint.')
+          // The author already sent this exact instruction. The new execution
+          // inherits it in its pinned task, not as another chat message.
+          reusedGuidance = !!failedIntent && data.guidance === failedIntent.guidance
+          const progress = db.select({ id: generationEvents.id }).from(generationEvents)
+            .where(and(eq(generationEvents.jobId, expectedCurrent),
+              eq(generationEvents.ownerUserId, data.owner),
+              eq(generationEvents.kind, 'verified'))).limit(1).get()
+          if (progress) conflict('This continuation verified new work; review its own checkpoints before recovering.')
+        }
+        const pending = db.select({ id: messages.id }).from(messages).where(and(
+          eq(messages.ownerUserId, data.owner), eq(messages.threadId, data.sourceThreadId),
+          eq(messages.role, 'user'),
+          sql`${messages.phase} IN ('queued','preparing','running')`,
+        )).limit(1).get()
+        if (pending) conflict('Resolve or withdraw queued instructions before recovering this Thread.')
+        // The old run and its messages are immutable. The new isolated writer
+        // is registered as the next run under the SAME conversation Thread.
+        db.insert(sessions).values({
+          id: data.childId, ownerUserId: data.owner, storyId: data.storyId,
+          title: data.title, sourceCommitSha: data.baseSha,
+          status: 'paused', createdAt: data.at, updatedAt: data.at,
+          generationConfigJson: data.draft,
+        }).run()
+        db.insert(runs).values({
+          jobId: data.childId, ownerUserId: data.owner,
+          threadId: data.sourceThreadId, runOrder: (current?.runOrder ?? -1) + 1,
+        }).run()
+        if (!reusedGuidance) {
+          db.insert(messages).values({
+            id: 'guidance:fork:' + data.childId, ownerUserId: data.owner,
+            threadId: data.sourceThreadId, sequence: nextSequence(data.sourceThreadId),
+            role: 'user', status: 'queued', phase: 'queued',
+            body: data.guidance || 'Continue from the last verified checkpoint.',
+            sourceJobId: data.sourceJobId, jobId: data.childId,
+            createdAt: data.at,
+          }).run()
+        }
+        db.update(threads).set({ activityAt: data.at }).where(and(
+          eq(threads.id, data.sourceThreadId), eq(threads.ownerUserId, data.owner))).run()
         return { inserted: true, storyId: data.storyId, commitSha: data.baseSha }
       }, { behavior: 'immediate' })
     },

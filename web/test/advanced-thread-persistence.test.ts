@@ -8,7 +8,7 @@ import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import type { AdvancedThreadPersistence, ForkReservation,
-  NewThreadChild, RestartReservation } from '../src/persistence/advanced-thread-contracts'
+  NewThreadChild, RecoveryContinuationRegistration, RestartReservation } from '../src/persistence/advanced-thread-contracts'
 
 const config = {
   baseURL: 'http://localhost:3000',
@@ -122,6 +122,101 @@ test('two independent connections reserve and register one exact checkpoint fork
       mode: 'original', branch: null, draft: data.draft, at,
     }), /assigned/)
     assert.deepEqual((await pair.a.testing.foreignKeyViolations()), [])
+  } finally { pair.close() }
+})
+
+test('blocked checkpoint recovery creates one isolated run of the SAME Thread, without duplicate dashboard entries', async () => {
+  const pair = openPair()
+  try {
+    const f = await fixtures(pair.a)
+    const a = pair.a.persistence.advancedThreads, b = pair.b.persistence.advancedThreads
+    const id = randomUUID(), fork = forkReservation(f, id)
+    await pair.a.testing.records.update('studio_sessions', { id: f.job }, { status: 'blocked' })
+    await a.reserveFork(fork)
+    const continuation: RecoveryContinuationRegistration = {
+      owner: f.owner, sourceJobId: f.job, sourceThreadId: f.thread,
+      childId: id, storyId: f.story, title: 'Source', baseSha: nextSha,
+      checkpointSha: nextSha, draft: fork.draft, guidance: fork.guidance, at,
+    }
+    await assert.rejects(b.registerRecoveryContinuation({ ...continuation, owner: f.stranger }),
+      /owner|identity|Thread|intent/)
+    assert.equal(await b.jobClaimed(id), false)
+    const stale = randomUUID()
+    await pair.a.testing.records.insert('story_thread_messages', {
+      id: stale, ownerUserId: f.owner, threadId: f.thread, sequence: 0,
+      role: 'user', status: 'queued', phase: 'queued', body: 'Old pending instruction', createdAt: at,
+    })
+    await assert.rejects(a.registerRecoveryContinuation(continuation), /queued instructions/)
+    assert.equal(await b.jobClaimed(id), false, 'a rejected recovery creates no session')
+    await pair.a.testing.records.delete('story_thread_messages', { id: stale })
+    const [first, second] = await Promise.all([
+      a.registerRecoveryContinuation(continuation),
+      b.registerRecoveryContinuation(continuation),
+    ])
+    assert.equal(Number(first.inserted) + Number(second.inserted), 1)
+    assert.equal((await a.run(f.owner, f.thread, 'first'))?.jobId, f.job)
+    assert.equal((await b.run(f.owner, f.thread, 'last'))?.jobId, id)
+    assert.equal(await a.runOrder(f.owner, f.thread, id), 1)
+    assert.equal(await b.identity(f.owner, 'fork:' + id), null,
+      'in-place recovery must not create a child Thread')
+    const history = await a.history(f.owner, f.thread)
+    assert.deepEqual(history.map(row => row.body), [fork.guidance])
+    assert.equal(history[0]?.status, 'queued')
+    assert.deepEqual((await pair.a.persistence.dashboard.forOwner(f.owner)).recentSessions.map(x => x.id), [id],
+      'dashboard lists the Thread once by its most recent run')
+    assert.equal((await pair.b.persistence.dashboard.forOwner(f.owner)).activeJobs.length, 1)
+    await assert.rejects(a.registerRecoveryContinuation({ ...continuation, sourceThreadId: 'wrong' }),
+      /different Thread|identity|source|no longer accessible/)
+
+    // A failed continuation with already-verified work cannot silently roll
+    // back to the earlier checkpoint: the author must inspect newer progress.
+    await pair.a.testing.records.update('studio_sessions', { id }, { status: 'blocked' })
+    await pair.a.testing.records.insert('generation_run_queue', {
+      jobId: id, ownerUserId: f.owner, intent: 'start', phase: 'finished',
+      createdAt: at, updatedAt: at,
+    })
+    await pair.a.testing.records.update('story_thread_messages',
+      { id: 'guidance:fork:' + id }, { phase: 'blocked' })
+    await pair.a.testing.records.insert('generation_events', {
+      jobId: id, ownerUserId: f.owner, kind: 'verified', stage: 'foundations',
+      filesJson: '["world/entity.md"]', createdAt: at,
+    })
+    const replacementId = randomUUID(), replacement = forkReservation(f, replacementId)
+    await a.reserveFork(replacement)
+    await assert.rejects(a.registerRecoveryContinuation({
+      ...continuation, childId: replacementId, draft: replacement.draft,
+      guidance: replacement.guidance, expectedLatestJobId: id,
+    }), /verified new work/)
+    assert.equal(await b.jobClaimed(replacementId), false)
+    assert.deepEqual(await pair.a.testing.foreignKeyViolations(), [])
+  } finally { pair.close() }
+})
+
+test('in-place recovery refuses advancing or non-blocked source runs', async () => {
+  const pair = openPair()
+  try {
+    const f = await fixtures(pair.a)
+    const id = randomUUID(), fork = forkReservation(f, id)
+    const a = pair.a.persistence.advancedThreads
+    await a.reserveFork(fork)
+    const data: RecoveryContinuationRegistration = {
+      owner: f.owner, sourceJobId: f.job, sourceThreadId: f.thread,
+      childId: id, storyId: f.story, title: 'Source', baseSha: nextSha,
+      checkpointSha: nextSha, draft: fork.draft, guidance: fork.guidance, at,
+    }
+    await assert.rejects(a.registerRecoveryContinuation(data), /not safely recoverable/)
+    await pair.a.testing.records.update('studio_sessions', { id: f.job }, { status: 'blocked' })
+    const later = randomUUID()
+    await pair.a.testing.records.insert('studio_sessions', {
+      id: later, ownerUserId: f.owner, storyId: f.story, title: 'Newer',
+      status: 'completed', sourceCommitSha: sha, createdAt: at, updatedAt: at,
+    })
+    await pair.a.testing.records.insert('story_thread_runs', {
+      jobId: later, ownerUserId: f.owner, threadId: f.thread, runOrder: 1,
+    })
+    await assert.rejects(a.registerRecoveryContinuation(data), /Thread has advanced/)
+    assert.equal(await a.jobClaimed(id), false)
+    assert.deepEqual(await pair.a.testing.foreignKeyViolations(), [])
   } finally { pair.close() }
 })
 

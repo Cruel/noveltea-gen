@@ -55,6 +55,12 @@ export type NewThreadChild = {
   editedMessageId?: string; editedBody?: string
 }
 export type ChildRegistration = { inserted: boolean; storyId: string; commitSha: string | null }
+/** Separate isolated execution, but another run of the same visible Thread. */
+export type RecoveryContinuationRegistration = {
+  owner: string; sourceJobId: string; sourceThreadId: string; childId: string;
+  storyId: string; title: string; baseSha: string; draft: string;
+  checkpointSha: string; guidance: string; at: string; expectedLatestJobId?: string
+}
 export interface AdvancedThreadPersistence {
   /** Standalone import for verified fork history; child-registration imports atomically. */
   importHistory(owner: string, threadId: string, history: ForkInheritedMessage[],
@@ -77,6 +83,7 @@ export interface AdvancedThreadPersistence {
   reserveRestart(data: RestartReservation): Promise<RestartIntent>
   preparedRestart(owner: string, childId: string, threadId: string): Promise<boolean>
   registerChild(data: NewThreadChild): Promise<ChildRegistration>
+  registerRecoveryContinuation(data: RecoveryContinuationRegistration): Promise<ChildRegistration>
   history(owner: string, threadId: string, beforeSequence?: number, beforeRunOrder?: number): Promise<HistoryMessage[]>
   editable(owner: string, threadId: string, messageId: string): Promise<EditableMessage | null>
   origin(owner: string, messageId: string): Promise<EditableMessage | null>

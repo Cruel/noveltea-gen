@@ -145,7 +145,13 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     }
     const status = row.status === 'paused' ? 'prepared' :
       row.status === 'running' ? 'interrupted' : row.status
-    return { ...base, status, threadId: null, task: null, contract: null,
+    const draft = row.status === 'paused' && row.configJson
+      ? JSON.parse(row.configJson) as { task?: unknown; contract?: unknown } : null
+    const preparedTask = typeof draft?.task === 'string' && draft.task.trim() ? draft.task : null
+    const preparedContract = draft?.contract && typeof draft.contract === 'object' ?
+      draft.contract as object : null
+    return { ...base, status, threadId: null,
+      task: preparedTask, contract: preparedContract,
       reason: row.status === 'running'
         ? 'Job was marked running without a pinned request. Reconcile its durable state before starting.'
         : row.status === 'blocked' ? 'Job is blocked before generation; inspect its saved state.'

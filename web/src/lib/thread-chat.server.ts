@@ -53,7 +53,8 @@ export async function readThreadChat(store: StudioDatabase, owner: string, threa
     runs: data.runs.map(({ requestJson, ...run }) => ({
       ...run, status: run.queuePhase === 'interrupted' ? 'interrupted'
         : run.queuePhase === 'queued' ? 'queued'
-        : run.queuePhase === 'running' ? 'running' : run.status,
+        : run.queuePhase === 'running' ? 'running'
+        : run.status === 'paused' && !requestJson ? 'prepared' : run.status,
       fixture: (() => {
         try { return (JSON.parse(requestJson ?? '{}') as { fixture?: boolean }).fixture === true }
         catch { return true }

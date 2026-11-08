@@ -11,8 +11,9 @@ import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory, continueCachedStory } from '../src/lib/git-cache.server'
-import { checkpointForkRequest } from '../src/lib/checkpoint-fork.server'
+import { checkpointContinueRequest, checkpointForkRequest } from '../src/lib/checkpoint-fork.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
+import { readThreadChat } from '../src/lib/thread-chat.server'
 import { generationConfigurationRequest } from '../src/lib/generation-config.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { authorizedStoryJob, inspectRegisteredJob, selectedJob } from '../src/lib/fixture-jobs.server'
@@ -40,7 +41,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
   { skip: !available, timeout: 240_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'nt-checkpoint-fork-'))
     const keys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_SKILL_CACHE_DIR', 'NT_CONFIG_FILE',
-      'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
+      'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE', 'NT_LIVE_GENERATION_IDEA']
     const old = Object.fromEntries(keys.map(key => [key, process.env[key]]))
     Object.assign(process.env, { NT_STATE_DIR: join(root, 'state'), NT_GIT_CACHE_DIR: join(root, 'cache'),
       NT_SKILL_CACHE_DIR: join(root, 'skills'), NT_CONFIG_FILE: join(root, 'config.json'),
@@ -629,6 +630,145 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         'only the independently authorized Character is rewritten')
       assert.equal(readRecoveryFork(focusedJob), null)
       assert.deepEqual(await parentMessages(), editSourceMessages)
+
+      // A terminal failure recovers in the same visible Thread. The new job
+      // is a separate isolated writer, but it starts using the pinned prior
+      // model/budget without requiring a second Job configuration page.
+      await store.testing.records.update('studio_sessions', { id: parentId }, { status: 'blocked' })
+      await store.testing.records.insert('generation_run_queue', {
+        jobId: parentId, ownerUserId: user.id, intent: 'start',
+        phase: 'finished', createdAt: '2026-01-01', updatedAt: '2026-01-01',
+      })
+      const oldMessages = await store.testing.records.all<{
+        id: string; status: string; phase: string | null
+      }>('story_thread_messages', { threadId: sourceThreadId })
+      for (const message of oldMessages) {
+        if (message.status === 'queued')
+          await store.testing.records.delete('story_thread_messages', { id: message.id })
+        else if (['queued', 'preparing', 'running'].includes(message.phase ?? ''))
+          await store.testing.records.update('story_thread_messages', { id: message.id }, { phase: 'finished' })
+      }
+      const continuationId = randomUUID()
+      const continuationRequest = () => new Request(config.baseURL + '/continue', {
+        method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ ...input, childId: continuationId,
+          guidance: 'Finish character foundations before producing the dialogue.' }),
+      })
+      // Model/preflight refusal must leave a prepared continuation IN the
+      // original Thread, with a task the inline retry can use after repair.
+      process.env.NT_LIVE_GENERATION_IDEA = '1'
+      let preparedResponse: Response
+      try {
+        preparedResponse = await checkpointContinueRequest(auth, store, continuationRequest(),
+          parentId, config.baseURL)
+      } finally { delete process.env.NT_LIVE_GENERATION_IDEA }
+      const preparedBody = await preparedResponse.json() as {
+        id?: string; started?: boolean; warning?: string
+      }
+      assert.equal(preparedResponse.status, 202)
+      assert.equal(preparedBody.started, false)
+      assert.match(preparedBody.warning ?? '', /Fixture execution refuses live/)
+      const paused = await inspectRegisteredJob(store, await selectedJob(store, user.id, continuationId),
+        user.id)
+      assert.equal(paused.status, 'prepared')
+      assert.match(paused.task ?? '', /Corrective guidance for this continuation:/)
+      assert.match(paused.task ?? '', /Finish character foundations before producing the dialogue/)
+      assert.ok(paused.contract, 'inline recovery can retry using the pinned contract')
+      const recovered = await checkpointContinueRequest(auth, store, continuationRequest(),
+        parentId, config.baseURL)
+      const recoveryBody = await recovered.json() as { id?: string; started?: boolean; warning?: string }
+      assert.equal(recovered.status, 202, JSON.stringify(recoveryBody))
+      assert.equal(recoveryBody.id, continuationId)
+      assert.equal(recoveryBody.started, true, recoveryBody.warning)
+      assert.equal(await store.persistence.advancedThreads.runOrder(user.id, sourceThreadId, continuationId), 1)
+      assert.equal((await store.persistence.advancedThreads.run(user.id, sourceThreadId, 'first'))?.jobId, parentId)
+      assert.equal((await store.persistence.advancedThreads.run(user.id, sourceThreadId, 'last'))?.jobId, continuationId)
+      assert.equal(await store.persistence.advancedThreads.identity(user.id, 'fork:' + continuationId), null)
+      assert.equal((await store.persistence.generation.queue.record(continuationId))?.phase, 'queued')
+      const continuation = await authorizedStoryJob(store, user.id, continuationId)
+      assert.equal(continuation.baseSha, world.commitSha)
+      assert.deepEqual(readRecoveryFork(continuation)?.checkpoint.completedWorkItems,
+        world.completedWorkItems)
+      assert.equal(git(continuation.worktreeRoot, 'status', '--porcelain'), '')
+      const guidanceRecord = await store.testing.records.first<{ status: string; phase: string }>(
+        'story_thread_messages', { id: 'guidance:fork:' + continuationId })
+      assert.equal(guidanceRecord?.status, 'delivered')
+      assert.equal(guidanceRecord?.phase, 'running')
+      const dashboard = await store.persistence.dashboard.forOwner(user.id)
+      assert.equal(dashboard.recentSessions.filter(session =>
+        session.threadId === sourceThreadId).length, 1,
+        'the dashboard must show only the latest run of a recovered Thread')
+      assert.equal(dashboard.recentSessions.find(session =>
+        session.threadId === sourceThreadId)?.id, continuationId)
+      const retry = await checkpointContinueRequest(auth, store, continuationRequest(),
+        parentId, config.baseURL)
+      assert.equal(retry.status, 202)
+      assert.equal((await retry.json() as { id: string }).id, continuationId)
+      assert.equal(await store.persistence.advancedThreads.runOrder(user.id, sourceThreadId, continuationId), 1)
+
+      // A toolchain refusal on the first continuation must not force a new
+      // visible Thread or skip immutable checkpoint verification. A new
+      // isolated execution from the original source can follow after review.
+      await store.testing.records.update('studio_sessions',
+        { id: continuationId }, { status: 'blocked' })
+      await store.testing.records.update('generation_run_queue',
+        { jobId: continuationId }, { phase: 'finished' })
+      await store.testing.records.update('story_thread_messages',
+        { id: 'guidance:fork:' + continuationId }, { phase: 'blocked' })
+      const repairedId = randomUUID()
+      const repairInput = { ...input, childId: repairedId, expectedLatestJobId: continuationId,
+        guidance: 'Finish character foundations before producing the dialogue.' }
+      const repairRequest = (data: unknown) => new Request(config.baseURL + '/continue', {
+        method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(data),
+      })
+      const staleRepair = await checkpointContinueRequest(auth, store,
+        repairRequest({ ...repairInput, expectedLatestJobId: randomUUID() }),
+        parentId, config.baseURL)
+      assert.equal(staleRepair.status, 409)
+      assert.equal(await store.persistence.advancedThreads.jobClaimed(repairedId), false)
+      const repaired = await checkpointContinueRequest(auth, store,
+        repairRequest(repairInput), parentId, config.baseURL)
+      const repairedBody = await repaired.json() as { started?: boolean; warning?: string }
+      assert.equal(repaired.status, 202, JSON.stringify(repairedBody))
+      assert.equal(repairedBody.started, true, repairedBody.warning)
+      assert.equal(await store.persistence.advancedThreads.runOrder(user.id, sourceThreadId, repairedId), 2)
+      assert.equal(await store.persistence.advancedThreads.identity(user.id, 'fork:' + repairedId), null)
+      const replacement = await authorizedStoryJob(store, user.id, repairedId)
+      assert.equal(replacement.baseSha, world.commitSha)
+      assert.deepEqual(readRecoveryFork(replacement)?.checkpoint.completedWorkItems,
+        world.completedWorkItems)
+      assert.equal((await store.persistence.dashboard.forOwner(user.id)).recentSessions
+        .filter(item => item.threadId === sourceThreadId).length, 1)
+      assert.equal((await store.persistence.generation.queue.record(repairedId))?.phase, 'queued')
+      const duplicateGuidance = await store.testing.records.first(
+        'story_thread_messages', { id: 'guidance:fork:' + repairedId })
+      assert.equal(duplicateGuidance, undefined,
+        'retrying unchanged guidance must not create a second copy of the author message')
+      const originalGuidance = await store.testing.records.first<{ body: string }>(
+        'story_thread_messages', { id: 'guidance:fork:' + continuationId })
+      assert.equal(originalGuidance?.body, repairInput.guidance,
+        'retry must preserve the author instruction already present in chat')
+      const repairedChat = await readThreadChat(store, user.id, sourceThreadId)
+      assert.ok(!repairedChat.messages.some(message => message.id === 'initial:' + repairedId),
+        'same-Thread retry must not synthesize a long task as a second user message')
+
+      // Existing deployments may already have synthesized a duplicate before
+      // the fix. Keep the receipt for audit, but exclude it from chat.
+      await store.testing.records.insert('story_thread_messages', {
+        id: 'initial:' + repairedId, ownerUserId: user.id,
+        threadId: sourceThreadId,
+        sequence: Math.max(...repairedChat.messages.map(item => item.sequence)) + 1,
+        role: 'user', status: 'delivered', phase: 'finished',
+        body: 'Original request\n\nCorrective guidance for this continuation:\nRepeated text',
+        jobId: repairedId, createdAt: '2026-01-01',
+      })
+      const afterReopen = await readThreadChat(store, user.id, sourceThreadId)
+      assert.deepEqual(afterReopen.messages.map(item => item.id),
+        repairedChat.messages.map(item => item.id),
+        'a historical synthetic task must stay hidden without deleting the receipt')
+      assert.ok(await store.testing.records.first('story_thread_messages',
+        { id: 'initial:' + repairedId }), 'historical receipt remains stored')
     } finally {
       store.close()
       for (const key of keys) if (old[key] === undefined) delete process.env[key]; else process.env[key] = old[key]

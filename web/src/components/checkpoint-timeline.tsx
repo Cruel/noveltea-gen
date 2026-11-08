@@ -3,7 +3,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { forkJobCheckpoint, type JobOverview } from '@/lib/jobs.functions'
+import { continueJobCheckpoint, forkJobCheckpoint, type JobOverview } from '@/lib/jobs.functions'
 import { jobQuery } from '@/lib/jobs.queries'
 import { storyNavigationKey } from '@/lib/threads.queries'
 
@@ -54,9 +54,78 @@ export function CheckpointTimeline({ job }: { job: JobOverview }) {
   </div>
 }
 
-/** Authenticated fork from the currently displayed immutable checkpoint proof.
- * A client-generated child UUID serves as an idempotency key, not permission. */
-export function CheckpointBranchAction({ job, point }: { job: JobOverview; point: Point }) {
+/** In-place recovery: a fresh isolated run remains in the same visible Thread.
+ * No route change or configuration page on the successful path. */
+export function CheckpointContinueAction({ job, point, suggestedGuidance = '',
+  expectedLatestJobId }: {
+  job: JobOverview; point: Point; suggestedGuidance?: string; expectedLatestJobId?: string
+}) {
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [childId, setChildId] = useState(() => crypto.randomUUID())
+  const [guidance, setGuidance] = useState(suggestedGuidance)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const submit = async () => {
+    if (!job.storyThreadId) { setError('The original Thread could not be verified.'); return }
+    setBusy(true); setError(null)
+    try {
+      const result = await continueJobCheckpoint({ data: {
+        jobId: job.id, childId, commitSha: point.commitSha,
+        sourceBaseSha: job.baseSha, sourceThreadId: job.storyThreadId,
+        proofDigest: point.proofDigest, guidance,
+        ...(expectedLatestJobId ? { expectedLatestJobId } : {}),
+      } })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['thread-chat', job.storyThreadId] }),
+        queryClient.invalidateQueries({ queryKey: storyNavigationKey(job.storyId) }),
+        queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+      ])
+      if (!result.started) setError(result.warning || 'Continuation was prepared but could not start.')
+      else setOpen(false)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not prepare a safe continuation.')
+    } finally { setBusy(false) }
+  }
+  return <div className="space-y-2 py-1 text-sm">
+    <div className="flex flex-wrap items-center gap-3">
+      {expectedLatestJobId
+        ? <Button type="button" size="sm" disabled={busy || !job.storyThreadId}
+            onClick={() => void submit()}>
+            {busy ? 'Retrying…' : 'Retry'}
+          </Button>
+        : <Button type="button" size="sm" disabled={busy || !job.storyThreadId}
+            onClick={() => setOpen(value => !value)}>
+            {open ? 'Cancel' : 'Resolve and continue'}
+          </Button>}
+      {expectedLatestJobId && <button type="button" disabled={busy}
+        aria-expanded={open} aria-controls={'continuation-' + job.id}
+        className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+        onClick={() => setOpen(value => !value)}>
+        {open ? 'Hide instructions' : 'Edit instructions'}
+      </button>}
+    </div>
+    {open && <div className="max-w-xl space-y-2">
+      <label className="block text-xs font-medium" htmlFor={'continuation-' + job.id}>
+        {expectedLatestJobId ? 'Change your previous instruction' : 'Corrective instruction (optional)'}
+      </label>
+      <Textarea id={'continuation-' + job.id} rows={2} maxLength={2000}
+        disabled={busy} value={guidance}
+        placeholder="Describe a correction, or leave blank to retry the approved plan."
+        onChange={event => {
+          setGuidance(event.target.value); setChildId(crypto.randomUUID()); setError(null)
+        }} />
+      {!expectedLatestJobId && <Button type="button" size="sm" disabled={busy}
+        onClick={() => void submit()}>{busy ? 'Continuing…' : 'Continue'}</Button>}
+    </div>}
+    {error && <p role="alert" className="whitespace-pre-wrap text-xs text-destructive">{error}</p>}
+  </div>
+}
+
+/** Explicit alternate-history branch. Unlike recovery, this is a new Thread. */
+export function CheckpointBranchAction({ job, point, buttonLabel = 'Branch from here' }: {
+  job: JobOverview; point: Point; buttonLabel?: string
+}) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
@@ -82,9 +151,9 @@ export function CheckpointBranchAction({ job, point }: { job: JobOverview; point
   }
   return <div className="py-2 text-sm">
     <Button type="button" size="sm" variant="outline" disabled={!job.storyThreadId || busy}
-      onClick={() => setOpen(value => !value)}>{open ? 'Close branch preview' : 'Branch from here'}</Button>
+      onClick={() => setOpen(value => !value)}>{open ? 'Close recovery options' : buttonLabel}</Button>
     {open && <div className="mt-3 max-w-xl space-y-2">
-      <p className="text-xs text-foreground">This creates a child Thread with its own clean worktree, fresh budget and prepared run at <code>{point.commitSha.slice(0, 12)}</code>. The original keeps running unchanged.</p>
+      <p className="text-xs text-foreground">This creates a child Thread with its own clean worktree, fresh budget and prepared run at <code>{point.commitSha.slice(0, 12)}</code>. The original Thread remains unchanged.</p>
       <label className="block text-xs font-medium text-foreground" htmlFor={'guidance-' + point.commitSha}>
         Corrective guidance (optional)
       </label>

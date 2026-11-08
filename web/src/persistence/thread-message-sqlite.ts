@@ -3,7 +3,7 @@ import { and, asc, desc, eq, isNotNull, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import {
-  generationEvents, generationRunQueue, sessions, storyConversations, storyThreadMessageCancellations,
+  checkpointForks, generationEvents, generationRunQueue, sessions, storyConversations, storyThreadMessageCancellations,
   storyThreadMessages, storyThreadRuns, storyThreads, threadActivePiTurns, threadLiveEffectReviews,
   threadLiveInputs, threadProtectedDecisions, threadQueuedMessageEdits,
 } from '../db/schema'
@@ -148,9 +148,20 @@ export function insertThreadAssistantSqlite(db: Db, owner: string, threadId: str
   return id
 }
 
+/** A checkpoint continuation is a new execution of the existing Thread, not
+ * a new author request. Its task includes the original task plus existing
+ * guidance, but must not be synthesized as another chat message. */
+function sameThreadRecoveryJobsSqlite(db: Db, owner: string, threadId: string): Set<string> {
+  return new Set(db.select({ childId: checkpointForks.childId }).from(checkpointForks)
+    .where(and(eq(checkpointForks.ownerUserId, owner),
+      eq(checkpointForks.sourceThreadId, threadId)))
+    .all().map(row => row.childId))
+}
+
 /** Import pre-Conversation runs atomically, preserving their durable job IDs.
  * No timestamps are used to invent checkpoint lineage or author approvals. */
 export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string): void {
+  const recoveryJobs = sameThreadRecoveryJobsSqlite(db, owner, threadId)
   const runs = db.select({
     jobId: storyThreadRuns.jobId, requestJson: sessions.generationRequestJson,
     status: sessions.status, queuePhase: generationRunQueue.phase,
@@ -164,7 +175,7 @@ export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string
     .where(and(eq(storyThreadRuns.threadId, threadId), eq(storyThreadRuns.ownerUserId, owner)))
     .orderBy(asc(storyThreadRuns.runOrder)).all()
   for (const run of runs) {
-    if (run.requestJson) {
+    if (run.requestJson && !recoveryJobs.has(run.jobId)) {
       let task: unknown
       try { task = (JSON.parse(run.requestJson) as { task?: unknown }).task } catch { /* legacy corrupt request */ }
       if (typeof task === 'string' && task.trim()) {
@@ -200,7 +211,7 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
           .where(and(eq(generationRunQueue.ownerUserId, owner),
             eq(generationRunQueue.jobId, jobId))).get()
         if (!admitted) throw new ThreadMessageConflict(409, 'Generation was not admitted.')
-        tx.update(m).set({ status: 'delivered' }).where(and(
+        tx.update(m).set({ status: 'delivered', phase: 'running' }).where(and(
           eq(m.id, 'guidance:fork:' + jobId), eq(m.ownerUserId, owner), eq(m.status, 'queued'),
         )).run()
         tx.update(m).set({ status: 'delivered', phase: 'running' }).where(and(
@@ -218,9 +229,15 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
       // A read of older jobs is a one-time reconciliation; keep this and
       // subsequent reads idempotent across concurrent requests.
       db.transaction(() => seedThreadMessagesSqlite(db, owner, threadId))
-      const messages = messagesQuery(db)
+      const recoveryJobs = sameThreadRecoveryJobsSqlite(db, owner, threadId)
+      const messages = (messagesQuery(db)
         .where(and(eq(m.ownerUserId, owner), eq(m.threadId, threadId)))
-        .orderBy(asc(m.sequence)).all() as ThreadMessage[]
+        .orderBy(asc(m.sequence)).all() as ThreadMessage[])
+        .filter(message => !(message.role === 'user' && message.jobId &&
+          message.id === 'initial:' + message.jobId && recoveryJobs.has(message.jobId)))
+      // Old versions may already have written synthetic "initial:" receipts.
+      // Preserve those durable records for audit but omit them from chat;
+      // recovery is never a second user instruction.
       const edits = db.select({
         messageId: threadQueuedMessageEdits.messageId, old: threadQueuedMessageEdits.oldBody,
         replacement: threadQueuedMessageEdits.newBody, editedAt: threadQueuedMessageEdits.editedAt,
@@ -278,6 +295,18 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
           throw new ThreadMessageConflict(409, 'Message ID is already assigned to a job.')
         const run = currentThreadRunSqlite(db, owner, threadId)
         if (!run) throw new ThreadMessageConflict(409, 'Create a generation run for this Thread before sending follow-ups.')
+        // A terminal blocked/paused run has no verified continuation source.
+        // Reject at this serialized admission boundary rather than storing an
+        // instruction that the controller can never dispatch.
+        // The special pre-start fork guidance is not a chat follow-up. It is
+        // recorded before its first queue admission and has a controller-owned
+        // stable ID; public chat submissions require UUIDs instead.
+        const initialGuidance = id === 'guidance:fork:' + run.jobId &&
+          run.status === 'paused' && !mode
+        if (!initialGuidance && (run.queuePhase === 'interrupted' ||
+            ['blocked', 'paused', 'cancelled'].includes(run.status)))
+          throw new ThreadMessageConflict(409,
+            'This Thread cannot accept follow-ups while generation is stopped. Review its saved decision or recovery checkpoint.')
         if (mode && (run.status !== 'running' || run.queuePhase !== 'running'))
           throw new ThreadMessageConflict(409, 'Steer or Follow up is available only while a generation run is active.')
         db.insert(m).values({

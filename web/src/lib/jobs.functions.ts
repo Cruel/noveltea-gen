@@ -4,7 +4,7 @@ import { auth, database } from './runtime.server'
 import { readAuthConfig } from './auth'
 import { generationJobRequest } from './fixture-jobs.server'
 import { generationControlRequest } from './generation-controls.server'
-import { checkpointForkRequest } from './checkpoint-fork.server'
+import { checkpointForkRequest, checkpointContinueRequest } from './checkpoint-fork.server'
 
 export type JobOverview = {
   id: string; storyId: string; title: string; provider: string; baseSha: string; headSha: string
@@ -77,6 +77,18 @@ export const forkJobCheckpoint = createServerFn({ method: 'POST' })
     request(data.jobId, '/fork', { childId: data.childId, commitSha: data.commitSha, sourceBaseSha: data.sourceBaseSha,
       sourceThreadId: data.sourceThreadId, proofDigest: data.proofDigest, guidance: data.guidance }),
     data.jobId, readAuthConfig().baseURL)))
+
+export const continueJobCheckpoint = createServerFn({ method: 'POST' })
+  .validator((data: { jobId: string; childId: string; commitSha: string; sourceBaseSha: string;
+    sourceThreadId: string; proofDigest: string; guidance: string;
+    expectedLatestJobId?: string }) => data)
+  .handler(async ({ data }) => result<{ id: string; started: boolean; warning?: string }>(
+    await checkpointContinueRequest(auth, database,
+      request(data.jobId, '/continue', { childId: data.childId, commitSha: data.commitSha,
+        sourceBaseSha: data.sourceBaseSha, sourceThreadId: data.sourceThreadId,
+        proofDigest: data.proofDigest, guidance: data.guidance,
+        ...(data.expectedLatestJobId ? { expectedLatestJobId: data.expectedLatestJobId } : {}) }),
+      data.jobId, readAuthConfig().baseURL)))
 
 export const getJobControls = createServerFn({ method: 'GET' })
   .validator((jobId: string) => jobId)
