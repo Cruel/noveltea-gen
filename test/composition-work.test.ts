@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { parseSpecialistJson } from "../src/composition-specialist.js";
+import { selectAssignment, verifyCompositionProse } from "../src/composition-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-composition-"));
 after(() => {
@@ -121,6 +122,28 @@ test("composes two outcomes and two alternative puzzle endings into validated co
   assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
   assert.equal(JSON.parse(x.inspect().stdout).headSha, result.headSha);
   assert.equal(JSON.parse(x.run().stdout).headSha, result.headSha);
+});
+
+test("scoped prose revision may reuse other fully composed Event content", { skip: !available }, async () => {
+  const x = setup("existing-composition");
+  x.prepare();
+  const original = x.run();
+  assert.equal(original.status, 0, original.stderr);
+  const validation = x.cli(["validate"]);
+  assert.equal(validation.status, 0, validation.stderr);
+  const report = JSON.parse(validation.stdout).report;
+  const architecture = JSON.parse(x.cli(["architecture", "inspect"]).stdout);
+  const dir = x.job.stateDir;
+  const interactive = JSON.parse(readFileSync(join(dir, "interactive-items/disclosure.json"), "utf8"));
+  const event = JSON.parse(readFileSync(join(dir, "event-items/disclosure.json"), "utf8"));
+  const assignment = selectAssignment(architecture.plan, report, interactive, event, "milestone.disclosure");
+  assert.ok(assignment.allowedExistingContent.length > 1);
+  const changedPath = "authored-content/disclosure-scene.md";
+  const originalText = readFileSync(join(x.job.worktreeStoryRoot, changedPath), "utf8");
+  writeFileSync(join(x.job.worktreeStoryRoot, changedPath), originalText + "\nA more restrained response closes the scene.\n");
+  const checked = await verifyCompositionProse(x.job, report, assignment, [changedPath]);
+  assert.ok(checked.outcomes.length >= 2);
+  assert.ok(checked.solutions.length >= 2);
 });
 
 test("verified deferred capture between Interactive and Composition does not block prose", { skip: !available }, () => {

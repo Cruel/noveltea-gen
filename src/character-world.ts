@@ -68,7 +68,8 @@ interface ArchitectureReceipt {
   plan?: Plan;
 }
 interface Obligation { id: string; path: string; field: string; requiredBy: string; code: string; message: string }
-interface CatalogRecord { path: string; metadata: { type: string; id: string; status: string; arcs?: string[]; characters?: string[] } }
+interface CatalogRecord { path: string; metadata: { type: string; id: string; status: string; arcs?: string[];
+  characters?: string[]; initial_knowledge?: Array<{ fact: string }> } }
 interface CatalogReport {
   records: CatalogRecord[];
   diagnostics: unknown[];
@@ -155,7 +156,20 @@ export function deriveFoundationAssignment(domain: FoundationDomain, plan: Plan,
       r.metadata.status !== "superseded" && existingIds.has(r.metadata.id)) : [];
   if (existingCharacters.length > 64)
     throw new Error("Character context exceeds the bounded existing-record inventory.");
-  const sourcePaths = [...new Set([...sources, ...selected, ...existingCharacters]
+  // Existing foundations are context, not records that must be regenerated.
+  // Include the relevant typed records so Pi can revise one part of an
+  // established cluster without inventing duplicates in the other part.
+  const existingFoundations = domain === "world"
+    ? report.records.filter(r => r.metadata.status !== "superseded" &&
+        ["fact", "world-entity"].includes(r.metadata.type))
+    : report.records.filter(r => r.metadata.status !== "superseded" &&
+        (r.metadata.type === "relationship" &&
+          r.metadata.characters?.every(id => existingIds.has(id)) ||
+         r.metadata.type === "fact" && existingCharacters.some(c =>
+           c.metadata.initial_knowledge?.some(k => k.fact === r.metadata.id))));
+  if (existingFoundations.length > 128)
+    throw new Error("Existing foundation context exceeds the bounded record inventory.");
+  const sourcePaths = [...new Set([...sources, ...selected, ...existingCharacters, ...existingFoundations]
     .map(r => r.path).concat(authored))].sort();
   return { domain, arcIds: selected.filter(r => r.metadata.type === "arc").map(r => r.metadata.id),
     milestoneIds: selected.filter(r => r.metadata.type === "milestone").map(r => r.metadata.id),
@@ -194,7 +208,7 @@ function normalizeArcCharacterLinks(text: string): { text: string; ids: string[]
     ids,
   };
 }
-async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAssignment, declared: string[], partial = false) {
+export async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAssignment, declared: string[], partial = false) {
   const paths: string[] = [];
   for (const entry of dirty(job)) {
     if (!["??", " M"].includes(entry.slice(0, 2))) {
@@ -237,14 +251,9 @@ async function auditPaths(job: JobStartResult, unit: Unit, assign: FoundationAss
     throw new Error("Specialist claimed modifiedRecords differ from actual Git diff: declared " +
       JSON.stringify(declared) + ", actual " + JSON.stringify(paths));
   }
-  if (!partial && unit.domain === "world" && (!paths.some(p => p.startsWith("facts/")) ||
-      !paths.some(p => p.startsWith("world-entities/")))) {
-    throw new Error("Worldbuilding must deliver meaningful objective Facts and World Entities.");
-  }
-  if (!partial && unit.domain === "character" && (!paths.some(p => p.startsWith("characters/")) ||
-      !paths.some(p => p.startsWith("relationships/")))) {
-    throw new Error("Character specialist must deliver Characters and a consequential Relationship.");
-  }
+  // The opposite record type may already be correct and must not be
+  // rewritten just to satisfy a two-category diff requirement. checkOutput
+  // independently verifies the complete, scoped canonical foundation state.
   return paths;
 }
 function verifyCommit(job: JobStartResult, unit: Unit, before: string, commit: string) {
@@ -268,32 +277,34 @@ async function fileDigest(job: JobStartResult, paths: string[]) {
   return digest(JSON.stringify(await Promise.all(paths.map(async p =>
     [p, digest(await readFile(join(job.worktreeStoryRoot, p)))]))));
 }
-async function checkOutput(job: JobStartResult, report: CatalogReport, unit: Unit, assign: FoundationAssignment) {
+export async function checkOutput(job: JobStartResult, report: CatalogReport, unit: Unit, assign: FoundationAssignment) {
   const current = report.records.filter(r => r.metadata.status !== "superseded");
   if (unit.paths?.some(p => !current.some(r => r.path === p))) {
     throw new Error("Specialist wrote files the canonical catalog did not recognize.");
   }
+  // Final-state evidence includes the existing, explicitly supplied records
+  // as well as the changed files. A pre-existing Fact or Relationship does not
+  // need a cosmetic rewrite to qualify a genuine revision of its counterpart.
+  const scoped = current.filter(r => assign.sourcePaths.includes(r.path) || unit.paths?.includes(r.path));
   if (unit.domain === "world") {
-    if (!unit.paths?.some(p => current.some(r => r.path === p && r.metadata.type === "fact")) ||
-        !unit.paths.some(p => current.some(r => r.path === p && r.metadata.type === "world-entity"))) {
-      throw new Error("World specialist did not deliver valid Facts and World Entities.");
+    if (!scoped.some(r => r.metadata.type === "fact") ||
+        !scoped.some(r => r.metadata.type === "world-entity")) {
+      throw new Error("World foundations require a canonical Fact and World Entity in the assigned scope.");
     }
   } else {
-    const characters = current.filter(r => r.metadata.type === "character");
-    const facts = current.filter(r => r.metadata.type === "fact");
-    const relationships = current.filter(r => r.metadata.type === "relationship");
-    if (characters.length < 2 || !facts.length || !relationships.length ||
-        !unit.paths?.some(p => current.some(r => r.path === p && r.metadata.type === "character")) ||
-        !unit.paths.some(p => current.some(r => r.path === p && r.metadata.type === "relationship"))) {
+    const characters = scoped.filter(r => r.metadata.type === "character");
+    const facts = scoped.filter(r => r.metadata.type === "fact");
+    const relationships = scoped.filter(r => r.metadata.type === "relationship");
+    if (characters.length < 2 || !facts.length || !relationships.length) {
       throw new Error("Foundation cluster requires at least two Characters, a Fact and a Relationship.");
     }
-    if (unit.paths.some(p => p.startsWith("arcs/") && !assign.sourcePaths.includes(p))) {
+    if (unit.paths?.some(p => p.startsWith("arcs/") && !assign.sourcePaths.includes(p))) {
       throw new Error("Character links reference an Arc outside the planned cluster.");
     }
-    const authoredCharacters = unit.paths.filter(p => current.some(r => r.path === p && r.metadata.type === "character"));
-    const knowledge = await Promise.all(authoredCharacters.map(p => readFile(join(job.worktreeStoryRoot, p), "utf8")));
+    const knowledge = await Promise.all(characters.map(r =>
+      readFile(join(job.worktreeStoryRoot, r.path), "utf8")));
     if (!knowledge.some(text => /initial_knowledge:\s*\n\s*- fact: fact\.[a-z][a-z0-9-]*/.test(text))) {
-      throw new Error("Character foundations must set at least one explicit, typed initial Fact-knowledge baseline.");
+      throw new Error("Character foundations require at least one explicit, typed initial Fact-knowledge baseline.");
     }
   }
 }
@@ -684,7 +695,17 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           async proposed => {
             // Inspect the actual working tree BEFORE showing validator diagnostics
             // to Pi. Unexpected paths, staging or forged manifests fail closed.
-            const paths = await auditPaths(job, unit, assign, proposed.claimedPaths);
+            let paths: string[] | undefined;
+            let manifestFeedback: string | undefined;
+            try {
+              paths = await auditPaths(job, unit, assign, proposed.claimedPaths);
+            } catch (error) {
+              const message = String(error);
+              // Only an incomplete self-report or empty work item is repairable.
+              // Out-of-scope/staged/unsafe paths must still fail closed.
+              if (!message.includes("claimed modifiedRecords differ from actual Git diff")) throw error;
+              manifestFeedback = message;
+            }
             assertHead(job, before);
             if (proposed.architecturalConflicts?.length) {
               // A self-reported conflict is bounded repair feedback to the
@@ -703,10 +724,15 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
             if (report.diagnostics.length) {
               return report.diagnostics.slice(0, 16).map(d => JSON.stringify(d));
             }
+            if (manifestFeedback) return [manifestFeedback +
+              ". Report only the exact changed files; do not touch existing canonical records just to fill a required category."];
             const candidate: Unit = { ...unit, paths };
             if (draft.status === "passed") {
-              await checkOutput(job, report, candidate, assign);
-              return [];
+              try { await checkOutput(job, report, candidate, assign); return []; }
+              catch (error) {
+                if (!/^Error: (World foundations require|Foundation cluster requires|Character foundations require)/.test(String(error))) throw error;
+                return [String(error)];
+              }
             }
             throw new Error("Canonical validator rejected the draft without actionable structural diagnostics.");
           }, choice ?? undefined);

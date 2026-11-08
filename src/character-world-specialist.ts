@@ -56,7 +56,7 @@ const DOMAINS = {
   world: {
     name: "nt-worldbuilding",
     owns: ["world-entities/*.md", "facts/*.md"],
-    guidance: "Create one or two consequential persistent setting elements (world-entity) and objective initial Facts, not a glossary of the cast. People belong in Character records, never in world-entity records. A world-entity has exactly one type-specific field, description (quoted string); a fact has exactly one type-specific field, initial (unquoted boolean). NEVER put description on a fact. EVERY record MUST have substantial readable Markdown narrative prose AFTER its closing --- frontmatter line. Never use initial: false to mean undiscovered. Do not invent engine Rooms, speculative Events or future Narrative State snapshots.",
+    guidance: "Establish or improve consequential persistent setting elements (world-entity) and objective initial Facts; reuse correct existing records instead of creating duplicates or rewriting unchanged types. This is not a glossary of the cast. People belong in Character records, never in world-entity records. A world-entity has exactly one type-specific field, description (quoted string); a fact has exactly one type-specific field, initial (unquoted boolean). NEVER put description on a fact. EVERY record MUST have substantial readable Markdown narrative prose AFTER its closing --- frontmatter line. Never use initial: false to mean undiscovered. Do not invent engine Rooms, speculative Events or future Narrative State snapshots.",
   },
   character: {
     name: "nt-character-development",
@@ -118,6 +118,8 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       "Do not modify files outside your ownership; never write Creative Direction, Milestones, Events, or engine files. " +
       "Preserve author-protected decisions and existing authorized choices; do not treat draft status as permission to retcon. " +
       "Write canonical schema '0.1' Markdown, with quoted YAML prose scalars, draft status and honest completeness. " +
+      "For existing Stories, preserve valid existing Facts, World Entities, Characters and Relationships. " +
+      "Change only records that need work; a category does not need an edit merely because it is part of final acceptance. " +
       "Where future conditional truth, discoveries or Relationship transitions depend on a branch, describe the pending Event obligation in prose rather than making false initial state claims. " +
       "Never invent typed Event IDs to fill deferred Milestone fulfillment. " +
       (sandboxTools ?

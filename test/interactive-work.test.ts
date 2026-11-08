@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { auditInteractivePaths, RepairableInteractiveScopeError, scopeRepairFeedback } from "../src/interactive-work.js";
+import { auditInteractivePaths, checkOutput, selectAssignment,
+  RepairableInteractiveScopeError, scopeRepairFeedback } from "../src/interactive-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-interactive-work-"));
 after(() => removeTestTree(root));
@@ -285,6 +286,33 @@ test("Puzzle with no independently accessible pre-solution clue is rejected", { 
   assert.notEqual(data.specialistUnits[1].phase, "committed");
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), data.specialistUnits[0].commitSha);
   assert.notEqual(git(x.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("existing Choice/Puzzle may be certified after a linked Event-only edit", { skip: !available }, async () => {
+  const x = setup("revise-existing-interactive");
+  x.prepare();
+  const originalRun = x.interactive();
+  assert.equal(originalRun.status, 0, originalRun.stderr);
+  const validated = x.cli(["validate"]);
+  assert.equal(validated.status, 0, validated.stderr);
+  const report = JSON.parse(validated.stdout).report;
+  const architecture = JSON.parse(x.cli(["architecture", "inspect"]).stdout);
+  const assignment = selectAssignment(architecture.plan, report, "milestone.disclosure");
+  assert.ok(assignment.sourcePaths.some(p => p.startsWith("choice-points/")));
+  assert.ok(assignment.sourcePaths.some(p => p.startsWith("puzzles/")));
+  for (const domain of ["choice", "puzzle"] as const) {
+    const path = domain === "choice" ? "events/disclose-ledger.md" : "events/decode-ledger.md";
+    const target = join(x.job.worktreeStoryRoot, path);
+    const originalText = readFileSync(target, "utf8");
+    writeFileSync(target, originalText + "\nThe response is delivered with more care.\n");
+    const paths = await auditInteractivePaths(x.job, assignment, domain, [path]);
+    assert.deepEqual(paths, [path]);
+    const unit = { domain, paths } as any;
+    const result = await checkOutput(x.job, report, report, assignment, unit, []);
+    if (domain === "choice") assert.ok(result.choices.length);
+    else assert.ok(result.puzzles.length);
+    writeFileSync(target, originalText);
+  }
 });
 
 test("read-only Milestone edits get bounded scope feedback, without being authorized", { skip: !available }, async () => {

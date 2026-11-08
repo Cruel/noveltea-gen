@@ -104,7 +104,7 @@ function reportOf(result: ValidationResult, head: string): Report {
   }
   return report;
 }
-function selectAssignment(plan: Plan, report: Report, milestoneId: string): InteractiveAssignment {
+export function selectAssignment(plan: Plan, report: Report, milestoneId: string): InteractiveAssignment {
   if (plan.contract.scope.depth === "architecture") throw new Error("Completion contract does not authorize interactive work.");
   const architecture = plan.items.find(i => i.id === "global-architecture");
   if (architecture?.status !== "verified" || !architecture.targetIds.includes(milestoneId)) {
@@ -128,6 +128,14 @@ function selectAssignment(plan: Plan, report: Report, milestoneId: string): Inte
   const characterIds = [...new Set(characters)].sort();
   if (characterIds.length < 2 || !eventIds.length) throw new Error("Missing Character/World/Event foundations.");
   const references = new Set<string>([...characterIds, ...eventIds, ...arcIds]);
+  // Existing Puzzles may use these Events without being referenced back by
+  // the Events. Include them and their clues in the editable/context inventory.
+  for (const puzzle of records.filter(r => r.metadata.type === "puzzle" &&
+      (r.metadata.solutions as string[] ?? []).some(id =>
+        adjacent.some(event => event.metadata.id === id)))) {
+    references.add(puzzle.metadata.id);
+    for (const clue of (puzzle.metadata.clues as string[] ?? [])) references.add(clue);
+  }
   for (const event of adjacent) {
     references.add(event.metadata.id);
     for (const id of event.metadata.participants as string[]) references.add(id);
@@ -233,9 +241,9 @@ export async function auditInteractivePaths(job: JobStartResult, assign: Interac
     throw new Error("Interactive specialist manifest differs from actual Git files: " +
       JSON.stringify({ actual: paths, claimed }));
   }
-  if (!paths.some(path => path.startsWith(domain === "choice" ? "choice-points/" : "puzzles/"))) {
-    throw new Error("Interactive specialist must author its assigned Choice Point/Puzzle.");
-  }
+  // Edits to an existing linked Event or clue can complete an already
+  // established Choice/Puzzle without rewriting its canonical definition.
+  // checkOutput verifies the assigned domain from the final catalog instead.
   return paths;
 }
 /** A repair attempt must never bypass the pinned Git protection decision,
@@ -319,7 +327,19 @@ function checkProgress(original: Report, candidate: Report, milestoneId: string,
 }
 function verifyChoice(report: Report, paths: string[], assign: InteractiveAssignment, obligations: string[]): ChoiceEvidence[] {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
-  const choiceRecords = records.filter(r => r.metadata.type === "choice-point" && paths.includes(r.path));
+  // An Arc may contain several Milestones. Merely appearing in the broad
+  // read-only context must not pull a previous Milestone's Choice into the
+  // current work item's verification receipt.
+  const affectedEvents = findEventRecords(report).filter(event =>
+    paths.includes(event.path) || records.some(content =>
+      paths.includes(content.path) && content.metadata.type === "authored-content" &&
+      (content.metadata.events as string[] ?? []).includes(event.metadata.id)));
+  const affectedChoices = new Set(affectedEvents.flatMap(selectEffects)
+    .flatMap(branch => branch.effects.filter(effect => effect.kind === "outcome")
+      .map(effect => effect.choice_point as string)));
+  const choiceRecords = records.filter(r => r.metadata.type === "choice-point" &&
+    (paths.includes(r.path) ||
+      assign.sourcePaths.includes(r.path) && affectedChoices.has(r.metadata.id)));
   if (!choiceRecords.length) throw new Error("No authored Choice Point in interactive work item.");
   const events = findEventRecords(report);
   const branches = events.flatMap(selectEffects);
@@ -405,9 +425,14 @@ function verifyChoice(report: Report, paths: string[], assign: InteractiveAssign
     return { id: record.metadata.id, outcomes: evidence };
   });
 }
-function verifyPuzzle(report: Report, paths: string[]): PuzzleEvidence[] {
+function verifyPuzzle(report: Report, paths: string[], assign: InteractiveAssignment): PuzzleEvidence[] {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
-  const authored = records.filter(r => r.metadata.type === "puzzle" && paths.includes(r.path));
+  const changedRecordIds = new Set(records.filter(r => paths.includes(r.path))
+    .map(r => r.metadata.id));
+  const authored = records.filter(r => r.metadata.type === "puzzle" &&
+    (paths.includes(r.path) || assign.sourcePaths.includes(r.path) &&
+      [...(r.metadata.solutions as string[] ?? []), ...(r.metadata.clues as string[] ?? [])]
+        .some(id => changedRecordIds.has(id))));
   if (!authored.length) throw new Error("No authored Puzzle in interactive work item.");
   const byId = new Map(records.map(record => [record.metadata.id, record]));
   return authored.map(record => {
@@ -439,10 +464,9 @@ function verifyPuzzle(report: Report, paths: string[]): PuzzleEvidence[] {
     if (eventRecords.some(e => e?.metadata.type !== "event" || e.metadata.completeness === "partial")) {
       throw new Error("Puzzle solution must be a complete Event, not just a declared ID.");
     }
-    if (eventRecords.filter(e => paths.includes(e!.path)).length < 2 ||
-        clueIds.filter(id => paths.includes(byId.get(id)!.path)).length < 2) {
-      throw new Error("Puzzle work item must actually author two solution Events and two pre-solution clue records.");
-    }
+    // Existing solution Events and playable clues are valid evidence when
+    // their canonical state and reachability still pass; a scoped edit need
+    // not touch all four records or create duplicate replacements.
     if (new Set(eventRecords.map(e => JSON.stringify({ consequences: e!.metadata.consequences,
       steps: e!.metadata.steps }))).size < 2) {
       throw new Error("Alternative Puzzle solution Events must have distinct narrative consequences.");
@@ -452,7 +476,7 @@ function verifyPuzzle(report: Report, paths: string[]): PuzzleEvidence[] {
     })) };
   });
 }
-async function checkOutput(job: JobStartResult, previous: Report, report: Report, assign: InteractiveAssignment,
+export async function checkOutput(job: JobStartResult, previous: Report, report: Report, assign: InteractiveAssignment,
   unit: Unit, obligations: string[]) {
   if (!unit.paths || unit.paths.some(path => !report.records.some(r => r.path === path &&
       r.metadata.status !== "superseded"))) {
@@ -479,13 +503,13 @@ async function checkOutput(job: JobStartResult, previous: Report, report: Report
   }
   if (unit.domain === "choice") {
     const choices = verifyChoice(report, unit.paths, assign, obligations);
-    if (!choices.some(choice => choice.outcomes.some(outcome => unit.paths!.some(path =>
-      report.records.some(r => r.path === path && r.metadata.id === outcome.event))))) {
-      throw new Error("Choice specialist did not modify an Event that actually selects a Choice outcome.");
+    if (!choices.some(choice => choice.outcomes.some(outcome =>
+      assign.eventIds.includes(outcome.event)))) {
+      throw new Error("Choice Point has no reachable outcome in the assigned Event cluster.");
     }
     return { choices, puzzles: [] };
   }
-  return { choices: [], puzzles: verifyPuzzle(report, unit.paths) };
+  return { choices: [], puzzles: verifyPuzzle(report, unit.paths, assign) };
 }
 async function publishHead(job: JobStartResult, before: string, after: string, id: string) {
   if (commitOrigin(job, id, after).jobId !== job.jobId) return;

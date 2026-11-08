@@ -5,6 +5,7 @@ import { hostname as requireHostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { changedPaths } from "../src/event-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-event-work-"));
 after(() => removeTestTree(root));
@@ -77,6 +78,28 @@ A missing witness leaves a ledger and suspicion between two former collaborators
   }
   return { repo, story, job, baseline, cli, prepare, event };
 }
+
+test("revising an existing Event does not require rewriting an already fulfilled Milestone", { skip: !available }, async () => {
+  const { job, prepare, event } = setup("existing-fulfilled-milestone");
+  prepare();
+  const first = event();
+  assert.equal(first.status, 0, first.stderr);
+  const milestone = join(job.worktreeStoryRoot, "milestones/disclosure.md");
+  const original = readFileSync(milestone, "utf8");
+  assert.match(original, /fulfillment: \{any_of: \[\[event\.disclose-ledger\]\]\}/);
+  const target = join(job.worktreeStoryRoot, "events/disclose-ledger.md");
+  writeFileSync(target, readFileSync(target, "utf8") + "\nA revised, grounded exchange follows the disclosure.\n");
+  const assignment = {
+    milestonePath: "milestones/disclosure.md",
+    sourcePaths: ["events/disclose-ledger.md"],
+  } as any;
+  assert.deepEqual(await changedPaths(job, assignment, ["events/disclose-ledger.md"]),
+    ["events/disclose-ledger.md"]);
+  await assert.rejects(changedPaths(job, assignment, ["events/unrelated.md"]),
+    /modifiedRecords differ.*authorized Git diff/);
+  assert.equal(readFileSync(milestone, "utf8"), original,
+    "The Milestone must not be touched just to pass a path audit.");
+});
 
 test("public CLI commits a reachable causal Event cluster with validated Milestone fulfillment", { skip: !available }, () => {
   const { repo, job, baseline, cli, prepare, event } = setup("fulfilled");

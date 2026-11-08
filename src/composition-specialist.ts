@@ -161,7 +161,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "Character or Creative Direction, and do not edit read-only puzzle clue content. " +
       "Existing protected author wording must be preserved. Work from the least-informed reachable entry: " +
       "shared text cannot assume exclusive Choice outcomes, conditional Revelation, or optional clue. " +
-      "Create one playable Authored Content document per Event in composeTargets, each with " +
+      "Ensure one playable Authored Content document per Event in composeTargets, reusing valid existing documents; each has " +
       "events: [that-single-event] and revelations: [only Revelations presented by that Event]. " +
       "Do not combine all Event prose into one record; each file has exactly one playback owner. " +
       "Existing clue Authored Content in sourcePaths already covers its linked discovery Events: read " +
@@ -174,7 +174,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "licenses revelation.ledger-secret, if present in the source; protecting does not. " +
       "Every later outcome-conditioned Event, including an aftermath, needs distinct playable " +
       "'## <Outcome> selected' sections for every reachable condition branch, not a generic summary. " +
-      "For each Puzzle solution Event, write standalone playable dialogue/narration under " +
+      "For each Puzzle solution Event, ensure standalone playable dialogue/narration under " +
       "'## Solution consequence' using only clues required on that route. Never place the watermark " +
       "in the seal/testimony route without an additional prerequisite, nor vice versa. " +
       "Do not write editorial directions as playable prose. " +

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { deriveFoundationAssignment } from "../src/character-world.js";
+import { deriveFoundationAssignment, auditPaths, checkOutput } from "../src/character-world.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-character-world-"));
 after(() => removeTestTree(root));
@@ -90,6 +90,39 @@ Ada investigates a missing witness and Neri's concealed evidence.
   }
   return { repo, story, baseline, job, cli, architecture };
 }
+
+test("existing foundation categories may remain unchanged during a scoped revision", { skip: !available }, async () => {
+  const { job, cli, architecture } = setup("existing-foundation-revisions");
+  const arch = architecture();
+  const result = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(result.status, 0, result.stderr);
+  const checked = cli(["validate"]);
+  assert.equal(checked.status, 0, checked.stderr);
+  const report = JSON.parse(checked.stdout).report;
+  const records = report.records.filter((r: any) => r.metadata.status !== "superseded");
+  const record = (type: string) => records.find((r: any) => r.metadata.type === type);
+  const fact = record("fact")?.path as string;
+  const entity = record("world-entity")?.path as string;
+  const relationship = record("relationship")?.path as string;
+  assert.ok(fact && entity && relationship);
+  const world = deriveFoundationAssignment("world", arch.plan, report, []);
+  assert.ok(world.sourcePaths.includes(fact) && world.sourcePaths.includes(entity));
+  const originalFact = readFileSync(join(job.worktreeStoryRoot, fact), "utf8");
+  writeFileSync(join(job.worktreeStoryRoot, fact), originalFact + "\nAn additional fact explanation.\n");
+  const worldUnit = { domain: "world", phase: "writing", paths: [fact] } as any;
+  assert.deepEqual(await auditPaths(job, worldUnit, world, [fact]), [fact]);
+  await checkOutput(job, report, worldUnit, world);
+  writeFileSync(join(job.worktreeStoryRoot, fact), originalFact);
+
+  const character = deriveFoundationAssignment("character", arch.plan, report, [fact, entity]);
+  assert.ok(character.sourcePaths.includes(relationship));
+  const originalRelationship = readFileSync(join(job.worktreeStoryRoot, relationship), "utf8");
+  writeFileSync(join(job.worktreeStoryRoot, relationship), originalRelationship + "\nRelationship scene context.\n");
+  const characterUnit = { domain: "character", phase: "writing", paths: [relationship] } as any;
+  assert.deepEqual(await auditPaths(job, characterUnit, character, [relationship]), [relationship]);
+  await checkOutput(job, report, characterUnit, character);
+  writeFileSync(join(job.worktreeStoryRoot, relationship), originalRelationship);
+});
 
 test("real public CLI creates two separately validated canonical specialist commits with branch-safe knowledge and relationships", { skip: !available }, () => {
   const { repo, baseline, job, cli, architecture } = setup("complete");

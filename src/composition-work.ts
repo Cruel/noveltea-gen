@@ -95,7 +95,7 @@ function verified(result: ValidationResult, base: string): Report {
       JSON.stringify(result).slice(0, 7500));
   return r;
 }
-function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt,
+export function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt,
   eventSource: EventSourceReceipt, milestoneId: string): CompositionAssignment {
   const arch = plan.items.find(i => i.id === "global-architecture");
   if (plan.contract.scope.depth !== "composition" || arch?.status !== "verified" ||
@@ -238,8 +238,15 @@ function sections(body: string) {
 /** Syntactic/source checks only; a separate read-only Pi reviewer checks semantics. */
 export async function verifyCompositionProse(job: JobStartResult, r: Report,
   a: CompositionAssignment, paths: string[]) {
-  const records = r.records.filter(x => paths.includes(x.path) && x.metadata.type === "authored-content");
-  if (records.length !== paths.length) throw new Error("Composition output is not canonical Authored Content.");
+  const changed = r.records.filter(x => paths.includes(x.path) && x.metadata.type === "authored-content");
+  if (changed.length !== paths.length) throw new Error("Composition output is not canonical Authored Content.");
+  // Inspect the authorized existing prose as well as the edited files.
+  // A scoped revision need not rewrite every already-composed Event in the
+  // Milestone to demonstrate complete player-facing coverage.
+  const records = r.records.filter(x => x.metadata.type === "authored-content" &&
+    x.metadata.status !== "superseded" &&
+    (paths.includes(x.path) || a.allowedExistingContent.includes(x.path)) &&
+    (x.metadata.events as string[]).some(id => a.eventIds.includes(id)));
   const linked = new Map<string, Array<{ body: string; sections: Map<string, string>; revelations: string[] }>>();
   for (const record of records) {
     const file = await readFile(join(job.worktreeStoryRoot, record.path), "utf8");
@@ -568,7 +575,15 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         s.phase = "writing"; s.beforeHead = base; await save(file, s);
         try {
           const verifyDraft = async (evidence: CompositionEvidence) => {
-            const paths = await auditCompositionPaths(job, assign, evidence.modifiedRecords);
+            let paths: string[] | undefined;
+            let manifestFeedback: string | undefined;
+            try {
+              paths = await auditCompositionPaths(job, assign, evidence.modifiedRecords);
+            } catch (error) {
+              const message = String(error);
+              if (!message.includes("Composition manifest differs from Git changes")) throw error;
+              manifestFeedback = message;
+            }
             assertHead(job, base);
             if (evidence.conflicts.length) throw new Error("Unresolved source conflict: " + evidence.conflicts.join("; "));
             const result = await validate(base);
@@ -579,14 +594,16 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             if (report.diagnostics.length) return report.diagnostics.slice(0, 24).map(d =>
               `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
             if (result.status !== "passed") throw new Error("Canonical validator rejected composition draft.");
+            if (manifestFeedback) return [manifestFeedback +
+              ". Report the exact changed Authored Content paths; existing valid prose does not need cosmetic edits."];
             let structural: Awaited<ReturnType<typeof verifyCompositionProse>>;
-            try { structural = await verifyCompositionProse(job, report, assign, paths); }
+            try { structural = await verifyCompositionProse(job, report, assign, paths!); }
             catch (e) { return [String(e)]; }
             // Independent semantic review participates in the SAME bounded
             // writer repair loop. Never accept a structurally green draft that
             // an editorial reviewer has already rejected.
             if (s.worker === "pi") {
-              const review = await reviewComposition(job, s.snapshot!, assign, paths,
+              const review = await reviewComposition(job, s.snapshot!, assign, paths!,
                 s.provider, s.model, s.thinking,
                 async session => { s.reviewSessionFile = session; await save(file, s); }, true);
               const missing = [...structural.outcomes, ...structural.solutions].filter(route =>
@@ -594,7 +611,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
               if (review.verdict !== "pass" || review.concerns.length || missing.length)
                 return [...review.concerns, ...missing.map(route =>
                   "Editorial review needs source-linked evidence for " + route)];
-              s.reviewedDigest = await fileDigest(job, paths);
+              s.reviewedDigest = await fileDigest(job, paths!);
               s.reviewedEvidence = review;
               await save(file, s);
             }

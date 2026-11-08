@@ -50,7 +50,7 @@ const SPECIALISTS = {
   },
   puzzle: {
     name: "nt-puzzle-design",
-    guidance: "Create a complete narrative Puzzle with at least TWO distinct reachable solving Events and pre-solution Authored Content clues each attached to a separate reachable discovery Event. Clue Markdown must actually describe the player-visible observation, and Puzzle prose should explain goal, inference, failed attempts, hints and solution payoffs. Do not link content first presented in a solution Event as a Puzzle clue. Solution Events must have real gated prerequisites and consequences, not merely be named in the Puzzle. Preserve original Event prerequisites and Choice Point outcomes.",
+    guidance: "Ensure a complete narrative Puzzle with at least TWO distinct reachable solving Events and pre-solution Authored Content clues each attached to a separate reachable discovery Event. Reuse verified existing solutions and clues, rather than recreating them just to include them in the diff. Clue Markdown must actually describe the player-visible observation, and Puzzle prose should explain goal, inference, failed attempts, hints and solution payoffs. Do not link content first presented in a solution Event as a Puzzle clue. Solution Events must have real gated prerequisites and consequences, not merely be named in the Puzzle. Preserve original Event prerequisites and Choice Point outcomes.",
   },
 } as const;
 function parseManifest(text: string) {
@@ -126,6 +126,8 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       "Existing Event prerequisites are immutable and must remain textually identical. " +
       "You may edit existing authorized Event, Choice Point, Revelation and Authored Content files, " +
       "and create connected new canonical records in your assigned directories. " +
+      "Reuse valid existing Choice/Puzzle definitions, solutions and clues instead of rewriting or " +
+      "recreating them solely to satisfy an output-file count; the controller audits final-state coverage. " +
       (sandboxTools ?
         "File and shell tools operate only in the networkless /story sandbox; Git and host paths are unavailable. " :
         "Do not stage, reset, checkout or commit. Grep, rg and Git diff/status inspections are permitted. ") +
@@ -154,9 +156,12 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
         typeof c.arguments?.path === "string").map(c =>
         relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
-      if (!edits.some(p => p.startsWith(domain === "choice" ? "choice-points/" : "puzzles/"))) {
-        throw new Error("Specialist did not author its owned canonical Choice Point/Puzzle record.");
+      if (!edits.length) {
+        throw new Error("Interactive specialist made no canonical Story edits.");
       }
+      // A linked Choice/Puzzle may already exist. The independent audit must
+      // check its final state; tool-call evidence need not show a cosmetic edit
+      // to that particular record type.
       const data = parseManifest(last.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
       const evidence: InteractiveEvidence = { modifiedRecords: data.paths, conflicts: data.conflicts,
         obligations: data.obligations, skillReads,

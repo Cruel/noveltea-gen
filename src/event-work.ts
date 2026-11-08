@@ -152,7 +152,7 @@ function normalizeMilestone(text: string): string {
   }
   return out.join("\n").trimEnd();
 }
-async function changedPaths(job: JobStartResult, assignment: EventAssignment, manifest: string[]): Promise<string[]> {
+export async function changedPaths(job: JobStartResult, assignment: EventAssignment, manifest: string[]): Promise<string[]> {
   const paths: string[] = [];
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   for (const entry of dirty(job)) {
@@ -184,8 +184,12 @@ async function changedPaths(job: JobStartResult, assignment: EventAssignment, ma
     paths.push(path);
   }
   paths.sort();
-  if (!paths.some(p => p.startsWith("events/")) || !paths.includes(assignment.milestonePath) ||
-      JSON.stringify(paths) !== JSON.stringify([...new Set(manifest)].sort())) {
+  // An already fulfilled Milestone need not be rewritten just to produce a diff.
+  // Reachability and linkage are checked from the final canonical catalog below.
+  if (!paths.some(p => p.startsWith("events/"))) {
+    throw new Error("Event specialist must change at least one Event in its assigned cluster.");
+  }
+  if (JSON.stringify(paths) !== JSON.stringify([...new Set(manifest)].sort())) {
     throw new Error("Event specialist modifiedRecords differ from the actual authorized Git diff: " +
       JSON.stringify({ expected: paths, declared: manifest }));
   }
@@ -475,7 +479,18 @@ export async function runEventWorkItem(input: EventOptions) {
         await persist(receiptFile, receipt);
         try {
           const verifyDraft = async (candidate: EventEvidence) => {
-            const paths = await changedPaths(job, assign, candidate.claimedPaths);
+            let paths: string[] | undefined;
+            let repairablePathError: string | undefined;
+            try {
+              paths = await changedPaths(job, assign, candidate.claimedPaths);
+            } catch (error) {
+              const message = String(error);
+              // Only incomplete work/manifest claims are repairable. Unauthorized
+              // edits, unsafe paths and protected mutations remain hard failures.
+              if (!message.includes("must change at least one Event") &&
+                  !message.includes("modifiedRecords differ from the actual authorized Git diff")) throw error;
+              repairablePathError = message;
+            }
             assertHead(job, receipt.expectedHead);
             if (candidate.conflicts.length) throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
             const checked = await validate(receipt.expectedHead);
@@ -487,7 +502,10 @@ export async function runEventWorkItem(input: EventOptions) {
             if (draft.diagnostics.length) return draft.diagnostics.slice(0, 20)
               .map(d => `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
             if (checked.status !== "passed") throw new Error("Event validator rejected the draft without diagnostics.");
-            try { acceptance(draft, assign, paths); return []; }
+            if (repairablePathError) return [repairablePathError +
+              " Edit an authorized Event if necessary, or correct modifiedRecords to list the exact Git changes. " +
+              "Do not modify the Milestone merely to make it appear in the diff."];
+            try { acceptance(draft, assign, paths!); return []; }
             catch (error) { return [String(error)]; }
           };
           let evidence: EventEvidence;

@@ -107,7 +107,8 @@ export async function authorEventCluster(
       "Actual enabling conditions belong in prerequisites.any_of, with nonempty alternatives containing completed and not_completed lists. " +
       "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
       "If a new Revelation is required, create a correctly typed canonical revelation with an existing Fact; do not invent a Choice Point, Puzzle, engine Room or game state snapshot. " +
-      "Fulfill the selected Milestone with reachable authored Event IDs, changing ONLY its fulfillment and completeness fields. " +
+      "Ensure the selected Milestone has reachable Event fulfillment. If its existing fulfillment is already correct, " +
+      "leave the Milestone byte-for-byte unchanged; otherwise change ONLY its fulfillment and completeness fields. " +
       "Do NOT edit any other Milestone, Creative Direction, unrelated Arc, or any Character baseline. " +
       "You may write events/*.md and strictly connected, authorized arcs/*.md, facts/*.md, revelations/*.md and relationships/*.md. " +
       "All records must contain valid schema '0.1' frontmatter with ONLY allowed fields and nonempty Markdown body prose. " +
@@ -118,7 +119,7 @@ export async function authorEventCluster(
       "If the scope cannot be fulfilled without changing a protected or unrelated record, report an architectural conflict rather than editing it. " +
       "Any unresolved future alternative must be a concrete later obligation, not a fabricated Event ID. " +
       "REPORT an exact JSON object at the end (no markdown fences): " +
-      '{"modifiedRecords":["events/example.md","milestones/example.md"],"architecturalConflicts":[],"laterObligations":["Future alternative requires Event design"]}. ' +
+      '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":["Future alternative requires Event design"]}. ' +
       "The modifiedRecords list MUST include every Story-relative file changed in this ENTIRE work item. " +
       "Call story_validate with no arguments after authoring, inspect diagnostic and reachability evidence, repair and revalidate before reporting. Your own claims are not sufficient evidence; the graph independently checks changes, protection and acceptance.\n" +
       "AUTHORIZED ASSIGNMENT:\n" + JSON.stringify(assignment, null, 2) +
