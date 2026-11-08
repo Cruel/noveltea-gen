@@ -4,13 +4,18 @@ import { auth, database } from './runtime.server'
 import { requireUser } from './access.server'
 import { deleteThread } from './thread-deletion.server'
 import { inspectStoryUsage } from './thread-usage.server'
+import { listStoryThreads, openStoryThread } from './story-threads.server'
 import {
-  archiveThread, createConversation, listStoryConversations, renameConversation, renameThread,
-  restoreThread, saveThreadPreferences,
+  archiveThread,
+  createConversation,
+  listStoryConversations,
+  renameConversation,
+  renameThread,
+  restoreThread,
+  saveThreadPreferences,
 } from './threads.server'
 
-const isId = (id: unknown): id is string =>
-  typeof id === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(id)
+const isId = (id: unknown): id is string => typeof id === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(id)
 async function ownerId() {
   await database.assertReady()
   const actor = await requireUser(auth, getRequestHeaders())
@@ -23,6 +28,22 @@ export const getStoryNavigation = createServerFn({ method: 'GET' })
     return storyId
   })
   .handler(async ({ data }) => listStoryConversations(database, await ownerId(), data))
+
+/** Story-first gateway: clients need only a Story ID to list Threads, or a
+ * Story ID and stable Thread ID to open its state and pinned fork lineage. */
+export const getStoryThreads = createServerFn({ method: 'GET' })
+  .validator((storyId: string) => {
+    if (!isId(storyId)) throw new Error('Invalid Story ID.')
+    return storyId
+  })
+  .handler(async ({ data }) => listStoryThreads(database, await ownerId(), data))
+
+export const getStoryThread = createServerFn({ method: 'GET' })
+  .validator((data: { storyId: string; threadId: string }) => {
+    if (!data || !isId(data.storyId) || !isId(data.threadId)) throw new Error('Invalid Story or Thread ID.')
+    return data
+  })
+  .handler(async ({ data }) => openStoryThread(database, await ownerId(), data.storyId, data.threadId))
 
 export const getStoryUsage = createServerFn({ method: 'GET' })
   .validator((storyId: string) => {
@@ -84,9 +105,14 @@ export const deleteThreadResources = createServerFn({ method: 'POST' })
 
 export const setThreadPreferences = createServerFn({ method: 'POST' })
   .validator((data: { storyId: string; view: 'tree' | 'flat'; expandedIds: string[] }) => {
-    if (!data || !isId(data.storyId) || !['tree', 'flat'].includes(data.view) ||
-        !Array.isArray(data.expandedIds) || data.expandedIds.length > 200 ||
-        data.expandedIds.some(id => !isId(id)))
+    if (
+      !data ||
+      !isId(data.storyId) ||
+      !['tree', 'flat'].includes(data.view) ||
+      !Array.isArray(data.expandedIds) ||
+      data.expandedIds.length > 200 ||
+      data.expandedIds.some((id) => !isId(id))
+    )
       throw new Error('Invalid Thread preferences.')
     return data
   })
