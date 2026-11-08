@@ -7,6 +7,7 @@ import type { CanonicalScopeRecord } from '../../../src/focused-scope'
 import { inferStoryRevision, type RevisionPreview, type ProtectedDecisionChange } from './story-revision-plan'
 import { assertProtectedThreadApproval } from './thread-protected-decision.server'
 import { enqueueThreadMessage, type ThreadMessage, ThreadChatError } from './thread-chat.server'
+import { planRevision, assertTurnPlan, type TurnPlan } from './turn-plan'
 
 type Source = { jobId: string; status: string; queuePhase: string | null }
 export type PinnedRevision = {
@@ -14,11 +15,12 @@ export type PinnedRevision = {
   selectedTargets: string[]; approved: boolean
   contract: RevisionPreview['contract']; writePaths: string[]; contextIds: string[]
   protectedChange?: ProtectedDecisionChange
+  turnPlan?: TurnPlan
 }
 /** Final authority check is performed after a fresh canonical validation and
  * before worktree allocation. A browser- or DB-originated path is never used
  * without byte-for-byte confirmation of the controller's derived grant. */
-export function assertPinnedRevision(scope: PinnedRevision, refreshed: RevisionPreview,
+export function assertPinnedRevision(scope: PinnedRevision, refreshed: RevisionPreview & { turnPlan?: TurnPlan | null },
   sourceJobId: string, headSha: string): void {
   if (scope.sourceJobId !== sourceJobId || scope.sourceSha !== headSha ||
       !Array.isArray(scope.selectedTargets) || !Array.isArray(scope.writePaths) ||
@@ -29,8 +31,13 @@ export function assertPinnedRevision(scope: PinnedRevision, refreshed: RevisionP
       JSON.stringify(refreshed.writePaths) !== JSON.stringify(scope.writePaths) ||
       JSON.stringify(refreshed.contextIds) !== JSON.stringify(scope.contextIds) ||
       JSON.stringify(refreshed.contract) !== JSON.stringify(scope.contract) ||
-      JSON.stringify(refreshed.protectedChange) !== JSON.stringify(scope.protectedChange ?? null))
+      JSON.stringify(refreshed.protectedChange) !== JSON.stringify(scope.protectedChange ?? null) ||
+      (!!refreshed.turnPlan !== !!scope.turnPlan))
     throw new ThreadChatError(409, 'Story impact or protected scope changed since approval; no continuation was started.')
+  if (refreshed.turnPlan && scope.turnPlan) {
+    try { assertTurnPlan(scope.turnPlan, refreshed.turnPlan) }
+    catch { throw new ThreadChatError(409, 'Saved specialist assignments changed since approval.') }
+  }
 }
 async function pendingInstruction(store: StudioDatabase, owner: string, threadId: string) {
   return store.persistence.revisions.head(owner, threadId)
@@ -80,7 +87,10 @@ export async function revisionFromSource(store: StudioDatabase, owner: string,
       report.protection.base !== headSha || report.protection.changes?.length ||
       report.protection.warnings?.length)
     throw new ThreadChatError(409, 'The pinned canonical validator cannot verify the complete Story and protected decisions at this HEAD.')
-  return inferStoryRevision(prompt, report.records, headSha, pinned.contract, selectedTargets)
+  const preview = inferStoryRevision(prompt, report.records, headSha, pinned.contract, selectedTargets)
+  return { ...preview, turnPlan: preview.clarification ? null :
+    planRevision(preview.request, preview.contract, headSha, sourceJobId, report.records,
+      preview.targets, preview.writePaths, preview.protectedChange) }
 }
 export async function previewThreadRevision(store: StudioDatabase, owner: string,
   threadId: string, prompt: string, selectedTargets?: string[], messageId?: string) {
@@ -154,6 +164,7 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   const receipt: PinnedRevision = { sourceJobId: source.jobId, sourceSha: plan.headSha,
     digest: plan.digest, selectedTargets: plan.targets, approved: !!approvalDigest || !!plan.protectedChange,
     contract: plan.contract, writePaths: plan.writePaths, contextIds: plan.contextIds,
+    ...(plan.turnPlan ? { turnPlan: plan.turnPlan } : {}),
     ...(plan.protectedChange ? { protectedChange: plan.protectedChange } : {}) }
   await store.persistence.revisions.grant(owner, threadId, id, content, source, JSON.stringify(receipt))
   return latest()

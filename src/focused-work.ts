@@ -20,13 +20,14 @@ import { preparePiContext, piNarrativeGroup, preflightPiAssignment } from "./job
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
 import { resolveFocusedScope, type CanonicalScopeRecord } from "./focused-scope.js";
+import { readTurnEvidence, assertFocusedTurnAssignment } from "./turn-plan-evidence.js";
 
 interface Receipt {
   version: 1; jobId: string; workItemId: string; planVersion: number; contractDigest: string;
   expectedHead: string; phase: "pending" | "writing" | "authored" | "committed";
   target: string; paths: string[]; context: string[]; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot; piSessionFile?: string;
-  sha256?: string; commitSha?: string;
+  sha256?: string; commitSha?: string; assignmentDigest?: string;
 }
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const repoPath = (job: JobStartResult, p: string) => job.storyRelativePath ? job.storyRelativePath + "/" + p : p;
@@ -66,7 +67,7 @@ function skillFor(target: string) {
   if (type === "choice-point" || type === "puzzle") return "nt-interactive-narrative";
   throw new Error("A direct focus specialist is not available for " + target + "; select an Arc or Milestone scope.");
 }
-async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) {
+async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string, outcome?: string) {
   const skill = skillFor(receipt.target);
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config = { discovery: "explicit-only" as const, novelteaSkills: receipt.snapshot!.path,
@@ -107,14 +108,18 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) 
       join(receipt.snapshot!.path, "skills", "nt-catalog", "references", "records.md")];
     await promptStorySpecialist(session, context.contextNote +
       "You are a narrowly scoped NovelTea " + skill + " revision specialist. FIRST read all pinned guidance using read:\n" +
-      required.join("\n") + "\nRead relevant Story context only from these paths:\n" +
-      receipt.context.join("\n") + "\nOnly edit these PREEXISTING canonical Markdown files:\n" +
+      required.join("\n") + "\nBegin with these relevant Story sources:\n" +
+      receipt.context.join("\n") + "\nYou may use read, grep, find, ls and story_context to inspect " +
+      "additional canonical Story records and discover typed dependencies. Discovery is READ-ONLY, " +
+      "never write authority; do not inspect private inboxes.\n" +
+      "Only edit these PREEXISTING canonical Markdown files:\n" +
       receipt.paths.join("\n") + "\nAll other files are READ-ONLY context (including upstream prerequisites, milestones, Arcs, and all sibling records). " +
       "Do not create files, use git commands, invoke untrusted shell commands, or change protected author decisions. " +
       "Preserve typed references and branch behavior. If a requested change requires additional records or upstream decisions, " +
       "report that obstacle and stop without touching unauthorized files. Do not claim incomplete/delegated work is finished. " +
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
-      "Author's bounded objective: " + task);
+      "Original Turn goal: " + task + "\nSpecialist assignment outcome: " +
+      (outcome ?? "Revise only the authorized record against the user request."));
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
       throw new Error("Focused Pi specialist failed or was interrupted.");
@@ -131,6 +136,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string) 
 export interface FocusedWorkOptions {
   story: string; job: string; target: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string; provider?: string; model?: string;
+  turnPlanDigest?: string;
 }
 export async function runFocusedWorkItem(input: FocusedWorkOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
@@ -156,6 +162,12 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     // Shared supporting targets are authorized exactly once, with the first target.
     const paths = [own.path, ...(input.target === input.contract.scope.targets[0] ? selection.selected
       .filter(r => input.contract.scope.supportingTargets?.includes(r.metadata.id)).map(r => r.path) : [])].sort();
+    const types = [...new Set(paths.map(path => selection.selected.find(r => r.path === path)?.metadata.type))];
+    if (types.some(type => !type)) throw new Error("A specialist path has no canonical record type.");
+    const turnPlan = await readTurnEvidence(job, input.contract, input.task, input.turnPlanDigest);
+    const turnAssignment = turnPlan ? assertFocusedTurnAssignment(turnPlan, input.target, paths,
+      types as string[]) : null;
+    const turnAssignmentDigest = turnPlan?.digest;
     // Refuse symlinked / substituted records BEFORE Pi receives editing tools.
     for (const path of paths) {
       const full = join(job.worktreeStoryRoot, path);
@@ -168,7 +180,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       if (receipt.jobId !== job.jobId || receipt.target !== input.target ||
           receipt.contractDigest !== contractDigest || receipt.planVersion !== plan.version ||
           JSON.stringify(receipt.paths) !== JSON.stringify(paths) ||
-          receipt.worker !== (input.fixture ? "fixture" : "pi"))
+          receipt.worker !== (input.fixture ? "fixture" : "pi") ||
+          receipt.assignmentDigest !== turnAssignmentDigest)
         throw new Error("Focused work-item provenance differs from the original authorization.");
       if (receipt.phase === "committed") {
         if (!receipt.commitSha || !receipt.sha256) throw new Error("Missing focused commit verification evidence.");
@@ -185,7 +198,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         planVersion: plan.version, contractDigest, expectedHead: current,
         phase: "pending", target: input.target, paths,
         context: selection.context.map(r => r.path).sort(), worker: input.fixture ? "fixture" : "pi",
-        provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna" };
+        provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
+        ...(turnAssignmentDigest ? { assignmentDigest: turnAssignmentDigest } : {}) };
       await save(file, receipt);
     }
     if (receipt.expectedHead !== current)
@@ -215,7 +229,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         const path = join(job.worktreeStoryRoot, outside.path);
         await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");
       }
-    } else await writeWithPi(job, receipt, input.task);
+    } else await writeWithPi(job, receipt, input.task, turnAssignment?.outcome);
     const edited = changes(job);
     if (!edited.length || edited.some(entry => entry.slice(0, 2) !== " M" ||
         !paths.includes(entry.slice(3).replace(job.storyRelativePath ? job.storyRelativePath + "/" : "", ""))))

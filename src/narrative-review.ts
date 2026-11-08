@@ -13,6 +13,7 @@ import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./sn
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
+import { readTurnEvidence } from "./turn-plan-evidence.js";
 import type { PlanHistoryStep } from "./plan-continuity.js";
 import { deferredCompletionObligations } from "./ideas.js";
 import type { auditIdeasUnderJobLock } from "./idea-placement.js";
@@ -75,7 +76,7 @@ interface Receipt {
 export interface NarrativeReviewOptions {
   story: string; job: string; action: "run" | "inspect";
   fixture?: boolean; skillsSource?: string; validatorSource?: string;
-  provider?: string; model?: string; thinking?: "low" | "high";
+  provider?: string; model?: string; thinking?: "low" | "high"; turnPlanDigest?: string;
 }
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 const fileFor = (job: JobStartResult) => join(job.stateDir, "narrative-review.json");
@@ -410,6 +411,17 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
       throw new Error("Narrative review requires a committed, versioned scope plan.");
     verifyPlanHistory(job, arch);
     const plan = arch.plan;
+    const turnEvidence = await readTurnEvidence(job, plan.contract, undefined, input.turnPlanDigest);
+    const withTurnAssignments = (audit: ScopeAudit): ScopeAudit => {
+      if (turnEvidence) {
+        audit.assignment.turnGoal = turnEvidence.goal;
+        audit.assignment.specialistAssignments = turnEvidence.assignments.map(a => ({
+          id: a.id, specialist: a.specialist, outcome: a.outcome, targets: a.targets,
+          authority: a.authority,
+        }));
+      }
+      return audit;
+    };
     // A focused contract does not authorize unrelated deferred idea edits.
     if (!isFocusedScope(plan.contract)) {
       const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
@@ -493,7 +505,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
             receipt.provider, receipt.model, receipt.thinking,
             async session => { receipt.sessionFiles.push(session); await save(file, receipt); });
         };
-        let audit = auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred);
+        let audit = withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred));
         receipt.audit = audit;
         if (audit.deterministic === "blocked") {
           receipt.phase = "blocked"; receipt.failure = "Objective scoped validation/coverage is not complete.";
@@ -534,7 +546,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
             if (after === before || receipt.seen.includes(after))
               throw new Error("Editorial repair stagnated or oscillated between prior drafts.");
             receipt.seen.push(after);
-            audit = auditNarrativeScope(plan, await validate(priorHead), priorHead, deferred);
+            audit = withTurnAssignments(auditNarrativeScope(plan, await validate(priorHead), priorHead, deferred));
             receipt.audit = audit;
             // Never certify invalid text; preserve the exact draft for inspection.
             if (audit.deterministic !== "passed") throw new Error("Repaired prose failed canonical scoped revalidation.");
@@ -568,7 +580,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
               await save(file, receipt);
               await publishVerifiedHead(job, priorHead, receipt.headSha);
               clean(job, receipt.headSha);
-              audit = auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred);
+              audit = withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred));
               receipt.audit = audit;
               if (audit.deterministic !== "passed")
                 throw new Error("Post-commit scoped repair validation failed; preserve commit for review.");

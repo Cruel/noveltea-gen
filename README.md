@@ -1666,14 +1666,15 @@ job UUID; edited payloads cannot repurpose a saved generation run.
 ### Bounded conversational Story revisions (#84)
 
 After a completed, verified Thread run, chat follow-ups may request a revision
-of a **specific existing** Character, Event or Milestone. Studio resolves the
+of existing Characters, Events, Milestones or coordinated multi-record Story work. Studio resolves the
 request using canonical typed record IDs/titles and the pinned native validator.
 A focused Character or Event revision authorizes only that existing record's
 path. Milestone requests derive downstream Events from typed fulfillment links
 and their authored prose from `authored-content.events`. This larger impact is
 shown in an adjustable preview where the author can **narrow** the proposed
 record set before explicit approval. Unrelated Story files, upstream Milestones,
-Creative Direction, supporting Characters and other context are **read-only**.
+ Creative Direction, supporting Characters and other context are **read-only**
+unless a separate explicit, typed relationship-verified supporting grant is reviewed.
 Ambiguous references, missing fulfillment, incompatible depths and proposed
 protected retcons stop with an explanation; approval of scope never supplies
 independent protected-decision authorization.
@@ -1697,6 +1698,30 @@ therefore cannot race to overwrite each other or reject the later instruction.
 After the preceding run completes with verified evidence, the next request is
 interpreted and either safely admitted or held in the queue for scope review.
 Later requests never overtake an unreviewed or interrupted predecessor.
+
+### Per-Turn specialist plans (#107)
+
+A first full-Story request produces versioned Foundation, Architecture,
+Character/World, Event, Interactive, Composition and independent Review
+assignments. Each assignment names its expected outcome, record-type ceiling,
+dependencies and read-only canonical discovery permission. A later focused or
+coordinated multi-record Turn produces its **own** set of typed assignments
+against the exact latest eligible verified source SHA, without replacing the
+Thread identity or inheriting the former Turn's writing authority.
+
+The immutable controller-authored `turn-plan.json` in the child Job private
+state binds the original author request, plan goal, source SHA, typed specialist
+outcomes and SHA-256 digest. The saved generation request pins that digest;
+restart, dispatch and review refuse a missing, altered or mismatched receipt.
+Specialists can discover additional Story paths with approved read/search tools,
+but that discovery never grants an edit. Existing-path edits are permitted only
+by a reviewed canonical target or a separately relationship-verified supporting
+target assigned to one owner; unfamiliar or protected changes require a new
+review and never inherit an implicit full-Story write grant. The focused writer
+independently checks its concrete assignment, Git diff, canonical types and
+native validation, while independent narrative review receives each specialist
+outcome in addition to the top-level author goal. Legacy direct CLI generation
+without a per-Turn receipt retains its independent explicit-contract checks.
 
 An ambiguous or unwanted **unadmitted queued** instruction can be cancelled
 from the Thread chat, including while awaiting scope clarification. Schema v23

@@ -74,7 +74,10 @@ test('a named Character within one explicit Event becomes read-only context, not
   assert.ok(!result.writePaths.includes('characters/nia.md'))
   const conflicting = inferStoryRevision('Edit event.confession and character.nia',
     catalog, sha, previous)
-  assert.match(conflicting.clarification!, /Multiple explicit record IDs/)
+  assert.equal(conflicting.clarification, null)
+  assert.deepEqual(conflicting.targets, ['character.nia', 'event.confession'])
+  assert.deepEqual(conflicting.writePaths, ['characters/nia.md', 'events/confession.md'])
+  assert.equal(conflicting.reviewRequired, true)
 })
 
 test('Event prose requests require approval for supporting linked content, not sibling events', () => {

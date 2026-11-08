@@ -132,6 +132,16 @@ test("weak choice and Revelation leak remain independent editorial blocks", () =
   { ...assignment, routes: [...assignment.routes, { event: "event.other", step: "t", branch: "b",
     status: "unverified", witness: [] }] });
   assert.equal(blocked.verdict, "block", "Independent blocking findings do not require invented positive witnesses");
+  const withSpecialists: ReviewAssignment = { ...assignment, specialistAssignments: [{
+    id: "focus:character.nia", specialist: "nt-character-development",
+    outcome: "Revise Nia\'s motivation", targets: ["character.nia"],
+    authority: { recordTypes: ["character"], existingPaths: ["characters/nia.md"], mayCreate: false },
+  }] };
+  assert.throws(() => checkEditorialVerdict({ verdict: "pass", findings: [], evidence },
+    withSpecialists), /specialist assignment/);
+  assert.equal(checkEditorialVerdict({ verdict: "pass", findings: [],
+    evidence: [...evidence, "Reviewed motivation: characters/nia.md:7"] },
+    withSpecialists).verdict, "pass");
   assert.equal(checkEditorialVerdict({ verdict: "pass", findings: [],
     evidence: ["event.confront#decision/protect: authored-content/confront.md:12",
       "milestone.disclosure#alternative 0: milestones/disclosure.md:9"] },

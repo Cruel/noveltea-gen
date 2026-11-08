@@ -18,6 +18,7 @@ import { readJobControl } from '../../../src/job-control'
 import { inspectFoundationConflict } from '../../../src/foundation-conflict'
 import { activeSpecialistChoice, verifySpecialistChoice } from '../../../src/specialist-choice'
 import { queueGeneration, queueRecord } from './generation-queue.server'
+import { readJobTurnPlan } from './turn-plan-receipt.server'
 
 class JobError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
@@ -363,6 +364,10 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     }
     const input = await readInput(request)
     const job = await restoreJob(row, user.id)
+    const turn = await readJobTurnPlan(job)
+    if (turn && (turn.originalRequest !== input.task ||
+        JSON.stringify(turn.contract) !== JSON.stringify(input.contract)))
+      throw new JobError(409, 'Generation differs from the immutable Turn plan and specialist assignments.')
     const existing = pinnedRequest(row, job)
     if (existing && JSON.stringify({ task: existing.task, contract: existing.contract }) !== JSON.stringify(input))
       throw new JobError(409, 'Job already has a different pinned generation request.')
@@ -399,6 +404,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     }).trim()) throw new JobError(409, 'Uncommitted files require manual reconciliation.')
     const pinned: GenerationRequest = {
       story: job.storyRoot, job: row.id, task: input.task, contract: input.contract, fixture: !selected,
+      ...(turn ? { turnPlanDigest: turn.digest } : {}),
       ...(process.env.NT_STUDIO_SKILLS_SOURCE ? { skillsSource: process.env.NT_STUDIO_SKILLS_SOURCE } : {}),
       ...(selected ? { provider: selected.provider, model: selected.id } : {}),
     }

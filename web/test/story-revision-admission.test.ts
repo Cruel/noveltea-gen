@@ -15,6 +15,7 @@ import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
 import { advanceThread, readThreadChat, cancelQueuedThreadMessage } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
+import { readJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { recordSteeringConsideration, prepareSteeringBoundaryReviews,
   attributeApprovedReplanCheckpoint } from '../src/lib/thread-steering-replan.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
@@ -320,6 +321,18 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     assert.equal(pinned?.contract.scope.depth, kind === 'broad' ? 'composition' : 'architecture')
     assert.equal(pinned?.task, task)
     assert.equal(child.baseSha, sha)
+    const turn = await readJobTurnPlan(child)
+    assert.ok(turn, 'the admitted child must preserve its own immutable Turn plan')
+    assert.equal(turn.originalRequest, task)
+    assert.equal(turn.source.jobId, sourceId)
+    assert.equal(turn.source.verifiedSha, sha)
+    assert.equal(turn.digest, pinned?.turnPlanDigest,
+      'the server-owned generation request pins the precise specialist plan')
+    assert.deepEqual(turn.assignments.filter(a => a.id.startsWith('focus:'))
+      .flatMap(a => a.authority.existingPaths).sort(), plan.writePaths)
+    assert.equal((await readJobTurnPlan(await restoreJob(
+      await selectedJob(store, owner, childId), owner)))?.digest, turn.digest,
+      'reconnect must read the same persisted plan, not silently regenerate scope')
     assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
     assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), sha)
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])

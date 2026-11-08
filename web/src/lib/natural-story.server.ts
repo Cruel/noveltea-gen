@@ -9,6 +9,9 @@ import { gitlabJobRequest } from './gitlab-jobs.server'
 import { generationConfigurationRequest } from './generation-config.server'
 import { generationJobRequest, verifyWebExecution } from './fixture-jobs.server'
 import { parseJobLimits, type JobLimits } from '../../../src/job-limits'
+import { authorizedStoryJob } from './fixture-jobs.server'
+import { planWholeStory } from './turn-plan'
+import { saveJobTurnPlan } from './turn-plan-receipt.server'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const SHA = /^[a-f0-9]{40}$/i
@@ -46,7 +49,8 @@ export async function previewNaturalStory(store: StudioDatabase, owner: string,
   await store.assertReady()
   const story = await selectedStory(store, owner, storyId)
   const plan = interpretNaturalStoryPrompt(prompt, edits)
-  return { plan, storyId: story.storyId, headSha: story.headSha!,
+  return { plan, turnPlan: planWholeStory(plan.task, plan.contract, story.headSha!),
+    storyId: story.storyId, headSha: story.headSha!,
     ...await modelOptions(store, owner) }
 }
 function checkLimits(limits: unknown): Limits {
@@ -129,6 +133,9 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
         { storyId: story.storyId, jobId: input.jobId, commit: story.headSha }), baseURL)))
   const job = prepared.job as { headSha?: string } | undefined
   if (!job?.headSha || !SHA.test(job.headSha)) throw new Error('Provider did not return a pinned job revision.')
+  if (job.headSha !== story.headSha) throw new Error('Acquired Story differs from the approved source revision.')
+  await saveJobTurnPlan(await authorizedStoryJob(store, actor.id, input.jobId),
+    planWholeStory(plan.task, plan.contract, story.headSha!))
   const threadId = await associateNaturalThread(store, actor.id, input.storyId,
     input.jobId, plan.task.slice(0, 120))
   await responseJson(await generationConfigurationRequest(auth, store,

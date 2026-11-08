@@ -16,6 +16,7 @@ import type { GenerationRequest } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
 import { assertPinnedRevision, revisionFromSource, submitThreadRevision, type PinnedRevision } from './story-revision.server'
 import { assertProtectedThreadApproval, commitProtectedThreadChange } from './thread-protected-decision.server'
+import { saveJobTurnPlan } from './turn-plan-receipt.server'
 
 const unsafeText = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
@@ -145,6 +146,9 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     const child = await continueCachedStory(parent, claim.id, head)
     if (child.baseSha !== head || child.headSha !== head)
       throw new ThreadChatError(409, 'Continuation baseline differs from verified source.')
+    if (!scope.turnPlan)
+      throw new ThreadChatError(409, 'Missing specialist assignment receipt; review the Turn again.')
+    await saveJobTurnPlan(child, scope.turnPlan)
     if (scope.protectedChange) {
       // The controller, not a Pi writer, makes the one explicitly authorized
       // amendment in an isolated child. Native revision verification and fresh
@@ -152,7 +156,8 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
       const committed = await commitProtectedThreadChange(child, scope.protectedChange, owner)
       const time = now()
       const request: GenerationRequest = { story: child.storyRoot, job: child.jobId,
-        task: claim.content, contract: scope.contract, fixture: true }
+        task: claim.content, contract: scope.contract, fixture: true,
+        turnPlanDigest: scope.turnPlan.digest }
       const draft: GenerationDraft = { version: 1, headSha: head, task: claim.content,
         contract: scope.contract, limits: {}, model: null }
       await store.persistence.continuation.protectedFinish({
@@ -173,6 +178,7 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
       contract: scope.contract, limits: oldDraft?.limits ?? {}, model }
     const pinned: GenerationRequest = { story: child.storyRoot, job: child.jobId,
       task: claim.content, contract: scope.contract, fixture: !model,
+      turnPlanDigest: scope.turnPlan.digest,
       ...(prior.skillsSource ? { skillsSource: prior.skillsSource } : {}),
       ...(model ? { provider: model.provider, model: model.id } : {}) }
     await assertServerClaimPermitted(child, child.threadId + ':generation:web', pinned)

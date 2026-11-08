@@ -35,7 +35,7 @@ export { generationStages, type GenerationEvidence } from "./generation-plan.js"
 export interface GenerationRequest {
   story: string; job: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string;
-  provider?: string; model?: string;
+  provider?: string; model?: string; turnPlanDigest?: string;
 }
 export interface GenerationOptions {
   story: string; job: string; action: "start" | "resume" | "inspect";
@@ -127,6 +127,7 @@ export const GenerationInputSchema = z.object({
     validatorSource: z.string().optional(),
     provider: z.string().optional(),
     model: z.string().optional(),
+    turnPlanDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }),
   pauseAfter: z.enum(generationStages).nullable().optional(),
 });

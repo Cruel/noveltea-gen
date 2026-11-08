@@ -38,6 +38,9 @@ export interface ReviewAssignment {
   puzzleRoutes: Array<{ puzzle: string; event: string; status: string; clueAccess: string }>;
   outstanding: Array<{ id: string; message: string }>;
   uncertainties: string[];
+  turnGoal?: string;
+  specialistAssignments?: Array<{ id: string; specialist: string; outcome: string; targets: string[];
+    authority: { recordTypes: string[]; existingPaths: string[]; mayCreate: boolean } }>;
   integration?: { base: string; targetHead: string; generationHead: string;
     risks: Array<{ path: string; ids: string[]; summary: string; evidence: string[] }> };
 }
@@ -72,6 +75,13 @@ export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignme
   // the reviewer cannot attest every route. Only a PASS requires positive
   // evidence for every representative route: never manufacture coverage.
   if (v.verdict === "pass") {
+    // A Turn plan is more specific than the overarching Story goal. Each
+    // concrete specialist-owned path needs source-linked independent evidence.
+    const owned = new Set((assignment.specialistAssignments ?? [])
+      .flatMap(item => item.authority.existingPaths));
+    if ([...owned].some(path => !v.evidence!.some(line => line.split(path + ":")
+      .slice(1).some(rest => /^[1-9][0-9]*/.test(rest)))))
+      throw new Error("Passing reviewer omitted source-linked evidence for a specialist assignment.");
     const routes = [...assignment.routes.map(r => [r.event + "#" + r.step + "/" + r.branch]),
       ...assignment.milestoneRoutes.map(r => [r.milestone + "#" + r.alternative,
         r.milestone + "#alternative " + r.alternative]),
@@ -174,6 +184,9 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "Use the bounded progression witnesses as representative routes, NOT exhaustive proof. " +
       "Review every listed Choice outcome and Puzzle solution, including least-informed routes. " +
       "Assess scope constraints, production envelope, and binding obligations. " +
+      "When Turn assignments are supplied, independently compare EACH specialist\'s changes " +
+      "with its specific outcome and authorization, not merely the top-level author brief; " +
+      "block unsupported claims and out-of-assignment changes. " +
       "Report actionable blocking/advisory findings with canonical source file:line or typed event#step/branch. " +
       "Label each repair owner composition/event/interactive/architecture/protected; " +
       "protected or architectural revisions MUST escalate, not be automatically edited. " +
