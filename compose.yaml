@@ -115,6 +115,8 @@ services:
       NT_AGENT_RPC_URL: http://agent:7001
       NT_NATIVE_CLI: /opt/noveltea/noveltea
       NT_STUDIO_SKILLS_SOURCE: /opt/noveltea-skills
+      # Must match agent's cache root: recovery bundles pin the absolute snapshot path.
+      NT_SKILL_CACHE_DIR: /var/lib/noveltea/state/skill-snapshots
       HOST: 0.0.0.0
       PORT: 3000
     volumes:

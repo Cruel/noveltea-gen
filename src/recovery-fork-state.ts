@@ -58,16 +58,33 @@ export async function verifyReadyRecoveryFork(job: JobStartResult): Promise<void
   let bundle: RecoveryForkBundle;
   try {
     bundle = readRecoveryFork(job)!;
+  } catch {
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "The prepared continuation bundle is missing or differs from its immutable recovery proof.");
+  }
+  try {
     assertNativeVersion(job.validatorVersion);
-    if (bundle.toolchain.runtime.nodeVersion !== process.version ||
-        job.validatorVersion !== bundle.toolchain.validator.version ||
-        bundle.toolchain.validator.contract !== "noveltea-validator/v1" ||
-        await openSkillSnapshot(bundle.toolchain.skills.id) !== bundle.toolchain.skills.path)
-      throw new Error("pinned tool identities changed");
   } catch {
     throw new RecoveryCompatibilityError("changed-tooling",
-      "The prepared Thread's validator, skills, or continuation bundle are missing or changed.");
+      "The installed native validator differs from the version pinned for this continuation.");
   }
+  if (bundle.toolchain.runtime.nodeVersion !== process.version)
+    throw new RecoveryCompatibilityError("changed-tooling",
+      "The Node.js runtime version differs from the version used to prepare this continuation.");
+  if (job.validatorVersion !== bundle.toolchain.validator.version ||
+      bundle.toolchain.validator.contract !== "noveltea-validator/v1")
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "The continuation validator pin differs from the immutable recovery bundle.");
+  let snapshotPath: string;
+  try {
+    snapshotPath = await openSkillSnapshot(bundle.toolchain.skills.id);
+  } catch {
+    throw new RecoveryCompatibilityError("missing-tooling",
+      "The pinned NovelTea skills snapshot is missing or could not be verified.");
+  }
+  if (snapshotPath !== bundle.toolchain.skills.path)
+    throw new RecoveryCompatibilityError("changed-tooling",
+      "The web and agent services use different skills-snapshot cache directories. Correct the deployment configuration before retrying.");
 }
 /** Only original inherited commits can use their source identity. New commits
  * must always use this job's own trailers and its own author permissions. */

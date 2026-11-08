@@ -18,11 +18,13 @@ export class RecoveryCompatibilityError extends Error {
   get nextSteps(): string[] {
     switch (this.code) {
       case "missing-tooling":
-        return ["Install the current native CLI and NovelTea skills, then retry.", "Start a fresh Thread if the required source evidence cannot be restored."];
+        return ["Restore the pinned skills snapshot or install verified current tooling.",
+          "If the original checkpoint is verified, review and prepare a fresh continuation in the same Thread."];
       case "incompatible-story":
         return ["Inspect the checkpoint and manually migrate the Story to the current canonical schema.", "Alternatively, start a fresh Thread; legacy checkpoints cannot be automatically replayed."];
       case "changed-tooling":
-        return ["Restore the tool versions pinned when this child was prepared.", "Or create a new Thread from the original verified checkpoint using current tools."];
+        return ["Check that web and agent use the same skills snapshot cache and native validator versions.",
+          "Review and prepare a fresh continuation from the original verified checkpoint in the same Thread."];
       default:
         return ["Inspect the original checkpoint and restore its trusted receipts or approvals.", "If it cannot be reconciled, manually migrate the Story or start a fresh Thread."];
     }
