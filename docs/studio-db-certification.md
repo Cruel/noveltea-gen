@@ -44,6 +44,27 @@ Fixture-based provider tests do not prove that a real GitHub App/GitLab
 installation, OAuth callback, remote push, or merge-request creation will
 work in a deployed environment. Optional real Pi, native validator and
 rootless Docker tests remain explicit opt-ins; skipped tests must be reported.
+
+### Targeted live Pi Story-owned Thread certification (2026-11-08)
+
+At base commit `dd9f4579ff8100a6d8a2870065a134c9802502ca`, the opt-in
+`web/test/real-pi-generation.test.ts` completed **1 pass, 0 failures, 0 skips**
+(43.3 s test duration) with a real `openai-codex/gpt-6-luna` model invocation.
+The credential was read **read-only** from the pre-cutover Compose Studio
+volume, using an unexpired access token with refresh disabled in the isolated
+test copy. The test generated a schema-0.1 Foundation with the pinned native
+validator in a rootless Docker sandbox, committed it in a disposable Git
+worktree and paused after the verified Foundation boundary. The expanded #104
+witness checked exactly one Story-owned root Thread, the initial author Turn
+linked to that actual execution, no Conversation table, surviving Thread/Turn/
+execution association after reopening the disposable SQLite database,
+cross-owner denial, and zero foreign-key violations. The source Compose database
+file was not modified by the certification.
+
+This is **not** certification of first-message Thread creation (#105), the
+entire Story-first refactor (#102), real GitHub/GitLab publishing, model token
+refresh, or production crash/recovery under an active writer. The regular
+credential-free suite continues to skip this explicit paid-model test.
 The race suite uses both independent SQLite WAL handles within one process
 and four independent OS worker processes. It does not measure PostgreSQL
 contention or multi-host network behavior.

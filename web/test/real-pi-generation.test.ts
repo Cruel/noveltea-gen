@@ -18,6 +18,7 @@ import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { listGenerationEvents } from '../src/lib/generation-progress.server'
 import { queueRecord } from '../src/lib/generation-queue.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
+import { listStoryThreads, openStoryThread } from '../src/lib/story-threads.server'
 import { readThreadChat } from '../src/lib/thread-chat.server'
 import { submitThreadRevision } from '../src/lib/story-revision.server'
 import { interpretNaturalStoryPrompt } from '../src/lib/natural-story-plan'
@@ -327,6 +328,40 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     assert.match(git(job.worktreeRoot, 'log', '-1', '--format=%B'), /NovelTea-Work-Item: foundation/)
     assert.ok(!JSON.stringify((await listGenerationEvents(store, user.id, jobId, 0))).includes(root),
       'the public progress journal must not reveal local paths')
+
+    // #104 live witness: actual Pi execution must belong to one Story-owned
+    // Thread, with one durable author Turn associated with its internal Job.
+    const threadId = 'root:' + jobId
+    await ensureRootThreads(store, user.id, storyId)
+    const navigation = await listStoryThreads(store, user.id, storyId)
+    assert.deepEqual(navigation.threads.map(thread => thread.id), [threadId])
+    assert.equal(navigation.threads[0]?.storyId, storyId)
+    const liveChat = await readThreadChat(store, user.id, threadId)
+    assert.equal(liveChat.storyId, storyId)
+    assert.deepEqual(liveChat.runs.map(run => run.jobId), [jobId])
+    const requestTurn = liveChat.turns.find(turn => turn.id === 'initial:' + jobId)
+    assert.ok(requestTurn, 'real author request must persist as a Story Turn')
+    assert.deepEqual(requestTurn.executionIds, [jobId],
+      'the author Turn must identify the real, verified Pi execution')
+    assert.equal(await store.testing.records.count('story_turn_executions', { turnId: requestTurn.id }), 1)
+    assert.equal(await store.testing.schema.hasTable('story_conversations'), false)
+    await assert.rejects(() => openStoryThread(store, randomUUID(), storyId, threadId),
+      /Story not found\./, 'an unrelated owner must not open the generated Thread')
+    assert.deepEqual(await store.testing.foreignKeyViolations(), [])
+
+    // Restart using the same disposable SQLite file; neither the author Turn
+    // nor the verified execution linkage may be re-created or duplicated.
+    store.close()
+    store = openStudioDatabase(join(app, 'studio.sqlite'))
+    await store.assertReady()
+    const recovered = await openStoryThread(store, user.id, storyId, threadId)
+    assert.equal(recovered.thread.id, threadId)
+    assert.equal(recovered.state.storyId, storyId)
+    assert.deepEqual(recovered.state.turns, liveChat.turns)
+    assert.deepEqual(recovered.state.runs.map(run => run.jobId), [jobId])
+    assert.equal(await store.testing.records.count('story_turns', { threadId }), 1)
+    assert.equal(await store.testing.records.count('story_turn_executions', { turnId: requestTurn.id }), 1)
+    assert.deepEqual(await store.testing.foreignKeyViolations(), [])
   } finally {
     if (agent && agent.exitCode === null && agent.signalCode === null) {
       agent.kill('SIGTERM')
