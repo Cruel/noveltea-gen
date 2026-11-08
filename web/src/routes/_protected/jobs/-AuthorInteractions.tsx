@@ -3,51 +3,16 @@ import { Textarea } from '@/components/ui/textarea'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getAuthorInteractions, sendAuthorCommand } from '../../../lib/author.functions'
+import { sendAuthorCommand } from '../../../lib/author.functions'
+import { authorInteractionsQuery } from '../../../lib/author.queries'
+import { isAuthorState, type SpecialistChoice, type RecoveryDecision } from '../../../lib/author-state'
 
-type Approval = {
-  id: string; nonce: string; proposalSha256: string; verifiedHead: string
-  phase: 'awaiting-controller' | 'recorded'; review: unknown
-  decision?: 'approved' | 'rejected'; principal?: string
-}
-type Item = {
-  id: string; kind: 'question' | 'approval'
-  phase: 'queued' | 'awaiting-author' | 'applied' | 'review-required'
-  prompt: string; answer?: string | null
-  requestType?: 'plan' | 'decision'; workItemId?: string | null
-  proposalSha256?: string; changeId?: string | null
-  approval: Approval | null
-}
-type RecoveryDecision = {
-  id: 'foundation-conflict' | 'validator-upgrade'
-  title: string; description: string; proposalSha256: string; verifiedHead: string
-  phase: 'awaiting-author' | 'applying' | 'recorded'
-  decision?: 'approved' | 'rejected'; note?: string
-  details: { sourceExcerpt: string; explanation: string } | {
-    original: { version: string }
-    replacement: { version: string }
-    validationDigest: string; diagnostics: number
-  }
-}
-type SpecialistChoice = {
-  id: string; workItem: string; phase: 'awaiting-author' | 'answered'
-  proposalSha256: string
-  question: { question: string; recommendedId: string; recommendationReason: string;
-    options: Array<{ id: string; title: string; approach: string;
-      benefits: string; tradeoffs: string }> }
-  answer?: { kind: 'option' | 'custom'; optionId?: string; text?: string; note: string }
-}
-type AuthorState = { status: string; items: Item[]; decisions: RecoveryDecision[];
-  choice: SpecialistChoice | null }
-
-export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChanged: () => void }) {
+export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: {
+  jobId: string; onChanged: () => void; presentation?: 'page' | 'chat'
+}) {
   const queryClient = useQueryClient()
-  const authorQuery = useQuery({
-    queryKey: ['author-interactions', jobId] as const,
-    queryFn: async () => JSON.parse(await getAuthorInteractions({ data: jobId })) as AuthorState,
-    refetchInterval: 8000,
-  })
-  const state = authorQuery.data ?? null
+  const authorQuery = useQuery(authorInteractionsQuery(jobId))
+  const state = isAuthorState(authorQuery.data) ? authorQuery.data : null
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({})
   const [choiceSelections, setChoiceSelections] = useState<Record<string, string>>({})
@@ -123,39 +88,55 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
   const pendingCount = (state?.decisions ?? []).filter(item => item.phase !== 'recorded').length +
     items.filter(item => item.phase === 'awaiting-author' || (item.approval && item.approval.phase !== 'recorded')).length +
     (state?.choice?.phase === 'awaiting-author' ? 1 : 0)
-  return <section aria-label="Author questions and approvals" className="job-author-review">
-    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+  // The chat shows only actionable author handoffs; the Job page retains the
+  // complete audit/history and standalone idea submission interface.
+  if (presentation === 'chat' && !pendingCount && state?.choice?.phase !== 'answered') return null
+  return <section aria-label="Author questions and approvals"
+    className={presentation === 'chat' ? 'min-w-0 space-y-3 rounded-lg border border-border/60 bg-muted/20 p-3 text-sm' : 'job-author-review'}>
+    {presentation === 'page' && <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <div><h2>Author review</h2>
         <p className="mt-1 text-xs text-muted-foreground">Approvals stay bound to the exact saved proposal and Git revision.</p></div>
       <span className="text-xs text-muted-foreground">{pendingCount ? pendingCount + ' awaiting review' : 'No pending decisions'}</span>
-    </div>
+    </div>}
     {(error || authorQuery.error) && <p className="error" role="alert">{error || authorQuery.error?.message}</p>}
     {notice && <p role="status">{notice}</p>}
-    {!state && !error && <p>Checking saved author interrupts…</p>}
-    {state && items.length === 0 && (state.decisions ?? []).length === 0 && !state.choice && <p>No author responses are awaiting review.</p>}
+    {!state && !error && presentation === 'page' && <p>Checking saved author interrupts…</p>}
+    {presentation === 'page' && state && items.length === 0 && (state.decisions ?? []).length === 0 && !state.choice && <p>No author responses are awaiting review.</p>}
     {state?.choice && <article aria-label="Specialist creative choice" key={state.choice.id}>
-      <h3>Creative decision needed · <code>{state.choice.workItem}</code></h3>
+      <h3>{presentation === 'chat' ? 'Your choice is needed' : <>Creative decision needed · <code>{state.choice.workItem}</code></>}</h3>
       <p>{state.choice.question.question}</p>
       {state.choice.phase === 'answered' ? <p role="status">Your choice is saved.
-        Select Resume in Execution controls to continue the original specialist.
+        {presentation === 'chat'
+          ? ' Select Continue generation below to resume the original specialist.'
+          : ' Select Resume in Execution controls to continue the original specialist.'}
         The answer does not itself authorize changing protected creative decisions.</p> : <>
         <fieldset disabled={busy !== null}>
           <legend>Choose an approach or provide your own</legend>
           <RadioGroup disabled={busy !== null}
             value={choiceSelections[state.choice.id] ?? state.choice.question.recommendedId}
             onValueChange={value => setChoiceSelections(old => ({ ...old, [state.choice!.id]: value }))}>
-          {state.choice.question.options.map(option => <label key={option.id}
-            style={{ display: 'block', marginBottom: '1rem' }}>
-            <RadioGroupItem value={option.id} aria-label={option.title} />
-            {' '}<strong>{option.title}</strong>
-            {option.id === state.choice!.question.recommendedId &&
-              <strong> · Recommended by specialist</strong>}
-            <p>{option.approach}</p>
-            <p><strong>Benefits:</strong> {option.benefits}</p>
-            <p><strong>Trade-offs:</strong> {option.tradeoffs}</p>
-            {option.id === state.choice!.question.recommendedId &&
-              <p><strong>Why recommended:</strong> {state.choice!.question.recommendationReason}</p>}
-          </label>)}
+          {state.choice.question.options.map(option => <div key={option.id}
+            className="mb-2 rounded-md border border-border/50 p-2">
+            <label className="flex items-center gap-2">
+              <RadioGroupItem value={option.id} aria-label={option.title} />
+              <strong>{option.title}</strong>
+              {option.id === state.choice!.question.recommendedId &&
+                <span className="text-xs text-muted-foreground">Recommended</span>}
+            </label>
+            <p className="mt-1 text-sm">{option.approach}</p>
+            {presentation === 'chat' ? <details className="mt-1 text-xs text-muted-foreground">
+              <summary className="cursor-pointer">Benefits and trade-offs</summary>
+              <p><strong>Benefits:</strong> {option.benefits}</p>
+              <p><strong>Trade-offs:</strong> {option.tradeoffs}</p>
+              {option.id === state.choice!.question.recommendedId &&
+                <p><strong>Why recommended:</strong> {state.choice!.question.recommendationReason}</p>}
+            </details> : <>
+              <p><strong>Benefits:</strong> {option.benefits}</p>
+              <p><strong>Trade-offs:</strong> {option.tradeoffs}</p>
+              {option.id === state.choice!.question.recommendedId &&
+                <p><strong>Why recommended:</strong> {state.choice!.question.recommendationReason}</p>}
+            </>}
+          </div>)}
           <label style={{ display: 'block' }}>
             <RadioGroupItem value="__custom__" aria-label="My own direction" />
             {' '}<strong>Something else — my own direction</strong>
@@ -277,7 +258,7 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
         </>}
       </>}
     </article>)}
-    <details className="job-disclosure mt-4">
+    {presentation === 'page' && <details className="job-disclosure mt-4">
       <summary>Send a new idea or constraint</summary>
       <div className="mt-3 grid gap-3">
         <label htmlFor="author-new-idea" className="text-xs text-muted-foreground">The idea will be queued for the next safe work boundary.</label>
@@ -287,6 +268,6 @@ export function AuthorInteractions({ jobId, onChanged }: { jobId: string; onChan
         <Button className="w-fit" size="sm" type="button" onClick={() => void sendIdea()}
           disabled={busy !== null || !idea.trim()}>Save idea</Button>
       </div>
-    </details>
+    </details>}
   </section>
 }

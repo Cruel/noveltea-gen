@@ -1,7 +1,7 @@
 import { and, desc, eq, isNull } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
-import { repositories, sessions, stories, storyThreadPreferences, userPreferences } from '../db/schema'
+import { repositories, sessions, stories, storyThreadRuns, storyThreads, storyThreadPreferences, userPreferences } from '../db/schema'
 import type { StudioPersistence } from './contracts'
 import { createGitSqlitePersistence } from './git-sqlite'
 import { createSqliteNaturalStoryPersistence } from './natural-story-sqlite'
@@ -57,14 +57,33 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
         const sessionRows = db.select({
           id: sessions.id, storyId: sessions.storyId, title: sessions.title,
           status: sessions.status, updatedAt: sessions.updatedAt,
-        }).from(sessions).where(eq(sessions.ownerUserId, owner))
-          .orderBy(desc(sessions.updatedAt)).limit(20).all()
+          threadId: storyThreadRuns.threadId, runOrder: storyThreadRuns.runOrder,
+          conversationId: storyThreads.conversationId,
+        }).from(sessions)
+          .leftJoin(storyThreadRuns, and(eq(storyThreadRuns.jobId, sessions.id),
+            eq(storyThreadRuns.ownerUserId, sessions.ownerUserId)))
+          .leftJoin(storyThreads, and(eq(storyThreads.id, storyThreadRuns.threadId),
+            eq(storyThreads.ownerUserId, sessions.ownerUserId)))
+          .where(eq(sessions.ownerUserId, owner))
+          .orderBy(desc(sessions.updatedAt)).limit(60).all()
+        // Internal recovery runs and ordinary sequential follow-ups are
+        // executions of one visible Thread, not duplicate dashboard items.
+        const latest = new Map<string, typeof sessionRows[number]>()
+        for (const row of sessionRows) {
+          const key = row.threadId ? 'thread:' + row.threadId : 'job:' + row.id
+          const prior = latest.get(key)
+          if (!prior || (row.runOrder ?? -1) > (prior.runOrder ?? -1))
+            latest.set(key, row)
+        }
+        const recentSessions = [...latest.values()]
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          .slice(0, 20).map(({ runOrder: _runOrder, ...session }) => session)
         return {
           repositories: repoRows,
           stories: storyRows,
-          activeJobs: sessionRows.filter(row =>
+          activeJobs: recentSessions.filter(row =>
             row.status === 'running' || row.status === 'paused' || row.status === 'blocked'),
-          recentSessions: sessionRows,
+          recentSessions,
         }
       },
     },

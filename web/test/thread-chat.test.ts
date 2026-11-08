@@ -171,6 +171,8 @@ test('settlement appends an assistant response on changed status; incomplete wor
     const messageId = randomUUID()
     await enqueueThreadMessage(db, alice, id, messageId, 'Follow-up while blocked')
     ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'blocked' }))
+    await assert.rejects(() => enqueueThreadMessage(db, alice, id, randomUUID(), 'Cannot run yet'),
+      /cannot accept follow-ups while generation is stopped/)
     await settleThreadRun(db, alice, job)
     await settleThreadRun(db, alice, job)
     const chat = (await readThreadChat(db, alice, id))

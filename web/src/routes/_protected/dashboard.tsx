@@ -3,6 +3,7 @@ import { useSuspenseQuery } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { dashboardQuery } from '../../lib/dashboard.queries'
+import type { DashboardJob } from '../../persistence/contracts'
 import { AddRepositoryDialog } from '@/components/add-repository-dialog'
 import { GitProviderIcon } from '@/components/git-provider-icon'
 import { repositoryBrowseHref } from '../../lib/repository-story-navigation'
@@ -11,6 +12,12 @@ export const Route = createFileRoute('/_protected/dashboard')({
   loader: ({ context }) => context.queryClient.ensureQueryData(dashboardQuery()),
   component: Dashboard,
 })
+
+function threadHref(job: DashboardJob): string {
+  if (!job.threadId || !job.conversationId) return '/jobs/' + encodeURIComponent(job.id)
+  return '/stories/' + encodeURIComponent(job.storyId) + '/conversations?' +
+    new URLSearchParams({ conversation: job.conversationId, thread: job.threadId }).toString()
+}
 
 function Dashboard() {
   const { data: dashboard } = useSuspenseQuery(dashboardQuery())
@@ -30,11 +37,11 @@ function Dashboard() {
           </li>
         })}</ul> : <p>No Stories imported yet.</p>}
       </CardContent></Card>
-      <Card><CardHeader><CardTitle>Active jobs</CardTitle></CardHeader><CardContent>
-        {dashboard.activeJobs.length ? <ul>{dashboard.activeJobs.map(job => <li key={job.id}><a href={'/jobs/' + job.id}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No active jobs.</p>}
+      <Card><CardHeader><CardTitle>Threads requiring attention</CardTitle></CardHeader><CardContent>
+        {dashboard.activeJobs.length ? <ul>{dashboard.activeJobs.map(job => <li key={job.id}><a href={threadHref(job)}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No active jobs.</p>}
       </CardContent></Card>
-      <Card><CardHeader><CardTitle>Recent sessions</CardTitle></CardHeader><CardContent>
-        {dashboard.recentSessions.length ? <ul>{dashboard.recentSessions.map(job => <li key={job.id}><a href={'/jobs/' + job.id}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No recent sessions.</p>}
+      <Card><CardHeader><CardTitle>Recent Threads</CardTitle></CardHeader><CardContent>
+        {dashboard.recentSessions.length ? <ul>{dashboard.recentSessions.map(job => <li key={job.id}><a href={threadHref(job)}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No recent sessions.</p>}
       </CardContent></Card>
     </div>
     <Card className="mt-5"><CardHeader className="flex flex-row items-center justify-between gap-3">

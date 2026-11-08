@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { LoaderCircle, Send } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -7,6 +7,9 @@ import { getThreadChat, getThreadRevisionPreview, postThreadMessage, cancelThrea
   editThreadQueuedMessage, postThreadProtectedDecision } from '@/lib/thread-chat.functions'
 import type { RevisionPreview } from '@/lib/story-revision-plan'
 import { ThreadMessageEdit } from './thread-message-edit'
+import { ThreadRunAttention } from './thread-run-attention'
+import { ThreadRunActivity } from './thread-run-activity'
+import { canSendThreadFollowUp } from '@/lib/thread-attention'
 
 export function ThreadChat({ threadId }: { threadId: string }) {
   const key = ['thread-chat', threadId]
@@ -44,7 +47,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     setMessage('')
   }
   const send = async () => {
-    if (!message.trim() || sending) return
+    if (!message.trim() || sending || !canSendThreadFollowUp(data?.runs.at(-1)?.status, !!data?.archived)) return
     setSending(true)
     setSendError(null)
     try {
@@ -179,20 +182,39 @@ export function ThreadChat({ threadId }: { threadId: string }) {
     } finally { setSending(false) }
   }
   const latest = data?.runs.at(-1)
-  return <section aria-label="Thread chat" className="mt-5 min-w-0 border-t border-border pt-4">
-    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-      <h3 className="m-0 text-sm font-semibold">Thread chat</h3>
-      <span className="flex items-center gap-2 text-xs text-muted-foreground">
-        {isFetching && <LoaderCircle aria-label="Updating chat" className="size-3.5 animate-spin motion-reduce:animate-none" />}
-        {latest && <>Latest run: {latest.queuePhase === 'queued' ? 'queued' : latest.status}
-          <Link to="/jobs/$jobId" params={{ jobId: latest.jobId }}>Inspect run</Link></>}
-      </span>
+  const scrollRegion = useRef<HTMLDivElement>(null)
+  const previousCount = useRef(0)
+  const followProgress = useCallback(() => {
+    const region = scrollRegion.current
+    if (region && region.scrollHeight - region.scrollTop - region.clientHeight < 160)
+      region.scrollTop = region.scrollHeight
+  }, [])
+  useEffect(() => {
+    const region = scrollRegion.current
+    const count = data?.messages.length ?? 0
+    if (region && (previousCount.current === 0 ||
+      region.scrollHeight - region.scrollTop - region.clientHeight < 160))
+      region.scrollTop = region.scrollHeight // Instant scrolling respects reduced-motion.
+    previousCount.current = count
+  }, [data?.messages.length, latest?.status])
+  const canSend = canSendThreadFollowUp(latest?.status, !!data?.archived)
+  return <section aria-label="Thread chat" className="flex min-h-0 min-w-0 flex-1 flex-col border-0 p-0">
+    <div className="flex items-center justify-end gap-2 px-4 py-2 text-xs text-muted-foreground">
+      {isFetching && <LoaderCircle aria-label="Updating chat" className="size-3.5 animate-spin motion-reduce:animate-none" />}
+      {latest && <span aria-label="Latest run status">{latest.queuePhase === 'queued' ? 'Queued' : latest.status.replaceAll('-', ' ')}</span>}
+      {latest && <Link to="/jobs/$jobId" params={{ jobId: latest.jobId }}
+        className="underline-offset-2 hover:underline">Run details</Link>}
     </div>
-    {error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}
-    <ol className="mb-4 grid max-h-[34rem] gap-3 overflow-y-auto p-0" aria-label="Delivered messages">
-      {data?.messages.map(item => <li key={item.id} className={
-        'list-none rounded-md px-3 py-2 ' +
-        (item.role === 'user' ? 'ml-6 bg-secondary' : 'mr-6 bg-muted/40')}>
+    {error && <p role="alert" className="px-4 text-sm text-destructive">{error.message}</p>}
+    <div ref={scrollRegion} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+    <ol className="mx-auto grid w-full max-w-3xl gap-4 p-0" aria-label="Delivered messages">
+      {data?.messages.filter(item => !(item.role === 'assistant' && item.jobId &&
+        data.runs.some(run => run.jobId === item.jobId &&
+          ['blocked', 'interrupted'].includes(run.status)) &&
+        item.content.startsWith('Generation blocked.'))).map(item => <Fragment key={item.id}>
+        <li className={
+        'list-none rounded-lg px-3 py-2 ' +
+        (item.role === 'user' ? 'ml-6 bg-secondary/70' : 'mr-6 bg-muted/30')}>
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong>
           <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString()}</time>
@@ -291,13 +313,30 @@ export function ThreadChat({ threadId }: { threadId: string }) {
               <Link to="/jobs/$jobId" params={{ jobId: item.jobId }}>Inspect saved job and receipts</Link>
             </div>
           </details>}
-      </li>)}
+      </li>
+      {data && item.role === 'user' && item.jobId &&
+        data.runs.some(run => run.jobId === item.jobId) &&
+        data.messages.find(message => message.role === 'user' &&
+          message.jobId === item.jobId)?.id === item.id && <li data-slot="thread-activity-item" className="list-none border-0 p-0">
+        <ThreadRunActivity jobId={item.jobId}
+          status={data.runs.find(run => run.jobId === item.jobId)!.status}
+          onProgress={followProgress} />
+      </li>}
+      </Fragment>)}
     </ol>
-    {data && !data.messages.length && <p className="text-sm text-muted-foreground">
-      No delivered messages yet. Generation requests appear here once submitted.
+    {data?.runs.filter(run => !data.messages.some(message =>
+      message.role === 'user' && message.jobId === run.jobId)).map(run =>
+      <div key={run.jobId} className="mx-auto max-w-3xl">
+        <ThreadRunActivity jobId={run.jobId} status={run.status} onProgress={followProgress} />
+      </div>)}
+    {data && !data.messages.length && <p className="mx-auto max-w-3xl text-sm text-muted-foreground">
+      No messages yet. Describe what you want NovelTea to create.
     </p>}
+    {latest && <div className="mx-auto mt-4 w-full max-w-3xl">
+      <ThreadRunAttention key={latest.jobId} run={latest} />
+    </div>}
     {review && <section aria-label="Story revision scope review"
-      className="mb-3 rounded-md border border-border p-3 text-sm">
+      className="mx-auto mt-4 w-full max-w-3xl rounded-md border border-border p-3 text-sm">
       <strong>Review Story revision scope</strong>
       <p className="mt-1 text-muted-foreground">{review.clarification ??
         (review.protectedChange
@@ -353,10 +392,17 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           onClick={() => void cancelQueued(reviewQueued.id)}>Cancel queued instruction</Button>}
       </div>
     </section>}
-    {sendError && <p role="alert" className="text-sm text-destructive">{sendError}</p>}
-    {data?.archived && <p className="text-xs text-muted-foreground">Restore this Thread to send a message.</p>}
+    </div>
+    <div className="border-t border-border/50 bg-background px-4 py-3">
+    {sendError && <p role="alert" className="mx-auto max-w-3xl text-sm text-destructive">{sendError}</p>}
+    {data?.archived && <p className="mx-auto max-w-3xl text-xs text-muted-foreground">Restore this Thread to send a message.</p>}
+    {latest && !canSend && !data?.archived && <p role="status"
+      className="mx-auto mb-2 max-w-3xl text-xs text-muted-foreground">
+      {latest.status === 'paused' ? 'Resolve the saved question or resume generation before sending another instruction.' :
+        'This run cannot accept follow-ups. Use the recovery actions above to continue safely.'}
+    </p>}
     {latest?.status === 'running' && !latest.fixture && !data?.archived &&
-      <div role="group" aria-label="Live message delivery" className="mb-2 flex gap-2 text-xs">
+      <div role="group" aria-label="Live message delivery" className="mx-auto mb-2 flex max-w-3xl gap-2 text-xs">
         <Button type="button" size="sm" variant={liveMode === 'steer' ? 'secondary' : 'outline'}
           aria-pressed={liveMode === 'steer'} disabled={sending} onClick={() => setLiveMode('steer')}>
           Steer · after current Pi turn</Button>
@@ -364,24 +410,23 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           aria-pressed={liveMode === 'follow-up'} disabled={sending} onClick={() => setLiveMode('follow-up')}>
           Follow up · after Pi task</Button>
       </div>}
-    <form onSubmit={event => { event.preventDefault(); void send() }} className="flex min-w-0 items-end gap-2">
+    <form onSubmit={event => { event.preventDefault(); void send() }} className="mx-auto flex max-w-3xl min-w-0 items-end gap-2">
       <textarea aria-label="Follow-up message" rows={2} maxLength={4000} value={message}
-        onChange={event => { setMessage(event.target.value); setPendingRetry(null); setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }} disabled={sending || data?.archived}
-        placeholder="Describe a revision to an existing Character, Event, or Milestone…"
-        className="min-w-0 flex-1 resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm" />
-      <Button type="submit" size="sm" disabled={sending || !message.trim() || !data || data.archived}>
+        onChange={event => { setMessage(event.target.value); setPendingRetry(null); setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            void send()
+          }
+        }}
+        disabled={sending || !canSend}
+        placeholder={canSend ? 'Message NovelTea…' : 'Continue or recover this run to send more messages'}
+        className="min-w-0 flex-1 resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm disabled:opacity-50" />
+      <Button type="submit" size="sm" disabled={sending || !message.trim() || !data || !canSend}>
         {sending ? <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" /> : <Send className="size-4" />}
         Send
       </Button>
     </form>
-    <p className="mt-2 text-xs text-muted-foreground">
-      Every revision is checked against canonical Story relationships and the verified source commit.
-      Material expansions require explicit scope review. Unrelated records stay read-only; each run has its own budget.
-      A queued request can be edited or withdrawn before delivery, retaining its audit history;
-      the next instruction will then be considered in order. During a live Pi run, Steer is the default:
-      it is queued for the exact active specialist after its current turn and tools settle.
-      Follow up is queued after the current Pi task (or after the run if no eligible Pi turn remains).
-      Neither option grants extra file or protected-decision authority.
-    </p>
+    </div>
   </section>
 }

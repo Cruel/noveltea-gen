@@ -63,6 +63,7 @@ export function useJobEventStream(jobId: string, activityVisible: boolean) {
             event.kind === 'finished' || event.kind === 'interrupted') {
           // Milestones can change the verified commit, job state, and available actions.
           void queryClient.invalidateQueries({ queryKey: ['job', jobId] })
+          void queryClient.invalidateQueries({ queryKey: ['thread-chat'] })
           void queryClient.invalidateQueries({ queryKey: ['job-controls', jobId] })
           void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
           if (event.kind === 'finished' || event.kind === 'interrupted')

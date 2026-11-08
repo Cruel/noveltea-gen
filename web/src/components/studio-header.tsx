@@ -39,7 +39,7 @@ export function StudioHeader({ user }: StudioHeaderProps) {
   }
 
   return <>
-    <header className="border-b border-border">
+    <header className="shrink-0 border-b border-border">
       <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between gap-4 px-6 py-3">
         <Link to="/dashboard" className="flex min-w-0 items-center gap-2 no-underline" aria-label="NovelTea Studio dashboard">
           <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">NovelTea</span>

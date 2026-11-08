@@ -62,24 +62,28 @@ function Run({ run }: { run: RunUsage }) {
 }
 
 export function ThreadUsage({ usage, threadId }: { usage: StoryUsage; threadId?: string }) {
+  const [scope, setScope] = React.useState<'story' | 'thread'>(threadId ? 'thread' : 'story')
   const thread = usage.threads.find(item => item.threadId === threadId)
-  return <div className="mb-4 space-y-4 rounded-md bg-muted/30 px-3 py-3">
-    <Totals label="Story usage" usage={usage.total} />
-    {thread && <>
-      <div className="border-t border-border/50 pt-3">
-        <Totals label="Selected Thread usage" usage={thread.total} />
-      </div>
-      <details className="border-t border-border/50 pt-3">
-        <summary className="cursor-pointer text-xs font-medium">Individual run budgets and usage</summary>
-        <ol className="mt-2 divide-y divide-border/40">{thread.runs.map(run =>
-          <Run key={run.jobId} run={run} />)}</ol>
-      </details>
-    </>}
-    <p className="text-xs text-muted-foreground">
-      Token and cost totals reflect observed Pi transcripts only; direct-model calls and missing
-      provider reports are not included. Active-time totals exclude pauses and downtime.
-      Tokens and costs are recorded amounts, not estimates or guaranteed full spend.
-      Child Threads and inherited messages are not charged again.
+  const selected = scope === 'thread' && thread ? thread.total : usage.total
+  return <div className="mt-3 space-y-3 text-xs">
+    <label className="flex items-center justify-between gap-2 text-muted-foreground">
+      Scope
+      <select aria-label="Usage scope" className="max-w-32 rounded border border-border bg-background px-2 py-1"
+        value={scope === 'thread' && thread ? 'thread' : 'story'}
+        onChange={event => setScope(event.target.value as 'story' | 'thread')}>
+        <option value="story">Story</option>
+        {thread && <option value="thread">This Thread</option>}
+      </select>
+    </label>
+    <Totals label={scope === 'thread' && thread ? 'Thread usage' : 'Story usage'} usage={selected} />
+    {scope === 'thread' && thread && <details>
+      <summary className="cursor-pointer font-medium">Individual run budgets and usage</summary>
+      <ol className="mt-2 divide-y divide-border/40">{thread.runs.map(run =>
+        <Run key={run.jobId} run={run} />)}</ol>
+    </details>}
+    <p className="text-[11px] text-muted-foreground">
+      Observed Pi transcript totals only; direct-model or unreported usage is excluded.
+      Inherited messages are not billed again.
     </p>
   </div>
 }

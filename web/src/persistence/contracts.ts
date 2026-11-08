@@ -18,7 +18,7 @@ export type DashboardSnapshot = {
 export type DashboardJob = {
   id: string; storyId: string; title: string
   status: 'running' | 'paused' | 'blocked' | 'completed' | 'cancelled'
-  updatedAt: string
+  updatedAt: string; threadId?: string | null; conversationId?: string | null
 }
 export interface DashboardCatalog {
   forOwner(ownerUserId: string): Promise<DashboardSnapshot>

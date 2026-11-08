@@ -29,6 +29,11 @@ test('Thread navigation renders job links, progress and accessible reduced-motio
   assert.match(collapsed, /aria-expanded="false"/)
   assert.match(collapsed, /Expand first/)
   assert.doesNotMatch(collapsed, /child-job/)
+  const selectedChild = renderToStaticMarkup(createElement(ThreadList, {
+    ...props, view: 'tree', expandedIds: [], selectedThreadId: 'child',
+  }))
+  assert.match(selectedChild, /child-job/, 'the selected child is visible even if its parent was collapsed')
+  assert.match(selectedChild, /aria-current="page"/)
   const expanded = renderToStaticMarkup(createElement(ThreadList, {
     ...props, view: 'tree', expandedIds: ['first'],
   }))
@@ -38,9 +43,10 @@ test('Thread navigation renders job links, progress and accessible reduced-motio
   assert.match(expanded, /Restart Thread/,
     'each Thread exposes an accessible restart action without opening provider operations')
   assert.match(expanded, /aria-level="2"/)
-  assert.match(expanded, /Execution timeline/)
+  assert.match(expanded, /Actions for child/,
+    'Thread actions are accessible through a portaled menu instead of an inline toolbar')
   assert.doesNotMatch(expanded, /Branch from here/,
-    'checkpoint actions load only after the authenticated timeline is expanded')
+    'checkpoint actions require an authenticated run inspection')
   assert.ok(expanded.indexOf('first-job') < expanded.indexOf('second-job'),
     'the active child promotes the parent above a newer sibling root')
   const flat = renderToStaticMarkup(createElement(ThreadList, {
@@ -65,7 +71,7 @@ test('archive navigation shows only active Threads by default and retains an arc
   const active = renderToStaticMarkup(createElement(ThreadList, {
     ...props, threads: activeThreads, archivedView: false,
   }))
-  assert.match(active, /Archive Thread parent/)
+  assert.match(active, /Actions for parent/)
   assert.doesNotMatch(active, /child-job/)
   const archived = renderToStaticMarkup(createElement(ThreadList, {
     ...props, threads: archivedThreads, archivedView: true,
@@ -73,8 +79,8 @@ test('archive navigation shows only active Threads by default and retains an arc
   assert.match(archived, /parent-job/)
   assert.match(archived, /child-job/)
   assert.match(archived, /aria-level="2"/)
-  assert.match(archived, /Restore Thread child/)
-  assert.doesNotMatch(archived, /Archive Thread parent/)
+  assert.match(archived, /Actions for child/)
+  assert.match(archived, /Archived/)
   assert.match(archived, /Ancestor/)
   const archivedFlat = renderToStaticMarkup(createElement(ThreadList, {
     ...props, view: 'flat', threads: archivedThreads, archivedView: true,
@@ -105,8 +111,8 @@ test('deleted parent remains a noninteractive lineage placeholder but a deleted 
   assert.match(view, /Deleted ancestor/)
   assert.match(view, /child-job/)
   assert.doesNotMatch(view, /parent-job/)
-  assert.doesNotMatch(view, /Permanently delete Thread parent/)
-  assert.doesNotMatch(view, /Rename Thread parent/)
-  assert.match(view, /Permanently delete Thread child/)
+  assert.doesNotMatch(view, /Actions for parent/,
+    'fully deleted ancestors have no available action menu')
+  assert.match(view, /Actions for child/)
   assert.deepEqual(selectNavigationThreads([parent], 'active'), [])
 })
