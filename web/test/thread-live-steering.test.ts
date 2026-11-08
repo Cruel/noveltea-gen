@@ -138,7 +138,7 @@ test('multiple rapid steers stay ordered and cannot be acknowledged by forged tr
   } finally { await release(); f.cleanup() }
 })
 
-test('Follow up queues with SDK after current Pi task, without allowing later steers to overtake it', async () => {
+test('queued next Turn never enters the Pi SDK and does not hold up safe current-session steering', async () => {
   const f = await setup()
   const pi = fakePi(f.job)
   const release = await registerPiTurn(pi.turn)
@@ -149,27 +149,81 @@ test('Follow up queues with SDK after current Pi task, without allowing later st
     const recorded = await submitThreadRevision(f.db, f.owner, f.threadId, pending,
       'Keep the character motive consistent', undefined, undefined, 'steer')
     assert.equal(recorded.liveState, 'pending')
-    await dispatchPendingPiSteering(f.db)
-    assert.equal((await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === pending)?.liveState, 'pending')
+    const queued = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === follow)!
+    assert.equal(queued.liveMode, 'follow-up')
+    assert.equal(queued.liveState, 'deferred')
+    assert.equal(queued.hasRevisionScope, 0, 'cannot approve the future HEAD during another Turn')
+    assert.equal(await f.db.testing.records.count('story_turn_executions', { turnId: follow }), 0,
+      'queued future Turn cannot inherit the current specialist execution')
+    const reconnect = openStudioDatabase(join(f.root, 'studio.sqlite'))
     try {
-      await dispatchPendingPiSteering(f.db)
-      assert.equal(pi.followUps.length, 1, 'SDK followUp queues after the running Pi task')
-      assert.equal(pi.sent.length, 0, 'steer cannot overtake an earlier Follow up')
-      await dispatchPendingPiSteering(f.db)
-      assert.equal(pi.sent.length, 0)
-      pi.messages.push({ role: 'user', content: pi.followUps[0]! })
-      pi.stop()
-      await settlePiSteering(f.db, pi.turn, true)
-      const chat = (await readThreadChat(f.db, f.owner, f.threadId))
-      assert.equal(chat.messages.find(m => m.id === follow)?.liveState, 'delivered')
-      assert.equal(chat.messages.find(m => m.id === pending)?.liveState, 'deferred')
-    } finally { await release() }
+      const saved = (await readThreadChat(reconnect, f.owner, f.threadId)).messages.find(m => m.id === follow)
+      assert.equal(saved?.liveState, 'deferred')
+      assert.equal(saved?.content, 'Please revise the Event after this run')
+    } finally { reconnect.close() }
+    await dispatchPendingPiSteering(f.db)
+    await dispatchPendingPiSteering(f.db)
+    assert.equal(pi.followUps.length, 0, 'future Turn must never use SDK followUp')
+    assert.equal(pi.sent.length, 1, 'current Pi steer is independent of the queued Turn')
+    pi.messages.push({ role: 'user', content: pi.sent[0]! })
+    pi.stop()
+    await settlePiSteering(f.db, pi.turn, true)
+    await release()
     await deferUndeliveredSteering(f.db, f.owner, f.job)
     const chat = (await readThreadChat(f.db, f.owner, f.threadId))
-    assert.equal(chat.messages.find(m => m.id === pending)?.liveState, 'deferred')
-    assert.equal(chat.messages.find(m => m.id === pending)?.phase, 'queued')
+    assert.equal(chat.messages.find(m => m.id === pending)?.liveState, 'delivered')
+    assert.equal(chat.messages.find(m => m.id === follow)?.liveState, 'deferred')
+    assert.equal(chat.messages.find(m => m.id === follow)?.phase, 'queued')
+    assert.equal((await f.db.persistence.continuation.pending(f.owner, f.threadId))?.id, follow)
     assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
   } finally { f.cleanup() }
+})
+
+test('queued next Turns support owner-scoped edits, withdrawal, idempotent retries and reconnect', async () => {
+  const f = await setup()
+  const pi = fakePi(f.job), release = await registerPiTurn(pi.turn)
+  try {
+    const first = randomUUID(), second = randomUUID(), requestId = randomUUID()
+    const [a, b] = await Promise.all([
+      submitThreadRevision(f.db, f.owner, f.threadId, first,
+        'Revise the final Event', undefined, undefined, 'follow-up'),
+      submitThreadRevision(f.db, f.owner, f.threadId, second,
+        'Then review the Character arc', undefined, undefined, 'follow-up'),
+    ])
+    assert.equal(a.liveState, 'deferred')
+    assert.equal(b.liveState, 'deferred')
+    assert.notEqual(a.sequence, b.sequence, 'concurrent follow-ups have distinct durable sequence numbers')
+    assert.equal(await f.db.testing.records.count('story_turn_executions', { turnId: first }), 0)
+    assert.equal(await f.db.testing.records.count('story_turn_executions', { turnId: second }), 0)
+    await assert.rejects(() => editQueuedThreadMessage(f.db, f.stranger, f.threadId,
+      first, requestId, a.content, 'Change the finale'), /not found/)
+    await assert.rejects(() => cancelQueuedThreadMessage(f.db, f.stranger, f.threadId,
+      second), /not found/)
+    const edit = await editQueuedThreadMessage(f.db, f.owner, f.threadId, first,
+      requestId, a.content, 'Change the finale')
+    assert.equal(edit.content, 'Change the finale')
+    assert.equal((await editQueuedThreadMessage(f.db, f.owner, f.threadId, first,
+      requestId, a.content, 'Change the finale')).editCount, 1)
+    const replay = await submitThreadRevision(f.db, f.owner, f.threadId, first,
+      a.content, undefined, undefined, 'follow-up')
+    assert.equal(replay.content, 'Change the finale')
+    const cancelled = await cancelQueuedThreadMessage(f.db, f.owner, f.threadId, second)
+    assert.equal(cancelled.phase, 'cancelled')
+    assert.equal((await cancelQueuedThreadMessage(f.db, f.owner, f.threadId, second)).phase,
+      'cancelled')
+    const reopened = openStudioDatabase(join(f.root, 'studio.sqlite'))
+    try {
+      const chat = await readThreadChat(reopened, f.owner, f.threadId)
+      assert.equal(chat.messages.find(m => m.id === first)?.content, 'Change the finale')
+      assert.equal(chat.messages.find(m => m.id === second)?.phase, 'cancelled')
+      assert.equal((await reopened.persistence.continuation.pending(f.owner, f.threadId))?.id, first)
+      assert.equal(await reopened.testing.records.count('story_thread_runs'), 1)
+    } finally { reopened.close() }
+    await dispatchPendingPiSteering(f.db)
+    assert.deepEqual(pi.sent, [])
+    assert.deepEqual(pi.followUps, [])
+    assert.deepEqual((await f.db.testing.foreignKeyViolations()), [])
+  } finally { await release(); f.cleanup() }
 })
 
 test('a pre-dispatch cancellation is durable and never reaches Pi', async () => {
@@ -441,7 +495,7 @@ test('pending coordinator messages remain unresolved at a verified checkpoint wi
     const id = randomUUID()
     const original = await submitThreadRevision(f.db, f.owner, f.threadId,
       id, 'Change milestone.reckoning after the current specialist finishes',
-      undefined, undefined, 'follow-up')
+      undefined, undefined, 'steer')
     assert.equal(original.liveState, 'deferred')
     const point = {
       eligible: true, commitSha: 'c'.repeat(40), parentSha: '0'.repeat(40),

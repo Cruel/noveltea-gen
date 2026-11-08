@@ -105,7 +105,7 @@ export async function previewThreadRevision(store: StudioDatabase, owner: string
 export async function submitThreadRevision(store: StudioDatabase, owner: string, threadId: string,
   id: string, content: string, selectedTargets?: string[], approvalDigest?: string,
   liveMode?: 'steer' | 'follow-up'): Promise<ThreadMessage> {
-  if (liveMode && (selectedTargets || approvalDigest))
+  if (liveMode === 'steer' && (selectedTargets || approvalDigest))
     throw new ThreadChatError(409, 'Live Pi instructions cannot grant a new Story write scope.')
   // Reserve the UUID and its exact place in the queue *synchronously* before
   // any native validation, Git access or other asynchronous scope inference.
@@ -118,11 +118,13 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   // queued message. Return the durable current version without inferring or
   // granting a new scope from the stale pre-edit text.
   if (saved.content !== content.trim()) return latest()
-  if (saved.liveMode && liveMode) {
+  if (saved.liveMode === 'steer') {
     if (selectedTargets || approvalDigest)
       throw new ThreadChatError(409, 'Steering is not a new scope approval or a writer grant.')
     return latest()
   }
+  // Explicit follow-ups use the same verified-source admission as normal Turns.
+  // They never inherit the current running specialist's scope or Pi session.
   if (saved.phase === 'cancelled')
     throw new ThreadChatError(409, 'This instruction was cancelled. Send a new instruction with a new ID.')
   const pinnedRow = { scope: await store.persistence.revisions.scope(owner, threadId, id) }

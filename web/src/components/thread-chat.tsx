@@ -22,7 +22,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       query.state.data?.runs.at(-1)?.status === 'running' ? 2500 : 15000,
   })
   const [message, setMessage] = useState('')
-  const [liveMode, setLiveMode] = useState<'steer' | 'follow-up'>('steer')
+  const [liveMode, setLiveMode] = useState<'steer' | 'follow-up'>('follow-up')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [pendingRetry, setPendingRetry] = useState<{ id: string; content: string } | null>(null)
@@ -65,7 +65,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       setPendingRetry(null)
       setMessage('')
       const candidate = result.chat.messages.find(item => item.id === id)
-      const firstQueued = result.chat.messages.filter(item => item.role === 'user' && item.phase === 'queued')
+      const firstQueued = result.chat.messages.filter(item => item.role === 'user' && item.phase === 'queued' && item.liveMode !== 'steer')
         .sort((a, b) => a.queuePriority - b.queuePriority || a.sequence - b.sequence)[0]
       const currentRun = result.chat.runs.at(-1)
       if (candidate?.phase === 'queued' && !candidate.hasRevisionScope &&
@@ -219,7 +219,12 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           <strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong>
           <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString()}</time>
           {item.role === 'user' && item.phase === 'cancelled' ? <span>Cancelled</span> :
-           item.role === 'user' && item.liveMode
+           item.role === 'user' && item.liveMode === 'follow-up'
+            ? <span>{item.phase === 'running' ? 'Turn running' :
+                item.phase === 'finished' ? 'Turn verified' :
+                item.phase === 'blocked' ? 'Turn blocked · review source' :
+                item.hasRevisionScope ? 'Next Turn · reviewed scope' : 'Next Turn · waiting for verified checkpoint / scope review'}</span> :
+           item.role === 'user' && item.liveMode === 'steer'
             ? <span>{item.effectVerifiedAt ? 'Effect independently verified' :
                 item.liveState === 'delivered' ? 'Pi acknowledged · effect not independently verified' :
                 item.liveState === 'sdk-queued' ? 'Sent to Pi · awaiting acknowledgement' :
@@ -257,7 +262,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
             </li>)}
           </ol>
         </details>}
-        {item.liveMode && (item.livePiSessionId || item.liveWorkItem || item.liveDeliveredAt) &&
+        {item.liveMode === 'steer' && (item.livePiSessionId || item.liveWorkItem || item.liveDeliveredAt) &&
           <details className="mt-1 text-xs text-muted-foreground">
             <summary className="cursor-pointer">Pi delivery provenance</summary>
             <p>Source run: {item.liveSourceJobId}</p>
@@ -281,8 +286,8 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         {item.role === 'user' && item.phase === 'queued' && !data?.archived &&
           !['dispatching', 'sdk-queued'].includes(item.liveState ?? '') &&
           <div className="mt-2 flex flex-wrap gap-2">
-            {!item.hasRevisionScope && latest?.status === 'completed' && latest.queuePhase === 'finished' &&
-              item.id === data?.messages.filter(m => m.role === 'user' && m.phase === 'queued')
+            {item.liveMode !== 'steer' && !item.hasRevisionScope && latest?.status === 'completed' && latest.queuePhase === 'finished' &&
+              item.id === data?.messages.filter(m => m.role === 'user' && m.phase === 'queued' && m.liveMode !== 'steer')
                 .sort((a, b) => a.queuePriority - b.queuePriority || a.sequence - b.sequence)[0]?.id &&
               <Button type="button" size="sm" variant="outline" disabled={sending}
                 onClick={() => void reviewQueuedMessage(item)}>Review queued scope</Button>}
@@ -294,7 +299,7 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           </div>}
         {item.phase === 'cancelled' && item.cancelledAt &&
           <p className="mt-1 text-xs text-muted-foreground">Cancelled at {new Date(item.cancelledAt).toLocaleString()}. Original request retained for history.</p>}
-        {data && item.role === 'user' && !item.liveMode && item.status === 'delivered' &&
+        {data && item.role === 'user' && item.liveMode !== 'steer' && item.status === 'delivered' &&
           item.phase === 'finished' && !data.archived &&
           <ThreadMessageEdit key={item.id} threadId={threadId} storyId={data.storyId}
             messageId={item.id} original={item.content}
@@ -402,13 +407,13 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         'This run cannot accept follow-ups. Use the recovery actions above to continue safely.'}
     </p>}
     {latest?.status === 'running' && !latest.fixture && !data?.archived &&
-      <div role="group" aria-label="Live message delivery" className="mx-auto mb-2 flex max-w-3xl gap-2 text-xs">
+      <div role="group" aria-label="Live message delivery" className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2 text-xs">
         <Button type="button" size="sm" variant={liveMode === 'steer' ? 'secondary' : 'outline'}
           aria-pressed={liveMode === 'steer'} disabled={sending} onClick={() => setLiveMode('steer')}>
-          Steer · after current Pi turn</Button>
+          Steer current work · next safe Pi boundary</Button>
         <Button type="button" size="sm" variant={liveMode === 'follow-up' ? 'secondary' : 'outline'}
           aria-pressed={liveMode === 'follow-up'} disabled={sending} onClick={() => setLiveMode('follow-up')}>
-          Follow up · after Pi task</Button>
+          Queue next Turn · after verified checkpoint</Button>
       </div>}
     <form onSubmit={event => { event.preventDefault(); void send() }} className="mx-auto flex max-w-3xl min-w-0 items-end gap-2">
       <textarea aria-label="Follow-up message" rows={2} maxLength={4000} value={message}

@@ -368,20 +368,23 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
             ['blocked', 'paused', 'cancelled'].includes(run.status)))
           throw new ThreadMessageConflict(409,
             'This Thread cannot accept follow-ups while generation is stopped. Review its saved decision or recovery checkpoint.')
-        if (mode && (run.status !== 'running' || run.queuePhase !== 'running'))
-          throw new ThreadMessageConflict(409, 'Steer or Follow up is available only while a generation run is active.')
+        if (mode === 'steer' && (run.status !== 'running' || run.queuePhase !== 'running'))
+          throw new ThreadMessageConflict(409, 'Steer is available only while a generation run is active.')
         db.insert(m).values({
           id, ownerUserId: owner, threadId, sequence: nextThreadSequenceSqlite(db, threadId),
           role: 'user', status: 'queued', body, phase: 'queued', createdAt: at,
         }).run()
         if (mode) {
-          const target = db.select({
+          // A follow-up is a future author Turn, never Pi SDK followUp().
+          // Record the explicit choice without binding it to a specialist,
+          // granting future-HEAD scope, or dispatching it to a live session.
+          const target = mode === 'steer' ? db.select({
             token: threadActivePiTurns.piToken, workItem: threadActivePiTurns.workItem,
             expectedHead: threadActivePiTurns.expectedHead,
           }).from(threadActivePiTurns).innerJoin(generationRunQueue, and(
             eq(generationRunQueue.jobId, threadActivePiTurns.jobId),
             eq(generationRunQueue.ownerUserId, owner), eq(generationRunQueue.phase, 'running'),
-          )).where(eq(threadActivePiTurns.jobId, run.jobId)).get()
+          )).where(eq(threadActivePiTurns.jobId, run.jobId)).get() : undefined
           db.insert(threadLiveInputs).values({
             messageId: id, ownerUserId: owner, threadId, sourceJobId: run.jobId, mode,
             state: target ? 'pending' : 'deferred', createdAt: at,

@@ -3,7 +3,8 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { generationRunQueue as queue, sessions, storyThreads as threads,
   storyThreadRuns as runs, storyThreadMessages as messages, storyThreadMessageCancellations as cancellations,
-  storyTurnExecutions as turnExecutions, threadSteeringIntents as steeringIntents } from '../db/schema'
+  storyTurnExecutions as turnExecutions, threadLiveInputs as liveInputs,
+  threadSteeringIntents as steeringIntents } from '../db/schema'
 import { insertThreadAssistantSqlite, nextThreadSequenceSqlite,
   seedThreadMessagesSqlite } from './thread-message-sqlite'
 import { consumeProtectedDecisionSqlite } from './approval-revision-sqlite'
@@ -38,7 +39,10 @@ export function createSqliteContinuationPersistence(db: Db,
       id: messages.id, content: messages.body, scope: messages.revisionScopeJson,
     }).from(messages).where(and(eq(messages.ownerUserId, owner),
       eq(messages.threadId, threadId), eq(messages.role, 'user'),
-      eq(messages.phase, 'queued'), notExists(
+      eq(messages.phase, 'queued'),
+      notExists(db.select({ id: liveInputs.messageId }).from(liveInputs).where(and(
+        eq(liveInputs.messageId, messages.id), eq(liveInputs.mode, 'steer')))),
+      notExists(
         db.select({ id: cancellations.messageId }).from(cancellations)
           .where(eq(cancellations.messageId, messages.id)),
       ))).orderBy(ordered, asc(messages.sequence)).limit(1).get() ?? null

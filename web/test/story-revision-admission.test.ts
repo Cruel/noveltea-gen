@@ -146,7 +146,23 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.deepEqual(firstReceipt.executions.map(run => ({ jobId: run.jobId, inputSha: run.inputSha,
         validatedSha: run.validatedSha })), [{ jobId: firstId, inputSha: sha, validatedSha: null }])
       assert.equal(firstChat.runs.length, 2)
+      if (kind === 'multi-turn' || kind === 'unverified-crash') {
+        // The queued child has been claimed by the agent and is executing
+        // its first specialist when the author sends another Turn.
+        ;(await store.testing.records.update('studio_sessions', { id: firstId }, { status: 'running' }))
+        ;(await store.testing.records.update('generation_run_queue', { jobId: firstId }, { phase: 'running' }))
+      }
       const secondTask = 'Make event.confession more suspenseful'
+      if (kind === 'multi-turn' || kind === 'unverified-crash') {
+        const queued = await submitThreadRevision(store, owner, threadId, secondId, secondTask,
+          undefined, undefined, 'follow-up')
+        assert.equal(queued.liveMode, 'follow-up')
+        assert.equal(queued.liveState, 'deferred', 'future Turn must not acquire a Pi lease')
+        assert.equal(queued.hasRevisionScope, 0, 'future HEAD cannot be preapproved')
+        await Promise.all([advanceThread(store, owner, threadId), advanceThread(store, owner, threadId)])
+        assert.equal((await readThreadChat(store, owner, threadId)).runs.length, 2,
+          'running first Turn prevents admission of a second writer')
+      }
       await assert.rejects(previewThreadRevision(store, owner, threadId, secondTask),
         /preceding Thread instruction|Finish or reconcile/, 'an unfinished first Turn cannot seed the next writer')
       const firstChild = await restoreJob(await selectedJob(store, owner, firstId), owner)
@@ -174,8 +190,19 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         assert.equal(unsafe.runs.at(-1)?.status, 'blocked')
         assert.equal(unsafe.turnReceipts.find(turn => turn.id === firstId)?.executions[0]?.validatedSha,
           null, 'the unverified Git HEAD must not become an inheritable checkpoint')
+        assert.equal(unsafe.messages.find(message => message.id === secondId)?.phase, 'queued',
+          'previously queued next Turn must survive failure without gaining a writer')
+        assert.equal(unsafe.messages.find(message => message.id === secondId)?.hasRevisionScope, 0,
+          'unverified output never authorizes queued scope')
+        await advanceThread(store, owner, threadId)
+        assert.equal(await store.testing.records.count('story_thread_runs'), 2,
+          'an unverified source cannot dispatch the queued next Turn')
+        assert.equal((await submitThreadRevision(store, owner, threadId,
+          secondId, secondTask, undefined, undefined, 'follow-up')).phase, 'queued',
+        'idempotent retry must retain already-queued author intent')
         await assert.rejects(() => submitThreadRevision(store, owner, threadId,
-          secondId, secondTask), /cannot accept follow-ups/i)
+          randomUUID(), secondTask), /cannot accept follow-ups/i,
+        'new Turns are disallowed while the source requires recovery')
         assert.equal(git(firstChild.worktreeRoot, 'rev-parse', 'HEAD'), firstOutput,
           'reconciliation leaves the unverified branch intact for inspection')
         assert.equal(await store.testing.records.count('story_thread_runs'), 2)
@@ -209,11 +236,20 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         firstOutput)
       assert.equal(settled.messages.filter(message => message.id === 'assistant:' + firstId).length, 1,
         'settlement and restart recovery must not duplicate chat delivery')
-      const secondPlan = await previewThreadRevision(store, owner, threadId, secondTask)
-      assert.equal(secondPlan.headSha, firstOutput)
-      assert.deepEqual(secondPlan.targets, ['event.confession'])
-      await submitThreadRevision(store, owner, threadId, secondId, secondTask)
-      await Promise.all([advanceThread(store, owner, threadId), advanceThread(store, owner, threadId)])
+      if (kind === 'multi-turn') {
+        const alreadyAdmitted = await readThreadChat(store, owner, threadId)
+        assert.equal(alreadyAdmitted.messages.find(m => m.id === secondId)?.phase, 'running',
+          'settling the verified source should admit the queued Turn exactly once')
+        assert.deepEqual(alreadyAdmitted.runs.map(r => r.jobId), [sourceId, firstId, secondId])
+        assert.equal(alreadyAdmitted.messages.find(m => m.id === secondId)?.liveState, 'deferred',
+          'the queued Turn is never marked as a consumed Pi steer')
+      } else {
+        const secondPlan = await previewThreadRevision(store, owner, threadId, secondTask)
+        assert.equal(secondPlan.headSha, firstOutput)
+        assert.deepEqual(secondPlan.targets, ['event.confession'])
+        await submitThreadRevision(store, owner, threadId, secondId, secondTask)
+        await Promise.all([advanceThread(store, owner, threadId), advanceThread(store, owner, threadId)])
+      }
       const secondChild = await restoreJob(await selectedJob(store, owner, secondId), owner)
       assert.equal(secondChild.baseSha, firstOutput)
       assert.equal(git(firstChild.worktreeRoot, 'rev-parse', 'HEAD'), firstOutput)

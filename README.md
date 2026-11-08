@@ -1767,8 +1767,8 @@ still rejects unapproved retcons that language-level inference misses.
 
 ### Live Thread steering and deferred follow-ups (#86)
 
-While a real Pi generation run is active, Thread chat defaults to **Steer**;
-the author can explicitly select **Follow up** instead. Steer saves a durable,
+While a real Pi generation run is active, Thread chat defaults to **Queue next Turn**;
+the author can explicitly select **Steer current work** instead. Steer saves a durable,
 owner-scoped message tied to the running job. The trusted agent host delivers
 pending messages through only that job's active specialist Pi SDK `steer()`
 method, after the current turn and tool calls. It cannot start another writer,
@@ -1778,17 +1778,23 @@ and protected Creative Decisions; native structural validation remains binding.
 
 After the turn settles, an exact matching user message in the Pi transcript is
 required before Studio marks a live message delivered. An ambiguous SDK
-dispatch is blocked for inspection rather than replayed. **Follow up** goes
-to the same active Pi session's SDK `followUp()` queue, which runs only once
-that specialist's current task settles; it cannot authorize another writer.
+dispatch is blocked for inspection rather than replayed. **Queue next Turn**
+persists an explicit follow-up marker in the same Thread, but never calls Pi
+SDK `followUp()`. It waits for the prior Turn's exact eligible verified Git
+revision and fresh impact/scope review. It cannot reserve a future HEAD,
+invent another Thread, or authorize an additional writer during the running Turn.
 SQLite serializes active Pi-turn registration, message admission, and turn
 closure. Messages are pinned to the precise turn active *at submission*; a
 message arriving during graph scheduling, commit, checkpoint publication, or
 just as Pi settles instead receives **pending coordinator routing** status.
 It is never blindly passed to a later specialist. Once the source run settles,
-it remains an ordinary queued next-run instruction eligible only for fresh,
-verified canonical impact analysis and bounded scope review. Ordering prevents
-later messages from overtaking earlier deferred author requests.
+it remains a deferred steer, not an automatic next Turn. An author can edit
+or withdraw it while unsent. Independently queued next Turns remain eligible
+only for fresh verified canonical impact analysis and bounded scope review;
+they never prevent a separate, safe current-session steer from being delivered.
+The queued Turn/active steer provenance trigger is corrected by Drizzle migration
+`0003_queued_turn_isolation`; run `pnpm --filter @noveltea/studio migrate`
+with Studio stopped before starting the updated application.
 
 Schema v25 persists the author-selected mode, source job, SDK turn identity
 and send/acknowledgement/deferred/blocked status independently of Thread text.
@@ -1801,8 +1807,9 @@ not proof of fulfillment**: an effect can be marked verified only with a
 separate review anchored to a controller-verified Story commit, never by the
 Pi transcript itself. Worker restart fences uncertain SDK calls rather than
 replaying them. Reconnected clients read the same durable queue and provenance. The
-credential-free tests cover actual Pi SDK tool-boundary steering and
-follow-up model turns (`web/test/pi-sdk-steering.test.ts`), plus durable
+credential-free SDK tests cover Pi tool-boundary steering and its separate
+low-level `followUp()` facility (`web/test/pi-sdk-steering.test.ts`); Studio
+only uses steering, plus durable
 Studio routing, cancellation, reconnect, ordering and failure cases
 (`web/test/thread-live-steering.test.ts`). A failed acknowledgement also
 retains the writer lease and persists a non-successful interruption receipt.

@@ -87,20 +87,21 @@ export function createSqliteSteeringSync(db: Db): SynchronousSteering {
         JOIN story_thread_messages m ON m.id=l.message_id AND m.owner_user_id=l.owner_user_id
           AND m.thread_id=l.thread_id
         JOIN generation_run_queue q ON q.job_id=l.source_job_id AND q.owner_user_id=l.owner_user_id
-        WHERE l.state='pending' AND q.phase='running'
+        WHERE l.mode='steer' AND l.state='pending' AND q.phase='running'
           AND m.phase='queued'
           AND EXISTS (SELECT 1 FROM thread_active_pi_turns t
             WHERE t.job_id=l.source_job_id AND t.pi_token=l.target_pi_token)
           AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id)
-          AND NOT EXISTS (SELECT 1 FROM story_thread_messages earlier
-            WHERE earlier.thread_id=m.thread_id AND earlier.owner_user_id=m.owner_user_id
-              AND earlier.role='user' AND earlier.sequence<m.sequence AND earlier.phase='queued'
+          -- Queued future Turns are independent of current Pi steering.
+          -- Only an earlier unsent steer for this exact run can hold dispatch.
+          AND NOT EXISTS (SELECT 1 FROM thread_live_inputs prior
+            JOIN story_thread_messages earlier ON earlier.id=prior.message_id
+            WHERE prior.thread_id=l.thread_id AND prior.owner_user_id=l.owner_user_id
+              AND prior.source_job_id=l.source_job_id AND prior.mode='steer'
+              AND prior.state IN ('pending','dispatching')
+              AND earlier.sequence<m.sequence AND earlier.phase='queued'
               AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c
-                WHERE c.message_id=earlier.id)
-              AND NOT EXISTS (SELECT 1 FROM thread_live_inputs prior
-                WHERE prior.message_id=earlier.id
-                  AND prior.source_job_id=l.source_job_id AND prior.state='sdk-queued'
-                  AND (prior.mode='steer' OR l.mode='follow-up')))
+                WHERE c.message_id=earlier.id))
         ORDER BY m.sequence LIMIT 32`) as PendingPiInput[]
     },
     turn(jobId, piToken) {
@@ -112,7 +113,7 @@ export function createSqliteSteeringSync(db: Db): SynchronousSteering {
       return db.run(sql`UPDATE thread_live_inputs SET
         state='dispatching',pi_token=${token},pi_session_id=${sessionId}
         WHERE message_id=${item.id} AND owner_user_id=${item.owner}
-          AND source_job_id=${item.jobId} AND state='pending'
+          AND source_job_id=${item.jobId} AND mode='steer' AND state='pending'
           AND target_pi_token=${token}
           AND EXISTS (SELECT 1 FROM thread_active_pi_turns t
             WHERE t.job_id=thread_live_inputs.source_job_id
@@ -246,7 +247,7 @@ export function createSqliteSteeringSync(db: Db): SynchronousSteering {
         const pending = db.all(sql`SELECT l.message_id AS id,l.thread_id AS threadId
           FROM thread_live_inputs l JOIN story_thread_messages m ON m.id=l.message_id
           WHERE l.owner_user_id=${owner} AND l.source_job_id=${jobId}
-            AND l.state IN ('pending','deferred') AND m.phase='queued'
+            AND l.mode='steer' AND l.state IN ('pending','deferred') AND m.phase='queued'
             AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c
               WHERE c.message_id=l.message_id)`) as Array<{ id: string; threadId: string }>
         for (const row of pending) db.insert(links).values({
@@ -352,7 +353,7 @@ export function createSqliteSteeringSync(db: Db): SynchronousSteering {
             WHERE latest.message_id=l.message_id AND latest.association='pending-unresolved'
             ORDER BY latest.rowid DESC LIMIT 1)
         WHERE l.owner_user_id=${owner} AND l.thread_id=${threadId}
-          AND l.state IN ('pending','deferred')
+          AND l.mode='steer' AND l.state IN ('pending','deferred')
           AND NOT EXISTS (SELECT 1 FROM thread_steering_intents i WHERE i.message_id=l.message_id)
         ORDER BY l.created_at,l.message_id`) as SteeringActivity[]
       return [...considered, ...pending]

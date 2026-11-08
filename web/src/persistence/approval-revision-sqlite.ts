@@ -3,7 +3,7 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { generationRunQueue, repositories, sessions, stories, storyThreadMessageCancellations,
   storyThreadMessages, storyThreadRuns, storyThreads, threadProtectedDecisions,
-  threadSteeringIntents } from '../db/schema'
+  threadLiveInputs, threadSteeringIntents } from '../db/schema'
 import { ThreadMessageConflict } from './thread-message-contracts'
 import type { ApprovalJobCatalog, ProtectedDecisionGrant, ProtectedDecisionReceipt,
   ProtectedDecisionRecords, RevisionQueueHead, RevisionRun, RevisionRecords } from './publication-contracts'
@@ -20,6 +20,8 @@ function queueHead(db: Db, owner: string, threadId: string): RevisionQueueHead |
   return db.select({ id: m.id, content: m.body, phase: m.phase }).from(m)
     .where(and(eq(m.ownerUserId, owner), eq(m.threadId, threadId), eq(m.role, 'user'),
       sql`${m.phase} in ('queued','preparing','running','blocked')`,
+      notExists(db.select({ id: threadLiveInputs.messageId }).from(threadLiveInputs)
+        .where(and(eq(threadLiveInputs.messageId, m.id), eq(threadLiveInputs.mode, 'steer')))),
       notExists(db.select({ id: storyThreadMessageCancellations.messageId })
         .from(storyThreadMessageCancellations).where(eq(storyThreadMessageCancellations.messageId, m.id)))))
     .orderBy(sql`COALESCE((SELECT original.sequence FROM thread_steering_intents intent

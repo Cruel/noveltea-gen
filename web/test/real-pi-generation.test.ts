@@ -196,8 +196,8 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     assert.equal(ready, true, 'independent trusted agent must accept and execute real Pi jobs')
     // Optional real SDK certification for #86. It uses the same separate
     // trusted agent and rootless Pi process, NOT the test's in-memory fake.
-    // Steering and follow-up must both reach that exact session and appear
-    // in its persisted transcript; tests without live credentials stay off.
+    // Steering must reach the exact Pi session; a future Turn must stay in
+    // the durable Thread queue, never enter the active SDK transcript.
     let liveSteeringIds: string[] = []
     if (process.env.NT_TEST_WEB_PI_STEERING === '1') {
       await ensureRootThreads(store, user.id, storyId)
@@ -222,8 +222,9 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
         'After the current Pi task, check the assigned result for consistency without expanding scope.',
         undefined, undefined, 'follow-up')
       assert.equal(steer.liveState, 'pending')
-      assert.equal(follow.liveState, 'pending')
-      liveSteeringIds = [steerId, followId]
+      assert.equal(follow.liveState, 'deferred')
+      assert.equal(follow.hasRevisionScope, 0)
+      liveSteeringIds = [steerId]
     }
     const deadline = Date.now() + 250_000
     let verified = false, finished = false
@@ -239,8 +240,11 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       const chat = (await readThreadChat(store, user.id, 'root:' + jobId))
       for (const id of liveSteeringIds) {
         assert.equal(chat.messages.find(message => message.id === id)?.liveState,
-          'delivered', 'Real Pi must consume and persist each exact live SDK message')
+          'delivered', 'Real Pi must consume and persist the exact live steer')
       }
+      const follow = chat.messages.find(message => message.liveMode === 'follow-up')
+      assert.ok(follow, 'future author Turn must remain in the Thread')
+      assert.equal(follow.liveState, 'deferred', 'no Pi SDK followUp delivery')
     }
     if (!verified) {
       const events = (await listGenerationEvents(store, user.id, jobId, 0)).map(e =>
