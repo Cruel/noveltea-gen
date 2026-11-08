@@ -51,8 +51,18 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   if (!selected) throw new RecoveryCompatibilityError("invalid-evidence",
     "Checkpoint is not finalized and independently verified.");
   assertRecoveryCompatibility(selected);
-  const { eligible: _eligible, reason: _reason, ...checkpoint } = selected;
+  const { eligible: _eligible, reason: _reason, semanticReview: _semanticReview, ...checkpoint } = selected;
   const inherited = readRecoveryFork(parent);
+  // Each source reviewer decision is resolved exactly at fork admission. The
+  // child retains that versioned status and cannot inherit a later pass.
+  const previousCoverage = inherited?.reviewCoverage ?? [];
+  const currentCoverage = points.filter(p => p.eligible && p.assurance && (() => {
+    try { git(parent, "merge-base", "--is-ancestor", p.commitSha, commitSha); return true; }
+    catch { return false; }
+  })()).map(p => ({ workItem: p.workItem, commitSha: p.commitSha,
+    status: p.semanticReview === "untracked" ? "required-pending" as const : p.semanticReview }));
+  const reviewCoverage = [...new Map([...previousCoverage, ...currentCoverage]
+    .map(entry => [entry.commitSha, entry])).values()];
   const plan = checkpoint.plan as Plan | null;
   const completed = new Set(checkpoint.completedWorkItems);
   const receipts: RecoveryForkBundle["receipts"] = {};
@@ -126,7 +136,7 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   const toolchain = await selectCurrentRecoveryToolchain(parent, checkpoint, skillsSource);
   return { version: 2, toolchain, sourceJobId: parent.jobId, sourceBaseSha: parent.baseSha,
     storyRoot: parent.storyRoot, childId, checkpoint: checkpoint as RecoveryCheckpoint,
-    contract: plan?.contract ?? contract, receipts, commits, completedStages };
+    reviewCoverage, contract: plan?.contract ?? contract, receipts, commits, completedStages };
 }
 async function writeOnce(path: string, value: string) {
   if (existsSync(path)) {

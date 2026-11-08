@@ -120,6 +120,15 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     source: point.source, snapshotId: point.snapshotId,
     completedWorkItems: point.completedWorkItems, remainingWorkItems: point.remainingWorkItems,
     nextWorkItem: point.nextWorkItem, dependencies: point.dependencies, validation: point.validation,
+    semanticReview: point.semanticReview,
+    assurance: point.eligible && point.assurance ? {
+      assignmentId: point.assurance.assignmentId,
+      changedPaths: point.assurance.changedPaths,
+      changedRecordTypes: point.assurance.changedRecordTypes,
+      reasons: point.assurance.reviewSelection.reasons,
+      diffDigest: point.assurance.diffDigest,
+      assignmentDigest: point.assurance.assignmentDigest,
+    } : null,
     reason: point.eligible ? null : point.reason?.includes("finalization is incomplete")
       ? "Checkpoint finalization is incomplete; reconcile the original receipt."
       : "Checkpoint failed verification; operator reconciliation required.",

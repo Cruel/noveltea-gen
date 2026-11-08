@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
+import type { SemanticReviewStatus } from "./checkpoint-assurance.js";
 import type { GenerationEvidence } from "./generation-plan.js";
 import type { CompletionContract } from "./architecture.js";
 import { openSkillSnapshot } from "./snapshot.js";
@@ -20,6 +21,9 @@ export interface RecoveryForkBundle {
   storyRoot: string;
   childId: string;
   checkpoint: RecoveryCheckpoint;
+  /** Status pinned at fork admission; later parent reviews cannot silently
+   * authorize writes in this independently versioned child Thread. */
+  reviewCoverage?: Array<{ workItem: string; commitSha: string; status: SemanticReviewStatus }>;
   contract: CompletionContract;
   receipts: Record<string, SpecialistReceipt>;
   commits: Record<string, { sha: string; jobId: string; planVersion: number | null }>;
@@ -45,6 +49,13 @@ export function readRecoveryFork(job: JobStartResult, requireReady = true): Reco
       bundle.sourceJobId !== pin.sourceJobId || bundle.sourceBaseSha !== pin.sourceBaseSha ||
       bundle.checkpoint.commitSha !== job.baseSha || pin.commitSha !== job.baseSha ||
       forkDigest(bundle) !== pin.bundleSha256 ||
+      (bundle.reviewCoverage !== undefined && (!Array.isArray(bundle.reviewCoverage) ||
+        bundle.reviewCoverage.some(item => !/^[a-f0-9]{40}$/.test(item.commitSha) ||
+          !bundle.checkpoint.completedWorkItems.includes(item.workItem) ||
+          !["not-required", "required-pending", "passed", "failed"].includes(item.status)) ||
+        new Set(bundle.reviewCoverage.map(item => item.commitSha)).size !== bundle.reviewCoverage.length)) ||
+      (bundle.checkpoint.assurance && !bundle.reviewCoverage?.some(item =>
+        item.commitSha === bundle.checkpoint.commitSha && item.workItem === bundle.checkpoint.workItem)) ||
       (requireReady && regular(join(job.stateDir, "recovery-fork-ready")).trim() !== pin.bundleSha256)) {
     throw new Error("Fork continuation is incomplete or differs from its immutable job pin.");
   }

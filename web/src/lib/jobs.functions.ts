@@ -23,6 +23,9 @@ export type JobOverview = {
     completedWorkItems: string[]; remainingWorkItems: string[]
     nextWorkItem: string | null; dependencies: Record<string, string[]>
     validation: { status: string; validatorVersion: string }
+    semanticReview: 'untracked' | 'not-required' | 'required-pending' | 'passed' | 'failed'
+    assurance: { assignmentId: string; changedPaths: string[]; changedRecordTypes: string[];
+      reasons: string[]; diffDigest: string; assignmentDigest: string } | null
   }>
   recovery?: {
     kind: 'manual-specialist' | 'operator-reconciliation'

@@ -9,6 +9,7 @@ import { authorInteractive, type InteractiveAssignment, type InteractiveDomain, 
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
+import { assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { verifiedNarrativeSuccessor, verifiedCompositionSuccessor } from "./job-successor.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { fixtureCluster } from "./fixture-cluster.js";
@@ -817,6 +818,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         if (current === unit.commitSha) await publishHead(job, before, unit.commitSha, unit.id);
         return;
       }
+      if (index > 0) await assertNativeReviewDependencies(job, unit.id);
       if (unit.phase === "writing") {
         throw new Error("Interrupted interactive specialist; inspect the preserved uncommitted Story and Pi transcript.");
       }

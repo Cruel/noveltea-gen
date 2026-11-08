@@ -7,6 +7,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { trustedHead } from "./revision.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
+import { checkpointAssurance, inspectCheckpointReview, type CheckpointAssurance, type SemanticReviewStatus } from "./checkpoint-assurance.js";
 
 /**
  * Recovery checkpoints are *logical* continuation records, not copies of a live
@@ -157,11 +158,14 @@ export interface RecoveryCheckpoint {
   nextWorkItem: string | null; dependencies: Record<string, string[]>;
   validation: { status: "passed" | "unverified-empty-baseline" | "not-verified"; validatorVersion: string };
   source: string; proofDigest: string; snapshotId: string | null;
+  /** Controller-derived review selection, sealed with the original native checkpoint. */
+  assurance?: CheckpointAssurance | null;
   compatibility: { logicalSchema: "noveltea-recovery/v1"; graphSchema: "noveltea-generation/v1" };
   /** Context references, never transferable approval grants. */
   provenance: { authorApprovals: "source-bound-not-reusable"; authorMessages: "source-bound-not-reusable" };
 }
-export type RecoveryInspection = RecoveryCheckpoint & { eligible: boolean; reason: string | null };
+export type RecoveryInspection = RecoveryCheckpoint & { eligible: boolean; reason: string | null;
+  semanticReview: SemanticReviewStatus | "untracked" };
 interface RecoveryIntent {
   version: 2; jobId: string; commitSha: string; parentSha: string; workItem: string;
   proofDigest: string; planDigest: string | null; architectureProof: Receipt | null;
@@ -393,6 +397,9 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
         architecture.verifiedSha !== point.commitSha)
       throw new Error("Historical Architecture proof differs from the authorized plan commit.");
   }
+  const review = await inspectCheckpointReview(job, point);
+  if (!review && await checkpointAssurance(job, point))
+    throw new Error("Turn checkpoint lacks its required original review-selection receipt.");
   if (point.planVersion !== (source.planVersion ?? (point.plan as { version?: number } | null)?.version ?? null) ||
       point.validation.status !== (source.proof.validation === "unverified-empty-baseline"
         ? "unverified-empty-baseline" : "passed") ||
@@ -413,7 +420,7 @@ function nonBranchable(job: JobStartResult, sha: string, reason: string): Recove
     source: "", proofDigest: "", snapshotId: null,
     compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
     provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
-    eligible: false, reason };
+    eligible: false, reason, semanticReview: "untracked" };
 }
 export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<RecoveryInspection[]> {
   if (!existsSync(dir(job))) return [];
@@ -439,7 +446,9 @@ export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<R
       if (boundaryError) throw boundaryError;
       const point = await readFinal(job, file.slice(0, 40));
       await verifyFinal(job, point, head);
-      results.push({ ...point, eligible: true, reason: null });
+      const review = point.assurance ? await inspectCheckpointReview(job, point) : null;
+      results.push({ ...point, eligible: true, reason: null,
+        semanticReview: review?.status ?? "untracked" });
     } catch (error) {
       // Inspectable, never branchable. Do not repair or trust a corrupt record
       // during an owner-scoped read, including a currently dirty specialist.
@@ -532,6 +541,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     compatibility: { logicalSchema: "noveltea-recovery/v1", graphSchema: "noveltea-generation/v1" },
     provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
   };
+  point.assurance = await checkpointAssurance(job, point);
   await atomic(finalizedFile(job, commitSha), point);
   await verifyFinal(job, point);
   return point;

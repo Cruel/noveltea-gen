@@ -42,6 +42,16 @@ export function CheckpointTimeline({ job }: { job: JobOverview }) {
         <div>Next: {point.nextWorkItem ?? 'No ready work item'} · Remaining: {point.remainingWorkItems.join(', ') || 'none'}</div>
         {point.nextWorkItem && <div>Next prerequisites: {(point.dependencies[point.nextWorkItem] ?? []).join(', ') || 'none'}</div>}
         <div>Validator: {point.validation.status} (<code>{point.validation.validatorVersion.slice(0, 12)}</code>)</div>
+        <div>Independent specialist review: {point.semanticReview === 'not-required' ? 'Not required' :
+          point.semanticReview === 'required-pending' ? 'Required · pending' :
+          point.semanticReview === 'passed' ? 'Passed' :
+          point.semanticReview === 'failed' ? 'Failed · dependent work blocked' : 'Not recorded'}</div>
+        {point.assurance && <>
+          <div>Assignment: {point.assurance.assignmentId} · Records: {point.assurance.changedRecordTypes.join(', ')}</div>
+          <div>Selection: {point.assurance.reasons.join(', ') || 'Routine bounded change'}</div>
+          <div>Changed files: {point.assurance.changedPaths.join(', ')}</div>
+          <div>Assignment proof: <code>{point.assurance.assignmentDigest.slice(0, 20)}</code> · Diff: <code>{point.assurance.diffDigest.slice(0, 20)}</code></div>
+        </>}
         {point.eligible && <>
           <div>Parent commit: <code>{point.parentSha.slice(0, 12)}</code> · Receipt: {point.source}</div>
           <div>Receipt proof: <code>{point.proofDigest.slice(0, 20)}</code></div>

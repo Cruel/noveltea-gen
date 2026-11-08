@@ -14,6 +14,7 @@ import { recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice
   completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { DEFAULT_CREATIVE_POLICY } from "./creative-policy.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
@@ -655,6 +656,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         }
         return;
       }
+      if (index > 0) await assertNativeReviewDependencies(job, unit.id);
       if (unit.phase === "writing") {
         throw new Error("Interrupted specialist writing; inspect preserved files and Pi session, then reconcile exact bytes. Never replay the writer.");
       }

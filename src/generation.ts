@@ -26,6 +26,7 @@ import { readJobControl } from "./job-control.js";
 import { inspectJobReport, type JobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints, reconcileRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { blockedByRequiredReview, executionId } from "./checkpoint-assurance.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
 import { generationStages, reconcileInventory, nextExecutionItem, type GenerationStage as Stage,
@@ -241,6 +242,25 @@ async function reconciledFailures(job: JobStartResult, failures: Record<string, 
   for (const key of Object.keys(next)) if (await retryable(key)) delete next[key];
   return next;
 }
+/** Apply only exact verified controller review receipts. A pending/failed
+ * specialist review blocks its transitive dependents, not independent work. */
+async function reviewGatedInventory(job: JobStartResult, inventory: GenerationInventory) {
+  const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(point =>
+    point.eligible && point.assurance);
+  const inherited = readRecoveryFork(job)?.reviewCoverage ?? [];
+  const decisions = [
+    ...inherited.map(point => ({ assignmentId: executionId(point.workItem), status: point.status })),
+    ...checkpoints.map(point => ({ assignmentId: executionId(point.workItem),
+      status: point.semanticReview === "untracked" ? "required-pending" as const : point.semanticReview })),
+  ];
+  const blocked = blockedByRequiredReview(inventory.items, decisions);
+  if (!blocked.size) return inventory;
+  return { ...inventory, items: inventory.items.map(item =>
+    blocked.has(item.id) && item.status === "pending" ? {
+      ...item, status: "blocked" as const,
+      blockingReason: "Required independent specialist review is pending or failed for a dependency.",
+    } : item) };
+}
 async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>> {
   const receipt = await checkPlan(job, s.request, s.planVersion);
   const plan = receipt?.plan;
@@ -276,13 +296,14 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
   }
   // A controller-approved plan revision may require another architecture unit before downstream work.
   if (plan && receipt.phase !== "committed") {
-    const inventory = reconcileInventory(plan, undefined, head, completedStages,
-      failures, s.inventory);
+    const inventory = await reviewGatedInventory(job, reconcileInventory(plan, undefined, head,
+      completedStages, failures, s.inventory));
     return { request, planVersion: plan.version, completedStages, failures, inventory, active: nextExecutionItem(inventory) ?? null };
   }
   const validation = plan && completedStages.some(e => e.stage === "architecture")
     ? await validateStoryJob(job, request.validatorSource ?? request.skillsSource, { ...job, baseSha: head }) : undefined;
-  const inventory = reconcileInventory(plan, validation, head, completedStages, failures, s.inventory);
+  const inventory = await reviewGatedInventory(job,
+    reconcileInventory(plan, validation, head, completedStages, failures, s.inventory));
   return { request, planVersion: plan?.version ?? null, completedStages, failures, inventory, active: nextExecutionItem(inventory) ?? null };
 }
 async function dispatch(s: State) {
