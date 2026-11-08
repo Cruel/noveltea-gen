@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull, notExists, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { checkpointForks, generationRunQueue, githubPublications, gitlabPublications,
-  sessions, stories, storyConversations, storyThreadMessages,
+  sessions, stories, storyThreadMessages,
   storyThreadRuns, storyThreads, threadLiveInputs, threadRestarts } from '../db/schema'
 import type { ConversationCatalog, ThreadDeletionRecord } from './conversation-contracts'
 
@@ -85,12 +85,10 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
       }).from(storyThreadRuns)
         .innerJoin(storyThreads, and(eq(storyThreads.id, storyThreadRuns.threadId),
           eq(storyThreads.ownerUserId, storyThreadRuns.ownerUserId)))
-        .innerJoin(storyConversations, and(eq(storyConversations.id, storyThreads.conversationId),
-          eq(storyConversations.ownerUserId, storyThreads.ownerUserId)))
         .innerJoin(sessions, and(eq(sessions.id, storyThreadRuns.jobId),
           eq(sessions.ownerUserId, storyThreadRuns.ownerUserId)))
         .where(and(eq(storyThreadRuns.ownerUserId, owner),
-          eq(storyConversations.storyId, storyId)))
+          eq(storyThreads.storyId, storyId)))
         .orderBy(storyThreadRuns.threadId, storyThreadRuns.runOrder).all()
     },
     async reconcileRoots(owner, storyId) {
@@ -105,14 +103,9 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
             .where(eq(storyThreadRuns.jobId, sessions.id))),
         )).all()
         for (const job of missing) {
-          const conversationId = 'legacy:' + job.id
           const threadId = 'root:' + job.id
-          tx.insert(storyConversations).values({
-            id: conversationId, ownerUserId: job.owner, storyId: job.story,
-            title: job.title, createdAt: job.createdAt, updatedAt: job.createdAt,
-          }).onConflictDoNothing().run()
           tx.insert(storyThreads).values({
-            id: threadId, ownerUserId: job.owner, conversationId, title: job.title,
+            id: threadId, ownerUserId: job.owner, storyId: job.story, title: job.title,
             activityAt: job.createdAt, createdAt: job.createdAt,
           }).onConflictDoNothing().run()
           tx.insert(storyThreadRuns).values({
@@ -123,14 +116,8 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
     },
     async navigation(owner, storyId) {
       ownerRequired(owner)
-      const conversations = db.select({
-        id: storyConversations.id, title: storyConversations.title,
-        createdAt: storyConversations.createdAt, updatedAt: storyConversations.updatedAt,
-      }).from(storyConversations).where(and(
-        eq(storyConversations.ownerUserId, owner), eq(storyConversations.storyId, storyId),
-      )).all()
       const threads = db.select({
-        id: storyThreads.id, conversationId: storyThreads.conversationId,
+        id: storyThreads.id, storyId: storyThreads.storyId,
         parentThreadId: storyThreads.parentThreadId, title: storyThreads.title,
         activityAt: storyThreads.activityAt, archivedAt: storyThreads.archivedAt,
         deletedAt: storyThreads.deletedAt,
@@ -158,8 +145,6 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
                 AND started.kind = 'started'), 0)
           ORDER BY e.id DESC LIMIT 1)`,
       }).from(storyThreads)
-        .innerJoin(storyConversations, and(eq(storyConversations.id, storyThreads.conversationId),
-          eq(storyConversations.ownerUserId, storyThreads.ownerUserId)))
         .leftJoin(storyThreadRuns, and(eq(storyThreadRuns.threadId, storyThreads.id),
           eq(storyThreadRuns.ownerUserId, storyThreads.ownerUserId),
           eq(storyThreadRuns.runOrder, sql<number>`(SELECT MAX(r2.run_order)
@@ -170,27 +155,18 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
         .leftJoin(generationRunQueue, and(eq(generationRunQueue.jobId, storyThreadRuns.jobId),
           eq(generationRunQueue.ownerUserId, storyThreads.ownerUserId)))
         .where(and(eq(storyThreads.ownerUserId, owner),
-          eq(storyConversations.storyId, storyId))).all()
-      return { conversations, threads }
+          eq(storyThreads.storyId, storyId))).all()
+      return { threads }
     },
     async create(owner, storyId, id, at) {
       ownerRequired(owner)
       return db.transaction(tx => {
-        const count = tx.select({ total: sql<number>`count(*)` }).from(storyConversations)
-          .where(and(eq(storyConversations.ownerUserId, owner),
-            eq(storyConversations.storyId, storyId))).get()?.total ?? 0
-        const title = 'New conversation' + (count ? ' ' + (count + 1) : '')
-        tx.insert(storyConversations).values({
-          id, ownerUserId: owner, storyId, title, createdAt: at, updatedAt: at,
+        const title = 'New Thread'
+        tx.insert(storyThreads).values({
+          id, ownerUserId: owner, storyId, title, createdAt: at, activityAt: at,
         }).run()
         return { id, title }
       })
-    },
-    async renameConversation(owner, id, title, at) {
-      ownerRequired(owner)
-      return db.update(storyConversations).set({ title, updatedAt: at })
-        .where(and(eq(storyConversations.id, id), eq(storyConversations.ownerUserId, owner)))
-        .run().changes === 1
     },
     async renameThread(owner, id, title) {
       ownerRequired(owner)

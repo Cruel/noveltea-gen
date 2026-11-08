@@ -7,22 +7,21 @@ import { previewNaturalStory, launchNaturalStory, type NaturalStoryInput } from 
 import type { PlanEdits } from './natural-story-plan'
 
 const ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
-const CONVERSATION = /^(?:legacy:)?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 export const previewStoryPrompt = createServerFn({ method: 'POST' })
-  .validator((data: { conversationId: string; prompt: string; edits?: PlanEdits }) => {
-    if (!data || !CONVERSATION.test(data.conversationId) || typeof data.prompt !== 'string' ||
+  .validator((data: { storyId: string; prompt: string; edits?: PlanEdits }) => {
+    if (!data || !ID.test(data.storyId) || typeof data.prompt !== 'string' ||
         data.prompt.length > 4000) throw new Error('Invalid Story prompt.')
     return data
   })
   .handler(async ({ data }) => {
     const actor = await requireUser(auth, getRequestHeaders())
     if (!actor) throw new Error('Sign in required.')
-    return previewNaturalStory(database, actor.id, data.conversationId, data.prompt, data.edits)
+    return previewNaturalStory(database, actor.id, data.storyId, data.prompt, data.edits)
   })
 
 export const startStoryPrompt = createServerFn({ method: 'POST' })
   .validator((data: NaturalStoryInput) => {
-    if (!data || !CONVERSATION.test(data.conversationId) || !ID.test(data.jobId) ||
+    if (!data || !ID.test(data.storyId) || !ID.test(data.jobId) ||
         typeof data.prompt !== 'string' || data.prompt.length > 4000 ||
         typeof data.headSha !== 'string' || !/^[a-f0-9]{40}$/i.test(data.headSha))
       throw new Error('Invalid Story generation request.')

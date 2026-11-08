@@ -24,13 +24,13 @@ const proof = 'd'.repeat(64)
 type TestDb = ReturnType<typeof openStudioDatabase>
 type Fixture = {
   owner: string; stranger: string; repo: string; story: string
-  job: string; conversation: string; thread: string
+  job: string; thread: string
 }
 async function fixtures(db: TestDb): Promise<Fixture> {
   await migrateStudio(db, config)
   const owner = randomUUID(), stranger = randomUUID()
   const repo = randomUUID(), story = randomUUID(), job = randomUUID()
-  const conversation = randomUUID(), thread = randomUUID()
+  const thread = randomUUID()
   const seed = studioSeed(db)
   for (const id of [owner, stranger]) { await seed.user(id) }
   (await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
@@ -41,12 +41,10 @@ async function fixtures(db: TestDb): Promise<Fixture> {
     status: 'completed', sourceCommitSha: sha, createdAt: at, updatedAt: at }))
   ;(await seed.queue({ jobId: job, ownerUserId: owner, intent: 'start', phase: 'finished',
     createdAt: at, updatedAt: at }))
-  ;(await seed.conversation({ id: conversation, ownerUserId: owner, storyId: story,
-    title: 'Conversation', createdAt: at, updatedAt: at }))
-  ;(await seed.thread({ id: thread, ownerUserId: owner, conversationId: conversation,
+  ;(await seed.thread({ id: thread, ownerUserId: owner, storyId: story,
     title: 'Root', activityAt: at, createdAt: at }))
   ;(await seed.threadRun({ jobId: job, ownerUserId: owner, threadId: thread, runOrder: 0 }))
-  return { owner, stranger, repo, story, job, conversation, thread }
+  return { owner, stranger, repo, story, job, thread }
 }
 function openPair() {
   const dir = mkdtempSync(join(tmpdir(), 'noveltea-advanced-thread-db-'))
@@ -74,7 +72,7 @@ function child(f: Fixture, data: ForkReservation): NewThreadChild {
   return {
     childId: data.childId, owner: data.owner, storyId: f.story,
     title: 'Fork', baseSha: nextSha,
-    conversationId: f.conversation, parentThreadId: f.thread,
+    parentThreadId: f.thread,
     threadId: 'fork:' + data.childId, draft: data.draft, at,
     kind: 'fork', history: JSON.parse(data.history), guidance: data.guidance,
   }
@@ -131,7 +129,9 @@ test('blocked checkpoint recovery creates one isolated run of the SAME Thread, w
     const f = await fixtures(pair.a)
     const a = pair.a.persistence.advancedThreads, b = pair.b.persistence.advancedThreads
     const id = randomUUID(), fork = forkReservation(f, id)
-    await pair.a.testing.records.update('studio_sessions', { id: f.job }, { status: 'blocked' })
+    await pair.a.testing.records.update('studio_sessions', { id: f.job }, {
+      status: 'blocked', generationRequestJson: JSON.stringify({ task: 'Original request', fixture: true }),
+    })
     await a.reserveFork(fork)
     const continuation: RecoveryContinuationRegistration = {
       owner: f.owner, sourceJobId: f.job, sourceThreadId: f.thread,
@@ -160,8 +160,11 @@ test('blocked checkpoint recovery creates one isolated run of the SAME Thread, w
     assert.equal(await b.identity(f.owner, 'fork:' + id), null,
       'in-place recovery must not create a child Thread')
     const history = await a.history(f.owner, f.thread)
-    assert.deepEqual(history.map(row => row.body), [fork.guidance])
-    assert.equal(history[0]?.status, 'queued')
+    assert.deepEqual(history.map(row => row.body), ['Original request', fork.guidance])
+    assert.equal(history[1]?.status, 'queued')
+    const chat = await pair.b.persistence.messages.read(f.owner, f.thread)
+    assert.deepEqual(chat.turns.find(turn => turn.id === 'initial:' + f.job)?.executionIds.sort(),
+      [f.job, id].sort(), 'recovery preserves the original Turn across two internal executions')
     assert.deepEqual((await pair.a.persistence.dashboard.forOwner(f.owner)).recentSessions.map(x => x.id), [id],
       'dashboard lists the Thread once by its most recent run')
     assert.equal((await pair.b.persistence.dashboard.forOwner(f.owner)).activeJobs.length, 1)
@@ -244,7 +247,7 @@ test('restart source identity and reservation stay pinned across interrupt, conc
       threadId: f.thread, runOrder: 1 }))
     const register: NewThreadChild = {
       childId: id, owner: f.owner, storyId: f.story, title: 'Restart',
-      baseSha: sha, conversationId: f.conversation,
+      baseSha: sha,
       parentThreadId: f.thread, threadId: 'restart:' + id,
       draft: data.draft, at, kind: 'restart',
     }

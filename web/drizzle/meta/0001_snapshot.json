@@ -1,8 +1,8 @@
 {
+  "id": "2157d0ca-f891-41f9-b740-03043f0a6207",
+  "prevId": "ca703c3a-673b-4230-a0b8-3b8efcc11a56",
   "version": "6",
   "dialect": "sqlite",
-  "id": "8d946a48-8126-4c49-bf44-f4662bf5147e",
-  "prevId": "1b6cae48-80e8-441c-92b1-8c3b80c65009",
   "tables": {
     "checkpoint_forks": {
       "name": "checkpoint_forks",
@@ -112,15 +112,32 @@
         "checkpoint_forks_owner_user_id_user_id_fk": {
           "name": "checkpoint_forks_owner_user_id_user_id_fk",
           "tableFrom": "checkpoint_forks",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "checkpoint_forks_source_job_id_owner_user_id_source_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk": {
+          "name": "checkpoint_forks_source_job_id_owner_user_id_source_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk",
+          "tableFrom": "checkpoint_forks",
+          "columnsFrom": [
+            "source_job_id",
+            "owner_user_id",
+            "source_thread_id"
+          ],
+          "tableTo": "story_thread_runs",
+          "columnsTo": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -210,17 +227,17 @@
         "generation_events_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "generation_events_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "generation_events",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -313,17 +330,17 @@
         "generation_run_queue_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "generation_run_queue_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "generation_run_queue",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -383,15 +400,15 @@
         "git_connection_flows_owner_user_id_user_id_fk": {
           "name": "git_connection_flows_owner_user_id_user_id_fk",
           "tableFrom": "git_connection_flows",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -538,15 +555,15 @@
         "git_connections_owner_user_id_user_id_fk": {
           "name": "git_connections_owner_user_id_user_id_fk",
           "tableFrom": "git_connections",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -630,28 +647,28 @@
         "github_install_flows_connection_id_git_connections_id_fk": {
           "name": "github_install_flows_connection_id_git_connections_id_fk",
           "tableFrom": "github_install_flows",
-          "tableTo": "git_connections",
           "columnsFrom": [
             "connection_id"
           ],
+          "tableTo": "git_connections",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "github_install_flows_owner_user_id_user_id_fk": {
           "name": "github_install_flows_owner_user_id_user_id_fk",
           "tableFrom": "github_install_flows",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -735,17 +752,17 @@
         "github_publications_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "github_publications_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "github_publications",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -829,17 +846,17 @@
         "gitlab_publications_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "gitlab_publications_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "gitlab_publications",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -889,15 +906,15 @@
         "pi_credentials_owner_user_id_user_id_fk": {
           "name": "pi_credentials_owner_user_id_user_id_fk",
           "tableFrom": "pi_credentials",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -995,28 +1012,28 @@
         "repositories_connection_id_git_connections_id_fk": {
           "name": "repositories_connection_id_git_connections_id_fk",
           "tableFrom": "repositories",
-          "tableTo": "git_connections",
           "columnsFrom": [
             "connection_id"
           ],
+          "tableTo": "git_connections",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "repositories_owner_user_id_user_id_fk": {
           "name": "repositories_owner_user_id_user_id_fk",
           "tableFrom": "repositories",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1131,17 +1148,17 @@
         "studio_sessions_story_id_owner_user_id_stories_id_owner_user_id_fk": {
           "name": "studio_sessions_story_id_owner_user_id_stories_id_owner_user_id_fk",
           "tableFrom": "studio_sessions",
-          "tableTo": "stories",
           "columnsFrom": [
             "story_id",
             "owner_user_id"
           ],
+          "tableTo": "stories",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1242,102 +1259,17 @@
         "stories_repository_id_owner_user_id_repositories_id_owner_user_id_fk": {
           "name": "stories_repository_id_owner_user_id_repositories_id_owner_user_id_fk",
           "tableFrom": "stories",
-          "tableTo": "repositories",
           "columnsFrom": [
             "repository_id",
             "owner_user_id"
           ],
+          "tableTo": "repositories",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "story_conversations": {
-      "name": "story_conversations",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "owner_user_id": {
-          "name": "owner_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "story_id": {
-          "name": "story_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "story_conversations_owner_pair": {
-          "name": "story_conversations_owner_pair",
-          "columns": [
-            "id",
-            "owner_user_id"
-          ],
-          "isUnique": true
-        },
-        "story_conversations_story_idx": {
-          "name": "story_conversations_story_idx",
-          "columns": [
-            "owner_user_id",
-            "story_id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "story_conversations_story_id_owner_user_id_stories_id_owner_user_id_fk": {
-          "name": "story_conversations_story_id_owner_user_id_stories_id_owner_user_id_fk",
-          "tableFrom": "story_conversations",
-          "tableTo": "stories",
-          "columnsFrom": [
-            "story_id",
-            "owner_user_id"
-          ],
-          "columnsTo": [
-            "id",
-            "owner_user_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1395,30 +1327,30 @@
         "story_onboarding_conversations_owner_user_id_user_id_fk": {
           "name": "story_onboarding_conversations_owner_user_id_user_id_fk",
           "tableFrom": "story_onboarding_conversations",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "story_onboarding_conversations_repository_id_owner_user_id_repositories_id_owner_user_id_fk": {
           "name": "story_onboarding_conversations_repository_id_owner_user_id_repositories_id_owner_user_id_fk",
           "tableFrom": "story_onboarding_conversations",
-          "tableTo": "repositories",
           "columnsFrom": [
             "repository_id",
             "owner_user_id"
           ],
+          "tableTo": "repositories",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -1485,30 +1417,30 @@
         "story_onboarding_drafts_owner_user_id_user_id_fk": {
           "name": "story_onboarding_drafts_owner_user_id_user_id_fk",
           "tableFrom": "story_onboarding_drafts",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "story_onboarding_drafts_repository_id_owner_user_id_repositories_id_owner_user_id_fk": {
           "name": "story_onboarding_drafts_repository_id_owner_user_id_repositories_id_owner_user_id_fk",
           "tableFrom": "story_onboarding_drafts",
-          "tableTo": "repositories",
           "columnsFrom": [
             "repository_id",
             "owner_user_id"
           ],
+          "tableTo": "repositories",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -1561,30 +1493,30 @@
         "story_thread_message_cancellations_message_id_story_thread_messages_id_fk": {
           "name": "story_thread_message_cancellations_message_id_story_thread_messages_id_fk",
           "tableFrom": "story_thread_message_cancellations",
-          "tableTo": "story_thread_messages",
           "columnsFrom": [
             "message_id"
           ],
+          "tableTo": "story_thread_messages",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "story_thread_message_cancellations_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "story_thread_message_cancellations_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "story_thread_message_cancellations",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1699,8 +1631,17 @@
           "columns": [
             "thread_id"
           ],
-          "isUnique": true,
-          "where": "\"story_thread_messages\".\"role\"='user' and \"story_thread_messages\".\"phase\"='preparing'"
+          "where": "\"story_thread_messages\".\"role\"='user' and \"story_thread_messages\".\"phase\"='preparing'",
+          "isUnique": true
+        },
+        "story_thread_messages_identity": {
+          "name": "story_thread_messages_identity",
+          "columns": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": true
         },
         "story_thread_messages_order": {
           "name": "story_thread_messages_order",
@@ -1724,17 +1665,17 @@
         "story_thread_messages_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "story_thread_messages_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "story_thread_messages",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1798,17 +1739,17 @@
         "story_thread_preferences_story_id_owner_user_id_stories_id_owner_user_id_fk": {
           "name": "story_thread_preferences_story_id_owner_user_id_stories_id_owner_user_id_fk",
           "tableFrom": "story_thread_preferences",
-          "tableTo": "stories",
           "columnsFrom": [
             "story_id",
             "owner_user_id"
           ],
+          "tableTo": "stories",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -1885,38 +1826,47 @@
             "run_order"
           ],
           "isUnique": false
+        },
+        "story_thread_runs_identity": {
+          "name": "story_thread_runs_identity",
+          "columns": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {
         "story_thread_runs_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "story_thread_runs_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "story_thread_runs",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "story_thread_runs_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "story_thread_runs_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "story_thread_runs",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1945,8 +1895,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "conversation_id": {
-          "name": "conversation_id",
+        "story_id": {
+          "name": "story_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -2025,56 +1975,56 @@
           ],
           "isUnique": true
         },
-        "story_threads_owner_conversation": {
-          "name": "story_threads_owner_conversation",
+        "story_threads_owner_story": {
+          "name": "story_threads_owner_story",
           "columns": [
             "id",
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
           "isUnique": true
         },
-        "story_threads_conversation_idx": {
-          "name": "story_threads_conversation_idx",
+        "story_threads_story_idx": {
+          "name": "story_threads_story_idx",
           "columns": [
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "story_threads_conversation_id_owner_user_id_story_conversations_id_owner_user_id_fk": {
-          "name": "story_threads_conversation_id_owner_user_id_story_conversations_id_owner_user_id_fk",
+        "story_threads_story_id_owner_user_id_stories_id_owner_user_id_fk": {
+          "name": "story_threads_story_id_owner_user_id_stories_id_owner_user_id_fk",
           "tableFrom": "story_threads",
-          "tableTo": "story_conversations",
           "columnsFrom": [
-            "conversation_id",
+            "story_id",
             "owner_user_id"
           ],
+          "tableTo": "stories",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
-        "story_threads_parent_thread_id_owner_user_id_conversation_id_story_threads_id_owner_user_id_conversation_id_fk": {
-          "name": "story_threads_parent_thread_id_owner_user_id_conversation_id_story_threads_id_owner_user_id_conversation_id_fk",
+        "story_threads_parent_thread_id_owner_user_id_story_id_story_threads_id_owner_user_id_story_id_fk": {
+          "name": "story_threads_parent_thread_id_owner_user_id_story_id_story_threads_id_owner_user_id_story_id_fk",
           "tableFrom": "story_threads",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "parent_thread_id",
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2085,6 +2035,161 @@
           "value": "\"story_threads\".\"parent_thread_id\" is null or \"story_threads\".\"parent_thread_id\" <> \"story_threads\".\"id\""
         }
       }
+    },
+    "story_turn_executions": {
+      "name": "story_turn_executions",
+      "columns": {
+        "turn_id": {
+          "name": "turn_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "job_id": {
+          "name": "job_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "thread_id": {
+          "name": "thread_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "story_turn_executions_turn_id_owner_user_id_thread_id_story_turns_id_owner_user_id_thread_id_fk": {
+          "name": "story_turn_executions_turn_id_owner_user_id_thread_id_story_turns_id_owner_user_id_thread_id_fk",
+          "tableFrom": "story_turn_executions",
+          "columnsFrom": [
+            "turn_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "tableTo": "story_turns",
+          "columnsTo": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "story_turn_executions_job_id_owner_user_id_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk": {
+          "name": "story_turn_executions_job_id_owner_user_id_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk",
+          "tableFrom": "story_turn_executions",
+          "columnsFrom": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "tableTo": "story_thread_runs",
+          "columnsTo": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "story_turn_executions_turn_id_job_id_pk": {
+          "columns": [
+            "turn_id",
+            "job_id"
+          ],
+          "name": "story_turn_executions_turn_id_job_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "story_turns": {
+      "name": "story_turns",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "thread_id": {
+          "name": "thread_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "story_turns_identity": {
+          "name": "story_turns_identity",
+          "columns": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": true
+        },
+        "story_turns_thread": {
+          "name": "story_turns_thread",
+          "columns": [
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "story_turns_id_owner_user_id_thread_id_story_thread_messages_id_owner_user_id_thread_id_fk": {
+          "name": "story_turns_id_owner_user_id_thread_id_story_thread_messages_id_owner_user_id_thread_id_fk",
+          "tableFrom": "story_turns",
+          "columnsFrom": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "tableTo": "story_thread_messages",
+          "columnsTo": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "thread_active_pi_turns": {
       "name": "thread_active_pi_turns",
@@ -2145,15 +2250,15 @@
         "thread_active_pi_turns_job_id_studio_sessions_id_fk": {
           "name": "thread_active_pi_turns_job_id_studio_sessions_id_fk",
           "tableFrom": "thread_active_pi_turns",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "job_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -2225,15 +2330,15 @@
         "thread_live_effect_reviews_message_id_thread_live_inputs_message_id_fk": {
           "name": "thread_live_effect_reviews_message_id_thread_live_inputs_message_id_fk",
           "tableFrom": "thread_live_effect_reviews",
-          "tableTo": "thread_live_inputs",
           "columnsFrom": [
             "message_id"
           ],
+          "tableTo": "thread_live_inputs",
           "columnsTo": [
             "message_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -2349,45 +2454,45 @@
         "thread_live_inputs_message_id_story_thread_messages_id_fk": {
           "name": "thread_live_inputs_message_id_story_thread_messages_id_fk",
           "tableFrom": "thread_live_inputs",
-          "tableTo": "story_thread_messages",
           "columnsFrom": [
             "message_id"
           ],
+          "tableTo": "story_thread_messages",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "thread_live_inputs_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "thread_live_inputs_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "thread_live_inputs",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "thread_live_inputs_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "thread_live_inputs_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "thread_live_inputs",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "source_job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2504,45 +2609,45 @@
         "thread_protected_decisions_message_id_story_thread_messages_id_fk": {
           "name": "thread_protected_decisions_message_id_story_thread_messages_id_fk",
           "tableFrom": "thread_protected_decisions",
-          "tableTo": "story_thread_messages",
           "columnsFrom": [
             "message_id"
           ],
+          "tableTo": "story_thread_messages",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "thread_protected_decisions_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "thread_protected_decisions_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "thread_protected_decisions",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "thread_protected_decisions_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "thread_protected_decisions_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "thread_protected_decisions",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "source_job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2612,30 +2717,30 @@
         "thread_queued_message_edits_message_id_story_thread_messages_id_fk": {
           "name": "thread_queued_message_edits_message_id_story_thread_messages_id_fk",
           "tableFrom": "thread_queued_message_edits",
-          "tableTo": "story_thread_messages",
           "columnsFrom": [
             "message_id"
           ],
+          "tableTo": "story_thread_messages",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "thread_queued_message_edits_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "thread_queued_message_edits_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "thread_queued_message_edits",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2744,45 +2849,45 @@
         "thread_restarts_source_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "thread_restarts_source_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "thread_restarts",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "source_thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "thread_restarts_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "thread_restarts_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "thread_restarts",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "source_job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "thread_restarts_owner_user_id_user_id_fk": {
           "name": "thread_restarts_owner_user_id_user_id_fk",
           "tableFrom": "thread_restarts",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2866,15 +2971,15 @@
         "thread_steering_checkpoint_links_message_id_thread_live_inputs_message_id_fk": {
           "name": "thread_steering_checkpoint_links_message_id_thread_live_inputs_message_id_fk",
           "tableFrom": "thread_steering_checkpoint_links",
-          "tableTo": "thread_live_inputs",
           "columnsFrom": [
             "message_id"
           ],
+          "tableTo": "thread_live_inputs",
           "columnsTo": [
             "message_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -2996,58 +3101,58 @@
         "thread_steering_intents_message_id_thread_live_inputs_message_id_fk": {
           "name": "thread_steering_intents_message_id_thread_live_inputs_message_id_fk",
           "tableFrom": "thread_steering_intents",
-          "tableTo": "thread_live_inputs",
           "columnsFrom": [
             "message_id"
           ],
+          "tableTo": "thread_live_inputs",
           "columnsTo": [
             "message_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "thread_steering_intents_review_message_id_story_thread_messages_id_fk": {
           "name": "thread_steering_intents_review_message_id_story_thread_messages_id_fk",
           "tableFrom": "thread_steering_intents",
-          "tableTo": "story_thread_messages",
           "columnsFrom": [
             "review_message_id"
           ],
+          "tableTo": "story_thread_messages",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "thread_steering_intents_thread_id_owner_user_id_story_threads_id_owner_user_id_fk": {
           "name": "thread_steering_intents_thread_id_owner_user_id_story_threads_id_owner_user_id_fk",
           "tableFrom": "thread_steering_intents",
-          "tableTo": "story_threads",
           "columnsFrom": [
             "thread_id",
             "owner_user_id"
           ],
+          "tableTo": "story_threads",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "thread_steering_intents_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk": {
           "name": "thread_steering_intents_source_job_id_owner_user_id_studio_sessions_id_owner_user_id_fk",
           "tableFrom": "thread_steering_intents",
-          "tableTo": "studio_sessions",
           "columnsFrom": [
             "source_job_id",
             "owner_user_id"
           ],
+          "tableTo": "studio_sessions",
           "columnsTo": [
             "id",
             "owner_user_id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3093,15 +3198,15 @@
         "user_preferences_owner_user_id_user_id_fk": {
           "name": "user_preferences_owner_user_id_user_id_fk",
           "tableFrom": "user_preferences",
-          "tableTo": "user",
           "columnsFrom": [
             "owner_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -3112,9 +3217,9 @@
   "views": {},
   "enums": {},
   "_meta": {
+    "columns": {},
     "schemas": {},
-    "tables": {},
-    "columns": {}
+    "tables": {}
   },
   "internal": {
     "indexes": {}

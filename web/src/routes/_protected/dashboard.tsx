@@ -14,9 +14,9 @@ export const Route = createFileRoute('/_protected/dashboard')({
 })
 
 function threadHref(job: DashboardJob): string {
-  if (!job.threadId || !job.conversationId) return '/jobs/' + encodeURIComponent(job.id)
+  if (!job.threadId) return '/jobs/' + encodeURIComponent(job.id)
   return '/stories/' + encodeURIComponent(job.storyId) + '/conversations?' +
-    new URLSearchParams({ conversation: job.conversationId, thread: job.threadId }).toString()
+    new URLSearchParams({ thread: job.threadId }).toString()
 }
 
 function Dashboard() {

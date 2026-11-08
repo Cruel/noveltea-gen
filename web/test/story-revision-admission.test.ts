@@ -143,6 +143,9 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       ;(await store.testing.records.insert('thread_live_inputs', { messageId: originalId,
         ownerUserId: owner, threadId, sourceJobId: sourceId,
         mode: 'steer', state: 'delivered', createdAt: 'now' }))
+      assert.equal(await store.testing.records.count('story_turn_executions',
+        { turnId: originalId, jobId: sourceId }), 1,
+      'a live input already linked by its request must not duplicate the Turn execution')
       await recordSteeringConsideration(store, originalId, owner, threadId,
         sourceId, task, 'focus:character.nia')
       assert.equal(await prepareSteeringBoundaryReviews(store, owner, sourceId, threadId, sha), 1)

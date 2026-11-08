@@ -34,7 +34,7 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
     const store = openStudioDatabase(filename)
     try {
       const tables = (await store.testing.schema.tables())
-      for (const name of ['user', 'session', 'account', 'verification', 'rateLimit', 'repositories', 'stories', 'studio_sessions', 'github_install_flows', 'story_onboarding_drafts', 'story_onboarding_conversations', 'pi_credentials', 'generation_events', 'generation_run_queue', 'github_publications', 'gitlab_publications', 'user_preferences', 'git_connections', 'git_connection_flows', 'story_conversations', 'story_threads', 'story_thread_runs', 'story_thread_preferences', 'story_thread_messages', 'checkpoint_forks', 'thread_restarts', 'thread_protected_decisions', 'thread_live_inputs', 'thread_active_pi_turns',
+      for (const name of ['user', 'session', 'account', 'verification', 'rateLimit', 'repositories', 'stories', 'studio_sessions', 'github_install_flows', 'story_onboarding_drafts', 'story_onboarding_conversations', 'pi_credentials', 'generation_events', 'generation_run_queue', 'github_publications', 'gitlab_publications', 'user_preferences', 'git_connections', 'git_connection_flows', 'story_threads', 'story_thread_runs', 'story_thread_preferences', 'story_thread_messages', 'checkpoint_forks', 'thread_restarts', 'thread_protected_decisions', 'thread_live_inputs', 'thread_active_pi_turns',
         'thread_queued_message_edits', 'thread_live_effect_reviews',
         'thread_steering_intents', 'thread_steering_checkpoint_links']) {
         assert.ok(tables.includes(name), `Missing ${name}`)

@@ -7,9 +7,8 @@ import { inspectStoryUsage } from './thread-usage.server'
 import { listStoryThreads, openStoryThread } from './story-threads.server'
 import {
   archiveThread,
-  createConversation,
-  listStoryConversations,
-  renameConversation,
+  createThread,
+  listStoryNavigation,
   renameThread,
   restoreThread,
   saveThreadPreferences,
@@ -27,7 +26,7 @@ export const getStoryNavigation = createServerFn({ method: 'GET' })
     if (!isId(storyId)) throw new Error('Invalid Story ID.')
     return storyId
   })
-  .handler(async ({ data }) => listStoryConversations(database, await ownerId(), data))
+  .handler(async ({ data }) => listStoryNavigation(database, await ownerId(), data))
 
 /** Story-first gateway: clients need only a Story ID to list Threads, or a
  * Story ID and stable Thread ID to open its state and pinned fork lineage. */
@@ -52,23 +51,12 @@ export const getStoryUsage = createServerFn({ method: 'GET' })
   })
   .handler(async ({ data }) => inspectStoryUsage(database, await ownerId(), data))
 
-export const addConversation = createServerFn({ method: 'POST' })
+export const addThread = createServerFn({ method: 'POST' })
   .validator((storyId: string) => {
     if (!isId(storyId)) throw new Error('Invalid Story ID.')
     return storyId
   })
-  .handler(async ({ data }) => createConversation(database, await ownerId(), data))
-
-export const setConversationTitle = createServerFn({ method: 'POST' })
-  .validator((data: { id: string; title: string }) => {
-    if (!data || !isId(data.id) || typeof data.title !== 'string' || data.title.length > 120)
-      throw new Error('Invalid Conversation title.')
-    return data
-  })
-  .handler(async ({ data }) => {
-    await renameConversation(database, await ownerId(), data.id, data.title)
-    return { success: true }
-  })
+  .handler(async ({ data }) => createThread(database, await ownerId(), data))
 
 export const setThreadTitle = createServerFn({ method: 'POST' })
   .validator((data: { id: string; title: string }) => {

@@ -19,11 +19,30 @@ export function studioSeed(store: TestStudioDatabase) {
     async job(row: TestFields) {
       await data.insert('studio_sessions', row)
     },
-    async conversation(row: TestFields) {
-      await data.insert('story_conversations', row)
-    },
     async thread(row: TestFields) {
       await data.insert('story_threads', row)
+    },
+    /** Fixture-only checkpoint evidence for tests that do not run native Git verification. */
+    async forkReceipt(
+      childId: string,
+      owner: string,
+      sourceJobId: string,
+      sourceThreadId: string,
+      commitSha: string,
+      at: string,
+    ) {
+      await data.insert('checkpoint_forks', {
+        childId,
+        ownerUserId: owner,
+        sourceJobId,
+        sourceThreadId,
+        sourceBaseSha: commitSha,
+        commitSha,
+        proofDigest: 'f'.repeat(64),
+        bundleJson: '{}',
+        draftJson: '{}',
+        createdAt: at,
+      })
     },
     async threadRun(row: TestFields) {
       await data.insert('story_thread_runs', row)

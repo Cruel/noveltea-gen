@@ -8,7 +8,7 @@ import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { appendGenerationEvent, listGenerationEvents } from '../src/lib/generation-progress.server'
-import { archiveThread, listStoryConversations, restoreThread } from '../src/lib/threads.server'
+import { archiveThread, listStoryNavigation, restoreThread } from '../src/lib/threads.server'
 import { selectNavigationThreads, orderThreads } from '../src/lib/thread-navigation'
 
 const config = {
@@ -39,7 +39,7 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     await appendGenerationEvent(store, owner, job, {
       kind: 'verified', stage: 'foundation', files: ['creative-direction/foundation.md'],
     })
-    const original = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
+    const original = (await listStoryNavigation(store, owner, story)).threads[0]!
     const archiveId = original.id
     const beforeRun = (await store.testing.records.first('story_thread_runs', { jobId: job }))
     const beforeJob = (await store.testing.records.first('studio_sessions', { id: job }))
@@ -53,10 +53,10 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     assert.ok(archivedAt.archivedAt)
     await archiveThread(store, owner, archiveId)
     assert.deepEqual((await store.testing.records.first<{ archivedAt: string | null }>('story_threads', { id: archiveId })), archivedAt, 'retry never advances the archive timestamp')
-    const after = await listStoryConversations(store, owner, story)
-    assert.deepEqual(selectNavigationThreads(after.conversations[0]!.threads, 'active'), [])
-    assert.equal(selectNavigationThreads(after.conversations[0]!.threads, 'archived')[0]?.id, archiveId)
-    assert.equal(after.conversations[0]!.threads[0]?.status, 'archived')
+    const after = await listStoryNavigation(store, owner, story)
+    assert.deepEqual(selectNavigationThreads(after.threads, 'active'), [])
+    assert.equal(selectNavigationThreads(after.threads, 'archived')[0]?.id, archiveId)
+    assert.equal(after.threads[0]?.status, 'archived')
     assert.deepEqual((await store.testing.records.first('story_thread_runs', { jobId: job })), beforeRun)
     assert.deepEqual((await store.testing.records.first('studio_sessions', { id: job })), beforeJob)
     assert.deepEqual((await listGenerationEvents(store, owner, job, 0)), beforeEvents)
@@ -65,11 +65,11 @@ test('archive and restore persist, are idempotent and preserve run, history and 
     store.close()
     store = openStudioDatabase(join(root, 'studio.sqlite'))
     await migrateStudio(store, config)
-    assert.ok((await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]?.archivedAt)
+    assert.ok((await listStoryNavigation(store, owner, story)).threads[0]?.archivedAt)
     await assert.rejects(() => restoreThread(store, stranger, archiveId), /not found/i)
     await restoreThread(store, owner, archiveId)
     await restoreThread(store, owner, archiveId)
-    const restored = (await listStoryConversations(store, owner, story)).conversations[0]!.threads[0]!
+    const restored = (await listStoryNavigation(store, owner, story)).threads[0]!
     assert.deepEqual(restored, { ...original }, 'restore preserves original status, title and activity')
     assert.deepEqual((await store.testing.records.first('story_thread_runs', { jobId: job })), beforeRun)
     assert.deepEqual((await listGenerationEvents(store, owner, job, 0)), beforeEvents)
@@ -95,20 +95,21 @@ test('archiving an ancestor preserves active child navigation and archived desce
       directory: 'story', title: 'Story', createdAt: at }))
     ;(await seed.job({ id: job, ownerUserId: owner, storyId: story, title: 'Job',
       status: 'completed', createdAt: at, updatedAt: at }))
-    const nav = await listStoryConversations(store, owner, story)
-    const parent = nav.conversations[0]!.threads[0]!
+    const nav = await listStoryNavigation(store, owner, story)
+    const parent = nav.threads[0]!
     const childId = 'child:' + randomUUID(), grandchildId = 'child:' + randomUUID()
     const childJob = randomUUID()
     ;(await seed.job({ id: childJob, ownerUserId: owner, storyId: story, title: 'Child work',
-      status: 'running', createdAt: '2026-11-02T00:00:00Z',
+      status: 'running', sourceCommitSha: 'a'.repeat(40), createdAt: '2026-11-02T00:00:00Z',
       updatedAt: '2026-11-02T00:00:00Z' }))
     for (const [id, parentThreadId, title] of [
       [childId, parent.id, 'Active child'], [grandchildId, childId, 'Archived grandchild'],
     ] as const) {
-      ;(await seed.thread({ id, ownerUserId: owner, conversationId: parent.conversationId,
+      ;(await seed.thread({ id, ownerUserId: owner, storyId: parent.storyId,
         parentThreadId, title, activityAt: '2026-11-04T00:00:00Z',
         createdAt: '2026-11-04T00:00:00Z' }))
     }
+    await seed.forkReceipt(childJob, owner, job, parent.id, 'a'.repeat(40), at)
     ;(await seed.threadRun({ jobId: childJob, ownerUserId: owner, threadId: childId, runOrder: 0 }))
     ;(await seed.queue({ jobId: childJob, ownerUserId: owner, intent: 'start',
       phase: 'running', createdAt: '2026-11-03T00:00:00Z',
@@ -116,8 +117,8 @@ test('archiving an ancestor preserves active child navigation and archived desce
     const childQueue = (await store.testing.records.first('generation_run_queue', { jobId: childJob }))
     await archiveThread(store, owner, parent.id)
     await archiveThread(store, owner, grandchildId)
-    const updated = await listStoryConversations(store, owner, story)
-    const all = updated.conversations[0]!.threads
+    const updated = await listStoryNavigation(store, owner, story)
+    const all = updated.threads
     const active = selectNavigationThreads(all, 'active')
     const archived = selectNavigationThreads(all, 'archived')
     assert.deepEqual(active.map(t => t.id), [childId])
@@ -133,7 +134,7 @@ test('archiving an ancestor preserves active child navigation and archived desce
       childQueue, 'archiving a parent does not interrupt an active child job')
     await restoreThread(store, owner, parent.id)
     assert.deepEqual(selectNavigationThreads(
-      (await listStoryConversations(store, owner, story)).conversations[0]!.threads, 'active'
+      (await listStoryNavigation(store, owner, story)).threads, 'active'
     ).map(t => t.id).sort(), [parent.id, childId].sort())
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])
   } finally { store.close() }

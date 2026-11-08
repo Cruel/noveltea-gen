@@ -43,7 +43,7 @@ const appTables = Object.values(schema).map(table => {
 const inspected = new WeakMap<StudioDatabase, number>()
 // Migration files are immutable deployment assets, not per-request inputs.
 const migrationCache = new Map<string, ReturnType<typeof readMigrationFiles>>()
-type SchemaSql = { type: 'table' | 'index'; name: string; sql: string }
+type SchemaSql = { type: 'table' | 'index' | 'trigger'; name: string; sql: string }
 const schemaSqlCache = new Map<string, Map<string, SchemaSql>>()
 
 /** Recreate the generated application schema in an isolated database once per
@@ -63,12 +63,12 @@ function expectedSchemaSql(): Map<string, SchemaSql> {
     const names = new Set<string>(appTables.map(table => table.name))
     const indexes = new Set<string>(appTables.flatMap(table => table.indexes))
     const rows = reference.prepare(
-      "SELECT type, name, sql FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL",
+      "SELECT type, name, sql FROM sqlite_master WHERE type IN ('table', 'index', 'trigger') AND sql IS NOT NULL",
     ).all() as SchemaSql[]
     const expected = new Map(rows.filter(row =>
       (row.type === 'table' && names.has(row.name)) ||
-      (row.type === 'index' && indexes.has(row.name))).map(row => [row.type + ':' + row.name, row]))
-    if (expected.size !== names.size + indexes.size)
+      (row.type === 'index' && indexes.has(row.name)) || row.type === 'trigger').map(row => [row.type + ':' + row.name, row]))
+    if ([...expected.values()].filter(row => row.type !== 'trigger').length !== names.size + indexes.size)
       throw new StudioSchemaError('Generated Studio migration does not contain every declared table and index')
     schemaSqlCache.set(folder, expected)
     return expected
@@ -77,7 +77,7 @@ function expectedSchemaSql(): Map<string, SchemaSql> {
   }
 }
 
-function schemaDefinition(store: StudioDatabase, type: 'table' | 'index', name: string): string | undefined {
+function schemaDefinition(store: StudioDatabase, type: SchemaSql['type'], name: string): string | undefined {
   const row = studioSqliteDriver(store).prepare(
     'SELECT sql FROM sqlite_master WHERE type=? AND name=?',
   ).get(type, name) as { sql: string | null } | undefined
@@ -166,6 +166,10 @@ export function assertStudioSchemaCurrent(store: StudioDatabase) {
         throw new StudioSchemaError(`Studio database schema definition drift (${name}). Restore or explicitly reset Studio.`)
       }
     }
+  }
+  for (const row of definitions.values()) {
+    if (row.type === 'trigger' && schemaDefinition(store, 'trigger', row.name) !== row.sql)
+      throw new StudioSchemaError(`Studio database schema definition drift (${row.name}). Restore or explicitly reset Studio.`)
   }
   inspected.set(store, schemaVersion)
 }

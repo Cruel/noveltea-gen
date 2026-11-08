@@ -32,7 +32,10 @@ test('fresh Drizzle baseline initializes the complete, constrained Studio schema
     const appNames = (await store.testing.schema.tables()).filter(name =>
       !name.startsWith('sqlite_') &&
       !['user', 'session', 'account', 'verification', 'rateLimit', '__drizzle_migrations'].includes(name))
-    assert.equal(appNames.length, 29)
+    assert.equal(appNames.length, 30)
+    assert.ok(!appNames.includes('story_conversations'))
+    assert.ok(appNames.includes('story_turns'))
+    assert.ok(appNames.includes('story_turn_executions'))
     for (const name of ['thread_steering_checkpoint_links', 'github_install_flows',
       'story_onboarding_conversations']) assert.ok(appNames.includes(name))
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])
@@ -62,17 +65,31 @@ test('fresh Drizzle baseline initializes the complete, constrained Studio schema
 
     await data.insert('studio_sessions', { id: 'job', ownerUserId: alice.id, storyId: 'story',
       title: 'Job', status: 'running', createdAt: stamp, updatedAt: stamp })
-    await data.insert('story_conversations', { id: 'conversation', ownerUserId: alice.id,
-      storyId: 'story', title: 'Conversation', createdAt: stamp, updatedAt: stamp })
     await data.insert('story_threads', { id: 'thread', ownerUserId: alice.id,
-      conversationId: 'conversation', title: 'Thread', activityAt: stamp, createdAt: stamp })
+      storyId: 'story', title: 'Thread', activityAt: stamp, createdAt: stamp })
     await assert.rejects(() => data.insert('story_threads', { id: 'self', ownerUserId: alice.id,
-      conversationId: 'conversation', parentThreadId: 'self', title: 'Broken',
+      storyId: 'story', parentThreadId: 'self', title: 'Broken',
       activityAt: stamp, createdAt: stamp }), /CHECK constraint/)
+
+    await data.insert('stories', { id: 'other-story', ownerUserId: alice.id, repositoryId: 'repository',
+      directory: 'other', title: 'Other Story', createdAt: stamp })
+    await data.insert('story_threads', { id: 'other-thread', ownerUserId: alice.id,
+      storyId: 'other-story', title: 'Other', activityAt: stamp, createdAt: stamp })
+    await assert.rejects(() => data.insert('story_thread_runs', { jobId: 'job', ownerUserId: alice.id,
+      threadId: 'other-thread', runOrder: 0 }), /same owned Story/)
+    await assert.rejects(() => data.insert('story_threads', { id: 'cross-story', ownerUserId: alice.id,
+      storyId: 'other-story', parentThreadId: 'thread', title: 'Crossed', activityAt: stamp,
+      createdAt: stamp }), /FOREIGN KEY/)
+    await data.insert('story_thread_runs', { jobId: 'job', ownerUserId: alice.id,
+      threadId: 'thread', runOrder: 0 })
 
     await data.insert('story_thread_messages', { id: 'one', ownerUserId: alice.id,
       threadId: 'thread', sequence: 1, role: 'user', status: 'queued',
-      body: 'Hello', phase: 'preparing', createdAt: stamp })
+      body: 'Hello', phase: 'preparing', jobId: 'job', createdAt: stamp })
+    assert.equal(await data.count('story_turns'), 1)
+    assert.equal(await data.count('story_turn_executions'), 1)
+    await assert.rejects(() => data.insert('story_turn_executions', { turnId: 'one', jobId: 'job',
+      ownerUserId: bob.id, threadId: 'other-thread' }), /FOREIGN KEY|UNIQUE/)
     await assert.rejects(() => data.insert('story_thread_messages', { id: 'two', ownerUserId: alice.id,
       threadId: 'thread', sequence: 2, role: 'user', status: 'queued',
       body: 'Hello', phase: 'preparing', createdAt: stamp }), /UNIQUE constraint/)
@@ -87,8 +104,8 @@ test('fresh Drizzle baseline initializes the complete, constrained Studio schema
       piSessionId: 'session', workItem: 'work', createdAt: stamp })
 
     await data.delete('repositories', { id: 'repository' })
-    for (const table of ['stories', 'studio_sessions', 'story_conversations', 'story_threads',
-      'story_thread_messages', 'thread_active_pi_turns']) {
+    for (const table of ['stories', 'studio_sessions', 'story_threads',
+      'story_thread_messages', 'story_turns', 'story_turn_executions', 'thread_active_pi_turns']) {
       assert.equal(await data.count(table), 0, 'cascade into ' + table)
     }
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])

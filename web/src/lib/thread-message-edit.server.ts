@@ -257,7 +257,7 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
   const now = new Date().toISOString(), childThread = 'fork:' + child.jobId
   await store.persistence.advancedThreads.registerChild({
     childId: child.jobId, owner, storyId: row.storyId, title: row.title + ' (edited message)',
-    baseSha: child.baseSha, conversationId: sourceThread!.conversation,
+    baseSha: child.baseSha,
     parentThreadId: data.threadId, threadId: childThread,
     draft: intent!.draft, at: now, kind: 'edit',
     history: intent!.history ? JSON.parse(intent!.history) as ForkHistoryMessage[] : undefined,

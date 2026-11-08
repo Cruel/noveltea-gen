@@ -3,8 +3,8 @@ import { and, asc, desc, eq, isNotNull, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import {
-  checkpointForks, generationEvents, generationRunQueue, sessions, storyConversations, storyThreadMessageCancellations,
-  storyThreadMessages, storyThreadRuns, storyThreads, threadActivePiTurns, threadLiveEffectReviews,
+  checkpointForks, generationEvents, generationRunQueue, sessions, storyThreadMessageCancellations,
+  storyThreadMessages, storyThreadRuns, storyThreads, storyTurns, storyTurnExecutions, threadActivePiTurns, threadLiveEffectReviews,
   threadLiveInputs, threadProtectedDecisions, threadQueuedMessageEdits,
 } from '../db/schema'
 import type { ThreadMessage } from '../lib/thread-chat.server'
@@ -29,11 +29,8 @@ function membership(db: Db, owner: string, threadId: string) {
   const row = db.select({
     id: storyThreads.id,
     archivedAt: sql<string | null>`COALESCE(${storyThreads.deletedAt}, ${storyThreads.archivedAt})`,
-    storyId: storyConversations.storyId,
-  }).from(storyThreads).innerJoin(storyConversations, and(
-    eq(storyConversations.id, storyThreads.conversationId),
-    eq(storyConversations.ownerUserId, storyThreads.ownerUserId),
-  )).where(and(eq(storyThreads.id, threadId), eq(storyThreads.ownerUserId, owner))).get()
+    storyId: storyThreads.storyId,
+  }).from(storyThreads).where(and(eq(storyThreads.id, threadId), eq(storyThreads.ownerUserId, owner))).get()
   if (!row) throw new ThreadMessageConflict(404, 'Thread not found.')
   return row
 }
@@ -158,9 +155,9 @@ function sameThreadRecoveryJobsSqlite(db: Db, owner: string, threadId: string): 
     .all().map(row => row.childId))
 }
 
-/** Import pre-Conversation runs atomically, preserving their durable job IDs.
- * No timestamps are used to invent checkpoint lineage or author approvals. */
-export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string): void {
+/** Persist initial admitted requests atomically, preserving execution identities.
+ * Also idempotently reconcile fixture/prepared runs when reading Chat. */
+export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string, includeSummaries = true): void {
   const recoveryJobs = sameThreadRecoveryJobsSqlite(db, owner, threadId)
   const runs = db.select({
     jobId: storyThreadRuns.jobId, requestJson: sessions.generationRequestJson,
@@ -191,7 +188,7 @@ export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string
         }).onConflictDoNothing().run()
       }
     }
-    if (run.queuePhase === 'finished' && ['completed', 'paused', 'blocked', 'cancelled'].includes(run.status))
+    if (includeSummaries && run.queuePhase === 'finished' && ['completed', 'paused', 'blocked', 'cancelled'].includes(run.status))
       insertThreadAssistantSqlite(db, owner, threadId, run.jobId)
   }
 }
@@ -211,7 +208,7 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
           .where(and(eq(generationRunQueue.ownerUserId, owner),
             eq(generationRunQueue.jobId, jobId))).get()
         if (!admitted) throw new ThreadMessageConflict(409, 'Generation was not admitted.')
-        tx.update(m).set({ status: 'delivered', phase: 'running' }).where(and(
+        tx.update(m).set({ status: 'delivered', phase: 'running', jobId }).where(and(
           eq(m.id, 'guidance:fork:' + jobId), eq(m.ownerUserId, owner), eq(m.status, 'queued'),
         )).run()
         tx.update(m).set({ status: 'delivered', phase: 'running' }).where(and(
@@ -271,7 +268,18 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
         eq(storyThreadRuns.ownerUserId, owner),
         sql`${generationEvents.kind} IN ('verified','finished','interrupted')`))
         .orderBy(asc(generationEvents.id)).all()
-      return { messages, runs, evidence }
+      const turnRows = db.select({ id: storyTurns.id, jobId: storyTurnExecutions.jobId })
+        .from(storyTurns).innerJoin(m, eq(m.id, storyTurns.id))
+        .leftJoin(storyTurnExecutions, eq(storyTurnExecutions.turnId, storyTurns.id))
+        .where(and(eq(storyTurns.ownerUserId, owner), eq(storyTurns.threadId, threadId)))
+        .orderBy(m.sequence, storyTurnExecutions.jobId).all()
+      const turns: Array<{ id: string; executionIds: string[] }> = []
+      for (const row of turnRows) {
+        let turn = turns.at(-1)
+        if (turn?.id !== row.id) { turn = { id: row.id, executionIds: [] }; turns.push(turn) }
+        if (row.jobId) turn.executionIds.push(row.jobId)
+      }
+      return { messages, runs, evidence, turns }
     },
     async enqueue(owner, threadId, id, body, mode, at) {
       ownerRequired(owner)

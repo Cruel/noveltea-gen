@@ -49,6 +49,7 @@ export async function readThreadChat(store: StudioDatabase, owner: string, threa
   const membership = await store.persistence.messages.membership(owner, threadId)
   return { threadId, storyId: membership.storyId,
     archived: !!membership.archivedAt,
+    turns: data.turns,
     messages: data.messages, steeringActivity: await steeringActivity(store, owner, threadId),
     runs: data.runs.map(({ requestJson, ...run }) => ({
       ...run, status: run.queuePhase === 'interrupted' ? 'interrupted'

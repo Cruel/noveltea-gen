@@ -39,17 +39,15 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     const futureSha = commit('Character verified')
     const owner = randomUUID(), story = randomUUID(), repo = randomUUID()
     const parentThread = randomUUID(), childThread = randomUUID()
-    const conversation = randomUUID(), jobId = randomUUID()
+    const jobId = randomUUID()
     const seed = studioSeed(db)
     ;(await seed.user(owner))
     ;(await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
       providerRepositoryId: 'provider', name: 'Repo', createdAt: 'now' }))
     ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
       directory: 'story', title: 'Story', createdAt: 'now' }))
-    ;(await seed.conversation({ id: conversation, ownerUserId: owner, storyId: story,
-      title: 'Character exploration', createdAt: 'now', updatedAt: 'now' }))
     for (const [id, parent] of [[parentThread, null], [childThread, parentThread]] as const) {
-      (await seed.thread({ id, ownerUserId: owner, conversationId: conversation,
+      (await seed.thread({ id, ownerUserId: owner, storyId: story,
         parentThreadId: parent, title: 'Branch', activityAt: 'now', createdAt: 'now' }))
     }
     const addMessage = async (id: string, ownerUserId: string, threadId: string,
@@ -66,7 +64,7 @@ test('real Git ancestry freezes only verified history at the checkpoint, excludi
     // verification receipt. It must not suppress the #79 baseline fallback.
     const seededThread = randomUUID()
     ;(await db.testing.records.insert('story_threads', { id: seededThread, ownerUserId: owner,
-      conversationId: conversation, title: 'Chat seeded', activityAt: 'now', createdAt: 'now' }))
+      storyId: story, title: 'Chat seeded', activityAt: 'now', createdAt: 'now' }))
     await addMessage(randomUUID(), owner, seededThread, 0, 'delivered', 'Rendered unverified chat', null)
     assert.deepEqual((await snapshotForkBoundaryHistory(db, owner, seededThread, source,
       'Pinned author task', 'now', forkSha)).map(m => m.body), ['Pinned author task'])

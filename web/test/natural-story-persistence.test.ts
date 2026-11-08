@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import { openStudioDatabase } from '../src/db/connection'
 import { migrateStudio } from '../src/db/migrations'
 import { createStudioAuth } from '../src/lib/auth'
-import { createConversation, ensureRootThreads } from '../src/lib/threads.server'
+import { ensureRootThreads } from '../src/lib/threads.server'
 
 const config = {
   baseURL: 'http://localhost:3000',
@@ -13,7 +13,7 @@ const config = {
   gitlab: { clientId: 'test', clientSecret: 'test' },
 }
 
-test('Drizzle ports atomically associate legacy roots and only deliver messages after admitted queue', async () => {
+test('Drizzle ports atomically associate Story roots and only deliver messages after admitted queue', async () => {
   const store = openStudioDatabase(':memory:')
   try {
     await migrateStudio(store, config)
@@ -35,16 +35,14 @@ test('Drizzle ports atomically associate legacy roots and only deliver messages 
     assert.equal(await store.persistence.generation.jobs.register(
       owner, jobId, storyId, 'Original', sha, at), true)
     await ensureRootThreads(store, owner, storyId)
-    const { id: conversationId } = await createConversation(store, owner, storyId)
     await assert.rejects(() =>
-      store.persistence.naturalStory.associateRoot(stranger, conversationId, jobId, 'Wrong', at),
+      store.persistence.naturalStory.associateRoot(stranger, storyId, jobId, 'Wrong', at),
     /not found/)
-    assert.equal(await store.persistence.naturalStory.associateRoot(
-      owner, conversationId, jobId, 'New title', at), 'root:' + jobId)
-    assert.equal(await store.persistence.naturalStory.associateRoot(
-      owner, conversationId, jobId, 'New title', at), 'root:' + jobId)
-    assert.equal((await store.persistence.naturalStory.previousJob(owner, jobId))?.conversationId,
-      conversationId)
+    for (let attempt = 0; attempt < 2; attempt++)
+      assert.equal(await store.persistence.naturalStory.associateRoot(
+        owner, storyId, jobId, 'New title', at), 'root:' + jobId)
+    assert.equal((await store.persistence.naturalStory.previousJob(owner, jobId))?.threadId,
+      'root:' + jobId)
 
     const threadId = 'root:' + jobId
     const guidanceId = 'guidance:fork:' + jobId

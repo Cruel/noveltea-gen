@@ -44,7 +44,7 @@ test('retention expires only settled published sessions, retaining recovery evid
   try {
     await migrateStudio(db, settings)
     const owner = randomUUID(), stranger = randomUUID()
-    const repositoryId = randomUUID(), storyId = randomUUID(), conversationId = randomUUID()
+    const repositoryId = randomUUID(), storyId = randomUUID()
     const providerId = 'retention-example'
     const base = join(tmp, 'cache', hash(owner), hash('github:' + providerId), 'base')
     mkdirSync(join(base, 'story'), { recursive: true })
@@ -65,8 +65,6 @@ test('retention expires only settled published sessions, retaining recovery evid
       provider: 'github', providerRepositoryId: providerId, name: 'Repo', createdAt: old })
     await seed.story({ id: storyId, ownerUserId: owner, repositoryId,
       directory: 'story', title: 'Retention Story', createdAt: old })
-    await seed.conversation({ id: conversationId, ownerUserId: owner, storyId,
-      title: 'History', createdAt: old, updatedAt: old })
 
     type Scenario = {
       name: string; status: 'completed' | 'paused' | 'blocked' | 'cancelled'
@@ -100,7 +98,7 @@ test('retention expires only settled published sessions, retaining recovery evid
       const job = await startStoryJob({ story: join(base, 'story'), job: jobId,
         worktreeCacheRoot: join(tmp, 'cache', hash(owner), hash('github:' + providerId)) })
       const at = scenario.recent ? recent : old
-      await seed.thread({ id: threadId, ownerUserId: owner, conversationId,
+      await seed.thread({ id: threadId, ownerUserId: owner, storyId,
         title: scenario.name, activityAt: at, createdAt: at })
       await seed.job({ id: jobId, ownerUserId: owner, storyId, title: scenario.name,
         sourceCommitSha: sha, status: scenario.status,

@@ -1,16 +1,10 @@
-/** Core Conversation and Thread catalog persistence.
+/** Story-owned Thread catalog persistence.
  * All operations are owner-scoped and async at the service boundary. The SQLite
  * adapter keeps multi-table reconciliation and archive updates transactional.
  */
-export type ConversationRecord = {
-  id: string
-  title: string
-  createdAt: string
-  updatedAt: string
-}
 export type NavigationThreadRecord = {
   id: string
-  conversationId: string
+  storyId: string
   parentThreadId: string | null
   title: string
   activityAt: string
@@ -52,11 +46,9 @@ export interface ConversationCatalog {
   /** Import historical root sessions once; never synthesize checkpoint provenance. */
   reconcileRoots(owner: string, storyId: string): Promise<void>
   navigation(owner: string, storyId: string): Promise<{
-    conversations: ConversationRecord[]
     threads: NavigationThreadRecord[]
   }>
   create(owner: string, storyId: string, id: string, at: string): Promise<{ id: string; title: string }>
-  renameConversation(owner: string, id: string, title: string, at: string): Promise<boolean>
   renameThread(owner: string, id: string, title: string): Promise<boolean>
   /** Idempotent for own Threads, rejects foreign and unknown IDs. */
   archiveThread(owner: string, id: string, archived: boolean, at: string): Promise<boolean>

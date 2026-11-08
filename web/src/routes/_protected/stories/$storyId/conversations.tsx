@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { Archive, ArrowLeft, ChevronDown, LoaderCircle, MoreHorizontal, PanelLeft, Pencil, Plus } from 'lucide-react'
+import { Archive, ArrowLeft, ChevronDown, LoaderCircle, MoreHorizontal, PanelLeft, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
@@ -10,14 +10,13 @@ import { ThreadChat } from '@/components/thread-chat'
 import { ThreadUsage } from '@/components/thread-usage'
 import { NaturalStoryComposer } from '@/components/natural-story-composer'
 import { storyNavigationQuery, storyNavigationKey, storyUsageKey, storyUsageQuery } from '@/lib/threads.queries'
-import { addConversation, changeThreadArchive, deleteThreadResources,
-  setConversationTitle, setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
+import { changeThreadArchive, deleteThreadResources,
+  setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
 import { selectNavigationThreads } from '@/lib/thread-navigation'
 import type { StoryThread } from '@/lib/threads.server'
 
 export const Route = createFileRoute('/_protected/stories/$storyId/conversations')({
-  validateSearch: (search: Record<string, unknown>): { conversation?: string; thread?: string; archived?: boolean } => ({
-    ...(typeof search.conversation === 'string' ? { conversation: search.conversation } : {}),
+  validateSearch: (search: Record<string, unknown>): { thread?: string; archived?: boolean } => ({
     ...(typeof search.thread === 'string' ? { thread: search.thread } : {}),
     ...(search.archived === true || search.archived === 'true' ? { archived: true } : {}),
   }),
@@ -50,14 +49,13 @@ function TitleEditor({ title, label, onSubmit, onCancel }: {
 
 function StoryConversations() {
   const { storyId } = Route.useParams()
-  const { conversation: selectedId, thread: selectedThreadId, archived } = Route.useSearch()
+  const { thread: selectedThreadId, archived } = Route.useSearch()
   const archivedView = archived === true
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { data, error, isFetching } = useQuery({
     ...storyNavigationQuery(storyId),
-    refetchInterval: query => query.state.data?.conversations.some(item =>
-      item.threads.some(thread => thread.status === 'running' || thread.status === 'queued'))
+    refetchInterval: query => query.state.data?.threads.some(thread => thread.status === 'running' || thread.status === 'queued')
       ? 8000 : 30000,
   })
   const [navigationOpen, setNavigationOpen] = useState(false)
@@ -69,10 +67,9 @@ function StoryConversations() {
   }, [])
   const [usageOpen, setUsageOpen] = useState(false)
   const usage = useQuery({ ...storyUsageQuery(storyId), enabled: usageOpen, refetchInterval: usageOpen ? 15000 : false })
-  const [creating, setCreating] = useState(false)
   const [creatingThread, setCreatingThread] = useState(false)
   const [changingArchive, setChangingArchive] = useState<string | null>(null)
-  const [editing, setEditing] = useState<{ kind: 'conversation' | 'thread'; id: string } | null>(null)
+  const [editing, setEditing] = useState<{ kind: 'thread'; id: string } | null>(null)
   const [issue, setIssue] = useState<string | null>(null)
   const refresh = async () => {
     await Promise.all([
@@ -80,12 +77,11 @@ function StoryConversations() {
       queryClient.invalidateQueries({ queryKey: storyUsageKey(storyId) }),
     ])
   }
-  const conversation = data?.conversations.find(item => item.id === selectedId) ?? data?.conversations[0]
   const view = data?.preferences.view ?? 'tree'
   const expandedIds = data?.preferences.expandedIds ?? []
-  const visibleThreads = conversation ? selectNavigationThreads(conversation.threads,
-    archivedView ? 'archived' : 'active') : []
-  const archivedCount = conversation?.threads.filter(thread =>
+  const visibleThreads = selectNavigationThreads(data?.threads ?? [],
+    archivedView ? 'archived' : 'active')
+  const archivedCount = data?.threads.filter(thread =>
     !!thread.archivedAt && !thread.deletionCompleteAt).length ?? 0
   const selectedThread = visibleThreads.find(thread => thread.id === selectedThreadId) ?? visibleThreads[0]
   const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds) => {
@@ -118,53 +114,23 @@ function StoryConversations() {
   }
   const rename = async (value: string) => {
     if (!editing) return
-    if (editing.kind === 'conversation')
-      await setConversationTitle({ data: { id: editing.id, title: value } })
-    else await setThreadTitle({ data: { id: editing.id, title: value } })
+    await setThreadTitle({ data: { id: editing.id, title: value } })
     await refresh()
-  }
-  const create = async () => {
-    setCreating(true); setIssue(null)
-    try {
-      const made = await addConversation({ data: storyId })
-      await refresh()
-      setCreatingThread(true)
-      setNavigationOpen(false)
-      await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
-        search: { conversation: made.id } })
-    } catch (cause) { setIssue(cause instanceof Error ? cause.message : 'Unable to create Conversation') }
-    finally { setCreating(false) }
   }
   const openThread = (thread: StoryThread) => {
     setNavigationOpen(false)
+    setCreatingThread(false)
     void navigate({
     to: '/stories/$storyId/conversations', params: { storyId },
-    search: { conversation: conversation!.id, thread: thread.id,
+    search: { thread: thread.id,
       ...(archivedView ? { archived: true } : {}) },
     })
   }
   // Reuse one navigation presentation in the desktop sidebar and mobile Sheet.
   // The chat is always the main panel; navigation never stacks above it.
-  const navigation = <aside aria-label="Conversations and Threads"
+  const navigation = <aside aria-label="Story Threads"
     className="flex h-full min-h-0 min-w-0 flex-col gap-2 rounded-lg bg-muted/20 p-2">
-        <div className="flex items-center justify-between px-2 pt-1">
-          <h2 className="m-0 text-xs font-semibold">Conversations</h2>
-          <Button variant="ghost" size="icon-sm" title="New Conversation" aria-label="New Conversation"
-            disabled={creating} onClick={() => void create()}><Plus className="size-4" /></Button>
-        </div>
-        <nav aria-label="Story Conversations" className="story-conversation-list max-h-40 min-w-0 overflow-y-auto">
-          {data?.conversations.map(item =>
-            <Link key={item.id} to="/stories/$storyId/conversations" params={{ storyId }}
-              search={{ conversation: item.id }}
-              onClick={() => { setNavigationOpen(false); setCreatingThread(false) }}
-              aria-current={item.id === conversation?.id ? 'page' : undefined}
-              className={'block w-full min-w-0 shrink-0 rounded-md px-2 py-1.5 text-sm no-underline hover:bg-muted/70 ' +
-                (item.id === conversation?.id ? 'bg-muted text-foreground font-medium' : 'text-muted-foreground')}>
-              <span className="block truncate" title={item.title}>{item.title}</span>
-            </Link>)}
-        </nav>
-        {conversation && <>
-          <div className="my-1 border-t border-border/50" />
+        {data && <>
           <div className="flex items-center justify-between px-2">
             <h2 className="m-0 text-xs font-semibold">Threads</h2>
             <Button variant="ghost" size="icon-sm" title="New Thread" aria-label="New Thread"
@@ -172,13 +138,13 @@ function StoryConversations() {
           </div>
           <nav aria-label="Thread visibility" className="flex items-center gap-1 px-1 text-xs">
             <Link to="/stories/$storyId/conversations" params={{ storyId }}
-              search={{ conversation: conversation.id }}
+              search={{}}
               onClick={() => setNavigationOpen(false)}
               aria-current={!archivedView ? 'page' : undefined}
               className={'rounded px-2 py-1 no-underline hover:bg-muted ' +
                 (!archivedView ? 'bg-secondary font-medium' : 'text-muted-foreground')}>Active</Link>
             <Link to="/stories/$storyId/conversations" params={{ storyId }}
-              search={{ conversation: conversation.id, archived: true }}
+              search={{ archived: true }}
               onClick={() => setNavigationOpen(false)}
               aria-current={archivedView ? 'page' : undefined}
               className={'rounded px-2 py-1 no-underline hover:bg-muted ' +
@@ -197,7 +163,7 @@ function StoryConversations() {
           </nav>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {editing?.kind === 'thread' && <TitleEditor key={editing.id}
-              title={conversation.threads.find(thread => thread.id === editing.id)?.title ?? ''}
+              title={data.threads.find(thread => thread.id === editing.id)?.title ?? ''}
               label="Thread title" onSubmit={rename} onCancel={() => setEditing(null)} />}
             {visibleThreads.length ? <ThreadList threads={visibleThreads} view={view} expandedIds={expandedIds}
               selectedThreadId={selectedThread?.id} archivedView={archivedView} busyThreadId={changingArchive}
@@ -228,9 +194,9 @@ function StoryConversations() {
         <ArrowLeft className="size-4" />
       </Link>
       <h1 className="m-0 min-w-0 flex-1 truncate text-lg font-semibold">{data?.story.title ?? 'Story'}</h1>
-      <span className="hidden text-xs text-muted-foreground lg:inline">Conversations</span>
+      <span className="hidden text-xs text-muted-foreground lg:inline">Threads</span>
       <Sheet open={navigationOpen} onOpenChange={setNavigationOpen}>
-        <SheetTrigger aria-label="Open Conversations and Threads"
+        <SheetTrigger aria-label="Open Story Threads"
           className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium hover:bg-muted focus-visible:outline-2 lg:hidden">
           <PanelLeft className="size-4" />
           <span>Threads</span>
@@ -240,44 +206,36 @@ function StoryConversations() {
           <div className="min-h-0 flex-1">{navigation}</div>
         </SheetContent>
       </Sheet>
-      {isFetching && <LoaderCircle aria-label="Refreshing Conversations"
+      {isFetching && <LoaderCircle aria-label="Refreshing Threads"
         className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" />}
     </div>
     {(issue || error) && <p role="alert" className="mb-3 text-sm text-destructive">{issue ?? error?.message}</p>}
     <div className="grid min-h-0 min-w-0 flex-1 gap-3 lg:grid-cols-[minmax(200px,252px)_minmax(0,1fr)]">
       <div className="hidden min-h-0 lg:block">{navigation}</div>
-      <section aria-label="Selected conversation"
+      <section aria-label="Selected Thread"
         className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-border/60 p-0">
-        {conversation ? <>
+        {data ? <>
           <header className="flex min-h-12 items-center gap-2 border-b border-border/50 px-4 py-2">
-            {editing?.kind === 'conversation' && editing.id === conversation.id
-              ? <TitleEditor key={conversation.id} title={conversation.title} label="Conversation title"
-                onSubmit={rename} onCancel={() => setEditing(null)} />
-              : <>
-                <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
-                  {creatingThread ? 'New Thread' : selectedThread?.title ?? conversation.title}
-                </h2>
-                <Button size="icon-sm" variant="ghost" title="Rename Conversation" aria-label="Rename Conversation"
-                  onClick={() => setEditing({ kind: 'conversation', id: conversation.id })}>
-                  <Pencil className="size-3.5" /></Button>
-              </>}
+            <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
+              {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
+            </h2>
           </header>
-          {creatingThread || !conversation.threads.length
+          {creatingThread || !data.threads.length
             ? <div className="mx-auto w-full max-w-2xl flex-1 overflow-y-auto px-4 py-6">
               <p className="mb-3 text-sm text-muted-foreground">Describe what you want to create in this Story.</p>
-              <NaturalStoryComposer key={conversation.id} conversationId={conversation.id}
+              <NaturalStoryComposer key={storyId} storyId={storyId}
                 onStarted={async threadId => {
                   setCreatingThread(false); await refresh()
                   await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
-                    search: { conversation: conversation.id, thread: threadId } })
+                    search: { thread: threadId } })
                 }} />
-              {conversation.threads.length > 0 && <Button variant="ghost" size="sm"
+              {data.threads.length > 0 && <Button variant="ghost" size="sm"
                 className="mt-3" onClick={() => setCreatingThread(false)}>Cancel</Button>}
             </div>
             : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />
               : <p className="p-5 text-sm text-muted-foreground">Select a Thread or create a new one.</p>}
         </> : <p className="p-5 text-sm text-muted-foreground">
-          {data ? 'Create a Conversation to get started.' : 'Loading Conversations…'}
+          Loading Threads…
         </p>}
       </section>
     </div>

@@ -152,23 +152,10 @@ export const gitlabPublications = sqliteTable('gitlab_publications', {
   check('gitlab_publications_phase_check', sql`${table.phase} in ('pending','linked')`),
 ])
 
-export const storyConversations = sqliteTable('story_conversations', {
-  id: text('id').primaryKey(),
-  ownerUserId: text('owner_user_id').notNull(),
-  storyId: text('story_id').notNull(),
-  title: text('title').notNull(),
-  createdAt: text('created_at').notNull(),
-  updatedAt: text('updated_at').notNull(),
-}, table => [
-  foreignKey({ columns: [table.storyId, table.ownerUserId], foreignColumns: [stories.id, stories.ownerUserId] }).onDelete('cascade'),
-  uniqueIndex('story_conversations_owner_pair').on(table.id, table.ownerUserId),
-  index('story_conversations_story_idx').on(table.ownerUserId, table.storyId),
-])
-
 export const storyThreads = sqliteTable('story_threads', {
   id: text('id').primaryKey(),
   ownerUserId: text('owner_user_id').notNull(),
-  conversationId: text('conversation_id').notNull(),
+  storyId: text('story_id').notNull(),
   parentThreadId: text('parent_thread_id'),
   title: text('title').notNull(),
   activityAt: text('activity_at').notNull(),
@@ -179,14 +166,14 @@ export const storyThreads = sqliteTable('story_threads', {
   deletionBytes: integer('deletion_bytes'),
   createdAt: text('created_at').notNull(),
 }, table => [
-  foreignKey({ columns: [table.conversationId, table.ownerUserId],
-    foreignColumns: [storyConversations.id, storyConversations.ownerUserId] }).onDelete('cascade'),
-  foreignKey({ columns: [table.parentThreadId, table.ownerUserId, table.conversationId],
-    foreignColumns: [table.id, table.ownerUserId, table.conversationId] }),
+  foreignKey({ columns: [table.storyId, table.ownerUserId],
+    foreignColumns: [stories.id, stories.ownerUserId] }).onDelete('cascade'),
+  foreignKey({ columns: [table.parentThreadId, table.ownerUserId, table.storyId],
+    foreignColumns: [table.id, table.ownerUserId, table.storyId] }),
   check('story_threads_parent_not_self', sql`${table.parentThreadId} is null or ${table.parentThreadId} <> ${table.id}`),
   uniqueIndex('story_threads_owner_pair').on(table.id, table.ownerUserId),
-  uniqueIndex('story_threads_owner_conversation').on(table.id, table.ownerUserId, table.conversationId),
-  index('story_threads_conversation_idx').on(table.ownerUserId, table.conversationId),
+  uniqueIndex('story_threads_owner_story').on(table.id, table.ownerUserId, table.storyId),
+  index('story_threads_story_idx').on(table.ownerUserId, table.storyId),
 ])
 
 export const storyThreadRuns = sqliteTable('story_thread_runs', {
@@ -201,6 +188,7 @@ export const storyThreadRuns = sqliteTable('story_thread_runs', {
   check('story_thread_runs_needs_author_check', sql`${table.needsAuthor} in (0, 1)`),
   uniqueIndex('story_thread_runs_order').on(table.threadId, table.runOrder),
   index('story_thread_runs_thread_idx').on(table.ownerUserId, table.threadId, table.runOrder),
+  uniqueIndex('story_thread_runs_identity').on(table.jobId, table.ownerUserId, table.threadId),
 ])
 
 /** Immutable author-visible fork history and sequential chat messages.
@@ -227,8 +215,39 @@ export const storyThreadMessages = sqliteTable('story_thread_messages', {
   check('story_thread_messages_status_check', sql`${table.status} in ('delivered', 'queued')`),
   check('story_thread_messages_phase_check', sql`${table.phase} is null or ${table.phase} in ('queued','preparing','running','finished','blocked')`),
   uniqueIndex('story_thread_messages_one_preparing').on(table.threadId).where(sql`${table.role}='user' and ${table.phase}='preparing'`),
+  uniqueIndex('story_thread_messages_identity').on(table.id, table.ownerUserId, table.threadId),
   uniqueIndex('story_thread_messages_order').on(table.threadId, table.sequence),
   index('story_thread_messages_thread_idx').on(table.ownerUserId, table.threadId, table.sequence),
+])
+
+/** A Turn is an author request, not a Job or a Pi SDK turn. Its request and
+ * lifecycle are retained in the linked Chat message, including queued edits.
+ * Inherited fork history is not a new request. */
+export const storyTurns = sqliteTable('story_turns', {
+  id: text('id').primaryKey(),
+  ownerUserId: text('owner_user_id').notNull(),
+  threadId: text('thread_id').notNull(),
+  createdAt: text('created_at').notNull(),
+}, table => [
+  foreignKey({ columns: [table.id, table.ownerUserId, table.threadId],
+    foreignColumns: [storyThreadMessages.id, storyThreadMessages.ownerUserId, storyThreadMessages.threadId] }).onDelete('cascade'),
+  uniqueIndex('story_turns_identity').on(table.id, table.ownerUserId, table.threadId),
+  index('story_turns_thread').on(table.ownerUserId, table.threadId),
+])
+
+/** Several isolated executions may fulfill one request (notably safe recovery).
+ * A live execution may also receive multiple explicitly admitted author Turns. */
+export const storyTurnExecutions = sqliteTable('story_turn_executions', {
+  turnId: text('turn_id').notNull(),
+  jobId: text('job_id').notNull(),
+  ownerUserId: text('owner_user_id').notNull(),
+  threadId: text('thread_id').notNull(),
+}, table => [
+  primaryKey({ columns: [table.turnId, table.jobId] }),
+  foreignKey({ columns: [table.turnId, table.ownerUserId, table.threadId],
+    foreignColumns: [storyTurns.id, storyTurns.ownerUserId, storyTurns.threadId] }).onDelete('cascade'),
+  foreignKey({ columns: [table.jobId, table.ownerUserId, table.threadId],
+    foreignColumns: [storyThreadRuns.jobId, storyThreadRuns.ownerUserId, storyThreadRuns.threadId] }).onDelete('cascade'),
 ])
 
 export const threadRestarts = sqliteTable('thread_restarts', {
@@ -344,6 +363,8 @@ export const checkpointForks = sqliteTable('checkpoint_forks', {
   editedBody: text('edited_body'),
 }, table => [
   foreignKey({ columns: [table.ownerUserId], foreignColumns: [betterAuthUser.id] }),
+  foreignKey({ columns: [table.sourceJobId, table.ownerUserId, table.sourceThreadId],
+    foreignColumns: [storyThreadRuns.jobId, storyThreadRuns.ownerUserId, storyThreadRuns.threadId] }),
 ])
 
 export const storyThreadMessageCancellations = sqliteTable('story_thread_message_cancellations', {

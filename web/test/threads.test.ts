@@ -5,7 +5,7 @@ import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import {
-  createConversation, listStoryConversations, renameConversation, renameThread,
+  createThread, listStoryNavigation, renameThread,
   saveThreadPreferences,
 } from '../src/lib/threads.server'
 import { orderThreads } from '../src/lib/thread-navigation'
@@ -17,7 +17,7 @@ const config = {
   gitlab: { clientId: 'test', clientSecret: 'test' },
 }
 
-test('Story Conversations expose owner-scoped legacy root Threads and meaningful progress, surviving reconnect', async () => {
+test('Stories expose owner-scoped root Threads and meaningful progress, surviving reconnect', async () => {
   const db = openStudioDatabase(':memory:')
   try {
     await migrateStudio(db, config)
@@ -41,44 +41,39 @@ test('Story Conversations expose owner-scoped legacy root Threads and meaningful
       phase: 'running', createdAt: '2026-11-02T02:00:00Z', updatedAt: '2026-11-02T02:00:00Z' }))
     ;(await seed.event({ jobId: ids[0]!, ownerUserId: alice, kind: 'working', stage: 'event',
       milestone: 'arc.one', filesJson: '[]', status: null, createdAt: '2026-11-02T03:00:00Z' }))
-    const first = await listStoryConversations(db, alice, 'story-' + alice)
-    assert.equal(first.conversations.length, 3)
-    assert.equal(first.conversations.every(item => item.threads.length === 1), true)
-    const running = first.conversations.flatMap(c => c.threads).find(t => t.jobId === ids[0])
+    const first = await listStoryNavigation(db, alice, 'story-' + alice)
+    assert.equal(first.threads.length, 3)
+    const running = first.threads.find(t => t.jobId === ids[0])
     assert.equal(running?.status, 'running')
     assert.equal(running?.currentWork, 'Event · arc.one')
     assert.equal(running?.activityAt, '2026-11-02T03:00:00Z')
     await renameThread(db, alice, running!.id, 'Character branch')
-    assert.equal((await listStoryConversations(db, alice, 'story-' + alice)).conversations
-      .flatMap(c => c.threads).find(t => t.id === running!.id)?.title, 'Character branch')
+    assert.equal((await listStoryNavigation(db, alice, 'story-' + alice)).threads.find(t => t.id === running!.id)?.title, 'Character branch')
     // An updated_at heartbeat must not move a job or silently generate new IDs.
     ;(await db.testing.records.update('studio_sessions', { id: ids[1] }, { updatedAt: '2099-01-01T00:00:00Z' }))
-    const second = await listStoryConversations(db, alice, 'story-' + alice)
-    assert.deepEqual(second.conversations.map(c => c.id), first.conversations.map(c => c.id))
-    assert.equal(second.conversations.flatMap(c => c.threads).find(t => t.jobId === ids[1])?.activityAt,
+    const second = await listStoryNavigation(db, alice, 'story-' + alice)
+    assert.deepEqual(second.threads.map(c => c.id), first.threads.map(c => c.id))
+    assert.equal(second.threads.find(t => t.jobId === ids[1])?.activityAt,
       '2026-11-01T00:00:00Z')
     ;(await db.testing.records.update('studio_sessions', { id: ids[1] }, { generationRequestJson: '{}' }))
     ;(await db.testing.records.update('story_thread_runs', { jobId: ids[1] }, { needsAuthor: 1 }))
-    assert.equal((await listStoryConversations(db, alice, 'story-' + alice)).conversations
-      .flatMap(c => c.threads).find(t => t.jobId === ids[1])?.status, 'needs-author')
+    assert.equal((await listStoryNavigation(db, alice, 'story-' + alice)).threads.find(t => t.jobId === ids[1])?.status, 'needs-author')
     const branchId = 'branch:' + randomUUID(), parent = running!.id
-    const parentConversation = first.conversations.find(c => c.threads.some(t => t.id === parent))!.id
     ;(await db.testing.records.insert('story_threads', { id: branchId, ownerUserId: alice,
-      conversationId: parentConversation, parentThreadId: parent, title: 'Alternative',
+      storyId: 'story-' + alice, parentThreadId: parent, title: 'Alternative',
       activityAt: '2026-11-04T00:00:00Z', createdAt: '2026-11-04T00:00:00Z' }))
-    const nested = (await listStoryConversations(db, alice, 'story-' + alice))
-      .conversations.find(c => c.id === parentConversation)!.threads
+    const nested = (await listStoryNavigation(db, alice, 'story-' + alice))
+      .threads.filter(t => t.id === parent || t.parentThreadId === parent)
     assert.deepEqual(orderThreads(nested, 'tree').map(row => [row.id, row.depth]),
       [[parent, 0], [branchId, 1]])
     await assert.rejects(async () => (await db.testing.records.insert('story_threads', {
       id: 'cross:' + randomUUID(), ownerUserId: alice,
-      conversationId: first.conversations.find(c => c.id !== parentConversation)!.id,
+      storyId: 'story-' + bob,
       parentThreadId: parent, title: 'Crossed', activityAt: '2026-11-04T00:00:00Z',
       createdAt: '2026-11-04T00:00:00Z',
-    })), /FOREIGN KEY/, 'a branch cannot cross Conversations')
-    await assert.rejects(() => listStoryConversations(db, bob, 'story-' + alice), /not found/i)
+    })), /FOREIGN KEY/, 'a branch cannot cross Stories or owners')
+    await assert.rejects(() => listStoryNavigation(db, bob, 'story-' + alice), /not found/i)
     await assert.rejects(() => renameThread(db, bob, running!.id, 'Stolen'), /not found/i)
-    await assert.rejects(() => renameConversation(db, bob, first.conversations[0]!.id, 'Stolen'), /not found/i)
     assert.deepEqual((await db.testing.foreignKeyViolations()), [])
   } finally { db.close() }
 })
@@ -94,17 +89,17 @@ test('authors can create, rename and persist navigation preferences, with bounds
       providerRepositoryId: 'repo', name: 'Repo', createdAt: 'now' }))
     ;(await seed.story({ id: story, ownerUserId: alice, repositoryId: repo,
       directory: 'story', title: 'Story', createdAt: 'now' }))
-    const conversation = await createConversation(db, alice, story)
-    assert.match(conversation.title, /New conversation/)
-    assert.equal((await listStoryConversations(db, alice, story)).conversations.length, 1)
-    await renameConversation(db, alice, conversation.id, 'Character alternatives')
-    assert.equal((await listStoryConversations(db, alice, story)).conversations[0]?.title, 'Character alternatives')
-    await assert.rejects(() => createConversation(db, bob, story), /not found/i)
+    const thread = await createThread(db, alice, story)
+    assert.match(thread.title, /New Thread/)
+    assert.equal((await listStoryNavigation(db, alice, story)).threads.length, 1)
+    await renameThread(db, alice, thread.id, 'Character alternatives')
+    assert.equal((await listStoryNavigation(db, alice, story)).threads[0]?.title, 'Character alternatives')
+    await assert.rejects(() => createThread(db, bob, story), /not found/i)
     await assert.rejects(() => saveThreadPreferences(db, bob, story, 'flat', []), /not found/i)
-    await assert.rejects(() => renameConversation(db, alice, conversation.id, ' '.repeat(5)), /title/i)
-    await assert.rejects(() => renameConversation(db, alice, conversation.id, 'X'.repeat(121)), /title/i)
+    await assert.rejects(() => renameThread(db, alice, thread.id, ' '.repeat(5)), /title/i)
+    await assert.rejects(() => renameThread(db, alice, thread.id, 'X'.repeat(121)), /title/i)
     await saveThreadPreferences(db, alice, story, 'flat', ['root-1', 'root-1', 'root-2'])
-    assert.deepEqual((await listStoryConversations(db, alice, story)).preferences,
+    assert.deepEqual((await listStoryNavigation(db, alice, story)).preferences,
       { view: 'flat', expandedIds: ['root-1', 'root-2'] })
     assert.deepEqual((await db.testing.foreignKeyViolations()), [])
   } finally { db.close() }

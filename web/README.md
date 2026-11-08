@@ -500,18 +500,27 @@ Always stop Studio writers and run `migrate` as a separate deployment step.
 Keep Better Auth pinned, and use the same stable secret and database path
 on migration and runtime.
 
-**Development schema reset:** The Studio application now uses a fresh
-Drizzle migration baseline. Existing application tables without a Drizzle
-migration journal cannot be adopted automatically. Back up any data you
-wish to keep before resetting; this reset intentionally discards Studio
+**Story-first development schema reset (#104):** The fresh Drizzle baseline
+stores Threads directly under Stories and durable Turns under Threads; it has
+no `story_conversations` table or mandatory Conversation relation. This is
+an intentionally incompatible, disposable-development-database cutover, **not**
+an in-place upgrade. Existing application tables and incompatible Drizzle
+histories cannot be adopted automatically. Back up any data you wish to keep
+before resetting; this operation discards only the selected Studio SQLite
 users, connections, repositories, Stories, jobs, and credentials. The
 independent LangGraph/agent/checkpointer SQLite databases are **not**
 affected.
 
 To reset deliberately, stop Studio and any agent/worker processes first.
-Set `NT_STUDIO_DB_PATH` to the **absolute path** of the Studio SQLite file
-(the default is documented below). After making a backup, remove only
-that file and its `-wal` and `-shm` companions with all writers stopped:
+Determine the **effective** selected SQLite path in the Studio process
+configuration: `NT_STUDIO_DB_PATH` takes precedence, otherwise it is
+`$XDG_STATE_HOME/noveltea-gen/studio.sqlite` or
+`~/.local/state/noveltea-gen/studio.sqlite`. Confirm the resolved absolute
+path, service/container environment and mounted volume independently. Verify
+that no other deployment or worker uses that file; never assume the default
+path is the one selected by a running service. Set `NT_STUDIO_DB_PATH`
+explicitly to that reviewed path. After a backup, remove only that file and
+its `-wal` and `-shm` companions with all writers stopped:
 
 ```sh
 : "${NT_STUDIO_DB_PATH:?Set the absolute Studio DB path before resetting}"

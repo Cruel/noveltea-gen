@@ -1,24 +1,20 @@
 import { randomUUID } from 'node:crypto'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { NavigationThreadRecord } from '../persistence/conversation-contracts'
-import { compareActivity, latestActivity } from './thread-navigation'
+import { latestActivity } from './thread-navigation'
 
 export type ThreadStatus = 'prepared' | 'queued' | 'running' | 'paused' | 'needs-author' |
   'blocked' | 'completed' | 'cancelled' | 'archived' | 'deleting' | 'deleted'
 export type StoryThread = {
-  id: string; conversationId: string; parentThreadId: string | null; title: string
+  id: string; storyId: string; parentThreadId: string | null; title: string
   activityAt: string; createdAt: string; archivedAt: string | null
   deletedAt?: string | null; deletionCompleteAt?: string | null
   status: ThreadStatus; currentWork: string | null; jobId: string | null
 }
-export type StoryConversation = {
-  id: string; title: string; createdAt: string; updatedAt: string; activityAt: string
-  threads: StoryThread[]
-}
 export type ThreadPreferences = { view: 'tree' | 'flat'; expandedIds: string[] }
 export type StoryNavigation = {
   story: { id: string; title: string }
-  conversations: StoryConversation[]
+  threads: StoryThread[]
   preferences: ThreadPreferences
 }
 
@@ -37,9 +33,8 @@ async function selectedStory(store: StudioDatabase, owner: string, storyId: stri
   return story
 }
 
-/** Backfill or reconcile jobs created before the Conversation registration hook.
- * Stable IDs and transactionally linked rows make GET idempotent across workers,
- * and never infer branchable historical checkpoints from those jobs. */
+/** Register roots for newly acquired internal jobs, idempotently across workers.
+ * Never infer branchable historical checkpoints from job existence. */
 export async function ensureRootThreads(store: StudioDatabase, owner: string, storyId: string) {
   await store.persistence.conversations.reconcileRoots(owner, storyId)
 }
@@ -60,12 +55,11 @@ function threadStatus(row: ThreadRow): ThreadStatus {
   return 'prepared'
 }
 
-export async function listStoryConversations(store: StudioDatabase, owner: string, storyId: string): Promise<StoryNavigation> {
+export async function listStoryNavigation(store: StudioDatabase, owner: string, storyId: string): Promise<StoryNavigation> {
   const story = await selectedStory(store, owner, storyId)
   await ensureRootThreads(store, owner, storyId)
-  const { conversations: rows, threads: threadRows } =
-    await store.persistence.conversations.navigation(owner, storyId)
-  const grouped = new Map<string, StoryThread[]>()
+  const { threads: threadRows } = await store.persistence.conversations.navigation(owner, storyId)
+  const threads: StoryThread[] = []
   for (const row of threadRows) {
     const status = threadStatus(row)
     const activityAt = latestActivity([row.activityAt, row.queueAt, row.queueUpdatedAt, row.lastEventAt]
@@ -73,31 +67,19 @@ export async function listStoryConversations(store: StudioDatabase, owner: strin
     const work = status === 'running' && row.workingStage
       ? row.workingStage.replaceAll('-', ' ').replace(/\b\w/g, char => char.toUpperCase()) +
         (row.workingMilestone ? ' · ' + row.workingMilestone : '') : null
-    const threads = grouped.get(row.conversationId) ?? []
-    threads.push({ id: row.id, conversationId: row.conversationId,
+    threads.push({ id: row.id, storyId: row.storyId,
       parentThreadId: row.parentThreadId, title: row.title, activityAt,
       createdAt: row.createdAt, archivedAt: row.archivedAt,
       deletedAt: row.deletedAt, deletionCompleteAt: row.deletionCompleteAt, status,
       currentWork: work, jobId: row.deletedAt ? null : row.jobId })
-    grouped.set(row.conversationId, threads)
   }
-  const conversations = rows.map(row => {
-    const threads = grouped.get(row.id) ?? []
-    const activityAt = latestActivity([row.createdAt, ...threads.map(thread => thread.activityAt)])
-    return { ...row, activityAt, threads }
-  }).sort((a, b) => compareActivity(b.activityAt, a.activityAt) || a.id.localeCompare(b.id))
   const prefs = await store.persistence.settings.getThreadPreferences(owner, storyId)
-  return { story, conversations, preferences: prefs ?? { view: 'tree', expandedIds: [] } }
+  return { story, threads, preferences: prefs ?? { view: 'tree', expandedIds: [] } }
 }
 
-export async function createConversation(store: StudioDatabase, owner: string, storyId: string) {
+export async function createThread(store: StudioDatabase, owner: string, storyId: string) {
   await selectedStory(store, owner, storyId)
   return store.persistence.conversations.create(owner, storyId, randomUUID(), new Date().toISOString())
-}
-export async function renameConversation(store: StudioDatabase, owner: string, conversationId: string, title: string) {
-  const valid = titleValue(title)
-  if (!await store.persistence.conversations.renameConversation(owner, conversationId, valid, new Date().toISOString()))
-    throw new Error('Conversation not found.')
 }
 export async function renameThread(store: StudioDatabase, owner: string, threadId: string, title: string) {
   const valid = titleValue(title)

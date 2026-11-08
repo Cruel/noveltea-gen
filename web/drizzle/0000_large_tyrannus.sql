@@ -13,7 +13,8 @@ CREATE TABLE `checkpoint_forks` (
 	`history_json` text,
 	`edited_message_id` text,
 	`edited_body` text,
-	FOREIGN KEY (`owner_user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`owner_user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`source_job_id`,`owner_user_id`,`source_thread_id`) REFERENCES `story_thread_runs`(`job_id`,`owner_user_id`,`thread_id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE TABLE `generation_events` (
@@ -180,18 +181,6 @@ CREATE TABLE `stories` (
 CREATE UNIQUE INDEX `stories_owner_pair` ON `stories` (`id`,`owner_user_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `stories_directory` ON `stories` (`repository_id`,`directory`);--> statement-breakpoint
 CREATE INDEX `stories_owner_idx` ON `stories` (`owner_user_id`);--> statement-breakpoint
-CREATE TABLE `story_conversations` (
-	`id` text PRIMARY KEY NOT NULL,
-	`owner_user_id` text NOT NULL,
-	`story_id` text NOT NULL,
-	`title` text NOT NULL,
-	`created_at` text NOT NULL,
-	`updated_at` text NOT NULL,
-	FOREIGN KEY (`story_id`,`owner_user_id`) REFERENCES `stories`(`id`,`owner_user_id`) ON UPDATE no action ON DELETE cascade
-);
---> statement-breakpoint
-CREATE UNIQUE INDEX `story_conversations_owner_pair` ON `story_conversations` (`id`,`owner_user_id`);--> statement-breakpoint
-CREATE INDEX `story_conversations_story_idx` ON `story_conversations` (`owner_user_id`,`story_id`);--> statement-breakpoint
 CREATE TABLE `story_onboarding_conversations` (
 	`owner_user_id` text NOT NULL,
 	`repository_id` text NOT NULL,
@@ -247,6 +236,7 @@ CREATE TABLE `story_thread_messages` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `story_thread_messages_one_preparing` ON `story_thread_messages` (`thread_id`) WHERE "story_thread_messages"."role"='user' and "story_thread_messages"."phase"='preparing';--> statement-breakpoint
+CREATE UNIQUE INDEX `story_thread_messages_identity` ON `story_thread_messages` (`id`,`owner_user_id`,`thread_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `story_thread_messages_order` ON `story_thread_messages` (`thread_id`,`sequence`);--> statement-breakpoint
 CREATE INDEX `story_thread_messages_thread_idx` ON `story_thread_messages` (`owner_user_id`,`thread_id`,`sequence`);--> statement-breakpoint
 CREATE TABLE `story_thread_preferences` (
@@ -273,23 +263,48 @@ CREATE TABLE `story_thread_runs` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `story_thread_runs_order` ON `story_thread_runs` (`thread_id`,`run_order`);--> statement-breakpoint
 CREATE INDEX `story_thread_runs_thread_idx` ON `story_thread_runs` (`owner_user_id`,`thread_id`,`run_order`);--> statement-breakpoint
+CREATE UNIQUE INDEX `story_thread_runs_identity` ON `story_thread_runs` (`job_id`,`owner_user_id`,`thread_id`);--> statement-breakpoint
 CREATE TABLE `story_threads` (
 	`id` text PRIMARY KEY NOT NULL,
 	`owner_user_id` text NOT NULL,
-	`conversation_id` text NOT NULL,
+	`story_id` text NOT NULL,
 	`parent_thread_id` text,
 	`title` text NOT NULL,
 	`activity_at` text NOT NULL,
 	`archived_at` text,
+	`deleted_at` text,
+	`deletion_complete_at` text,
+	`deletion_plan_json` text,
+	`deletion_bytes` integer,
 	`created_at` text NOT NULL,
-	FOREIGN KEY (`conversation_id`,`owner_user_id`) REFERENCES `story_conversations`(`id`,`owner_user_id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`parent_thread_id`,`owner_user_id`,`conversation_id`) REFERENCES `story_threads`(`id`,`owner_user_id`,`conversation_id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`story_id`,`owner_user_id`) REFERENCES `stories`(`id`,`owner_user_id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`parent_thread_id`,`owner_user_id`,`story_id`) REFERENCES `story_threads`(`id`,`owner_user_id`,`story_id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "story_threads_parent_not_self" CHECK("story_threads"."parent_thread_id" is null or "story_threads"."parent_thread_id" <> "story_threads"."id")
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `story_threads_owner_pair` ON `story_threads` (`id`,`owner_user_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `story_threads_owner_conversation` ON `story_threads` (`id`,`owner_user_id`,`conversation_id`);--> statement-breakpoint
-CREATE INDEX `story_threads_conversation_idx` ON `story_threads` (`owner_user_id`,`conversation_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `story_threads_owner_story` ON `story_threads` (`id`,`owner_user_id`,`story_id`);--> statement-breakpoint
+CREATE INDEX `story_threads_story_idx` ON `story_threads` (`owner_user_id`,`story_id`);--> statement-breakpoint
+CREATE TABLE `story_turn_executions` (
+	`turn_id` text NOT NULL,
+	`job_id` text NOT NULL,
+	`owner_user_id` text NOT NULL,
+	`thread_id` text NOT NULL,
+	PRIMARY KEY(`turn_id`, `job_id`),
+	FOREIGN KEY (`turn_id`,`owner_user_id`,`thread_id`) REFERENCES `story_turns`(`id`,`owner_user_id`,`thread_id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`job_id`,`owner_user_id`,`thread_id`) REFERENCES `story_thread_runs`(`job_id`,`owner_user_id`,`thread_id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE TABLE `story_turns` (
+	`id` text PRIMARY KEY NOT NULL,
+	`owner_user_id` text NOT NULL,
+	`thread_id` text NOT NULL,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`id`,`owner_user_id`,`thread_id`) REFERENCES `story_thread_messages`(`id`,`owner_user_id`,`thread_id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `story_turns_identity` ON `story_turns` (`id`,`owner_user_id`,`thread_id`);--> statement-breakpoint
+CREATE INDEX `story_turns_thread` ON `story_turns` (`owner_user_id`,`thread_id`);--> statement-breakpoint
 CREATE TABLE `thread_active_pi_turns` (
 	`job_id` text PRIMARY KEY NOT NULL,
 	`pi_token` text NOT NULL,

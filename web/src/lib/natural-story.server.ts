@@ -12,10 +12,9 @@ import { parseJobLimits, type JobLimits } from '../../../src/job-limits'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const SHA = /^[a-f0-9]{40}$/i
-const CONVERSATION_ID = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|legacy:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i
 type Limits = JobLimits
 export type NaturalStoryInput = {
-  conversationId: string
+  storyId: string
   jobId: string
   headSha: string
   prompt: string
@@ -25,10 +24,10 @@ export type NaturalStoryInput = {
   fixture?: boolean
   approvedDigest?: string
 }
-async function selectedConversation(store: StudioDatabase, owner: string, conversationId: string) {
-  if (!CONVERSATION_ID.test(conversationId)) throw new Error('Invalid Conversation ID.')
-  const row = await store.persistence.naturalStory.conversation(owner, conversationId)
-  if (!row) throw new Error('Conversation not found.')
+async function selectedStory(store: StudioDatabase, owner: string, storyId: string) {
+  if (!UUID.test(storyId)) throw new Error('Invalid Story ID.')
+  const row = await store.persistence.naturalStory.story(owner, storyId)
+  if (!row) throw new Error('Story not found.')
   if (!SHA.test(row.headSha ?? '')) throw new Error('Story has no verified source commit.')
   return row
 }
@@ -43,11 +42,11 @@ async function modelOptions(store: StudioDatabase, owner: string) {
   return { models, defaultModel }
 }
 export async function previewNaturalStory(store: StudioDatabase, owner: string,
-  conversationId: string, prompt: string, edits?: PlanEdits) {
+  storyId: string, prompt: string, edits?: PlanEdits) {
   await store.assertReady()
-  const conversation = await selectedConversation(store, owner, conversationId)
+  const story = await selectedStory(store, owner, storyId)
   const plan = interpretNaturalStoryPrompt(prompt, edits)
-  return { plan, storyId: conversation.storyId, headSha: conversation.headSha!,
+  return { plan, storyId: story.storyId, headSha: story.headSha!,
     ...await modelOptions(store, owner) }
 }
 function checkLimits(limits: unknown): Limits {
@@ -66,13 +65,11 @@ async function responseJson(response: Response): Promise<Record<string, unknown>
   return data ?? {}
 }
 
-/** A prepared job already owns a root Thread. Rehome only that root into the
- * author's selected Conversation; never alter a fork or another owner/thread.
- * A failed acquisition remains inspectable rather than being silently retried. */
+/** A prepared job owns a Story-scoped root Thread. Validate that identity;
+ * a failed acquisition remains inspectable rather than silently retried. */
 export async function associateNaturalThread(store: StudioDatabase, owner: string,
-  conversationId: string, jobId: string, title: string) {
-  // The adapter checks the Conversation and root run again under one transaction.
-  return store.persistence.naturalStory.associateRoot(owner, conversationId, jobId,
+  storyId: string, jobId: string, title: string) {
+  return store.persistence.naturalStory.associateRoot(owner, storyId, jobId,
     title, new Date().toISOString())
 }
 
@@ -87,8 +84,8 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   const origin = headers.get('origin')
   if (origin && origin !== baseURL) throw new Error('Cross-origin write refused.')
   if (!input || !UUID.test(input.jobId)) throw new Error('Invalid idempotent job ID.')
-  const conversation = await selectedConversation(store, actor.id, input.conversationId)
-  if (input.headSha !== conversation.headSha)
+  const story = await selectedStory(store, actor.id, input.storyId)
+  if (input.headSha !== story.headSha)
     throw new Error('The Story base revision changed. Review the refreshed plan before starting.')
   const plan = interpretNaturalStoryPrompt(input.prompt, input.edits)
   if (plan.reviewRequired && input.approvedDigest !== plan.digest)
@@ -107,9 +104,9 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   verifyWebExecution(!model)
 
   const previous = await store.persistence.naturalStory.previousJob(actor.id, input.jobId)
-  if (previous && (previous.storyId !== conversation.storyId ||
-      !['legacy:' + input.jobId, input.conversationId].includes(previous.conversationId ?? '')))
-    throw new Error('Job ID already belongs to a different Story or Conversation.')
+  if (previous && (previous.storyId !== story.storyId ||
+      previous.threadId !== 'root:' + input.jobId))
+    throw new Error('Job ID already belongs to a different Story or Thread.')
   const draft = { version: 1 as const, task: plan.task, contract: plan.contract, limits, model }
   if (previous?.configJson) {
     const saved = JSON.parse(previous.configJson) as Record<string, unknown>
@@ -118,23 +115,21 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
       throw new Error('Job ID was already submitted with different generation settings.')
   }
   if (previous?.requestJson) {
-    if (previous.conversationId !== input.conversationId)
-      throw new Error('Job ID already belongs to a different Conversation.')
     const request = JSON.parse(previous.requestJson) as Record<string, unknown>
     if (request.task !== plan.task || JSON.stringify(request.contract) !== JSON.stringify(plan.contract))
       throw new Error('Job ID was already admitted with a different request.')
     return { jobId: input.jobId, threadId: 'root:' + input.jobId, plan }
   }
-  const prepared = await responseJson(await (conversation.provider === 'github'
+  const prepared = await responseJson(await (story.provider === 'github'
     ? githubJobRequest(auth, store,
       asRequest(baseURL, headers, '/api/github/jobs', 'POST',
-        { storyId: conversation.storyId, jobId: input.jobId, commit: conversation.headSha }), baseURL)
+        { storyId: story.storyId, jobId: input.jobId, commit: story.headSha }), baseURL)
     : gitlabJobRequest(auth, store,
       asRequest(baseURL, headers, '/api/gitlab/jobs', 'POST',
-        { storyId: conversation.storyId, jobId: input.jobId, commit: conversation.headSha }), baseURL)))
+        { storyId: story.storyId, jobId: input.jobId, commit: story.headSha }), baseURL)))
   const job = prepared.job as { headSha?: string } | undefined
   if (!job?.headSha || !SHA.test(job.headSha)) throw new Error('Provider did not return a pinned job revision.')
-  const threadId = await associateNaturalThread(store, actor.id, input.conversationId,
+  const threadId = await associateNaturalThread(store, actor.id, input.storyId,
     input.jobId, plan.task.slice(0, 120))
   await responseJson(await generationConfigurationRequest(auth, store,
     asRequest(baseURL, headers, '/api/jobs/' + input.jobId + '/configuration',

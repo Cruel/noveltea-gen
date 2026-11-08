@@ -28,10 +28,8 @@ async function setup() {
     providerRepositoryId: '123', name: 'Repo', createdAt: at }))
   ;(await seed.story({ id: story, ownerUserId: alice, repositoryId: repo,
     directory: 'story', title: 'Story', createdAt: at }))
-  const conversation = randomUUID(), id = randomUUID(), job = randomUUID()
-  ;(await seed.conversation({ id: conversation, ownerUserId: alice, storyId: story,
-    title: 'Story chat', createdAt: at, updatedAt: at }))
-  ;(await seed.thread({ id, ownerUserId: alice, conversationId: conversation,
+  const id = randomUUID(), job = randomUUID()
+  ;(await seed.thread({ id, ownerUserId: alice, storyId: story,
     title: 'Thread', activityAt: at, createdAt: at }))
   ;(await seed.job({ id: job, ownerUserId: alice, storyId: story, title: 'Root',
     sourceCommitSha: 'a'.repeat(40), status: 'completed', createdAt: at,
@@ -43,7 +41,7 @@ async function setup() {
     createdAt: at, updatedAt: at }))
   ;(await seed.event({ jobId: job, ownerUserId: alice, kind: 'finished',
     stage: null, milestone: null, filesJson: '[]', status: 'completed', createdAt: at }))
-  return { db, alice, bob, id, story, conversation, job }
+  return { db, alice, bob, id, story, job }
 }
 
 test('Thread chat is immutable, ordered, owner-scoped, reconnectable and honest about fixture evidence', async () => {

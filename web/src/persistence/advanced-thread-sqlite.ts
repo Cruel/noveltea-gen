@@ -2,19 +2,20 @@ import { randomUUID } from 'node:crypto'
 import { and, asc, count, desc, eq, isNotNull, lt, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
-import { checkpointForks as forks, generationEvents, generationRunQueue as queue, repositories, sessions, stories, storyConversations as conversations,
+import { checkpointForks as forks, generationEvents, generationRunQueue as queue, repositories, sessions, stories,
   storyThreadMessages as messages, storyThreadRuns as runs, storyThreads as threads,
   threadRestarts as restarts } from '../db/schema'
 import type { AdvancedThreadPersistence, ForkInheritedMessage, ForkIntent,
   ForkReservation, NewThreadChild, RecoveryContinuationRegistration, RestartIntent, RestartReservation, ThreadIdentity } from './advanced-thread-contracts'
+import { seedThreadMessagesSqlite } from './thread-message-sqlite'
 type Db = BetterSQLite3Database<typeof schema>
 const conflict = (message: string): never => { throw new Error(message) }
 const requireOwner = (owner: string) => {
   if (!owner) conflict('Authenticated owner required.')
 }
 const identityFields = {
-  id: threads.id, parent: threads.parentThreadId, conversation: threads.conversationId,
-  story: conversations.storyId, title: threads.title,
+  id: threads.id, parent: threads.parentThreadId,
+  story: threads.storyId, title: threads.title,
 }
 const editableFields = {
   id: messages.id, threadId: messages.threadId, sequence: messages.sequence,
@@ -37,10 +38,7 @@ const restartFields = {
 export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
   const identity = (owner: string, id: string): ThreadIdentity | null => {
     requireOwner(owner)
-    return db.select(identityFields).from(threads).innerJoin(conversations, and(
-      eq(conversations.id, threads.conversationId),
-      eq(conversations.ownerUserId, threads.ownerUserId),
-    )).where(and(eq(threads.id, id), eq(threads.ownerUserId, owner))).get() ?? null
+    return db.select(identityFields).from(threads).where(and(eq(threads.id, id), eq(threads.ownerUserId, owner))).get() ?? null
   }
   const ancestor = (owner: string, id: string): ThreadIdentity | null => {
     const visited = new Set<string>()
@@ -119,7 +117,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
     },
     async sourceThread(owner, jobId) {
       requireOwner(owner)
-      return db.select({ id: runs.threadId, conversation: threads.conversationId })
+      return db.select({ id: runs.threadId, story: threads.storyId })
         .from(runs).innerJoin(threads, and(eq(threads.id, runs.threadId),
           eq(threads.ownerUserId, runs.ownerUserId)))
         .where(and(eq(runs.jobId, jobId), eq(runs.ownerUserId, owner))).get() ?? null
@@ -206,7 +204,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
             original.storyId !== parent.story || original.sha !== data.original)
           throw new Error('Restart source Story or original pinned baseline changed.')
         const root = ancestor(data.owner, data.sourceThread)
-        if (!root || root.conversation !== parent.conversation || root.story !== parent.story)
+        if (!root || root.story !== parent.story)
           throw new Error('Restart Thread ancestry changed.')
         const first = db.select({ id: runs.jobId }).from(runs).where(and(
           eq(runs.ownerUserId, data.owner), eq(runs.threadId, root.id),
@@ -243,8 +241,8 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
       return db.transaction(() => {
         const parent = identity(data.owner, data.parentThreadId)
         requireNotDeleted(data.owner, data.parentThreadId)
-        if (!parent || parent.story !== data.storyId || parent.conversation !== data.conversationId)
-          conflict('Child parent Story or Conversation identity changed.')
+        if (!parent || parent.story !== data.storyId)
+          conflict('Child parent Story identity changed.')
         const current = db.select({ storyId: sessions.storyId, owner: sessions.ownerUserId,
           commitSha: sessions.sourceCommitSha }).from(sessions)
           .where(eq(sessions.id, data.childId)).get()
@@ -259,8 +257,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
           const registeredThread = identity(data.owner, data.threadId)
           if (!registration || !registeredThread ||
               registeredThread.parent !== data.parentThreadId ||
-              registeredThread.story !== data.storyId ||
-              registeredThread.conversation !== data.conversationId)
+              registeredThread.story !== data.storyId)
             conflict('Existing child has incomplete or changed lineage registration.')
           // Repeat requests are read-only: preserve the original preparedAt receipt.
           return { inserted: false, storyId: current.storyId, commitSha: current.commitSha }
@@ -278,7 +275,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
           const first = root && db.select({ id: runs.jobId }).from(runs).where(and(
             eq(runs.ownerUserId, data.owner), eq(runs.threadId, root.id),
           )).orderBy(asc(runs.runOrder)).limit(1).get()
-          if (!root || root.story !== data.storyId || root.conversation !== data.conversationId ||
+          if (!root || root.story !== data.storyId ||
               first?.id !== saved.rootJob || latest?.id !== saved.sourceJob ||
               db.select({ sha: sessions.sourceCommitSha }).from(sessions).where(and(
                 eq(sessions.id, saved.rootJob), eq(sessions.ownerUserId, data.owner),
@@ -302,7 +299,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
           updatedAt: data.at, generationConfigJson: data.draft,
         }).run()
         db.insert(threads).values({
-          id: data.threadId, ownerUserId: data.owner, conversationId: data.conversationId,
+          id: data.threadId, ownerUserId: data.owner, storyId: data.storyId,
           parentThreadId: data.parentThreadId, title: data.title, activityAt: data.at,
           createdAt: data.at,
         }).run()
@@ -405,6 +402,7 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
           status: 'paused', createdAt: data.at, updatedAt: data.at,
           generationConfigJson: data.draft,
         }).run()
+        seedThreadMessagesSqlite(db, data.owner, data.sourceThreadId, false)
         db.insert(runs).values({
           jobId: data.childId, ownerUserId: data.owner,
           threadId: data.sourceThreadId, runOrder: (current?.runOrder ?? -1) + 1,

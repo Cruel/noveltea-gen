@@ -58,7 +58,6 @@ export function createSqlitePersistence(db: StudioDrizzle): StudioPersistence {
           id: sessions.id, storyId: sessions.storyId, title: sessions.title,
           status: sessions.status, updatedAt: sessions.updatedAt,
           threadId: storyThreadRuns.threadId, runOrder: storyThreadRuns.runOrder,
-          conversationId: storyThreads.conversationId,
         }).from(sessions)
           .leftJoin(storyThreadRuns, and(eq(storyThreadRuns.jobId, sessions.id),
             eq(storyThreadRuns.ownerUserId, sessions.ownerUserId)))

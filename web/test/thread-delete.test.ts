@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { deleteThread } from '../src/lib/thread-deletion.server'
-import { archiveThread, listStoryConversations } from '../src/lib/threads.server'
+import { archiveThread, listStoryNavigation } from '../src/lib/threads.server'
 import { selectNavigationThreads } from '../src/lib/thread-navigation'
 import { selectedJob, restoreJob } from '../src/lib/fixture-jobs.server'
 import { openStudioDatabase } from './support/studio-database'
@@ -81,7 +81,7 @@ test('deletion reclaims a leaf worktree, Git ref and private state without affec
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     await assert.rejects(deleteThread(f.store, f.stranger, thread.id), /not found/i)
     assert.equal(existsSync(parent.worktreeRoot), true)
     git(parent.gitRoot, 'branch', 'externally-retained', parent.headSha)
@@ -106,7 +106,7 @@ test('deletion reclaims a leaf worktree, Git ref and private state without affec
       'the deletion never prunes externally referenced Git objects')
     await assert.rejects(selectedJob(f.store, f.owner, parent.jobId), /permanently deleted/i)
     assert.deepEqual(await deleteThread(f.store, f.owner, thread.id), outcome)
-    const tombstone = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const tombstone = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     assert.ok(tombstone.deletionCompleteAt)
     assert.deepEqual(selectNavigationThreads([tombstone], 'active'), [])
     assert.deepEqual(await f.store.testing.foreignKeyViolations(), [])
@@ -117,12 +117,13 @@ test('completed parent deletion retains child lineage, independent Git checkout 
   const f = await fixture()
   try {
     const parent = await f.job()
-    const parentThread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const parentThread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     const child = await f.job()
     const id = 'fork:' + child.jobId
     await f.seed.thread({ id, ownerUserId: f.owner,
-      conversationId: parentThread.conversationId, parentThreadId: parentThread.id,
+      storyId: parentThread.storyId, parentThreadId: parentThread.id,
       title: 'Independent child', activityAt: at, createdAt: at })
+    await f.seed.forkReceipt(child.jobId, f.owner, parent.jobId, parentThread.id, child.baseSha, at)
     await f.seed.threadRun({ jobId: child.jobId, ownerUserId: f.owner, threadId: id, runOrder: 0 })
     const originalChildHead = git(child.worktreeRoot, 'rev-parse', 'HEAD')
     const retainedReceipt = join(parent.stateDir, 'architecture.json')
@@ -160,7 +161,7 @@ test('completed parent deletion retains child lineage, independent Git checkout 
     assert.equal(existsSync(child.worktreeRoot), true)
     assert.equal(git(child.worktreeRoot, 'rev-parse', 'HEAD'), originalChildHead)
     assert.equal((await restoreJob((await f.store.persistence.generation.jobs.selected(f.owner, child.jobId))!, f.owner)).jobId, child.jobId)
-    const threads = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads
+    const threads = (await listStoryNavigation(f.store, f.owner, f.story)).threads
     assert.equal(threads.find(row => row.id === id)?.parentThreadId, parentThread.id)
     assert.equal(threads.find(row => row.id === id)?.status, 'completed')
     assert.equal(threads.find(row => row.id === parentThread.id)?.status, 'deleted')
@@ -172,11 +173,12 @@ test('a symlink disguised as retained ancestry evidence blocks cleanup before Gi
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     const child = await f.job()
     await f.seed.thread({ id: 'fork:' + child.jobId, ownerUserId: f.owner,
-      conversationId: thread.conversationId, parentThreadId: thread.id,
+      storyId: thread.storyId, parentThreadId: thread.id,
       title: 'Child', activityAt: at, createdAt: at })
+    await f.seed.forkReceipt(child.jobId, f.owner, parent.jobId, thread.id, child.baseSha, at)
     await f.seed.threadRun({ jobId: child.jobId, ownerUserId: f.owner,
       threadId: 'fork:' + child.jobId, runOrder: 0 })
     symlinkSync('job.json', join(parent.stateDir, 'architecture.json'))
@@ -190,7 +192,7 @@ test('dirty state refuses cleanup; partial Git removal is retryable and does not
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     const extra = join(parent.worktreeStoryRoot, 'uncommitted.md')
     writeFileSync(extra, 'Unreviewed author edit\n')
     await assert.rejects(deleteThread(f.store, f.owner, thread.id), /dirty|checkout/i)
@@ -214,7 +216,7 @@ test('pending child forks and linked publications veto deletion before any physi
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     const child = randomUUID()
     await f.store.testing.records.insert('checkpoint_forks', {
       childId: child, ownerUserId: f.owner, sourceJobId: parent.jobId,
@@ -241,7 +243,7 @@ test('unsettled continuation and Pi delivery block deletion before worktree clea
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     const id = randomUUID()
     await f.seed.message({ id, ownerUserId: f.owner, threadId: thread.id,
       sequence: 0, role: 'user', status: 'queued', phase: 'preparing',
@@ -266,7 +268,7 @@ test('archived checkpoints remain recoverable while deleted runs cannot be re-en
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     await archiveThread(f.store, f.owner, thread.id)
     assert.equal((await restoreJob(await selectedJob(f.store, f.owner, parent.jobId), f.owner)).jobId,
       parent.jobId, 'archive has no execution-side effects')
@@ -282,7 +284,7 @@ test('an unexpected writer lock blocks physical deletion and the saved plan can 
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     const lock = join(parent.stateDir, '.story-job-running')
     mkdirSync(lock)
     await assert.rejects(deleteThread(f.store, f.owner, thread.id), /lock/i)
@@ -299,7 +301,7 @@ test('changed Git branch identity blocks cleanup and active work first receives 
   const f = await fixture()
   try {
     const parent = await f.job()
-    const thread = (await listStoryConversations(f.store, f.owner, f.story)).conversations[0]!.threads[0]!
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
     await f.store.testing.records.update('studio_sessions', { id: parent.jobId }, { status: 'running' })
     const pending = await deleteThread(f.store, f.owner, thread.id)
     assert.equal(pending.state, 'pending')

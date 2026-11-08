@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
-import { archiveThread, listStoryConversations, restoreThread } from '../src/lib/threads.server'
+import { archiveThread, listStoryNavigation, restoreThread } from '../src/lib/threads.server'
 import { cancelQueuedThreadMessage, editQueuedThreadMessage,
   enqueueThreadMessage, readThreadChat } from '../src/lib/thread-chat.server'
 
@@ -20,7 +20,7 @@ const config = {
 
 /** Two real SQLite connections exercise the same public owner-scoped contract
  * the web and worker processes use, with no alternate test schema. */
-test('Conversation and Thread writes serialize across Studio connections and survive reopen', async () => {
+test('Story and Thread writes serialize across Studio connections and survive reopen', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'noveltea-core-thread-db-'))
   const file = join(dir, 'studio.sqlite')
   const a = openStudioDatabase(file)
@@ -43,11 +43,11 @@ test('Conversation and Thread writes serialize across Studio connections and sur
 
     // Independent requests reconcile the same legacy root exactly once.
     const [firstNav, secondNav] = await Promise.all([
-      listStoryConversations(a, owner, story), listStoryConversations(b, owner, story),
+      listStoryNavigation(a, owner, story), listStoryNavigation(b, owner, story),
     ])
-    const threadId = firstNav.conversations[0]!.threads[0]!.id
-    assert.equal(threadId, secondNav.conversations[0]!.threads[0]!.id)
-    assert.equal(firstNav.conversations[0]!.threads.length, 1)
+    const threadId = firstNav.threads[0]!.id
+    assert.equal(threadId, secondNav.threads[0]!.id)
+    assert.equal(firstNav.threads.length, 1)
     assert.equal((await readThreadChat(b, owner, threadId)).messages[0]?.content, 'Opening request')
 
     const [one, two, three] = [randomUUID(), randomUUID(), randomUUID()]

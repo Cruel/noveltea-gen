@@ -25,7 +25,7 @@ import { safeToResume } from '../src/lib/generation-controls.server'
 import { randomUUID } from 'node:crypto'
 import { interpretNaturalStoryPrompt } from '../src/lib/natural-story-plan'
 import { associateNaturalThread } from '../src/lib/natural-story.server'
-import { createConversation, ensureRootThreads } from '../src/lib/threads.server'
+import { ensureRootThreads } from '../src/lib/threads.server'
 import { readThreadChat } from '../src/lib/thread-chat.server'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
@@ -107,10 +107,9 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     ;(await seed.job({ id: jobId, ownerUserId: alice.id, storyId, title: 'Private Story',
       sourceCommitSha: pinned, status: 'paused',
       createdAt: '2026-11-01', updatedAt: '2026-11-01' }))
-    const conversation = await createConversation(store, alice.id, storyId)
     await ensureRootThreads(store, alice.id, storyId)
-    assert.equal(await associateNaturalThread(store, alice.id, conversation.id, jobId, payload.task), 'root:' + jobId)
-    await assert.rejects(() => associateNaturalThread(store, bob.id, conversation.id, jobId, payload.task), /not found/)
+    assert.equal(await associateNaturalThread(store, alice.id, storyId, jobId, payload.task), 'root:' + jobId)
+    await assert.rejects(() => associateNaturalThread(store, bob.id, storyId, jobId, payload.task), /not found/)
     assert.deepEqual((await readThreadChat(store, alice.id, 'root:' + jobId)).messages, [])
 
     const api = async (method: 'GET' | 'POST', body?: unknown, session?: string, origin = config.baseURL) => {

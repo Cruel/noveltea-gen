@@ -2,7 +2,7 @@
  * persistence owns identity, idempotency, sequencing, and atomic registration.
  * No driver handles cross this port. */
 export type ThreadIdentity = {
-  id: string; parent: string | null; conversation: string; story: string; title: string
+  id: string; parent: string | null; story: string; title: string
 }
 export type ForkIntent = {
   owner: string; source: string; base: string; commitSha: string; bundle: string; draft: string;
@@ -50,7 +50,7 @@ export type EditableMessage = {
 }
 export type NewThreadChild = {
   childId: string; owner: string; storyId: string; title: string; baseSha: string;
-  conversationId: string; parentThreadId: string; threadId: string; draft: string; at: string;
+  parentThreadId: string; threadId: string; draft: string; at: string;
   kind: 'fork' | 'restart' | 'edit'; history?: ForkInheritedMessage[]; guidance?: string;
   editedMessageId?: string; editedBody?: string
 }
@@ -73,7 +73,7 @@ export interface AdvancedThreadPersistence {
     repositoryId: string; provider: 'github' | 'gitlab'; providerId: string;
     repository: string; directory: string
   } | null>
-  sourceThread(owner: string, jobId: string): Promise<{ id: string; conversation: string } | null>
+  sourceThread(owner: string, jobId: string): Promise<{ id: string; story: string } | null>
   inspectJob(owner: string, jobId: string): Promise<JobInspection>
   forkDraft(owner: string, childId: string): Promise<{ bundle: string; original: string } | null>
   jobClaimed(childId: string): Promise<boolean>

@@ -24,7 +24,7 @@ export class ThreadRestartError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 type Source = {
-  threadId: string; conversationId: string; storyId: string; sourceJobId: string
+  threadId: string; storyId: string; sourceJobId: string
   rootJobId: string; originalSha: string; task: string; contract: GenerationRequest['contract']
   sourceTitle: string; model: GenerationDraft['model']
   limits: GenerationDraft['limits']; repositoryId: string
@@ -52,8 +52,8 @@ async function sourceFor(store: StudioDatabase, owner: string, threadId: string)
   }
   if (!root) throw new ThreadRestartError(404, 'Thread not found.')
   const member = await store.persistence.advancedThreads.identity(owner, threadId)
-  if (!member || member.conversation !== root.conversation || member.story !== root.story)
-    throw new ThreadRestartError(409, 'Thread belongs to a different Story or Conversation.')
+  if (!member || member.story !== root.story)
+    throw new ThreadRestartError(409, 'Thread belongs to a different Story.')
   if ((await store.persistence.conversations.deletion(owner, threadId))?.deletedAt)
     throw new ThreadRestartError(410, 'A permanently deleted Thread cannot be restarted.')
   const latest = await store.persistence.advancedThreads.run(owner, threadId, 'last')
@@ -81,7 +81,7 @@ async function sourceFor(store: StudioDatabase, owner: string, threadId: string)
   const repository = await store.persistence.advancedThreads.repository(owner, member.story)
   if (!repository || !['github', 'gitlab'].includes(repository.provider))
     throw new ThreadRestartError(409, 'Saved Story provider identity is invalid.')
-  return { ...repository, threadId, conversationId: member.conversation, storyId: member.story,
+  return { ...repository, threadId, storyId: member.story,
     sourceJobId: latest.jobId, rootJobId: first.jobId, originalSha: original.commitSha!,
     task: task.trim(), contract, sourceTitle: member.title,
     model: currentConfig?.model ?? config?.model ?? null,
@@ -333,7 +333,7 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
   await store.persistence.advancedThreads.registerChild({
     childId: input.childId, owner: actor.id, storyId: source.storyId,
     title: source.sourceTitle + ' (restart)', baseSha: child.baseSha,
-    conversationId: source.conversationId, parentThreadId: threadId,
+    parentThreadId: threadId,
     threadId: 'restart:' + input.childId, draft: intent!.draft,
     at: new Date().toISOString(), kind: 'restart',
   })

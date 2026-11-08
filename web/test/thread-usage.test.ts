@@ -39,7 +39,7 @@ test('run budgets are independent; Story, Thread and deleted-history usage survi
   try {
     await migrateStudio(db, config)
     const owner = randomUUID(), stranger = randomUUID()
-    const repoId = randomUUID(), storyId = randomUUID(), conversationId = randomUUID()
+    const repoId = randomUUID(), storyId = randomUUID()
     const parentThread = randomUUID(), childThread = randomUUID()
     const providerId = 'repo-usage'
     const root = join(cache, hash(owner), hash('github:' + providerId), 'base')
@@ -60,11 +60,9 @@ test('run budgets are independent; Story, Thread and deleted-history usage survi
       providerRepositoryId: providerId, name: 'NovelTea', createdAt: at })
     await seed.story({ id: storyId, ownerUserId: owner, repositoryId: repoId,
       directory: 'story', title: 'The Story', createdAt: at })
-    await seed.conversation({ id: conversationId, ownerUserId: owner, storyId,
-      title: 'Primary', createdAt: at, updatedAt: at })
-    await seed.thread({ id: parentThread, ownerUserId: owner, conversationId,
+    await seed.thread({ id: parentThread, ownerUserId: owner, storyId,
       parentThreadId: null, title: 'Original', activityAt: at, createdAt: at })
-    await seed.thread({ id: childThread, ownerUserId: owner, conversationId,
+    await seed.thread({ id: childThread, ownerUserId: owner, storyId,
       parentThreadId: parentThread, title: 'Fork', activityAt: at, createdAt: at })
 
     const jobs: JobStartResult[] = []
@@ -78,6 +76,7 @@ test('run budgets are independent; Story, Thread and deleted-history usage survi
         sourceCommitSha: commit, status: 'completed',
         generationRequestJson: JSON.stringify({ fixture: false }),
         generationThreadId: 'graph:' + id, createdAt: at, updatedAt: at })
+      if (i === 2) await seed.forkReceipt(id, owner, jobs[1]!.jobId, parentThread, commit, at)
       await seed.threadRun({ jobId: id, ownerUserId: owner, threadId, runOrder: order })
       await configurePiPolicy(job, { version: 1,
         profile: { provider: 'openai', model: 'gpt-6-luna' },

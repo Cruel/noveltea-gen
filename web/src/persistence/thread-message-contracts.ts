@@ -7,6 +7,7 @@ export type ChatEvidence = {
 }
 export type ChatReadModel = {
   messages: ThreadMessage[]
+  turns: Array<{ id: string; executionIds: string[] }>
   runs: Array<ChatRun & { requestJson: string | null }>
   evidence: ChatEvidence[]
 }

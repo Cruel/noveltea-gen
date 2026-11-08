@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "1b6cae48-80e8-441c-92b1-8c3b80c65009",
+  "id": "ca703c3a-673b-4230-a0b8-3b8efcc11a56",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "checkpoint_forks": {
@@ -118,6 +118,23 @@
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "checkpoint_forks_source_job_id_owner_user_id_source_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk": {
+          "name": "checkpoint_forks_source_job_id_owner_user_id_source_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk",
+          "tableFrom": "checkpoint_forks",
+          "tableTo": "story_thread_runs",
+          "columnsFrom": [
+            "source_job_id",
+            "owner_user_id",
+            "source_thread_id"
+          ],
+          "columnsTo": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -1259,91 +1276,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "story_conversations": {
-      "name": "story_conversations",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "owner_user_id": {
-          "name": "owner_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "story_id": {
-          "name": "story_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "story_conversations_owner_pair": {
-          "name": "story_conversations_owner_pair",
-          "columns": [
-            "id",
-            "owner_user_id"
-          ],
-          "isUnique": true
-        },
-        "story_conversations_story_idx": {
-          "name": "story_conversations_story_idx",
-          "columns": [
-            "owner_user_id",
-            "story_id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "story_conversations_story_id_owner_user_id_stories_id_owner_user_id_fk": {
-          "name": "story_conversations_story_id_owner_user_id_stories_id_owner_user_id_fk",
-          "tableFrom": "story_conversations",
-          "tableTo": "stories",
-          "columnsFrom": [
-            "story_id",
-            "owner_user_id"
-          ],
-          "columnsTo": [
-            "id",
-            "owner_user_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "story_onboarding_conversations": {
       "name": "story_onboarding_conversations",
       "columns": {
@@ -1702,6 +1634,15 @@
           "isUnique": true,
           "where": "\"story_thread_messages\".\"role\"='user' and \"story_thread_messages\".\"phase\"='preparing'"
         },
+        "story_thread_messages_identity": {
+          "name": "story_thread_messages_identity",
+          "columns": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": true
+        },
         "story_thread_messages_order": {
           "name": "story_thread_messages_order",
           "columns": [
@@ -1885,6 +1826,15 @@
             "run_order"
           ],
           "isUnique": false
+        },
+        "story_thread_runs_identity": {
+          "name": "story_thread_runs_identity",
+          "columns": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {
@@ -1945,8 +1895,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "conversation_id": {
-          "name": "conversation_id",
+        "story_id": {
+          "name": "story_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -1980,6 +1930,34 @@
           "notNull": false,
           "autoincrement": false
         },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "deletion_complete_at": {
+          "name": "deletion_complete_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "deletion_plan_json": {
+          "name": "deletion_plan_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "deletion_bytes": {
+          "name": "deletion_bytes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "text",
@@ -1997,31 +1975,31 @@
           ],
           "isUnique": true
         },
-        "story_threads_owner_conversation": {
-          "name": "story_threads_owner_conversation",
+        "story_threads_owner_story": {
+          "name": "story_threads_owner_story",
           "columns": [
             "id",
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
           "isUnique": true
         },
-        "story_threads_conversation_idx": {
-          "name": "story_threads_conversation_idx",
+        "story_threads_story_idx": {
+          "name": "story_threads_story_idx",
           "columns": [
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "story_threads_conversation_id_owner_user_id_story_conversations_id_owner_user_id_fk": {
-          "name": "story_threads_conversation_id_owner_user_id_story_conversations_id_owner_user_id_fk",
+        "story_threads_story_id_owner_user_id_stories_id_owner_user_id_fk": {
+          "name": "story_threads_story_id_owner_user_id_stories_id_owner_user_id_fk",
           "tableFrom": "story_threads",
-          "tableTo": "story_conversations",
+          "tableTo": "stories",
           "columnsFrom": [
-            "conversation_id",
+            "story_id",
             "owner_user_id"
           ],
           "columnsTo": [
@@ -2031,19 +2009,19 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "story_threads_parent_thread_id_owner_user_id_conversation_id_story_threads_id_owner_user_id_conversation_id_fk": {
-          "name": "story_threads_parent_thread_id_owner_user_id_conversation_id_story_threads_id_owner_user_id_conversation_id_fk",
+        "story_threads_parent_thread_id_owner_user_id_story_id_story_threads_id_owner_user_id_story_id_fk": {
+          "name": "story_threads_parent_thread_id_owner_user_id_story_id_story_threads_id_owner_user_id_story_id_fk",
           "tableFrom": "story_threads",
           "tableTo": "story_threads",
           "columnsFrom": [
             "parent_thread_id",
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
           "columnsTo": [
             "id",
             "owner_user_id",
-            "conversation_id"
+            "story_id"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -2057,6 +2035,161 @@
           "value": "\"story_threads\".\"parent_thread_id\" is null or \"story_threads\".\"parent_thread_id\" <> \"story_threads\".\"id\""
         }
       }
+    },
+    "story_turn_executions": {
+      "name": "story_turn_executions",
+      "columns": {
+        "turn_id": {
+          "name": "turn_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "job_id": {
+          "name": "job_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "thread_id": {
+          "name": "thread_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "story_turn_executions_turn_id_owner_user_id_thread_id_story_turns_id_owner_user_id_thread_id_fk": {
+          "name": "story_turn_executions_turn_id_owner_user_id_thread_id_story_turns_id_owner_user_id_thread_id_fk",
+          "tableFrom": "story_turn_executions",
+          "tableTo": "story_turns",
+          "columnsFrom": [
+            "turn_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "columnsTo": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "story_turn_executions_job_id_owner_user_id_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk": {
+          "name": "story_turn_executions_job_id_owner_user_id_thread_id_story_thread_runs_job_id_owner_user_id_thread_id_fk",
+          "tableFrom": "story_turn_executions",
+          "tableTo": "story_thread_runs",
+          "columnsFrom": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "columnsTo": [
+            "job_id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "story_turn_executions_turn_id_job_id_pk": {
+          "columns": [
+            "turn_id",
+            "job_id"
+          ],
+          "name": "story_turn_executions_turn_id_job_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "story_turns": {
+      "name": "story_turns",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "thread_id": {
+          "name": "thread_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "story_turns_identity": {
+          "name": "story_turns_identity",
+          "columns": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": true
+        },
+        "story_turns_thread": {
+          "name": "story_turns_thread",
+          "columns": [
+            "owner_user_id",
+            "thread_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "story_turns_id_owner_user_id_thread_id_story_thread_messages_id_owner_user_id_thread_id_fk": {
+          "name": "story_turns_id_owner_user_id_thread_id_story_thread_messages_id_owner_user_id_thread_id_fk",
+          "tableFrom": "story_turns",
+          "tableTo": "story_thread_messages",
+          "columnsFrom": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "columnsTo": [
+            "id",
+            "owner_user_id",
+            "thread_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "thread_active_pi_turns": {
       "name": "thread_active_pi_turns",

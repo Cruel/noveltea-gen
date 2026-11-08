@@ -16,8 +16,8 @@ type Preview = {
 const lines = (text: string) => text.split(/\r?\n/).map(value => value.trim()).filter(Boolean)
 const multiline = (list: string[]) => list.join('\n')
 
-export function NaturalStoryComposer({ conversationId, onStarted }: {
-  conversationId: string; onStarted: (threadId: string, jobId: string) => Promise<void>
+export function NaturalStoryComposer({ storyId, onStarted }: {
+  storyId: string; onStarted: (threadId: string, jobId: string) => Promise<void>
 }) {
   const [prompt, setPrompt] = useState('')
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -77,7 +77,7 @@ export function NaturalStoryComposer({ conversationId, onStarted }: {
     if (!prompt.trim() || busy) return
     setBusy(true); setError(null)
     try {
-      const result = await previewStoryPrompt({ data: { conversationId, prompt, edits } })
+      const result = await previewStoryPrompt({ data: { storyId, prompt, edits } })
       setPreview(result)
       if (!startImmediately || result.plan.reviewRequired || advanced) {
         setApproved(false)
@@ -94,7 +94,7 @@ export function NaturalStoryComposer({ conversationId, onStarted }: {
     const id = pendingId ?? crypto.randomUUID()
     setPendingId(id)
     const response = await startStoryPrompt({ data: {
-      conversationId, jobId: id, headSha: result.headSha, prompt, edits, model,
+      storyId, jobId: id, headSha: result.headSha, prompt, edits, model,
       fixture: modelChoice === 'fixture', limits: limits(),
       ...(explicitlyApproved ? { approvedDigest: result.plan.digest } : {}),
     } })

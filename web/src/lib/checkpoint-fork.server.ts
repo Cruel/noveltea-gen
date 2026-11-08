@@ -152,7 +152,7 @@ async function checkpointRecoveryRequest(auth: StudioAuth, store: StudioDatabase
     await store.persistence.advancedThreads.registerChild({
       childId: child.jobId, owner: user.id, storyId: row.storyId,
       title: row.title + ' (fork)', baseSha: child.baseSha,
-      conversationId: sourceThread.conversation, parentThreadId: sourceThread.id,
+      parentThreadId: sourceThread.id,
       threadId: 'fork:' + child.jobId, draft: intent!.draft,
       at: now, kind: 'fork', history: intent!.history ? JSON.parse(intent!.history) as
         import('./thread-fork-history.server').ForkHistoryMessage[] : undefined,

@@ -6,6 +6,8 @@ import { generationRunQueue as runs, generationEvents as events, sessions, stori
 import type { GenerationPersistence, GenerationProgress, GenerationQueueStore,
   QueueIntent, QueueRecord } from './generation-contracts'
 
+import { seedThreadMessagesSqlite } from './thread-message-sqlite'
+
 type StudioDrizzle = BetterSQLite3Database<typeof schema>
 function assertOwner(owner: string) {
   if (!owner) throw new Error('Authenticated owner is required')
@@ -70,6 +72,9 @@ export function enqueueGenerationSqlite(db: StudioDrizzle, owner: string,
       jobId, ownerUserId: owner, intent, phase: 'queued',
       createdAt: now, updatedAt: now,
     }).run()
+    const membership = tx.select({ threadId: storyThreadRuns.threadId }).from(storyThreadRuns)
+      .where(and(eq(storyThreadRuns.jobId, jobId), eq(storyThreadRuns.ownerUserId, owner))).get()
+    if (membership) seedThreadMessagesSqlite(tx, owner, membership.threadId)
   }, { behavior: 'immediate' })
 }
 

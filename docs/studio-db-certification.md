@@ -95,14 +95,16 @@ business assertions should not need SQL rewrites. These changes do **not**
 imply that a PostgreSQL backend is implemented or certified.
 
 Better Auth exclusively owns `user`, `session`, `account`, `verification`
-and `rateLimit`. `web/src/db/schema.ts` and `web/drizzle/` own the 29
-application tables; `auth-reference.ts` is only an FK target, not a second
-user-table owner. The single explicit `migrate` command runs Better Auth's
+and `rateLimit`. `web/src/db/schema.ts` and `web/drizzle/` own the 30
+application tables (Story-owned Threads, Turns and Turn-to-execution links;
+no mandatory Conversation table). `auth-reference.ts` is only an FK target,
+not a second user-table owner. The single explicit `migrate` command runs Better Auth's
 supported migration planner first, then the immutable generated Drizzle
 migration(s), then auth schema and SQLite integrity/foreign-key checks.
 Runtime startup checks the migration journal and compares each application
-`CREATE TABLE`/named `CREATE INDEX` definition to a pristine SQLite reference
-constructed from the committed Drizzle migration set. This fails closed on
+`CREATE TABLE`, named `CREATE INDEX` and controller-invariant
+`CREATE TRIGGER` definitions to a pristine SQLite reference constructed
+from the committed Drizzle migration set. This fails closed on
 constraint and type drift as well as column/index omissions; equivalent but
 textually rewritten DDL may be rejected. Expected definitions are cached per
 immutable deployed migration directory. Runtime startup only **validates**;

@@ -13,7 +13,7 @@ import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory, continueCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, inspectRegisteredJob, generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { generationConfigurationRequest } from '../src/lib/generation-config.server'
-import { ensureRootThreads, listStoryConversations } from '../src/lib/threads.server'
+import { ensureRootThreads, listStoryNavigation } from '../src/lib/threads.server'
 import { threadRestartRequest, type Upstream } from '../src/lib/thread-restart.server'
 import { deleteThread } from '../src/lib/thread-deletion.server'
 import { initialStoryDocument } from '../src/lib/git-cache.server'
@@ -223,8 +223,8 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     const record = await selectedJob(f.db, f.owner.id, selected.childId)
     assert.equal(JSON.parse(record.configJson!).task, 'Original creative goal')
     assert.equal(JSON.parse(record.configJson!).limits.steps, 7)
-    const conversations = await listStoryConversations(f.db, f.owner.id, f.storyId)
-    const all = conversations.conversations.flatMap(c => c.threads)
+    const navigation = await listStoryNavigation(f.db, f.owner.id, f.storyId)
+    const all = navigation.threads
     const restart = all.find(t => t.id === 'restart:' + selected.childId)
     assert.equal(restart?.parentThreadId, f.threadId)
     assert.equal(restart?.status, 'prepared')

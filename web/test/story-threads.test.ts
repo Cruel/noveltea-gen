@@ -62,20 +62,13 @@ test('Story gateway lists zero Threads and refuses foreign Stories and cross-Sto
       0,
       'an empty Story must not create a fake root Thread',
     )
-    const conversation = randomUUID(),
-      threadId = randomUUID()
-    await seed.conversation({
-      id: conversation,
-      ownerUserId: alice,
-      storyId: otherStory,
-      title: 'Hidden group',
-      createdAt: at,
-      updatedAt: at,
-    })
+    assert.equal(await db.testing.records.count('story_conversations').catch(() => -1), -1,
+      'fresh schema has no Conversation table')
+    const threadId = randomUUID()
     await seed.thread({
       id: threadId,
       ownerUserId: alice,
-      conversationId: conversation,
+      storyId: otherStory,
       title: 'Different Story',
       activityAt: at,
       createdAt: at,
@@ -179,7 +172,6 @@ test('Story gateway preserves fork checkpoint identity, chat, navigation and res
     )
     assert.ok(!('conversations' in first))
     assert.equal(first.threads[0]?.parentThreadId, null)
-    const conversationId = 'legacy:' + sourceJob
     const fork = {
       childId: forkJob,
       owner,
@@ -210,7 +202,6 @@ test('Story gateway preserves fork checkpoint identity, chat, navigation and res
       storyId: story,
       title: 'Alternative',
       baseSha: checkpoint,
-      conversationId,
       parentThreadId: rootId,
       threadId: childId,
       draft: fork.draft,
@@ -268,7 +259,6 @@ test('Story gateway preserves fork checkpoint identity, chat, navigation and res
       storyId: story,
       title: 'Restart from clue',
       baseSha: checkpoint,
-      conversationId,
       parentThreadId: childId,
       threadId: restartId,
       draft: fork.draft,
@@ -314,6 +304,13 @@ test('Story gateway preserves fork checkpoint identity, chat, navigation and res
       [forkJob, followUp],
     )
     assert.equal(updated.state.messages.at(-1)?.content, 'Revise a clue')
+    const turns = await a.testing.records.all<{ id: string }>('story_turns', { threadId: childId })
+    assert.ok(turns.some(turn => turn.id === updated.state.messages.at(-1)?.id),
+      'each new author request has a durable Turn independent of its execution')
+    await assert.rejects(() => a.testing.records.update('story_threads', { id: childId },
+      { parentThreadId: null }), /immutable|constraint/i)
+    await assert.rejects(() => a.testing.records.update('checkpoint_forks', { childId: forkJob },
+      { commitSha: base }), /immutable/i)
     assert.equal((await listStoryThreads(a, owner, story)).threads.length, 3)
     assert.ok(
       !('preferences' in (await listStoryThreads(a, owner, story))),

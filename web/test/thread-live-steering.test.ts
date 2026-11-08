@@ -29,7 +29,7 @@ async function setup() {
   const db = openStudioDatabase(join(root, 'studio.sqlite'))
   await migrateStudio(db, config)
   const owner = randomUUID(), stranger = randomUUID(), story = randomUUID(),
-    repo = randomUUID(), conversation = randomUUID(), threadId = randomUUID(),
+    repo = randomUUID(), threadId = randomUUID(),
     job = randomUUID()
   const seed = studioSeed(db)
   for (const id of [owner, stranger]) { await seed.user(id, 0) }
@@ -37,9 +37,7 @@ async function setup() {
     providerRepositoryId: '123', name: 'Repo', createdAt: 'now' }))
   ;(await seed.story({ id: story, ownerUserId: owner, repositoryId: repo,
     directory: 'story', title: 'Story', createdAt: 'now' }))
-  ;(await seed.conversation({ id: conversation, ownerUserId: owner, storyId: story,
-    title: 'Story chat', createdAt: 'now', updatedAt: 'now' }))
-  ;(await seed.thread({ id: threadId, ownerUserId: owner, conversationId: conversation,
+  ;(await seed.thread({ id: threadId, ownerUserId: owner, storyId: story,
     title: 'Thread', activityAt: 'now', createdAt: 'now' }))
   ;(await seed.job({ id: job, ownerUserId: owner, storyId: story,
     title: 'Live', status: 'running', createdAt: 'now', updatedAt: 'now' }))

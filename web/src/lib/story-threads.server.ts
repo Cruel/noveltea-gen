@@ -1,13 +1,10 @@
 import type { StudioStore } from '../persistence/store'
 import { readThreadChat } from './thread-chat.server'
 import { syncAppliedAuthorMessages } from './thread-message-edit.server'
-import { listStoryConversations, type StoryThread } from './threads.server'
+import { listStoryNavigation, type StoryThread } from './threads.server'
 
-/** Story -> Thread is the author-facing identity. This adapter intentionally
- * hides temporary Conversation grouping and internal Job catalog IDs. Existing
- * reconciliation and run/checkpoint receipts remain authoritative until the
- * clean Studio schema cutover. */
-export type StoryScopedThread = Omit<StoryThread, 'conversationId' | 'jobId'>
+/** Story -> Thread is the author-facing identity; Jobs are internal executions. */
+export type StoryScopedThread = Omit<StoryThread, 'jobId'>
 export type ThreadForkPoint = {
   kind: 'checkpoint' | 'restart'
   commitSha: string
@@ -26,14 +23,12 @@ export async function listStoryThreads(
   owner: string,
   storyId: string,
 ): Promise<StoryThreadList> {
-  const navigation = await listStoryConversations(store, owner, storyId)
+  const navigation = await listStoryNavigation(store, owner, storyId)
   // Navigation preferences are presentation-only and cannot affect the
   // existence, ordering, or parent revision of any Thread.
   return {
     story: navigation.story,
-    threads: navigation.conversations.flatMap((conversation) =>
-      conversation.threads.map(({ conversationId: _conversationId, jobId: _jobId, ...thread }) => thread),
-    ),
+    threads: navigation.threads.map(({ jobId: _jobId, ...thread }) => thread),
   }
 }
 

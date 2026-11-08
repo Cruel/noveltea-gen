@@ -99,7 +99,7 @@ test('protected receipts and Story-scope grants enforce current owner, queue hea
   try {
     await migrateStudio(db, config)
     const owner = randomUUID(), outsider = randomUUID(), repo = randomUUID()
-    const story = randomUUID(), job = randomUUID(), conversation = randomUUID(), thread = randomUUID()
+    const story = randomUUID(), job = randomUUID(), thread = randomUUID()
     const seed = studioSeed(db)
     for (const id of [owner, outsider]) { await seed.user(id) }
     (await seed.repository({ id: repo, ownerUserId: owner, provider: 'github',
@@ -110,9 +110,7 @@ test('protected receipts and Story-scope grants enforce current owner, queue hea
       status: 'completed', sourceCommitSha: sha, createdAt: t0, updatedAt: t0 }))
     ;(await seed.queue({ jobId: job, ownerUserId: owner, intent: 'start', phase: 'finished',
       createdAt: t0, updatedAt: t0 }))
-    ;(await seed.conversation({ id: conversation, ownerUserId: owner, storyId: story,
-      title: 'Chat', createdAt: t0, updatedAt: t0 }))
-    ;(await seed.thread({ id: thread, ownerUserId: owner, conversationId: conversation,
+    ;(await seed.thread({ id: thread, ownerUserId: owner, storyId: story,
       title: 'Thread', activityAt: t0, createdAt: t0 }))
     ;(await seed.threadRun({ jobId: job, ownerUserId: owner, threadId: thread, runOrder: 0 }))
     const [denialId, approvalId, futureId] = [randomUUID(), randomUUID(), randomUUID()]
