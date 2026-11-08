@@ -1,9 +1,9 @@
-import { and, asc, desc, eq, isNull, notExists, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, notExists, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { generationRunQueue as queue, sessions, storyThreads as threads,
   storyThreadRuns as runs, storyThreadMessages as messages, storyThreadMessageCancellations as cancellations,
-  threadSteeringIntents as steeringIntents } from '../db/schema'
+  storyTurnExecutions as turnExecutions, threadSteeringIntents as steeringIntents } from '../db/schema'
 import { insertThreadAssistantSqlite, nextThreadSequenceSqlite,
   seedThreadMessagesSqlite } from './thread-message-sqlite'
 import { consumeProtectedDecisionSqlite } from './approval-revision-sqlite'
@@ -131,7 +131,10 @@ export function createSqliteContinuationPersistence(db: Db,
           verifiedCommitSha: committedSha,
         }).where(and(eq(messages.id, data.claim.id),
           eq(messages.ownerUserId, data.owner), eq(messages.phase, 'preparing'))).run()
-        insertThreadAssistantSqlite(db, data.owner, data.threadId, data.claim.id)
+        const assistantId = insertThreadAssistantSqlite(db, data.owner, data.threadId, data.claim.id)
+        db.update(messages).set({ verifiedCommitSha: committedSha }).where(and(
+          eq(messages.id, assistantId), eq(messages.ownerUserId, data.owner),
+          eq(messages.threadId, data.threadId))).run()
         db.update(threads).set({ activityAt: data.at }).where(and(
           eq(threads.id, data.threadId), eq(threads.ownerUserId, data.owner))).run()
       }, { behavior: 'immediate' })
@@ -188,23 +191,52 @@ export function createSqliteContinuationPersistence(db: Db,
     settle(owner, jobId, verifiedCommit, at) {
       auth(owner)
       return db.transaction(() => {
-        const saved = db.select({ threadId: runs.threadId }).from(runs).where(and(
-          eq(runs.jobId, jobId), eq(runs.ownerUserId, owner))).get()
+        const saved = db.select({ threadId: runs.threadId, status: sessions.status })
+          .from(runs).innerJoin(sessions, and(eq(sessions.id, runs.jobId),
+            eq(sessions.ownerUserId, runs.ownerUserId))).where(and(
+            eq(runs.jobId, jobId), eq(runs.ownerUserId, owner))).get()
         if (!saved) return null
         const phase = db.select({ phase: queue.phase }).from(queue).where(and(
           eq(queue.jobId, jobId), eq(queue.ownerUserId, owner))).get()?.phase
         if (phase !== 'finished' && phase !== 'interrupted') return null
         steering.deferUndelivered(owner, jobId)
         seedThreadMessagesSqlite(db, owner, saved.threadId)
-        db.update(messages).set({
-          phase: phase === 'finished' ? 'finished' : 'blocked',
-          ...(phase === 'finished' ? { status: 'delivered' } : {}),
-          ...(verifiedCommit ? { verifiedCommitSha: verifiedCommit } : {}),
+        // Queue completion alone does not establish a validated Story revision.
+        // A missing trusted SHA blocks the Turn without re-queuing its writer.
+        const verified = phase === 'finished' && verifiedCommit !== null
+        // A safe-boundary pause keeps the original author Turn in progress:
+        // resume is another attempt of this execution, not a new request.
+        const pausedForResume = phase === 'finished' && saved.status === 'paused'
+        const updated = pausedForResume ? { changes: 0 } : db.update(messages).set({
+          phase: verified ? 'finished' : 'blocked',
+          ...(verified ? { status: 'delivered', verifiedCommitSha: verifiedCommit } : {}),
         }).where(and(eq(messages.ownerUserId, owner), eq(messages.jobId, jobId),
           eq(messages.role, 'user'), eq(messages.phase, 'running'))).run()
-        if (verifiedCommit) steering.boundaryReviews(owner, jobId, saved.threadId, verifiedCommit, at)
+        if (phase === 'finished' && !verified && updated.changes) {
+          // An execution reporting success without a verified final receipt
+          // must not remain an apparently completed source for later Turns.
+          db.update(sessions).set({ status: 'blocked', updatedAt: at }).where(and(
+            eq(sessions.id, jobId), eq(sessions.ownerUserId, owner),
+            eq(sessions.status, 'completed'))).run()
+        }
+        if (verified && verifiedCommit) {
+          // A separately authorized same-Thread recovery may have multiple
+          // executions fulfilling the original Turn. Only the immutable
+          // Turn→execution association allows a formerly blocked request to
+          // reach completion; unrelated Threads cannot inherit the outcome.
+          const linked = db.select({ id: turnExecutions.turnId }).from(turnExecutions)
+            .where(and(eq(turnExecutions.jobId, jobId), eq(turnExecutions.ownerUserId, owner),
+              eq(turnExecutions.threadId, saved.threadId)))
+          db.update(messages).set({ phase: 'finished', status: 'delivered',
+            verifiedCommitSha: verifiedCommit }).where(and(
+            eq(messages.ownerUserId, owner), eq(messages.threadId, saved.threadId),
+            eq(messages.role, 'user'), eq(messages.phase, 'blocked'),
+            inArray(messages.id, linked),
+          )).run()
+          steering.boundaryReviews(owner, jobId, saved.threadId, verifiedCommit, at)
+        }
         const assistant = insertThreadAssistantSqlite(db, owner, saved.threadId, jobId)
-        if (verifiedCommit) db.update(messages).set({ verifiedCommitSha: verifiedCommit }).where(and(
+        if (phase === 'finished' && verifiedCommit) db.update(messages).set({ verifiedCommitSha: verifiedCommit }).where(and(
           eq(messages.id, assistant), eq(messages.ownerUserId, owner),
           eq(messages.threadId, saved.threadId))).run()
         db.update(threads).set({ activityAt: at }).where(and(

@@ -8,7 +8,8 @@ import {
   threadLiveInputs, threadProtectedDecisions, threadQueuedMessageEdits,
 } from '../db/schema'
 import type { ThreadMessage } from '../lib/thread-chat.server'
-import { ThreadMessageConflict, type ChatRun, type ThreadMessagePersistence } from './thread-message-contracts'
+import { ThreadMessageConflict, type ChatRun, type ThreadMessagePersistence,
+  type TurnReceipt } from './thread-message-contracts'
 
 type Db = BetterSQLite3Database<typeof schema>
 const m = storyThreadMessages
@@ -112,6 +113,12 @@ function summary(db: Db, owner: string, jobId: string): string {
   })()
   if (run.queuePhase === 'interrupted' || run.status === 'running')
     return 'The run was interrupted. Inspect the preserved worktree and receipts; do not automatically replay the writer.'
+  const unverified = db.select({ id: m.id }).from(m).where(and(
+    eq(m.ownerUserId, owner), eq(m.jobId, jobId), eq(m.role, 'user'),
+    eq(m.phase, 'blocked'),
+  )).limit(1).get()
+  if (unverified)
+    return 'The execution ended without a verified final Story revision. Its worktree and checkpoints require reconciliation; no writer was replayed.'
   if (run.status === 'completed')
     return fixture
       ? 'Fixture execution finished. Its output is not independently validated editorial completion.'
@@ -188,7 +195,14 @@ export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string
         }).onConflictDoNothing().run()
       }
     }
-    if (includeSummaries && run.queuePhase === 'finished' && ['completed', 'paused', 'blocked', 'cancelled'].includes(run.status))
+    // Queue terminalization may precede durable chat settlement. Do not
+    // fabricate an assistant completion while its author Turn is still running.
+    const unsettled = db.select({ id: m.id }).from(m).where(and(
+      eq(m.ownerUserId, owner), eq(m.jobId, run.jobId),
+      eq(m.role, 'user'), eq(m.phase, 'running'),
+    )).limit(1).get()
+    if (includeSummaries && !unsettled && run.queuePhase === 'finished' &&
+        ['completed', 'paused', 'blocked', 'cancelled'].includes(run.status))
       insertThreadAssistantSqlite(db, owner, threadId, run.jobId)
   }
 }
@@ -268,18 +282,51 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
         eq(storyThreadRuns.ownerUserId, owner),
         sql`${generationEvents.kind} IN ('verified','finished','interrupted')`))
         .orderBy(asc(generationEvents.id)).all()
-      const turnRows = db.select({ id: storyTurns.id, jobId: storyTurnExecutions.jobId })
-        .from(storyTurns).innerJoin(m, eq(m.id, storyTurns.id))
+      const turnRows = db.select({
+        id: storyTurns.id, jobId: storyTurnExecutions.jobId,
+        inputSha: sessions.sourceCommitSha, status: sessions.status,
+        queuePhase: generationRunQueue.phase,
+        // Only a controller-settled assistant receipt proves a completed
+        // deterministic boundary. Queue state and a source SHA alone do not.
+        validatedSha: sql<string | null>`(SELECT proof.verified_commit_sha
+          FROM story_thread_messages proof
+          WHERE proof.owner_user_id=${storyTurns.ownerUserId}
+            AND proof.thread_id=${storyTurns.threadId}
+            AND proof.job_id=${storyTurnExecutions.jobId}
+            AND proof.role='assistant' AND proof.verified_commit_sha IS NOT NULL
+          ORDER BY proof.sequence DESC LIMIT 1)`,
+      }).from(storyTurns).innerJoin(m, eq(m.id, storyTurns.id))
         .leftJoin(storyTurnExecutions, eq(storyTurnExecutions.turnId, storyTurns.id))
+        .leftJoin(storyThreadRuns, and(eq(storyThreadRuns.jobId, storyTurnExecutions.jobId),
+          eq(storyThreadRuns.ownerUserId, owner)))
+        .leftJoin(sessions, and(eq(sessions.id, storyTurnExecutions.jobId),
+          eq(sessions.ownerUserId, owner)))
+        .leftJoin(generationRunQueue, and(eq(generationRunQueue.jobId, storyTurnExecutions.jobId),
+          eq(generationRunQueue.ownerUserId, owner)))
         .where(and(eq(storyTurns.ownerUserId, owner), eq(storyTurns.threadId, threadId)))
-        .orderBy(m.sequence, storyTurnExecutions.jobId).all()
+        .orderBy(m.sequence, storyThreadRuns.runOrder).all()
       const turns: Array<{ id: string; executionIds: string[] }> = []
+      const turnReceipts: TurnReceipt[] = []
+      const messagesById = new Map(messages.map(message => [message.id, message]))
       for (const row of turnRows) {
-        let turn = turns.at(-1)
-        if (turn?.id !== row.id) { turn = { id: row.id, executionIds: [] }; turns.push(turn) }
-        if (row.jobId) turn.executionIds.push(row.jobId)
+        let turn = turns.at(-1), receipt = turnReceipts.at(-1)
+        if (turn?.id !== row.id) {
+          turn = { id: row.id, executionIds: [] }; turns.push(turn)
+          const original = messagesById.get(row.id)
+          if (!original) throw new Error('Turn has no persisted author request.')
+          receipt = { id: row.id, request: original.editHistory?.[0]?.old ?? original.content,
+            effectiveRequest: original.content, outcome: original.phase,
+            inputSha: null, executions: [] }
+          turnReceipts.push(receipt)
+        }
+        if (row.jobId && row.inputSha && row.status) {
+          turn!.executionIds.push(row.jobId)
+          receipt!.inputSha ??= row.inputSha
+          receipt!.executions.push({ jobId: row.jobId, inputSha: row.inputSha,
+            status: row.status, queuePhase: row.queuePhase, validatedSha: row.validatedSha })
+        }
       }
-      return { messages, runs, evidence, turns }
+      return { messages, runs, evidence, turns, turnReceipts }
     },
     async enqueue(owner, threadId, id, body, mode, at) {
       ownerRequired(owner)

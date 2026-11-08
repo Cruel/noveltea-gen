@@ -70,6 +70,8 @@ test('Thread chat is immutable, ordered, owner-scoped, reconnectable and honest 
       ['finished', 'queued', 'queued'])
     assert.deepEqual((await db.testing.foreignKeyViolations()), [])
     assert.equal(reopened.runs[0]?.jobId, job)
+    assert.equal(reopened.turnReceipts.find(turn => turn.id === id1)?.outcome, 'queued')
+    assert.equal(reopened.turnReceipts.find(turn => turn.id === id2)?.executions.length, 0)
   } finally { db.close() }
 })
 
@@ -137,9 +139,69 @@ test('agent restart reconciles a terminal queue receipt without replaying its wr
     await recoverSettledThreadRuns(db)
     await recoverSettledThreadRuns(db)
     const chat = (await readThreadChat(db, alice, id))
-    assert.equal(chat.messages.find(item => item.id === message)?.phase, 'finished')
+    assert.equal(chat.messages.find(item => item.id === message)?.phase, 'blocked',
+      'a queue-only success is not a verified Story checkpoint')
     assert.equal(chat.messages.filter(item => item.id === 'assistant:' + job).length, 1)
     assert.equal(chat.runs.length, 1)
+    assert.equal(chat.turnReceipts.find(turn => turn.id === message)?.executions[0]?.validatedSha, null)
+    assert.equal(await db.testing.records.count('story_thread_runs'), 1,
+      'restart must never allocate or replay an execution')
+  } finally { db.close() }
+})
+
+test('verified partial pause preserves a running Turn until resume completes the same execution', async () => {
+  const { db, alice, id, job } = await setup()
+  try {
+    const messageId = randomUUID(), head = 'b'.repeat(40)
+    ;(await db.testing.records.insert('story_thread_messages', {
+      id: messageId, ownerUserId: alice, threadId: id, sequence: 2, role: 'user',
+      status: 'queued', body: 'Keep working from this safe boundary',
+      phase: 'running', jobId: job, createdAt: 'now',
+    }))
+    ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'paused' }))
+    await db.persistence.continuation.settle(alice, job, null, '2026-11-08T12:00:00Z')
+    assert.equal((await readThreadChat(db, alice, id)).messages.find(m => m.id === messageId)?.phase,
+      'running', 'a safe pause does not end the author Turn')
+    ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'completed' }))
+    await db.persistence.continuation.settle(alice, job, head, '2026-11-08T12:01:00Z')
+    await db.persistence.continuation.settle(alice, job, head, '2026-11-08T12:01:00Z')
+    const final = await readThreadChat(db, alice, id)
+    assert.equal(final.messages.find(m => m.id === messageId)?.phase, 'finished')
+    assert.equal(final.turnReceipts.find(turn => turn.id === messageId)?.executions[0]?.validatedSha,
+      head)
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
+  } finally { db.close() }
+})
+
+test('a verified same-Thread recovery execution completes the original blocked Turn', async () => {
+  const { db, alice, id, job, story } = await setup()
+  try {
+    const messageId = randomUUID(), childId = randomUUID(), newHead = 'c'.repeat(40)
+    ;(await db.testing.records.insert('story_thread_messages', {
+      id: messageId, ownerUserId: alice, threadId: id, sequence: 2,
+      role: 'user', status: 'queued', body: 'Original unresolved author request',
+      phase: 'blocked', jobId: job, createdAt: 'now',
+    }))
+    const seed = studioSeed(db)
+    ;(await seed.job({ id: childId, ownerUserId: alice, storyId: story, title: 'Recovery',
+      sourceCommitSha: 'b'.repeat(40), status: 'completed',
+      createdAt: 'now', updatedAt: 'now' }))
+    ;(await seed.threadRun({ jobId: childId, ownerUserId: alice, threadId: id, runOrder: 1 }))
+    ;(await seed.queue({ jobId: childId, ownerUserId: alice, intent: 'start',
+      phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
+    // Model the immutable recovery association created by checkpoint-fork
+    // registration; settlement cannot infer this link from job timestamps.
+    ;(await db.testing.records.insert('story_turn_executions', {
+      turnId: messageId, jobId: childId, ownerUserId: alice, threadId: id,
+    }))
+    await db.persistence.continuation.settle(alice, childId, newHead, '2026-11-08T12:02:00Z')
+    const after = await readThreadChat(db, alice, id)
+    const receipt = after.turnReceipts.find(turn => turn.id === messageId)!
+    assert.equal(after.messages.find(m => m.id === messageId)?.phase, 'finished')
+    assert.deepEqual(receipt.executions.map(run => [run.jobId, run.inputSha, run.validatedSha]),
+      [[job, 'a'.repeat(40), null], [childId, 'b'.repeat(40), newHead]])
+    assert.equal(after.runs.length, 2)
+    assert.deepEqual((await db.testing.foreignKeyViolations()), [])
   } finally { db.close() }
 })
 

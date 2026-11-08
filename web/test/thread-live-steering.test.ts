@@ -256,6 +256,10 @@ test('queued edits preserve provenance, revoke stale scopes, and reject duplicat
     const history = (await readThreadChat(f.db, f.owner, f.threadId)).messages.find(m => m.id === id)?.editHistory
     assert.deepEqual(history?.map(h => [h.old, h.replacement]),
       [['Original character constraint', 'Edited constraint']])
+    const receipt = (await readThreadChat(f.db, f.owner, f.threadId)).turnReceipts
+      .find(turn => turn.id === id)!
+    assert.equal(receipt.request, 'Original character constraint')
+    assert.equal(receipt.effectiveRequest, 'Edited constraint')
     assert.equal((await editQueuedThreadMessage(f.db, f.owner, f.threadId, id, requestId,
       'Original character constraint', 'Edited constraint')).editCount, 1,
     'exactly the same edit request can be safely retried')

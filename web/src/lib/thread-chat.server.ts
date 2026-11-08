@@ -51,6 +51,7 @@ export async function readThreadChat(store: StudioDatabase, owner: string, threa
   return { threadId, storyId: membership.storyId,
     archived: !!membership.archivedAt,
     turns: data.turns,
+    turnReceipts: data.turnReceipts,
     messages: data.messages, steeringActivity: await steeringActivity(store, owner, threadId),
     runs: data.runs.map(({ requestJson, ...run }) => ({
       ...run, status: run.queuePhase === 'interrupted' ? 'interrupted'
@@ -208,8 +209,6 @@ export async function recoverSettledThreadRuns(store: StudioDatabase) {
 export async function settleThreadRun(store: StudioDatabase, owner: string, jobId: string) {
   const threadId = await store.persistence.continuation.runThread(owner, jobId)
   if (!threadId) return
-  const record = { threadId }
-  if (!record) return
   let verifiedCommit: string | null = null
   const settled = (await queueRecord(store, jobId))
   if (settled?.phase === 'finished') {
@@ -222,7 +221,9 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
         const job = await restoreJob(saved, owner)
         const inspected = await inspectRegisteredJob(store, saved, owner)
         const head = await trustedHead(job)
-        if (inspected.status === 'completed' && job.headSha === head)
+        if (inspected.status === 'completed' &&
+            !('revisionVerified' in inspected && inspected.revisionVerified === false) &&
+            job.headSha === head)
           verifiedCommit = head
       }
     } catch { /* Missing or unsafe worktrees remain inspectable, not inheritable. */ }
@@ -238,5 +239,5 @@ export async function settleThreadRun(store: StudioDatabase, owner: string, jobI
     }
   } catch { /* No fabricated checkpoint or effect assertion on recovery failure. */ }
   await store.persistence.continuation.settle(owner, jobId, verifiedCommit, now())
-  await advanceThread(store, owner, record.threadId)
+  await advanceThread(store, owner, threadId)
 }

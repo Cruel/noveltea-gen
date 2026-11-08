@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -13,7 +13,8 @@ import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
-import { advanceThread, readThreadChat, cancelQueuedThreadMessage } from '../src/lib/thread-chat.server'
+import { advanceThread, readThreadChat, cancelQueuedThreadMessage,
+  settleThreadRun, recoverSettledThreadRuns } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
 import { readJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { recordSteeringConsideration, prepareSteeringBoundaryReviews,
@@ -46,7 +47,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
@@ -134,6 +135,103 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       : kind === 'cancel' ? 'Change this Event' : 'Make character.nia less confrontational'
     await assert.rejects(previewThreadRevision(store, stranger, threadId, task), /no source generation|has no source|not found/i)
     const plan = await previewThreadRevision(store, owner, threadId, task)
+    if (kind === 'multi-turn' || kind === 'unverified-crash') {
+      const firstId = randomUUID(), secondId = randomUUID()
+      await submitThreadRevision(store, owner, threadId, firstId, task)
+      await Promise.all([advanceThread(store, owner, threadId), advanceThread(store, owner, threadId)])
+      const firstChat = await readThreadChat(store, owner, threadId)
+      const firstReceipt = firstChat.turnReceipts.find(turn => turn.id === firstId)!
+      assert.equal(firstReceipt.request, task)
+      assert.equal(firstReceipt.inputSha, sha)
+      assert.deepEqual(firstReceipt.executions.map(run => ({ jobId: run.jobId, inputSha: run.inputSha,
+        validatedSha: run.validatedSha })), [{ jobId: firstId, inputSha: sha, validatedSha: null }])
+      assert.equal(firstChat.runs.length, 2)
+      const secondTask = 'Make event.confession more suspenseful'
+      await assert.rejects(previewThreadRevision(store, owner, threadId, secondTask),
+        /preceding Thread instruction|Finish or reconcile/, 'an unfinished first Turn cannot seed the next writer')
+      const firstChild = await restoreJob(await selectedJob(store, owner, firstId), owner)
+      const pinnedFirst = pinnedRequest(await selectedJob(store, owner, firstId), firstChild)!
+      const recordPath = join(firstChild.worktreeStoryRoot, 'characters/nia.md')
+      writeFileSync(recordPath, readFileSync(recordPath, 'utf8') + '\nCharacter revised\n')
+      git(firstChild.worktreeRoot, 'add', '.')
+      git(firstChild.worktreeRoot, '-c', 'user.name=Studio fixture',
+        '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'Fixture validated Character revision')
+      const firstOutput = git(firstChild.worktreeRoot, 'rev-parse', 'HEAD')
+      assert.notEqual(firstOutput, sha)
+      if (kind === 'unverified-crash') {
+        // The worker finished in the queue after an actual Git commit, but
+        // crashed before trusted-head finalization or the graph checkpoint.
+        ;(await store.testing.records.update('studio_sessions', { id: firstId }, {
+          status: 'completed', generationRequestJson: JSON.stringify(pinnedFirst),
+          generationThreadId: firstChild.threadId + ':generation:web',
+        }))
+        ;(await store.testing.records.update('generation_run_queue', { jobId: firstId },
+          { phase: 'finished' }))
+        await settleThreadRun(store, owner, firstId)
+        await recoverSettledThreadRuns(store)
+        const unsafe = await readThreadChat(store, owner, threadId)
+        assert.equal(unsafe.messages.find(message => message.id === firstId)?.phase, 'blocked')
+        assert.equal(unsafe.runs.at(-1)?.status, 'blocked')
+        assert.equal(unsafe.turnReceipts.find(turn => turn.id === firstId)?.executions[0]?.validatedSha,
+          null, 'the unverified Git HEAD must not become an inheritable checkpoint')
+        await assert.rejects(() => submitThreadRevision(store, owner, threadId,
+          secondId, secondTask), /cannot accept follow-ups/i)
+        assert.equal(git(firstChild.worktreeRoot, 'rev-parse', 'HEAD'), firstOutput,
+          'reconciliation leaves the unverified branch intact for inspection')
+        assert.equal(await store.testing.records.count('story_thread_runs'), 2)
+        assert.equal(unsafe.messages.filter(message => message.id === 'assistant:' + firstId).length,
+          1, 'recovery must not duplicate an unverified completion response')
+        assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+        return
+      }
+      // Simulate the *controller's* finalized trusted revision and graph; the
+      // real native/specialist proof contract is exercised in its own tests.
+      mkdirSync(join(firstChild.stateDir, 'revisions'), { recursive: true })
+      writeFileSync(join(firstChild.stateDir, 'revisions', 'verified-head.json'), JSON.stringify({
+        version: 1, jobId: firstId, headSha: firstOutput, workItemId: 'focus:character.nia',
+      }))
+      await claimServerGeneration(firstChild, firstChild.threadId + ':generation:web', pinnedFirst)
+      const graph = openWebGenerationGraph(join(firstChild.stateDir, 'web-generation.sqlite'))
+      await graph.graph.updateState({ configurable: { thread_id: firstChild.threadId + ':generation:web' } },
+        { request: pinnedFirst, status: 'completed', completedStages: [] })
+      await graph.graph.updateState({ configurable: { thread_id: firstChild.threadId + ':generation:web' } },
+        { status: 'completed' }, 'completion_decision')
+      graph.saver.db.close()
+      ;(await store.testing.records.update('studio_sessions', { id: firstId }, {
+        status: 'completed', generationRequestJson: JSON.stringify(pinnedFirst),
+        generationThreadId: firstChild.threadId + ':generation:web',
+      }))
+      ;(await store.testing.records.update('generation_run_queue', { jobId: firstId }, { phase: 'finished' }))
+      await settleThreadRun(store, owner, firstId)
+      await recoverSettledThreadRuns(store)
+      const settled = await readThreadChat(store, owner, threadId)
+      assert.equal(settled.turnReceipts.find(turn => turn.id === firstId)?.executions[0]?.validatedSha,
+        firstOutput)
+      assert.equal(settled.messages.filter(message => message.id === 'assistant:' + firstId).length, 1,
+        'settlement and restart recovery must not duplicate chat delivery')
+      const secondPlan = await previewThreadRevision(store, owner, threadId, secondTask)
+      assert.equal(secondPlan.headSha, firstOutput)
+      assert.deepEqual(secondPlan.targets, ['event.confession'])
+      await submitThreadRevision(store, owner, threadId, secondId, secondTask)
+      await Promise.all([advanceThread(store, owner, threadId), advanceThread(store, owner, threadId)])
+      const secondChild = await restoreJob(await selectedJob(store, owner, secondId), owner)
+      assert.equal(secondChild.baseSha, firstOutput)
+      assert.equal(git(firstChild.worktreeRoot, 'rev-parse', 'HEAD'), firstOutput)
+      assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), sha)
+      assert.equal(git(secondChild.worktreeRoot, 'status', '--porcelain'), '')
+      const chained = await readThreadChat(store, owner, threadId)
+      assert.deepEqual(chained.runs.map(run => run.jobId), [sourceId, firstId, secondId])
+      assert.deepEqual(chained.turnReceipts.find(turn => turn.id === secondId)?.executions.map(
+        run => [run.jobId, run.inputSha, run.validatedSha]), [[secondId, firstOutput, null]])
+      const reopened = openStudioDatabase(join(root, 'studio.sqlite'))
+      try {
+        await reopened.assertReady()
+        assert.deepEqual((await readThreadChat(reopened, owner, threadId)).turnReceipts,
+          chained.turnReceipts, 'Turn provenance is durable across a database restart')
+      } finally { reopened.close() }
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+      return
+    }
     if (kind === 'redirect') {
       const originalId = randomUUID()
       const existing = (await readThreadChat(store, owner, threadId))
@@ -356,5 +454,9 @@ test('simultaneous completed-Thread submissions both persist; only the first rec
   { timeout: 60_000 }, () => exerciseRevisionAdmission('concurrent'))
 test('ambiguous queued instruction can be cancelled without rewriting its history or blocking the next',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('cancel'))
+test('two different-scope Turns continue a single Thread from exact verified Git HEAD across restart',
+  { timeout: 90_000 }, () => exerciseRevisionAdmission('multi-turn'))
+test('Git commit without final trusted checkpoint blocks further Turns and survives recovery',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('unverified-crash'))
 test('cancellation racing with asynchronous inference cannot resurrect or authorize the message',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('cancel-inflight'))

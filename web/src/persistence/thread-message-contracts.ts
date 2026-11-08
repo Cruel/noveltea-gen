@@ -5,9 +5,21 @@ export type ChatEvidence = {
   jobId: string; kind: string; stage: string | null; milestone: string | null
   filesJson: string; status: string | null; createdAt: string
 }
+/** Controller receipts, not semantic-review approvals. A null validatedSha
+ * means the execution has not produced an eligible final Story checkpoint. */
+export type TurnExecutionReceipt = {
+  jobId: string; inputSha: string; status: string; queuePhase: string | null
+  validatedSha: string | null
+}
+export type TurnReceipt = {
+  id: string; request: string; effectiveRequest: string
+  outcome: ThreadMessage['phase']; inputSha: string | null
+  executions: TurnExecutionReceipt[]
+}
 export type ChatReadModel = {
   messages: ThreadMessage[]
   turns: Array<{ id: string; executionIds: string[] }>
+  turnReceipts: TurnReceipt[]
   runs: Array<ChatRun & { requestJson: string | null }>
   evidence: ChatEvidence[]
 }
