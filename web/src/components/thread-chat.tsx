@@ -10,6 +10,8 @@ import { ThreadMessageEdit } from './thread-message-edit'
 import { ThreadRunAttention } from './thread-run-attention'
 import { ThreadRunActivity } from './thread-run-activity'
 import { canSendThreadFollowUp } from '@/lib/thread-attention'
+import { setCreativeMode } from '@/lib/threads.functions'
+import type { CreativeMode } from '../../../src/creative-policy'
 
 export function ThreadChat({ threadId }: { threadId: string }) {
   const key = ['thread-chat', threadId]
@@ -23,9 +25,12 @@ export function ThreadChat({ threadId }: { threadId: string }) {
   })
   const [message, setMessage] = useState('')
   const [liveMode, setLiveMode] = useState<'steer' | 'follow-up'>('follow-up')
+  const [modeOverride, setModeOverride] = useState<'default' | CreativeMode>('default')
+  const [modeSaving, setModeSaving] = useState(false)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
-  const [pendingRetry, setPendingRetry] = useState<{ id: string; content: string } | null>(null)
+  const [pendingRetry, setPendingRetry] = useState<{ id: string; content: string;
+    creativeMode?: CreativeMode } | null>(null)
   const [queuedEdit, setQueuedEdit] = useState<{ id: string; original: string; text: string;
     requestId: string } | null>(null)
   const [review, setReview] = useState<RevisionPreview | null>(null)
@@ -35,10 +40,13 @@ export function ThreadChat({ threadId }: { threadId: string }) {
   const submit = async (plan: RevisionPreview, approve = false) => {
     const content = reviewQueued?.content ?? message.trim()
     const id = reviewQueued?.id ?? (pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID())
-    setPendingRetry({ id, content })
+    const creativeMode = data?.messages.find(item => item.id === id)?.creativeModeOverride ??
+      (modeOverride === 'default' ? undefined : modeOverride)
+    setPendingRetry({ id, content, creativeMode })
     const result = await postThreadMessage({ data: { threadId, id, content,
       ...(selectedTargets ? { selectedTargets } : {}),
-      ...(approve ? { approvalDigest: plan.digest } : {}) } })
+      ...(approve ? { approvalDigest: plan.digest } : {}),
+      ...(creativeMode ? { creativeMode } : {}) } })
     client.setQueryData(key, result.chat)
     setPendingRetry(null)
     setReview(null)
@@ -55,15 +63,19 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       // Two tabs can submit against a completed Thread without a stale preview
       // rejecting the later message or granting it the earlier author's scope.
       const content = message.trim()
-      const id = pendingRetry?.content === content ? pendingRetry.id : crypto.randomUUID()
-      setPendingRetry({ id, content })
+      const creativeMode = modeOverride === 'default' ? undefined : modeOverride
+      const id = pendingRetry?.content === content && pendingRetry.creativeMode === creativeMode
+        ? pendingRetry.id : crypto.randomUUID()
+      setPendingRetry({ id, content, creativeMode })
       const active = data?.runs.at(-1)
       const mode = active?.status === 'running' && !active.fixture ? liveMode : undefined
       const result = await postThreadMessage({ data: { threadId, id, content,
-        ...(mode ? { liveMode: mode } : {}) } })
+        ...(mode ? { liveMode: mode } : {}),
+        ...(creativeMode ? { creativeMode } : {}) } })
       client.setQueryData(key, result.chat)
       setPendingRetry(null)
       setMessage('')
+      setModeOverride('default')
       const candidate = result.chat.messages.find(item => item.id === id)
       const firstQueued = result.chat.messages.filter(item => item.role === 'user' && item.phase === 'queued' && item.liveMode !== 'steer')
         .sort((a, b) => a.queuePriority - b.queuePriority || a.sequence - b.sequence)[0]
@@ -199,7 +211,24 @@ export function ThreadChat({ threadId }: { threadId: string }) {
   }, [data?.messages.length, latest?.status])
   const canSend = canSendThreadFollowUp(latest?.status, !!data?.archived)
   return <section aria-label="Thread chat" className="flex min-h-0 min-w-0 flex-1 flex-col border-0 p-0">
-    <div className="flex items-center justify-end gap-2 px-4 py-2 text-xs text-muted-foreground">
+    <div className="flex flex-wrap items-center justify-end gap-2 px-4 py-2 text-xs text-muted-foreground">
+      <label className="inline-flex items-center gap-2">Thread mode
+        <select aria-label="Thread default creative mode" value={data?.creativePolicy.mode ?? 'autonomous'}
+          disabled={!data || modeSaving || !!data.archived}
+          onChange={async event => {
+            const mode = event.target.value as CreativeMode
+            setModeSaving(true)
+            try {
+              await setCreativeMode({ data: { threadId, mode } })
+              await client.invalidateQueries({ queryKey: key })
+            } catch (cause) {
+              setSendError(cause instanceof Error ? cause.message : 'Creative mode could not be saved.')
+            } finally { setModeSaving(false) }
+          }} className="rounded border border-input bg-background px-2 py-1 text-foreground">
+          <option value="autonomous">Autonomous</option>
+          <option value="collaborative">Collaborative</option>
+        </select>
+      </label>
       {isFetching && <LoaderCircle aria-label="Updating chat" className="size-3.5 animate-spin motion-reduce:animate-none" />}
       {latest && <span aria-label="Latest run status">{latest.queuePhase === 'queued' ? 'Queued' : latest.status.replaceAll('-', ' ')}</span>}
       {latest && <Link to="/jobs/$jobId" params={{ jobId: latest.jobId }}
@@ -217,6 +246,8 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         (item.role === 'user' ? 'ml-6 bg-secondary/70' : 'mr-6 bg-muted/30')}>
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong>
+          {item.role === 'user' && data.turnReceipts.find(turn => turn.id === item.id)?.creativePolicy &&
+            <span aria-label="Turn creative mode">{data.turnReceipts.find(turn => turn.id === item.id)!.creativePolicy.mode}</span>}
           <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString()}</time>
           {item.role === 'user' && item.phase === 'cancelled' ? <span>Cancelled</span> :
            item.role === 'user' && item.liveMode === 'follow-up'
@@ -415,6 +446,19 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           aria-pressed={liveMode === 'follow-up'} disabled={sending} onClick={() => setLiveMode('follow-up')}>
           Queue next Turn · after verified checkpoint</Button>
       </div>}
+    <div className="mx-auto mb-2 flex max-w-3xl items-center justify-end gap-2 text-xs text-muted-foreground">
+      <label className="inline-flex items-center gap-2">This Turn
+        <select aria-label="Creative mode for this Turn" value={modeOverride}
+          disabled={sending || !canSend} onChange={event => {
+            setModeOverride(event.target.value as 'default' | CreativeMode)
+            setPendingRetry(null)
+          }} className="rounded border border-input bg-background px-2 py-1 text-foreground">
+          <option value="default">Thread default</option>
+          <option value="autonomous">Autonomous once</option>
+          <option value="collaborative">Collaborative once</option>
+        </select>
+      </label>
+    </div>
     <form onSubmit={event => { event.preventDefault(); void send() }} className="mx-auto flex max-w-3xl min-w-0 items-end gap-2">
       <textarea aria-label="Follow-up message" rows={2} maxLength={4000} value={message}
         onChange={event => { setMessage(event.target.value); setPendingRetry(null); setReview(null); setReviewQueued(null); setSelectedTargets(undefined) }}

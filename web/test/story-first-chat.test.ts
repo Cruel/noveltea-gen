@@ -194,8 +194,16 @@ test('one pending first Turn becomes one linked execution only after durable que
       sourceCommitSha: sha,
       createdAt: at,
     })
-    const first = await db.persistence.naturalStory.beginFirstTurn(owner, storyId, jobId, prompt, at)
+    const first = await db.persistence.naturalStory.beginFirstTurn(
+      owner, storyId, jobId, prompt, at, 'collaborative')
     assert.deepEqual(first, { headSha: sha, state: 'claimed' })
+    const pinned = await db.persistence.messages.owned(owner, 'root:' + jobId, jobId)
+    assert.equal(JSON.parse(pinned!.creativePolicyJson).mode, 'collaborative')
+    assert.equal(pinned!.creativeModeOverride, 'collaborative')
+    assert.equal(JSON.parse((await db.persistence.messages.membership(owner,
+      'root:' + jobId)).creativePolicyJson).mode, 'collaborative')
+    await assert.rejects(() => db.persistence.naturalStory.beginFirstTurn(
+      owner, storyId, jobId, prompt, at, 'autonomous'), /already belongs/)
     const overlapping = await db.persistence.naturalStory.beginFirstTurn(owner, storyId, jobId, prompt, at)
     assert.equal(overlapping.state, 'pending', 'double-submit does not re-enter provider admission')
     assert.equal((await listStoryThreads(db, owner, storyId)).threads.length, 1)

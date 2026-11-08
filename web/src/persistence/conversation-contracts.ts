@@ -51,6 +51,7 @@ export interface ConversationCatalog {
   }>
   create(owner: string, storyId: string, id: string, at: string): Promise<{ id: string; title: string }>
   renameThread(owner: string, id: string, title: string): Promise<boolean>
+  setCreativePolicy(owner: string, id: string, policyJson: string): Promise<boolean>
   /** Idempotent for own Threads, rejects foreign and unknown IDs. */
   archiveThread(owner: string, id: string, archived: boolean, at: string): Promise<boolean>
   deletion(owner: string, id: string): Promise<ThreadDeletionRecord | null>

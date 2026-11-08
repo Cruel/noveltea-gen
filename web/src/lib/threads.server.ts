@@ -3,6 +3,7 @@ import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { NavigationThreadRecord } from '../persistence/conversation-contracts'
 import type { StoryCollection } from '../persistence/collection-contracts'
 import { latestActivity } from './thread-navigation'
+import { creativePolicy, type CreativeMode } from '../../../src/creative-policy'
 
 export type ThreadStatus = 'prepared' | 'queued' | 'running' | 'paused' | 'needs-author' |
   'blocked' | 'completed' | 'cancelled' | 'archived' | 'deleting' | 'deleted'
@@ -115,6 +116,12 @@ function collectionName(value: string) {
 export async function createThread(store: StudioDatabase, owner: string, storyId: string) {
   await selectedStory(store, owner, storyId)
   return store.persistence.conversations.create(owner, storyId, randomUUID(), new Date().toISOString())
+}
+export async function setThreadCreativeMode(store: StudioDatabase, owner: string,
+  threadId: string, mode: CreativeMode): Promise<void> {
+  const json = JSON.stringify(creativePolicy(mode))
+  if (!await store.persistence.conversations.setCreativePolicy(owner, threadId, json))
+    throw new Error('Thread not found.')
 }
 export async function renameThread(store: StudioDatabase, owner: string, threadId: string, title: string) {
   const valid = titleValue(title)

@@ -21,6 +21,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
 import { resolveFocusedScope, type CanonicalScopeRecord } from "./focused-scope.js";
 import { readTurnEvidence, assertFocusedTurnAssignment } from "./turn-plan-evidence.js";
+import { creativePolicyInstruction, DEFAULT_CREATIVE_POLICY, type CreativePolicy } from "./creative-policy.js";
 
 interface Receipt {
   version: 1; jobId: string; workItemId: string; planVersion: number; contractDigest: string;
@@ -67,7 +68,8 @@ function skillFor(target: string) {
   if (type === "choice-point" || type === "puzzle") return "nt-interactive-narrative";
   throw new Error("A direct focus specialist is not available for " + target + "; select an Arc or Milestone scope.");
 }
-async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string, outcome?: string) {
+async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
+  outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY) {
   const skill = skillFor(receipt.target);
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config = { discovery: "explicit-only" as const, novelteaSkills: receipt.snapshot!.path,
@@ -118,6 +120,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string, 
       "Preserve typed references and branch behavior. If a requested change requires additional records or upstream decisions, " +
       "report that obstacle and stop without touching unauthorized files. Do not claim incomplete/delegated work is finished. " +
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
+      creativePolicyInstruction(policy) +
       "Original Turn goal: " + task + "\nSpecialist assignment outcome: " +
       (outcome ?? "Revise only the authorized record against the user request."));
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
@@ -229,7 +232,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         const path = join(job.worktreeStoryRoot, outside.path);
         await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");
       }
-    } else await writeWithPi(job, receipt, input.task, turnAssignment?.outcome);
+    } else await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
+      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY);
     const edited = changes(job);
     if (!edited.length || edited.some(entry => entry.slice(0, 2) !== " M" ||
         !paths.includes(entry.slice(3).replace(job.storyRelativePath ? job.storyRelativePath + "/" : "", ""))))

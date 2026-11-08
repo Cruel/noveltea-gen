@@ -18,6 +18,7 @@ export function StoryFirstChat({
   onSubmitted: (threadId: string) => Promise<void>
 }) {
   const [input, setInput] = useState('')
+  const [creativeMode, setCreativeMode] = useState<'autonomous' | 'collaborative'>('autonomous')
   const [requestId, setRequestId] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -49,6 +50,8 @@ export function StoryFirstChat({
           storyId,
           jobId: id,
           prompt,
+          ...(saved ? saved.creativeModeOverride ? { creativeMode: saved.creativeModeOverride } : {}
+            : { creativeMode }),
           ...(confirmed ? { confirmFullStory: true } : {}),
         },
       })
@@ -120,6 +123,8 @@ export function StoryFirstChat({
       {!saved && (
         <StoryChatPrompt
           value={input}
+          creativeMode={creativeMode}
+          onCreativeModeChange={setCreativeMode}
           busy={busy}
           sending={sending}
           onChange={(value) => {

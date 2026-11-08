@@ -173,6 +173,12 @@ export function createSqliteConversationCatalog(db: Db): ConversationCatalog {
         return { id, title }
       })
     },
+    async setCreativePolicy(owner, id, policyJson) {
+      ownerRequired(owner)
+      return db.update(storyThreads).set({ creativePolicyJson: policyJson })
+        .where(and(eq(storyThreads.id, id), eq(storyThreads.ownerUserId, owner),
+          isNull(storyThreads.deletedAt))).run().changes === 1
+    },
     async renameThread(owner, id, title) {
       ownerRequired(owner)
       return db.update(storyThreads).set({ title })

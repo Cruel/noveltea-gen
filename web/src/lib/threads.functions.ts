@@ -11,10 +11,12 @@ import {
   createCollection, renameCollection, removeCollection, assignThreadCollection, chooseStory,
   listStoryNavigation,
   renameThread,
+  setThreadCreativeMode,
   restoreThread,
   saveThreadPreferences,
 } from './threads.server'
 
+import { validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 const isId = (id: unknown): id is string => typeof id === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(id)
 async function ownerId() {
   await database.assertReady()
@@ -107,6 +109,17 @@ export const saveSelectedStory = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }) => {
     await chooseStory(database, await ownerId(), data)
+    return { success: true }
+  })
+
+export const setCreativeMode = createServerFn({ method: 'POST' })
+  .validator((data: { threadId: string; mode: CreativeMode }) => {
+    if (!data || !isId(data.threadId) || !validCreativeMode(data.mode))
+      throw new Error('Invalid creative mode.')
+    return data
+  })
+  .handler(async ({ data }) => {
+    await setThreadCreativeMode(database, await ownerId(), data.threadId, data.mode)
     return { success: true }
   })
 

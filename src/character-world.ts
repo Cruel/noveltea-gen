@@ -13,6 +13,8 @@ import { verifyJobPiSession } from "./job-session.js";
 import { recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
   completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
+import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { DEFAULT_CREATIVE_POLICY } from "./creative-policy.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { loadSkillConfig } from "./skills.js";
@@ -88,6 +90,7 @@ export interface CharacterWorldOptions {
   task?: string;
   provider?: string;
   model?: string;
+  turnPlanDigest?: string;
 }
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -504,6 +507,9 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       throw new Error("Character/World foundations require a verified committed architecture cluster.");
     }
     const plan = arch.plan;
+    const turnEvidence = input.action === "run"
+      ? await readTurnEvidence(job, plan.contract, input.task, input.turnPlanDigest) : null;
+    const policy = turnEvidence?.creativePolicy ?? DEFAULT_CREATIVE_POLICY;
     const contractDigest = digest(JSON.stringify(plan.contract));
     let receipt: Receipt;
     if (existsSync(file)) {
@@ -670,7 +676,10 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         : { ...deriveFoundationAssignment(unit.domain, plan,
           reportOf(await validate(before), before),
           state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/"))),
-          ...(input.task ? { authorTask: input.task } : {}) };
+          ...(input.task ? { authorTask: input.task } : {}),
+          creativePolicy: policy };
+      if (JSON.stringify(assign?.creativePolicy ?? DEFAULT_CREATIVE_POLICY) !== JSON.stringify(policy))
+        throw new Error("Foundation assignment creative policy differs from the original Turn receipt.");
       if (!assign || assign.domain !== unit.domain) throw Error("Saved specialist assignment missing or mismatched.");
       if (unit.phase === "pending" || resumingChoice) {
         if (!resumingChoice) {

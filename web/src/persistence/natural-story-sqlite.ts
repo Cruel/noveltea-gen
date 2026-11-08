@@ -3,6 +3,7 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../db/schema'
 import { generationRunQueue, repositories, sessions, stories, storyThreadMessages, storyThreadRuns, storyThreads } from '../db/schema'
 import type { NaturalStoryPersistence } from './natural-story-contracts'
+import { creativePolicy, DEFAULT_CREATIVE_POLICY } from '../../../src/creative-policy'
 
 type Db = BetterSQLite3Database<typeof schema>
 const validOwner = (owner: string) => {
@@ -32,8 +33,9 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
         eq(storyThreadRuns.jobId, sessions.id), eq(storyThreadRuns.ownerUserId, sessions.ownerUserId),
       )).where(and(eq(sessions.id, jobId), eq(sessions.ownerUserId, owner))).get() ?? null
     },
-    async beginFirstTurn(owner, storyId, jobId, prompt, at) {
+    async beginFirstTurn(owner, storyId, jobId, prompt, at, creativeMode) {
       validOwner(owner)
+      const policyJson = JSON.stringify(creativeMode ? creativePolicy(creativeMode) : DEFAULT_CREATIVE_POLICY)
       return db.transaction(
         (tx) => {
           const member = selected(owner, storyId)
@@ -60,6 +62,8 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
               base: storyThreadMessages.verifiedCommitSha,
               role: storyThreadMessages.role,
               phase: storyThreadMessages.phase,
+              creativePolicyJson: storyThreadMessages.creativePolicyJson,
+              creativeModeOverride: storyThreadMessages.creativeModeOverride,
             })
             .from(storyThreadMessages)
             .where(eq(storyThreadMessages.id, jobId))
@@ -74,7 +78,9 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
               existing.owner !== owner ||
               existing.threadId !== threadId ||
               existing.role !== 'user' ||
-              existing.body !== prompt
+              existing.body !== prompt ||
+              creativeMode !== undefined && (existing.creativePolicyJson !== policyJson ||
+                existing.creativeModeOverride !== creativeMode)
             )
               throw new Error('Request ID already belongs to a different Story, Thread or message.')
             if (existing.base !== member.headSha)
@@ -90,6 +96,7 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
                 ownerUserId: owner,
                 storyId,
                 title: prompt.slice(0, 120),
+                creativePolicyJson: policyJson,
                 activityAt: at,
                 createdAt: at,
               })
@@ -105,6 +112,8 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
                 role: 'user',
                 status: 'queued',
                 body: prompt,
+                creativePolicyJson: policyJson,
+                creativeModeOverride: creativeMode ?? null,
                 phase: 'preparing',
                 verifiedCommitSha: member.headSha,
                 createdAt: at,

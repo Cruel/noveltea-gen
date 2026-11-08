@@ -3,6 +3,7 @@ import type { StudioStore } from '../persistence/store'
 import { requireUser } from './access.server'
 import { interpretNaturalStoryPrompt } from './natural-story-plan'
 import { launchNaturalStory } from './natural-story.server'
+import { parseCreativePolicy, validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 
@@ -12,6 +13,7 @@ export type FirstStoryTurnInput = {
   prompt: string
   /** Explicit author confirmation of full-Story execution after clarification. */
   confirmFullStory?: boolean
+  creativeMode?: CreativeMode
 }
 export type FirstStoryTurnResult = {
   storyId: string
@@ -40,7 +42,8 @@ export async function submitFirstStoryTurn(
     !input ||
     !UUID.test(input.storyId) ||
     !UUID.test(input.jobId) ||
-    (input.confirmFullStory !== undefined && typeof input.confirmFullStory !== 'boolean')
+    (input.confirmFullStory !== undefined && typeof input.confirmFullStory !== 'boolean') ||
+    (input.creativeMode !== undefined && !validCreativeMode(input.creativeMode))
   )
     throw new Error('Invalid first Story Turn.')
   const plan = interpretNaturalStoryPrompt(input.prompt)
@@ -51,6 +54,7 @@ export async function submitFirstStoryTurn(
     input.jobId,
     prompt,
     new Date().toISOString(),
+    input.creativeMode,
   )
   const result: FirstStoryTurnResult = {
     storyId: input.storyId,
@@ -74,7 +78,11 @@ export async function submitFirstStoryTurn(
         message: plan.clarification ?? 'Confirm full-Story generation before starting.',
       }
     }
+    const pinnedMessage = await store.persistence.messages.owned(actor.id, result.threadId, input.jobId)
+    if (!pinnedMessage) throw new Error('First Turn creative policy receipt is missing.')
+    const pinnedPolicy = parseCreativePolicy(pinnedMessage.creativePolicyJson)
     await launchNaturalStory(auth, store, headers, baseURL, {
+      creativeMode: pinnedPolicy.mode,
       storyId: input.storyId,
       jobId: input.jobId,
       headSha,

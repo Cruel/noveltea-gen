@@ -8,6 +8,7 @@ import {
   threadLiveInputs, threadProtectedDecisions, threadQueuedMessageEdits,
 } from '../db/schema'
 import type { ThreadMessage } from '../lib/thread-chat.server'
+import { creativePolicy, parseCreativePolicy, type CreativeMode } from '../../../src/creative-policy'
 import { ThreadMessageConflict, type ChatRun, type ThreadMessagePersistence,
   type TurnReceipt } from './thread-message-contracts'
 
@@ -31,6 +32,7 @@ function membership(db: Db, owner: string, threadId: string) {
     id: storyThreads.id,
     archivedAt: sql<string | null>`COALESCE(${storyThreads.deletedAt}, ${storyThreads.archivedAt})`,
     storyId: storyThreads.storyId,
+    creativePolicyJson: storyThreads.creativePolicyJson,
   }).from(storyThreads).where(and(eq(storyThreads.id, threadId), eq(storyThreads.ownerUserId, owner))).get()
   if (!row) throw new ThreadMessageConflict(404, 'Thread not found.')
   return row
@@ -51,6 +53,7 @@ export function currentThreadRunSqlite(db: Db, owner: string, threadId: string):
 
 const messageFields = {
   sequence: m.sequence, id: m.id, role: m.role, status: m.status, content: m.body,
+  creativePolicyJson: m.creativePolicyJson, creativeModeOverride: m.creativeModeOverride,
   queuePriority: sql<number>`COALESCE((SELECT original.sequence FROM thread_steering_intents intent
     JOIN story_thread_messages original ON original.id=intent.message_id
     WHERE intent.review_message_id=${m.id}), ${m.sequence})`,
@@ -234,7 +237,8 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
     },
     async membership(owner, threadId) {
       const row = membership(db, owner, threadId)
-      return { storyId: row.storyId, archivedAt: row.archivedAt }
+      return { storyId: row.storyId, archivedAt: row.archivedAt,
+        creativePolicyJson: row.creativePolicyJson }
     },
     async read(owner, threadId) {
       membership(db, owner, threadId)
@@ -284,7 +288,8 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
         sql`${generationEvents.kind} IN ('verified','finished','interrupted')`))
         .orderBy(asc(generationEvents.id)).all()
       const turnRows = db.select({
-        id: storyTurns.id, jobId: storyTurnExecutions.jobId,
+        id: storyTurns.id, creativePolicyJson: storyTurns.creativePolicyJson,
+        jobId: storyTurnExecutions.jobId,
         inputSha: sessions.sourceCommitSha, status: sessions.status,
         queuePhase: generationRunQueue.phase,
         // Only a controller-settled assistant receipt proves a completed
@@ -322,7 +327,7 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
           if (!original) throw new Error('Turn has no persisted author request.')
           receipt = { id: row.id, request: original.editHistory?.[0]?.old ?? original.content,
             effectiveRequest: original.content, outcome: original.phase,
-            inputSha: null, executions: [] }
+            inputSha: null, creativePolicy: parseCreativePolicy(row.creativePolicyJson), executions: [] }
           turnReceipts.push(receipt)
         }
         if (row.jobId && row.inputSha && row.status) {
@@ -334,7 +339,7 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
       }
       return { messages, runs, evidence, turns, turnReceipts }
     },
-    async enqueue(owner, threadId, id, body, mode, at) {
+    async enqueue(owner, threadId, id, body, mode, at, creativeMode?: CreativeMode) {
       ownerRequired(owner)
       return db.transaction(() => {
         const member = membership(db, owner, threadId)
@@ -348,6 +353,7 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
           if (existing.role !== 'user' ||
               existing.content !== body && edit?.body !== body ||
               mode !== undefined && existing.liveMode !== mode ||
+              creativeMode !== undefined && existing.creativeModeOverride !== creativeMode ||
               !ownedMessage(db, owner, threadId, id))
             throw new ThreadMessageConflict(409, 'Message ID is already in use.')
           return existing
@@ -373,6 +379,9 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
         db.insert(m).values({
           id, ownerUserId: owner, threadId, sequence: nextThreadSequenceSqlite(db, threadId),
           role: 'user', status: 'queued', body, phase: 'queued', createdAt: at,
+          creativePolicyJson: JSON.stringify(creativeMode ? creativePolicy(creativeMode) :
+            parseCreativePolicy(member.creativePolicyJson)),
+          creativeModeOverride: creativeMode ?? null,
         }).run()
         if (mode) {
           // A follow-up is a future author Turn, never Pi SDK followUp().

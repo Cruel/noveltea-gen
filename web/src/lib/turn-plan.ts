@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { CompletionContract } from '../../../src/architecture'
 import type { CanonicalScopeRecord } from '../../../src/focused-scope'
 import type { TurnAssignmentEvidence, TurnEvidence } from '../../../src/turn-plan-evidence'
+import { DEFAULT_CREATIVE_POLICY, parseCreativePolicy, type CreativePolicy } from '../../../src/creative-policy'
 
 export type TurnSpecialistAssignment = TurnAssignmentEvidence
 export type TurnPlan = TurnEvidence
@@ -41,7 +42,7 @@ const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(va
 /** An intent receipt, not a capability token. Every write is still checked
  * independently by the canonical resolver, Git diff and native validator. */
 export function planWholeStory(request: string, contract: CompletionContract, base: string,
-  sourceJobId: string | null = null): TurnPlan {
+  sourceJobId: string | null = null, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY): TurnPlan {
   if (!sha.test(base) || !request.trim() || contract.scope.kind !== 'full-story')
     throw new Error('A whole-Story Turn requires an original brief and exact verified source.')
   const stages = ['foundation', 'architecture', 'foundations', 'event', 'interactive',
@@ -64,13 +65,14 @@ export function planWholeStory(request: string, contract: CompletionContract, ba
   const body = { version: 1 as const, kind: 'full-story' as const,
     originalRequest: request, goal: request,
     source: { jobId: sourceJobId, verifiedSha: base }, contract, assignments,
-    reviewRequired: false }
+    creativePolicy: parseCreativePolicy(policy), reviewRequired: false }
   return { ...body, digest: digest(body) }
 }
 
 export function planRevision(request: string, contract: CompletionContract, base: string,
   sourceJobId: string, catalog: CanonicalScopeRecord[], targetIds: string[],
-  allowedPaths: string[], protectedChange?: { path: string } | null): TurnPlan {
+  allowedPaths: string[], protectedChange?: { path: string } | null,
+  policy: CreativePolicy = DEFAULT_CREATIVE_POLICY): TurnPlan {
   if (!sha.test(base) || !sourceJobId || !request.trim() || targetIds.length > 128)
     throw new Error('A revision Turn requires its original request and verified base.')
   const active = new Map(catalog.filter(r => r.metadata.status !== 'superseded')
@@ -124,7 +126,7 @@ export function planRevision(request: string, contract: CompletionContract, base
     kind: protectedChange ? 'protected-amendment' as const : 'revision' as const,
     originalRequest: request, goal: request,
     source: { jobId: sourceJobId, verifiedSha: base },
-    contract, assignments, reviewRequired: targetIds.length > 1 ||
+    contract, assignments, creativePolicy: parseCreativePolicy(policy), reviewRequired: targetIds.length > 1 ||
       !!contract.scope.supportingTargets?.length || !!protectedChange }
   return { ...body, digest: digest(body) }
 }
@@ -135,8 +137,13 @@ export function assertTurnPlan(saved: TurnPlan, expected: TurnPlan): void {
     throw new Error('Turn plan/assignment provenance differs from the original verified request.')
 }
 
+function validSavedPolicy(value: unknown): boolean {
+  try { parseCreativePolicy(value); return true } catch { return false }
+}
+
 export function verifyTurnPlan(plan: TurnPlan): void {
   if (!plan || plan.version !== 1 || !sha.test(plan.source?.verifiedSha) ||
+      (plan.creativePolicy !== undefined && !validSavedPolicy(plan.creativePolicy)) ||
       !Array.isArray(plan.assignments) || plan.assignments.length < 1 ||
       plan.assignments.length > 129 || !plan.originalRequest?.trim() ||
       !plan.goal?.trim() || !plan.assignments.every(a =>

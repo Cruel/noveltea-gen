@@ -1,4 +1,5 @@
 import type { ThreadMessage } from '../lib/thread-chat.server'
+import type { CreativeMode, CreativePolicy } from '../../../src/creative-policy'
 
 export type ChatRun = { jobId: string; status: string; queuePhase: string | null; runOrder: number }
 export type ChatEvidence = {
@@ -14,6 +15,7 @@ export type TurnExecutionReceipt = {
 export type TurnReceipt = {
   id: string; request: string; effectiveRequest: string
   outcome: ThreadMessage['phase']; inputSha: string | null
+  creativePolicy: CreativePolicy
   executions: TurnExecutionReceipt[]
 }
 export type ChatReadModel = {
@@ -29,10 +31,11 @@ export class ThreadMessageConflict extends Error {
 export interface ThreadMessagePersistence {
   owned(owner: string, threadId: string, id: string): Promise<ThreadMessage | null>
   markAdmitted(owner: string, jobId: string): Promise<void>
-  membership(owner: string, threadId: string): Promise<{ storyId: string; archivedAt: string | null }>
+  membership(owner: string, threadId: string): Promise<{ storyId: string; archivedAt: string | null; creativePolicyJson: string }>
   read(owner: string, threadId: string): Promise<ChatReadModel>
   enqueue(owner: string, threadId: string, id: string, body: string,
-    mode: 'steer' | 'follow-up' | undefined, at: string): Promise<ThreadMessage>
+    mode: 'steer' | 'follow-up' | undefined, at: string,
+    creativeMode?: CreativeMode): Promise<ThreadMessage>
   edit(owner: string, threadId: string, id: string, requestId: string,
     expected: string, replacement: string, at: string): Promise<ThreadMessage>
   cancel(owner: string, threadId: string, id: string, at: string): Promise<ThreadMessage>

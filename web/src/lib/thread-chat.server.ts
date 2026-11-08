@@ -17,6 +17,7 @@ import type { GenerationDraft } from './generation-config.server'
 import { assertPinnedRevision, revisionFromSource, submitThreadRevision, type PinnedRevision } from './story-revision.server'
 import { assertProtectedThreadApproval, commitProtectedThreadChange } from './thread-protected-decision.server'
 import { saveJobTurnPlan } from './turn-plan-receipt.server'
+import { parseCreativePolicy, validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 
 const unsafeText = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
@@ -34,6 +35,7 @@ export type ThreadMessage = {
   liveSourceJobId: string | null; livePiSessionId: string | null
   liveWorkItem: string | null; liveDeliveredAt: string | null
   editCount: number
+  creativePolicyJson: string; creativeModeOverride: CreativeMode | null
   editHistory?: Array<{ old: string; replacement: string; editedAt: string }>
 }
 type Run = { jobId: string; status: string; queuePhase: string | null; runOrder: number }
@@ -49,6 +51,7 @@ export async function readThreadChat(store: StudioDatabase, owner: string, threa
   const data = await store.persistence.messages.read(owner, threadId)
   const membership = await store.persistence.messages.membership(owner, threadId)
   return { threadId, storyId: membership.storyId,
+    creativePolicy: parseCreativePolicy(membership.creativePolicyJson),
     archived: !!membership.archivedAt,
     turns: data.turns,
     turnReceipts: data.turnReceipts,
@@ -71,11 +74,13 @@ export async function readThreadChat(store: StudioDatabase, owner: string, threa
 
 /** Durable, sequential, idempotent author admission across HTTP retries. */
 export async function enqueueThreadMessage(store: StudioDatabase, owner: string, threadId: string,
-  id: string, content: string, mode?: 'steer' | 'follow-up'): Promise<ThreadMessage> {
+  id: string, content: string, mode?: 'steer' | 'follow-up',
+  creativeMode?: CreativeMode): Promise<ThreadMessage> {
   if (!UUID.test(id) || typeof content !== 'string' || !content.trim() ||
-      unsafeText.test(content))
+      unsafeText.test(content) ||
+      creativeMode !== undefined && !validCreativeMode(creativeMode))
     throw new ThreadChatError(400, 'Send a printable message of 1–4000 characters with a UUID.')
-  return store.persistence.messages.enqueue(owner, threadId, id, content.trim(), mode, now())
+  return store.persistence.messages.enqueue(owner, threadId, id, content.trim(), mode, now(), creativeMode)
 }
 
 export async function editQueuedThreadMessage(store: StudioDatabase, owner: string,
@@ -132,8 +137,11 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     if (scope.sourceJobId !== claim.source || scope.sourceSha !== head ||
         !Array.isArray(scope.selectedTargets))
       throw new ThreadChatError(409, 'Revision authorization is stale or incomplete; review the Story impact again.')
+    const savedTurn = await store.persistence.messages.owned(owner, threadId, claim.id)
+    if (!savedTurn) throw new ThreadChatError(409, 'Admitted Turn is missing its pinned policy.')
     const refreshed = await revisionFromSource(store, owner, claim.source, claim.content,
-      scope.protectedChange ? undefined : scope.selectedTargets)
+      scope.protectedChange ? undefined : scope.selectedTargets,
+      parseCreativePolicy(savedTurn.creativePolicyJson))
     assertPinnedRevision(scope, refreshed, claim.source, head)
     if (scope.protectedChange)
       await assertProtectedThreadApproval(store, owner, threadId, claim.id, claim.source, refreshed)

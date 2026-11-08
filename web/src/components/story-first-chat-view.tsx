@@ -33,12 +33,16 @@ export function EmptyStoryWelcome() {
 
 export function StoryChatPrompt({
   value,
+  creativeMode,
+  onCreativeModeChange,
   busy,
   sending,
   onChange,
   onSend,
 }: {
   value: string
+  creativeMode: 'autonomous' | 'collaborative'
+  onCreativeModeChange: (mode: 'autonomous' | 'collaborative') => void
   busy: boolean
   sending: boolean
   onChange: (next: string) => void
@@ -53,6 +57,17 @@ export function StoryChatPrompt({
         onSend()
       }}
     >
+      <div className="mx-auto mb-2 flex max-w-3xl justify-end text-xs text-muted-foreground">
+        <label className="inline-flex items-center gap-2">Creative mode
+          <select aria-label="Initial Thread creative mode" value={creativeMode}
+            disabled={busy}
+            onChange={event => onCreativeModeChange(event.target.value as 'autonomous' | 'collaborative')}
+            className="rounded border border-input bg-background px-2 py-1 text-foreground">
+            <option value="autonomous">Autonomous</option>
+            <option value="collaborative">Collaborative</option>
+          </select>
+        </label>
+      </div>
       <div className="mx-auto flex max-w-3xl items-end gap-2">
         <textarea
           aria-label="Story message"

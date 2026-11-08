@@ -17,6 +17,8 @@ test('an empty Story opens ordinary Chat and truthful Outline/Graph placeholders
       createElement(EmptyStoryWelcome),
       createElement(StoryChatPrompt, {
         value: '',
+        creativeMode: 'autonomous',
+        onCreativeModeChange: () => {},
         busy: false,
         sending: false,
         onChange: () => {},
@@ -28,6 +30,7 @@ test('an empty Story opens ordinary Chat and truthful Outline/Graph placeholders
   assert.match(markup, /Story Graph/)
   assert.match(markup, /What would you like to create/)
   assert.match(markup, /aria-label="Story message"/)
+  assert.match(markup, /aria-label="Initial Thread creative mode"/)
   assert.match(markup, /aria-label="Start Story Chat"/)
   assert.match(markup, />Send</)
   assert.doesNotMatch(markup, /Approve full-Story plan and run|Configure generation|Job wizard/)

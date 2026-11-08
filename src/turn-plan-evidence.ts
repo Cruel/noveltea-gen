@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
+import { parseCreativePolicy, type CreativePolicy } from "./creative-policy.js";
 
 export interface TurnAssignmentEvidence {
   id: string;
@@ -22,10 +23,14 @@ export interface TurnEvidence {
   contract: CompletionContract;
   assignments: TurnAssignmentEvidence[];
   reviewRequired: boolean;
+  creativePolicy?: CreativePolicy;
   digest: string;
 }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const SHA = /^[a-f0-9]{40}$/;
+const validSavedPolicy = (value: unknown): boolean => {
+  try { parseCreativePolicy(value); return true; } catch { return false; }
+};
 const safePath = /^[a-z][a-z-]*\/[a-z0-9-]+\.md$/;
 
 /** Controller-owned private evidence; a model's claim is never permission. */
@@ -48,6 +53,7 @@ export async function readTurnEvidence(job: JobStartResult, contract: Completion
   if (plan?.version !== 1 || !SHA.test(plan.source?.verifiedSha ?? "") ||
     plan.source.verifiedSha !== job.baseSha || !plan.goal?.trim() ||
     (originalRequest !== undefined && plan.originalRequest !== originalRequest) ||
+    (plan.creativePolicy !== undefined && !validSavedPolicy(plan.creativePolicy)) ||
     JSON.stringify(plan.contract) !== JSON.stringify(contract) ||
     !Array.isArray(assignments) || !assignments.length || assignments.length > 129 ||
     new Set(assignments.map(a => a.id)).size !== assignments.length ||

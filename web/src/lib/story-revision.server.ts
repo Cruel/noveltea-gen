@@ -4,10 +4,13 @@ import { selectedJob, restoreJob, pinnedRequest, inspectRegisteredJob } from './
 import { trustedHead } from '../../../src/revision'
 import { validateStoryJob } from '../../../src/validator'
 import type { CanonicalScopeRecord } from '../../../src/focused-scope'
-import { inferStoryRevision, type RevisionPreview, type ProtectedDecisionChange } from './story-revision-plan'
+import { inferStoryRevision, applyCreativeModeToRevision,
+  type RevisionPreview, type ProtectedDecisionChange } from './story-revision-plan'
 import { assertProtectedThreadApproval } from './thread-protected-decision.server'
 import { enqueueThreadMessage, type ThreadMessage, ThreadChatError } from './thread-chat.server'
 import { planRevision, assertTurnPlan, type TurnPlan } from './turn-plan'
+import { DEFAULT_CREATIVE_POLICY, parseCreativePolicy,
+  type CreativeMode, type CreativePolicy } from '../../../src/creative-policy'
 
 type Source = { jobId: string; status: string; queuePhase: string | null }
 export type PinnedRevision = {
@@ -61,7 +64,8 @@ async function latestRun(store: StudioDatabase, owner: string, threadId: string)
   return row
 }
 export async function revisionFromSource(store: StudioDatabase, owner: string,
-  sourceJobId: string, prompt: string, selectedTargets?: string[]) {
+  sourceJobId: string, prompt: string, selectedTargets?: string[],
+  policy: CreativePolicy = DEFAULT_CREATIVE_POLICY) {
   const jobRow = await selectedJob(store, owner, sourceJobId)
   const parent = await restoreJob(jobRow, owner)
   const pinned = pinnedRequest(jobRow, parent)
@@ -87,10 +91,11 @@ export async function revisionFromSource(store: StudioDatabase, owner: string,
       report.protection.base !== headSha || report.protection.changes?.length ||
       report.protection.warnings?.length)
     throw new ThreadChatError(409, 'The pinned canonical validator cannot verify the complete Story and protected decisions at this HEAD.')
-  const preview = inferStoryRevision(prompt, report.records, headSha, pinned.contract, selectedTargets)
+  const preview = applyCreativeModeToRevision(
+    inferStoryRevision(prompt, report.records, headSha, pinned.contract, selectedTargets), policy)
   return { ...preview, turnPlan: preview.clarification ? null :
     planRevision(preview.request, preview.contract, headSha, sourceJobId, report.records,
-      preview.targets, preview.writePaths, preview.protectedChange) }
+      preview.targets, preview.writePaths, preview.protectedChange, policy) }
 }
 export async function previewThreadRevision(store: StudioDatabase, owner: string,
   threadId: string, prompt: string, selectedTargets?: string[], messageId?: string) {
@@ -98,19 +103,22 @@ export async function previewThreadRevision(store: StudioDatabase, owner: string
   if (pending && pending.content !== prompt.trim())
     throw new ThreadChatError(409, 'Queued instruction changed; refresh the Thread before reviewing.')
   const run = await latestRun(store, owner, threadId)
-  return revisionFromSource(store, owner, run.jobId, prompt, selectedTargets)
+  const pinned = messageId ? await store.persistence.messages.owned(owner, threadId, messageId) : null
+  const policy = parseCreativePolicy(pinned?.creativePolicyJson ??
+    (await store.persistence.messages.membership(owner, threadId)).creativePolicyJson)
+  return revisionFromSource(store, owner, run.jobId, prompt, selectedTargets, policy)
 }
 /** One transaction binds the reviewed preview to the immutable queued message.
  * A retry with the same UUID cannot replace its earlier controller grant. */
 export async function submitThreadRevision(store: StudioDatabase, owner: string, threadId: string,
   id: string, content: string, selectedTargets?: string[], approvalDigest?: string,
-  liveMode?: 'steer' | 'follow-up'): Promise<ThreadMessage> {
+  liveMode?: 'steer' | 'follow-up', creativeMode?: CreativeMode): Promise<ThreadMessage> {
   if (liveMode === 'steer' && (selectedTargets || approvalDigest))
     throw new ThreadChatError(409, 'Live Pi instructions cannot grant a new Story write scope.')
   // Reserve the UUID and its exact place in the queue *synchronously* before
   // any native validation, Git access or other asynchronous scope inference.
   // The second concurrent request therefore always has its own durable slot.
-  const saved = await enqueueThreadMessage(store, owner, threadId, id, content, liveMode)
+  const saved = await enqueueThreadMessage(store, owner, threadId, id, content, liveMode, creativeMode)
   // Admission is durable, but scope inference is asynchronous: retry/cancel
   // may update the row before this request returns to the caller.
   const latest = async () => await store.persistence.messages.owned(owner, threadId, id) ?? saved
@@ -143,7 +151,8 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
       current.status !== 'completed' || current.queuePhase !== 'finished') return latest()
 
   const source = current
-  const plan = await revisionFromSource(store, owner, source.jobId, content, selectedTargets)
+  const plan = await revisionFromSource(store, owner, source.jobId, content, selectedTargets,
+    parseCreativePolicy(saved.creativePolicyJson))
   // Clarifications and unapproved material expansions stay durably queued for
   // review or cancellation, rather than consuming the head of the Thread.
   if (plan.clarification) return latest()

@@ -1,5 +1,6 @@
 import { createServerFn } from '@tanstack/react-start'
 import { getRequestHeaders } from '@tanstack/react-start/server'
+import { validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 import { auth, database } from './runtime.server'
 import { requireUser } from './access.server'
 import { readThreadChat, advanceThread, cancelQueuedThreadMessage,
@@ -142,20 +143,21 @@ export const cancelThreadMessage = createServerFn({ method: 'POST' })
 export const postThreadMessage = createServerFn({ method: 'POST' })
   .validator((data: { threadId: string; id: string; content: string;
     selectedTargets?: string[]; approvalDigest?: string;
-    liveMode?: 'steer' | 'follow-up' }) => {
+    liveMode?: 'steer' | 'follow-up'; creativeMode?: CreativeMode }) => {
     if (!data || !ID.test(data.threadId) || typeof data.id !== 'string' ||
         typeof data.content !== 'string' || data.content.length > 4000 ||
         data.selectedTargets !== undefined && (!Array.isArray(data.selectedTargets) ||
           data.selectedTargets.length > 128 || data.selectedTargets.some(id => typeof id !== 'string')) ||
         data.approvalDigest !== undefined && !/^[a-f0-9]{64}$/.test(data.approvalDigest) ||
-        data.liveMode !== undefined && !['steer','follow-up'].includes(data.liveMode))
+        data.liveMode !== undefined && !['steer','follow-up'].includes(data.liveMode) ||
+        data.creativeMode !== undefined && !validCreativeMode(data.creativeMode))
       throw new Error('Invalid Thread message.')
     return data
   })
   .handler(async ({ data }) => {
     const ownerId = await owner()
     const message = await submitThreadRevision(database, ownerId, data.threadId, data.id,
-      data.content, data.selectedTargets, data.approvalDigest, data.liveMode)
+      data.content, data.selectedTargets, data.approvalDigest, data.liveMode, data.creativeMode)
     await advanceThread(database, ownerId, data.threadId)
     return { message, chat: await readThreadChat(database, ownerId, data.threadId) }
   })

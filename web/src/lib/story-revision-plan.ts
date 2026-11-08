@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { parseGenerationContract } from '../../../src/generation'
 import { resolveFocusedScope, type CanonicalScopeRecord } from '../../../src/focused-scope'
 import type { CompletionContract } from '../../../src/architecture'
+import { hasExplicitCreativeAlternatives, routeCreativeChoice, type CreativePolicy } from '../../../src/creative-policy'
 
 type RecordItem = CanonicalScopeRecord & { metadata: CanonicalScopeRecord['metadata'] & {
   title?: string; arcs?: string[]; events?: string[]; fulfillment?: { any_of?: string[][] }
@@ -20,6 +21,16 @@ export type RevisionPreview = {
   protectedChange: ProtectedDecisionChange | null;
   protectedConflict: ProtectedConflictCandidate | null; digest: string
 }
+/** Resolve ordinary creative discretion by the Turn's pinned policy, not by
+ * changing scope, protected authorization, or the underlying impact digest. */
+export function applyCreativeModeToRevision(preview: RevisionPreview, policy: CreativePolicy): RevisionPreview {
+  if (preview.clarification || preview.protectedChange ||
+      !hasExplicitCreativeAlternatives(preview.request) ||
+      routeCreativeChoice(policy, 'creative-ambiguity') !== 'ask-author') return preview
+  return { ...preview, clarification:
+    'Which of the proposed creative alternatives should be used? Specify your preference in the queued request.' }
+}
+
 const SHA = /^[a-f0-9]{40}$/
 const unsafe = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
 const writingTypes = new Set(['character', 'relationship', 'world-entity', 'fact', 'revelation',

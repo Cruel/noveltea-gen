@@ -41,7 +41,7 @@ test('migration command initializes, verifies and repeats on a durable SQLite da
         assert.ok(tables.includes(name), `Missing ${name}`)
       }
       const history = (await store.testing.schema.migrationHistory())
-      assert.equal(history.length, 4, 'Studio requires baseline, Thread invariants, Collection and queued Turn isolation migrations')
+      assert.equal(history.length, 5, 'Studio requires the creative policy migration after the queued Turn isolation migration')
       for (const migration of history) {
         assert.match(migration.hash, /^[a-f0-9]{64}$/)
         assert.ok(migration.createdAt > 0)
@@ -110,7 +110,7 @@ test('migration CLI loads the Vite development environment including local overr
     assert.equal(existsSync(ignoredPath), false, 'Base .env DB path unexpectedly won')
     const store = openStudioDatabase(databasePath)
     try {
-      assert.equal((await store.testing.schema.migrationHistory()).length, 4)
+      assert.equal((await store.testing.schema.migrationHistory()).length, 5)
     } finally { store.close() }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

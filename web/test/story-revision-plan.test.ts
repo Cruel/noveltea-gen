@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { inferStoryRevision } from '../src/lib/story-revision-plan'
+import { inferStoryRevision, applyCreativeModeToRevision } from '../src/lib/story-revision-plan'
+import { creativePolicy } from '../../src/creative-policy'
 import { resolveFocusedScope, type CanonicalScopeRecord } from '../../src/focused-scope'
 import { reconcileInventory, nextExecutionItem } from '../../src/generation-plan'
 import { assertPinnedRevision, type PinnedRevision } from '../src/lib/story-revision.server'
@@ -32,6 +33,28 @@ const catalog: CanonicalScopeRecord[] = [
   record('authored-content', 'escape', { title: 'Escape scene', events: ['event.escape'] }),
   record('character', 'sol', { title: 'Sol' }),
 ]
+test('Collaborative mode asks about open creative alternatives while Autonomous mode can proceed', () => {
+  const preview = inferStoryRevision('Make character.nia either less trusting or more guarded',
+    catalog, sha, previous)
+  assert.equal(preview.clarification, null)
+  const autonomous = applyCreativeModeToRevision(preview, creativePolicy('autonomous'))
+  const collaborative = applyCreativeModeToRevision(preview, creativePolicy('collaborative'))
+  assert.equal(autonomous.clarification, null)
+  assert.deepEqual(autonomous.targets, ['character.nia'])
+  assert.match(collaborative.clarification ?? '', /Which of the proposed creative alternatives/)
+  assert.deepEqual(collaborative.targets, autonomous.targets)
+  assert.equal(collaborative.digest, autonomous.digest)
+  const withProtectedCanon = catalog.map(item => item.metadata.type === 'creative-direction'
+    ? { ...item, metadata: { ...item.metadata, decisions: [{ id: 'tone', statement: 'Hopeful',
+      origin: 'user', authority: 'user-protected' }] } } : item)
+  const protectedCandidate = inferStoryRevision('Change protected decision creative-direction.foundation#tone to "Bleak"',
+    withProtectedCanon, sha, previous)
+  assert.equal(applyCreativeModeToRevision(protectedCandidate, creativePolicy('autonomous')).protectedChange,
+    protectedCandidate.protectedChange)
+  assert.equal(applyCreativeModeToRevision(protectedCandidate, creativePolicy('collaborative')).protectedChange,
+    protectedCandidate.protectedChange)
+})
+
 test('focused Character request grants one preexisting record path while reading typed context', () => {
   const result = inferStoryRevision('Make Nia less confrontational', catalog, sha, previous)
   assert.deepEqual(result.targets, ['character.nia'])

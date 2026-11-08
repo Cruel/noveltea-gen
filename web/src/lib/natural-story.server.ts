@@ -11,6 +11,7 @@ import { generationJobRequest, verifyWebExecution } from './fixture-jobs.server'
 import { parseJobLimits, type JobLimits } from '../../../src/job-limits'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { planWholeStory } from './turn-plan'
+import { creativePolicy, validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 import { saveJobTurnPlan } from './turn-plan-receipt.server'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
@@ -26,6 +27,7 @@ export type NaturalStoryInput = {
   limits?: Limits
   fixture?: boolean
   approvedDigest?: string
+  creativeMode?: CreativeMode
 }
 async function selectedStory(store: StudioDatabase, owner: string, storyId: string) {
   if (!UUID.test(storyId)) throw new Error('Invalid Story ID.')
@@ -87,7 +89,9 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   if (!actor) throw new Error('Sign in required.')
   const origin = headers.get('origin')
   if (origin && origin !== baseURL) throw new Error('Cross-origin write refused.')
-  if (!input || !UUID.test(input.jobId)) throw new Error('Invalid idempotent job ID.')
+  if (!input || !UUID.test(input.jobId) ||
+      input.creativeMode !== undefined && !validCreativeMode(input.creativeMode))
+    throw new Error('Invalid idempotent job ID or creative mode.')
   const story = await selectedStory(store, actor.id, input.storyId)
   if (input.headSha !== story.headSha)
     throw new Error('The Story base revision changed. Review the refreshed plan before starting.')
@@ -135,9 +139,13 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   if (!job?.headSha || !SHA.test(job.headSha)) throw new Error('Provider did not return a pinned job revision.')
   if (job.headSha !== story.headSha) throw new Error('Acquired Story differs from the approved source revision.')
   await saveJobTurnPlan(await authorizedStoryJob(store, actor.id, input.jobId),
-    planWholeStory(plan.task, plan.contract, story.headSha!))
+    planWholeStory(plan.task, plan.contract, story.headSha!, null,
+      creativePolicy(input.creativeMode ?? 'autonomous')))
   const threadId = await associateNaturalThread(store, actor.id, input.storyId,
     input.jobId, plan.task.slice(0, 120))
+  if (input.creativeMode && !await store.persistence.conversations.setCreativePolicy(
+      actor.id, threadId, JSON.stringify(creativePolicy(input.creativeMode))))
+    throw new Error('First Thread creative mode could not be pinned.')
   await responseJson(await generationConfigurationRequest(auth, store,
     asRequest(baseURL, headers, '/api/jobs/' + input.jobId + '/configuration',
       'PUT', { ...draft, headSha: job.headSha }),
