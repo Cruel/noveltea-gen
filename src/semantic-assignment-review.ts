@@ -26,6 +26,7 @@ export interface SemanticReviewPacket {
   items: SemanticReviewItem[];
 }
 export interface SemanticFinding {
+  commitSha: string;
   assignmentId: string;
   path: string;
   line: number;
@@ -36,7 +37,7 @@ export interface SemanticVerdict {
   sourceDigest: string;
   verdict: "pass" | "fail";
   findings: SemanticFinding[];
-  evidence: Array<{ assignmentId: string; path: string; line: number; explanation: string }>;
+  evidence: Array<{ commitSha: string; assignmentId: string; path: string; line: number; explanation: string }>;
 }
 
 /** Model output is untrusted. An evaluator receives only this immutable packet;
@@ -125,21 +126,24 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
       !Array.isArray(verdict.findings) || !Array.isArray(verdict.evidence) ||
       verdict.findings.length > 100 || verdict.evidence.length > 100)
     throw new Error("Semantic reviewer returned malformed or stale findings.");
-  const belongs = (id: string, path: string, line: number) =>
-    packet.items.some(item => item.assignment.id === id &&
+  const belongs = (sha: string, id: string, path: string, line: number) =>
+    packet.items.some(item => item.assurance.commitSha === sha && item.assignment.id === id &&
       item.assurance.changedPaths.includes(path) &&
       Number.isSafeInteger(line) && line > 0 &&
       item.canonicalContext.some(c => c.path === path &&
         line <= c.content.split("\n").length));
-  if (verdict.findings.some(f => !f || !belongs(f.assignmentId, f.path, f.line) ||
+  if (verdict.findings.some(f => !f || !belongs(f.commitSha, f.assignmentId, f.path, f.line) ||
         !["missing-requirement", "unrequested-change", "continuity", "other"].includes(f.kind) ||
         typeof f.message !== "string" || !f.message.trim()) ||
-      verdict.evidence.some(e => !e || !belongs(e.assignmentId, e.path, e.line) ||
+      verdict.evidence.some(e => !e || !belongs(e.commitSha, e.assignmentId, e.path, e.line) ||
         typeof e.explanation !== "string" || !e.explanation.trim()) ||
       (verdict.verdict === "pass" && verdict.findings.length > 0) ||
       (verdict.verdict === "fail" && !verdict.findings.length) ||
-      (verdict.verdict === "pass" && packet.items.some(item =>
-        !verdict.evidence.some(e => e.assignmentId === item.assignment.id))))
+      packet.items.some(item =>
+        !verdict.evidence.some(e => e.commitSha === item.assurance.commitSha &&
+          e.assignmentId === item.assignment.id) &&
+        !verdict.findings.some(f => f.commitSha === item.assurance.commitSha &&
+          f.assignmentId === item.assignment.id)))
     throw new Error("Semantic reviewer lacks assignment-specific, source-linked evidence.");
   return verdict;
 }
@@ -154,7 +158,8 @@ export async function reviewBoundedAssignments(job: JobStartResult,
   const verdict = validateSemanticVerdict(packet, await evaluator(structuredClone(packet)));
   if (seal) {
     for (const item of packet.items) {
-      const findings = verdict.findings.filter(f => f.assignmentId === item.assignment.id);
+      const findings = verdict.findings.filter(f => f.commitSha === item.assurance.commitSha &&
+        f.assignmentId === item.assignment.id);
       const result: IndependentReviewResult = {
         version: 1,
         source: { jobId: item.assurance.jobId, commitSha: item.assurance.commitSha,
@@ -164,7 +169,8 @@ export async function reviewBoundedAssignments(job: JobStartResult,
         reviewer, status: findings.length ? "failed" : "passed",
         findings: findings.map(f => ({ path: f.path, message: f.path + ":" + f.line + " " + f.message })),
         evidence: JSON.stringify({ policy: packet.policy, sourceDigest: packet.sourceDigest,
-          evidence: verdict.evidence.filter(e => e.assignmentId === item.assignment.id) }),
+          evidence: verdict.evidence.filter(e => e.commitSha === item.assurance.commitSha &&
+            e.assignmentId === item.assignment.id) }),
       };
       const point = points.find(p => p.commitSha === item.assurance.commitSha)!;
       await sealIndependentReview(job, point, result);
@@ -186,5 +192,5 @@ export async function runPiAssignmentReview(job: JobStartResult,
   return reviewBoundedAssignments(job, points,
     packet => reviewSpecialistAssignments(job, options.snapshot, packet,
       options.provider, options.model, options.thinking, options.onSession),
-    options.reviewer, options.seal ?? false);
+    options.reviewer, options.seal ?? true);
 }

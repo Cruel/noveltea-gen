@@ -3,12 +3,12 @@ import { test } from "node:test";
 import { validateSemanticVerdict, type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 
 const makePacket = (group = false): SemanticReviewPacket => {
-  const item = (id: string, path: string) => ({
+  const item = (id: string, path: string, sha: string) => ({
     assignment: { id, specialist: "nt-character-development", outcome: "Give Nia a reason to wait",
       targets: ["character.nia"], dependsOn: [], discovery: "canonical-story-read-only" as const,
       authority: { recordTypes: ["character"], existingPaths: [path], mayCreate: false } },
     assurance: { version: 1 as const, policyVersion: 1 as const, jobId: "j",
-      baseSha: "a".repeat(40), parentSha: "a".repeat(40), commitSha: "b".repeat(40),
+      baseSha: "a".repeat(40), parentSha: "a".repeat(40), commitSha: sha,
       workItem: id, validationProofDigest: "c".repeat(64), validatorVersion: "1",
       turnDigest: "d".repeat(64), assignmentId: id, assignmentDigest: "e".repeat(64),
       assignmentDependencies: [], changedPaths: [path], changedRecordTypes: ["character"],
@@ -18,14 +18,14 @@ const makePacket = (group = false): SemanticReviewPacket => {
     canonicalContext: [{ path, content: "# Nia\nNia waits." }],
   });
   return { policy: "assignment-fidelity/v1", sourceDigest: "source",
-    items: [item("focus:character.nia", "characters/nia.md"),
-      ...(group ? [item("focus:character.eli", "characters/eli.md")] : [])] };
+    items: [item("focus:character.nia", "characters/nia.md", "b".repeat(40)),
+      ...(group ? [item("focus:character.eli", "characters/eli.md", "c".repeat(40))] : [])] };
 };
-const evidence = (id: string, path: string) =>
-  ({ assignmentId: id, path, line: 2, explanation: "Source text supports the assigned change." });
+const evidence = (id: string, path: string, commitSha = "b".repeat(40)) =>
+  ({ commitSha, assignmentId: id, path, line: 2, explanation: "Source text supports the assigned change." });
 const finding = (id: string, path: string, kind: "missing-requirement" |
-  "unrequested-change" = "missing-requirement") =>
-  ({ assignmentId: id, path, line: 2, kind, message: "Required motive is missing." });
+  "unrequested-change" = "missing-requirement", commitSha = "b".repeat(40)) =>
+  ({ commitSha, assignmentId: id, path, line: 2, kind, message: "Required motive is missing." });
 
 test("faithful single assignment passes with exact source-linked evidence", () => {
   const packet = makePacket();
@@ -45,12 +45,31 @@ test("irrelevant creative addition and missing assignment requirement are action
 test("group review attributes failure to its exact assignment and record", () => {
   const packet = makePacket(true);
   assert.equal(validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,
-    verdict: "fail", findings: [finding("focus:character.eli", "characters/eli.md")],
+    verdict: "fail", findings: [finding("focus:character.eli", "characters/eli.md", "missing-requirement", "c".repeat(40))],
     evidence: [evidence("focus:character.nia", "characters/nia.md")] }).findings[0]!.assignmentId,
     "focus:character.eli");
   assert.throws(() => validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,
     verdict: "pass", findings: [],
     evidence: [evidence("focus:character.nia", "characters/nia.md")] }), /source-linked/);
+  assert.throws(() => validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,
+    verdict: "fail", findings: [finding("focus:character.eli", "characters/eli.md",
+      "missing-requirement", "c".repeat(40))], evidence: [] }), /source-linked/,
+    "a grouped failure cannot silently approve an unchecked sibling");
+  assert.throws(() => validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,
+    verdict: "fail", findings: [finding("focus:character.eli", "characters/eli.md",
+      "missing-requirement", "b".repeat(40))],
+    evidence: [evidence("focus:character.nia", "characters/nia.md")] }), /source-linked/,
+    "the wrong checkpoint cannot receive another checkpoint's finding");
+});
+test("repeated assignment IDs remain distinct across group checkpoint commits", () => {
+  const packet = makePacket(true);
+  packet.items[1]!.assignment.id = packet.items[0]!.assignment.id;
+  packet.items[1]!.assurance.assignmentId = packet.items[0]!.assurance.assignmentId;
+  assert.equal(validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,
+    verdict: "fail", findings: [finding("focus:character.nia", "characters/eli.md",
+      "unrequested-change", "c".repeat(40))],
+    evidence: [evidence("focus:character.nia", "characters/nia.md")] }).findings[0]!.commitSha,
+    "c".repeat(40));
 });
 test("stale source and unauthorized reviewer actions cannot become approvals", () => {
   const packet = makePacket();
