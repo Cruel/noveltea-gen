@@ -767,8 +767,28 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.deepEqual(afterReopen.messages.map(item => item.id),
         repairedChat.messages.map(item => item.id),
         'a historical synthetic task must stay hidden without deleting the receipt')
+      assert.deepEqual(afterReopen.turnReceipts, repairedChat.turnReceipts,
+        'a hidden synthetic recovery task must not become a second author Turn receipt')
       assert.ok(await store.testing.records.first('story_thread_messages',
         { id: 'initial:' + repairedId }), 'historical receipt remains stored')
+
+      // The source run's checkpoint predates later same-Thread executions.
+      // Even a later message tagged with that same validated input SHA must
+      // not enter a new fork of the older source run.
+      await store.testing.records.insert('story_thread_messages', {
+        id: randomUUID(), ownerUserId: user.id, threadId: sourceThreadId,
+        sequence: Math.max(...afterReopen.messages.map(item => item.sequence)) + 2,
+        role: 'user', status: 'delivered', phase: 'finished',
+        body: 'Later Turn intent must not enter an older checkpoint',
+        jobId: repairedId, verifiedCommitSha: world.commitSha, createdAt: '2026-01-02',
+      })
+      const laterForkId = randomUUID()
+      const forkedOld = await fork({ ...input, childId: laterForkId })
+      assert.equal(forkedOld.status, 200, JSON.stringify(forkedOld.body))
+      const olderFork = await readThreadChat(store, user.id, 'fork:' + laterForkId)
+      assert.ok(!olderFork.messages.some(item =>
+        item.content === 'Later Turn intent must not enter an older checkpoint'),
+      'the HTTP fork must restrict source messages to its source execution run order')
     } finally {
       store.close()
       for (const key of keys) if (old[key] === undefined) delete process.env[key]; else process.env[key] = old[key]

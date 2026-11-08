@@ -62,6 +62,9 @@ async function checkpointRecoveryRequest(auth: StudioAuth, store: StudioDatabase
     const sourceThread = await store.persistence.advancedThreads.sourceThread(user.id, sourceId)
     if (!sourceThread || sourceThread.id !== input.sourceThreadId)
       return reply({ error: 'Source Thread changed; refresh its timeline.' }, 409)
+    const sourceRunOrder = await store.persistence.advancedThreads.runOrder(user.id, sourceThread.id, sourceId)
+    if (sourceRunOrder === null)
+      return reply({ error: 'Source execution no longer belongs to this Thread.' }, 409)
     if (sameThread && typeof input.expectedLatestJobId === 'string') {
       const latest = await store.persistence.advancedThreads.run(user.id, sourceThread.id, 'last')
       if (latest?.jobId !== input.expectedLatestJobId)
@@ -119,7 +122,7 @@ async function checkpointRecoveryRequest(auth: StudioAuth, store: StudioDatabase
         (sameThread ? 'continuation' : 'branch') + ':\n' + guidance : original.task
       if (task.length > 4000) return reply({ error: 'Guidance exceeds the prepared run task limit.' }, 400)
       const history = await snapshotForkBoundaryHistory(store, user.id, sourceThread.id, parent,
-        original.task, row.createdAt, input.commitSha as string)
+        original.task, row.createdAt, input.commitSha as string, undefined, sourceRunOrder)
       const prior = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
       const draft: GenerationDraft = { version: 1, headSha: input.commitSha, task,
         contract: bundle.contract, model: prior?.model ?? null, limits: prior?.limits ?? {} }

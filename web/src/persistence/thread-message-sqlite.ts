@@ -185,7 +185,8 @@ export function seedThreadMessagesSqlite(db: Db, owner: string, threadId: string
       if (typeof task === 'string' && task.trim()) {
         const existing = db.select({ id: m.id }).from(m).where(and(
           eq(m.ownerUserId, owner), eq(m.threadId, threadId), eq(m.role, 'user'),
-          sql`(${m.jobId} = ${run.jobId} OR (${run.runOrder} = 0 AND ${m.jobId} IS NULL))`,
+          sql`(${m.jobId} = ${run.jobId} OR ${m.id} = ${run.jobId} OR
+            (${run.runOrder} = 0 AND ${m.jobId} IS NULL))`,
         )).limit(1).get()
         if (!existing) db.insert(m).values({
           id: 'initial:' + run.jobId, ownerUserId: owner, threadId,
@@ -309,6 +310,11 @@ export function createSqliteThreadMessages(db: Db): ThreadMessagePersistence {
       const turnReceipts: TurnReceipt[] = []
       const messagesById = new Map(messages.map(message => [message.id, message]))
       for (const row of turnRows) {
+        // Older same-Thread recoveries sometimes persisted a synthetic
+        // initial:job Turn even though the author supplied guidance already.
+        // It remains in audit storage but is not a separate author request.
+        if (!messagesById.has(row.id) && row.id.startsWith('initial:') &&
+            recoveryJobs.has(row.id.slice('initial:'.length))) continue
         let turn = turns.at(-1), receipt = turnReceipts.at(-1)
         if (turn?.id !== row.id) {
           turn = { id: row.id, executionIds: [] }; turns.push(turn)

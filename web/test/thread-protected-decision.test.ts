@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -12,11 +12,16 @@ import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from '../src/db/migrations'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
-import { selectedJob, restoreJob, inspectRegisteredJob } from '../src/lib/fixture-jobs.server'
+import { selectedJob, restoreJob, inspectRegisteredJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
-import { cancelQueuedThreadMessage, advanceThread, readThreadChat } from '../src/lib/thread-chat.server'
+import { cancelQueuedThreadMessage, advanceThread, readThreadChat,
+  settleThreadRun, recoverSettledThreadRuns } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
 import { assertProtectedThreadApproval, recordProtectedThreadDecision } from '../src/lib/thread-protected-decision.server'
+import { runRevisionAction, trustedHead } from '../../src/revision'
+import { requestTrustedApproval, recordTrustedControllerDecision } from '../../src/trusted-approval'
+import { snapshotForkBoundaryHistory } from '../src/lib/thread-fork-history.server'
+import { openStoryThread } from '../src/lib/story-threads.server'
 
 const native = process.env.NT_NATIVE_CLI ?? '/home/thomas/dev/nt/build/cli/linux/noveltea'
 const reference = resolve(process.env.NT_SKILLS_CHECKOUT ?? '/home/thomas/dev/noveltea-skills',
@@ -201,6 +206,152 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       assert.equal(ordinary.hasRevisionScope, 1,
         'nonprotected follow-up edits continue normally after the exact protected amendment')
       assert.deepEqual((await f.store.testing.foreignKeyViolations()), [])
+    } finally { f.cleanup() }
+  })
+
+test('native-validated protected Turn then Character Turn preserve exact Git lineage, restart receipts and older fork authority',
+  { skip: !existsSync(native) || !existsSync(reference), timeout: 180_000 }, async () => {
+    const f = await setup()
+    try {
+      const protectedId = randomUUID()
+      const protectedPlan = await previewThreadRevision(f.store, f.owner, f.threadId, message)
+      await submitThreadRevision(f.store, f.owner, f.threadId, protectedId, message)
+      await recordProtectedThreadDecision(f.store, f.owner, f.threadId,
+        protectedId, f.sourceId, protectedPlan, 'approved')
+      await submitThreadRevision(f.store, f.owner, f.threadId,
+        protectedId, message, undefined, protectedPlan.digest)
+      await Promise.all([advanceThread(f.store, f.owner, f.threadId),
+        advanceThread(f.store, f.owner, f.threadId)])
+      const first = await restoreJob(await selectedJob(f.store, f.owner, protectedId), f.owner)
+      const firstSha = git(first.worktreeRoot, 'rev-parse', 'HEAD')
+      assert.notEqual(firstSha, f.sha)
+      assert.equal(await trustedHead(first), firstSha,
+        'the first Turn was committed by the native-validated protected revision graph')
+      assert.equal((await readThreadChat(f.store, f.owner, f.threadId))
+        .turnReceipts.find(turn => turn.id === protectedId)?.executions[0]?.validatedSha, firstSha)
+      await assert.rejects(() => assertProtectedThreadApproval(f.store, f.owner, f.threadId,
+        protectedId, f.sourceId, protectedPlan), /fresh|exact/i,
+      'a consumed protected approval cannot be replayed')
+
+      const characterId = randomUUID()
+      const characterTask = 'Make character.mara more assertive'
+      const characterPlan = await previewThreadRevision(f.store, f.owner, f.threadId, characterTask)
+      assert.deepEqual(characterPlan.targets, ['character.mara'])
+      assert.equal(characterPlan.headSha, firstSha)
+      await submitThreadRevision(f.store, f.owner, f.threadId, characterId, characterTask)
+      await Promise.all([advanceThread(f.store, f.owner, f.threadId),
+        advanceThread(f.store, f.owner, f.threadId)])
+      const second = await restoreJob(await selectedJob(f.store, f.owner, characterId), f.owner)
+      const pinned = pinnedRequest(await selectedJob(f.store, f.owner, characterId), second)!
+      assert.equal(second.baseSha, firstSha)
+      assert.equal(git(second.worktreeRoot, 'rev-parse', 'HEAD'), firstSha)
+      assert.equal(git(second.worktreeRoot, 'status', '--porcelain'), '')
+      const path = join(second.worktreeStoryRoot, 'characters/mara.md')
+      writeFileSync(path, readFileSync(path, 'utf8') +
+        '\nMara calmly challenges the council rather than retreating.\n')
+      const proposal = await runRevisionAction({ story: second.storyRoot, job: second.jobId,
+        workItem: 'character-follow-up', action: 'inspect', path: 'characters/mara.md' })
+      assert.equal(proposal.status, 'proposed')
+      assert.deepEqual(proposal.protectedChanges, [],
+        'native diff reports no protected decision under the separate Character scope')
+      const staged = await requestTrustedApproval(second, {
+        id: 'character-review', kind: 'editorial', workItemId: 'character-follow-up',
+        payload: {
+          version: 1, kind: 'editorial', jobId: second.jobId, threadId: second.threadId,
+          workItemId: 'character-follow-up', baseSha: second.baseSha,
+          verifiedHead: firstSha, proposalSha256: proposal.proposalSha256,
+          verdict: 'pass', evidence: 'characters/mara.md:1',
+          notes: 'The added character line stays within the approved characterization request.',
+        },
+      })
+      const approved = await recordTrustedControllerDecision(second, {
+        id: staged.id, nonce: staged.nonce, proposalSha256: proposal.proposalSha256,
+      }, 'approved', { source: 'trusted-web', principal: 'user:' + f.owner })
+      const referenceFile = join(second.stateDir, 'character-approval-reference.json')
+      writeFileSync(referenceFile, JSON.stringify({ receiptId: approved.id, nonce: approved.nonce }))
+      await runRevisionAction({ story: second.storyRoot, job: second.jobId,
+        workItem: 'character-follow-up', action: 'review',
+        proposal: proposal.proposalSha256, approvalFile: referenceFile })
+      const finished = await runRevisionAction({ story: second.storyRoot, job: second.jobId,
+        workItem: 'character-follow-up', action: 'commit', proposal: proposal.proposalSha256 })
+      const secondSha = finished.commitSha!
+      assert.equal(finished.status, 'committed')
+      assert.notEqual(secondSha, firstSha)
+      assert.equal(await trustedHead(second), secondSha)
+      assert.equal(git(second.worktreeRoot, 'diff', '--name-only', firstSha, secondSha),
+        'story/characters/mara.md')
+      assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), firstSha,
+        'the second Turn cannot mutate the previous verified execution')
+      assert.equal(git(f.source.worktreeRoot, 'rev-parse', 'HEAD'), f.sha)
+
+      await claimServerGeneration(second, second.threadId + ':generation:web', pinned)
+      const graph = openWebGenerationGraph(join(second.stateDir, 'web-generation.sqlite'))
+      await graph.graph.updateState({ configurable: { thread_id: second.threadId + ':generation:web' } },
+        { request: pinned, status: 'completed', completedStages: [] })
+      await graph.graph.updateState({ configurable: { thread_id: second.threadId + ':generation:web' } },
+        { status: 'completed' }, 'completion_decision')
+      graph.saver.db.close()
+      await f.store.testing.records.update('studio_sessions', { id: characterId }, {
+        status: 'completed', generationRequestJson: JSON.stringify(pinned),
+        generationThreadId: second.threadId + ':generation:web',
+      })
+      await f.store.testing.records.update('generation_run_queue', { jobId: characterId },
+        { phase: 'finished' })
+      await settleThreadRun(f.store, f.owner, characterId)
+      await recoverSettledThreadRuns(f.store)
+      await recoverSettledThreadRuns(f.store)
+      const chat = await readThreadChat(f.store, f.owner, f.threadId)
+      assert.deepEqual(chat.runs.map(run => run.jobId), [f.sourceId, protectedId, characterId])
+      assert.deepEqual(chat.turnReceipts.find(turn => turn.id === characterId)?.executions.map(
+        run => [run.jobId, run.inputSha, run.validatedSha]),
+      [[characterId, firstSha, secondSha]])
+      assert.equal(chat.messages.filter(row => row.id === 'assistant:' + characterId).length, 1)
+
+      // Fork the *older* trusted checkpoint only after the newer Turn settles.
+      // Its immutable origin must not move to the later Character commit.
+      const firstRunOrder = await f.store.persistence.advancedThreads.runOrder(
+        f.owner, f.threadId, protectedId)
+      assert.equal(firstRunOrder, 1)
+      const history = await snapshotForkBoundaryHistory(f.store, f.owner, f.threadId,
+        first, message, 'now', firstSha, undefined, firstRunOrder)
+      assert.ok(history.every(row => row.verifiedSha !== secondSha))
+      assert.ok(!history.some(row => row.body === characterTask), JSON.stringify(history))
+      assert.ok(!chat.messages.some(row => row.id === 'initial:' + characterId),
+        'the admitted author Turn must not get a second synthetic message at its input SHA')
+      const digest = createHash('sha256').update(readFileSync(
+        join(first.stateDir, 'revisions/thread-protected.json'))).digest('hex')
+      const forkJob = randomUUID(), forkThread = 'fork:' + forkJob
+      await f.store.persistence.advancedThreads.reserveFork({
+        childId: forkJob, owner: f.owner, sourceJobId: protectedId,
+        sourceBaseSha: first.baseSha, commitSha: firstSha,
+        bundle: '{"version":1}', draft: '{"version":1}',
+        sourceThreadId: f.threadId, proofDigest: digest,
+        guidance: 'Explore the earlier protected version', history: JSON.stringify(history),
+        at: new Date().toISOString(),
+      })
+      await f.store.persistence.advancedThreads.registerChild({
+        childId: forkJob, owner: f.owner, storyId: (await readThreadChat(f.store, f.owner, f.threadId)).storyId,
+        title: 'Earlier checkpoint alternative', baseSha: firstSha,
+        parentThreadId: f.threadId, threadId: forkThread,
+        draft: '{"version":1}', at: new Date().toISOString(), kind: 'fork',
+        history, guidance: 'Explore the earlier protected version',
+      })
+      const forked = await openStoryThread(f.store, f.owner, chat.storyId, forkThread)
+      assert.equal(forked.ancestry.at(-1)?.forkPoint?.commitSha, firstSha)
+      assert.equal(forked.ancestry.at(-1)?.forkPoint?.proofDigest, digest)
+      assert.ok(!forked.state.messages.some(row => row.content === characterTask))
+      await assert.rejects(() => assertProtectedThreadApproval(f.store, f.owner,
+        forkThread, protectedId, f.sourceId, protectedPlan), /fresh|exact/i,
+      'fork ancestry is not a transferable protected approval')
+      const reopened = openStudioDatabase(join(f.root, 'studio.sqlite'))
+      try {
+        await reopened.assertReady()
+        assert.deepEqual((await readThreadChat(reopened, f.owner, f.threadId)).turnReceipts,
+          chat.turnReceipts)
+        assert.deepEqual((await openStoryThread(reopened, f.owner, chat.storyId, forkThread)).ancestry,
+          forked.ancestry)
+      } finally { reopened.close() }
+      assert.deepEqual(await f.store.testing.foreignKeyViolations(), [])
     } finally { f.cleanup() }
   })
 
