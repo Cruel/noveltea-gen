@@ -145,6 +145,28 @@ local developer PostgreSQL configuration.
   old Drizzle composition until #141 switches all domains together; no
   cross-ORM write transaction or PostgreSQL runtime is enabled here.
 
+## S09 Thread message admission and durable sequencing (#134, 2026-11-09)
+
+- `thread-message-kysely.ts` supplies the existing `ThreadMessagePersistence`
+  contract once for SQLite and PostgreSQL, including exact owner-scoped read
+  models, durable Turn associations and verified receipts, idempotent initial
+  message and assistant settlement reconciliation (including a status returning
+  to an earlier outcome), queued message admission, edit/cancel fencing and
+  first-edit replay history.
+- Sequence allocation, queue activity and derived Turn creation run inside the
+  existing shared `withWriteTransaction` thread guard. The canonical schema's
+  generated `thread_queued_message_edits.sequence` defines first/latest edit
+  semantics instead of SQLite `rowid`; no new migration is necessary.
+- `kysely-thread-messages.test.ts` runs identical tests on fresh SQLite and
+  PostgreSQL schemas for owner isolation, replay, protected edits, guided and
+  live mode transitions, synthetic-history reconciliation, verification
+  provenance, abort/rollback and restart. Its OS-process workers actually
+  contend for the same Thread writer guard and validate contiguous message
+  allocation and single-winner concurrent edits on both engines.
+- The test belongs to the mandatory Studio offline CI gate. The live Drizzle
+  composition remains unchanged until #141; independent staged repositories
+  never participate in a mixed live transaction.
+
 ## Gate ownership
 
 - #128: shared executor/guard correctness and mandatory SQLite/PostgreSQL CI

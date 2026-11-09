@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Pool } from 'pg'
 import { betterAuth } from 'better-auth'
 import type { Kysely } from 'kysely'
-import { openKyselyDatabase, type SharedDatabase } from '../../src/db/kysely-connection'
+import { openKyselyDatabase, type DatabaseOptions, type SharedDatabase } from '../../src/db/kysely-connection'
 import type { StudioDb } from '../../src/db/studio-db'
 import {
   openStudioSchemaConnection,
@@ -18,6 +18,8 @@ import { createKyselyPublicationRecords } from '../../src/persistence/publicatio
 import { createKyselyGitPersistence } from '../../src/persistence/git-kysely'
 import { createKyselyConversationCatalog } from '../../src/persistence/conversation-kysely'
 import { createKyselyNaturalStoryPersistence } from '../../src/persistence/natural-story-kysely'
+import { createKyselyThreadMessages } from '../../src/persistence/thread-message-kysely'
+import type { ThreadMessagePersistence } from '../../src/persistence/thread-message-contracts'
 import { createKyselyCatalogPersistence } from '../../src/persistence/catalog-kysely'
 import type { ConversationCatalog } from '../../src/persistence/conversation-contracts'
 import type { NaturalStoryPersistence } from '../../src/persistence/natural-story-contracts'
@@ -41,6 +43,8 @@ const authConfig = {
 }
 
 export interface KyselyFeatureFixture {
+  /** Disposable-only connection options for independent OS-process conformance workers. */
+  databaseOptions: DatabaseOptions
   collections: CollectionCatalog
   publications: PublicationRecords
   git: GitIdentities
@@ -49,11 +53,14 @@ export interface KyselyFeatureFixture {
   piCredentials: PiCredentialVault
   conversations: ConversationCatalog
   naturalStory: NaturalStoryPersistence
+  messages: ThreadMessagePersistence
   dashboard: DashboardCatalog
   settings: SettingsPreferences
   account(owner: string, provider: GitProvider): Promise<void>
   /** Reopen the same backing database with a new connection to prove persistence. */
   reopenGit(): Promise<ReturnType<typeof createKyselyGitPersistence>>
+  openIndependentMessages(): Promise<{ messages: ThreadMessagePersistence; close(): Promise<void> }>
+  reopenMessages(): Promise<ThreadMessagePersistence>
   reopenNavigation(): Promise<{
     conversations: ConversationCatalog
     naturalStory: NaturalStoryPersistence
@@ -138,9 +145,11 @@ export async function openKyselyFeatureFixture(
     const authContext = await auth.$context
     const fixtureRecords = records(maintenance.db)
     return {
+      databaseOptions: options,
       collections: createKyselyCollectionCatalog(database),
       conversations: createKyselyConversationCatalog(database),
       naturalStory: createKyselyNaturalStoryPersistence(database),
+      messages: createKyselyThreadMessages(database),
       ...createKyselyCatalogPersistence(database),
       publications: createKyselyPublicationRecords(database),
       ...createKyselyGitPersistence(database),
@@ -156,6 +165,15 @@ export async function openKyselyFeatureFixture(
         await database!.close()
         database = openKyselyDatabase<StudioDb>(options)
         return createKyselyGitPersistence(database)
+      },
+      async openIndependentMessages() {
+        const other = openKyselyDatabase<StudioDb>(options)
+        return { messages: createKyselyThreadMessages(other), close: () => other.close() }
+      },
+      async reopenMessages() {
+        await database!.close()
+        database = openKyselyDatabase<StudioDb>(options)
+        return createKyselyThreadMessages(database)
       },
       async reopenNavigation() {
         await database!.close()
