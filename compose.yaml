@@ -40,12 +40,16 @@ services:
     cap_drop: [ALL]
 
   init:
+    # Local secrets are optional for Compose config/CI validation; runtime
+    # authentication and backend startup validation still require real values.
     build:
       context: .
       dockerfile: deploy/Dockerfile
     image: noveltea-trusted:local
     command: ["node", "deploy/compose-init.mjs"]
-    env_file: ./web/.env
+    env_file:
+      - path: ./web/.env
+        required: false
     environment:
       NT_STUDIO_DB_PATH: /var/lib/noveltea/app/studio.sqlite
     volumes:
@@ -107,7 +111,9 @@ services:
   web:
     image: noveltea-trusted:local
     command: ["pnpm", "--filter", "@noveltea/studio", "start"]
-    env_file: ./web/.env
+    env_file:
+      - path: ./web/.env
+        required: false
     environment:
       NT_STUDIO_DB_PATH: /var/lib/noveltea/app/studio.sqlite
       NT_STATE_DIR: /var/lib/noveltea/state
@@ -165,7 +171,9 @@ services:
   agent:
     image: noveltea-trusted:local
     command: ["pnpm", "--filter", "@noveltea/studio", "agent:worker"]
-    env_file: ./web/.env
+    env_file:
+      - path: ./web/.env
+        required: false
     environment:
       NT_STUDIO_DB_PATH: /var/lib/noveltea/app/studio.sqlite
       NT_AGENT_PORT: "7001"

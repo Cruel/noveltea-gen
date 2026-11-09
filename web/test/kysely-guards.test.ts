@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -18,6 +19,8 @@ function deferred<T>() {
   return { promise, resolve }
 }
 const url = process.env.NT_KYSELY_PROOF_URL
+if (process.env.NT_REQUIRE_KYSELY_PROOF === '1' && !url)
+  throw new Error('Mandatory PostgreSQL transaction proof URL is missing')
 
 for (const backend of ['sqlite', 'postgres'] as const) {
   test(
@@ -25,16 +28,23 @@ for (const backend of ['sqlite', 'postgres'] as const) {
     { skip: backend === 'postgres' && !url, timeout: 90_000 },
     async (t) => {
       const dir = mkdtempSync(join(tmpdir(), 'nt-guards-'))
+      const pgSchema = backend === 'postgres' ? 'studio_guards_' + randomUUID().replace(/-/g, '') : undefined
+      const admin = pgSchema ? new Pool({ connectionString: url }) : undefined
       const options: DatabaseOptions =
         backend === 'sqlite'
           ? { backend, path: join(dir, 'proof.sqlite'), busyTimeoutMs: 0, maxAttempts: 10 }
-          : { backend, connection: { connectionString: url }, poolSize: 1 }
+          : {
+              backend,
+              connection: { connectionString: url, options: `-c search_path=${pgSchema}` },
+              poolSize: 1,
+            }
       const connections = Array.from({ length: 4 }, () => openKyselyDatabase<ProofDb>(options))
       const first = connections[0]!
       const second = connections[1]!
       const third = connections[2]!
       const observer = backend === 'postgres' ? new Pool({ connectionString: url, max: 1 }) : undefined
       try {
+        if (pgSchema) await admin!.query(`CREATE SCHEMA "${pgSchema}"`)
         await first.withWriteTransaction([], async (tx) => {
           await tx.schema
             .createTable('proofQueue')
@@ -419,7 +429,12 @@ for (const backend of ['sqlite', 'postgres'] as const) {
       } finally {
         await observer?.end()
         await Promise.all(connections.map((db) => db.close()))
-        rmSync(dir, { recursive: true, force: true })
+        try {
+          if (pgSchema) await admin!.query(`DROP SCHEMA IF EXISTS "${pgSchema}" CASCADE`)
+        } finally {
+          await admin?.end()
+          rmSync(dir, { recursive: true, force: true })
+        }
       }
     },
   )

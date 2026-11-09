@@ -78,7 +78,12 @@ Run focused offline tests:
 pnpm --filter @noveltea/studio exec tsx --test test/kysely-connection.test.ts test/kysely-guards.test.ts
 ```
 
-Run the required live certificate:
+The repository's mandatory credential-free CI runs both files with
+`NT_KYSELY_PROOF_URL` bound to the CI PostgreSQL service and
+`NT_REQUIRE_KYSELY_PROOF=1`; missing proof configuration fails instead of
+silently skipping. Each proof run creates an isolated PostgreSQL schema for
+its tables and processes; no permanent developer database configuration is
+needed. To independently rerun the wider Gate 0 proof, execute:
 
 ```sh
 pnpm certify:postgres-transactions
@@ -91,8 +96,9 @@ Compose project/volume, and starts no Studio/model/provider service. Only this
 certificate adds an ephemeral loopback port and disposable test network for the
 host's node-postgres clients. Production networks/ports are unchanged. Cleanup
 removes the invocation's temporary override, networks and exact database volume,
-never developer volumes. `NT_KYSELY_PROOF_URL` is an internal opt-in test variable;
-never point it at an existing database (the proof creates its own tables).
+never developer volumes. `NT_KYSELY_PROOF_URL` is a CI-supplied variable or an explicit local test
+option; it needs permission to create and drop one uniquely named schema,
+not a specific local PostgreSQL setup. Never target a production database.
 
 Proof coverage:
 

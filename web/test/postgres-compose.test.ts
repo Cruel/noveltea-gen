@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { test } from 'node:test'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 type ComposeService = {
   network_mode?: string
@@ -76,6 +78,41 @@ test('default Compose keeps SQLite and a networkless rootless Docker controller'
   assert.ok(!service(base, 'controller').networks)
   for (const name of ['init', 'web', 'web-dev', 'agent']) {
     assert.notEqual(service(base, name).environment?.NT_STUDIO_DB_BACKEND, 'postgres')
+  }
+})
+
+test('base Compose config succeeds even when the optional local .env path does not exist', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'noveltea-compose-noenv-'))
+  try {
+    const missing = join(directory, 'not-created.env')
+    const fixture = join(directory, 'compose.yaml')
+    writeFileSync(
+      fixture,
+      readFileSync(join(root, 'compose.yaml'), 'utf8').replaceAll('path: ./web/.env', 'path: ' + missing),
+    )
+    const result = spawnSync(
+      'docker',
+      ['compose', '-f', fixture, '--profile', 'dev', 'config', '--no-env-resolution', '--format', 'json'],
+      {
+        cwd: directory,
+        encoding: 'utf8',
+        env: { ...process.env, ...credentials },
+      },
+    )
+    assert.equal(result.status, 0, result.stderr)
+    const manifest = JSON.parse(result.stdout) as ComposeConfig
+    assert.equal(service(manifest, 'controller').network_mode, 'none')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('base Compose can resolve without a developer env file, with runtime validation separate', () => {
+  const base = config(false)
+  for (const name of ['init', 'web', 'web-dev', 'agent']) {
+    const files = service(base, name).env_file ?? []
+    assert.equal(files.length, 1)
+    assert.equal((files[0] as { required?: boolean }).required, false)
   }
 })
 
