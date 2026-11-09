@@ -24,8 +24,8 @@ function SheetTitle({ className, ...props }: DialogPrimitive.Title.Props) {
     className={cn('text-sm font-semibold', className)} {...props} />
 }
 
-function SheetContent({ className, children, side = 'left', ...props }:
-  DialogPrimitive.Popup.Props & { side?: 'left' | 'right' }) {
+function SheetContent({ className, children, side = 'left', closeLabel = 'Close navigation', ...props }:
+  DialogPrimitive.Popup.Props & { side?: 'left' | 'right'; closeLabel?: string }) {
   return <DialogPrimitive.Portal>
     <DialogPrimitive.Backdrop data-slot="sheet-overlay"
       className="fixed inset-0 z-50 bg-black/60 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 motion-reduce:animate-none" />
@@ -37,7 +37,7 @@ function SheetContent({ className, children, side = 'left', ...props }:
       )}
       {...props}>
       {children}
-      <SheetClose aria-label="Close navigation"
+      <SheetClose aria-label={closeLabel}
         className="absolute right-3 top-3 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2">
         <XIcon className="size-4" />
       </SheetClose>

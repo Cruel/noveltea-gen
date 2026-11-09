@@ -12,7 +12,7 @@ import { ThreadUsage } from '@/components/thread-usage'
 import { StoryFirstChat } from '@/components/story-first-chat'
 import { StoryWorkspaceOutline } from '@/components/story-workspace-outline'
 import { StoryDesktopWorkspace, StoryMobileWorkspace } from '@/components/story-desktop-workspace'
-import { StoryWorkspaceInspector } from '@/components/story-workspace-explorer'
+import { StoryInspectorSheet } from '@/components/story-workspace-explorer'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
 import { dashboardQuery } from '@/lib/dashboard.queries'
@@ -117,6 +117,8 @@ function StoryConversations() {
     return () => media.removeEventListener('change', update)
   }, [])
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  useEffect(() => { setInspectorOpen(false) }, [storyId, explorerThreadId])
   const explorer = useQuery({
     queryKey: ['workspace-explorer', storyId, explorerThreadId],
     queryFn: () => readWorkspaceStoryIndex({ data: { storyId, threadId: explorerThreadId } }),
@@ -275,7 +277,12 @@ function StoryConversations() {
         </details>
   </aside>
   const outlinePanel = <div className="flex h-full min-h-0 flex-col gap-2 rounded-lg bg-muted/20 p-3">
-  <h2 className="text-xs font-semibold">Story Outline</h2>
+  <div className="flex shrink-0 items-center justify-between gap-2">
+    <h2 className="text-xs font-semibold">Story Outline</h2>
+    <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs"
+      disabled={!explorerIndex || !selectedRecordId || !explorerThreadId}
+      onClick={() => setInspectorOpen(true)}>Inspect record</Button>
+  </div>
   <div className="min-h-0 flex-1 overflow-auto" aria-label="Story Outline">
     {explorer.error && <p role="alert" className="text-xs text-destructive">{explorer.error.message}</p>}
     {!explorer.data && !explorer.error &&
@@ -299,20 +306,20 @@ function StoryConversations() {
       <p>Source commit: <code>{explorer.data.baseSha}</code></p>
       <p>No verified Thread revision is available yet. Canonical records and native links appear after validation.</p>
     </div> : <>
-      <p role="status" className="mb-2 text-xs text-muted-foreground">
-        Verified Thread revision <code>{explorerIndex.headSha.slice(0, 12)}</code>
-        {' · '}Source <code>{explorerIndex.baseSha.slice(0, 12)}</code>
-        {' · '}{explorerIndex.records.length} records
-        {' · '}{explorerIndex.diagnostics.length} diagnostics
-      </p>
-      <div className="min-h-32 flex-1 overflow-hidden">
+      <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
+        <p role="status" className="min-w-0 text-xs text-muted-foreground">
+          Verified Thread <code>{explorerIndex.headSha.slice(0, 12)}</code>
+          {' · '}{explorerIndex.records.length} records
+          {' · '}{explorerIndex.diagnostics.length} diagnostics
+        </p>
+        <Button type="button" size="sm" variant="outline" className="shrink-0 text-xs"
+          disabled={!selectedRecordId || !explorerThreadId}
+          onClick={() => setInspectorOpen(true)}>Inspect record</Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-hidden">
         <StoryRelationshipGraph workspace={{ storyId, threadId: explorerThreadId }}
           index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
       </div>
-      {explorerThreadId && <div className="max-h-[40%] shrink-0 overflow-auto pt-2">
-        <StoryWorkspaceInspector storyId={storyId} threadId={explorerThreadId}
-          index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
-      </div>}
       {explorer.data.jobId && <Link to="/jobs/$jobId"
         params={{ jobId: explorer.data.jobId }} search={{ tab: 'story' }}
         className="mt-2 shrink-0 text-xs underline underline-offset-2">
@@ -398,5 +405,8 @@ function StoryConversations() {
     {isDesktop ? <StoryDesktopWorkspace outline={outlinePanel}
       graph={graphPanel} threads={navigation} chat={chatPanel} /> :
       <StoryMobileWorkspace chat={chatPanel} />}
+    {explorerIndex && explorerThreadId && <StoryInspectorSheet storyId={storyId} threadId={explorerThreadId}
+      index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord}
+      open={inspectorOpen} onOpenChange={setInspectorOpen} />}
   </main>
 }

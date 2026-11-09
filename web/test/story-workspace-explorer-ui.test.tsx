@@ -57,3 +57,22 @@ test('selected verified record is shared by Outline and Graph without making del
   assert.match(switched, /aria-current="true"/)
   assert.doesNotMatch(switched, /Ring the bell/)
 })
+
+test('Story Graph owns the viewport and canonical record inspection is on demand', () => {
+  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/conversations.tsx', import.meta.url), 'utf8')
+  const inspector = readFileSync(new URL('../src/components/story-workspace-explorer.tsx', import.meta.url), 'utf8')
+  const graph = readFileSync(new URL('../src/routes/_protected/jobs/-StoryRelationshipGraph.tsx', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
+
+  assert.match(route, /<StoryInspectorSheet[^>]*storyId=/)
+  assert.match(route, /open=\{inspectorOpen\}/)
+  assert.match(route, /onClick=\{\(\) => setInspectorOpen\(true\)\}>Inspect record/)
+  assert.doesNotMatch(route, /max-h-\[40%\]/)
+  assert.doesNotMatch(route, /<StoryWorkspaceInspector/)
+  assert.match(inspector, /<SheetContent side="right" closeLabel="Close record inspector"/)
+  assert.match(inspector, /\{open && <div className="min-h-0 flex-1 overflow-y-auto"/)
+  assert.doesNotMatch(inspector, /max-h-64 overflow-auto/)
+  assert.match(graph, /workspace \? <details className="story-workspace-graph-filters"/)
+  assert.match(styles, /\.story-desktop-graph \.story-relationships \{[^}]*overflow: hidden;/)
+  assert.match(styles, /\.story-desktop-graph \.story-graph-canvas \{[^}]*flex: 1 1 0%;[^}]*min-height: 0;/)
+})

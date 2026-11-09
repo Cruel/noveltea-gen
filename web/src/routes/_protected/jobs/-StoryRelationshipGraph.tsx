@@ -144,16 +144,7 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
   }, [currentGraph, selectedId, kind, connectedOnly, collapseOuter, limit, showDeleted,
     index.deletedRecords, index.unindexedRecords])
 
-  return <section aria-label="Story relationship explorer" className="story-relationships">
-    <div className="story-explorer-heading">
-      <div><h3>Canonical relationships</h3>
-        <p className="muted">Read-only native Context Manifest links, with separate Git change overlays. Deleted nodes have no inferred links.</p>
-      </div>
-      <Button type="button" disabled={!selectedId} onClick={() => setRefreshToken(n => n + 1)}>
-        Refresh links
-      </Button>
-    </div>
-    <div className="story-graph-filters">
+  const filterControls = <div className="story-graph-filters">
       <label>Neighborhood <StudioSelect aria-label="Relationship neighborhood"
         value={scope} onValueChange={value => setScope(value as typeof scope)}
         options={[{ value: 'focused', label: 'Focused' }, { value: 'related', label: 'Related' }]} />
@@ -174,6 +165,19 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
       <label className="story-graph-checkbox"><Checkbox checked={showDeleted}
         onCheckedChange={checked => setShowDeleted(checked)} /> Git placeholders</label>
     </div>
+  return <section aria-label="Story relationship explorer" className="story-relationships">
+    <div className="story-explorer-heading">
+      <div><h3>Canonical relationships</h3>
+        {!workspace && <p className="muted">Read-only native Context Manifest links, with separate Git change overlays. Deleted nodes have no inferred links.</p>}
+      </div>
+      <Button type="button" disabled={!selectedId} onClick={() => setRefreshToken(n => n + 1)}>
+        Refresh links
+      </Button>
+    </div>
+    {workspace ? <details className="story-workspace-graph-filters">
+      <summary className="cursor-pointer text-xs">Graph filters</summary>
+      {filterControls}
+    </details> : filterControls}
     {!selectedId ? (view.nodes.length > 0 ? <>
       <p role="status" className="muted">No current typed records. {view.nodes.length} Git-only placeholders
         {view.hidden > 0 ? ' · ' + view.hidden + ' hidden by the record limit' : ''}; no native links.</p>

@@ -38,9 +38,13 @@
 .story-graph-filters [data-slot=select-trigger] { min-width: 130px; max-width: 170px; }
 .story-graph-filters .story-graph-checkbox { display: flex; align-items: center; gap: .4rem; padding-bottom: .45rem; }
 .story-graph-canvas { height: 360px; min-width: 0; background: #101820; border: 1px solid #344657; border-radius: 6px; overflow: hidden; }
-.story-desktop-graph .story-relationships { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: auto; padding: .5rem; }
-.story-desktop-graph .story-graph-canvas { flex: 1 0 150px; height: auto; min-height: 150px; }
-.story-desktop-graph .story-graph-filters { flex-shrink: 0; }
+/* The Graph owns the desktop viewport: only the optional filter list scrolls. */
+.story-desktop-graph .story-relationships { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; padding: .5rem; }
+.story-desktop-graph .story-graph-canvas { flex: 1 1 0%; height: auto; min-height: 0; }
+.story-workspace-graph-filters { flex-shrink: 0; min-width: 0; margin: .2rem 0; }
+.story-workspace-graph-filters > summary { font-size: .75rem; font-weight: 500; }
+.story-workspace-graph-filters .story-graph-filters { max-height: 8rem; overflow-y: auto; margin: .5rem 0; }
+.story-desktop-graph .story-graph-link-list[open] { flex-shrink: 0; max-height: 5.5rem; overflow: auto; }
 .story-graph-canvas .react-flow__controls button { background: #263847; color: #e4e9ef; fill: #e4e9ef; border-color: #60788b; }
 .story-graph-canvas .react-flow__edge-textbg { fill: #182631; }
 .story-graph-link-list { font-size: .78rem; margin-top: .5rem; }
