@@ -12,6 +12,8 @@ test('inline execution evidence distinguishes verified checkpoints, unverified d
     threadId: 'internal-generation-session', storyThreadId: 'thread-1', fixture: false,
     task: null, threadMessages: [], contract: null, reason: null, completedStages: [],
     revisionVerified: false, restartSource: null, forkSource: null,
+    savedPiSessions: [{ group: 'foundation:write', sessionId: 'session-12345678',
+      model: 'openai/gpt-6-luna', transcriptRetained: true }],
     recovery: { kind: 'operator-reconciliation', stage: 'interrupted',
       workItem: null, files: ['events/draft.md'], candidateDigest: null,
       guidance: 'Inspect before deciding how to continue.' },
@@ -41,6 +43,9 @@ test('inline execution evidence distinguishes verified checkpoints, unverified d
   assert.match(html, /Native validation: passed/)
   assert.match(html, /Semantic review: not-required/)
   assert.match(html, /Preserved interrupted specialist/)
+  assert.match(html, /Saved specialist Pi sessions/)
+  assert.match(html, /session-12345678/)
+  assert.match(html, /original transcript retained/)
   assert.match(html, /creative-direction\/foundation\.md/)
   assert.doesNotMatch(html, /PRIVATE_PI_TRANSCRIPT/)
 })

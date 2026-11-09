@@ -45,6 +45,16 @@ export function ExecutionEvidence({ job, controls, events, hasMore }: {
       {job.completedStages.map((stage, i) => <p key={i}>{stage.stage}: {stage.status}</p>)}
     </div>
     <div className="grid gap-1">
+      <strong>Saved specialist Pi sessions</strong>
+      {job.savedPiSessions?.map(session => <p key={session.group + session.sessionId}
+        className="break-words">
+        {session.group} · session <code>{session.sessionId}</code> · {session.model} ·
+        {session.transcriptRetained ? 'original transcript retained' : 'transcript unavailable'}
+      </p>)}
+      {!job.savedPiSessions?.length && <p>No finalized specialist Pi session receipts found.
+        Unfinished transcripts are not treated as verified sessions.</p>}
+    </div>
+    <div className="grid gap-1">
       <strong>Model usage and limits</strong>
       {controls ? <>
         <p>Queue: {controls.queue ?? 'not queued'} · control: {controls.control}</p>

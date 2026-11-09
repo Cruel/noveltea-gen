@@ -13,6 +13,8 @@ export type JobOverview = {
     originMessageId: string | null; verifiedCommitSha: string | null; createdAt: string }>
   contract: object | null; reason: string | null; completedStages: Array<{ stage: string; status: string }>
   revisionVerified?: boolean
+  savedPiSessions?: Array<{ group: string; sessionId: string; model: string;
+    transcriptRetained: boolean }>
   restartSource: { sourceThreadId: string; sourceJobId: string; originalJobId: string;
     originalSha: string; selectedSha: string; mode: 'original' | 'newer'; targetBranch: string | null } | null
   forkSource: { jobId: string; commitSha: string; completedWorkItems: string[];

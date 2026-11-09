@@ -19,6 +19,7 @@ import { inspectFoundationConflict } from '../../../src/foundation-conflict'
 import { activeSpecialistChoice, verifySpecialistChoice } from '../../../src/specialist-choice'
 import { queueGeneration, queueRecord } from './generation-queue.server'
 import { readJobTurnPlan } from './turn-plan-receipt.server'
+import { inspectSavedPiSessions } from './saved-pi-sessions.server'
 
 class JobError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
@@ -137,7 +138,8 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
   const studioThread = inspection.threadId ? { id: inspection.threadId } : null
   const threadMessages = inspection.messages
   const restart = inspection.restart
-  const base = { recoveryCheckpoints, forkSource: forkSourceSummary(job), restartSource: restart ?? null,
+  const base = { recoveryCheckpoints, savedPiSessions: await inspectSavedPiSessions(job),
+    forkSource: forkSourceSummary(job), restartSource: restart ?? null,
     storyThreadId: studioThread?.id ?? null,
     threadMessages,
     id: row.id, storyId: row.storyId, title: row.title, provider: row.provider,
