@@ -16,6 +16,12 @@ import { studioAuthOptionsForDatabase } from '../../src/lib/auth'
 import { createKyselyCollectionCatalog } from '../../src/persistence/collection-kysely'
 import { createKyselyPublicationRecords } from '../../src/persistence/publication-kysely'
 import { createKyselyGitPersistence } from '../../src/persistence/git-kysely'
+import { createKyselyConversationCatalog } from '../../src/persistence/conversation-kysely'
+import { createKyselyNaturalStoryPersistence } from '../../src/persistence/natural-story-kysely'
+import { createKyselyCatalogPersistence } from '../../src/persistence/catalog-kysely'
+import type { ConversationCatalog } from '../../src/persistence/conversation-contracts'
+import type { NaturalStoryPersistence } from '../../src/persistence/natural-story-contracts'
+import type { DashboardCatalog, SettingsPreferences } from '../../src/persistence/contracts'
 import type {
   GitIdentities,
   RepositoryCatalogWrites,
@@ -41,9 +47,20 @@ export interface KyselyFeatureFixture {
   repositories: RepositoryCatalogWrites
   onboarding: StoryOnboarding
   piCredentials: PiCredentialVault
+  conversations: ConversationCatalog
+  naturalStory: NaturalStoryPersistence
+  dashboard: DashboardCatalog
+  settings: SettingsPreferences
   account(owner: string, provider: GitProvider): Promise<void>
   /** Reopen the same backing database with a new connection to prove persistence. */
   reopenGit(): Promise<ReturnType<typeof createKyselyGitPersistence>>
+  reopenNavigation(): Promise<{
+    conversations: ConversationCatalog
+    naturalStory: NaturalStoryPersistence
+    collections: CollectionCatalog
+    dashboard: DashboardCatalog
+    settings: SettingsPreferences
+  }>
   /** Exactly one test-only records surface for SQLite and PostgreSQL. */
   records: TestPersistence['records']
   owner(): Promise<string>
@@ -122,6 +139,9 @@ export async function openKyselyFeatureFixture(
     const fixtureRecords = records(maintenance.db)
     return {
       collections: createKyselyCollectionCatalog(database),
+      conversations: createKyselyConversationCatalog(database),
+      naturalStory: createKyselyNaturalStoryPersistence(database),
+      ...createKyselyCatalogPersistence(database),
       publications: createKyselyPublicationRecords(database),
       ...createKyselyGitPersistence(database),
       records: fixtureRecords,
@@ -136,6 +156,16 @@ export async function openKyselyFeatureFixture(
         await database!.close()
         database = openKyselyDatabase<StudioDb>(options)
         return createKyselyGitPersistence(database)
+      },
+      async reopenNavigation() {
+        await database!.close()
+        database = openKyselyDatabase<StudioDb>(options)
+        return {
+          collections: createKyselyCollectionCatalog(database),
+          conversations: createKyselyConversationCatalog(database),
+          naturalStory: createKyselyNaturalStoryPersistence(database),
+          ...createKyselyCatalogPersistence(database),
+        }
       },
       async owner() {
         const id = randomUUID()

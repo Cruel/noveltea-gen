@@ -121,6 +121,30 @@ local developer PostgreSQL configuration.
   suite 14/14 separately; schema/rollback/parity, generated type, TypeScript,
   and persistence-boundary checks passed. CI still needs to verify the commit.
 
+## S08 Story admission and navigation implementation (#133, 2026-11-09)
+
+- `natural-story-kysely.ts` implements Story-first initial Turn reservation,
+  restart/idempotency, admission fencing and root association using the common
+  transaction-scoped executor. The existing Git Kysely onboarding port owns
+  Story registration and import; there is no mandatory Conversation layer.
+- `conversation-kysely.ts` shares Thread reconciliation, owner-scoped run
+  history, latest-run navigation, archive, creative policy, deletion
+  reservations and tombstones. Event-work lookups use the same indexed,
+  transaction-neutral SQL on SQLite and PostgreSQL; no event history is
+  materialized in the web process. `catalog-kysely.ts` shares dashboard,
+  repository and Story selections, and Thread view preferences, while
+  `collection-kysely.ts` retains optional Collection organization.
+- `kysely-story-navigation.test.ts` uses the common, disposable Kysely
+  fixture and the same contract assertions on both engines: Story imports,
+  exact owner/repository identity, first Turn retries, cross-user conflicts,
+  latest run/event ordering, nested ancestry and Collections, archival,
+  deletion, legacy root reconciliation, preference filtering, and restart.
+  These tests are required in the Studio offline CI gate; a missing required
+  PostgreSQL URL fails rather than silently skipping.
+- The new ports are **staged only**. Live SQLite Studio continues using the
+  old Drizzle composition until #141 switches all domains together; no
+  cross-ORM write transaction or PostgreSQL runtime is enabled here.
+
 ## Gate ownership
 
 - #128: shared executor/guard correctness and mandatory SQLite/PostgreSQL CI
