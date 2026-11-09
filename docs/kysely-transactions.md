@@ -59,11 +59,16 @@ There is deliberately no separate queue lock or narrower bypass protocol yet.
 PostgreSQL `lock_timeout` is five seconds per acquisition. Deadlock (`40P01`) and
 serialization (`40001`) errors retry the **whole rolled-back transaction**, with
 locks reacquired before preconditions. SQLite retries `SQLITE_BUSY` and
-`SQLITE_BUSY_SNAPSHOT`. Attempts default to three, configurable within 1–10;
-backoff is 10 ms times the failed attempt. SQLite busy timeout defaults to 100 ms,
-bounded to 0–5000 ms. Uniqueness/semantic errors, lock timeout and connection loss
-are not retried. Connection termination rejects the active transaction; `pg`
-disconnect notifications do not crash the process and broken clients are evicted.
+`SQLITE_BUSY_SNAPSHOT` with a shared five-second contention budget
+(`contentionBudgetMs`, configurable 1–60000 ms), rather than restarting the
+budget on each attempt. SQLite's `busyTimeoutMs` defaults to 500 ms (0–5000 ms)
+and is capped to the remaining budget before each `BEGIN IMMEDIATE` on that
+connection, avoiding long synchronous event-loop stalls. PostgreSQL defaults to
+three attempts and SQLite to ten; `maxAttempts` remains configurable within 1–10
+for both. Backoff is 10 ms times the failed attempt. Uniqueness/semantic errors,
+PostgreSQL lock timeout and connection loss are not retried. Connection
+termination rejects the active transaction; `pg` disconnect notifications do
+not crash the process and broken clients are evicted.
 
 ## Proofs and certification
 
@@ -92,7 +97,8 @@ never point it at an existing database (the proof creates its own tables).
 Proof coverage:
 
 - immediate SQLite admission **before the first write**, independent-handle
-  visibility, awaited callback, rollback, release and lifecycle;
+  visibility, awaited callback, rollback, release and lifecycle, plus real
+  cross-process contention lasting beyond 100 ms and a bounded shared retry budget;
 - nested typed queries read their own writes while another connection cannot,
   with complete rollback after failure;
 - competing absent-child reservations, CAS and DELETE under mandatory admission;

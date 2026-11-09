@@ -41,7 +41,8 @@ function inspect(file) {
       path.startsWith("web/test/") &&
       path !== "web/test/support/sqlite-test-records.ts" &&
       path !== "web/test/support/sqlite-controller-fixture.ts" &&
-      path !== "web/test/support/sqlite-oauth-source.ts"
+      path !== "web/test/support/sqlite-oauth-source.ts" &&
+      path !== "web/test/support/sqlite-lock-holder.ts"
     ) {
       if (ts.isPropertyAccessExpression(node) && node.name.text === "sqlite")
         fail("direct SQLite driver access in test: use store.testing or StudioPersistence");

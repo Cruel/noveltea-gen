@@ -2,6 +2,8 @@ import Database from 'better-sqlite3'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { performance } from 'node:perf_hooks'
 import { setTimeout as delay } from 'node:timers/promises'
 import {
   CamelCasePlugin,
@@ -27,7 +29,7 @@ export interface SharedDatabase<DB> {
   close(): Promise<void>
 }
 export type DatabaseOptions = (
-  | { backend: 'sqlite'; path: string; busyTimeoutMs?: number }
+  | { backend: 'sqlite'; path: string; busyTimeoutMs?: number; contentionBudgetMs?: number }
   | { backend: 'postgres'; connection: Omit<PoolConfig, 'max'>; poolSize?: number }
 ) & { maxAttempts?: number }
 
@@ -51,11 +53,16 @@ function lockId(value: string): string {
  */
 export function openKyselyDatabase<DB = StudioDb>(options: DatabaseOptions): SharedDatabase<DB> {
   const backend = options.backend
-  const attempts = bounded(options.maxAttempts ?? 3, 'maxAttempts', 1, 10)
+  const attempts = bounded(options.maxAttempts ?? (backend === 'sqlite' ? 10 : 3), 'maxAttempts', 1, 10)
+  const contentionBudgetMs =
+    backend === 'sqlite'
+      ? bounded(options.contentionBudgetMs ?? 5000, 'contentionBudgetMs', 1, 60_000)
+      : undefined
+  const sqliteDeadline = backend === 'sqlite' ? new AsyncLocalStorage<number>() : undefined
   let db: Kysely<DB>
   let sqliteHandle: Database.Database | undefined
   if (options.backend === 'sqlite') {
-    const timeout = bounded(options.busyTimeoutMs ?? 100, 'busyTimeoutMs', 0, 5000)
+    const timeout = bounded(options.busyTimeoutMs ?? 500, 'busyTimeoutMs', 0, 5000)
     if (options.path !== ':memory:') {
       if (!isAbsolute(options.path)) throw new Error('Studio database path must be absolute')
       mkdirSync(dirname(options.path), { recursive: true, mode: 0o700 })
@@ -74,6 +81,10 @@ export function openKyselyDatabase<DB = StudioDb>(options: DatabaseOptions): Sha
         const driver = createDriver()
         // Kysely owns this exact connection and handles awaited commit/rollback/release.
         driver.beginTransaction = async (connection) => {
+          // The synchronous SQLite busy handler must never consume a fresh timeout
+          // on every retry. Cap each lock wait to the transaction's shared deadline.
+          const remaining = (sqliteDeadline?.getStore() ?? performance.now() + timeout) - performance.now()
+          sqlite.pragma(`busy_timeout = ${Math.max(0, Math.min(timeout, Math.floor(remaining)))}`)
           await connection.executeQuery(CompiledQuery.raw('BEGIN IMMEDIATE'))
         }
         return driver
@@ -122,19 +133,22 @@ export function openKyselyDatabase<DB = StudioDb>(options: DatabaseOptions): Sha
           }),
         ),
       ].sort()
+      const deadline = contentionBudgetMs === undefined ? undefined : performance.now() + contentionBudgetMs
       for (let attempt = 1; ; attempt++) {
         try {
-          return await db.transaction().execute(async (tx) => {
-            if (backend === 'postgres') {
-              await sql`set local lock_timeout = '5s'`.execute(tx)
-              // Mandatory for EVERY writer, including empty guard lists and formerly autocommit DML.
-              // Queue capacity, absent identities and event publication are covered by this fallback.
-              for (const key of ['0:exclusive', ...keys]) {
-                await sql`select pg_advisory_xact_lock(${lockId(key)}::bigint)`.execute(tx)
+          const run = () =>
+            db.transaction().execute(async (tx) => {
+              if (backend === 'postgres') {
+                await sql`set local lock_timeout = '5s'`.execute(tx)
+                // Mandatory for EVERY writer, including empty guard lists and formerly autocommit DML.
+                // Queue capacity, absent identities and event publication are covered by this fallback.
+                for (const key of ['0:exclusive', ...keys]) {
+                  await sql`select pg_advisory_xact_lock(${lockId(key)}::bigint)`.execute(tx)
+                }
               }
-            }
-            return await work(tx)
-          })
+              return await work(tx)
+            })
+          return await (sqliteDeadline && deadline !== undefined ? sqliteDeadline.run(deadline, run) : run())
         } catch (error) {
           const code = (error as { code?: string } | null)?.code
           const retry =
@@ -142,7 +156,9 @@ export function openKyselyDatabase<DB = StudioDb>(options: DatabaseOptions): Sha
               ? code === '40P01' || code === '40001'
               : code === 'SQLITE_BUSY' || code === 'SQLITE_BUSY_SNAPSHOT'
           if (!retry || attempt >= attempts) throw error
-          await delay(10 * attempt)
+          const backoff = 10 * attempt
+          if (deadline !== undefined && performance.now() + backoff >= deadline) throw error
+          await delay(backoff)
         }
       }
     },
