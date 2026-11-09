@@ -1,0 +1,94 @@
+# Opt-in PostgreSQL topology. The default compose.yaml remains SQLite-only.
+# #128/#129 will enable Kysely migrations and the populated trusted-catalog
+# view; until then init deliberately refuses PostgreSQL application startup.
+# Keep this override separate from the normal deployment command.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: noveltea_bootstrap
+      POSTGRES_DB: noveltea
+      POSTGRES_PASSWORD: ${NT_PG_ADMIN_PASSWORD:?Set a separate PostgreSQL bootstrap password}
+      NT_PG_APP_PASSWORD: ${NT_PG_APP_PASSWORD:?Set a PostgreSQL application password}
+      NT_PG_CONTROLLER_PASSWORD: ${NT_PG_CONTROLLER_PASSWORD:?Set a read-only controller password}
+    volumes:
+      - noveltea-postgres:/var/lib/postgresql/data
+      - ./deploy/postgres-bootstrap.sh:/docker-entrypoint-initdb.d/10-noveltea-roles.sh:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$POSTGRES_PASSWORD" psql -h 127.0.0.1
+          -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -XAtqc 'SELECT 1'
+          | grep -qx 1
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+    restart: unless-stopped
+    init: true
+    security_opt: [no-new-privileges:true]
+    # PostgreSQL's official entrypoint needs to chown/chmod its first-use
+    # volume and drop from root to its postgres UID inside the rootless userns.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, DAC_OVERRIDE]
+    networks: [pg-app, pg-controller]
+
+  init:
+    environment: &studio-postgres-env
+      NT_STUDIO_DB_BACKEND: postgres
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: noveltea
+      PGUSER: noveltea_app
+      PGPASSWORD: ${NT_PG_APP_PASSWORD:?Set a PostgreSQL application password}
+    networks: [backend, pg-app]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  web:
+    environment: *studio-postgres-env
+    networks: [frontend, backend, pg-app]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # Extends resolves the original web definition, not necessarily override
+  # values; declare PostgreSQL settings here for the dev-profile variant.
+  web-dev:
+    environment: *studio-postgres-env
+    networks: [frontend, backend, pg-app]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  agent:
+    environment: *studio-postgres-env
+    networks: [backend, pg-app]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  controller:
+    # Compose override merging otherwise leaves the incompatible base
+    # network_mode: none in place. Explicitly reset it.
+    network_mode: !reset null
+    environment:
+      NT_STUDIO_DB_BACKEND: postgres
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: noveltea
+      PGUSER: noveltea_controller
+      PGPASSWORD: ${NT_PG_CONTROLLER_PASSWORD:?Set a read-only controller password}
+    networks: [pg-controller]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+networks:
+  # Two private DB networks prevent a shared Web/Agent DB link from granting
+  # the daemon-facing controller lateral access to Web or Agent.
+  pg-app:
+    internal: true
+  pg-controller:
+    internal: true
+
+volumes:
+  noveltea-postgres:
+    name: ${NT_PG_VOLUME_NAME:-noveltea-postgres}

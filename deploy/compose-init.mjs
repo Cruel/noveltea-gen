@@ -6,6 +6,12 @@ import { dirname } from 'node:path'
 /** One-shot Compose prerequisite: initialize a durable controller secret and
  * migrate the app catalog before independent web/agent/controller processes.
  * No host Docker socket is mounted into this service. */
+// Do not silently run SQLite when the explicitly selected PostgreSQL
+// transport is configured. #128 will replace this guard after the shared
+// Kysely connection/migration path is implemented.
+if (process.env.NT_STUDIO_DB_BACKEND && process.env.NT_STUDIO_DB_BACKEND !== 'sqlite') {
+  throw new Error('PostgreSQL Studio persistence is not yet installed; complete #128 before starting the full PostgreSQL Compose stack.')
+}
 // Fail at deployment startup, not halfway through a paid generation job,
 // when a bind mount is missing or the native CLI cannot run in this image.
 const binary = '/opt/noveltea/noveltea'

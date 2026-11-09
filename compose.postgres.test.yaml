@@ -1,0 +1,12 @@
+# Certification-only overlay. Neither CI nor disposable PostgreSQL probes
+# may read the private developer web/.env or start real application services.
+# Production MUST NOT use this overlay.
+services:
+  init:
+    env_file: !reset []
+  web:
+    env_file: !reset []
+  web-dev:
+    env_file: !reset []
+  agent:
+    env_file: !reset []

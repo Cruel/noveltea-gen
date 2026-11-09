@@ -150,6 +150,17 @@ remotely, configure a trusted HTTPS reverse proxy with request limits and
 align `BETTER_AUTH_URL` and OAuth redirect origins. Never publish the
 agent's port 7001 or the controller socket.
 
+## Optional PostgreSQL topology (development/certification)
+
+SQLite remains the default. See [PostgreSQL Compose topology](../docs/postgres-compose.md)
+for the explicit `compose.postgres.yaml` override, private app/controller DB
+networks, least-privilege roles, persistent database volume, and isolated
+`pnpm certify:postgres-compose` certificate. The PostgreSQL service and
+networking can be verified now; full PostgreSQL Studio startup is deliberately
+blocked pending the shared Kysely connection and migration tickets (#128 onward).
+Do not use this override against an existing SQLite deployment or delete
+existing developer volumes.
+
 ## Live web development with Compose
 
 Production remains the default: `docker compose up -d` starts `web`,
