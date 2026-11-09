@@ -14,6 +14,8 @@ import { StoryWorkspaceOutline } from '@/components/story-workspace-outline'
 import { StoryDesktopWorkspace, StoryMobileWorkspace, parseStoryMobileView,
   STORY_MOBILE_VIEW_KEY, type StoryMobileView } from '@/components/story-desktop-workspace'
 import { StoryInspectorSheet } from '@/components/story-workspace-explorer'
+import { ThreadReviewSheet, type ReviewOpen } from '@/components/thread-review-sheet'
+import type { ReviewSelection } from '@/lib/thread-review.server'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
 import { getThreadChat } from '@/lib/thread-chat.functions'
@@ -156,8 +158,13 @@ function StoryConversations() {
     threadId: string; jobId: string; step: ActivityStep
   } | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState<ReviewOpen | null>(null)
+  const openReview = (scope: ReviewSelection) => {
+    setReviewOpen(previous => ({ scope, token: (previous?.token ?? 0) + 1 }))
+  }
   useEffect(() => {
     setInspectorOpen(false)
+    setReviewOpen(null)
     setGraphFocus(null)
     setHoveredActivity(null)
     setPinnedActivity(null)
@@ -406,11 +413,9 @@ function StoryConversations() {
           onFocusComplete={token => setGraphFocus(current => current?.token === token ? null : current)}
           highlights={highlights} />
       </div>
-      {explorer.data.jobId && <Link to="/jobs/$jobId"
-        params={{ jobId: explorer.data.jobId }} search={{ tab: 'story' }}
-        className="mt-2 shrink-0 text-xs underline underline-offset-2">
-        Review Changes (full diff)
-      </Link>}
+      {explorer.data.jobId && <Button type="button" size="sm" variant="outline"
+        className="mt-2 shrink-0 self-start text-xs"
+        onClick={() => openReview({ kind: 'cumulative' })}>Review changes</Button>}
     </>}
 </div>
   const chatPanel = <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
@@ -419,6 +424,8 @@ function StoryConversations() {
       <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
         {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
       </h2>
+      {explorerThreadId && <Button size="sm" type="button" variant="outline"
+        onClick={() => openReview({ kind: 'cumulative' })}>Review changes</Button>}
     </header>
     <div className="flex min-h-0 flex-1 flex-col">
     {creatingThread || !data.threads.length ||
@@ -433,6 +440,7 @@ function StoryConversations() {
               search: { thread: threadId } })
           }} />
       : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id}
+        onReviewTurn={turnId => openReview({ kind: 'turn', turnId })}
         onActivityHover={onActivityHover} onActivityPin={onActivityPin}
         pinnedActivity={pinnedActivity?.threadId === selectedThread.id ?
           { jobId: pinnedActivity.jobId, stepId: pinnedActivity.step.id } : null} />
@@ -483,5 +491,19 @@ function StoryConversations() {
     {explorerIndex && explorerThreadId && <StoryInspectorSheet storyId={storyId} threadId={explorerThreadId}
       index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord}
       open={inspectorOpen} onOpenChange={setInspectorOpen} />}
+    {explorerThreadId && reviewOpen && <ThreadReviewSheet
+      key={explorerThreadId + ':' + reviewOpen.token} threadId={explorerThreadId}
+      initialScope={reviewOpen.scope} open onOpenChange={next => { if (!next) setReviewOpen(null) }}
+      canInspectRecord={id => !!explorerIndex?.records.some(record => record.id === id)}
+      onInspectRecord={id => {
+        if (!explorerIndex?.records.some(record => record.id === id)) return
+        selectRecord(id)
+        setReviewOpen(null)
+        setInspectorOpen(true)
+      }}
+      onCorrection={() => {
+        changeMobileView('chat')
+        void queryClient.invalidateQueries({ queryKey: storyNavigationKey(storyId) })
+      }} />}
   </main>
 }

@@ -14,8 +14,9 @@ import { canSendThreadFollowUp } from '@/lib/thread-attention'
 import { setCreativeMode } from '@/lib/threads.functions'
 import type { CreativeMode } from '../../../src/creative-policy'
 
-export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedActivity }: {
+export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedActivity, onReviewTurn }: {
   threadId: string
+  onReviewTurn?: (turnId: string) => void
   onActivityHover?: (jobId: string, step: ActivityStep | null) => void
   onActivityPin?: (jobId: string, step: ActivityStep) => void
   pinnedActivity?: { jobId: string; stepId: number } | null
@@ -290,6 +291,13 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
               <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
         <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
+        {item.role === 'assistant' && item.jobId && onReviewTurn &&
+          data.turnReceipts.filter(turn => turn.outcome === 'finished' &&
+            turn.executions.some(execution => execution.jobId === item.jobId &&
+              execution.status === 'completed' && execution.queuePhase === 'finished' &&
+              !!execution.validatedSha)).map(turn =>
+            <Button key={turn.id} type="button" size="sm" variant="outline" className="mt-2"
+              onClick={() => onReviewTurn(turn.id)}>Review Turn changes</Button>)}
         {data?.steeringActivity.filter(activity => activity.messageId === item.id).map(activity =>
           <div key={activity.messageId} className="mt-2 text-xs text-muted-foreground">
             <p className="m-0">Controller: {activity.disposition === 'within-scope' ? 'Within assigned scope' :
