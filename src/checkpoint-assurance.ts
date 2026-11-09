@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
+import { inspectSpecialistChoice, authorChoiceDirection } from "./specialist-choice.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { readTurnEvidence, type TurnAssignmentEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 
@@ -117,25 +118,144 @@ export function unresolvedNativePrerequisites(workItem: string,
   return blocked.sort();
 }
 
-/** A cluster may contain two independently committed specialist units.
- * Enforce the same review gate between those units, including after fork
- * recovery, before opening another writer or resuming one. */
+/** Return a *view* of review coverage after a verified repair. Never rewrite
+ * historical immutable failures. A passing repair can supersede only the
+ * precise chain of source failures whose immutable proofs it references. */
+export async function resolvedCheckpointReviews(job: JobStartResult,
+  points: Array<RecoveryCheckpoint & { eligible: boolean; semanticReview: SemanticReviewStatus | "untracked" }>,
+): Promise<Map<string, SemanticReviewStatus>> {
+  const covered = new Map<string, SemanticReviewStatus>();
+  const byCommit = new Map(points.filter(p => p.eligible).map(p => [p.commitSha, p]));
+  for (const point of points) {
+    if (!point.eligible || point.semanticReview !== "passed" ||
+        !point.workItem.startsWith("repair-")) continue;
+    const ancestors: string[] = [];
+    let source = point;
+    const visited = new Set<string>();
+    for (;;) {
+      if (!source.workItem.startsWith("repair-")) break;
+      const proof = await readRepairCommitProof(job, source.workItem);
+      if (proof.commitSha !== source.commitSha || visited.has(proof.sourceCommitSha))
+        throw Error("Review repair chain contains a conflicting or cyclic source.");
+      visited.add(proof.sourceCommitSha);
+      const parent = byCommit.get(proof.sourceCommitSha);
+      if (!parent || parent.semanticReview !== "failed" ||
+          parent.assurance?.assignmentId !== source.assurance?.assignmentId)
+        throw Error("Passing repair cannot supersede an unverified or unrelated failure.");
+      ancestors.push(parent.commitSha);
+      source = parent;
+      if (ancestors.length > 2) throw Error("Review repair chain exceeded bounded attempts.");
+    }
+    for (const ancestor of ancestors) covered.set(ancestor, "not-required");
+  }
+  return covered;
+}
+
+export class IndependentReviewGateError extends Error {
+  readonly name = "IndependentReviewGateError";
+}
+/** Multi-unit World/Character and Choice/Puzzle specialists stop at an exact
+ * verified checkpoint rather than write past its mandatory independent review. */
 export async function assertNativeReviewDependencies(job: JobStartResult, nextWorkItem: string) {
   const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
   const { readRecoveryFork } = await import("./recovery-fork-state.js");
   const current = (await inspectRecoveryCheckpoints(job)).filter(point => point.eligible);
   const fork = readRecoveryFork(job);
+  const resolved = await resolvedCheckpointReviews(job, current);
   const dependencies = current.at(-1)?.dependencies ?? fork?.checkpoint.dependencies ?? {};
   const statuses = [
     ...(fork?.reviewCoverage ?? []),
     ...current.filter(point => point.assurance).map(point => ({ workItem: point.workItem,
-      status: point.semanticReview === "untracked" ? "required-pending" as const : point.semanticReview })),
+      status: resolved.get(point.commitSha) ??
+        (point.semanticReview === "untracked" ? "required-pending" as const : point.semanticReview) })),
   ];
   const pending = unresolvedNativePrerequisites(nextWorkItem, dependencies, statuses);
-  if (pending.length) throw new Error("Required independent review is pending or failed for prerequisite " +
+  if (pending.length) throw new IndependentReviewGateError("Required independent review is pending or failed for prerequisite " +
     pending.join(", ") + "; do not start or replay a dependent specialist.");
 }
 
+export interface RepairCommitProof {
+  version: 1; jobId: string; threadId: string; branch: string; baseSha: string;
+  phase: "committed"; worker: "pi"; workItemId: string; sourceCommitSha: string;
+  rootFailureSha: string; sourceReviewDigest: string; originalReviewDigest: string;
+  assignmentId: string; assignmentDigest: string; assignmentRevision?: {
+    version: number; assignment: TurnAssignmentEvidence; choiceId: string;
+    proposalSha256: string; principal: string; direction: string; digest: string };
+  beforeHead: string; commitSha: string; paths: string[]; digest: string;
+  validation: { status: "passed"; validatorVersion: string; proofDigest: string };
+  sessionFile: string; sessionSha256: string; sessionId: string;
+  provider: string; model: string; snapshot: { id: string; path: string };
+  planVersion: number;
+}
+/** Repair provenance is a separate immutable source, never the mutable
+ * controller attempt state or a model's proposed new scope. */
+export async function readRepairCommitProof(job: JobStartResult, workItem: string): Promise<RepairCommitProof> {
+  const match = workItem.match(/^repair-([a-f0-9]{40})$/);
+  if (!match) throw Error("Not a repair work item.");
+  const path = join(job.stateDir, "review-repairs", "proofs", match[1] + ".json");
+  const stat = await lstat(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128_000)
+    throw Error("Unsafe verified review-repair proof.");
+  const proof = JSON.parse(await readFile(path, "utf8")) as RepairCommitProof;
+  if (proof.version !== 1 || proof.phase !== "committed" || proof.worker !== "pi" ||
+      proof.jobId !== job.jobId || proof.threadId !== job.threadId ||
+      proof.baseSha !== job.baseSha || proof.branch !== job.branch ||
+      proof.workItemId !== workItem || proof.sourceCommitSha !== match[1] ||
+      !SHA.test(proof.rootFailureSha) || !SHA.test(proof.commitSha) ||
+      !SHA.test(proof.beforeHead) || !/^[a-f0-9]{64}$/.test(proof.digest) ||
+      !/^[a-f0-9]{64}$/.test(proof.sourceReviewDigest) ||
+      !/^[a-f0-9]{64}$/.test(proof.originalReviewDigest) ||
+      !/^[a-f0-9]{64}$/.test(proof.assignmentDigest) ||
+      !/^[a-f0-9]{64}$/.test(proof.validation?.proofDigest) ||
+      proof.validation?.status !== "passed" ||
+      proof.validation.validatorVersion !== job.validatorVersion ||
+      !Array.isArray(proof.paths) || !proof.paths.length ||
+      proof.paths.some(path => !canonicalPath(path)) ||
+      !Number.isSafeInteger(proof.planVersion) || proof.planVersion < 1)
+    throw Error("Review-repair proof has invalid identity or validation binding.");
+  const source = JSON.parse(await readFile(join(job.stateDir, "recovery-checkpoints",
+    proof.sourceCommitSha + ".json"), "utf8")) as RecoveryCheckpoint;
+  if (source.jobId !== job.jobId || source.commitSha !== proof.sourceCommitSha ||
+      !source.assurance || proof.paths.some(path => !source.assurance!.changedPaths.includes(path)) ||
+      !gitAncestor(job, source.commitSha, proof.beforeHead))
+    throw Error("Review repair exceeds the original rejected, validated source.");
+  const review = await readIndependentReview(job, source.assurance);
+  if (review.status !== "failed" || !review.result ||
+      digest(review.result) !== proof.sourceReviewDigest ||
+      source.assurance.assignmentId !== proof.assignmentId ||
+      source.assurance.workItem !== source.workItem ||
+      proof.beforeHead !== git(job, "rev-parse", proof.commitSha + "^").trim())
+    throw Error("Review repair is not based on a sealed failed independent verdict.");
+  return proof;
+}
+export async function repairReviewAssignment(job: JobStartResult,
+  workItem: string, original: TurnAssignmentEvidence): Promise<TurnAssignmentEvidence> {
+  if (!workItem.startsWith("repair-")) return original;
+  const proof = await readRepairCommitProof(job, workItem);
+  if (proof.assignmentId !== original.id) throw Error("Repair assignment differs from the original specialist.");
+  if (!proof.assignmentRevision) {
+    if (proof.assignmentDigest !== digest(original))
+      throw Error("Repair assignment changed without authenticated author direction.");
+    return original;
+  }
+  const revision = proof.assignmentRevision;
+  const choice = await inspectSpecialistChoice(job, revision.choiceId);
+  const direction = choice.answer && authorChoiceDirection(choice.question, choice.answer);
+  const expected = { version: revision.version, assignment: revision.assignment,
+    choiceId: revision.choiceId, proposalSha256: revision.proposalSha256,
+    principal: revision.principal, direction: revision.direction };
+  if (revision.version !== 2 || !choice.answer || choice.phase !== "consumed" ||
+      choice.proposalSha256 !== revision.proposalSha256 ||
+      choice.answer.principal !== revision.principal ||
+      direction !== revision.direction || revision.digest !== digest(expected) ||
+      revision.assignment.id !== original.id ||
+      JSON.stringify(revision.assignment.authority) !== JSON.stringify(original.authority) ||
+      JSON.stringify(revision.assignment.targets) !== JSON.stringify(original.targets) ||
+      JSON.stringify(revision.assignment.dependsOn) !== JSON.stringify(original.dependsOn) ||
+      proof.assignmentDigest !== digest(revision.assignment))
+    throw Error("Repair assignment revision lacks a trusted, exact author choice.");
+  return revision.assignment;
+}
 function assignmentId(workItem: string): string {
   if (workItem === "foundation") return "foundation";
   if (workItem === "global-architecture") return "architecture";
@@ -210,12 +330,18 @@ export async function checkpointAssurance(job: JobStartResult,
   point: RecoveryCheckpoint): Promise<CheckpointAssurance | null> {
   const turn = await turnEvidence(job);
   if (!turn) return null;
-  const id = assignmentId(point.workItem);
-  const assignment = turn.assignments.find(item => item.id === id);
+  const proof = point.workItem.startsWith("repair-")
+    ? await readRepairCommitProof(job, point.workItem) : null;
+  const id = proof?.assignmentId ?? assignmentId(point.workItem);
+  const original = turn.assignments.find(item => item.id === id);
+  const assignment = original ? await repairReviewAssignment(job, point.workItem, original) : null;
   if (!assignment || point.baseSha !== turn.source.verifiedSha || point.jobId !== job.jobId)
     throw new Error("Checkpoint has no original, source-bound specialist assignment.");
   const diff = exactDiff(job, point.parentSha, point.commitSha);
   assertAuthority(assignment, diff.paths, turn);
+  if (proof && (proof.commitSha !== point.commitSha || proof.beforeHead !== point.parentSha ||
+      JSON.stringify([...proof.paths].sort()) !== JSON.stringify(diff.paths)))
+    throw Error("Repair checkpoint differs from the recorded authorized correction.");
   const types = [...new Set(diff.paths.map(path => directories[path.split("/")[0]!]!))].sort();
   // A previous failed independent review is a durable, exact-commit receipt,
   // never a suggestion supplied by the model that wrote this diff.
@@ -228,7 +354,7 @@ export async function checkpointAssurance(job: JobStartResult,
       .map(async entry => (await readIndependentReview(job, entry)).status))).includes("failed");
   const selection = selectCheckpointReview({ workItem: point.workItem, paths: diff.paths,
     addedLines: diff.addedLines, removedLines: diff.removedLines,
-    dependencyCount: assignment.dependsOn.length, previousFailure });
+    dependencyCount: assignment.dependsOn.length, previousFailure: !!proof || previousFailure });
   return { version: 1, policyVersion: 1, jobId: job.jobId, baseSha: job.baseSha,
     commitSha: point.commitSha, parentSha: point.parentSha, workItem: point.workItem,
     validationProofDigest: point.proofDigest, validatorVersion: point.validation.validatorVersion,

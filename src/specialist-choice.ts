@@ -190,6 +190,27 @@ async function verifyChoiceSession(job: JobStartResult, workItem: string,
       sessionFile, sessionId);
   if (/^event-[a-z][a-z0-9-]*$/.test(workItem))
     return verifyJobPiSession(job, "event", sessionFile, sessionId, workItem);
+  const repair = workItem.match(/^repair-([a-f0-9]{40})$/);
+  if (repair) {
+    const path = join(job.stateDir, "review-repairs", repair[1] + ".json");
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128_000)
+      throw Error("Unsafe rejected-review repair state.");
+    const state = JSON.parse(await readFile(path, "utf8")) as {
+      version: number; jobId: string; threadId: string; sourceCommitSha: string;
+      phase: string; origin: { sessionFile: string; sessionId: string };
+    };
+    if (state.version !== 1 || state.jobId !== job.jobId ||
+        state.threadId !== job.threadId || state.sourceCommitSha !== repair[1] ||
+        !["repairing", "awaiting-author"].includes(state.phase) ||
+        state.origin?.sessionFile !== sessionFile || state.origin.sessionId !== sessionId)
+      throw Error("Rejected-review author choice differs from the original writer.");
+    const header = JSON.parse((await readFile(sessionFile, "utf8")).split("\n")[0]!) as {
+      type?: string; id?: string };
+    if (header.type !== "session" || header.id !== sessionId)
+      throw Error("Original review-repair Pi session header changed.");
+    return;
+  }
   throw Error("Specialist choice work-item session binding is not configured.");
 }
 async function readSpecialistState(job: JobStartResult, path: string) {
@@ -281,6 +302,21 @@ export async function activeSpecialistChoice(job: JobStartResult) {
       const state = await readSpecialistState(job, join(events, name));
       if (state.phase === "awaiting-author")
         waiting.push({ id: state.workItemId, phase: state.phase, authorChoiceId: state.authorChoiceId });
+    }
+  }
+  const repairs = join(job.stateDir, "review-repairs");
+  if (existsSync(repairs)) {
+    const { readdir } = await import("node:fs/promises");
+    const names = (await readdir(repairs)).filter(n => /^[a-f0-9]{40}\.json$/.test(n));
+    if (names.length > 256) throw Error("Rejected-review choice inventory exceeds bounded limit.");
+    for (const name of names) {
+      const state = JSON.parse(await readFile(join(repairs, name), "utf8")) as {
+        jobId?: string; threadId?: string; phase?: string; choiceId?: string };
+      if (state.jobId !== job.jobId || state.threadId !== job.threadId)
+        throw Error("Rejected-review choice belongs to a different job.");
+      if (state.phase === "awaiting-author")
+        waiting.push({ id: "repair-" + name.slice(0, 40),
+          phase: state.phase, authorChoiceId: state.choiceId });
     }
   }
   if (!waiting.length) return null;

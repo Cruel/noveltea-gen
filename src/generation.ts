@@ -26,7 +26,8 @@ import { readJobControl } from "./job-control.js";
 import { inspectJobReport, type JobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints, reconcileRecoveryCheckpoints } from "./recovery-checkpoints.js";
-import { blockedByRequiredReview, executionId } from "./checkpoint-assurance.js";
+import { blockedByRequiredReview, executionId, resolvedCheckpointReviews,
+  IndependentReviewGateError, assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { assessTurnFulfillment } from "./turn-fulfillment.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -263,10 +264,13 @@ async function reviewGatedInventory(job: JobStartResult, inventory: GenerationIn
   const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(point =>
     point.eligible && point.assurance);
   const inherited = readRecoveryFork(job)?.reviewCoverage ?? [];
+  const resolved = await resolvedCheckpointReviews(job, checkpoints);
   const decisions = [
     ...inherited.map(point => ({ assignmentId: executionId(point.workItem), status: point.status })),
-    ...checkpoints.map(point => ({ assignmentId: executionId(point.workItem),
-      status: point.semanticReview === "untracked" ? "required-pending" as const : point.semanticReview })),
+    ...checkpoints.filter(point => !point.workItem.startsWith("repair-"))
+      .map(point => ({ assignmentId: executionId(point.workItem),
+      status: resolved.get(point.commitSha) ??
+        (point.semanticReview === "untracked" ? "required-pending" as const : point.semanticReview) })),
   ];
   const blocked = blockedByRequiredReview(inventory.items, decisions);
   if (!blocked.size) return inventory;
@@ -355,6 +359,82 @@ async function authorBoundary(job: JobStartResult): Promise<Partial<State> | nul
   return { status: updates.status === "paused" ? "paused" : updates.status === "cancelled" ? "cancelled" : "blocked",
     reason: updates.blockers.join(", ") + ("error" in updates ? ": " + updates.error : "") };
 }
+
+/** A native-validated checkpoint does not complete a dependent assignment
+ * until its selected independent semantic review is sealed. The reviewer is
+ * read-only; the rejected original writer gets only a bounded repair lease.
+ * Preserve s.result across pauses, otherwise LangGraph could replay the
+ * already-committed specialist on resume. */
+async function independentAssignmentBoundary(s: State): Promise<Partial<State>> {
+  if (s.request.fixture || !s.result || !s.active ||
+      s.result.status !== "review-handoff" &&
+      !accepted[s.active.stage].includes(s.result.status)) return {};
+  const job = await openJob(s);
+  try {
+    const { runPiAssignmentReview } = await import("./semantic-assignment-review.js");
+    const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
+    const { createSkillSnapshot } = await import("./snapshot.js");
+    const { loadSkillConfig } = await import("./skills.js");
+    const { inspectPiPolicy } = await import("./job-pi-policy.js");
+    const points = (await inspectRecoveryCheckpoints(job))
+      .filter(point => point.eligible && point.assurance &&
+        point.assurance.reviewSelection.status === "required-pending")
+      .sort((a, b) => a.completedWorkItems.length - b.completedWorkItems.length);
+    const effective = await resolvedCheckpointReviews(job, points);
+    if (s.result.status === "review-handoff" && !points.length)
+      throw Error("A specialist paused at a mandatory review handoff without a reviewable checkpoint.");
+    for (const point of points) {
+      if (effective.get(point.commitSha) === "not-required" ||
+          point.semanticReview === "passed") continue;
+      if (point.semanticReview === "required-pending") {
+        const config = s.request.skillsSource
+          ? { discovery: "explicit-only" as const, novelteaSkills: s.request.skillsSource,
+              skillDirs: [], requiredSkills: [] }
+          : await loadSkillConfig(undefined, false);
+        const snapshot = await createSkillSnapshot({
+          ...config, requiredSkills: ["nt-narrative-review", "nt-catalog"] });
+        if (!snapshot) throw Error("Mandatory semantic review lacks pinned narrative-review skills.");
+        const { policy } = await inspectPiPolicy(job);
+        await runPiAssignmentReview(job, [point], {
+          snapshot, provider: s.request.provider ?? policy.profile.provider,
+          model: s.request.model ?? policy.profile.model,
+          thinking: policy.profile.thinking === "low" || policy.profile.thinking === "high"
+            ? policy.profile.thinking : undefined,
+          reviewer: "independent-pi-assignment-review", onSession: async () => {},
+        });
+      }
+      const reviewed = (await inspectRecoveryCheckpoints(job))
+        .find(saved => saved.eligible && saved.commitSha === point.commitSha);
+      if (!reviewed || reviewed.semanticReview === "required-pending")
+        throw Error("Independent semantic reviewer did not seal a source-linked decision.");
+      if (reviewed.semanticReview === "failed") {
+        const progress = await advanceRejectedRepair(job, point.commitSha, {
+          skillsSource: s.request.skillsSource, provider: s.request.provider,
+          model: s.request.model });
+        if (progress.next !== "completed") return {
+          status: progress.next === "author-choice" ? "paused" : "blocked",
+          reason: progress.next === "author-choice"
+            ? "Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending."
+            : progress.next === "author-escalation"
+              ? "Bounded original-session corrections did not pass independent rereview. Author-led scope review is required."
+              : "Interrupted original-session correction is preserved for manual recovery.",
+        };
+      }
+    }
+    if (s.result.status === "review-handoff") {
+      const next = s.active.stage === "foundations" ? "character-foundations" :
+        s.active.stage === "interactive" && s.active.milestone
+          ? "interactive-puzzle-" + s.active.milestone.slice(10) : null;
+      if (!next) throw Error("Unexpected multi-specialist review handoff.");
+      await assertNativeReviewDependencies(job, next);
+      return { result: null }; // Re-enter only the unfinished specialist unit.
+    }
+    return { result: { ...s.result, headSha: await trustedHead(job) } };
+  } catch (error) {
+    return { status: "blocked", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** The production parent graph. Specialists retain ownership of side effects and recovery. */
 export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner: "server" | "cli" = "server") {
   return new StateGraph(Channels, { input: GenerationInputSchema })
@@ -495,6 +575,13 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         const stop = blocked(error);
         if (stop.status === "paused" || stop.status === "cancelled") return stop;
         const job = await openJob(s);
+        if (error instanceof IndependentReviewGateError) {
+          return withStoryJobLock(job, "generation-review-handoff", async () => {
+            clean(job);
+            const headSha = await trustedHead(job);
+            return { result: { status: "review-handoff", headSha } };
+          });
+        }
         return withStoryJobLock(job, "generation-local-block", async () => {
           try { clean(job); await trustedHead(job); }
           catch { return stop; }
@@ -502,6 +589,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         });
       }
     })
+    .addNode("independent_assignment_review", independentAssignmentBoundary)
     .addNode("verify_committed_work", async s => {
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-verification", async () => {
@@ -582,7 +670,9 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
       s.ideaTask ? "idea_integration" : s.active ? "specialist_dispatch" : "completion_decision")
     .addConditionalEdges("idea_integration", s => s.status !== "running" ? END : "verify_idea_integration")
     .addConditionalEdges("verify_idea_integration", s => s.status !== "running" ? END : "author_update_intake")
-    .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END : s.active ? "verify_committed_work" : "author_update_intake")
+    .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END : s.active ? "independent_assignment_review" : "author_update_intake")
+    .addConditionalEdges("independent_assignment_review", s => s.status !== "running" ? END :
+      s.result ? "verify_committed_work" : "specialist_dispatch")
     .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END : "author_update_intake")
     .addEdge("completion_decision", END)
     .compile({ checkpointer });

@@ -6,7 +6,8 @@ import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { readTurnEvidence, type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
-import { sealIndependentReview, type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
+import { sealIndependentReview, repairReviewAssignment,
+  type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const MAX_ITEMS = 8;
@@ -76,8 +77,11 @@ export async function prepareSemanticReview(job: JobStartResult,
     seen.add(point.commitSha);
     if (assurance.turnDigest !== plan.digest || assurance.baseSha !== job.baseSha)
       throw new Error("Reviewer assignment or source baseline is stale.");
-    const assignment = plan.assignments.find(a => a.id === assurance.assignmentId);
-    if (!assignment) throw new Error("Pinned specialist assignment is absent.");
+    const original = plan.assignments.find(a => a.id === assurance.assignmentId);
+    if (!original) throw new Error("Pinned specialist assignment is absent.");
+    const assignment = await repairReviewAssignment(job, point.workItem, original);
+    if (hash(JSON.stringify(assignment)) !== assurance.assignmentDigest)
+      throw new Error("Reviewer received a changed or unauthorized assignment version.");
     const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
     const diff = git(job, "diff", "--no-ext-diff", "--unified=3",
       point.parentSha, point.commitSha, "--", ...assurance.changedPaths.map(p => prefix + p));

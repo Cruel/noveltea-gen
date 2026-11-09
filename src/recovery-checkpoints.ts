@@ -55,6 +55,8 @@ function sourceFor(id: string): { path: string; unit?: string } {
   if (interactive) return { path: "interactive-items/" + interactive[2] + ".json", unit: id };
   const composition = id.match(/^composition-([a-z][a-z0-9-]*)$/);
   if (composition) return { path: "composition-items/" + composition[1] + ".json" };
+  const repair = id.match(/^repair-([a-f0-9]{40})$/);
+  if (repair) return { path: "review-repairs/proofs/" + repair[1] + ".json" };
   const focus = id.match(/^focus:([a-z][a-z0-9.-]*)$/);
   if (focus) return { path: "focused-items/" + focus[1] + ".json" };
   throw new Error("Unsupported specialist work item: " + id);
@@ -135,6 +137,7 @@ async function receiptProof(job: JobStartResult, id: string, sha: string, archiv
     id.startsWith("event-") ? ["NovelTea-Event-Design", receipt.contentDigest] :
     id.startsWith("interactive-") ? ["NovelTea-Interactive", proof.digest] :
     id.startsWith("composition-") ? ["NovelTea-Composition", receipt.digest] :
+    id.startsWith("repair-") ? ["NovelTea-Review-Repair", receipt.digest] :
     ["NovelTea-Focused-Digest", receipt.sha256];
   if (!HASH.test(trailer[1] ?? "") || !commitMessage.includes(trailer.join(": ")))
     throw new Error("Specialist content digest differs from the original Git commit.");
@@ -202,6 +205,7 @@ function stageOf(id: string) {
   if (id.startsWith("event-")) return "event";
   if (id.startsWith("interactive-")) return "interactive";
   if (id.startsWith("composition-")) return "composition";
+  if (/^repair-[a-f0-9]{40}$/.test(id)) return "repair";
   if (id.startsWith("focus:")) return "focus";
   throw new Error("Unsupported recovery stage.");
 }
@@ -228,11 +232,14 @@ async function planFor(job: JobStartResult, requiredDigest?: string | null) {
 function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: string): { order: string[]; dependencies: Record<string,string[]> } {
   const order = ["foundation", "global-architecture"];
   const deps: Record<string, string[]> = { foundation: [], "global-architecture": ["foundation"] };
-  if (!plan) return { order, dependencies: deps };
   const add = (id: string, dependency: string[]) => {
     if (order.includes(id)) return;
     order.push(id); deps[id] = dependency;
   };
+  if (!plan) {
+    if (stageOf(committedItem) === "repair") add(committedItem, []);
+    return { order, dependencies: deps };
+  }
   // A direct specialist command may legitimately extend an architecture-only
   // job. It does not silently upgrade the author-approved parent contract.
   // The recovery inventory extends just far enough to represent that work.
@@ -240,6 +247,9 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
     architecture: 0, foundations: 1, event: 2, interactive: 3, composition: 4,
   };
   const requested = stageRank[stageOf(committedItem)] ?? 0;
+  // A repair is a distinct verified correction, not a fabricated completion
+  // of an unrelated specialist or a replacement for the rejected checkpoint.
+  if (stageOf(committedItem) === "repair") add(committedItem, []);
   const approved = stageRank[plan.contract.scope.depth ?? "composition"] ?? 4;
   const depth = Math.max(approved, requested);
   if (plan.items.some(i => i.id.startsWith("focus-"))) {
@@ -523,7 +533,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   const previous = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.commitSha !== commitSha &&
     isAncestor(job, p.commitSha, commitSha));
   const completed = [...new Set([...verifiedBaselineStages(job, plan, workItem),
-    ...previous.flatMap(p => p.completedWorkItems), workItem])];
+    ...previous.flatMap(p => p.completedWorkItems).filter(id => work.order.includes(id)), workItem])];
   const remaining = work.order.filter(id => !completed.includes(id));
   const next = remaining.find(id => (work.dependencies[id] ?? []).every(dep => completed.includes(dep))) ?? null;
   const point: RecoveryCheckpoint = {

@@ -48,6 +48,8 @@ Usage:
   pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job review run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job review inspect --story /path/to/story --job draft-1
+  pnpm dev job repair run --story /path/to/story --job draft-1 --commit <rejected-commit-sha> --skills-source /path/to/noveltea-skills
+  pnpm dev job repair inspect --story /path/to/story --job draft-1 --commit <rejected-commit-sha>
   pnpm dev job report --story /path/to/story --job draft-1 [--format markdown] [--output /outside/report.md]
   pnpm dev job report --story /path/to/story --job draft-1 --preview [--fixture]
   pnpm dev job merge preview --story /path/to/story --job draft-1 --fixture
@@ -368,6 +370,34 @@ async function main(): Promise<void> {
       result = action === "inspect" ? await inspectTrustedApproval(job, id) :
         await decideTrustedCliApproval(job, id);
     }
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
+  if (process.argv[2] === "job" && process.argv[3] === "repair") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (!["run", "inspect"].includes(action ?? ""))
+      throw Error("Expected job repair run|inspect.");
+    const values = parseJobOptions(args, "repair", ["--story", "--job", "--commit",
+      "--skills-source", "--provider", "--model", "--thinking"]);
+    const story = values.get("--story"), jobId = values.get("--job"), sha = values.get("--commit");
+    if (!story || !jobId || !sha || !/^[a-f0-9]{40}$/.test(sha))
+      throw Error("Repair requires --story, --job and the exact rejected --commit SHA.");
+    if (action === "inspect" && values.size !== 3)
+      throw Error("Repair inspect accepts only --story, --job and --commit.");
+    const thinking = values.get("--thinking");
+    if (thinking && !["low", "high"].includes(thinking))
+      throw Error("Repair thinking must be low or high.");
+    disableJobCloudTracing();
+    const { startStoryJob } = await import("./job.js");
+    const { inspectRejectedRepair, advanceRejectedRepair } = await import("./rejected-review-repair.js");
+    const job = await startStoryJob({ story, job: jobId }, false);
+    const result = action === "inspect"
+      ? await inspectRejectedRepair(job, sha)
+      : await advanceRejectedRepair(job, sha, {
+        skillsSource: values.get("--skills-source"), provider: values.get("--provider"),
+        model: values.get("--model"), thinking: thinking as "low" | "high" | undefined });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     return;
   }
