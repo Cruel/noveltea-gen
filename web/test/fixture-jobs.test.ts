@@ -425,7 +425,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(pause.status, 'paused')
     assert.equal(pause.revisionVerified, false)
     assert.equal(pause.recovery, null, 'Answered question is not an unsafe-writer repair prompt')
-    assert.match(pause.reason, /creative decision/)
+    assert.match(pause.reason, /waiting for your answer/)
     await answerSpecialistChoice(acquired, pendingChoice.id, pendingChoice.proposalSha256,
       { kind: 'option', optionId: 'existing-canon', note: '' }, 'user:author')
     assert.equal(await safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),

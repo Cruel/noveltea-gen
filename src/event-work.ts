@@ -18,14 +18,18 @@ import { loadSkillConfig } from "./skills.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
+import { recordSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
+  completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
 
-type Phase = "ready" | "writing" | "authored" | "committed";
+type Phase = "ready" | "writing" | "awaiting-author" | "authored" | "committed";
 interface EventReceipt {
   version: 1; jobId: string; baseSha: string; workItemId: string;
   milestoneId: string; planVersion: number; planDigest: string;
   expectedHead: string; phase: Phase; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot;
-  sessionFile?: string; skillReads?: string[]; claimedPaths?: string[];
+  sessionFile?: string; sessionId?: string; authorChoiceId?: string;
+  assignment?: EventAssignment;
+  skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
   conflicts?: string[]; obligations?: string[]; validation?: {
     status: "passed"; validatorVersion: string; protectionBase: string;
@@ -152,7 +156,8 @@ function normalizeMilestone(text: string): string {
   }
   return out.join("\n").trimEnd();
 }
-export async function changedPaths(job: JobStartResult, assignment: EventAssignment, manifest: string[]): Promise<string[]> {
+export async function changedPaths(job: JobStartResult, assignment: EventAssignment, manifest: string[],
+  allowEmpty = false): Promise<string[]> {
   const paths: string[] = [];
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   for (const entry of dirty(job)) {
@@ -186,7 +191,7 @@ export async function changedPaths(job: JobStartResult, assignment: EventAssignm
   paths.sort();
   // An already fulfilled Milestone need not be rewritten just to produce a diff.
   // Reachability and linkage are checked from the final canonical catalog below.
-  if (!paths.some(p => p.startsWith("events/"))) {
+  if (!allowEmpty && !paths.some(p => p.startsWith("events/"))) {
     throw new Error("Event specialist must change at least one Event in its assigned cluster.");
   }
   if (JSON.stringify(paths) !== JSON.stringify([...new Set(manifest)].sort())) {
@@ -468,13 +473,23 @@ export async function runEventWorkItem(input: EventOptions) {
         if (receipt.phase === "writing") {
           throw new Error("Interrupted Event specialist writing; inspect preserved worktree and session before retry.");
         }
+        const resuming = receipt.phase === "awaiting-author";
+        const choice = resuming && receipt.authorChoiceId
+          ? await verifySpecialistChoice(job, receipt.authorChoiceId, "answered") : null;
+        if (resuming && (!choice || choice.workItem !== receipt.workItemId || !receipt.assignment))
+          throw new Error("Event choice has no exact answered work-item assignment.");
         assertHead(job, receipt.expectedHead);
-        if (dirty(job).length) throw new Error("Event specialist requires a clean work-item boundary.");
-        const prior = reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
-        const assign = { ...selectedAssignment(job, arch.plan!, prior, receipt.milestoneId, receipt.workItemId),
-          ...(input.task ? { authorTask: input.task } : {}) };
-        await preflightPiAssignment(job, "event:" + receipt.workItemId, receipt.worker === "pi"
-          ? { provider: receipt.provider, model: receipt.model } : undefined);
+        if (!resuming && dirty(job).length)
+          throw new Error("Event specialist requires a clean work-item boundary.");
+        const prior = resuming ? null : reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
+        const assign = resuming ? receipt.assignment! : {
+          ...selectedAssignment(job, arch.plan!, prior!, receipt.milestoneId, receipt.workItemId),
+          ...(input.task ? { authorTask: input.task } : {}),
+        };
+        await preflightPiAssignment(job, "event:" + receipt.workItemId,
+          receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model } : undefined);
+        if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
+        receipt.assignment = assign;
         receipt.phase = "writing";
         await persist(receiptFile, receipt);
         try {
@@ -529,8 +544,30 @@ export async function runEventWorkItem(input: EventOptions) {
             }
           } else {
             evidence = await authorEventCluster(job, receipt.snapshot!, assign, receipt.provider, receipt.model,
-              async file => { receipt.sessionFile = file; await persist(receiptFile, receipt); }, verifyDraft);
+              async file => { receipt.sessionFile = file; await persist(receiptFile, receipt); }, verifyDraft,
+              choice ?? undefined);
           }
+          if (evidence.authorQuestion) {
+            await changedPaths(job, assign, evidence.claimedPaths, true);
+            assertHead(job, receipt.expectedHead);
+            const checked = await validate(receipt.expectedHead);
+            const protection = (checked.report as Report | undefined)?.protection;
+            if (!protection || protection.status !== "checked" ||
+                protection.changes.length || protection.warnings.length)
+              throw Error("Event author choice cannot bypass protected-canon validation.");
+            if (!evidence.sessionFile || !evidence.piSessionId)
+              throw Error("Event author choice lacks a pinned Pi session.");
+            if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
+            const pending = await recordSpecialistChoice(job, receipt.workItemId,
+              evidence.authorQuestion, evidence.piSessionId, evidence.sessionFile);
+            receipt.authorChoiceId = pending.id;
+            receipt.sessionId = evidence.piSessionId;
+            receipt.sessionFile = evidence.sessionFile;
+            receipt.phase = "awaiting-author";
+            await persist(receiptFile, receipt);
+            throw new SpecialistChoiceRequiredError();
+          }
+          if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
           receipt.claimedPaths = evidence.claimedPaths;
           receipt.conflicts = evidence.conflicts;
           receipt.obligations = evidence.obligations;
@@ -541,7 +578,8 @@ export async function runEventWorkItem(input: EventOptions) {
           receipt.phase = "authored";
           await persist(receiptFile, receipt);
         } catch (error) {
-          receipt.failure = String(error);
+          if (error instanceof SpecialistChoiceRequiredError) delete receipt.failure;
+          else receipt.failure = String(error);
           await persist(receiptFile, receipt);
           throw error;
         }

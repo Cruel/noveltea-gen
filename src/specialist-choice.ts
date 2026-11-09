@@ -14,10 +14,30 @@ export interface SpecialistChoiceOption {
   tradeoffs: string;
 }
 export interface SpecialistChoiceQuestion {
+  /** Omitted in existing persisted multi-alternative receipts. */
+  kind?: "free-text" | "yes-no" | "alternatives";
   question: string;
-  options: SpecialistChoiceOption[];
-  recommendedId: string;
-  recommendationReason: string;
+  options?: SpecialistChoiceOption[];
+  recommendedId?: string;
+  recommendationReason?: string;
+  context?: Array<{ path: string; line: number; description: string }>;
+}
+export function specialistChoiceKind(q: SpecialistChoiceQuestion) {
+  return q.kind ?? "alternatives";
+}
+export function specialistChoiceOptions(q: SpecialistChoiceQuestion): SpecialistChoiceOption[] {
+  if (specialistChoiceKind(q) === "yes-no") return [
+    { id: "yes", title: "Yes", approach: "", benefits: "", tradeoffs: "" },
+    { id: "no", title: "No", approach: "", benefits: "", tradeoffs: "" },
+  ];
+  return q.options ?? [];
+}
+export function authorChoiceDirection(q: SpecialistChoiceQuestion, answer: SpecialistChoiceAnswer): string {
+  if (answer.kind === "custom") return answer.text + (answer.note ? "\nAdditional guidance: " + answer.note : "");
+  const selected = specialistChoiceOptions(q).find(o => o.id === answer.optionId);
+  if (!selected) throw Error("Stored author answer no longer matches the exact options.");
+  return JSON.stringify({ id: selected.id, title: selected.title, approach: selected.approach }) +
+    (answer.note ? "\nAdditional guidance: " + answer.note : "");
 }
 export type SpecialistChoiceAnswer =
   | { kind: "option"; optionId: string; note: string }
@@ -32,7 +52,7 @@ export interface SpecialistChoiceReceipt {
 }
 export class SpecialistChoiceRequiredError extends Error {
   constructor() {
-    super("Specialist paused for an author choice. Review 2–4 options or supply your own direction in Author questions and approvals.");
+    super("Specialist paused for an author choice. Respond in Chat or Author questions and approvals.");
     this.name = "SpecialistChoiceRequiredError";
   }
 }
@@ -49,12 +69,38 @@ function git(job: JobStartResult, ...args: string[]) {
 export function parseSpecialistChoice(value: unknown): SpecialistChoiceQuestion {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid author-choice request.");
   const q = value as Record<string, unknown>;
-  if (Object.keys(q).sort().join(",") !==
-      "options,question,recommendationReason,recommendedId" ||
-      typeof q.question !== "string" || q.question.trim().length < 15 || q.question.length > 1500 ||
-      typeof q.recommendationReason !== "string" || q.recommendationReason.trim().length < 15 ||
-      q.recommendationReason.length > 1200 ||
-      typeof q.recommendedId !== "string" ||
+  const kind = q.kind ?? "alternatives";
+  if (!["free-text", "yes-no", "alternatives"].includes(String(kind)) ||
+      typeof q.question !== "string" || q.question.trim().length < 10 || q.question.length > 1500 ||
+      Object.keys(q).some(key => !["kind", "question", "options", "recommendedId",
+        "recommendationReason", "context"].includes(key)))
+    throw Error("Invalid bounded author question.");
+  if (q.context !== undefined && (!Array.isArray(q.context) || q.context.length > 8 ||
+      q.context.some(ref => !ref || typeof ref !== "object" ||
+        Object.keys(ref).sort().join(",") !== "description,line,path" ||
+        typeof ref.path !== "string" ||
+        !/^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/.test(ref.path) ||
+        !Number.isSafeInteger(ref.line) || ref.line < 1 || ref.line > 100000 ||
+        typeof ref.description !== "string" || !ref.description.trim() || ref.description.length > 400)))
+    throw Error("Author choice context references must be bounded canonical Story locations.");
+  if (kind === "free-text" && (q.options !== undefined ||
+      q.recommendedId !== undefined || q.recommendationReason !== undefined))
+    throw Error("A free-text question cannot force suggested alternatives.");
+  if (kind === "yes-no" && (q.options !== undefined ||
+      q.recommendedId !== undefined && !["yes", "no"].includes(String(q.recommendedId))))
+    throw Error("A Yes/No question has fixed Yes/No/Other choices.");
+  if (kind !== "alternatives") {
+    if (q.recommendationReason !== undefined &&
+        (typeof q.recommendationReason !== "string" ||
+          !q.recommendationReason.trim() || q.recommendationReason.length > 1200))
+      throw Error("Invalid author-choice recommendation.");
+    return { kind: kind as "free-text" | "yes-no", question: q.question,
+      ...(q.recommendedId !== undefined ? { recommendedId: q.recommendedId as string } : {}),
+      ...(q.recommendationReason !== undefined ? { recommendationReason: q.recommendationReason as string } : {}),
+      ...(q.context !== undefined ? { context: q.context as SpecialistChoiceQuestion["context"] } : {}) };
+  }
+  if (typeof q.recommendationReason !== "string" || q.recommendationReason.trim().length < 15 ||
+      q.recommendationReason.length > 1200 || typeof q.recommendedId !== "string" ||
       !Array.isArray(q.options) || q.options.length < 2 || q.options.length > 4)
     throw Error("An author choice requires 2–4 explained alternatives and one reasoned recommendation.");
   const ids = new Set<string>();
@@ -72,8 +118,10 @@ export function parseSpecialistChoice(value: unknown): SpecialistChoiceQuestion 
       benefits: o.benefits as string, tradeoffs: o.tradeoffs as string };
   });
   if (!ids.has(q.recommendedId)) throw Error("Recommended solution must be one of the offered alternatives.");
-  return { question: q.question, options, recommendedId: q.recommendedId,
-    recommendationReason: q.recommendationReason };
+  return { ...(q.kind !== undefined ? { kind: "alternatives" as const } : {}),
+    question: q.question, options, recommendedId: q.recommendedId as string,
+    recommendationReason: q.recommendationReason as string,
+    ...(q.context !== undefined ? { context: q.context as SpecialistChoiceQuestion["context"] } : {}) };
 }
 /** Recover a structured author request even when Pi formats the final JSON
  * across lines or in a Markdown code fence. Never parse tool output or allow
@@ -135,6 +183,28 @@ async function evidence(job: JobStartResult) {
   }
   return { head, digest: sha(JSON.stringify({ head, versions })) };
 }
+async function verifyChoiceSession(job: JobStartResult, workItem: string,
+  sessionFile: string, sessionId: string) {
+  if (workItem === "world-foundations" || workItem === "character-foundations")
+    return verifyJobPiSession(job, workItem === "world-foundations" ? "world" : "character",
+      sessionFile, sessionId);
+  if (/^event-[a-z][a-z0-9-]*$/.test(workItem))
+    return verifyJobPiSession(job, "event", sessionFile, sessionId, workItem);
+  throw Error("Specialist choice work-item session binding is not configured.");
+}
+async function readSpecialistState(job: JobStartResult, path: string) {
+  const stat = await lstat(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 200_000)
+    throw Error("Unsafe specialist work-item state.");
+  const state = JSON.parse(await readFile(path, "utf8")) as {
+    jobId?: string; threadId?: string; workItemId?: string;
+    phase?: string; authorChoiceId?: string;
+    units?: Array<{ id?: string; phase?: string; authorChoiceId?: string }>;
+  };
+  if (state.jobId !== job.jobId || state.threadId && state.threadId !== job.threadId)
+    throw Error("Specialist state belongs to another job.");
+  return state;
+}
 async function safeRead(job: JobStartResult, id: string) {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("Invalid specialist-choice ID.");
   const path = file(job, id);
@@ -151,9 +221,19 @@ async function safeRead(job: JobStartResult, id: string) {
         worktreeDigest: r.worktreeDigest, sessionId: r.sessionId,
         sessionSha256: r.sessionSha256, question: parseSpecialistChoice(r.question) })) !== r.proposalSha256)
     throw Error("Specialist-choice receipt is inconsistent or modified.");
+  if (r.phase === "awaiting-author" && r.answer)
+    throw Error("A pending author question cannot contain a prefilled answer.");
   if (r.phase !== "awaiting-author" && (!r.answer ||
-      !/^user:[A-Za-z0-9_-]{1,128}$/.test(r.answer.principal)))
-    throw Error("A resolved choice has no authenticated author answer.");
+      !/^user:[A-Za-z0-9_-]{1,128}$/.test(r.answer.principal) ||
+      typeof r.answer.submittedAt !== "string" ||
+      !/^\d{4}-\d\d-\d\dT/.test(r.answer.submittedAt) ||
+      typeof r.answer.note !== "string" || r.answer.note.length > 1000 ||
+      (r.answer.kind === "option"
+        ? specialistChoiceKind(r.question) === "free-text" ||
+          !specialistChoiceOptions(r.question).some(o =>
+            o.id === (r.answer as { optionId: string }).optionId)
+        : r.answer.kind !== "custom" || !r.answer.text?.trim() || r.answer.text.length > 4000)))
+    throw Error("A resolved choice has no valid authenticated, source-bound answer.");
   return r;
 }
 async function save(job: JobStartResult, r: SpecialistChoiceReceipt) {
@@ -167,9 +247,7 @@ export async function recordSpecialistChoice(job: JobStartResult, workItem: stri
   question: SpecialistChoiceQuestion, sessionId: string, sessionFile: string) {
   const q = parseSpecialistChoice(question);
   if (!ID.test(workItem)) throw Error("Invalid specialist choice work item.");
-  const kind = workItem === "world-foundations" ? "world" : workItem === "character-foundations" ? "character" : null;
-  if (!kind) throw Error("Specialist choice work-item session binding is not configured.");
-  await verifyJobPiSession(job, kind, sessionFile, sessionId);
+  await verifyChoiceSession(job, workItem, sessionFile, sessionId);
   const { head, digest } = await evidence(job);
   const transcriptHash = sha(await readFile(sessionFile));
   const immutable = { jobId: job.jobId, workItem, headSha: head, worktreeDigest: digest,
@@ -187,27 +265,31 @@ export async function inspectSpecialistChoice(job: JobStartResult, id: string) {
 /** A single shared author panel reads the currently waiting specialist rather
  * than accepting an arbitrary controller-supplied receipt path. */
 export async function activeSpecialistChoice(job: JobStartResult) {
-  const path = join(job.stateDir, "character-world.json");
-  if (!existsSync(path)) return null;
-  const st = await lstat(path);
-  if (!st.isFile() || st.isSymbolicLink() || st.size > 200_000)
-    throw Error("Invalid specialist state.");
-  const state = JSON.parse(await readFile(path, "utf8")) as {
-    jobId?: string; threadId?: string;
-    units?: Array<{ id?: string; phase?: string; authorChoiceId?: string }>;
-  };
-  if (state.jobId !== job.jobId || (state.threadId && state.threadId !== job.threadId) ||
-      !Array.isArray(state.units)) throw Error("Specialist state belongs to another job.");
-  const waiting = state.units.filter(u => u.phase === "awaiting-author");
+  const waiting: Array<{ id?: string; phase?: string; authorChoiceId?: string }> = [];
+  const statePath = join(job.stateDir, "character-world.json");
+  if (existsSync(statePath)) {
+    const state = await readSpecialistState(job, statePath);
+    if (!Array.isArray(state.units)) throw Error("Invalid Character/World choice state.");
+    waiting.push(...state.units.filter(u => u.phase === "awaiting-author"));
+  }
+  const events = join(job.stateDir, "event-items");
+  if (existsSync(events)) {
+    const { readdir } = await import("node:fs/promises");
+    const names = (await readdir(events)).filter(n => /^[a-z0-9-]+\.json$/.test(n));
+    if (names.length > 256) throw Error("Specialist author-choice inventory exceeds bounded limit.");
+    for (const name of names) {
+      const state = await readSpecialistState(job, join(events, name));
+      if (state.phase === "awaiting-author")
+        waiting.push({ id: state.workItemId, phase: state.phase, authorChoiceId: state.authorChoiceId });
+    }
+  }
   if (!waiting.length) return null;
-  if (waiting.length !== 1 || !waiting[0]?.authorChoiceId ||
-      waiting[0]?.id !== "character-foundations" && waiting[0]?.id !== "world-foundations")
+  if (waiting.length !== 1 || !waiting[0]?.authorChoiceId || !waiting[0]?.id)
     throw Error("Ambiguous specialist author-choice state.");
-  const receipt = await safeRead(job, waiting[0].authorChoiceId);
-  if (receipt.workItem !== waiting[0].id ||
-      !["awaiting-author", "answered"].includes(receipt.phase))
+  const choice = await safeRead(job, waiting[0].authorChoiceId);
+  if (choice.workItem !== waiting[0].id || !["awaiting-author", "answered"].includes(choice.phase))
     throw Error("Specialist author-choice state and saved receipt differ.");
-  return receipt;
+  return choice;
 }
 export async function verifySpecialistChoice(job: JobStartResult, id: string,
   phase: "awaiting-author" | "answered") {
@@ -216,8 +298,7 @@ export async function verifySpecialistChoice(job: JobStartResult, id: string,
   const { head, digest } = await evidence(job);
   if (head !== r.headSha || digest !== r.worktreeDigest)
     throw Error("Uncommitted draft changed after the specialist asked; reconcile it before proceeding.");
-  await verifyJobPiSession(job, r.workItem === "world-foundations" ? "world" : "character",
-    r.sessionFile, r.sessionId);
+  await verifyChoiceSession(job, r.workItem, r.sessionFile, r.sessionId);
   if (sha(await readFile(r.sessionFile)) !== r.sessionSha256)
     throw Error("Original Pi session changed since the author question; refuse replay.");
   return r;
@@ -229,7 +310,8 @@ export async function answerSpecialistChoice(job: JobStartResult, id: string, pr
   const r = await verifySpecialistChoice(job, id, "awaiting-author");
   if (r.proposalSha256 !== proposalSha256 || !answer || !["option", "custom"].includes(answer.kind) ||
       typeof answer.note !== "string" || answer.note.length > 1000 ||
-      (answer.kind === "option" && (!r.question.options.some(o => o.id === answer.optionId) ||
+      (answer.kind === "option" && (specialistChoiceKind(r.question) === "free-text" ||
+        !specialistChoiceOptions(r.question).some(o => o.id === answer.optionId) ||
         Object.keys(answer).sort().join(",") !== "kind,note,optionId")) ||
       (answer.kind === "custom" && (typeof answer.text !== "string" ||
         !answer.text.trim() || answer.text.length > 4000 ||

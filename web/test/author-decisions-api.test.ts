@@ -213,6 +213,63 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       text: 'Follow existing canon but include a distinct consequence for both investigation paths.' })
     assert.equal(custom.status, 200, custom.data.error)
     assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'custom')
+
+    // The same authenticated endpoint accepts free-text questions from a
+    // different specialist without a synthetic 2–4-choice requirement.
+    const worldDir = join(job.stateDir, 'character-world-sessions', 'world')
+    mkdirSync(worldDir, { recursive: true })
+    const worldSession = randomUUID(), worldFile = join(worldDir, 'world.jsonl')
+    writeFileSync(worldFile, JSON.stringify({ type: 'session', id: worldSession,
+      cwd: job.worktreeStoryRoot }) + '\n')
+    const textQuestion = { kind: 'free-text' as const, question: 'How should this lost archive be remembered?' }
+    const plain = await recordSpecialistChoice(job, 'world-foundations',
+      textQuestion, worldSession, worldFile)
+    writeFileSync(join(job.stateDir, 'character-world.json'), JSON.stringify({
+      jobId, threadId: job.threadId, units: [
+        { id: 'world-foundations', phase: 'awaiting-author', authorChoiceId: plain.id },
+        { id: 'character-foundations', phase: 'pending' },
+      ],
+    }))
+    assert.equal((await inspectSpecialistChoice(job, plain.id)).question.kind, 'free-text')
+    assert.equal((await api('POST', { action: 'choice', id: plain.id,
+      proposalSha256: plain.proposalSha256, kind: 'option', optionId: 'yes' })).status, 409)
+    const plainAnswer = await api('POST', { action: 'choice', id: plain.id,
+      proposalSha256: plain.proposalSha256, kind: 'custom',
+      text: 'It should represent lost community trust.', note: 'Preserve the uncertainty.' })
+    assert.equal(plainAnswer.status, 200, plainAnswer.data.error)
+    assert.equal((await inspectSpecialistChoice(job, plain.id)).answer?.note, 'Preserve the uncertainty.')
+
+    // Event-design questions are not tied to Character/World state or a
+    // different authorization endpoint. Yes/No and Other remain distinct.
+    writeFileSync(join(job.stateDir, 'character-world.json'), JSON.stringify({
+      jobId, threadId: job.threadId, units: [
+        { id: 'world-foundations', phase: 'committed' },
+        { id: 'character-foundations', phase: 'committed' },
+      ],
+    }))
+    const eventDir = join(job.stateDir, 'event-sessions', 'event-revelation')
+    mkdirSync(eventDir, { recursive: true })
+    const eventSession = randomUUID(), eventFile = join(eventDir, 'event.jsonl')
+    writeFileSync(eventFile, JSON.stringify({ type: 'session', id: eventSession,
+      cwd: job.worktreeStoryRoot }) + '\n')
+    const binary = await recordSpecialistChoice(job, 'event-revelation', {
+      kind: 'yes-no', question: 'Should the witness disclose the ledger to the player?',
+    }, eventSession, eventFile)
+    mkdirSync(join(job.stateDir, 'event-items'), { recursive: true })
+    writeFileSync(join(job.stateDir, 'event-items', 'revelation.json'), JSON.stringify({
+      jobId, workItemId: 'event-revelation',
+      phase: 'awaiting-author', authorChoiceId: binary.id,
+    }))
+    assert.equal((await inspectSpecialistChoice(job, binary.id)).workItem, 'event-revelation')
+    assert.equal((await api('POST', { action: 'choice', id: binary.id,
+      proposalSha256: binary.proposalSha256, kind: 'option', optionId: 'maybe' })).status, 409)
+    const eventAnswer = await api('POST', { action: 'choice', id: binary.id,
+      proposalSha256: binary.proposalSha256, kind: 'option', optionId: 'yes',
+      note: 'Reveal it only after the event.' })
+    assert.equal(eventAnswer.status, 200, eventAnswer.data.error)
+    assert.equal((await inspectSpecialistChoice(job, binary.id)).answer?.kind, 'option')
+    assert.equal((await api('POST', { action: 'choice', id: binary.id,
+      proposalSha256: binary.proposalSha256, kind: 'option', optionId: 'no' })).status, 409)
   } finally {
     store.close()
     if (previous.state === undefined) delete process.env.NT_STATE_DIR

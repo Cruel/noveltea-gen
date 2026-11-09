@@ -70,11 +70,13 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
         ['paused', 'blocked'].includes(saved.status ?? '') && !saved.result &&
         ['Foundation requires an explicit author decision before generation can proceed.',
           'Pi did not author the canonical Markdown through a standard write/edit tool.'].includes(saved.reason ?? '')
-      const choiceBoundary = !!choiceAnswer && choiceAnswer.workItem.endsWith('-foundations') &&
+      const choiceBoundary = !!choiceAnswer &&
+        (choiceAnswer.workItem.endsWith('-foundations') || choiceAnswer.workItem.startsWith('event-')) &&
         saved.active !== null && typeof saved.active === 'object' &&
-        (saved.active as { stage?: string }).stage === 'foundations' &&
+        (saved.active as { stage?: string }).stage ===
+          (choiceAnswer?.workItem.startsWith('event-') ? 'event' : 'foundations') &&
         saved.status === 'paused' && !saved.result &&
-        saved.reason === 'Specialist paused for an author choice. Review 2–4 options or supply your own direction in Author questions and approvals.'
+        saved.reason?.startsWith('Specialist paused for an author choice.') === true
       const budgetBoundary = !!policy.budget.pause && !!saved.active && !saved.result &&
         saved.reason?.startsWith('Pi budget exhausted at safe boundary:') === true
       if (authorBoundary) {

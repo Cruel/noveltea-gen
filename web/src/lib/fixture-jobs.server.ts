@@ -258,7 +258,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
       guidance: string } | null = null
     let waitingForChoice = false
     if (!revisionVerified && row.status === 'paused' && state.active?.stage === 'foundations' &&
-        checkpointReason === 'Specialist paused for an author choice. Review 2–4 options or supply your own direction in Author questions and approvals.') {
+        checkpointReason?.startsWith('Specialist paused for an author choice.') === true) {
       try {
         const question = await activeSpecialistChoice(job)
         if (question && (question.phase === 'awaiting-author' || question.phase === 'answered')) {
@@ -302,7 +302,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
         (state.status ?? 'interrupted'),
       revisionVerified, recovery,
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
-        : waitingForChoice ? 'The specialist is waiting for your creative decision. Choose one of 2–4 proposed approaches or enter your own answer under Author questions and approvals. After saving your choice, use Resume.'
+        : waitingForChoice ? 'The specialist is waiting for your answer in Chat or Author questions and approvals. After saving the answer, use Resume.'
         : authorReady ? 'Foundation exception approved; use Resume to request its first verified retry.'
         : handoff && handoff.status === 'rejected'
           ? 'Author rejected the requested Foundation exception. The protected decision remains binding.'

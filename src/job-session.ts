@@ -6,13 +6,17 @@ import type { JobStartResult } from "./job.js";
 /** Verify the original persisted Pi conversation, never silently replace it. */
 export async function verifyJobPiSession(
   job: JobStartResult,
-  kind: "foundation" | "architecture" | "world" | "character",
+  kind: "foundation" | "architecture" | "world" | "character" | "event",
   file: string | undefined,
   id: string | undefined,
+  workItem?: string,
 ): Promise<void> {
-  const sessions = kind === "world" || kind === "character"
-    ? join(job.stateDir, "character-world-sessions", kind) + sep
-    : join(job.stateDir, kind + "-sessions") + sep;
+  if (kind === "event" && (!workItem || !/^event-[a-z][a-z0-9-]*$/.test(workItem)))
+    throw new Error("Event session requires a pinned specialist work item.");
+  const sessions = kind === "event" ? join(job.stateDir, "event-sessions", workItem!) + sep :
+    kind === "world" || kind === "character"
+      ? join(job.stateDir, "character-world-sessions", kind) + sep
+      : join(job.stateDir, kind + "-sessions") + sep;
   if (!file || !file.startsWith(sessions) || !existsSync(file) ||
       await realpath(file) !== file || !(await lstat(file)).isFile()) {
     throw new Error("Cannot recover Pi session: original " + kind +

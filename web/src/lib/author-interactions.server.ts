@@ -108,7 +108,7 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     if (input?.action === 'choice') {
       const keys = Object.keys(input).sort().join(',')
       if (!recoverable || row?.status !== 'paused' ||
-          !['action,id,kind,optionId,proposalSha256', 'action,id,kind,optionId,proposalSha256,note',
+          !['action,id,kind,optionId,proposalSha256', 'action,id,kind,note,optionId,proposalSha256',
             'action,id,kind,proposalSha256,text', 'action,id,kind,note,proposalSha256,text']
             .includes(keys) ||
           typeof input.id !== 'string' || !/^[a-f0-9-]{36}$/.test(input.id) ||

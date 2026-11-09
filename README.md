@@ -1723,6 +1723,29 @@ native validation, while independent narrative review receives each specialist
 outcome in addition to the top-level author goal. Legacy direct CLI generation
 without a per-Turn receipt retains its independent explicit-contract checks.
 
+### Unified Author Choices (#114)
+
+Character, World, and Event specialists share one bounded, durable author-choice
+contract and the same authenticated Chat/Job answer form. Specialists can ask
+an ordinary free-text question without forcing radio choices; yes/no
+questions always offer **Other**; meaningful 2–4-option proposals also offer
+**Other** with required custom text. Optional author notes are recorded for
+both recommended and custom answers. Agent-supplied option identities,
+rationales, recommendations, and canonical context references are data, not
+authority. Their shapes, lengths, IDs, and safe Story paths are validated.
+
+The controller records one source-bound private `specialist-choices/<id>.json`
+receipt with the exact job, Thread, specialist, session transcript SHA-256,
+Git HEAD, modified draft fingerprint, option identity, and authenticated
+author response. The existing author-facing `/author` endpoint verifies
+owner, origin, paused execution and original proposal digest before recording
+the answer; a repeated answer or rewritten question is rejected. A separate
+**Continue generation** action resumes only the original paused specialist.
+The original session is claimed before further Pi calls; an uncertain crash
+is fenced rather than replayed. A normal answer does not authorize changes
+to user-protected decisions, which still require an exact trusted approval.
+Native validation and source-bound edit authority remain mandatory.
+
 ### Turn-level plan completeness (#113)
 
 Successful specialist assignments, native Story validation, and the existing

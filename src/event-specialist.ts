@@ -1,6 +1,8 @@
 import { mkdir } from "node:fs/promises";
+import { parseSpecialistChoice, extractSpecialistChoice, authorChoiceDirection,
+  type SpecialistChoiceQuestion, type SpecialistChoiceReceipt } from "./specialist-choice.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
@@ -40,6 +42,8 @@ export interface EventEvidence {
   conflicts: string[];
   obligations: string[];
   sessionFile?: string;
+  piSessionId?: string;
+  authorQuestion?: SpecialistChoiceQuestion;
   skillReads: string[];
 }
 
@@ -62,6 +66,7 @@ export async function authorEventCluster(
   job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
   provider: string, modelId: string, onSession: (file: string) => Promise<void>,
   verifyDraft: (evidence: EventEvidence) => Promise<string[]>,
+  resume?: SpecialistChoiceReceipt,
 ): Promise<EventEvidence> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -87,7 +92,9 @@ export async function authorEventCluster(
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager,
+    sessionManager: resume
+      ? SessionManager.open(resume.sessionFile, dirname(resume.sessionFile), project.root)
+      : context.manager,
     customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
     noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
   });
@@ -118,6 +125,7 @@ export async function authorEventCluster(
         "Do not run git add, commit, checkout or reset. Git diff/status and grep inspection are permitted. ") +
       "If the scope cannot be fulfilled without changing a protected or unrelated record, report an architectural conflict rather than editing it. " +
       "Any unresolved future alternative must be a concrete later obligation, not a fabricated Event ID. " +
+      "Only if a consequential ambiguity needs author input, optionally return JSON with authorDecisionRequest of kind free-text (question), yes-no (question and optional recommendedId/recommendationReason), or alternatives (question, 2–4 meaningful options with id/title/approach/benefits/tradeoffs and reasoned recommendation), and modifiedRecords:[all changed paths]. All structured choices include Other. This is not authority for protected changes. " +
       "REPORT an exact JSON object at the end (no markdown fences): " +
       '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":["Future alternative requires Event design"]}. ' +
       "The modifiedRecords list MUST include every Story-relative file changed in this ENTIRE work item. " +
@@ -126,7 +134,10 @@ export async function authorEventCluster(
       specialistAuthorInstruction(assignment.authorTask);
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
+      const direction = resume?.answer
+        ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer) +
+          "\nContinue in this exact session without changing protected decisions.\n" : "";
+      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + direction + prompt : prompt);
       const last = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
         throw new Error("Event specialist Pi turn failed: " + (last?.role === "assistant"
@@ -135,6 +146,18 @@ export async function authorEventCluster(
       const skillReads = await requirePinnedSkillReads(session, project.root, required, "Event specialist");
       const finalAssistant = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!finalAssistant || finalAssistant.role !== "assistant") throw new Error("Event specialist reply is missing.");
+      const text = finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+      const proposed = extractSpecialistChoice(text);
+      if (proposed) {
+        const question = parseSpecialistChoice(proposed.authorDecisionRequest);
+        if (!Array.isArray(proposed.modifiedRecords) ||
+            !proposed.modifiedRecords.every(p => typeof p === "string"))
+          throw Error("Event author question lacks an exact modifiedRecords manifest.");
+        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
+        return { claimedPaths: proposed.modifiedRecords as string[], conflicts: [], obligations: [],
+          skillReads, sessionFile: session.sessionManager.getSessionFile() ?? undefined,
+          piSessionId: session.sessionId, authorQuestion: question };
+      }
       const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
         m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
       const calls = session.messages.flatMap(m => m.role === "assistant"

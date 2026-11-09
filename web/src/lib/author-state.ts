@@ -25,8 +25,10 @@ export type RecoveryDecision = {
 export type SpecialistChoice = {
   id: string; workItem: string; phase: 'awaiting-author' | 'answered'
   proposalSha256: string
-  question: { question: string; recommendedId: string; recommendationReason: string;
-    options: Array<{ id: string; title: string; approach: string;
+  question: { kind?: 'free-text' | 'yes-no' | 'alternatives'; question: string;
+    recommendedId?: string; recommendationReason?: string;
+    context?: Array<{ path: string; line: number; description: string }>
+    options?: Array<{ id: string; title: string; approach: string;
       benefits: string; tradeoffs: string }> }
   answer?: { kind: 'option' | 'custom'; optionId?: string; text?: string; note: string }
 }

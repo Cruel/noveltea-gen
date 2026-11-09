@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { AuthorChoicePanel } from '@/components/author-choice-panel'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { sendAuthorCommand } from '../../../lib/author.functions'
@@ -37,10 +37,10 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
     finally { setBusy(null) }
   }
   const submitChoice = async (item: SpecialistChoice) => {
-    const selected = choiceSelections[item.id] ?? item.question.recommendedId
-    const custom = selected === '__custom__'
+    const selected = choiceSelections[item.id] ?? item.question.recommendedId ?? ''
+    const custom = item.question.kind === 'free-text' || selected === '__custom__'
     const text = (customAnswers[item.id] ?? '').trim()
-    if (custom && !text) return
+    if (!selected && !custom || custom && !text) return
     setBusy(item.id); setError(null)
     try {
       await sendAuthorCommand({ data: { jobId, commandJson: JSON.stringify({
@@ -102,62 +102,15 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
     {notice && <p role="status">{notice}</p>}
     {!state && !error && presentation === 'page' && <p>Checking saved author interrupts…</p>}
     {presentation === 'page' && state && items.length === 0 && (state.decisions ?? []).length === 0 && !state.choice && <p>No author responses are awaiting review.</p>}
-    {state?.choice && <article aria-label="Specialist creative choice" key={state.choice.id}>
-      <h3>{presentation === 'chat' ? 'Your choice is needed' : <>Creative decision needed · <code>{state.choice.workItem}</code></>}</h3>
-      <p>{state.choice.question.question}</p>
-      {state.choice.phase === 'answered' ? <p role="status">Your choice is saved.
-        {presentation === 'chat'
-          ? ' Select Continue generation below to resume the original specialist.'
-          : ' Select Resume in Execution controls to continue the original specialist.'}
-        The answer does not itself authorize changing protected creative decisions.</p> : <>
-        <fieldset disabled={busy !== null}>
-          <legend>Choose an approach or provide your own</legend>
-          <RadioGroup disabled={busy !== null}
-            value={choiceSelections[state.choice.id] ?? state.choice.question.recommendedId}
-            onValueChange={value => setChoiceSelections(old => ({ ...old, [state.choice!.id]: value }))}>
-          {state.choice.question.options.map(option => <div key={option.id}
-            className="mb-2 rounded-md border border-border/50 p-2">
-            <label className="flex items-center gap-2">
-              <RadioGroupItem value={option.id} aria-label={option.title} />
-              <strong>{option.title}</strong>
-              {option.id === state.choice!.question.recommendedId &&
-                <span className="text-xs text-muted-foreground">Recommended</span>}
-            </label>
-            <p className="mt-1 text-sm">{option.approach}</p>
-            {presentation === 'chat' ? <details className="mt-1 text-xs text-muted-foreground">
-              <summary className="cursor-pointer">Benefits and trade-offs</summary>
-              <p><strong>Benefits:</strong> {option.benefits}</p>
-              <p><strong>Trade-offs:</strong> {option.tradeoffs}</p>
-              {option.id === state.choice!.question.recommendedId &&
-                <p><strong>Why recommended:</strong> {state.choice!.question.recommendationReason}</p>}
-            </details> : <>
-              <p><strong>Benefits:</strong> {option.benefits}</p>
-              <p><strong>Trade-offs:</strong> {option.tradeoffs}</p>
-              {option.id === state.choice!.question.recommendedId &&
-                <p><strong>Why recommended:</strong> {state.choice!.question.recommendationReason}</p>}
-            </>}
-          </div>)}
-          <label style={{ display: 'block' }}>
-            <RadioGroupItem value="__custom__" aria-label="My own direction" />
-            {' '}<strong>Something else — my own direction</strong>
-          </label>
-          </RadioGroup>
-          {choiceSelections[state.choice.id] === '__custom__' && <Textarea
-            aria-label="Custom creative direction" rows={4} maxLength={4000}
-            value={customAnswers[state.choice.id] ?? ''}
-            placeholder="Describe the solution you'd prefer, independently of the suggested options."
-            onChange={e => setCustomAnswers(old => ({ ...old, [state.choice!.id]: e.target.value }))}/>}
-        </fieldset>
-        <label htmlFor={'choice-note-' + state.choice.id}>Additional instructions (optional)</label>
-        <Textarea id={'choice-note-' + state.choice.id} rows={2} maxLength={1000}
-          disabled={busy !== null} value={choiceNotes[state.choice.id] ?? ''}
-          onChange={e => setChoiceNotes(old => ({ ...old, [state.choice!.id]: e.target.value }))}/>
-        <Button type="button" disabled={busy !== null ||
-          (choiceSelections[state.choice.id] === '__custom__' &&
-            !(customAnswers[state.choice.id] ?? '').trim())}
-          onClick={() => void submitChoice(state.choice!)}>Submit decision</Button>
-      </>}
-    </article>}
+    {state?.choice && <AuthorChoicePanel key={state.choice.id}
+      choice={state.choice} presentation={presentation} busy={busy !== null}
+      selection={choiceSelections[state.choice.id] ?? ''}
+      customAnswer={customAnswers[state.choice.id] ?? ''}
+      note={choiceNotes[state.choice.id] ?? ''}
+      onSelect={value => setChoiceSelections(old => ({ ...old, [state.choice!.id]: value }))}
+      onCustomAnswer={value => setCustomAnswers(old => ({ ...old, [state.choice!.id]: value }))}
+      onNote={value => setChoiceNotes(old => ({ ...old, [state.choice!.id]: value }))}
+      onSubmit={() => void submitChoice(state.choice!)} />}
     {(state?.decisions ?? []).map(item => <article key={'recovery-' + item.id}
       aria-label={item.title} className="job-review-item">
       <details open={item.phase !== 'recorded' ? true : undefined}>

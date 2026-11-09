@@ -47,6 +47,29 @@ test("choice parser enforces 2–4 complete options and exactly one recommended 
     candidate.options[0], { ...candidate.options[1], tradeoffs: "" },
   ] }), /trade-offs/);
 });
+
+
+test("shared Author Choices accept text, binary/Other and meaningful multi-alternatives without forced recommendations", () => {
+  const plain = parseSpecialistChoice({ kind: "free-text",
+    question: "What should Nia say when she learns the truth?" });
+  assert.equal(plain.kind, "free-text");
+  assert.equal(plain.options, undefined);
+  const binary = parseSpecialistChoice({ kind: "yes-no",
+    question: "Should Nia disclose the evidence to the player?",
+    recommendedId: "no", recommendationReason: "The current event withholds the witness identity." });
+  assert.equal(binary.kind, "yes-no");
+  assert.equal(binary.recommendedId, "no");
+  assert.equal(parseSpecialistChoice({ kind: "alternatives", ...candidate,
+    context: [{ path: "characters/nia.md", line: 4, description: "Her established motive" }] }).context?.length, 1);
+  assert.throws(() => parseSpecialistChoice({ kind: "free-text", ...candidate }), /free-text/);
+  assert.throws(() => parseSpecialistChoice({ kind: "yes-no", question: "Can Nia reveal the ledger?",
+    recommendedId: "maybe" }), /Yes\/No/);
+  assert.throws(() => parseSpecialistChoice({ kind: "alternatives", ...candidate,
+    context: [{ path: "../private.json", line: 1, description: "Unsafe context" }] }), /canonical/);
+  assert.throws(() => parseSpecialistChoice({ kind: "alternatives", ...candidate,
+    options: [candidate.options[0], candidate.options[0]] }), /unique/);
+});
+
 test("author answer survives restart; only the original session, HEAD and draft bytes can resume", {
   timeout: 35_000,
 }, async () => {
@@ -86,6 +109,14 @@ test("author answer survives restart; only the original session, HEAD and draft 
     }));
     assert.equal((await activeSpecialistChoice(job))?.id, receipt.id);
     assert.equal((await verifySpecialistChoice(job, receipt.id, "awaiting-author")).phase, "awaiting-author");
+    const savedChoiceFile = join(job.stateDir, "specialist-choices", receipt.id + ".json");
+    const originalBytes = readFileSync(savedChoiceFile, "utf8");
+    const altered = JSON.parse(originalBytes);
+    altered.question.options[0].id = "substituted-option";
+    writeFileSync(savedChoiceFile, JSON.stringify(altered));
+    await assert.rejects(() => inspectSpecialistChoice(job, receipt.id),
+      /inconsistent or modified|Recommended solution/, "changed option identities cannot inherit an old response");
+    writeFileSync(savedChoiceFile, originalBytes);
     await assert.rejects(() => answerSpecialistChoice(job, receipt.id, "f".repeat(64),
       { kind: "option", optionId: "systemic", note: "" }, "user:owner"), /stale/);
     await assert.rejects(() => answerSpecialistChoice(job, receipt.id, receipt.proposalSha256,
@@ -113,6 +144,69 @@ test("author answer survives restart; only the original session, HEAD and draft 
     await completeSpecialistChoice(job, receipt.id);
     assert.equal((await inspectSpecialistChoice(job, receipt.id)).phase, "consumed");
     assert.equal(existsSync(dirtyFile), true, "Author decision never resets an uncommitted Story draft");
+
+    // A different Event-design specialist uses the same controller and typed
+    // answer path, not a Character-specific RPC or permission shortcut.
+    writeFileSync(join(job.stateDir, "character-world.json"), JSON.stringify({
+      jobId: job.jobId, threadId: job.threadId,
+      units: [{ id: "world-foundations", phase: "committed" },
+        { id: "character-foundations", phase: "committed" }],
+    }));
+    const eventDir = join(job.stateDir, "event-sessions", "event-disclosure");
+    mkdirSync(eventDir, { recursive: true });
+    const eventSession = randomUUID(), eventFile = join(eventDir, "event.jsonl");
+    writeFileSync(eventFile, JSON.stringify({ type: "session", id: eventSession,
+      cwd: job.worktreeStoryRoot }) + "\n");
+    const binary = parseSpecialistChoice({ kind: "yes-no",
+      question: "Should Nia reveal the archive record before confronting the witness?" });
+    const event = await recordSpecialistChoice(job, "event-disclosure", binary, eventSession, eventFile);
+    const eventItems = join(job.stateDir, "event-items");
+    mkdirSync(eventItems);
+    writeFileSync(join(eventItems, "disclosure.json"), JSON.stringify({
+      jobId: job.jobId, workItemId: "event-disclosure",
+      phase: "awaiting-author", authorChoiceId: event.id,
+    }));
+    assert.equal((await activeSpecialistChoice(job))?.workItem, "event-disclosure");
+    await assert.rejects(() => answerSpecialistChoice(job, event.id, event.proposalSha256,
+      { kind: "option", optionId: "maybe", note: "" }, "user:owner"), /Invalid/);
+    const eventAnswer = await answerSpecialistChoice(job, event.id, event.proposalSha256,
+      { kind: "option", optionId: "no", note: "Reveal after the player's choice." }, "user:owner");
+    assert.equal(eventAnswer.answer?.kind, "option");
+    assert.equal((await verifySpecialistChoice(job, event.id, "answered")).phase, "answered");
+    await claimSpecialistChoice(job, event.id);
+    await assert.rejects(() => claimSpecialistChoice(job, event.id), /required author boundary/);
+    await completeSpecialistChoice(job, event.id);
+
+    // Plain-text questions also use the same bounded authenticated receipt.
+    writeFileSync(join(eventItems, "disclosure.json"), JSON.stringify({
+      jobId: job.jobId, workItemId: "event-disclosure", phase: "committed",
+    }));
+    const worldDir = join(job.stateDir, "character-world-sessions", "world");
+    mkdirSync(worldDir, { recursive: true });
+    const worldSession = randomUUID(), worldFile = join(worldDir, "world.jsonl");
+    writeFileSync(worldFile, JSON.stringify({ type: "session", id: worldSession,
+      cwd: job.worktreeStoryRoot }) + "\n");
+    const textQuestion = parseSpecialistChoice({ kind: "free-text",
+      question: "What should the archive's forgotten name mean to the player?" });
+    const world = await recordSpecialistChoice(job, "world-foundations",
+      textQuestion, worldSession, worldFile);
+    writeFileSync(join(job.stateDir, "character-world.json"), JSON.stringify({
+      jobId: job.jobId, threadId: job.threadId,
+      units: [{ id: "world-foundations", phase: "awaiting-author", authorChoiceId: world.id },
+        { id: "character-foundations", phase: "pending" }],
+    }));
+    assert.equal((await activeSpecialistChoice(job))?.id, world.id);
+    await assert.rejects(() => answerSpecialistChoice(job, world.id, world.proposalSha256,
+      { kind: "option", optionId: "yes", note: "" }, "user:owner"), /Invalid/);
+    const worldAnswer = await answerSpecialistChoice(job, world.id, world.proposalSha256,
+      { kind: "custom", text: "It represents a debt that the archivists refuse to name.",
+        note: "Keep the meaning ambiguous until the final route." }, "user:owner");
+    assert.equal(worldAnswer.answer?.note, "Keep the meaning ambiguous until the final route.");
+    assert.equal((await activeSpecialistChoice({ ...job }))?.phase, "answered");
+    git(job.worktreeRoot, "add", ".");
+    git(job.worktreeRoot, "commit", "-qm", "Unauthorized revision after author answer");
+    await assert.rejects(() => verifySpecialistChoice(job, world.id, "answered"),
+      /changed/, "new HEAD cannot inherit an answer to the prior Story revision");
   } finally {
     if (old.state === undefined) delete process.env.NT_STATE_DIR;
     else process.env.NT_STATE_DIR = old.state;
