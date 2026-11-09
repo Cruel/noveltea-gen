@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ReactNode, KeyboardEvent, PointerEvent } from 'react'
+import type { ReactElement, ReactNode, KeyboardEvent, PointerEvent } from 'react'
 import { PanelLeftClose, PanelLeftOpen, PanelTopClose, PanelTopOpen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+
+/** A typed slot prevents a plain string from replacing the entire mobile Chat UI. */
+export function StoryMobileWorkspace({ chat }: { chat: ReactElement }) {
+  return <section aria-label="Selected Thread"
+    className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60">
+    {chat}
+  </section>
+}
 
 export const STORY_LAYOUT_KEY = 'noveltea.story-workspace.layout.v1'
 export type StoryLayout = {

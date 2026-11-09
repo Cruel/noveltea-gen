@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { test } from 'node:test'
-import { StoryDesktopWorkspace, DEFAULT_STORY_LAYOUT, STORY_LAYOUT_KEY,
+import { StudioSelect } from '../src/components/studio-select'
+import { StoryDesktopWorkspace, StoryMobileWorkspace, DEFAULT_STORY_LAYOUT, STORY_LAYOUT_KEY,
   clampStoryHeight, parseStoryLayout, storyHeightForKey } from '../src/components/story-desktop-workspace'
 
 test('Story desktop layout has two full-width stacked regions with aligned independent sidebars', () => {
@@ -28,6 +29,35 @@ test('Story desktop layout has two full-width stacked regions with aligned indep
   assert.match(markup, /aria-label="Collapse Outline sidebar"/)
   assert.match(markup, /aria-label="Collapse Thread sidebar"/)
   assert.match(markup, /aria-label="Collapse Story workspace"/)
+})
+
+test('mobile workspace renders the actual Chat component instead of its variable name', () => {
+  const markup = renderToStaticMarkup(createElement(StoryMobileWorkspace, {
+    chat: createElement('div', null,
+      createElement('nav', { 'aria-label': 'Story workspace views' }, 'Chat Graph Outline'),
+      createElement('textarea', { 'aria-label': 'Compose message', defaultValue: 'Unsent draft' })),
+  }))
+  assert.match(markup, /aria-label="Selected Thread"/)
+  assert.match(markup, /aria-label="Story workspace views"/)
+  assert.match(markup, /Chat Graph Outline/)
+  assert.match(markup, /Unsent draft/)
+  assert.doesNotMatch(markup, />chatPanel</)
+})
+
+test('Story select renders the supplied label, not the opaque ID', () => {
+  const markup = renderToStaticMarkup(createElement(StudioSelect, {
+    value: '00000000-0000-4000-8000-000000000001',
+    'aria-label': 'Selected Story',
+    onValueChange: () => {},
+    options: [
+      { value: '00000000-0000-4000-8000-000000000001', label: 'The Last Bell · example' },
+      { value: '00000000-0000-4000-8000-000000000002', label: 'Other Story' },
+    ],
+  }))
+  assert.match(markup, /aria-label="Selected Story"/)
+  assert.match(markup, /data-slot="select-value"[^>]*>The Last Bell · example<\/span>/)
+  // Base UI legitimately stores the opaque value in an inaccessible hidden form input.
+  assert.doesNotMatch(markup.slice(0, markup.indexOf('</button>')), /00000000-0000-4000-8000-000000000001/)
 })
 
 test('site-wide layout storage restores only valid bounded panel state', () => {

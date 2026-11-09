@@ -21,13 +21,16 @@ export function StudioSelect({
   'aria-label': ariaLabel,
 }: StudioSelectProps) {
   const hasEmpty = options.some(option => option.value === '')
+  const selectedLabel = options.find(option => option.value === value)?.label
   return <Select
     value={value === '' ? (hasEmpty ? EMPTY : null) : value}
     onValueChange={next => onValueChange(next === EMPTY ? '' : next ?? '')}
     disabled={disabled}
   >
     <SelectTrigger aria-label={ariaLabel} className={className ?? 'w-full'}>
-      <SelectValue placeholder={placeholder ?? 'Choose an option'} />
+      <SelectValue placeholder={placeholder ?? 'Choose an option'}>
+        {selectedLabel ?? placeholder ?? 'Choose an option'}
+      </SelectValue>
     </SelectTrigger>
     <SelectContent>
       {options.map(option => <SelectItem

@@ -11,7 +11,7 @@ import { ThreadChat } from '@/components/thread-chat'
 import { ThreadUsage } from '@/components/thread-usage'
 import { StoryFirstChat } from '@/components/story-first-chat'
 import { StoryWorkspaceOutline } from '@/components/story-workspace-outline'
-import { StoryDesktopWorkspace } from '@/components/story-desktop-workspace'
+import { StoryDesktopWorkspace, StoryMobileWorkspace } from '@/components/story-desktop-workspace'
 import { StoryWorkspaceInspector } from '@/components/story-workspace-explorer'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
@@ -335,11 +335,15 @@ function StoryConversations() {
           </Button>)}
       </nav>}
     </header>
-    {!isDesktop && explorerView === 'outline' ? <div className="min-h-0 flex-1 overflow-auto">
+    {!isDesktop && explorerView === 'outline' && <div className="min-h-0 flex-1 overflow-auto">
       {outlinePanel}
-    </div> : !isDesktop && explorerView === 'graph' ? <div className="min-h-0 flex-1 overflow-hidden">
+    </div>}
+    {!isDesktop && explorerView === 'graph' && <div className="min-h-0 flex-1 overflow-y-auto">
       {graphPanel}
-    </div> : creatingThread || !data.threads.length ||
+    </div>}
+    {/* Keep the composer mounted while viewing Graph or Outline: unsent text must survive. */}
+    <div className={'min-h-0 flex-1 flex-col ' + (!isDesktop && explorerView !== 'chat' ? 'hidden' : 'flex')}>
+    {creatingThread || !data.threads.length ||
       (selectedThread && selectedThread.status === 'prepared' && selectedThread.id.startsWith('root:'))
       ? <StoryFirstChat key={creatingThread || !data.threads.length ? 'new:' + storyId : selectedThread!.id}
           storyId={storyId}
@@ -352,6 +356,7 @@ function StoryConversations() {
           }} />
       : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />
         : <p className="p-5 text-sm text-muted-foreground">Select a Thread or create a new one.</p>}
+    </div>
   </> : <p className="p-5 text-sm text-muted-foreground">Loading Threads…</p>}
 </div>
   return <main className="mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden px-3 py-3 sm:px-6 sm:py-4">
@@ -392,9 +397,6 @@ function StoryConversations() {
     {(issue || error) && <p role="alert" className="mb-3 text-sm text-destructive">{issue ?? error?.message}</p>}
     {isDesktop ? <StoryDesktopWorkspace outline={outlinePanel}
       graph={graphPanel} threads={navigation} chat={chatPanel} /> :
-      <section aria-label="Selected Thread"
-        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60">
-        chatPanel
-      </section>}
+      <StoryMobileWorkspace chat={chatPanel} />}
   </main>
 }
