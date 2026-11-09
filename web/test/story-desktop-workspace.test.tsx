@@ -4,7 +4,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { test } from 'node:test'
 import { StudioSelect } from '../src/components/studio-select'
 import { StoryDesktopWorkspace, StoryMobileWorkspace, DEFAULT_STORY_LAYOUT, STORY_LAYOUT_KEY,
-  clampStoryHeight, parseStoryLayout, storyHeightForKey, storyHeightForPointer } from '../src/components/story-desktop-workspace'
+  clampStoryHeight, parseStoryLayout, storyHeightForKey, storyHeightForPointer,
+  parseStoryMobileView, mobileViewForKey, STORY_MOBILE_VIEW_KEY } from '../src/components/story-desktop-workspace'
 
 test('Story desktop layout has two full-width stacked regions with aligned independent sidebars', () => {
   const markup = renderToStaticMarkup(createElement(StoryDesktopWorkspace, {
@@ -31,17 +32,47 @@ test('Story desktop layout has two full-width stacked regions with aligned indep
   assert.match(markup, /aria-label="Collapse Story workspace"/)
 })
 
-test('mobile workspace renders the actual Chat component instead of its variable name', () => {
-  const markup = renderToStaticMarkup(createElement(StoryMobileWorkspace, {
-    chat: createElement('div', null,
-      createElement('nav', { 'aria-label': 'Story workspace views' }, 'Chat Graph Outline'),
-      createElement('textarea', { 'aria-label': 'Compose message', defaultValue: 'Unsent draft' })),
-  }))
-  assert.match(markup, /aria-label="Selected Thread"/)
-  assert.match(markup, /aria-label="Story workspace views"/)
-  assert.match(markup, /Chat Graph Outline/)
-  assert.match(markup, /Unsent draft/)
-  assert.doesNotMatch(markup, />chatPanel</)
+test('mobile workspace exposes three exclusive accessible views while retaining the Chat draft', () => {
+  const chat = createElement('textarea', { 'aria-label': 'Compose message', defaultValue: 'Unsent draft' })
+  const slots = { chat, outline: createElement('span', null, 'STORY_OUTLINE'),
+    graph: createElement('span', null, 'NATIVE_GRAPH'), onViewChange: () => {} }
+  const chatMarkup = renderToStaticMarkup(createElement(StoryMobileWorkspace, { ...slots, view: 'chat' }))
+  assert.match(chatMarkup, /aria-label="Selected Thread"/)
+  assert.match(chatMarkup, /role="tablist" aria-label="Story workspace views"/)
+  assert.equal((chatMarkup.match(/role="tab"/g) ?? []).length, 3)
+  assert.equal((chatMarkup.match(/aria-selected="true"/g) ?? []).length, 1)
+  assert.match(chatMarkup, /aria-label="Compose message"/)
+  assert.match(chatMarkup, /Unsent draft/)
+  assert.doesNotMatch(chatMarkup, /NATIVE_GRAPH|STORY_OUTLINE/)
+  const graphMarkup = renderToStaticMarkup(createElement(StoryMobileWorkspace, { ...slots, view: 'graph' }))
+  assert.match(graphMarkup, /NATIVE_GRAPH/)
+  assert.doesNotMatch(graphMarkup, /STORY_OUTLINE/)
+  assert.match(graphMarkup, /hidden=""[^>]*>.*Unsent draft/s)
+  const outlineMarkup = renderToStaticMarkup(createElement(StoryMobileWorkspace, { ...slots, view: 'outline' }))
+  assert.match(outlineMarkup, /STORY_OUTLINE/)
+  assert.doesNotMatch(outlineMarkup, /NATIVE_GRAPH/)
+  assert.match(outlineMarkup, /hidden=""[^>]*>.*Unsent draft/s)
+})
+
+test('mobile view tabs support keyboard previous/next and first/last without capturing unrelated keys', () => {
+  assert.equal(mobileViewForKey('chat', 'ArrowRight'), 'outline')
+  assert.equal(mobileViewForKey('outline', 'ArrowRight'), 'graph')
+  assert.equal(mobileViewForKey('graph', 'ArrowRight'), 'chat')
+  assert.equal(mobileViewForKey('chat', 'ArrowLeft'), 'graph')
+  assert.equal(mobileViewForKey('graph', 'Home'), 'chat')
+  assert.equal(mobileViewForKey('chat', 'End'), 'graph')
+  assert.equal(mobileViewForKey('chat', 'Tab'), null)
+  assert.equal(mobileViewForKey('outline', 'Escape'), null)
+})
+
+test('mobile view preference is independent of desktop layout and rejects invalid values', () => {
+  assert.equal(STORY_MOBILE_VIEW_KEY, 'noveltea.story-workspace.mobile-view.v1')
+  assert.equal(parseStoryMobileView(null), 'chat')
+  assert.equal(parseStoryMobileView('outline'), 'outline')
+  assert.equal(parseStoryMobileView('graph'), 'graph')
+  assert.equal(parseStoryMobileView('chat'), 'chat')
+  assert.equal(parseStoryMobileView('invalid'), 'chat')
+  assert.equal(parseStoryMobileView('{"height":42}'), 'chat')
 })
 
 test('Story select renders the supplied label, not the opaque ID', () => {

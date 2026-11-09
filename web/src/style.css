@@ -38,9 +38,12 @@
 .story-graph-filters [data-slot=select-trigger] { min-width: 130px; max-width: 170px; }
 .story-graph-filters .story-graph-checkbox { display: flex; align-items: center; gap: .4rem; padding-bottom: .45rem; }
 .story-graph-canvas { height: 360px; min-width: 0; background: #101820; border: 1px solid #344657; border-radius: 6px; overflow: hidden; }
-/* The Graph owns the desktop viewport: only the optional filter list scrolls. */
-.story-desktop-graph .story-relationships { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; padding: .5rem; }
-.story-desktop-graph .story-graph-canvas { flex: 1 1 0%; height: auto; min-height: 0; }
+/* Override the global unlayered section/nav rules at mobile workspace scope. */
+.story-mobile-workspace { padding: 0; }
+.story-mobile-tabs { display: flex; gap: .25rem; }
+/* Desktop and mobile Graphs own their full pane: only optional filters scroll. */
+.story-desktop-graph .story-relationships, .story-mobile-graph .story-relationships { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; padding: .5rem; }
+.story-desktop-graph .story-graph-canvas, .story-mobile-graph .story-graph-canvas { flex: 1 1 0%; height: auto; min-height: 0; }
 .story-workspace-graph-filters { flex-shrink: 0; min-width: 0; margin: .2rem 0; }
 .story-workspace-graph-filters > summary { font-size: .75rem; font-weight: 500; }
 .story-workspace-graph-filters .story-graph-filters { max-height: 8rem; overflow-y: auto; margin: .5rem 0; }

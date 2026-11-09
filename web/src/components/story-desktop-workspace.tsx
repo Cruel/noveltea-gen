@@ -3,11 +3,63 @@ import type { ReactElement, ReactNode, KeyboardEvent, PointerEvent } from 'react
 import { PanelLeftClose, PanelLeftOpen, PanelTopClose, PanelTopOpen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
-/** A typed slot prevents a plain string from replacing the entire mobile Chat UI. */
-export function StoryMobileWorkspace({ chat }: { chat: ReactElement }) {
+export type StoryMobileView = 'chat' | 'outline' | 'graph'
+export const STORY_MOBILE_VIEW_KEY = 'noveltea.story-workspace.mobile-view.v1'
+export function parseStoryMobileView(value: string | null): StoryMobileView {
+  return value === 'outline' || value === 'graph' ? value : 'chat'
+}
+
+const mobileViews: StoryMobileView[] = ['chat', 'outline', 'graph']
+export function mobileViewForKey(current: StoryMobileView, key: string): StoryMobileView | null {
+  const index = mobileViews.indexOf(current)
+  const nextIndex = key === 'Home' ? 0 : key === 'End' ? mobileViews.length - 1 :
+    key === 'ArrowRight' ? (index + 1) % mobileViews.length :
+    key === 'ArrowLeft' ? (index + mobileViews.length - 1) % mobileViews.length : -1
+  return nextIndex < 0 ? null : mobileViews[nextIndex]!
+}
+
+/** Mobile views occupy the same workspace. Chat remains mounted when hidden so
+ * pending choices and an unsent composer draft survive navigation. */
+export function StoryMobileWorkspace({ chat, outline, graph, view, onViewChange }: {
+  chat: ReactElement; outline: ReactNode; graph: ReactNode
+  view: StoryMobileView; onViewChange: (view: StoryMobileView) => void
+}) {
+  const navigateTabs = (event: KeyboardEvent<HTMLButtonElement>, current: StoryMobileView) => {
+    const next = mobileViewForKey(current, event.key)
+    if (!next) return
+    event.preventDefault()
+    onViewChange(next)
+    const tabs = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+    tabs?.[mobileViews.indexOf(next)]?.focus()
+  }
   return <section aria-label="Selected Thread"
-    className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60">
-    {chat}
+    className="story-mobile-workspace flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60">
+    <nav role="tablist" aria-label="Story workspace views"
+      className="story-mobile-tabs flex shrink-0 items-center justify-center gap-1 border-b border-border/60 p-2">
+      {mobileViews.map(item => <Button key={item} type="button" role="tab"
+        id={'story-mobile-tab-' + item} aria-controls={'story-mobile-panel-' + item}
+        aria-selected={view === item} tabIndex={view === item ? 0 : -1}
+        size="sm" variant={view === item ? 'secondary' : 'ghost'}
+        className="min-w-0 flex-1 text-xs motion-reduce:transition-none"
+        onClick={() => onViewChange(item)} onKeyDown={event => navigateTabs(event, item)}>
+        {item.charAt(0).toUpperCase() + item.slice(1)}
+      </Button>)}
+    </nav>
+    <div id="story-mobile-panel-chat" role="tabpanel" aria-labelledby="story-mobile-tab-chat"
+      hidden={view !== 'chat'}
+      className={view === 'chat' ? 'flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden' : 'hidden'}>
+      {chat}
+    </div>
+    <div id="story-mobile-panel-outline" role="tabpanel" aria-labelledby="story-mobile-tab-outline"
+      hidden={view !== 'outline'}
+      className={view === 'outline' ? 'flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden' : 'hidden'}>
+      {view === 'outline' ? outline : null}
+    </div>
+    <div id="story-mobile-panel-graph" role="tabpanel" aria-labelledby="story-mobile-tab-graph"
+      hidden={view !== 'graph'}
+      className={view === 'graph' ? 'story-mobile-graph min-h-0 min-w-0 flex-1 overflow-hidden' : 'hidden'}>
+      {view === 'graph' ? graph : null}
+    </div>
   </section>
 }
 

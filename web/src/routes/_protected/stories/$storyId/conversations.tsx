@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Archive, ArrowLeft, ChevronDown, LoaderCircle, MoreHorizontal, PanelLeft, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -11,7 +11,8 @@ import { ThreadChat } from '@/components/thread-chat'
 import { ThreadUsage } from '@/components/thread-usage'
 import { StoryFirstChat } from '@/components/story-first-chat'
 import { StoryWorkspaceOutline } from '@/components/story-workspace-outline'
-import { StoryDesktopWorkspace, StoryMobileWorkspace } from '@/components/story-desktop-workspace'
+import { StoryDesktopWorkspace, StoryMobileWorkspace, parseStoryMobileView,
+  STORY_MOBILE_VIEW_KEY, type StoryMobileView } from '@/components/story-desktop-workspace'
 import { StoryInspectorSheet } from '@/components/story-workspace-explorer'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
@@ -112,7 +113,25 @@ function StoryConversations() {
     visibleThreads.find(thread => !thread.deletedAt && (archivedView ? !!thread.archivedAt : !thread.archivedAt)) ??
     visibleThreads.find(thread => !thread.deletedAt)
   const explorerThreadId = creatingThread ? null : selectedThread?.id ?? null
-  const [explorerView, setExplorerView] = useState<'chat' | 'graph' | 'outline'>('chat')
+  const [explorerView, setExplorerView] = useState<StoryMobileView>('chat')
+  const graphTabFocusPending = useRef(false)
+  const [graphFocus, setGraphFocus] = useState<{ id: string; threadId: string; token: number } | null>(null)
+  useEffect(() => {
+    try { setExplorerView(parseStoryMobileView(window.localStorage.getItem(STORY_MOBILE_VIEW_KEY))) }
+    catch { /* storage disabled */ }
+  }, [])
+  const changeMobileView = (next: StoryMobileView) => {
+    if (next !== 'graph') setGraphFocus(null)
+    setExplorerView(next)
+    try { window.localStorage.setItem(STORY_MOBILE_VIEW_KEY, next) } catch { /* storage disabled */ }
+  }
+  const viewInGraph = () => {
+    if (!selectedRecordId || !explorerThreadId || !explorerIndex) return
+    graphTabFocusPending.current = true
+    setGraphFocus(current => ({ id: selectedRecordId, threadId: explorerThreadId,
+      token: (current?.token ?? 0) + 1 }))
+    changeMobileView('graph')
+  }
   const [isDesktop, setIsDesktop] = useState(false)
   useEffect(() => {
     const media = window.matchMedia('(min-width: 1024px)')
@@ -121,6 +140,14 @@ function StoryConversations() {
     media.addEventListener('change', update)
     return () => media.removeEventListener('change', update)
   }, [])
+  useEffect(() => {
+    // View in Graph removes the focused Outline button. Restore keyboard
+    // focus to the new active tab after React commits the mobile view.
+    if (!isDesktop && explorerView === 'graph' && graphTabFocusPending.current) {
+      graphTabFocusPending.current = false
+      document.getElementById('story-mobile-tab-graph')?.focus()
+    }
+  }, [isDesktop, explorerView])
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
   const [hoveredActivity, setHoveredActivity] = useState<{
     threadId: string; jobId: string; step: ActivityStep
@@ -131,6 +158,7 @@ function StoryConversations() {
   const [inspectorOpen, setInspectorOpen] = useState(false)
   useEffect(() => {
     setInspectorOpen(false)
+    setGraphFocus(null)
     setHoveredActivity(null)
     setPinnedActivity(null)
     setSelectedRecordId(explorerThreadId
@@ -185,6 +213,7 @@ function StoryConversations() {
       saveStoryGraphPreferences(storyId, explorerThreadId, { selectedId: selectedRecordId })
   }, [explorerIndex, explorerThreadId, selectedRecordId, storyId])
   const selectRecord = (id: string) => {
+    setGraphFocus(null)
     setSelectedRecordId(id)
     if (explorerThreadId) saveStoryGraphPreferences(storyId, explorerThreadId, { selectedId: id })
     setNavigationOpen(false)
@@ -333,7 +362,8 @@ function StoryConversations() {
       disabled={!explorerIndex || !selectedRecordId || !explorerThreadId}
       onClick={() => setInspectorOpen(true)}>Inspect record</Button>
     {!isDesktop && <Button type="button" size="sm" variant="ghost"
-      onClick={() => setExplorerView('graph')}>View in Graph</Button>}
+      disabled={!selectedRecordId || !explorerIndex || !explorerThreadId}
+      onClick={viewInGraph}>View in Graph</Button>}
   </div>
   <div className="min-h-0 flex-1 overflow-auto" aria-label="Story Outline">
     {explorer.error && <p role="alert" className="text-xs text-destructive">{explorer.error.message}</p>}
@@ -372,6 +402,8 @@ function StoryConversations() {
         <StoryRelationshipGraph key={storyId + ':' + explorerThreadId}
           workspace={{ storyId, threadId: explorerThreadId }}
           index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord}
+          focusRequest={!isDesktop && graphFocus?.threadId === explorerThreadId ? graphFocus : null}
+          onFocusComplete={token => setGraphFocus(current => current?.token === token ? null : current)}
           highlights={highlights} />
       </div>
       {explorer.data.jobId && <Link to="/jobs/$jobId"
@@ -387,23 +419,8 @@ function StoryConversations() {
       <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
         {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
       </h2>
-      {!isDesktop && <nav aria-label="Story workspace views" className="flex shrink-0 items-center gap-1 text-xs">
-        {(['chat', 'graph', 'outline'] as const).map(view =>
-          <Button key={view} size="sm" variant={explorerView === view ? 'secondary' : 'ghost'}
-            className="h-7 px-2" aria-pressed={explorerView === view}
-            onClick={() => setExplorerView(view)}>
-            {view.charAt(0).toUpperCase() + view.slice(1)}
-          </Button>)}
-      </nav>}
     </header>
-    {!isDesktop && explorerView === 'outline' && <div className="min-h-0 flex-1 overflow-auto">
-      {outlinePanel}
-    </div>}
-    {!isDesktop && explorerView === 'graph' && <div className="min-h-0 flex-1 overflow-y-auto">
-      {graphPanel}
-    </div>}
-    {/* Keep the composer mounted while viewing Graph or Outline: unsent text must survive. */}
-    <div className={'min-h-0 flex-1 flex-col ' + (!isDesktop && explorerView !== 'chat' ? 'hidden' : 'flex')}>
+    <div className="flex min-h-0 flex-1 flex-col">
     {creatingThread || !data.threads.length ||
       (selectedThread && selectedThread.status === 'prepared' && selectedThread.id.startsWith('root:'))
       ? <StoryFirstChat key={creatingThread || !data.threads.length ? 'new:' + storyId : selectedThread!.id}
@@ -461,7 +478,8 @@ function StoryConversations() {
     {(issue || error) && <p role="alert" className="mb-3 text-sm text-destructive">{issue ?? error?.message}</p>}
     {isDesktop ? <StoryDesktopWorkspace outline={outlinePanel}
       graph={graphPanel} threads={navigation} chat={chatPanel} /> :
-      <StoryMobileWorkspace chat={chatPanel} />}
+      <StoryMobileWorkspace chat={chatPanel} outline={outlinePanel} graph={graphPanel}
+        view={explorerView} onViewChange={changeMobileView} />}
     {explorerIndex && explorerThreadId && <StoryInspectorSheet storyId={storyId} threadId={explorerThreadId}
       index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord}
       open={inspectorOpen} onOpenChange={setInspectorOpen} />}

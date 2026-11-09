@@ -4,7 +4,8 @@ import { StudioSelect } from '@/components/studio-select'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { readStoryGraph, readWorkspaceStoryGraph } from '../../../lib/story-data.functions'
-import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node, type ReactFlowInstance } from '@xyflow/react'
+import { Background, Controls, MarkerType, ReactFlow, useNodesInitialized, useReactFlow,
+  type Edge, type Node, type ReactFlowInstance } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { ExplorerGraph, ExplorerIndex } from '../../../lib/story-explorer.server'
 import { changeText } from './-StoryChangeLabels'
@@ -18,13 +19,31 @@ type Props = {
   selectedId: string | null
   onSelect: (id: string) => void
   highlights?: ActivityRecordHighlights
+  focusRequest?: { id: string; token: number } | null
+  onFocusComplete?: (token: number) => void
+}
+
+/** Only explicit author navigation moves the Graph viewport; selection and
+ * live activity update node state without triggering automatic panning. */
+function FocusRequestedRecord({ request, onComplete }: {
+  request: { id: string; token: number } | null
+  onComplete?: (token: number) => void
+}) {
+  const flow = useReactFlow()
+  const initialized = useNodesInitialized()
+  useEffect(() => {
+    if (!initialized || !request || !flow.getNode(request.id)) return
+    void flow.fitView({ nodes: [{ id: request.id }], padding: 0.45, duration: 0 })
+    onComplete?.(request.token)
+  }, [initialized, request, flow, onComplete])
+  return null
 }
 
 const limits = [16, 40, 80] as const
 
 /** Render only the native Context Manifest neighborhood; no client link discovery. */
 export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, onSelect,
-  highlights = {} }: Props) {
+  highlights = {}, focusRequest = null, onFocusComplete }: Props) {
   const saved = () => workspace?.threadId
     ? readStoryGraphPreferences(workspace.storyId, workspace.threadId) : null
   const [scope, setScope] = useState<'focused' | 'related'>('focused')
@@ -268,6 +287,9 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
               proOptions={{ hideAttribution: true }}>
               <Background gap={22} color="#344657" />
               <Controls showInteractive={false} />
+              {workspace && <FocusRequestedRecord
+                request={focusRequest?.id === currentGraph.selectedId ? focusRequest : null}
+                onComplete={onFocusComplete} />}
             </ReactFlow>
           </div>
           {!currentGraph.relationships.length && <p>No typed relationship evidence in this native context.</p>}
