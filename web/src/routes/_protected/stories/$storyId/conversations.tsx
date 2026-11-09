@@ -15,6 +15,7 @@ import { StoryDesktopWorkspace, StoryMobileWorkspace, parseStoryMobileView,
   STORY_MOBILE_VIEW_KEY, type StoryMobileView } from '@/components/story-desktop-workspace'
 import { StoryInspectorSheet } from '@/components/story-workspace-explorer'
 import { ThreadReviewSheet, type ReviewOpen } from '@/components/thread-review-sheet'
+import { ThreadPublishSheet } from '@/components/thread-publish-sheet'
 import type { ReviewSelection } from '@/lib/thread-review.server'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
@@ -159,12 +160,14 @@ function StoryConversations() {
   } | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [reviewOpen, setReviewOpen] = useState<ReviewOpen | null>(null)
+  const [publishOpen, setPublishOpen] = useState(false)
   const openReview = (scope: ReviewSelection) => {
     setReviewOpen(previous => ({ scope, token: (previous?.token ?? 0) + 1 }))
   }
   useEffect(() => {
     setInspectorOpen(false)
     setReviewOpen(null)
+    setPublishOpen(false)
     setGraphFocus(null)
     setHoveredActivity(null)
     setPinnedActivity(null)
@@ -468,6 +471,10 @@ function StoryConversations() {
       </div> : <div className="min-w-0 flex-1 truncate text-lg font-semibold">
         {data?.story.title ?? 'Story'}
       </div>}
+      {explorerThreadId && !selectedThread?.archivedAt && <Button type="button"
+        size="sm" variant="outline" onClick={() => setPublishOpen(true)}>
+        Publish
+      </Button>}
       <span className="hidden text-xs text-muted-foreground lg:inline">Story workspace</span>
       <Sheet open={navigationOpen} onOpenChange={setNavigationOpen}>
         <SheetTrigger aria-label="Open Story Threads"
@@ -491,6 +498,8 @@ function StoryConversations() {
     {explorerIndex && explorerThreadId && <StoryInspectorSheet storyId={storyId} threadId={explorerThreadId}
       index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord}
       open={inspectorOpen} onOpenChange={setInspectorOpen} />}
+    {explorerThreadId && publishOpen && <ThreadPublishSheet key={explorerThreadId}
+      threadId={explorerThreadId} open onOpenChange={setPublishOpen} />}
     {explorerThreadId && reviewOpen && <ThreadReviewSheet
       key={explorerThreadId + ':' + reviewOpen.token} threadId={explorerThreadId}
       initialScope={reviewOpen.scope} open onOpenChange={next => { if (!next) setReviewOpen(null) }}

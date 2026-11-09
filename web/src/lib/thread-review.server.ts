@@ -109,10 +109,14 @@ async function source(store: StudioStore, owner: string, threadId: string,
     for (const run of chat.runs) {
       const published = await store.persistence.publications.get(owner, run.jobId,
         row.provider as 'github' | 'gitlab')
-      if (published?.phase === 'linked') {
-        if (!ancestor(job, published.headSha, chosen.head))
-          throw new ThreadReviewError(409, 'Published Thread revision is not on the selected lineage.')
-        publication = published.headSha
+      if (published?.phase === 'linked' && ancestor(job, published.headSha, chosen.head)) {
+        // A linked draft may have been updated from a later Turn while its
+        // receipt still belongs to the original publication Job. Prefer the
+        // deepest published ancestor, not the last Job in creation order.
+        if (!publication || ancestor(job, publication, published.headSha))
+          publication = published.headSha
+        else if (!ancestor(job, published.headSha, publication))
+          throw new ThreadReviewError(409, 'Published Thread revisions have diverged.')
       }
     }
     base = publication ?? base

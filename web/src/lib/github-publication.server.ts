@@ -6,6 +6,8 @@ import { authorizedStoryJob } from './fixture-jobs.server'
 import { github, matchingRepository, GithubError, errorResponse, json } from './github-repositories.server'
 import { withStoryJobLock } from '../../../src/job-lock'
 import type { JobStartResult } from '../../../src/job'
+import { resolveThreadPublication, type ThreadPublicationChoice,
+  type ThreadPublicationSelection } from './thread-publication.server'
 import {
   PublicationFailure, reviewPublication, publicationDescription, pushVerifiedBranch,
   remotePublicationHead, readPublicationRequest, type PublicationPreview,
@@ -30,10 +32,10 @@ async function savedPublication(store: StudioDatabase, owner: string, id: string
   } : undefined
 }
 async function savePublication(store: StudioDatabase, owner: string, job: JobStartResult, target: string,
-  head: string, pr?: GithubPr): Promise<void> {
+  head: string, pr?: GithubPr, selection?: ThreadPublicationSelection): Promise<void> {
   try {
-    await store.persistence.publications.save(owner, job.jobId, 'github', {
-      targetBranch: target, remoteBranch: job.branch, headSha: head,
+    await store.persistence.publications.save(owner, selection?.recordJobId ?? job.jobId, 'github', {
+      targetBranch: target, remoteBranch: selection?.remoteBranch ?? job.branch, headSha: head,
       phase: pr ? 'linked' : 'pending', number: pr?.number ?? null, url: pr?.html_url ?? null,
     }, new Date().toISOString())
   } catch (error) {
@@ -69,16 +71,19 @@ async function readRow(store: StudioDatabase, owner: string, id: string): Promis
 }
 
 async function preview(store: StudioDatabase, owner: string, row: Row, job: JobStartResult,
-  token: string, target: string, targetSha: string): Promise<PublicationPreview> {
-  const saved = await savedPublication(store, owner, job.jobId)
-  if (saved && (saved.targetBranch !== target || saved.remoteBranch !== job.branch))
+  token: string, target: string, targetSha: string,
+  selection?: ThreadPublicationSelection): Promise<PublicationPreview> {
+  const saved = await savedPublication(store, owner, selection?.recordJobId ?? job.jobId)
+  if (saved && (saved.targetBranch !== target || saved.remoteBranch !== (selection?.remoteBranch ?? job.branch)))
     throw new GithubError(409, 'Saved publication targets a different upstream branch. Operator reconciliation required.')
   return reviewPublication(store, job, {
     repository: row.repository, directory: row.directory, initialContentSha256: row.initialContentSha256,
     remoteUrl: `https://github.com/${row.repository}.git`,
   }, token, target, targetSha, saved?.phase === 'linked' && saved.prNumber && saved.prUrl
     ? { number: saved.prNumber, url: saved.prUrl, headSha: saved.headSha, targetBranch: saved.targetBranch }
-    : null)
+    : null, selection ? { id: selection.threadId, rootBaseSha: selection.rootBaseSha,
+      passedReviews: selection.review.passed,
+      skippedReviews: selection.review.skipped, branch: selection.remoteBranch } : undefined)
 }
 async function writeGithub(token: string, path: string, method: 'POST' | 'PATCH', body: unknown): Promise<GithubPr> {
   let response: Response
@@ -106,71 +111,86 @@ function verifyPr(pr: GithubPr, repoId: string, branch: string, target: string) 
     throw new GithubError(409, 'Linked PR is closed or no longer a draft. Reconcile it on GitHub.')
 }
 async function findPr(token: string, path: string, repo: string, repoId: string,
-  job: JobStartResult, target: string) {
+  branch: string, target: string) {
   const owner = repo.split('/')[0]!
-  const query = new URLSearchParams({ state: 'all', head: owner + ':' + job.branch, per_page: '100' })
+  const query = new URLSearchParams({ state: 'all', head: owner + ':' + branch, per_page: '100' })
   const pulls = await github<GithubPr[]>(token, path + '/pulls?' + query)
   if (!Array.isArray(pulls)) throw new GithubError(502, 'GitHub returned an invalid PR list.')
-  const matches = pulls.filter(pr => pr.head?.ref === job.branch)
+  const matches = pulls.filter(pr => pr.head?.ref === branch)
   if (matches.length > 1) throw new GithubError(409, 'More than one PR uses this job branch. Reconcile manually.')
-  if (matches[0]) verifyPr(matches[0], repoId, job.branch, target)
+  if (matches[0]) verifyPr(matches[0], repoId, branch, target)
   return matches[0] ?? null
 }
 async function publish(store: StudioDatabase, owner: string, row: Row, job: JobStartResult,
-  token: string, expected: { headSha?: string; targetSha?: string; allowPartial?: boolean }) {
+  token: string, expected: { headSha?: string; targetSha?: string; allowPartial?: boolean },
+  thread?: { choice: ThreadPublicationChoice; selection: ThreadPublicationSelection }) {
   return withStoryJobLock(job, 'github-draft-publication', async () => {
+    const selection = thread ? await resolveThreadPublication(store, owner, thread.choice) : undefined
+    if (thread && (selection?.headSha !== thread.selection.headSha ||
+        selection?.recordJobId !== thread.selection.recordJobId ||
+        selection?.remoteBranch !== thread.selection.remoteBranch))
+      throw new GithubError(409, 'Thread publication selection changed. Refresh before publishing.')
     const remote = await remoteContext(token, row)
-    const view = await preview(store, owner, row, job, token, remote.target, remote.targetSha)
+    const view = await preview(store, owner, row, job, token, remote.target, remote.targetSha, selection)
     if (expected.headSha !== view.headSha || expected.targetSha !== view.targetSha)
       throw new GithubError(409, 'Publication preview is stale. Refresh validation and upstream state.')
     if (!view.canPublish) throw new GithubError(422, 'Canonical validation or worktree safety blocks publication.')
     if (view.blockers.length && expected.allowPartial !== true)
       throw new GithubError(409, 'This is a partial or divergent draft. Explicitly confirm its listed blockers.')
-    const existing = await savedPublication(store, owner, job.jobId)
+    const existing = await savedPublication(store, owner, selection?.recordJobId ?? job.jobId)
     // An intent receipt precedes both the push and PR creation. Crash recovery
     // always reconciles remote refs and PRs before performing any new write.
-    if (!existing) await savePublication(store, owner, job, remote.target, view.headSha)
+    if (!existing) await savePublication(store, owner, job, remote.target, view.headSha, undefined, selection)
     const source = { repository: row.repository, directory: row.directory,
       initialContentSha256: row.initialContentSha256,
       remoteUrl: 'https://github.com/' + row.repository + '.git' }
-    pushVerifiedBranch(job, source, token, view.headSha)
-    await savePublication(store, owner, job, remote.target, view.headSha)
+    if (selection?.linked) {
+      const remoteHead = remotePublicationHead(job, source, token, selection.remoteBranch)
+      if (remoteHead !== selection.linked.receipt.headSha && remoteHead !== view.headSha)
+        throw new GithubError(409, 'Linked draft branch changed outside this publication. Reconcile before updating.')
+    }
+    pushVerifiedBranch(job, source, token, view.headSha, selection?.remoteBranch)
+    await savePublication(store, owner, job, remote.target, view.headSha, undefined, selection)
     const targetAgain = await remoteContext(token, row)
     if (targetAgain.target !== remote.target || targetAgain.targetSha !== remote.targetSha)
       throw new GithubError(409, 'Upstream changed after push. Branch is preserved; refresh the publication preview.')
     const path = remote.path
-    const saved = await savedPublication(store, owner, job.jobId)
+    const saved = await savedPublication(store, owner, selection?.recordJobId ?? job.jobId)
     let pr: GithubPr | null = null
     if (saved?.prNumber) {
       pr = await github<GithubPr>(token, path + '/pulls/' + saved.prNumber)
-      verifyPr(pr, row.providerId, job.branch, remote.target)
-    } else pr = await findPr(token, path, row.repository, row.providerId, job, remote.target)
+      verifyPr(pr, row.providerId, selection?.remoteBranch ?? job.branch, remote.target)
+    } else pr = await findPr(token, path, row.repository, row.providerId,
+      selection?.remoteBranch ?? job.branch, remote.target)
     const body = publicationDescription(job, view)
     if (!pr) {
       try {
         pr = await writeGithub(token, path + '/pulls', 'POST', {
           title: 'NovelTea Story: ' + row.title.slice(0, 120),
-          head: job.branch, base: remote.target, draft: true, body,
+          head: selection?.remoteBranch ?? job.branch, base: remote.target, draft: true, body,
         })
       } catch (error) {
         // A timeout or GitHub's 422 can mean CREATE succeeded remotely.
-        pr = await findPr(token, path, row.repository, row.providerId, job, remote.target).catch(() => null)
+        pr = await findPr(token, path, row.repository, row.providerId,
+          selection?.remoteBranch ?? job.branch, remote.target).catch(() => null)
         if (!pr) throw error
       }
     } else {
       pr = await writeGithub(token, path + '/pulls/' + pr.number, 'PATCH', { body })
     }
-    verifyPr(pr, row.providerId, job.branch, remote.target)
-    if (pr.head.sha !== view.headSha || remotePublicationHead(job, source, token, job.branch) !== view.headSha)
+    verifyPr(pr, row.providerId, selection?.remoteBranch ?? job.branch, remote.target)
+    if (pr.head.sha !== view.headSha || remotePublicationHead(job, source, token,
+      selection?.remoteBranch ?? job.branch) !== view.headSha)
       throw new GithubError(409, 'GitHub PR or remote branch moved from the verified job HEAD. Reconcile before linking.')
-    await savePublication(store, owner, job, remote.target, view.headSha, pr)
+    await savePublication(store, owner, job, remote.target, view.headSha, pr, selection)
     return { ...view, linked: { number: pr.number, url: pr.html_url,
       headSha: view.headSha, targetBranch: remote.target } }
   })
 }
 
 export async function githubPublicationRequest(auth: StudioAuth, store: StudioDatabase,
-  request: Request, id: string, baseURL: string): Promise<Response> {
+  request: Request, id: string, baseURL: string,
+  choice?: ThreadPublicationChoice): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'POST')
     return json({ error: 'Method not allowed' }, 405)
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
@@ -179,6 +199,11 @@ export async function githubPublicationRequest(auth: StudioAuth, store: StudioDa
     await store.assertReady()
     const actor = await requireUser(auth, request.headers)
     if (!actor) return json({ error: 'Sign in required' }, 401)
+    const selection = choice ? await resolveThreadPublication(store, actor.id, choice) : undefined
+    if (selection && (selection.job.jobId !== id || selection.provider !== 'github'))
+      throw new GithubError(409, 'Selected Thread revision or provider changed.')
+    if (!choice && await store.persistence.continuation.runThread(actor.id, id))
+      throw new GithubError(409, 'Publish this Story through its owning Thread.')
     const row = await readRow(store, actor.id, id)
     const token = await getRepositoryToken(auth, store, request.headers, 'github', row.repositoryId)
     if (!token) throw new GithubError(409, 'Reconnect your GitHub account before publishing.')
@@ -186,11 +211,18 @@ export async function githubPublicationRequest(auth: StudioAuth, store: StudioDa
     if (job.baseSha !== row.baseSha) throw new GithubError(409, 'Saved job baseline has changed.')
     if (request.method === 'POST') {
       const expected = await readPublicationRequest(request)
-      return json({ publication: await publish(store, actor.id, row, job, token, expected) })
+      return json({ publication: await publish(store, actor.id, row, job, token, expected,
+        selection && choice ? { selection, choice } : undefined) })
     }
     const remote = await remoteContext(token, row)
     return json({ publication: await withStoryJobLock(job, 'github-publication-preview',
-      () => preview(store, actor.id, row, job, token, remote.target, remote.targetSha)) })
+      async () => {
+        const fresh = choice ? await resolveThreadPublication(store, actor.id, choice) : undefined
+        if (selection && (fresh?.headSha !== selection.headSha ||
+            fresh?.recordJobId !== selection.recordJobId))
+          throw new GithubError(409, 'Thread advanced. Refresh publication preview.')
+        return preview(store, actor.id, row, job, token, remote.target, remote.targetSha, fresh)
+      }) })
   } catch (error) {
     if (error instanceof PublicationFailure) return json({ error: error.message }, error.status)
     return errorResponse(error)

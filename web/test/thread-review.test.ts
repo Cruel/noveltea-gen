@@ -169,6 +169,16 @@ process.stdout.write(JSON.stringify({protocolVersion:1, success:true, exitCode:0
     assert.equal(afterPublish.baseSha, sha1)
     assert.equal(afterPublish.headSha, sha2)
     assert.deepEqual(afterPublish.files.map(item => item.path), ['events/bell.md'])
+    // An explicit update of the original draft links Turn two's exact SHA to
+    // that earlier PR, leaving no unreviewed changes in the cumulative view.
+    await store.persistence.publications.save(alice, firstId, 'github', {
+      targetBranch: 'main', remoteBranch: 'review', headSha: sha2, phase: 'linked',
+      number: 1, url: 'https://example.test/pull/1',
+    }, at)
+    const afterUpdate = await readThreadReview(store, alice, threadId, { kind: 'cumulative' })
+    assert.equal(afterUpdate.publicationSha, sha2)
+    assert.equal(afterUpdate.baseSha, sha2)
+    assert.deepEqual(afterUpdate.files, [])
 
     await assert.rejects(() => readThreadReview(store, bob, threadId, { kind: 'cumulative' }), /not found/i)
     await assert.rejects(() => readThreadReviewDiff(store, alice, threadId,

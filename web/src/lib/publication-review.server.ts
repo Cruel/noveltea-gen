@@ -24,6 +24,7 @@ export type PublicationPreview = {
   targetBranch: string; targetSha: string; validation: string
   diagnostics: unknown[]; protection: string; merge: 'clean' | 'conflicts' | 'not-assessed'
   blockers: string[]; canPublish: boolean; linked: PublicationLink | null
+  thread?: { id: string; rootBaseSha: string; passedReviews: number; skippedReviews: number }
 }
 
 /** Trusted Git invocation with child-only credentials and suppressed transport diagnostics. */
@@ -95,7 +96,8 @@ async function completedReview(job: JobStartResult, head: string) {
 /** Same author-review contract for GitHub and GitLab; no merge or rebase. */
 export async function reviewPublication(store: StudioDatabase, job: JobStartResult,
   source: PublicationSource, token: string, targetBranch: string, targetSha: string,
-  linked: PublicationLink | null): Promise<PublicationPreview> {
+  linked: PublicationLink | null, thread?: { id: string; rootBaseSha: string;
+    passedReviews: number; skippedReviews: number; branch: string }): Promise<PublicationPreview> {
   const queue = (await queueRecord(store, job.jobId))
   if (queue && ['queued', 'running', 'interrupted'].includes(queue.phase))
     throw new PublicationFailure(409, 'Generation is queued, running or interrupted. Reconcile the writer before publication.')
@@ -122,7 +124,7 @@ export async function reviewPublication(store: StudioDatabase, job: JobStartResu
     const hasErrors = diagnostics.some(d => d && typeof d === 'object' &&
       'severity' in d && (d as { severity: unknown }).severity === 'error')
     if (result.status !== 'passed' &&
-        !(emptyBase && result.status === 'unverified' && !hasErrors && result.report))
+        (thread || !(emptyBase && result.status === 'unverified' && !hasErrors && result.report)))
       blockers.push('Canonical Story validation did not pass; resolve diagnostics before publication.')
     if (protection !== 'checked') {
       if (emptyBase && result.status === 'unverified' && !hasErrors)
@@ -133,7 +135,7 @@ export async function reviewPublication(store: StudioDatabase, job: JobStartResu
   if (!await completedReview(job, head))
     blockers.push('Full scoped completion review is absent or stale; draft is partial.')
   let merge: PublicationPreview['merge'] = 'clean'
-  if (targetSha !== job.baseSha) {
+  if (targetSha !== (thread?.rootBaseSha ?? job.baseSha)) {
     blockers.push('Upstream changed since the pinned job baseline; no automatic merge or rebase.')
     blockers.push('Merged Story semantics and canonical protection against the new upstream have not been certified.')
     try {
@@ -149,13 +151,22 @@ export async function reviewPublication(store: StudioDatabase, job: JobStartResu
   }
   const hard = blockers.some(b => b.startsWith('Uncommitted') || b.startsWith('No committed') ||
     b.startsWith('Canonical Story validation') || b.startsWith('Canonical protected-decision'))
-  return { jobId: job.jobId, headSha: head, baseSha: job.baseSha, branch: job.branch,
+  return { jobId: job.jobId, headSha: head, baseSha: job.baseSha,
+    branch: thread?.branch ?? job.branch,
     targetBranch, targetSha, validation, diagnostics, protection, merge,
-    blockers, canPublish: !hard, linked }
+    blockers, canPublish: !hard && (!thread || targetSha === thread.rootBaseSha &&
+      validation === 'passed' && protection === 'checked'), linked,
+    ...(thread ? { thread: { id: thread.id, rootBaseSha: thread.rootBaseSha,
+      passedReviews: thread.passedReviews, skippedReviews: thread.skippedReviews } } : {}),
+  }
 }
 export function publicationDescription(job: JobStartResult, view: PublicationPreview) {
   return [
     'NovelTea Story draft generated from a pinned, verified job revision.',
+    ...(view.thread ? ['', 'Thread: `' + view.thread.id + '`',
+      'Pinned upstream base: `' + view.thread.rootBaseSha + '`',
+      'Required semantic reviews passed: ' + view.thread.passedReviews,
+      'Routine reviews not required: ' + view.thread.skippedReviews + ' (not reported as passed)'] : []),
     '', 'Job: `' + job.jobId + '`', 'Base commit: `' + job.baseSha + '`',
     'Verified head: `' + view.headSha + '`',
     'Canonical validation: ' + view.validation + ' (protection: ' + view.protection + ')',
@@ -165,14 +176,15 @@ export function publicationDescription(job: JobStartResult, view: PublicationPre
   ].join('\n')
 }
 export function pushVerifiedBranch(job: JobStartResult, source: PublicationSource,
-  token: string, head: string) {
-  const remote = remotePublicationHead(job, source, token, job.branch)
+  token: string, head: string, remoteBranch = job.branch) {
+  safeDefaultBranch(remoteBranch)
+  const remote = remotePublicationHead(job, source, token, remoteBranch)
   if (remote && remote !== head && publicationGit(job, source, token,
     ['merge-base', '--is-ancestor', remote, head], true).code !== 0)
     throw new PublicationFailure(409, 'Remote job branch diverged. Never force-push or overwrite it.')
   if (remote !== head) {
-    gitOutput(job, source, token, 'push', 'origin', 'HEAD:refs/heads/' + job.branch)
-    if (remotePublicationHead(job, source, token, job.branch) !== head)
+    gitOutput(job, source, token, 'push', 'origin', 'HEAD:refs/heads/' + remoteBranch)
+    if (remotePublicationHead(job, source, token, remoteBranch) !== head)
       throw new PublicationFailure(409, 'Remote push outcome is uncertain; retry to reconcile the branch.')
   }
 }
