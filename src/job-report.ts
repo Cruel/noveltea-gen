@@ -8,6 +8,7 @@ import type { ScopeAudit } from "./narrative-review.js";
 import { auditIdeasUnderJobLock } from "./idea-placement.js";
 import { runAuthorAction } from "./author-updates.js";
 import { previewStoryMerge } from "./merge-preview.js";
+import { prepareTurnFulfillment, readTurnFulfillment } from "./turn-fulfillment.js";
 
 type Outcome = "completed" | "paused" | "blocked" | "failed";
 type IntegrationStatus = "mergeable" | "conflicts" | "not assessed";
@@ -202,8 +203,6 @@ export async function inspectJobReport(input: JobReportOptions) {
     (plan?.contract.scope.kind === "full-story" ||
       idea.scopeIds.some(id => scopeIds.has(id)))).map(idea => idea.id);
   if (scopedIdeaIds.length) blockers.push("Binding in-scope deferred ideas remain unresolved: " + scopedIdeaIds.join(", "));
-  const outcome = statusOf(review, audit, plan, head, author, blockers,
-    { status: ideas.status, outstanding: scopedIdeaIds }, contractOk && reviewCurrent);
   // Scope fulfillment describes the verified committed Story, not whether the
   // coordinator is presently paused or the target branch can integrate it.
   const scopeFulfillment = reviewCurrent && (audit?.deterministic === "blocked" ||
@@ -212,6 +211,52 @@ export async function inspectJobReport(input: JobReportOptions) {
       obj(review.editorial)?.verdict === "pass" && audit?.deterministic === "passed" &&
       ideas.status === "ready" && scopedIdeaIds.length === 0 && clean && !review.failure
       ? "complete-in-scope" : "unverified";
+  // The narrative scope reviewer and native validator are not a verdict on
+  // whether the original author request and the approved overall plan were met.
+  // A source-bound Turn plan requires its own independent final decision.
+  const turn = await receipt(join(root, "turn-plan.json"), job);
+  const planFulfillment: {
+    policy: "turn-completeness/v1"; status: "not-applicable" | "required" | "reviewing" | "passed" | "incomplete";
+    headSha: string | null; planVersion: number | null;
+    findings: Array<{ objectiveId: string; message: string; followUp: {
+      assignmentId: string; outcome: string; targets: string[] } | null }>;
+    assurance: "unverified" | "semantic";
+  } = { policy: "turn-completeness/v1", status: turn && turn.kind !== "protected-amendment"
+    ? "required" : "not-applicable",
+    headSha: null, planVersion: null, findings: [], assurance: "unverified" };
+  if (turn && turn.kind !== "protected-amendment" && plan && scopeFulfillment === "complete-in-scope") {
+    try {
+      const packet = await prepareTurnFulfillment(job, {
+        headSha: head, baseSha: job.baseSha, planVersion: plan.version, contract: plan.contract,
+        scopeCurrent: reviewCurrent, scopeComplete: true,
+        editorialPass: review?.worker === "pi" && obj(review.editorial)?.verdict === "pass",
+        scopedPaths: audit?.scopedPaths ?? [],
+      });
+      if (packet) {
+        const decision = await readTurnFulfillment(job, packet);
+        planFulfillment.status = !decision ? "required" : decision.phase === "reviewing"
+          ? "reviewing" : decision.verdict?.verdict === "complete" ? "passed" : "incomplete";
+        planFulfillment.headSha = packet.source.headSha;
+        planFulfillment.planVersion = packet.source.planVersion;
+        planFulfillment.findings = decision?.verdict?.findings ?? [];
+        planFulfillment.assurance = ["passed", "incomplete"].includes(planFulfillment.status)
+          ? "semantic" : "unverified";
+      }
+    } catch (error) {
+      blockers.push("Turn: " + String((error as Error).message));
+    }
+  }
+  if (turn && turn.kind !== "protected-amendment") {
+    if (planFulfillment.status === "incomplete") {
+      for (const finding of planFulfillment.findings)
+        blockers.push("Turn objective " + finding.objectiveId + ": " + finding.message);
+    } else if (planFulfillment.status !== "passed") {
+      blockers.push("Turn: final plan-level completeness review has not passed (" +
+        planFulfillment.status + ").");
+    }
+  }
+  const outcome = statusOf(review, audit, plan, head, author, blockers,
+    { status: ideas.status, outstanding: scopedIdeaIds }, contractOk && reviewCurrent);
   // Git history is the authority for completed work, not a guessed receipt phase.
   const commits = git(job.worktreeRoot, "log", "--reverse", "--format=%H%x09%s", job.baseSha + ".." + head)
     .split("\n").filter(Boolean).map(line => {
@@ -267,7 +312,7 @@ export async function inspectJobReport(input: JobReportOptions) {
     baseSha: job.baseSha, headSha: head, clean,
   }, plan: plan ? { version: plan.version, scope: plan.contract.scope, contract: plan.contract,
     phase: arch?.phase ?? "unknown", receipt: "architecture.json" } : null,
-  generation: { status: outcome, scopeFulfillment,
+  generation: { status: outcome, scopeFulfillment, planFulfillment,
     review: review ? { phase: review.phase, headSha: review.headSha,
       worker: review.worker, current: reviewCurrent } : null,
     blockers, author },
@@ -289,6 +334,8 @@ export function formatJobReport(report: JobReport): string {
     "Generation base: " + report.identity.baseSha,
     "Outcome: " + report.generation.status,
     "Scope fulfillment: " + report.generation.scopeFulfillment,
+    "Turn plan fulfillment: " + report.generation.planFulfillment.status +
+      " (" + report.generation.planFulfillment.assurance + ")",
     "Integration: " + report.integration.status + " (target " + report.integration.targetHead + ")",
     "Scope contract: " + (report.plan ? "version " + report.plan.version +
       ", " + report.plan.scope.kind + " at " + report.plan.scope.depth : "not established"), "",
@@ -304,6 +351,11 @@ export function formatJobReport(report: JobReport): string {
     "Deterministic: " + (report.evidence.scope?.deterministic ?? "unverified"),
     "Protection: " + report.evidence.protection.status,
     "Editorial: " + report.evidence.editorial.verdict,
+    "Turn-level independent review: " + report.generation.planFulfillment.status,
+    ...report.generation.planFulfillment.findings.map(f => "- Unmet " + f.objectiveId +
+      ": " + f.message + (f.followUp ? " — Proposed follow-up " + f.followUp.assignmentId +
+      " (" + f.followUp.outcome + "; targets: " + f.followUp.targets.join(", ") + ")"
+      : " — Author-directed replan required")),
     "Deferred idea audit: " + report.evidence.deferredIdeas.status,
     "Deferred binding IDs: " + (report.evidence.deferredIdeas.outstanding.join(", ") || "none"),
     "Unverified logical conditions: " + report.evidence.logicalUnverified.length,

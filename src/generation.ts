@@ -27,6 +27,9 @@ import { inspectJobReport, type JobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints, reconcileRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { blockedByRequiredReview, executionId } from "./checkpoint-assurance.js";
+import { assessTurnFulfillment } from "./turn-fulfillment.js";
+import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
 import { generationStages, reconcileInventory, nextExecutionItem, type GenerationStage as Stage,
@@ -63,17 +66,22 @@ function reviewEscalation(report: JobReport, inventory: GenerationInventory | nu
         ({ source: d.source, message: d.message, repair: d.repair })),
     ...report.evidence.editorial.findings.filter(f => f.severity === "blocking").map(f =>
       ({ source: String(f.source), message: String(f.message), repair: String(f.repair) })),
+    ...report.generation.planFulfillment.findings.map(f => ({ source: f.objectiveId,
+      message: f.message, repair: f.followUp ? "turn-follow-up" : "architecture" })),
     ...(inventory?.items ?? []).filter(i => i.status === "blocked" && i.stage !== "review" &&
       i.blockingReason && !i.blockingReason.startsWith("Blocked dependency:")).map(i =>
       ({ source: i.id, message: i.blockingReason!, repair: "architecture" })),
   ];
   if (!sources.length) return null;
+  const turnIncomplete = report.generation.planFulfillment.status === "incomplete";
   const protectedChange = sources.some(s => s.repair === "protected");
   const replan = sources.some(s => ["architecture", "event", "interactive"].includes(s.repair));
   return {
     kind: protectedChange ? "protected-approval" : replan ? "dependency-replan" : "targeted-repair",
-    sources, requiresTrustedApproval: protectedChange || replan,
-    action: protectedChange
+    sources, requiresTrustedApproval: protectedChange || replan || turnIncomplete,
+    action: turnIncomplete
+      ? "The final Turn reviewer identified missing whole-plan objectives. Preserve verified work; authorize a new bounded follow-up specialist assignment at the current Story HEAD, or explicitly approve a versioned plan revision for out-of-scope requirements. No proposed repair grants write authority."
+      : protectedChange
       ? "Protected decisions cannot be edited automatically. Obtain exact trusted-controller authorization through the existing revision/approval workflow."
       : replan
         ? "Affect only the listed source/dependency scope. Propose and obtain a controller-approved architecture/scope revision with explicit carry-forward, or authorize a bounded targeted repair; do not widen coverage automatically."
@@ -170,6 +178,13 @@ export function parseGenerationContract(value: unknown): CompletionContract {
   return contract;
 }
 async function checkPlan(job: JobStartResult, request: GenerationRequest, version: number | null | undefined) {
+  if (request.turnPlanDigest) {
+    const path = join(job.stateDir, "turn-plan.json");
+    const contract = existsSync(path)
+      ? (JSON.parse(await readFile(path, "utf8")) as { contract: CompletionContract }).contract
+      : request.contract;
+    await readTurnEvidence(job, contract, request.task, request.turnPlanDigest);
+  }
   const file = join(job.stateDir, "architecture.json");
   if (!existsSync(file)) {
     if (version != null) throw new Error("Pinned architecture receipt is missing; restore it before resuming.");
@@ -509,8 +524,32 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
     })
     .addNode("completion_decision", async s => {
       const job = await openJob(s);
-      return withStoryJobLock(job, "generation-completion", async () => {
-        try {
+      try {
+        const preflight = await withStoryJobLock(job, "generation-completion-preflight", async () => {
+          clean(job); await trustedHead(job); await checkPlan(job, s.request, s.planVersion);
+          const stopped = await authorBoundary(job);
+          return stopped ? { stopped, report: null } :
+            { stopped: null, report: await inspectJobReport(s.request) };
+        });
+        if (preflight.stopped) return preflight.stopped;
+        const preliminary = preflight.report!;
+        // Never keep the Story writer lease across a long-running, read-only
+        // independent Pi evaluation. The source-bound receipt rechecks HEAD
+        // and approval history before it can become authoritative.
+        if (preliminary.generation.scopeFulfillment === "complete-in-scope" &&
+            preliminary.generation.planFulfillment.status === "required") {
+          const record = JSON.parse(await readFile(join(job.stateDir, "narrative-review.json"),
+            "utf8")) as { worker: "fixture" | "pi"; provider: string; model: string;
+              thinking?: "low" | "high"; snapshot?: SkillSnapshot };
+          if (record.worker !== "pi" || !record.snapshot ||
+              await openSkillSnapshot(record.snapshot.id) !== record.snapshot.path)
+            throw new Error("Independent Turn completeness requires the pinned real Pi reviewer, not a fixture.");
+          const { reviewTurnCompleteness } = await import("./narrative-review-specialist.js");
+          await assessTurnFulfillment(job, preliminary, "independent-turn-completeness/v1",
+            (packet, onSession) => reviewTurnCompleteness(job, record.snapshot!, packet,
+              record.provider, record.model, record.thinking, onSession));
+        }
+        return await withStoryJobLock(job, "generation-completion", async () => {
           clean(job); await trustedHead(job); await checkPlan(job, s.request, s.planVersion);
           const stopped = await authorBoundary(job);
           if (stopped) return stopped;
@@ -534,8 +573,8 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
               ...(budgeted.length ? ["Automated idea reassessment limit reached; author review required."] : []),
               ...(escalation ? [escalation.action] : [])].join("; "),
           };
-        } catch (error) { return blocked(error); }
-      });
+        });
+      } catch (error) { return blocked(error); }
     })
     .addEdge(START, "schedule")
     .addConditionalEdges("schedule", s => s.status !== "running" ? END : "author_update_intake")

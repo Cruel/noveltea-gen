@@ -1723,6 +1723,34 @@ native validation, while independent narrative review receives each specialist
 outcome in addition to the top-level author goal. Legacy direct CLI generation
 without a per-Turn receipt retains its independent explicit-contract checks.
 
+### Turn-level plan completeness (#113)
+
+Successful specialist assignments, native Story validation, and the existing
+scope/editorial review are separate from **fulfillment of the whole author Turn**.
+After current scoped validation and independent editorial review pass, the
+parent controller checks the original immutable `turn-plan.json`, the current
+approved and source-bound architecture plan/history, all verified checkpoint
+review receipts, and a bounded view of the final canonical Story. A separately
+sandboxed, read-only Pi reviewer examines the *combined* Story against the
+original request, binding constraints, production envelope, and planned
+specialist outcomes. A missing whole-Turn requirement is **incomplete**, even
+when every specialist was individually verified. Its findings can propose a
+specific existing specialist assignment and authorized target, or require a
+new author-approved plan revision. A proposal never grants file-write or
+protected-decision authority and does not restart verified specialists.
+
+The controller writes private `turn-fulfillment/<packet-digest>.json` receipts
+bound to the original Turn/source SHA, approved plan version and digest,
+validated checkpoint proofs, independent-review status, final Story HEAD, and
+prior scope review. A finalized receipt is reused after restart; interrupted
+review sessions are fenced rather than replayed. A changed Story or approved
+plan requires a new assessment; a passing native validator, fixture, or a
+writer's own claim cannot manufacture a plan-level semantic pass. The job
+report displays the distinct Turn-level result and any proposed follow-ups.
+Legacy direct CLI runs without a per-Turn plan remain governed by their
+explicit scoped completion contract; protected-decision amendments use their
+separate trusted controller/native validation path.
+
 An ambiguous or unwanted **unadmitted queued** instruction can be cancelled
 from the Thread chat, including while awaiting scope clarification. Schema v23
 stores an append-only owner-scoped cancellation receipt with its timestamp;
