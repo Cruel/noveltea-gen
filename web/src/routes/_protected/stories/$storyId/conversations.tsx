@@ -11,6 +11,7 @@ import { ThreadChat } from '@/components/thread-chat'
 import { ThreadUsage } from '@/components/thread-usage'
 import { StoryFirstChat } from '@/components/story-first-chat'
 import { StoryWorkspaceOutline } from '@/components/story-workspace-outline'
+import { StoryDesktopWorkspace } from '@/components/story-desktop-workspace'
 import { StoryWorkspaceInspector } from '@/components/story-workspace-explorer'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
@@ -107,6 +108,14 @@ function StoryConversations() {
     visibleThreads.find(thread => !thread.deletedAt)
   const explorerThreadId = creatingThread ? null : selectedThread?.id ?? null
   const [explorerView, setExplorerView] = useState<'chat' | 'graph' | 'outline'>('chat')
+  const [isDesktop, setIsDesktop] = useState(false)
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1024px)')
+    const update = () => setIsDesktop(media.matches)
+    update()
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
   const explorer = useQuery({
     queryKey: ['workspace-explorer', storyId, explorerThreadId],
@@ -201,24 +210,6 @@ function StoryConversations() {
   // The chat is always the main panel; navigation never stacks above it.
   const navigation = <aside aria-label="Story Threads"
     className="flex h-full min-h-0 min-w-0 flex-col gap-2 rounded-lg bg-muted/20 p-2">
-        <details open className="flex max-h-[42%] min-h-0 shrink-0 flex-col overflow-hidden border-b border-border/50 pb-2">
-          <summary className="cursor-pointer px-2 py-1 text-xs font-semibold">Story Outline</summary>
-          <div className="min-h-0 overflow-y-auto px-1" aria-label="Story Outline">
-            {explorer.error && <p role="alert" className="px-2 text-xs text-destructive">
-              {explorer.error.message}</p>}
-            {!explorer.data && !explorer.error &&
-              <p role="status" className="px-2 text-xs text-muted-foreground">Verifying Story revision…</p>}
-            {explorer.data?.source === 'base' &&
-              <p className="px-2 text-xs text-muted-foreground">
-                {explorer.data.story?.title ?? 'Story'} · {explorer.data.story?.provider ?? 'repository'}
-                {' · '}{explorer.data.story?.directory ?? 'Story root'}
-                {' · '}pinned source {explorer.data.baseSha.slice(0, 12)}.
-                Select a verified Thread to browse native records.
-              </p>}
-            {explorerIndex && <StoryWorkspaceOutline index={explorerIndex}
-              selectedId={selectedRecordId} onSelect={selectRecord} />}
-          </div>
-        </details>
         {data && <>
           <div className="flex items-center justify-between px-2">
             <h2 className="m-0 text-xs font-semibold">Threads</h2>
@@ -283,7 +274,87 @@ function StoryConversations() {
             Usage unavailable: {usage.error.message}</p>}
         </details>
   </aside>
-  return <main className="mx-auto flex min-h-0 w-full max-w-[1280px] flex-1 flex-col overflow-hidden px-3 py-3 sm:px-6 sm:py-4">
+  const outlinePanel = <div className="flex h-full min-h-0 flex-col gap-2 rounded-lg bg-muted/20 p-3">
+  <h2 className="text-xs font-semibold">Story Outline</h2>
+  <div className="min-h-0 flex-1 overflow-auto" aria-label="Story Outline">
+    {explorer.error && <p role="alert" className="text-xs text-destructive">{explorer.error.message}</p>}
+    {!explorer.data && !explorer.error &&
+      <p role="status" className="text-xs text-muted-foreground">Verifying Story revision…</p>}
+    {explorer.data?.source === 'base' && <p className="text-xs text-muted-foreground">
+      {explorer.data.story?.title ?? 'Story'} · {explorer.data.story?.provider ?? 'repository'}
+      {' · '}{explorer.data.story?.directory ?? 'Story root'}
+      {' · '}pinned source {explorer.data.baseSha.slice(0, 12)}.
+      Select a verified Thread to browse native records.
+    </p>}
+    {explorerIndex && <StoryWorkspaceOutline index={explorerIndex}
+      selectedId={selectedRecordId} onSelect={selectRecord} />}
+  </div>
+</div>
+  const graphPanel = <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden p-3">
+  {explorer.error ? <p role="alert" className="text-sm text-destructive">{explorer.error.message}</p>
+    : !explorer.data ? <p role="status" className="text-sm text-muted-foreground">Verifying selected Thread revision…</p>
+    : !explorerIndex ? <div className="space-y-2 text-sm text-muted-foreground">
+      <h3 className="text-sm font-semibold text-foreground">Pinned Story source</h3>
+      <p>{explorer.data.story?.title} · {explorer.data.story?.provider} · {explorer.data.story?.directory}</p>
+      <p>Source commit: <code>{explorer.data.baseSha}</code></p>
+      <p>No verified Thread revision is available yet. Canonical records and native links appear after validation.</p>
+    </div> : <>
+      <p role="status" className="mb-2 text-xs text-muted-foreground">
+        Verified Thread revision <code>{explorerIndex.headSha.slice(0, 12)}</code>
+        {' · '}Source <code>{explorerIndex.baseSha.slice(0, 12)}</code>
+        {' · '}{explorerIndex.records.length} records
+        {' · '}{explorerIndex.diagnostics.length} diagnostics
+      </p>
+      <div className="min-h-32 flex-1 overflow-hidden">
+        <StoryRelationshipGraph workspace={{ storyId, threadId: explorerThreadId }}
+          index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
+      </div>
+      {explorerThreadId && <div className="max-h-[40%] shrink-0 overflow-auto pt-2">
+        <StoryWorkspaceInspector storyId={storyId} threadId={explorerThreadId}
+          index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
+      </div>}
+      {explorer.data.jobId && <Link to="/jobs/$jobId"
+        params={{ jobId: explorer.data.jobId }} search={{ tab: 'story' }}
+        className="mt-2 shrink-0 text-xs underline underline-offset-2">
+        Review Changes (full diff)
+      </Link>}
+    </>}
+</div>
+  const chatPanel = <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+  {data ? <>
+    <header className="flex min-h-12 items-center gap-2 border-b border-border/50 px-4 py-2">
+      <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
+        {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
+      </h2>
+      {!isDesktop && <nav aria-label="Story workspace views" className="flex shrink-0 items-center gap-1 text-xs">
+        {(['chat', 'graph', 'outline'] as const).map(view =>
+          <Button key={view} size="sm" variant={explorerView === view ? 'secondary' : 'ghost'}
+            className="h-7 px-2" aria-pressed={explorerView === view}
+            onClick={() => setExplorerView(view)}>
+            {view.charAt(0).toUpperCase() + view.slice(1)}
+          </Button>)}
+      </nav>}
+    </header>
+    {!isDesktop && explorerView === 'outline' ? <div className="min-h-0 flex-1 overflow-auto">
+      {outlinePanel}
+    </div> : !isDesktop && explorerView === 'graph' ? <div className="min-h-0 flex-1 overflow-hidden">
+      {graphPanel}
+    </div> : creatingThread || !data.threads.length ||
+      (selectedThread && selectedThread.status === 'prepared' && selectedThread.id.startsWith('root:'))
+      ? <StoryFirstChat key={creatingThread || !data.threads.length ? 'new:' + storyId : selectedThread!.id}
+          storyId={storyId}
+          threadId={!creatingThread && data.threads.length > 0 && selectedThread?.id.startsWith('root:')
+            ? selectedThread.id : undefined}
+          onSubmitted={async threadId => {
+            setCreatingThread(false); await refresh()
+            await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
+              search: { thread: threadId } })
+          }} />
+      : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />
+        : <p className="p-5 text-sm text-muted-foreground">Select a Thread or create a new one.</p>}
+  </> : <p className="p-5 text-sm text-muted-foreground">Loading Threads…</p>}
+</div>
+  return <main className="mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden px-3 py-3 sm:px-6 sm:py-4">
     <div className="mb-3 flex shrink-0 min-w-0 items-center gap-2">
       <Link to="/dashboard" aria-label="Back to dashboard" title="Back to dashboard"
         className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
@@ -303,7 +374,7 @@ function StoryConversations() {
       </div> : <div className="min-w-0 flex-1 truncate text-lg font-semibold">
         {data?.story.title ?? 'Story'}
       </div>}
-      <span className="hidden text-xs text-muted-foreground lg:inline">Threads</span>
+      <span className="hidden text-xs text-muted-foreground lg:inline">Story workspace</span>
       <Sheet open={navigationOpen} onOpenChange={setNavigationOpen}>
         <SheetTrigger aria-label="Open Story Threads"
           className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium hover:bg-muted focus-visible:outline-2 lg:hidden">
@@ -319,78 +390,11 @@ function StoryConversations() {
         className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" />}
     </div>
     {(issue || error) && <p role="alert" className="mb-3 text-sm text-destructive">{issue ?? error?.message}</p>}
-    <div className="grid min-h-0 min-w-0 flex-1 gap-3 lg:grid-cols-[minmax(200px,252px)_minmax(0,1fr)]">
-      <div className="hidden min-h-0 lg:block">{navigation}</div>
+    {isDesktop ? <StoryDesktopWorkspace outline={outlinePanel}
+      graph={graphPanel} threads={navigation} chat={chatPanel} /> :
       <section aria-label="Selected Thread"
-        className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-border/60 p-0">
-        {data ? <>
-          <header className="flex min-h-12 items-center gap-2 border-b border-border/50 px-4 py-2">
-            <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
-              {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
-            </h2>
-            <nav aria-label="Story workspace views" className="flex shrink-0 items-center gap-1 text-xs">
-              {(['chat', 'graph', 'outline'] as const).map(view =>
-                <Button key={view} size="sm" variant={explorerView === view ? 'secondary' : 'ghost'}
-                  className={'h-7 px-2 ' + (view === 'outline' ? 'lg:hidden' : '')}
-                  aria-pressed={explorerView === view}
-                  onClick={() => setExplorerView(view)}>
-                  {view.charAt(0).toUpperCase() + view.slice(1)}
-                </Button>)}
-            </nav>
-          </header>
-          {explorerView === 'outline' ? <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            <h3 className="mb-2 text-sm font-semibold">Canonical Story Outline</h3>
-            {explorerIndex ? <StoryWorkspaceOutline index={explorerIndex}
-              selectedId={selectedRecordId} onSelect={selectRecord} /> :
-              <p role={explorer.error ? 'alert' : 'status'} className="text-sm text-muted-foreground">
-                {explorer.error?.message ?? 'No verified Thread record catalog is available.'}
-              </p>}
-          </div> : explorerView === 'graph' ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
-            {explorer.error ? <p role="alert" className="text-sm text-destructive">{explorer.error.message}</p>
-              : !explorer.data ? <p role="status" className="text-sm text-muted-foreground">
-                Verifying selected Thread revision…</p>
-              : !explorerIndex ? <div className="space-y-2 text-sm text-muted-foreground">
-                <h3 className="text-sm font-semibold text-foreground">Pinned Story source</h3>
-                <p>{explorer.data.story?.title} · {explorer.data.story?.provider} · {explorer.data.story?.directory}</p>
-                <p>Source commit: <code>{explorer.data.baseSha}</code></p>
-                <p>No Thread revision has been verified yet. Canonical records and native links will be
-                  available here after a Thread has a settled, validated revision.</p>
-              </div> : <>
-                <p role="status" className="mb-2 text-xs text-muted-foreground">
-                  Verified Thread revision <code>{explorerIndex.headSha.slice(0, 12)}</code>
-                  {' · '}Source <code>{explorerIndex.baseSha.slice(0, 12)}</code>
-                  {' · '}{explorerIndex.records.length} records
-                  {' · '}{explorerIndex.diagnostics.length} diagnostics
-                </p>
-                <StoryRelationshipGraph workspace={{ storyId, threadId: explorerThreadId }}
-                  index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
-                {explorerThreadId && <div className="mt-3">
-                  <StoryWorkspaceInspector storyId={storyId} threadId={explorerThreadId}
-                    index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
-                </div>}
-                {explorer.data.jobId && <Link to="/jobs/$jobId"
-                  params={{ jobId: explorer.data.jobId }} search={{ tab: 'story' }}
-                  className="mt-3 inline-flex text-xs underline underline-offset-2">
-                  Review Changes (full diff)
-                </Link>}
-              </>}
-          </div> : creatingThread || !data.threads.length ||
-            (selectedThread && selectedThread.status === 'prepared' && selectedThread.id.startsWith('root:'))
-            ? <StoryFirstChat key={creatingThread || !data.threads.length ? 'new:' + storyId : selectedThread!.id}
-              storyId={storyId}
-              threadId={!creatingThread && data.threads.length > 0 && selectedThread?.id.startsWith('root:')
-                ? selectedThread.id : undefined}
-              onSubmitted={async threadId => {
-                setCreatingThread(false); await refresh()
-                await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
-                  search: { thread: threadId } })
-              }} />
-            : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />
-              : <p className="p-5 text-sm text-muted-foreground">Select a Thread or create a new one.</p>}
-        </> : <p className="p-5 text-sm text-muted-foreground">
-          Loading Threads…
-        </p>}
-      </section>
-    </div>
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/60">
+        chatPanel
+      </section>}
   </main>
 }
