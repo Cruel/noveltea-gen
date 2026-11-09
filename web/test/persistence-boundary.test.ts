@@ -6,6 +6,9 @@ test('Studio application source cannot import or access the raw SQLite driver', 
   assertPersistenceBoundary()
   for (const source of [
     "import Database from 'better-sqlite3'",
+    "import { Pool } from 'pg'",
+    "import { Kysely } from 'kysely'",
+    "import { openKyselyDatabase } from '../db/kysely-connection'",
     "const Database = require('better-sqlite3')",
     "await import('drizzle-orm/better-sqlite3')",
     "import { drizzle } from 'drizzle-orm/better-sqlite3'",

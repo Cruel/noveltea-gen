@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import { assertLegacySqliteBackend } from './backend-readiness'
 
 /** A separately opened, read-only catalog for the rootless sandbox controller.
  * Host validation must never create or migrate the application's database.
@@ -9,6 +10,7 @@ export type TrustedControllerJobRow = {
   configJson: string | null
 }
 export function readTrustedControllerJob(dbPath: string, jobId: string): TrustedControllerJobRow | null {
+  assertLegacySqliteBackend()
   const db = new Database(dbPath, { readonly: true, fileMustExist: true })
   try {
     return db.prepare(`SELECT s.owner_user_id AS ownerId, r.provider AS provider,

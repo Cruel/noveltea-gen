@@ -165,6 +165,17 @@ These are deterministic, credential-free **database primitive** tests. They do n
 
 **Still mandatory for #128 and later:** produce the typed `Kysely<StudioDb>` implementation; test global guard participation by every interacting write; real PG transaction-scoped nested helper isolation/rollback; bounded retries/deadlock order (`40P01` and `40001`); lock release after connection termination; absent-row reservation races; and generated event-ID allocation/commit-order cursor races. Run these with a real PostgreSQL server and competing connections, then repeat relevant behavior through the same StudioStore tests on both dialects. Failure requiring domain-repository duplication reopens the architecture gate.
 
+## S03 shared helper implementation (#128)
+
+The shared factories and conservative global-write guard are now implemented;
+see [interface, protocol and proof scope](kysely-transactions.md). The existing
+`pnpm certify:postgres-transactions` certificate now also executes the same typed
+Kysely proof algorithms against both engines, including four independent OS
+processes, retries, absent identities, event cursor ordering and abrupt backend
+termination. The native primitive checks remain in place. This does not claim a
+migrated PostgreSQL StudioStore: application/controller selection remains
+fail-closed, and full domain contracts must be carried forward to #142.
+
 ## Gate 0 review decision
 
 **Architecture gate: PASS (feasible, conditional on required proofs).** There is no identified domain operation that must be implemented twice. The simplest safe design is a common Kysely query algorithm with a transaction-scoped executor and an initially conservative writer lock; fine-grained locks can be introduced only after the same tests establish equivalence. Material correctness work remains in #128/#129 and later tests. **Stop** if those prototypes/tests reveal that a shared algorithm cannot preserve any invariant without substantial duplicated business logic. This report records the feasibility pass and the precise follow-up criteria; it does **not** certify PostgreSQL or authorize bypassing the blocking dependencies.

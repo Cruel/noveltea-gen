@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web/src')
 const driverExempt = new Set([
-  'db/connection.ts', // owns the driver and lifecycle
+  'db/connection.ts', // owns the legacy driver and lifecycle
+  'db/kysely-connection.ts', // owns both shared drivers and guarded transaction lifecycle
   'db/migrations.ts', // PRAGMAs and Drizzle migration history
   'db/migrate-cli.ts', // offline operator migration command
   'db/trusted-catalog.ts', // isolated, read-only sandbox authorization
@@ -35,6 +36,10 @@ const driverPatterns = [
 export function sourceViolations(path, source) {
   if ((path.startsWith('persistence/') && (path.endsWith('-sqlite.ts') || path === 'persistence/sqlite.ts')) || driverExempt.has(path)) return []
   const errors = driverPatterns.filter(({ pattern }) => pattern.test(source)).map(x => x.reason)
+  if (!path.startsWith('db/') && !path.startsWith('persistence/') &&
+      /(?:['"](?:pg|kysely)['"]|from\s*['"][^'"]*\/db\/kysely-connection['"])/.test(source)) {
+    errors.push('shared database infrastructure outside persistence adapter')
+  }
   if (/\bstudioSqliteDriver\b/.test(source)) {
     errors.push('raw SQLite accessor outside Better Auth adapter')
   }

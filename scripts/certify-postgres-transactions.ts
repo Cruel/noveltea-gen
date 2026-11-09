@@ -2,13 +2,16 @@
  * Gate 0 PostgreSQL transaction feasibility certificate.
  *
  * Uses #127's opt-in Compose topology with a unique project and volume.
- * Tests native PostgreSQL primitives, not a Kysely/Studio implementation.
+ * Tests native PostgreSQL primitives and the shared Kysely transaction boundary.
+ * Full StudioStore domain migration/certification remains a separate gate.
  * Never starts Studio or touches an existing developer DB.
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 const root = resolve(".");
@@ -175,6 +178,14 @@ test("PostgreSQL Gate 0: isolated transaction feasibility (#128 prerequisite)", 
     "Refusing existing Compose containers",
   );
 
+  const temporary = mkdtempSync(join(tmpdir(), "nt-pg-kysely-"));
+  const override = join(temporary, "ports.yaml");
+  // Only this disposable certificate publishes a random loopback port.
+  writeFileSync(
+    override,
+    'services:\n  postgres:\n    ports: ["127.0.0.1::5432"]\n    networks: [pg-proof]\nnetworks:\n  pg-proof: {}\n',
+  );
+  files.push("-f", override);
   let started = false;
   try {
     compose("config", "--quiet");
@@ -268,10 +279,36 @@ SELECT count(*) FROM audit_queue WHERE phase='running';`);
         "First claim must take the oldest eligible job",
       );
     });
+
+    await t.test("shared typed Kysely helpers against competing application connections", () => {
+      const address = compose("port", "postgres", "5432");
+      assert.match(address, /^127\.0\.0\.1:\d+$/);
+      const result = spawnSync(
+        "pnpm",
+        ["--filter", "@noveltea/studio", "exec", "tsx", "--test", "test/kysely-guards.test.ts"],
+        {
+          cwd: root,
+          env: {
+            ...env,
+            NT_KYSELY_PROOF_URL: `postgresql://noveltea_app:${credentials.NT_PG_APP_PASSWORD}@${address}/noveltea`,
+          },
+          encoding: "utf8",
+          timeout: 120_000,
+        },
+      );
+      process.stdout.write(result.stdout ?? "");
+      process.stderr.write(result.stderr ?? "");
+      assert.equal(result.status, 0, "Shared Kysely proof failed");
+    });
   } finally {
-    if (started) {
-      compose("down"); // Never -v: the composed base defines developer volumes.
-      if (volumeExists()) docker(["volume", "rm", volume]); // Only this invocation's unique volume.
+    try {
+      if (started) {
+        compose("down"); // Never -v: the composed base defines developer volumes.
+        if (volumeExists()) docker(["volume", "rm", volume]); // Only this invocation's unique volume.
+      }
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+      files.splice(-2);
     }
   }
 });

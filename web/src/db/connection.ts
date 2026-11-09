@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import { assertLegacySqliteBackend } from './backend-readiness'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -32,6 +33,7 @@ const handles = new WeakMap<object, {
 }>()
 
 export function openStudioDatabase(path = defaultStudioPath()): StudioStore {
+  assertLegacySqliteBackend()
   if (path !== ':memory:') {
     if (!isAbsolute(path)) throw new Error('Studio database path must be absolute')
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
