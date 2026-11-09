@@ -7,21 +7,41 @@ import { authorizedStoryJob } from './fixture-jobs.server'
 import type { JobStartResult } from '../../../src/job'
 import { generationStages } from '../../../src/generation'
 import type { GenerationStage } from '../../../src/generation-plan'
+import type { PiWorkStatus } from '../../../src/pi-work-status'
 
 export type ProgressKind = 'started' | 'working' | 'verified' | 'finished' | 'interrupted'
 export type ProgressStatus = 'paused' | 'blocked' | 'completed' | 'cancelled'
+/** Controller event provenance cannot be supplied by Pi. Only the status
+ * reporter sets source=pi, with no verified SHA, diagnostics or review claim. */
+export type ProgressDetail = {
+  source: 'controller' | 'pi'
+  specialist?: string
+  turnId?: string
+  headSha?: string
+  changedRecordIds?: string[]
+  validation?: 'passed' | 'rejected' | 'unverified' | 'error'
+  diagnostics?: number
+  outcome?: string
+  review?: 'complete-in-scope' | 'incomplete' | 'blocked'
+  summary?: string
+  proposedPaths?: string[]
+}
 export type ProgressEvent = {
   id: number; kind: ProgressKind; stage: GenerationStage | null; milestone: string | null
   files: string[]; status: ProgressStatus | null; createdAt: string
+  detail?: ProgressDetail
 }
 type EventInput = {
   kind: ProgressKind; stage?: GenerationStage; milestone?: string
   files?: string[]; status?: ProgressStatus
+  headSha?: string; outcome?: string; specialist?: string; turnId?: string
+  changedRecordIds?: string[]; validation?: ProgressDetail['validation']; diagnostics?: number
+  piStatus?: PiWorkStatus
 }
 
 const stageSet = new Set<string>(generationStages)
 const canonicalFile = (path: string) =>
-  path.length <= 1024 && path.endsWith('.md') &&
+  path.length <= 1024 && !path.includes('\\') && !path.startsWith('/') && path.endsWith('.md') &&
   path.split('/').length >= 2 &&
   path.split('/').every(part => !!part && part !== '.' && part !== '..' && !part.startsWith('.'))
 const canonicalMilestone = (id: string) => /^[a-z][a-z0-9-]*\.[a-z0-9.-]+$/.test(id) && id.length <= 160
@@ -30,11 +50,52 @@ const canonicalMilestone = (id: string) => /^[a-z][a-z0-9-]*\.[a-z0-9.-]+$/.test
 export async function appendGenerationEvent(store: StudioDatabase, owner: string, jobId: string, input: EventInput) {
   if (input.stage && !stageSet.has(input.stage)) throw new Error('Invalid progress stage')
   if (input.milestone && !canonicalMilestone(input.milestone)) throw new Error('Invalid progress milestone')
+  if (input.piStatus && (input.kind !== 'working' || input.files?.length || input.headSha ||
+      input.outcome || input.specialist || input.status || input.changedRecordIds?.length ||
+      input.validation || input.diagnostics !== undefined))
+    throw new Error('Pi status cannot claim controller evidence')
+  if (input.headSha && !/^[a-f0-9]{40}$/i.test(input.headSha))
+    throw new Error('Invalid verified progress SHA')
+  if (input.diagnostics !== undefined && (!Number.isSafeInteger(input.diagnostics) ||
+      input.diagnostics < 0 || input.diagnostics > 2_000))
+    throw new Error('Invalid progress diagnostic count')
   const files = [...new Set((input.files ?? []).filter(canonicalFile))].slice(0, 24)
+  const changedRecordIds = [...new Set((input.changedRecordIds ?? [])
+    .filter(id => /^[a-z0-9][a-z0-9.-]{0,159}$/.test(id)))].slice(0, 24)
+  const detail: ProgressDetail = input.piStatus ? {
+    source: 'pi', summary: input.piStatus.summary,
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    proposedPaths: input.piStatus.proposedPaths.filter(canonicalFile).slice(0, 12),
+  } : {
+    source: 'controller',
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    ...(changedRecordIds.length ? { changedRecordIds } : {}),
+    ...(input.validation ? { validation: input.validation } : {}),
+    ...(input.diagnostics !== undefined ? { diagnostics: input.diagnostics } : {}),
+    ...(input.specialist ? { specialist: input.specialist.slice(0, 160) } : {}),
+    ...(input.headSha ? { headSha: input.headSha } : {}),
+    ...(input.outcome ? { outcome: input.outcome.slice(0, 160) } : {}),
+    ...(input.kind === 'verified' && input.stage === 'review' &&
+      (input.outcome === 'complete-in-scope' || input.outcome === 'incomplete' ||
+        input.outcome === 'blocked') ? { review: input.outcome } : {}),
+  }
   await store.persistence.generation.events.append(owner, jobId, {
     kind: input.kind, stage: input.stage ?? null, milestone: input.milestone ?? null,
-    filesJson: JSON.stringify(files), status: input.status ?? null, createdAt: new Date().toISOString(),
+    filesJson: JSON.stringify({ files, detail }), status: input.status ?? null,
+    createdAt: new Date().toISOString(),
   })
+}
+
+/** Historical rows used a bare file array. Preserve them as controller
+ * evidence without inventing a verified SHA or an independent review. */
+export function decodeProgressFiles(value: string): { files: string[]; detail?: ProgressDetail } {
+  const parsed: unknown = JSON.parse(value)
+  if (Array.isArray(parsed)) return { files: parsed as string[] }
+  if (!parsed || typeof parsed !== 'object') throw new Error('Invalid persisted progress payload')
+  const payload = parsed as { files?: unknown; detail?: ProgressDetail }
+  if (!Array.isArray(payload.files) || !payload.files.every(path => typeof path === 'string'))
+    throw new Error('Invalid persisted progress files')
+  return { files: payload.files, detail: payload.detail }
 }
 
 export async function listGenerationEvents(store: StudioDatabase, owner: string, jobId: string,
@@ -43,7 +104,7 @@ export async function listGenerationEvents(store: StudioDatabase, owner: string,
     owner, jobId, after, Math.max(1, Math.min(100, limit)))
   return rows.map(({ filesJson, ...row }) => ({
     ...row, stage: row.stage as GenerationStage | null, status: row.status as ProgressStatus | null,
-    files: JSON.parse(filesJson) as string[],
+    ...decodeProgressFiles(filesJson),
   }))
 }
 
@@ -58,7 +119,7 @@ export async function recentGenerationEvents(store: StudioDatabase, owner: strin
   const hasMore = rows.length > 100
   return { events: rows.slice(0, 100).reverse().map(({ filesJson, ...row }) => ({
     ...row, stage: row.stage as GenerationStage | null, status: row.status as ProgressStatus | null,
-    files: JSON.parse(filesJson) as string[],
+    ...decodeProgressFiles(filesJson),
   })), hasMore }
 }
 

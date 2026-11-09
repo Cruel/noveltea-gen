@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -210,11 +211,11 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
     // All Pi file/search/shell tools use the isolated controller adapter,
     // including standalone CLI jobs. No local host-tool fallback is permitted.
     // Neither a structured-record writer nor a Git commit tool is exposed.
-    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
   });
   let reads: string[] = [];
   let wrote = false;

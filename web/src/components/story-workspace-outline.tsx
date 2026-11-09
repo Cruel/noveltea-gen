@@ -1,11 +1,13 @@
 import { Button } from '@/components/ui/button'
 import type { ExplorerIndex, ExplorerRecord } from '@/lib/story-explorer.server'
 import { StoryChangeLabels } from '@/routes/_protected/jobs/-StoryChangeLabels'
+import type { ActivityRecordHighlights } from '@/lib/story-activity-overlay'
 
 type Selection = {
   index: ExplorerIndex
   selectedId: string | null
   onSelect: (id: string) => void
+  highlights?: ActivityRecordHighlights
 }
 
 const order = ['creative-direction', 'arc', 'milestone', 'event', 'beat', 'character',
@@ -14,7 +16,7 @@ const order = ['creative-direction', 'arc', 'milestone', 'event', 'beat', 'chara
 
 /** Record hierarchy comes from the native catalog, not inferred Markdown links.
  * Git-only placeholders never become selectable typed records. */
-export function StoryWorkspaceOutline({ index, selectedId, onSelect }: Selection) {
+export function StoryWorkspaceOutline({ index, selectedId, onSelect, highlights = {} }: Selection) {
   const groups = new Map<string, ExplorerRecord[]>()
   for (const record of index.records) groups.set(record.type, [...(groups.get(record.type) ?? []), record])
   const arcs = groups.get('arc') ?? []
@@ -27,12 +29,23 @@ export function StoryWorkspaceOutline({ index, selectedId, onSelect }: Selection
     const diagnostics = index.diagnostics.filter(item => item.path === record.path).length
     return <Button key={record.id} type="button" size="sm" variant="ghost"
       data-record-id={record.id}
+      data-activity={highlights[record.id]}
+      aria-label={record.title + (highlights[record.id] === 'verified' ? ' · verified checkpoint' :
+        highlights[record.id] === 'working' ? ' · active, unverified' :
+        highlights[record.id] === 'proposed' ? ' · Pi-proposed, unverified' : '')}
       aria-current={selectedId === record.id ? 'true' : undefined}
       className={'h-auto min-h-7 w-full items-start justify-start px-2 py-1 text-left text-xs ' +
-        (selectedId === record.id ? 'bg-secondary' : '')}
+        (selectedId === record.id ? 'bg-secondary ' : '') +
+        (highlights[record.id] === 'verified' ? 'ring-1 ring-emerald-500/70 ' :
+          highlights[record.id] === 'working' ? 'ring-1 ring-amber-400/80 ' :
+          highlights[record.id] === 'proposed' ? 'outline-dashed outline-1 outline-sky-400/70 ' : '')}
       onClick={() => onSelect(record.id)}>
       <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{record.title}</span>
       <StoryChangeLabels change={record.change} />
+      {highlights[record.id] && <span className="text-[10px] text-muted-foreground">
+        {highlights[record.id] === 'verified' ? 'Verified' :
+          highlights[record.id] === 'working' ? 'Active · unverified' : 'Pi proposed'}
+      </span>}
       {diagnostics > 0 && <span title={diagnostics + ' diagnostics'} className="text-destructive">!</span>}
     </Button>
   }

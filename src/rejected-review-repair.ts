@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { existsSync } from "node:fs";
@@ -639,8 +640,8 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     thinkingLevel: resolved.resolution.thinking, resourceLoader: loader, settingsManager,
     sessionManager: SessionManager.open(state.origin.sessionFile,
       dirname(state.origin.sessionFile), project.root),
-    customTools: [...scopedTools, createStoryValidateTool(job)],
-    noTools: "all", tools: ["read", "edit", "write", "grep", "find", "ls", "story_validate"],
+    customTools: [...scopedTools, createStoryValidateTool(job), createPiStatusTool()],
+    noTools: "all", tools: ["read", "edit", "write", "grep", "find", "ls", "story_validate", "report_status"],
   });
   try {
     if (resolved.resolution.thinking &&

@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { mkdir } from "node:fs/promises";
 import { parseSpecialistChoice, extractSpecialistChoice, authorChoiceDirection, type SpecialistChoiceQuestion,
   type SpecialistChoiceReceipt } from "./specialist-choice.js";
@@ -100,8 +101,8 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     sessionManager: resume
       ? SessionManager.open(resume.sessionFile, dirname(resume.sessionFile), project.root)
       : context.manager,
-    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
-    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {

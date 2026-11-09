@@ -58,6 +58,45 @@ test('selected verified record is shared by Outline and Graph without making del
   assert.doesNotMatch(switched, /Ring the bell/)
 })
 
+test('record highlights remain separate from canonical selection, with explicit unverified provenance', () => {
+  const markup = renderToStaticMarkup(createElement(StoryWorkspaceOutline, {
+    index, selectedId: 'event.bell', onSelect: () => {},
+    highlights: { 'event.bell': 'verified', 'character.one': 'proposed',
+      'event.unassigned': 'working' },
+  }))
+  assert.match(markup, /data-record-id="event.bell" data-activity="verified"/)
+  assert.match(markup, /data-record-id="character.one" data-activity="proposed"/)
+  assert.match(markup, /aria-label="Character One · Pi-proposed, unverified"/)
+  assert.match(markup, /data-record-id="event.unassigned" data-activity="working"/)
+  assert.equal((markup.match(/aria-current="true"/g) ?? []).length, 1)
+  assert.doesNotMatch(markup, /data-activity="proposed"[^>]+aria-current="true"/)
+})
+
+test('desktop/mobile Story panes share Thread-scoped overlays without forced viewport changes', () => {
+  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/conversations.tsx', import.meta.url), 'utf8')
+  const graph = readFileSync(new URL('../src/routes/_protected/jobs/-StoryRelationshipGraph.tsx', import.meta.url), 'utf8')
+  const activity = readFileSync(new URL('../src/components/thread-run-activity.tsx', import.meta.url), 'utf8')
+  const chat = readFileSync(new URL('../src/components/thread-chat.tsx', import.meta.url), 'utf8')
+  assert.match(route, /highlights=\{highlights\}/)
+  assert.match(chat, /data-turn-activity=/)
+  assert.match(chat, /onMouseEnter=\{item.role === 'user'/)
+  assert.match(chat, /onFocus=\{item.role === 'user'/)
+  assert.match(chat, /turn\.id === messageId\)\?\.executionIds/)
+  assert.match(chat, /linked\.includes\(evidence\.jobId\)/)
+  assert.match(chat, /evidence\.kind === 'verified'/)
+  assert.match(route, /<StoryDesktopWorkspace outline=\{outlinePanel\}/)
+  assert.match(route, /explorerView === 'graph'/)
+  assert.match(route, /explorerView === 'outline'/)
+  assert.match(route, /onActivityPin=\{onActivityPin\}/)
+  assert.match(activity, /Highlight in Story/)
+  assert.match(graph, /onMoveEnd=\{rememberViewport\}/)
+  assert.match(graph, /defaultViewport=\{initialViewport/)
+  assert.match(graph, /Follow activity \(moves viewport\)/)
+  assert.match(graph, /duration: 0/)
+  assert.doesNotMatch(graph, /key=\{selectedId \+ scope/)
+  assert.match(activity, /motion-reduce:transition-none/)
+})
+
 test('Story Graph owns the viewport and canonical record inspection is on demand', () => {
   const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/conversations.tsx', import.meta.url), 'utf8')
   const inspector = readFileSync(new URL('../src/components/story-workspace-explorer.tsx', import.meta.url), 'utf8')

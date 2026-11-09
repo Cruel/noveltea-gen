@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { mkdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -98,8 +99,8 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
-    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {

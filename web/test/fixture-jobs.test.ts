@@ -273,6 +273,14 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(events[2]?.stage, 'foundation')
     assert.equal(events[3]?.status, 'paused')
     assert.ok(events[2]?.files.includes('creative-direction/foundation.md'))
+    assert.equal(events[1]?.detail?.source, 'controller')
+    assert.equal(events[2]?.detail?.source, 'controller')
+    assert.equal(events[2]?.detail?.turnId,
+      chat.turns.find(turn => turn.executionIds.includes(jobId))?.id)
+    assert.equal(events[2]?.detail?.headSha, started.body.job.headSha)
+    assert.equal(events[2]?.detail?.validation, 'passed')
+    assert.ok((events[2]?.detail?.diagnostics ?? 1) >= 0)
+    assert.ok((events[2]?.detail?.changedRecordIds ?? []).every(id => typeof id === 'string'))
     assert.equal(JSON.stringify(events).includes(root), false, 'no host paths or internal output in progress')
     assert.equal(JSON.stringify(events).includes('tool_calls'), false)
     assert.equal(events.every((event, index) => index === 0 || event.id > events[index - 1]!.id), true)
@@ -366,6 +374,10 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     })
     const sanitized = await listGenerationEvents(store, alice.id, jobId, events.at(-1)!.id)
     assert.deepEqual(sanitized[0]?.files, ['creative-direction/foundation.md'])
+    await assert.rejects(() => appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'verified', stage: 'foundation',
+      piStatus: { summary: 'I validated everything', proposedPaths: ['events/test.md'] },
+    }), /Pi status cannot claim controller evidence/)
     const pinnedRequest = JSON.parse((await store.testing.records.first<{ generationRequestJson: string }>(
       'studio_sessions', { id: jobId }))!.generationRequestJson)
     assert.equal(pinnedRequest.fixture, true)
@@ -488,6 +500,24 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(older.hasMore, false)
     assert.equal(older.events.length, 10)
     assert.ok(older.events.at(-1)!.id < newest.events[0]!.id)
+    // Pi status uses the same durable owner-scoped cursor but cannot fabricate
+    // a checkpoint, diagnostic, canonical change or independent review.
+    await appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'working',
+      piStatus: { summary: 'Inspecting opening', proposedPaths: ['events/opening.md'] },
+    })
+    const proposed = (await listGenerationEvents(store, alice.id, jobId, newest.events.at(-1)!.id))[0]!
+    assert.equal(proposed.detail?.source, 'pi')
+    assert.deepEqual(proposed.files, [])
+    assert.deepEqual(proposed.detail?.proposedPaths, ['events/opening.md'])
+    assert.equal(proposed.detail?.headSha, undefined)
+    assert.equal(proposed.detail?.review, undefined)
+    assert.equal(proposed.detail?.diagnostics, undefined)
+    assert.deepEqual(await listGenerationEvents(store, bob.id, jobId, newest.events.at(-1)!.id), [])
+    store.close()
+    store = openStudioDatabase(join(root, 'studio.sqlite'))
+    assert.deepEqual((await listGenerationEvents(store, alice.id, jobId, newest.events.at(-1)!.id))
+      .map(event => event.id), [proposed.id], 'restart preserves exact Pi status cursor')
   } finally {
     if (worker && worker.exitCode === null && worker.signalCode === null) {
       worker.kill('SIGKILL')

@@ -9,11 +9,17 @@ import type { RevisionPreview } from '@/lib/story-revision-plan'
 import { ThreadMessageEdit } from './thread-message-edit'
 import { ThreadRunAttention } from './thread-run-attention'
 import { ThreadRunActivity } from './thread-run-activity'
+import type { ActivityStep } from '@/lib/thread-activity'
 import { canSendThreadFollowUp } from '@/lib/thread-attention'
 import { setCreativeMode } from '@/lib/threads.functions'
 import type { CreativeMode } from '../../../src/creative-policy'
 
-export function ThreadChat({ threadId }: { threadId: string }) {
+export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedActivity }: {
+  threadId: string
+  onActivityHover?: (jobId: string, step: ActivityStep | null) => void
+  onActivityPin?: (jobId: string, step: ActivityStep) => void
+  pinnedActivity?: { jobId: string; stepId: number } | null
+}) {
   const key = ['thread-chat', threadId]
   const client = useQueryClient()
   const { data, error, isFetching } = useQuery({
@@ -23,6 +29,13 @@ export function ThreadChat({ threadId }: { threadId: string }) {
       ['preparing', 'queued', 'running'].includes(message.phase)) ||
       query.state.data?.runs.at(-1)?.status === 'running' ? 2500 : 15000,
   })
+  const turnActivity = (messageId: string, jobId: string, at: string): ActivityStep | null => {
+    const linked = data?.turns.find(turn => turn.id === messageId)?.executionIds ?? [jobId]
+    const files = [...new Set((data?.evidence ?? []).filter(evidence =>
+      linked.includes(evidence.jobId) && evidence.kind === 'verified').flatMap(evidence => evidence.files))]
+    return files.length ? { id: 0, kind: 'stage', state: 'verified', stage: null,
+      milestone: null, files, outcome: null, at } : null
+  }
   const [message, setMessage] = useState('')
   const [liveMode, setLiveMode] = useState<'steer' | 'follow-up'>('follow-up')
   const [modeOverride, setModeOverride] = useState<'default' | CreativeMode>('default')
@@ -241,7 +254,17 @@ export function ThreadChat({ threadId }: { threadId: string }) {
         data.runs.some(run => run.jobId === item.jobId &&
           ['blocked', 'interrupted'].includes(run.status)) &&
         item.content.startsWith('Generation blocked.'))).map(item => <Fragment key={item.id}>
-        <li className={
+        <li tabIndex={item.role === 'user' && item.jobId ? 0 : undefined}
+        data-turn-activity={item.role === 'user' && item.jobId ? item.id : undefined}
+        onMouseEnter={item.role === 'user' && item.jobId && onActivityHover ? () =>
+          onActivityHover(item.jobId!, turnActivity(item.id, item.jobId!, item.createdAt)) : undefined}
+        onMouseLeave={item.role === 'user' && item.jobId && onActivityHover ? () =>
+          onActivityHover(item.jobId!, null) : undefined}
+        onFocus={item.role === 'user' && item.jobId && onActivityHover ? () =>
+          onActivityHover(item.jobId!, turnActivity(item.id, item.jobId!, item.createdAt)) : undefined}
+        onBlur={item.role === 'user' && item.jobId && onActivityHover ? () =>
+          onActivityHover(item.jobId!, null) : undefined}
+        className={
         'list-none rounded-lg px-3 py-2 ' +
         (item.role === 'user' ? 'ml-6 bg-secondary/70' : 'mr-6 bg-muted/30')}>
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -356,14 +379,18 @@ export function ThreadChat({ threadId }: { threadId: string }) {
           message.jobId === item.jobId)?.id === item.id && <li data-slot="thread-activity-item" className="list-none border-0 p-0">
         <ThreadRunActivity jobId={item.jobId}
           status={data.runs.find(run => run.jobId === item.jobId)!.status}
-          onProgress={followProgress} />
+          onProgress={followProgress} onActivityHover={onActivityHover}
+          onActivityPin={onActivityPin}
+          pinnedId={pinnedActivity?.jobId === item.jobId ? pinnedActivity.stepId : null} />
       </li>}
       </Fragment>)}
     </ol>
     {data?.runs.filter(run => !data.messages.some(message =>
       message.role === 'user' && message.jobId === run.jobId)).map(run =>
       <div key={run.jobId} className="mx-auto max-w-3xl">
-        <ThreadRunActivity jobId={run.jobId} status={run.status} onProgress={followProgress} />
+        <ThreadRunActivity jobId={run.jobId} status={run.status} onProgress={followProgress}
+          onActivityHover={onActivityHover} onActivityPin={onActivityPin}
+          pinnedId={pinnedActivity?.jobId === run.jobId ? pinnedActivity.stepId : null} />
       </div>)}
     {data && !data.messages.length && <p className="mx-auto max-w-3xl text-sm text-muted-foreground">
       No messages yet. Describe what you want NovelTea to create.

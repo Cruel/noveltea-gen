@@ -27,26 +27,57 @@ function StepIcon({ step }: { step: ActivityStep }) {
   return <CircleDot className="size-3.5" />
 }
 
-export function ActivityRow({ step }: { step: ActivityStep }) {
+export function ActivityRow({ step, onHover, onPin, pinned = false }: {
+  step: ActivityStep; onHover?: (step: ActivityStep | null) => void
+  onPin?: () => void; pinned?: boolean
+}) {
   const [showFiles, setShowFiles] = useState(false)
   const [open, setOpen] = useState<boolean | undefined>()
   const isStart = step.kind === 'started'
+  const canHighlight = step.state === 'verified' && (step.files.length > 0 ||
+    !!step.detail?.changedRecordIds?.length) ||
+    step.state === 'proposed' && !!step.detail?.proposedPaths?.length ||
+    step.state === 'working' && !!step.milestone
+  const pinButton = onPin && canHighlight && <button type="button"
+    aria-pressed={pinned} className="mt-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
+    onClick={onPin}>{pinned ? 'Clear Story highlight' : 'Highlight in Story'}</button>
   const files = showFiles ? step.files : step.files.slice(0, 3)
   const status = step.state === 'working' ? 'running' :
     step.state === 'stopped' ? 'error' : undefined
 
-  if (isStart) return <TraceLine status={status} title={step.at}>
+  const interaction = onHover ? {
+    onMouseEnter: () => onHover(step), onMouseLeave: () => onHover(null),
+    onFocus: () => onHover(step), onBlur: () => onHover(null), tabIndex: 0,
+  } : {}
+  if (isStart || step.kind === 'report') return <TraceLine status={status} title={step.at}
+    {...interaction} data-activity-source={step.kind === 'report' ? 'pi' : 'controller'}>
     <TraceIcon><StepIcon step={step} /></TraceIcon>
-    <TraceTitle>{activityTitle(step)}</TraceTitle>
+    <div className="min-w-0"><TraceTitle>{activityTitle(step)}</TraceTitle>
+      {step.kind === 'report' && <TraceDescription>
+        Pi-proposed, unverified{step.detail?.proposedPaths?.length
+          ? ' · ' + step.detail.proposedPaths.join(', ') : ''}
+      </TraceDescription>}
+      {pinButton}
+    </div>
   </TraceLine>
 
-  return <TraceLine status={status} title={step.at} className="grid-cols-1 gap-0">
+  return <TraceLine status={status} title={step.at} className="grid-cols-1 gap-0"
+    {...interaction} data-activity-source="controller">
+
     <TraceCollapsible open={open ?? step.state === 'working'}
       onOpenChange={setOpen}>
       <TraceCollapsibleTrigger className="group/trigger w-full">
         <TraceIcon><StepIcon step={step} /></TraceIcon>
         <div className="min-w-0 flex-1">
           <TraceTitle>{activityTitle(step)}</TraceTitle>
+          {step.detail?.headSha && <span className="block text-xs text-muted-foreground">
+            Checkpoint {step.detail.headSha.slice(0, 12)}
+            {step.detail.outcome ? ' · ' + step.detail.outcome : ''}
+            {step.detail.validation ? ' · native ' + step.detail.validation : ''}
+            {step.detail.diagnostics !== undefined ? ' · ' + step.detail.diagnostics + ' diagnostics' : ''}
+            {step.detail.review ? ' · review ' + step.detail.review : ''}
+            {step.detail.turnId ? ' · Turn ' + step.detail.turnId.slice(0, 8) : ''}
+          </span>}
           {step.state === 'verified' && step.files.length > 0 &&
             <span className="block text-xs text-muted-foreground">
               {step.files.length} verified Story {step.files.length === 1 ? 'file' : 'files'}
@@ -79,6 +110,7 @@ export function ActivityRow({ step }: { step: ActivityStep }) {
         </TraceDescription>}
       </TraceCollapsibleContent>
     </TraceCollapsible>
+    {pinButton}
   </TraceLine>
 }
 
@@ -90,12 +122,16 @@ function LiveActivityStream({ jobId }: { jobId: string }) {
 /** Durable activity is embedded after the user's run request, not hidden in a
  * separate tab. This reads the same shared Query cache as the Job page's SSE.
  * Only controller-verified changes produce file rows; never read Pi transcripts. */
-export function ThreadRunActivity({ jobId, status, onProgress }: {
+export function ThreadRunActivity({ jobId, status, onProgress, onActivityHover,
+  onActivityPin, pinnedId }: {
   jobId: string; status: string; onProgress?: () => void
+  onActivityHover?: (jobId: string, step: ActivityStep | null) => void
+  onActivityPin?: (jobId: string, step: ActivityStep) => void
+  pinnedId?: number | null
 }) {
   const queryClient = useQueryClient()
   const { data: history, error, isPending } = useQuery(jobEventsQuery(jobId))
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(status === 'running' || status === 'queued')
   const [showAll, setShowAll] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderError, setOlderError] = useState<string | null>(null)
@@ -130,7 +166,7 @@ export function ThreadRunActivity({ jobId, status, onProgress }: {
   // A failed preflight can record "started" without reaching a specialist.
   // The status card already explains it; don't show an empty second timeline.
   if (!stillRunning && !isPending && !error && !history?.hasMore &&
-      !workSteps.some(step => step.kind === 'stage')) return null
+      !workSteps.some(step => step.kind === 'stage' || step.kind === 'report')) return null
 
   return <div role="group" aria-label="Generation activity"
     className="mr-6 min-w-0 px-1 py-2 text-sm">
@@ -158,7 +194,10 @@ export function ThreadRunActivity({ jobId, status, onProgress }: {
         {stillRunning ? 'Waiting for the first recorded stage…' : 'No stage activity was recorded for this run.'}
       </p>}
       {visible.length > 0 && <Trace>
-        {visible.map(step => <ActivityRow key={step.id} step={step} />)}
+        {visible.map(step => <ActivityRow key={step.id} step={step}
+          onHover={onActivityHover ? next => onActivityHover(jobId, next) : undefined}
+          onPin={onActivityPin ? () => onActivityPin(jobId, step) : undefined}
+          pinned={pinnedId === step.id} />)}
       </Trace>}
       {(workSteps.length > 8 || history?.hasMore) && <div className="mt-2 flex flex-wrap gap-2">
         {workSteps.length > 8 && <Button size="sm" variant="ghost"

@@ -1,4 +1,6 @@
 import { assertNativeVersion } from '../../src/native-cli-version';
+import { withPiStatusReporter } from '../../src/pi-work-status'
+import { validateStoryJob } from '../../src/validator'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import type { StudioStore as StudioDatabase } from './persistence/store'
@@ -52,6 +54,13 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     runtime = await createUserPiRuntime(store, item.ownerId)
   }
   const threadId = row.threadId!
+  // Resolve the durable Turn->execution association once, owner-scoped, so
+  // replayed controller events identify the exact author request.
+  const ownerThreadId = await store.persistence.continuation.runThread(item.ownerId, row.id)
+  const turnId = ownerThreadId
+    ? (await store.persistence.messages.read(item.ownerId, ownerThreadId))
+      .turns.find(turn => turn.executionIds.includes(row.id))?.id
+    : undefined
   const claim = () => withStoryJobLock(job, 'studio-generation-admission', async () => {
     const current = await store.persistence.generation.jobs.state(item.ownerId, row.id)
     if (current?.status !== 'paused' || current.requestJson !== JSON.stringify(pinned) ||
@@ -81,7 +90,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   })
   await claim()
   const execute = async () => {
-    await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'started' })
+    await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'started', turnId })
     const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
     try {
       if (item.intent !== 'start') {
@@ -106,7 +115,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
           if (working !== key) {
             working = key
             await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'working',
-              stage: intake.active.stage, milestone: intake.active.milestone })
+              stage: intake.active.stage, milestone: intake.active.milestone,
+              specialist: intake.active.stage, turnId })
           }
         }
         const completed = (updates.verify_committed_work as {
@@ -114,8 +124,23 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         if (completed && completed.length > verified) {
           for (const evidence of completed.slice(verified)) {
             const files = committedStoryFiles(job, previousHead, evidence.headSha)
+            // The native catalog may resolve changed record IDs, but never
+            // infer IDs from filenames or treat a rejected catalog as canonical.
+            const validated = await validateStoryJob(job)
+            const records = validated.status === 'passed' &&
+              Array.isArray(validated.report?.records) ? validated.report.records : []
+            const changedRecordIds = records.flatMap((candidate: unknown) => {
+              if (!candidate || typeof candidate !== 'object') return []
+              const record = candidate as { path?: unknown; metadata?: { id?: unknown } }
+              return typeof record.path === 'string' && files.includes(record.path) &&
+                typeof record.metadata?.id === 'string' ? [record.metadata.id] : []
+            })
+            const diagnostics = Array.isArray(validated.report?.diagnostics)
+              ? validated.report.diagnostics.length : undefined
             await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'verified',
-              stage: evidence.stage, milestone: evidence.milestone, files })
+              stage: evidence.stage, milestone: evidence.milestone, files,
+              headSha: evidence.headSha, outcome: evidence.status, specialist: evidence.stage,
+              turnId, changedRecordIds, validation: validated.status, diagnostics })
             // Only a finalized recovery proof can associate a steering message
             // with this verified Git boundary. If publication is interrupted,
             // terminal settlement reconciles the same proof idempotently.
@@ -145,13 +170,17 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         throw new Error('Generation finished against a changed worker or job state.')
       }
       await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
-        status: state as 'paused' | 'blocked' | 'completed' | 'cancelled' })
+        status: state as 'paused' | 'blocked' | 'completed' | 'cancelled', turnId })
     } finally { saver.db.close() }
   }
   try {
     await withActiveExecutionTime(job, async () => {
-      if (runtime) await withJobModelRuntime(runtime, execute)
-      else await execute()
+      const executeWithStatus = () => withPiStatusReporter(
+        status => appendGenerationEvent(store, item.ownerId, row.id, {
+          kind: 'working', piStatus: status, turnId }),
+        execute)
+      if (runtime) await withJobModelRuntime(runtime, executeWithStatus)
+      else await executeWithStatus()
     })
   } finally {
     if (selected) await new SandboxClient().dispose(job.jobId).catch(() => {})

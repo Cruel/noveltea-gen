@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { mkdir } from "node:fs/promises";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { join, resolve, sep } from "node:path";
@@ -60,8 +61,8 @@ export async function authorArchitecture(
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool],
-    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate"],
+    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
+    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {

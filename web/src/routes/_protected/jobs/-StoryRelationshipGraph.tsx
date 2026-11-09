@@ -4,10 +4,12 @@ import { StudioSelect } from '@/components/studio-select'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { readStoryGraph, readWorkspaceStoryGraph } from '../../../lib/story-data.functions'
-import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node } from '@xyflow/react'
+import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node, type ReactFlowInstance } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { ExplorerGraph, ExplorerIndex } from '../../../lib/story-explorer.server'
 import { changeText } from './-StoryChangeLabels'
+import type { ActivityRecordHighlights } from '@/lib/story-activity-overlay'
+import { readStoryGraphPreferences, saveStoryGraphPreferences } from '@/lib/story-graph-preferences'
 
 type Props = {
   jobId?: string
@@ -15,28 +17,67 @@ type Props = {
   index: ExplorerIndex
   selectedId: string | null
   onSelect: (id: string) => void
+  highlights?: ActivityRecordHighlights
 }
 
 const limits = [16, 40, 80] as const
 
 /** Render only the native Context Manifest neighborhood; no client link discovery. */
-export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, onSelect }: Props) {
+export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, onSelect,
+  highlights = {} }: Props) {
+  const saved = () => workspace?.threadId
+    ? readStoryGraphPreferences(workspace.storyId, workspace.threadId) : null
   const [scope, setScope] = useState<'focused' | 'related'>('focused')
   const [kind, setKind] = useState('all')
   const [limit, setLimit] = useState<number>(16)
   const [connectedOnly, setConnectedOnly] = useState(false)
   const [collapseOuter, setCollapseOuter] = useState(true)
   const [showDeleted, setShowDeleted] = useState(true)
+  const [followActivity, setFollowActivity] = useState(false)
+  const [initialViewport, setInitialViewport] = useState<{
+    x: number; y: number; zoom: number
+  } | null>(null)
+  const [flow, setFlow] = useState<ReactFlowInstance | null>(null)
+  // Delay the first Flow mount until stored viewport/filters have been read;
+  // otherwise fitView can overwrite a Thread's saved pan on hydration.
+  const [ready, setReady] = useState(!workspace?.threadId)
   const [refreshToken, setRefreshToken] = useState(0)
-
-  useEffect(() => { setKind('all') }, [selectedId])
+  useEffect(() => {
+    const next = saved()
+    if (next) {
+      setScope(next.scope); setKind(next.kind); setLimit(next.limit)
+      setConnectedOnly(next.connectedOnly); setCollapseOuter(next.collapseOuter)
+      setShowDeleted(next.showDeleted); setFollowActivity(next.followActivity)
+      setInitialViewport(next.viewport)
+    }
+    setReady(true)
+  }, [workspace?.storyId, workspace?.threadId])
+  useEffect(() => {
+    if (ready && workspace?.threadId) saveStoryGraphPreferences(workspace.storyId, workspace.threadId, {
+      scope, kind, limit: limit as 16 | 40 | 80, connectedOnly, collapseOuter,
+      showDeleted, followActivity,
+    })
+  }, [ready, workspace?.storyId, workspace?.threadId, scope, kind, limit,
+    connectedOnly, collapseOuter, showDeleted, followActivity])
+  const activeIds = Object.keys(highlights)
+  const activeKey = activeIds.join('|')
+  useEffect(() => {
+    if (!followActivity || !flow || !activeIds.length) return
+    const nodes = flow.getNodes().filter(node => activeIds.includes(node.id))
+    if (nodes.length) void flow.fitView({ nodes, padding: 0.3, duration: 0 })
+  // Only a deliberate Follow activity opt-in may change pan/zoom on updates.
+  }, [followActivity, flow, activeKey])
+  const rememberViewport = (_: unknown, viewport: { x: number; y: number; zoom: number }) => {
+    if (ready && workspace?.threadId) saveStoryGraphPreferences(workspace.storyId,
+      workspace.threadId, { viewport })
+  }
 
   const graphQuery = useQuery({
     queryKey: ['story-graph', workspace?.storyId ?? jobId, workspace?.threadId, index.headSha, selectedId, scope, refreshToken] as const,
     queryFn: () => workspace
       ? readWorkspaceStoryGraph({ data: { ...workspace, selectedId: selectedId!, scope } })
       : readStoryGraph({ data: { jobId: jobId!, selectedId: selectedId!, scope } }),
-    enabled: !!selectedId,
+    enabled: !!selectedId && ready,
   })
   const graph = graphQuery.data?.graph ?? null
   const error = graphQuery.error?.message ?? null
@@ -144,6 +185,17 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
   }, [currentGraph, selectedId, kind, connectedOnly, collapseOuter, limit, showDeleted,
     index.deletedRecords, index.unindexedRecords])
 
+  const highlightedNodes = view.nodes.map(node => {
+    const state = highlights[node.id]
+    if (!state) return node
+    return { ...node, data: { ...node.data,
+      label: String(node.data.label) + '\n' +
+        (state === 'verified' ? 'Verified checkpoint' : state === 'working'
+          ? 'Active · unverified' : 'Pi-proposed · unverified') },
+      style: { ...node.style, border: state === 'verified' ? '2px solid #48b67e' :
+        state === 'working' ? '2px dashed #e6ba56' : '2px dashed #74c8f1' },
+    }
+  })
   const filterControls = <div className="story-graph-filters">
       <label>Neighborhood <StudioSelect aria-label="Relationship neighborhood"
         value={scope} onValueChange={value => setScope(value as typeof scope)}
@@ -164,7 +216,11 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
         onCheckedChange={checked => setCollapseOuter(checked)} /> Collapse outer layers</label>
       <label className="story-graph-checkbox"><Checkbox checked={showDeleted}
         onCheckedChange={checked => setShowDeleted(checked)} /> Git placeholders</label>
+      {workspace && <label className="story-graph-checkbox"><Checkbox checked={followActivity}
+        onCheckedChange={checked => setFollowActivity(checked)} /> Follow activity (moves viewport)</label>}
     </div>
+  if (!ready && workspace?.threadId) return <section aria-label="Story relationship explorer"
+    className="story-relationships"><p role="status" className="muted">Restoring Graph view…</p></section>
   return <section aria-label="Story relationship explorer" className="story-relationships">
     <div className="story-explorer-heading">
       <div><h3>Canonical relationships</h3>
@@ -182,7 +238,9 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
       <p role="status" className="muted">No current typed records. {view.nodes.length} Git-only placeholders
         {view.hidden > 0 ? ' · ' + view.hidden + ' hidden by the record limit' : ''}; no native links.</p>
       <div className="story-graph-canvas" aria-label="Read-only Git-only Story placeholders">
-        <ReactFlow nodes={view.nodes} edges={[]} fitView fitViewOptions={{ padding: 0.3 }}
+        <ReactFlow nodes={view.nodes} edges={[]} fitView={!initialViewport}
+          defaultViewport={initialViewport ?? undefined} fitViewOptions={{ padding: 0.3 }}
+          onInit={setFlow} onMoveEnd={rememberViewport}
           nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false}
           colorMode="dark" deleteKeyCode={null} proOptions={{ hideAttribution: true }}>
           <Background gap={22} color="#344657" />
@@ -198,8 +256,10 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
             {' · '}{currentGraph.records.length} in the bounded native manifest (maximum {currentGraph.maxFiles}).
           </p>
           <div className="story-graph-canvas" aria-label="Interactive read-only Story relationship graph">
-            <ReactFlow key={selectedId + scope + kind + limit + connectedOnly + collapseOuter + showDeleted}
-              nodes={view.nodes} edges={view.edges} fitView fitViewOptions={{ padding: 0.3 }}
+            <ReactFlow nodes={highlightedNodes} edges={view.edges}
+              fitView={!initialViewport} defaultViewport={initialViewport ?? undefined}
+              fitViewOptions={{ padding: 0.3 }}
+              onInit={setFlow} onMoveEnd={rememberViewport}
               colorMode="dark" nodesDraggable={false} nodesConnectable={false}
               edgesReconnectable={false} deleteKeyCode={null}
               onNodeClick={(_, node) => {

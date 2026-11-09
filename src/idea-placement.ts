@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { createHash } from "node:crypto";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { existsSync } from "node:fs";
@@ -271,9 +272,9 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking,
     resourceLoader: loader, settingsManager,
-    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool],
+    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool, createPiStatusTool()],
     noTools: "all", tools: writable
-      ? ["read", "edit", "write", "story_context"] : ["read", "story_context"],
+      ? ["read", "edit", "write", "story_context", "report_status"] : ["read", "story_context", "report_status"],
   });
   try {
     const pinned = [join(snapshot.path, "skills", skill, "SKILL.md"),

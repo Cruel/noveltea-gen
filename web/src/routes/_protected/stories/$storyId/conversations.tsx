@@ -15,6 +15,11 @@ import { StoryDesktopWorkspace, StoryMobileWorkspace } from '@/components/story-
 import { StoryInspectorSheet } from '@/components/story-workspace-explorer'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
+import { getThreadChat } from '@/lib/thread-chat.functions'
+import { jobEventsQuery } from '@/lib/job-events.queries'
+import { projectActivity, type ActivityStep } from '@/lib/thread-activity'
+import { activityHighlights, visibleActivityStep } from '@/lib/story-activity-overlay'
+import { readStoryGraphPreferences, saveStoryGraphPreferences } from '@/lib/story-graph-preferences'
 import { dashboardQuery } from '@/lib/dashboard.queries'
 import { storyNavigationQuery, storyNavigationKey, storyUsageKey, storyUsageQuery } from '@/lib/threads.queries'
 import { addCollection, setCollectionName, deleteCollection, moveThreadToCollection,
@@ -117,8 +122,20 @@ function StoryConversations() {
     return () => media.removeEventListener('change', update)
   }, [])
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+  const [hoveredActivity, setHoveredActivity] = useState<{
+    threadId: string; jobId: string; step: ActivityStep
+  } | null>(null)
+  const [pinnedActivity, setPinnedActivity] = useState<{
+    threadId: string; jobId: string; step: ActivityStep
+  } | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
-  useEffect(() => { setInspectorOpen(false) }, [storyId, explorerThreadId])
+  useEffect(() => {
+    setInspectorOpen(false)
+    setHoveredActivity(null)
+    setPinnedActivity(null)
+    setSelectedRecordId(explorerThreadId
+      ? readStoryGraphPreferences(storyId, explorerThreadId).selectedId : null)
+  }, [storyId, explorerThreadId])
   const explorer = useQuery({
     queryKey: ['workspace-explorer', storyId, explorerThreadId],
     queryFn: () => readWorkspaceStoryIndex({ data: { storyId, threadId: explorerThreadId } }),
@@ -126,17 +143,50 @@ function StoryConversations() {
     refetchInterval: selectedThread?.status === 'running' ? 8000 : 30000,
   })
   const explorerIndex = explorer.data?.index ?? null
+  const selectedChat = useQuery({
+    queryKey: ['thread-chat', explorerThreadId],
+    queryFn: () => getThreadChat({ data: explorerThreadId! }),
+    enabled: !!explorerThreadId,
+  })
+  const runJobs = selectedChat.data?.runs.map(run => run.jobId) ?? []
+  const activeJobId = selectedChat.data?.runs.at(-1)?.jobId ?? null
+  const jobActivity = useQuery({
+    ...jobEventsQuery(activeJobId ?? ''), enabled: !!activeJobId,
+  })
+  const activeSteps = projectActivity(jobActivity.data?.events ?? [],
+    selectedChat.data?.runs.at(-1)?.status)
+  const recentStep = [...activeSteps].reverse().find(step =>
+    step.state === 'verified' || step.state === 'working' || step.state === 'proposed') ?? null
+  const pinnedStep = pinnedActivity?.threadId === explorerThreadId &&
+    runJobs.includes(pinnedActivity.jobId) ? pinnedActivity : null
+  const activityStep = visibleActivityStep(hoveredActivity, explorerThreadId, runJobs,
+    pinnedStep ?? (recentStep && activeJobId ? { jobId: activeJobId, step: recentStep } : null))
+  const highlights = activityHighlights(explorerIndex, activityStep)
+  const onActivityHover = (jobId: string, step: ActivityStep | null) => {
+    setHoveredActivity(step && explorerThreadId
+      ? { jobId, threadId: explorerThreadId, step } : null)
+  }
+  const onActivityPin = (jobId: string, step: ActivityStep) => {
+    if (!explorerThreadId) return
+    setPinnedActivity(previous => previous?.threadId === explorerThreadId &&
+      previous.jobId === jobId && previous.step.id === step.id ? null :
+      { threadId: explorerThreadId, jobId, step })
+  }
   useEffect(() => {
-    setSelectedRecordId(current => {
-      if (!explorerIndex) return null
-      return current && explorerIndex.records.some(record => record.id === current) ? current :
-        explorerIndex.records.find(record => record.type === 'creative-direction')?.id ??
-        explorerIndex.records[0]?.id ?? null
-    })
+    if (!explorerIndex) return
+    setSelectedRecordId(current => current &&
+      explorerIndex.records.some(record => record.id === current) ? current :
+      explorerIndex.records.find(record => record.type === 'creative-direction')?.id ??
+      explorerIndex.records[0]?.id ?? null)
   }, [explorerIndex, explorerThreadId, storyId])
+  useEffect(() => {
+    if (explorerThreadId && selectedRecordId && explorerIndex?.records.some(
+      record => record.id === selectedRecordId))
+      saveStoryGraphPreferences(storyId, explorerThreadId, { selectedId: selectedRecordId })
+  }, [explorerIndex, explorerThreadId, selectedRecordId, storyId])
   const selectRecord = (id: string) => {
     setSelectedRecordId(id)
-    setExplorerView('graph')
+    if (explorerThreadId) saveStoryGraphPreferences(storyId, explorerThreadId, { selectedId: id })
     setNavigationOpen(false)
   }
   const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds,
@@ -282,6 +332,8 @@ function StoryConversations() {
     <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs"
       disabled={!explorerIndex || !selectedRecordId || !explorerThreadId}
       onClick={() => setInspectorOpen(true)}>Inspect record</Button>
+    {!isDesktop && <Button type="button" size="sm" variant="ghost"
+      onClick={() => setExplorerView('graph')}>View in Graph</Button>}
   </div>
   <div className="min-h-0 flex-1 overflow-auto" aria-label="Story Outline">
     {explorer.error && <p role="alert" className="text-xs text-destructive">{explorer.error.message}</p>}
@@ -294,7 +346,7 @@ function StoryConversations() {
       Select a verified Thread to browse native records.
     </p>}
     {explorerIndex && <StoryWorkspaceOutline index={explorerIndex}
-      selectedId={selectedRecordId} onSelect={selectRecord} />}
+      selectedId={selectedRecordId} onSelect={selectRecord} highlights={highlights} />}
   </div>
 </div>
   const graphPanel = <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden p-3">
@@ -317,8 +369,10 @@ function StoryConversations() {
           onClick={() => setInspectorOpen(true)}>Inspect record</Button>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
-        <StoryRelationshipGraph workspace={{ storyId, threadId: explorerThreadId }}
-          index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
+        <StoryRelationshipGraph key={storyId + ':' + explorerThreadId}
+          workspace={{ storyId, threadId: explorerThreadId }}
+          index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord}
+          highlights={highlights} />
       </div>
       {explorer.data.jobId && <Link to="/jobs/$jobId"
         params={{ jobId: explorer.data.jobId }} search={{ tab: 'story' }}
@@ -361,7 +415,10 @@ function StoryConversations() {
             await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
               search: { thread: threadId } })
           }} />
-      : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id} />
+      : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id}
+        onActivityHover={onActivityHover} onActivityPin={onActivityPin}
+        pinnedActivity={pinnedActivity?.threadId === selectedThread.id ?
+          { jobId: pinnedActivity.jobId, stepId: pinnedActivity.step.id } : null} />
         : <p className="p-5 text-sm text-muted-foreground">Select a Thread or create a new one.</p>}
     </div>
   </> : <p className="p-5 text-sm text-muted-foreground">Loading Threads…</p>}

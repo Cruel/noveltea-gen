@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -95,8 +96,8 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool],
-    noTools: "all", tools: ["read", "edit", "grep", "find", "ls", "story_context"],
+    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool, createPiStatusTool()],
+    noTools: "all", tools: ["read", "edit", "grep", "find", "ls", "story_context", "report_status"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking)

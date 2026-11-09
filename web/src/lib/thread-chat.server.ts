@@ -10,7 +10,7 @@ import { assertServerClaimPermitted } from '../../../src/generation-owner'
 import { queueRecord } from './generation-queue.server'
 import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint,
   steeringActivity } from './thread-steering-replan.server'
-import { committedStoryFiles } from './generation-progress.server'
+import { committedStoryFiles, decodeProgressFiles } from './generation-progress.server'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import type { GenerationRequest } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
@@ -67,7 +67,7 @@ export async function readThreadChat(store: StudioDatabase, owner: string, threa
       })(),
     })),
     evidence: data.evidence.map(({ filesJson, ...item }) => ({
-      ...item, files: JSON.parse(filesJson) as string[],
+      ...item, files: decodeProgressFiles(filesJson).files,
     })),
   }
 }

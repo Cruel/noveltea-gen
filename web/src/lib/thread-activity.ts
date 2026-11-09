@@ -1,14 +1,15 @@
-import type { ProgressEvent } from './generation-progress.server'
+import type { ProgressEvent, ProgressDetail } from './generation-progress.server'
 
 export type ActivityStep = {
   id: number
-  kind: 'started' | 'stage' | 'finished'
+  kind: 'started' | 'stage' | 'report' | 'finished'
   stage: ProgressEvent['stage']
   milestone: string | null
-  state: 'started' | 'working' | 'verified' | 'unverified' | 'stopped' | 'finished' | 'paused'
+  state: 'started' | 'working' | 'verified' | 'unverified' | 'stopped' | 'finished' | 'paused' | 'proposed'
   files: string[]
   outcome: ProgressEvent['status'] | 'interrupted' | null
   at: string
+  detail?: ProgressDetail
 }
 
 const names: Record<NonNullable<ProgressEvent['stage']>, string> = {
@@ -36,12 +37,17 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
   for (const event of events) {
     if (event.kind === 'started') {
       steps.push({ id: event.id, kind: 'started', stage: null, milestone: null,
-        state: 'started', files: [], outcome: null, at: event.createdAt })
+        state: 'started', files: [], outcome: null, at: event.createdAt,
+        detail: event.detail })
+    } else if (event.kind === 'working' && event.detail?.source === 'pi') {
+      steps.push({ id: event.id, kind: 'report', stage: null, milestone: null,
+        state: 'proposed', files: [], outcome: null, at: event.createdAt,
+        detail: event.detail })
     } else if (event.kind === 'working') {
       for (const step of steps) if (step.state === 'working') step.state = 'unverified'
       steps.push({ id: event.id, kind: 'stage', stage: event.stage,
         milestone: event.milestone, state: 'working', files: [], outcome: null,
-        at: event.createdAt })
+        at: event.createdAt, detail: event.detail })
     } else if (event.kind === 'verified') {
       const preceding = [...steps].reverse().find(step =>
         step.kind === 'stage' && step.state === 'working' &&
@@ -49,11 +55,12 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
       if (preceding) {
         preceding.state = 'verified'
         preceding.files = event.files
+        preceding.detail = event.detail
         preceding.at = event.createdAt
       } else {
         steps.push({ id: event.id, kind: 'stage', stage: event.stage,
           milestone: event.milestone, state: 'verified', files: event.files,
-          outcome: null, at: event.createdAt })
+          outcome: null, at: event.createdAt, detail: event.detail })
       }
     } else if (event.kind === 'finished' || event.kind === 'interrupted') {
       const outcome = event.kind === 'interrupted' ? 'interrupted' : event.status
@@ -63,7 +70,8 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
             ? 'stopped' : outcome === 'paused' ? 'paused' : 'unverified'
       }
       steps.push({ id: event.id, kind: 'finished', stage: null, milestone: null,
-        state: 'finished', files: [], outcome, at: event.createdAt })
+        state: 'finished', files: [], outcome, at: event.createdAt,
+        detail: event.detail })
     }
   }
   // A legacy or interrupted run can lack a terminal journal event. Never
@@ -80,6 +88,7 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
 
 export function activityTitle(step: ActivityStep): string {
   if (step.kind === 'started') return 'Started generation'
+  if (step.kind === 'report') return 'Pi status · ' + (step.detail?.summary ?? 'Working; unverified')
   if (step.kind === 'finished') {
     switch (step.outcome) {
       case 'completed': return 'Generation finished'

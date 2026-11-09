@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { mkdir } from "node:fs/promises";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { join, relative, resolve, sep } from "node:path";
@@ -110,10 +111,10 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,
-    customTools: [...(sandboxTools ?? []), ...(phase === "write" ? [createStoryValidateTool(job)] : []), context.contextTool],
+    customTools: [...(sandboxTools ?? []), ...(phase === "write" ? [createStoryValidateTool(job)] : []), context.contextTool, createPiStatusTool()],
     noTools: "all", tools: phase === "write"
-      ? [...SANDBOX_TOOLS, "story_context", "story_validate"]
-      : [...SANDBOX_READ_ONLY_TOOLS, "story_context"],
+      ? [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"]
+      : [...SANDBOX_READ_ONLY_TOOLS, "story_context", "report_status"],
   });
   if (context.thinking && session.thinkingLevel !== context.thinking) {
     session.dispose(); throw new Error("Pi did not honor requested thinking effort.");

@@ -1,3 +1,4 @@
+import { createPiStatusTool } from "./pi-work-status.js";
 import { mkdir } from "node:fs/promises";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { dirname, join, resolve, sep } from "node:path";
@@ -135,9 +136,9 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
     sessionManager: role === "repair" && originalSessionFile
       ? SessionManager.open(originalSessionFile, dirname(originalSessionFile), project.root)
       : context?.manager ?? SessionManager.create(project.root, dir),
-    customTools: [...(sandboxTools ?? []), ...(context ? [context.contextTool] : [])],
+    customTools: [...(sandboxTools ?? []), ...(context ? [context.contextTool] : []), createPiStatusTool()],
     noTools: "all", tools: role === "review"
-      ? [...SANDBOX_READ_ONLY_TOOLS, "story_context"] : ["read", "edit", "write", "grep", "find", "ls"],
+      ? [...SANDBOX_READ_ONLY_TOOLS, "story_context", "report_status"] : ["read", "edit", "write", "grep", "find", "ls", "report_status"],
   });
   if (selectedThinking && session.thinkingLevel !== selectedThinking) {
     session.dispose(); throw new Error("Pi failed to honor narrative review thinking effort.");

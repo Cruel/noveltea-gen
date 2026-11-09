@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { ProgressEvent } from '../src/lib/generation-progress.server'
+import { decodeProgressFiles, type ProgressEvent } from '../src/lib/generation-progress.server'
 import { activityTitle, projectActivity, activityStageName } from '../src/lib/thread-activity'
 import {
   Trace, TraceLine, TraceIcon, TraceTitle, TraceDescription,
@@ -14,6 +14,39 @@ const event = (id: number, kind: ProgressEvent['kind'],
   files: string[] = [], status: ProgressEvent['status'] = null): ProgressEvent => ({
   id, kind, stage, milestone: null, files, status,
   createdAt: new Date(id * 1000).toISOString(),
+})
+
+test('progress history decodes legacy and provenance-bearing rows without granting Pi authority', () => {
+  assert.deepEqual(decodeProgressFiles('["events/old.md"]'), { files: ['events/old.md'] })
+  const report = { files: [], detail: { source: 'pi',
+    summary: 'Working on scenes', proposedPaths: ['events/draft.md'] } }
+  assert.deepEqual(decodeProgressFiles(JSON.stringify(report)), report)
+  assert.deepEqual(decodeProgressFiles(JSON.stringify({
+    files: ['events/new.md'], detail: { source: 'controller',
+      headSha: 'a'.repeat(40), validation: 'passed', diagnostics: 0 },
+  })).detail?.source, 'controller')
+  assert.throws(() => decodeProgressFiles('{"files":"bad"}'), /Invalid persisted progress files/)
+})
+
+test('Pi status remains distinct from controller working and verified checkpoints', () => {
+  const working = event(1, 'working', 'event')
+  const pi = { ...event(2, 'working'), detail: {
+    source: 'pi' as const, summary: 'Drafting the conversation',
+    proposedPaths: ['events/conversation.md'],
+  } }
+  const verified = { ...event(3, 'verified', 'event', ['events/conversation.md']),
+    detail: { source: 'controller' as const, headSha: 'b'.repeat(40), outcome: 'committed' } }
+  const before = projectActivity([working, pi], 'running')
+  assert.deepEqual(before.map(step => step.state), ['working', 'proposed'])
+  assert.deepEqual(before[1]?.files, [])
+  assert.equal(before[1]?.detail?.proposedPaths?.[0], 'events/conversation.md')
+  assert.match(activityTitle(before[1]!), /Pi status/)
+  const after = projectActivity([working, pi, verified], 'completed')
+  assert.deepEqual(after.map(step => step.state), ['verified', 'proposed'])
+  assert.deepEqual(after[0]?.files, ['events/conversation.md'])
+  assert.equal(after[0]?.detail?.headSha, 'b'.repeat(40))
+  assert.equal(after[1]?.state, 'proposed',
+    'previous Pi report must never be promoted to authoritative verification')
 })
 
 test('the real blocked World foundations timeline renders verified stages and files before the failure', () => {
