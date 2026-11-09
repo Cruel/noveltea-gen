@@ -91,7 +91,21 @@ only its unique volume. **Never run `docker compose down -v` on the ordinary
 deployment**: that would destroy live SQLite, state and controller volumes.
 
 This is a PostgreSQL **topology and role** certificate, not a claim of
-application query/transaction parity. Shared Kysely concurrency, schema,
-controller query and end-to-end deployment certification belong to the
-downstream #128 onward gates described in
+application query/transaction parity.
+
+The post-#127 Gate 0 **transaction feasibility** certificate is separate:
+
+```sh
+pnpm certify:postgres-transactions
+```
+
+It launches an independent, disposable PostgreSQL Compose project and verifies
+transaction-scoped advisory-lock exclusion/release, uncommitted-write isolation
+and rollback, and capacity-one FIFO admission with two competing database
+sessions. It removes only its own uniquely named volume and never starts Studio.
+See [the Gate 0 audit addendum](kysely-transaction-audit.md) for evidence and
+remaining #128 proof requirements.
+
+Shared Kysely concurrency, schema, controller query and end-to-end deployment
+certification still belong to the downstream #128 onward gates described in
 [ADR 0001](adr/0001-kysely-sqlite-first-studio-persistence.md).

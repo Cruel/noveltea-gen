@@ -147,6 +147,24 @@ Result: **9 passed, 0 failed, 0 skipped** (2026-11-09). The complete Studio test
 - **#140** — reuse the trusted-catalog Kysely query in a separate read-only controller connection/role and verify network restrictions.
 - **#142–#143** — dual-backend multi-process correctness tests and certification; PostgreSQL must not be silently skipped or counted as complete from compilation.
 
+## PostgreSQL feasibility addendum after #127 (2026-11-09)
+
+#127 introduced a real PostgreSQL 17-alpine server, scoped application/controller roles, and isolated rootless Compose test infrastructure. This addendum extends Gate 0's *native PostgreSQL concurrency evidence* without claiming a migrated Studio store. Unlike the initial SQLite-only driver proof, the new certificate uses multiple independent PostgreSQL TCP sessions authenticated as the **application role** against a fresh per-run PostgreSQL Compose project and uniquely named database volume. It starts only PostgreSQL, never Studio or Pi, and deletes only its own volume.
+
+Run from the repository root:
+
+`pnpm certify:postgres-transactions`
+
+Implementation: [`scripts/certify-postgres-transactions.ts`](../scripts/certify-postgres-transactions.ts). The certificate asserts rootless Docker before startup and uses `compose.yaml`, `compose.postgres.yaml`, and `compose.postgres.test.yaml` to avoid loading developer service environment files. It checks three prerequisites directly against PostgreSQL:
+
+1. **Transaction-scoped advisory-lock contention:** With one transaction holding `pg_advisory_xact_lock`, another independent session sees `pg_try_advisory_xact_lock = false`. After rollback **and after commit**, the second session can acquire the lock. This proves the primitive's lifetime but not the eventual Kysely wrapper's correct use of it.
+2. **Transaction connection and rollback visibility:** A writer transaction reads its own uncommitted row, while a second connection observes zero rows. Rolling back leaves zero persisted rows. Every nested Kysely helper in #128 must receive the same transactional executor; the test demonstrates why root/pool connections cannot substitute for it.
+3. **One-slot queue admission with two clients:** Two sequential claim attempts compete while the first holds the advisory transaction lock; the second waits, observes the committed first claim, and cannot overclaim capacity. The initial claimant takes the oldest of two queued jobs, and after both transactions one job remains queued. This validates the basic locking strategy, **not** all real Studio queue/FIFO state-machine behavior.
+
+These are deterministic, credential-free **database primitive** tests. They do not add a PostgreSQL Studio schema, duplicate domain repository, PG application driver, or model/provider integration. They are a prerequisite to #128's shared helper work, **not a replacement** for its implementation tests or #142's multi-process certification. In particular the certificate does not prove that unguarded autocommit writes in the future Studio code participate in the same lock, nor that the real queue helper takes the guard before every precondition read.
+
+**Still mandatory for #128 and later:** produce the typed `Kysely<StudioDb>` implementation; test global guard participation by every interacting write; real PG transaction-scoped nested helper isolation/rollback; bounded retries/deadlock order (`40P01` and `40001`); lock release after connection termination; absent-row reservation races; and generated event-ID allocation/commit-order cursor races. Run these with a real PostgreSQL server and competing connections, then repeat relevant behavior through the same StudioStore tests on both dialects. Failure requiring domain-repository duplication reopens the architecture gate.
+
 ## Gate 0 review decision
 
 **Architecture gate: PASS (feasible, conditional on required proofs).** There is no identified domain operation that must be implemented twice. The simplest safe design is a common Kysely query algorithm with a transaction-scoped executor and an initially conservative writer lock; fine-grained locks can be introduced only after the same tests establish equivalence. Material correctness work remains in #128/#129 and later tests. **Stop** if those prototypes/tests reveal that a shared algorithm cannot preserve any invariant without substantial duplicated business logic. This report records the feasibility pass and the precise follow-up criteria; it does **not** certify PostgreSQL or authorize bypassing the blocking dependencies.
