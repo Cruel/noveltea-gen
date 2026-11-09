@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { test } from 'node:test'
@@ -30,7 +31,13 @@ test('selected verified record is shared by Outline and Graph without making del
   const markup = renderToStaticMarkup(createElement(StoryWorkspaceOutline, {
     index, selectedId: 'event.bell', onSelect: () => {},
   }))
-  assert.match(markup, /aria-label="Canonical Story Outline"/)
+  assert.match(markup, /aria-label="Canonical Story Outline" class="story-workspace-outline/)
+  assert.doesNotMatch(markup, /\btruncate\b/)
+  // Unlayered global `nav { display:flex; gap:1.5rem }` otherwise creates three
+  // compressed columns rather than a readable vertical record hierarchy.
+  const styles = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
+  assert.match(styles, /\.story-workspace-outline\s*\{\s*display:\s*flex;\s*flex-direction:\s*column;\s*gap:/)
+  assert.match(styles, /\.story-workspace-outline\s*>\s*details\s*\{[^}]*width:\s*100%/)
   assert.ok(markup.indexOf('Warning') < markup.indexOf('Bell milestone'))
   assert.ok(markup.indexOf('Bell milestone') < markup.indexOf('Ring the bell'))
   assert.match(markup, /aria-current="true"/)

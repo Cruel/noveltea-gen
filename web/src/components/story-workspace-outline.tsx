@@ -28,10 +28,10 @@ export function StoryWorkspaceOutline({ index, selectedId, onSelect }: Selection
     return <Button key={record.id} type="button" size="sm" variant="ghost"
       data-record-id={record.id}
       aria-current={selectedId === record.id ? 'true' : undefined}
-      className={'h-auto min-h-7 w-full justify-start overflow-hidden px-2 py-1 text-left text-xs ' +
+      className={'h-auto min-h-7 w-full items-start justify-start px-2 py-1 text-left text-xs ' +
         (selectedId === record.id ? 'bg-secondary' : '')}
       onClick={() => onSelect(record.id)}>
-      <span className="min-w-0 flex-1 truncate">{record.title}</span>
+      <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{record.title}</span>
       <StoryChangeLabels change={record.change} />
       {diagnostics > 0 && <span title={diagnostics + ' diagnostics'} className="text-destructive">!</span>}
     </Button>
@@ -43,7 +43,7 @@ export function StoryWorkspaceOutline({ index, selectedId, onSelect }: Selection
     </summary>
     <div className="grid pl-2">{records.map(entry)}</div>
   </details>
-  return <nav aria-label="Canonical Story Outline" className="min-w-0 space-y-1">
+  return <nav aria-label="Canonical Story Outline" className="story-workspace-outline min-w-0 w-full">
     {group('creative-direction', groups.get('creative-direction') ?? [])}
     {arcs.length > 0 && <details open>
       <summary className="cursor-pointer px-1 py-1 text-xs font-medium">Arcs ({arcs.length})</summary>
