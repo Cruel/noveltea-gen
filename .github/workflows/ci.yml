@@ -57,13 +57,13 @@ jobs:
       NT_KYSELY_PROOF_URL: postgresql://noveltea_test:noveltea_test_only@127.0.0.1:5432/noveltea_test
       NT_REQUIRE_KYSELY_PROOF: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: "11.15.0"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: pnpm
@@ -97,7 +97,7 @@ jobs:
       run:
         working-directory: noveltea-gen
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: noveltea-gen
           persist-credentials: false
@@ -115,7 +115,7 @@ jobs:
           fi
       - name: Checkout private skills and canonical Story fixture
         if: steps.skills-access.outputs.enabled == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Cruel/noveltea-skills
           ref: master
@@ -124,12 +124,12 @@ jobs:
           persist-credentials: false
       - name: Install pnpm
         if: steps.skills-access.outputs.enabled == 'true'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: "11.15.0"
       - name: Set up Node.js
         if: steps.skills-access.outputs.enabled == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: pnpm
@@ -153,7 +153,7 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
       - name: Download built native CLI
         if: steps.skills-access.outputs.enabled == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           repository: Cruel/nt
           run-id: ${{ steps.native-build.outputs.run_id }}
