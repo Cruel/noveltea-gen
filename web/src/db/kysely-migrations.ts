@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, promises as fs } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -137,6 +138,45 @@ function normalizedIndexPredicate(predicate: string): string {
 
 const expectedTableNames = new Set(expected.tables.keys())
 const authTables = new Set(['user', 'session', 'account', 'verification', 'rateLimit'])
+const sourceLedger = 'studio_migration_sources'
+
+/** Hash the exact applied source, not its physical DDL: data-only migration
+ * changes and even comment changes must be detected. Baseline translations
+ * are source-owned by both the frozen SQL and its interpreter.
+ */
+function migrationChecksum(name: string, folder: string): string {
+  const hash = createHash('sha256').update('NovelTea Kysely migration source v1\\0').update(name)
+  if (name === studioBaselineName) {
+    hash.update(readFileSync(new URL('../../kysely-schema/0000_studio_baseline.sql', import.meta.url)))
+    hash.update(readFileSync(new URL('./kysely-baseline.ts', import.meta.url)))
+  } else {
+    hash.update(readFileSync(join(folder, name + '.ts')))
+  }
+  return hash.digest('hex')
+}
+
+function withSourceLedger(name: string, folder: string, migration: Migration): Migration {
+  const checksum = migrationChecksum(name, folder)
+  return {
+    async up(db) {
+      if (name === studioBaselineName) {
+        await db.schema
+          .createTable('studioMigrationSources')
+          .ifNotExists()
+          .addColumn('name', 'text', (col) => col.primaryKey().notNull())
+          .addColumn('checksum', 'text', (col) => col.notNull())
+          .execute()
+      }
+      await migration.up(db)
+      await db.insertInto('studioMigrationSources').values({ name, checksum }).execute()
+    },
+    async down(db) {
+      if (!migration.down) throw new StudioSchemaError(`Migration ${name} cannot roll back without down()`)
+      await migration.down(db)
+      await db.deleteFrom('studioMigrationSources').where('name', '=', name).execute()
+    },
+  }
+}
 
 async function migrator(connection: Connection): Promise<Migrator> {
   const files = new FileMigrationProvider({ fs, path: { join }, migrationFolder: connection.migrationFolder })
@@ -156,14 +196,18 @@ async function migrator(connection: Connection): Promise<Migrator> {
       async getMigrations() {
         const authored = await files.getMigrations()
         const result: Record<string, Migration> = {
-          [studioBaselineName]: studioBaselineFor(connection.backend),
+          [studioBaselineName]: withSourceLedger(
+            studioBaselineName,
+            connection.migrationFolder,
+            studioBaselineFor(connection.backend),
+          ),
         }
         for (const name of studioMigrationNames(connection.migrationFolder).slice(1)) {
           const migration = authored[name]
           if (!migration || typeof migration.up !== 'function')
             throw new StudioSchemaError(`Missing or invalid Studio migration: ${name}`)
           const template = readFileSync(join(connection.migrationFolder, `${name}.ts`), 'utf8')
-          result[name] = {
+          result[name] = withSourceLedger(name, connection.migrationFolder, {
             up: (db) => {
               if (template.includes('up migration code goes here...'))
                 throw new StudioSchemaError(`Migration ${name} has an unimplemented up() scaffold`)
@@ -179,7 +223,7 @@ async function migrator(connection: Connection): Promise<Migrator> {
                 )
               return migration.down(db)
             },
-          }
+          })
         }
         return result
       },
@@ -211,7 +255,11 @@ export async function inspectStudioMigrationHistory(connection: Connection): Pro
     throw new StudioSchemaError(
       'Untracked Studio application tables exist without Kysely migration history. Back up and explicitly reset the selected Studio database; automatic adoption is forbidden.',
     )
-  if (!hasJournal) return 0
+  if (!hasJournal) {
+    if (tables.has(sourceLedger))
+      throw new StudioSchemaError('Studio Kysely source integrity ledger has no migration journal')
+    return 0
+  }
   if (!tables.has('kysely_migration_lock'))
     throw new StudioSchemaError('Studio Kysely migration lock table is missing')
   const history = await sql<{ name: string }>`SELECT name FROM kysely_migration ORDER BY name`.execute(
@@ -225,6 +273,28 @@ export async function inspectStudioMigrationHistory(connection: Connection): Pro
       throw new StudioSchemaError(
         'Studio Kysely migration history is incompatible or newer than this build; refusing automatic repair.',
       )
+  }
+  if (!tables.has(sourceLedger)) {
+    // Kysely can create an empty journal before a transaction that fails;
+    // when no application migrations committed there is no provenance to lose.
+    if (history.rows.length === 0 && !hasApp) return 0
+    throw new StudioSchemaError(
+      'Studio Kysely source integrity ledger is missing; migration provenance cannot be adopted',
+    )
+  }
+  const sources = await sql<{
+    name: string
+    checksum: string
+  }>`SELECT name, checksum FROM studio_migration_sources ORDER BY name`.execute(connection.db)
+  if (sources.rows.length !== history.rows.length)
+    throw new StudioSchemaError('Studio Kysely source integrity ledger count mismatch')
+  for (let i = 0; i < history.rows.length; i++) {
+    const source = sources.rows[i]!
+    if (
+      source.name !== history.rows[i]!.name ||
+      source.checksum !== migrationChecksum(source.name, connection.migrationFolder)
+    )
+      throw new StudioSchemaError(`Studio Kysely migration source checksum drift (${source.name})`)
   }
   return history.rows.length
 }
@@ -249,7 +319,13 @@ function assertAuthAndAppTables(tables: Set<string>) {
 
 type SqliteDefinition = { type: string; name: string; sql: string }
 const schemaDefinitionsSql = `SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table', 'index', 'trigger')`
-const internalTables = new Set(['user', 'kysely_migration', 'kysely_migration_lock', 'sqlite_sequence'])
+const internalTables = new Set([
+  'user',
+  'kysely_migration',
+  'kysely_migration_lock',
+  'sqlite_sequence',
+  sourceLedger,
+])
 
 /** Replay the authored migration history into an empty in-memory SQLite DB.
  * This is only an expectation for read-only schema checks; never auto-repairs
@@ -309,6 +385,7 @@ type PgIndex = {
   indexname: string
   indexdef: string
   indisunique: boolean
+  constraintIndex: boolean
 }
 type PgConstraint = {
   tableName: string
@@ -327,9 +404,11 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
     sql<PgColumn>`SELECT table_name, column_name, data_type, is_nullable, column_default, is_identity
       FROM information_schema.columns WHERE table_schema = current_schema()`.execute(db),
     sql<PgIndex>`SELECT t.relname AS tablename, i.relname AS indexname,
-        pg_get_indexdef(x.indexrelid) AS indexdef, x.indisunique
+        pg_get_indexdef(x.indexrelid) AS indexdef, x.indisunique,
+        (c.oid IS NOT NULL) AS constraint_index
       FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid
       JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      LEFT JOIN pg_constraint c ON c.conindid=x.indexrelid AND c.contype IN ('p','u')
       WHERE n.nspname=current_schema()`.execute(db),
     sql<PgConstraint>`SELECT t.relname AS table_name, c.conname, c.contype,
         c.condeferrable, c.condeferred, pg_get_constraintdef(c.oid) AS definition
@@ -349,8 +428,9 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
   }
   // Replay authored SQLite migrations instead of maintaining an independent
   // type/schema engine. This also includes future added columns and tables.
-  await expectedSqliteSnapshot(connection, async (sqlite) => {
-    const appTables = [...appDefinitions(sqlite).keys()]
+  const snapshot = await expectedSqliteSnapshot(connection, async (sqlite) => {
+    const definitions = appDefinitions(sqlite)
+    const appTables = [...definitions.keys()]
       .filter((key) => key.startsWith('table:'))
       .map((key) => key.slice('table:'.length))
     for (const table of appTables) {
@@ -447,30 +527,76 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
         }
       ).sql
       const checks = [...tableSql.matchAll(/CONSTRAINT\s+"([^"]+)"\s+CHECK\(([^\n]*)\)/gi)]
+      const expectedCheckNames = new Set<string>()
       for (const [, name, expression] of checks) {
+        expectedCheckNames.add(name!)
         const found = constraintsResult.rows.find(
           (c) => c.tableName === table && c.conname === name && c.contype === 'c',
         )
         if (!found || !sameCheckSemantics(expression!, found.definition))
           throw new StudioSchemaError(`Studio PostgreSQL CHECK constraint drift (${name})`)
       }
+      for (const row of constraintsResult.rows.filter((c) => c.tableName === table && c.contype === 'c')) {
+        if (!expectedCheckNames.has(row.conname))
+          throw new StudioSchemaError(`Studio PostgreSQL unexpected CHECK constraint drift (${row.conname})`)
+      }
+      const namedUniques = [
+        ...tableSql.matchAll(/CONSTRAINT\s+["`]?([a-z_][a-z0-9_]*)["`]?\s+UNIQUE\s*\(([^)]+)\)/gi),
+      ]
+      const expectedUniqueNames = new Set<string>()
+      for (const [, name, columns] of namedUniques) {
+        expectedUniqueNames.add(name!)
+        const row = constraintsResult.rows.find(
+          (c) => c.tableName === table && c.contype === 'u' && c.conname === name,
+        )
+        const normalize = (value: string) => value.replace(/["`\s]/g, '').toLowerCase()
+        if (!row || normalize(row.definition) !== normalize(`UNIQUE (${columns})`))
+          throw new StudioSchemaError(`Studio PostgreSQL unique constraint drift (${name})`)
+      }
+      for (const row of constraintsResult.rows.filter((c) => c.tableName === table && c.contype === 'u')) {
+        if (!expectedUniqueNames.has(row.conname))
+          throw new StudioSchemaError(`Studio PostgreSQL unexpected unique constraint drift (${row.conname})`)
+      }
     }
+    return definitions
   })
-  for (const [table, definitions] of expected.indexes) {
-    for (const ddl of definitions) {
+  const applicationTables = new Set(
+    [...snapshot.keys()]
+      .filter((name) => name.startsWith('table:'))
+      .map((name) => name.slice('table:'.length)),
+  )
+  const physicalTables = new Set(columnsResult.rows.map((col) => col.tableName))
+  const unrelated = new Set([
+    ...authTables,
+    'kysely_migration',
+    'kysely_migration_lock',
+    'studio_migration_sources',
+  ])
+  for (const table of physicalTables) {
+    if (!applicationTables.has(table) && !unrelated.has(table))
+      throw new StudioSchemaError(`Studio PostgreSQL unexpected application table drift (${table})`)
+  }
+  const expectedIndexNames = new Set<string>()
+  for (const [key, ddl] of snapshot) {
+    if (!key.startsWith('index:')) continue
+    const name = key.slice('index:'.length)
+    expectedIndexNames.add(name)
+    {
       const match =
-        /^CREATE (UNIQUE )?INDEX [`"]?([a-z_]+)[`"]? ON [`"]?[a-z_]+[`"]?\s*\(([^)]+)\)(?:\s+WHERE\s+([\s\S]*?))?;?$/i.exec(
+        /^CREATE (UNIQUE )?INDEX [`"]?([a-z_][a-z0-9_]*)[`"]? ON [`"]?([a-z_][a-z0-9_]*)[`"]?\s*\(([^)]+)\)(?:\s+WHERE\s+([\s\S]*?))?;?$/i.exec(
           ddl,
         )
       if (!match) throw new Error('Cannot inspect Studio index: ' + ddl)
-      const actual = indexesResult.rows.find((row) => row.tablename === table && row.indexname === match[2])
+      const actual = indexesResult.rows.find(
+        (row) => row.tablename === match[3] && row.indexname === match[2] && !row.constraintIndex,
+      )
       if (!actual || actual.indisunique !== !!match[1])
         throw new StudioSchemaError(`Studio PostgreSQL index drift (${match[2]})`)
-      const columns = match[3]!.replace(/[`"\s]/g, '')
+      const columns = match[4]!.replace(/[`"\s]/g, '')
       const indexdef = actual.indexdef.toLowerCase().replace(/["\s]/g, '')
       if (!indexdef.includes('(' + columns + ')'))
         throw new StudioSchemaError(`Studio PostgreSQL index columns drift (${match[2]})`)
-      const predicate = match[4]
+      const predicate = match[5]
       const actualPredicate = actual.indexdef.split(/\bwhere\b/i)[1]
       if (
         !!predicate !== !!actualPredicate ||
@@ -479,7 +605,19 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
         throw new StudioSchemaError(`Studio PostgreSQL partial index drift (${match[2]})`)
     }
   }
-  for (const [name, ddl] of expected.triggers) {
+  for (const row of indexesResult.rows) {
+    if (
+      applicationTables.has(row.tablename) &&
+      !row.constraintIndex &&
+      !expectedIndexNames.has(row.indexname)
+    )
+      throw new StudioSchemaError(`Studio PostgreSQL unexpected index drift (${row.indexname})`)
+  }
+  const expectedTriggerNames = new Set<string>()
+  for (const [key, ddl] of snapshot) {
+    if (!key.startsWith('trigger:')) continue
+    const name = key.slice('trigger:'.length)
+    expectedTriggerNames.add(name)
     const trigger = postgresTrigger(name, ddl)
     const row = triggersResult.rows.find((r) => r.tgname === name && r.tableName === trigger.table)
     const normalizeTrigger = (definition: string) =>
@@ -495,6 +633,10 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
       normalizeTrigger(row.triggerDef) !== normalizeTrigger(trigger.create)
     )
       throw new StudioSchemaError(`Studio PostgreSQL trigger drift (${name})`)
+  }
+  for (const row of triggersResult.rows) {
+    if (applicationTables.has(row.tableName) && !expectedTriggerNames.has(row.tgname))
+      throw new StudioSchemaError(`Studio PostgreSQL unexpected trigger drift (${row.tgname})`)
   }
 }
 

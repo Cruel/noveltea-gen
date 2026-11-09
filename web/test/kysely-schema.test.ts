@@ -607,6 +607,63 @@ test('Kysely CLI up/down/check operates on isolated SQLite without changing the 
 })
 
 test(
+  'PostgreSQL readiness rejects unexpected indexes, constraints and triggers',
+  {
+    skip: !process.env.NT_TEST_PG_URL && 'Set NT_TEST_PG_URL for PostgreSQL schema tests',
+  },
+  async () => {
+    const connectionString = process.env.NT_TEST_PG_URL!
+    const schema = 'studio_extra_' + randomUUID().replace(/-/g, '')
+    const admin = new Pool({ connectionString })
+    try {
+      await admin.query(`CREATE SCHEMA "${schema}"`)
+      const conn = openStudioSchemaConnection({
+        backend: 'postgres',
+        connection: { connectionString, options: `-c search_path=${schema}` },
+      })
+      try {
+        await migrateStudioKysely(conn, config)
+        await sql.raw('CREATE INDEX unexpected_extra_idx ON repositories (id)').execute(conn.db)
+        await assert.rejects(assertKyselyStudioSchemaCurrent(conn), /index drift/)
+        await sql.raw('DROP INDEX unexpected_extra_idx').execute(conn.db)
+        await sql
+          .raw('ALTER TABLE repositories ADD CONSTRAINT unexpected_extra_check CHECK (length(id) > 0)')
+          .execute(conn.db)
+        await assert.rejects(assertKyselyStudioSchemaCurrent(conn), /CHECK constraint drift/)
+        await sql.raw('ALTER TABLE repositories DROP CONSTRAINT unexpected_extra_check').execute(conn.db)
+        await sql
+          .raw('ALTER TABLE repositories ADD CONSTRAINT unexpected_extra_unique UNIQUE (name)')
+          .execute(conn.db)
+        await assert.rejects(assertKyselyStudioSchemaCurrent(conn), /unique constraint drift/)
+        await sql.raw('ALTER TABLE repositories DROP CONSTRAINT unexpected_extra_unique').execute(conn.db)
+        await sql
+          .raw(
+            `CREATE FUNCTION unexpected_extra_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN RETURN NEW; END;
+        $$`,
+          )
+          .execute(conn.db)
+        await sql
+          .raw(
+            `CREATE TRIGGER unexpected_extra BEFORE UPDATE ON repositories
+          FOR EACH ROW EXECUTE FUNCTION unexpected_extra_fn()`,
+          )
+          .execute(conn.db)
+        await assert.rejects(assertKyselyStudioSchemaCurrent(conn), /trigger drift/)
+      } finally {
+        await conn.close()
+      }
+    } finally {
+      try {
+        await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      } finally {
+        await admin.end()
+      }
+    }
+  },
+)
+
+test(
   'Kysely PostgreSQL baseline: real database parity, FKs, auth, rollback and drift',
   {
     skip: !process.env.NT_TEST_PG_URL && 'Set NT_TEST_PG_URL for PostgreSQL schema tests',

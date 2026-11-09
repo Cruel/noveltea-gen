@@ -37,8 +37,10 @@ const addonFile = `
 export async function up(db: any) {
   await db.schema.createTable('migration_probe').addColumn('id', 'integer', c => c.primaryKey()).execute()
   await db.schema.alterTable('repositories').addColumn('migration_tag', 'text').execute()
+  await db.schema.createIndex('migration_tag_idx').on('repositories').column('migration_tag').execute()
 }
 export async function down(db: any) {
+  await db.schema.dropIndex('migration_tag_idx').execute()
   await db.schema.alterTable('repositories').dropColumn('migration_tag').execute()
   await db.schema.dropTable('migration_probe').execute()
 }
@@ -89,6 +91,33 @@ async function certifyTarget(options: StudioSchemaOptions) {
   await withFixture(options, addon, addonFile, async (connection, file) => {
     await migrateStudioKysely(connection, auth, 'latest')
     assert.equal(await inspectStudioMigrationHistory(connection), 2)
+    await assertKyselyStudioSchemaCurrent(connection)
+    // Source-only edits, including data migrations that don't alter DDL,
+    // must be rejected even while the physical schema is still identical.
+    writeFileSync(file, addonFile + '\n// silently edited after apply\n')
+    await assert.rejects(inspectStudioMigrationHistory(connection), /checksum|source integrity/i)
+    await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /checksum|source integrity/i)
+    writeFileSync(file, addonFile)
+    assert.equal(await inspectStudioMigrationHistory(connection), 2)
+    const previousChecksum = await sql<{
+      checksum: string
+    }>`SELECT checksum FROM studio_migration_sources WHERE name = ${addon}`.execute(connection.db)
+    assert.ok(previousChecksum.rows[0]?.checksum)
+    await sql`UPDATE studio_migration_sources SET checksum = 'modified' WHERE name = ${addon}`.execute(
+      connection.db,
+    )
+    await assert.rejects(inspectStudioMigrationHistory(connection), /checksum|source integrity/i)
+    await sql`UPDATE studio_migration_sources SET checksum = ${previousChecksum.rows[0]!.checksum} WHERE name = ${addon}`.execute(
+      connection.db,
+    )
+    assert.equal(await inspectStudioMigrationHistory(connection), 2)
+    await sql.raw('DROP INDEX migration_tag_idx').execute(connection.db)
+    await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /(?:index|schema definition) drift/i)
+    await connection.db.schema
+      .createIndex('migration_tag_idx')
+      .on('repositories')
+      .column('migration_tag')
+      .execute()
     await assertKyselyStudioSchemaCurrent(connection)
     assert.ok((await selectedTables(connection)).some((table) => table.name === 'migration_probe'))
     assert.ok(

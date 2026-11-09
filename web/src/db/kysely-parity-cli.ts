@@ -57,6 +57,7 @@ try {
       'rateLimit',
       'kysely_migration',
       'kysely_migration_lock',
+      'studio_migration_sources',
       'sqlite_sequence',
     ])
     const profiles = await Promise.all(

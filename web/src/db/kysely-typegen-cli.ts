@@ -30,6 +30,7 @@ export async function generatedStudioDb(): Promise<string> {
       'rateLimit',
       'kysely_migration',
       'kysely_migration_lock',
+      'studio_migration_sources',
     ])
     const generated = await generate({
       db: connection.db,
