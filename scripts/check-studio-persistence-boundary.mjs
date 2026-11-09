@@ -38,9 +38,19 @@ const driverPatterns = [
 export function sourceViolations(path, source) {
   if ((path.startsWith('persistence/') && (path.endsWith('-sqlite.ts') || path === 'persistence/sqlite.ts')) || driverExempt.has(path)) return []
   const errors = driverPatterns.filter(({ pattern }) => pattern.test(source)).map(x => x.reason)
-  if (!path.startsWith('db/') && !path.startsWith('persistence/') &&
-      /(?:['"](?:pg|kysely)['"]|from\s*['"][^'"]*\/db\/kysely-connection['"])/.test(source)) {
+  const databaseAdapter = path.startsWith('db/')
+  const sharedRepository = path.startsWith('persistence/') && path.endsWith('-kysely.ts')
+  if (!databaseAdapter && !sharedRepository &&
+      /(?:['"](?:pg|kysely(?:\/[^'"]*)?)['"]|from\s*['"][^'"]*\/db\/kysely-connection['"])/.test(source)) {
     errors.push('shared database infrastructure outside persistence adapter')
+  }
+  if (!databaseAdapter &&
+      /(?:from\s*|require\(\s*|import\(\s*)['"]pg['"]/.test(source)) {
+    errors.push('PostgreSQL driver outside database infrastructure')
+  }
+  if (!databaseAdapter && !path.startsWith('persistence/') &&
+      /from\s*['"][^'"]*\/persistence\/[^'"]+-kysely['"]/.test(source)) {
+    errors.push('Kysely repository imported by application caller')
   }
   if (/\bstudioSqliteDriver\b/.test(source)) {
     errors.push('raw SQLite accessor outside Better Auth adapter')

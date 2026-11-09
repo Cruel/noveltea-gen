@@ -8,6 +8,9 @@ test('Studio application source cannot import or access the raw SQLite driver', 
     "import Database from 'better-sqlite3'",
     "import { Pool } from 'pg'",
     "import { Kysely } from 'kysely'",
+    "import { sql } from 'kysely'",
+    "import { createKyselyCollectionCatalog } from '../persistence/collection-kysely'",
+    "import { createKyselyPublicationRecords } from '../persistence/publication-kysely'",
     "import { openKyselyDatabase } from '../db/kysely-connection'",
     "const Database = require('better-sqlite3')",
     "await import('drizzle-orm/better-sqlite3')",
@@ -29,4 +32,10 @@ test('Studio application source cannot import or access the raw SQLite driver', 
     'await store.persistence.messages.owned(owner, threadId, id)'), [])
   assert.ok(sourceViolations('lib/auth.ts',
     'database: studioSqliteDriver(store)').length > 0)
+  assert.deepEqual(sourceViolations('persistence/collection-kysely.ts',
+    "import { sql } from 'kysely'"), [])
+  assert.ok(sourceViolations('persistence/unconverted.ts',
+    "import { sql } from 'kysely'").length > 0)
+  assert.ok(sourceViolations('persistence/collection-kysely.ts',
+    "import { Pool } from 'pg'").length > 0)
 })

@@ -4,32 +4,12 @@ import * as schema from '../db/schema'
 import { githubPublications, gitlabPublications, repositories, sessions, stories } from '../db/schema'
 import type { CatalogProvider } from './contracts'
 import { PublicationStateConflict } from './publication-contracts'
+import { reconcilePublication } from './publication-reconcile'
 import type { PublicationJob, PublicationReceipt, PublicationRecords } from './publication-contracts'
 
 type Db = BetterSQLite3Database<typeof schema>
 function ownerRequired(owner: string): void {
   if (!owner) throw new Error('Authenticated owner required.')
-}
-
-/** A verified remote link can be repaired only by reconciling the provider;
- * saving the next pending push cannot erase durable PR/MR identity. */
-function reconcile(current: PublicationReceipt | null, next: PublicationReceipt): PublicationReceipt {
-  if (next.phase === 'linked' && (!Number.isSafeInteger(next.number) || (next.number ?? 0) <= 0 || !next.url))
-    throw new PublicationStateConflict('Provider link identity is incomplete.')
-  if (next.phase === 'pending' && (next.number !== null || next.url !== null))
-    throw new PublicationStateConflict('Pending publication cannot claim a provider link.')
-  if (!current) return next
-  if (current.targetBranch !== next.targetBranch || current.remoteBranch !== next.remoteBranch)
-    throw new PublicationStateConflict('Publication branch identity changed. Reconcile before retry.')
-  if (current.phase === 'pending' && next.phase === 'linked' && current.headSha !== next.headSha)
-    throw new PublicationStateConflict('Verified publication HEAD differs from the saved push intent.')
-  if (current.phase === 'linked' && next.phase === 'linked' &&
-      (current.number !== next.number || current.url !== next.url))
-    throw new PublicationStateConflict('Linked publication identity changed. Reconcile with provider.')
-  if (current.phase === 'linked' && next.phase === 'pending') return current
-  // Preserve the original intended HEAD until the remote PR/MR is verified.
-  if (next.phase === 'pending') return { ...current, phase: 'pending' }
-  return next
 }
 
 export function createSqlitePublicationRecords(db: Db): PublicationRecords {
@@ -77,7 +57,7 @@ export function createSqlitePublicationRecords(db: Db): PublicationRecords {
         // Reject revoked or cross-provider job ownership even on an existing receipt.
         if (!job(owner, jobId, provider))
           throw new PublicationStateConflict('Publication job is not owned by this provider account.')
-        const effective = reconcile(get(owner, jobId, provider), next)
+        const effective = reconcilePublication(get(owner, jobId, provider), next)
         if (provider === 'github') {
           tx.insert(githubPublications).values({
             jobId, ownerUserId: owner, targetBranch: effective.targetBranch,
