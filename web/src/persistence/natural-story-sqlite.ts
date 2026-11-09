@@ -15,6 +15,7 @@ export function createSqliteNaturalStoryPersistence(db: Db): NaturalStoryPersist
     db.select({
       id: stories.id, storyId: stories.id,
       headSha: stories.sourceCommitSha, provider: repositories.provider,
+      providerId: repositories.providerRepositoryId, directory: stories.directory,
     }).from(stories).innerJoin(repositories, and(
       eq(repositories.id, stories.repositoryId),
       eq(repositories.ownerUserId, stories.ownerUserId),

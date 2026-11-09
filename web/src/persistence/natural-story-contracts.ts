@@ -2,7 +2,8 @@ import type { CreativeMode } from '../../../src/creative-policy'
 
 /** Owner-scoped Story admission and atomic root registration. */
 export type NaturalStory = {
-  id: string; storyId: string; provider: 'github' | 'gitlab'; headSha: string | null
+  id: string; storyId: string; provider: 'github' | 'gitlab'; providerId: string
+  directory: string; headSha: string | null
 }
 export type NaturalPreviousJob = {
   storyId: string; requestJson: string | null; configJson: string | null

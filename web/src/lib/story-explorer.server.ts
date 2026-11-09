@@ -51,6 +51,35 @@ const MAX_RECORD_SIZE = 512 * 1024
 const MAX_RECORDS = 10_000
 const MAX_DIAGNOSTICS = 2_000
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+const SHA = /^[a-f0-9]{40}$/i
+
+/** Story-first reads are strictly pinned to a clean, validated commit. The
+ * legacy Job diagnostics can still inspect rejected/dirty authoring evidence. */
+export type VerifiedExplorerSource = { storyBaseSha: string }
+
+function gitEnvironment() {
+  const env = { ...process.env }
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
+  return env
+}
+
+function assertCleanRevision(job: JobStartResult, baseSha: string) {
+  if (!SHA.test(baseSha)) throw new ExplorerError(409, 'Story has no valid pinned source commit.')
+  const env = gitEnvironment()
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim()
+  if (head !== job.headSha) throw new ExplorerError(409, 'Thread revision changed during Story inspection.')
+  const clean = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim()
+  if (clean) throw new ExplorerError(409, 'Thread has unverified draft files. Only a clean verified revision is browsable.')
+  const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', baseSha, head], {
+    cwd: job.worktreeRoot, env, stdio: 'ignore', timeout: 10_000,
+  })
+  if (ancestor.error || ancestor.status !== 0)
+    throw new ExplorerError(409, 'Thread revision does not descend from the pinned Story source.')
+}
 
 class ExplorerError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
@@ -254,15 +283,15 @@ function json(body: unknown, status = 200) {
 }
 
 export async function validatedExplorer(auth: StudioAuth, store: StudioDatabase,
-  request: Request, jobId: string): Promise<{ job: JobStartResult; result: ValidationResult; index: ExplorerIndex }> {
+  request: Request, jobId: string, verified?: VerifiedExplorerSource): Promise<{ job: JobStartResult; result: ValidationResult; index: ExplorerIndex }> {
   await store.assertReady()
   const user = await requireUser(auth, request.headers)
   if (!user) throw new ExplorerError(401, 'Sign in required.')
   if (!uuid.test(jobId)) throw new ExplorerError(400, 'Invalid job ID.')
   const job = await authorizedStoryJob(store, user.id, jobId)
+  if (verified) assertCleanRevision(job, verified.storyBaseSha)
   const result = await validateStoryJob(job)
-  const env = { ...process.env }
-  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
+  const env = gitEnvironment()
   const currentHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: job.worktreeRoot,
     env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   if (currentHead !== job.headSha)
@@ -276,23 +305,29 @@ export async function validatedExplorer(auth: StudioAuth, store: StudioDatabase,
     throw new ExplorerError(409, 'Pinned canonical Story validator is unavailable or returned an invalid report. ' +
       'Restore the original validator and job state before browsing.')
   }
-  const index = canonicalExplorerIndex(result.report, job.baseSha, job.headSha, result.status)
-  const changes = storyChangeOverlay(job, currentHead, index.records)
+  if (verified && (result.status !== 'passed' || result.validator.implementation !== 'native-cli' ||
+      (result.report.protection as { status?: string } | undefined)?.status !== 'checked'))
+    throw new ExplorerError(409, 'Selected Thread does not have a verified native canonical revision.')
+  if (verified) assertCleanRevision(job, verified.storyBaseSha)
+  const baseSha = verified?.storyBaseSha ?? job.baseSha
+  const index = canonicalExplorerIndex(result.report, baseSha, job.headSha, result.status)
+  const changes = storyChangeOverlay({ ...job, baseSha }, currentHead, index.records)
   for (const record of index.records) {
     if (changes.byPath[record.path]) record.change = changes.byPath[record.path]
   }
   index.deletedRecords = changes.deletedRecords
   index.unindexedRecords = changes.unindexedRecords
+  if (verified) assertCleanRevision(job, verified.storyBaseSha)
   return { job, result, index }
 }
 
 /** Owner-scoped read-only canonical explorer. id is a typed Story ID, NOT a
  * path; no client-originated path, Git revision or native CLI option is used. */
 export async function storyExplorerRequest(auth: StudioAuth, store: StudioDatabase,
-  request: Request, jobId: string): Promise<Response> {
+  request: Request, jobId: string, verified?: VerifiedExplorerSource): Promise<Response> {
   if (request.method !== 'GET') return json({ error: 'Method not allowed.' }, 405)
   try {
-    const { job, index } = await validatedExplorer(auth, store, request, jobId)
+    const { job, index } = await validatedExplorer(auth, store, request, jobId, verified)
     const params = new URL(request.url).searchParams
     if ([...params.keys()].some(key => key !== 'id') || params.getAll('id').length > 1)
       throw new ExplorerError(400, 'Only an indexed typed Story ID may be selected.')
@@ -300,11 +335,13 @@ export async function storyExplorerRequest(auth: StudioAuth, store: StudioDataba
     if (!id) {
       if (Buffer.byteLength(JSON.stringify(index)) > MAX_RESPONSE_BYTES)
         throw new ExplorerError(413, 'Canonical Story catalog exceeds the explorer response limit.')
+      if (verified) assertCleanRevision(job, verified.storyBaseSha)
       return json({ index })
     }
     const selected = index.records.find(record => record.id === id)
     if (!selected) throw new ExplorerError(404, 'Record ID is not present in the canonical Story index.')
     const markdown = await readCanonicalMarkdown(job.worktreeStoryRoot, selected.path)
+    if (verified) assertCleanRevision(job, verified.storyBaseSha)
     return json({ record: selected, markdown, headSha: index.headSha })
   } catch (error) {
     if (error instanceof ExplorerError) return json({ error: error.message }, error.status)
@@ -319,7 +356,7 @@ export async function storyExplorerRequest(auth: StudioAuth, store: StudioDataba
 /** Bounded native relationship evidence for one already-indexed typed ID.
  * No client-controlled task kind, native CLI, path, Git SHA or traversal depth. */
 export async function storyRelationshipsRequest(auth: StudioAuth, store: StudioDatabase,
-  request: Request, jobId: string): Promise<Response> {
+  request: Request, jobId: string, verified?: VerifiedExplorerSource): Promise<Response> {
   if (request.method !== 'GET') return json({ error: 'Method not allowed.' }, 405)
   try {
     const params = new URL(request.url).searchParams
@@ -330,7 +367,7 @@ export async function storyRelationshipsRequest(auth: StudioAuth, store: StudioD
     const scope = params.get('scope') ?? 'focused'
     if (scope !== 'focused' && scope !== 'related')
       throw new ExplorerError(400, 'Invalid native relationship scope.')
-    const { job, result, index } = await validatedExplorer(auth, store, request, jobId)
+    const { job, result, index } = await validatedExplorer(auth, store, request, jobId, verified)
     if (!index.records.some(record => record.id === selectedId))
       throw new ExplorerError(404, 'Selected ID is not in the canonical Story index.')
     if (result.validator.implementation !== 'native-cli')
@@ -355,6 +392,7 @@ export async function storyRelationshipsRequest(auth: StudioAuth, store: StudioD
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: job.worktreeRoot,
       env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
     if (head !== job.headSha) throw new ExplorerError(409, 'Story HEAD changed during relationship lookup.')
+    if (verified) assertCleanRevision(job, verified.storyBaseSha)
     return json({ graph })
   } catch (error) {
     if (error instanceof ExplorerError) return json({ error: error.message }, error.status)

@@ -3,6 +3,7 @@ import { getRequestHeaders } from '@tanstack/react-start/server'
 import { auth, database } from './runtime.server'
 import { readAuthConfig } from './auth'
 import { storyExplorerRequest, storyRelationshipsRequest } from './story-explorer.server'
+import { storyWorkspaceExplorerRequest } from './story-workspace-explorer.server'
 import { jobChangesRequest } from './job-changes.server'
 import type { ExplorerIndex, ExplorerRecord, ExplorerGraph } from './story-explorer.server'
 
@@ -37,6 +38,40 @@ export const readStoryGraph = createServerFn({ method: 'GET' })
   .handler(async ({ data }) => result<{ graph: ExplorerGraph }>(
     await storyRelationshipsRequest(auth, database,
       request(data.jobId, '/relationships', { id: data.selectedId, scope: data.scope }), data.jobId)))
+
+type WorkspaceIdentity = { storyId: string; threadId: string | null }
+const workspaceRequest = (identity: WorkspaceIdentity, suffix: string, args: Record<string, string> = {}) => {
+  const params = new URLSearchParams(args)
+  return new Request(readAuthConfig().baseURL + '/stories/' + encodeURIComponent(identity.storyId) +
+    '/explorer/' + suffix + (params.size ? '?' + params : ''),
+  { headers: getRequestHeaders() })
+}
+
+export const readWorkspaceStoryIndex = createServerFn({ method: 'GET' })
+  .validator((data: WorkspaceIdentity) => data)
+  .handler(async ({ data }) => {
+    const view = await result<{
+      source: 'base' | 'thread'; baseSha: string; jobId: string | null; index: ExplorerIndex | null
+      story?: { title: string; provider: 'github' | 'gitlab'; directory: string }
+    }>(await storyWorkspaceExplorerRequest(auth, database,
+      workspaceRequest(data, 'index'), data.storyId, data.threadId, 'index'))
+    return { ...view, index: view.index ? {
+      ...view.index, readiness: view.index.readiness as object | null,
+    } : null }
+  })
+
+export const readWorkspaceStoryRecord = createServerFn({ method: 'GET' })
+  .validator((data: WorkspaceIdentity & { recordId: string }) => data)
+  .handler(async ({ data }) => result<{ record: ExplorerRecord; markdown: string; headSha: string }>(
+    await storyWorkspaceExplorerRequest(auth, database,
+      workspaceRequest(data, 'record', { id: data.recordId }), data.storyId, data.threadId, 'record')))
+
+export const readWorkspaceStoryGraph = createServerFn({ method: 'GET' })
+  .validator((data: WorkspaceIdentity & { selectedId: string; scope: 'focused' | 'related' }) => data)
+  .handler(async ({ data }) => result<{ graph: ExplorerGraph }>(
+    await storyWorkspaceExplorerRequest(auth, database,
+      workspaceRequest(data, 'graph', { id: data.selectedId, scope: data.scope }),
+      data.storyId, data.threadId, 'graph')))
 
 export const readJobChanges = createServerFn({ method: 'GET' })
   .validator((data: { jobId: string; file?: string }) => data)

@@ -10,6 +10,10 @@ import { StudioSelect } from '@/components/studio-select'
 import { ThreadChat } from '@/components/thread-chat'
 import { ThreadUsage } from '@/components/thread-usage'
 import { StoryFirstChat } from '@/components/story-first-chat'
+import { StoryWorkspaceOutline } from '@/components/story-workspace-outline'
+import { StoryWorkspaceInspector } from '@/components/story-workspace-explorer'
+import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
+import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
 import { dashboardQuery } from '@/lib/dashboard.queries'
 import { storyNavigationQuery, storyNavigationKey, storyUsageKey, storyUsageQuery } from '@/lib/threads.queries'
 import { addCollection, setCollectionName, deleteCollection, moveThreadToCollection,
@@ -101,6 +105,29 @@ function StoryConversations() {
   const selectedThread = visibleThreads.find(thread => thread.id === selectedThreadId && !thread.deletedAt) ??
     visibleThreads.find(thread => !thread.deletedAt && (archivedView ? !!thread.archivedAt : !thread.archivedAt)) ??
     visibleThreads.find(thread => !thread.deletedAt)
+  const explorerThreadId = creatingThread ? null : selectedThread?.id ?? null
+  const [explorerView, setExplorerView] = useState<'chat' | 'graph' | 'outline'>('chat')
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+  const explorer = useQuery({
+    queryKey: ['workspace-explorer', storyId, explorerThreadId],
+    queryFn: () => readWorkspaceStoryIndex({ data: { storyId, threadId: explorerThreadId } }),
+    retry: false,
+    refetchInterval: selectedThread?.status === 'running' ? 8000 : 30000,
+  })
+  const explorerIndex = explorer.data?.index ?? null
+  useEffect(() => {
+    setSelectedRecordId(current => {
+      if (!explorerIndex) return null
+      return current && explorerIndex.records.some(record => record.id === current) ? current :
+        explorerIndex.records.find(record => record.type === 'creative-direction')?.id ??
+        explorerIndex.records[0]?.id ?? null
+    })
+  }, [explorerIndex, explorerThreadId, storyId])
+  const selectRecord = (id: string) => {
+    setSelectedRecordId(id)
+    setExplorerView('graph')
+    setNavigationOpen(false)
+  }
   const savePreferences = async (nextView: 'tree' | 'flat', nextExpanded = expandedIds,
     nextCollapsed = collapsedCollectionIds) => {
     setIssue(null)
@@ -174,6 +201,24 @@ function StoryConversations() {
   // The chat is always the main panel; navigation never stacks above it.
   const navigation = <aside aria-label="Story Threads"
     className="flex h-full min-h-0 min-w-0 flex-col gap-2 rounded-lg bg-muted/20 p-2">
+        <details open className="flex max-h-[42%] min-h-0 shrink-0 flex-col overflow-hidden border-b border-border/50 pb-2">
+          <summary className="cursor-pointer px-2 py-1 text-xs font-semibold">Story Outline</summary>
+          <div className="min-h-0 overflow-y-auto px-1" aria-label="Story Outline">
+            {explorer.error && <p role="alert" className="px-2 text-xs text-destructive">
+              {explorer.error.message}</p>}
+            {!explorer.data && !explorer.error &&
+              <p role="status" className="px-2 text-xs text-muted-foreground">Verifying Story revision…</p>}
+            {explorer.data?.source === 'base' &&
+              <p className="px-2 text-xs text-muted-foreground">
+                {explorer.data.story?.title ?? 'Story'} · {explorer.data.story?.provider ?? 'repository'}
+                {' · '}{explorer.data.story?.directory ?? 'Story root'}
+                {' · '}pinned source {explorer.data.baseSha.slice(0, 12)}.
+                Select a verified Thread to browse native records.
+              </p>}
+            {explorerIndex && <StoryWorkspaceOutline index={explorerIndex}
+              selectedId={selectedRecordId} onSelect={selectRecord} />}
+          </div>
+        </details>
         {data && <>
           <div className="flex items-center justify-between px-2">
             <h2 className="m-0 text-xs font-semibold">Threads</h2>
@@ -283,8 +328,53 @@ function StoryConversations() {
             <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
               {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
             </h2>
+            <nav aria-label="Story workspace views" className="flex shrink-0 items-center gap-1 text-xs">
+              {(['chat', 'graph', 'outline'] as const).map(view =>
+                <Button key={view} size="sm" variant={explorerView === view ? 'secondary' : 'ghost'}
+                  className={'h-7 px-2 ' + (view === 'outline' ? 'lg:hidden' : '')}
+                  aria-pressed={explorerView === view}
+                  onClick={() => setExplorerView(view)}>
+                  {view.charAt(0).toUpperCase() + view.slice(1)}
+                </Button>)}
+            </nav>
           </header>
-          {creatingThread || !data.threads.length ||
+          {explorerView === 'outline' ? <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <h3 className="mb-2 text-sm font-semibold">Canonical Story Outline</h3>
+            {explorerIndex ? <StoryWorkspaceOutline index={explorerIndex}
+              selectedId={selectedRecordId} onSelect={selectRecord} /> :
+              <p role={explorer.error ? 'alert' : 'status'} className="text-sm text-muted-foreground">
+                {explorer.error?.message ?? 'No verified Thread record catalog is available.'}
+              </p>}
+          </div> : explorerView === 'graph' ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {explorer.error ? <p role="alert" className="text-sm text-destructive">{explorer.error.message}</p>
+              : !explorer.data ? <p role="status" className="text-sm text-muted-foreground">
+                Verifying selected Thread revision…</p>
+              : !explorerIndex ? <div className="space-y-2 text-sm text-muted-foreground">
+                <h3 className="text-sm font-semibold text-foreground">Pinned Story source</h3>
+                <p>{explorer.data.story?.title} · {explorer.data.story?.provider} · {explorer.data.story?.directory}</p>
+                <p>Source commit: <code>{explorer.data.baseSha}</code></p>
+                <p>No Thread revision has been verified yet. Canonical records and native links will be
+                  available here after a Thread has a settled, validated revision.</p>
+              </div> : <>
+                <p role="status" className="mb-2 text-xs text-muted-foreground">
+                  Verified Thread revision <code>{explorerIndex.headSha.slice(0, 12)}</code>
+                  {' · '}Source <code>{explorerIndex.baseSha.slice(0, 12)}</code>
+                  {' · '}{explorerIndex.records.length} records
+                  {' · '}{explorerIndex.diagnostics.length} diagnostics
+                </p>
+                <StoryRelationshipGraph workspace={{ storyId, threadId: explorerThreadId }}
+                  index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
+                {explorerThreadId && <div className="mt-3">
+                  <StoryWorkspaceInspector storyId={storyId} threadId={explorerThreadId}
+                    index={explorerIndex} selectedId={selectedRecordId} onSelect={selectRecord} />
+                </div>}
+                {explorer.data.jobId && <Link to="/jobs/$jobId"
+                  params={{ jobId: explorer.data.jobId }} search={{ tab: 'story' }}
+                  className="mt-3 inline-flex text-xs underline underline-offset-2">
+                  Review Changes (full diff)
+                </Link>}
+              </>}
+          </div> : creatingThread || !data.threads.length ||
             (selectedThread && selectedThread.status === 'prepared' && selectedThread.id.startsWith('root:'))
             ? <StoryFirstChat key={creatingThread || !data.threads.length ? 'new:' + storyId : selectedThread!.id}
               storyId={storyId}

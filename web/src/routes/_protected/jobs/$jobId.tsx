@@ -21,6 +21,9 @@ import { GitChanges } from './-GitChanges'
 import { PublishDraft } from './-PublishDraft'
 
 export const Route = createFileRoute('/_protected/jobs/$jobId')({
+  validateSearch: (search: Record<string, unknown>): { tab?: JobTab } => ({
+    ...(search.tab === 'story' ? { tab: 'story' as const } : {}),
+  }),
   loader: ({ context, params }) => Promise.all([
     context.queryClient.ensureQueryData(jobQuery(params.jobId)),
     context.queryClient.ensureQueryData(jobEventsQuery(params.jobId)),
@@ -61,13 +64,14 @@ function JobDetails() {
 }
 
 function JobDetailsForId({ jobId }: { jobId: string }) {
+  const { tab: requestedTab } = Route.useSearch()
   const queryClient = useQueryClient()
   const { data: job, error: jobError, isFetching } = useQuery({
     ...jobQuery(jobId),
     refetchInterval: query => activeStatuses.has(query.state.data?.status ?? '') ? 8000 : false,
   })
   const { data: controls, error: controlsError } = useQuery(jobControlsQuery(jobId))
-  const [tab, setTab] = useState<JobTab>('overview')
+  const [tab, setTab] = useState<JobTab>(requestedTab ?? 'overview')
   const activity = useJobEventStream(jobId, tab === 'activity')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)

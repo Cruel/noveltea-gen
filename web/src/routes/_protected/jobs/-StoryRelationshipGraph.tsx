@@ -3,14 +3,15 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { StudioSelect } from '@/components/studio-select'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { readStoryGraph } from '../../../lib/story-data.functions'
+import { readStoryGraph, readWorkspaceStoryGraph } from '../../../lib/story-data.functions'
 import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { ExplorerGraph, ExplorerIndex } from '../../../lib/story-explorer.server'
 import { changeText } from './-StoryChangeLabels'
 
 type Props = {
-  jobId: string
+  jobId?: string
+  workspace?: { storyId: string; threadId: string | null }
   index: ExplorerIndex
   selectedId: string | null
   onSelect: (id: string) => void
@@ -19,7 +20,7 @@ type Props = {
 const limits = [16, 40, 80] as const
 
 /** Render only the native Context Manifest neighborhood; no client link discovery. */
-export function StoryRelationshipGraph({ jobId, index, selectedId, onSelect }: Props) {
+export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, onSelect }: Props) {
   const [scope, setScope] = useState<'focused' | 'related'>('focused')
   const [kind, setKind] = useState('all')
   const [limit, setLimit] = useState<number>(16)
@@ -31,8 +32,10 @@ export function StoryRelationshipGraph({ jobId, index, selectedId, onSelect }: P
   useEffect(() => { setKind('all') }, [selectedId])
 
   const graphQuery = useQuery({
-    queryKey: ['story-graph', jobId, index.headSha, selectedId, scope, refreshToken] as const,
-    queryFn: () => readStoryGraph({ data: { jobId, selectedId: selectedId!, scope } }),
+    queryKey: ['story-graph', workspace?.storyId ?? jobId, workspace?.threadId, index.headSha, selectedId, scope, refreshToken] as const,
+    queryFn: () => workspace
+      ? readWorkspaceStoryGraph({ data: { ...workspace, selectedId: selectedId!, scope } })
+      : readStoryGraph({ data: { jobId: jobId!, selectedId: selectedId!, scope } }),
     enabled: !!selectedId,
   })
   const graph = graphQuery.data?.graph ?? null

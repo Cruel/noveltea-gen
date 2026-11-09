@@ -12,6 +12,7 @@ import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { canonicalExplorerIndex, canonicalRelationshipGraph, storyExplorerRequest,
   storyRelationshipsRequest } from '../src/lib/story-explorer.server'
+import { storyWorkspaceExplorerRequest } from '../src/lib/story-workspace-explorer.server'
 import { generationConfigurationRequest } from '../src/lib/generation-config.server'
 import { userPiCredentials } from '../src/lib/pi-credentials.server'
 
@@ -48,7 +49,7 @@ test('native indexed Story explorer is owner-scoped, read-only, and never reveal
   timeout: 180_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-explorer-'))
-  const envKeys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_PI_CREDENTIAL_KEY']
+  const envKeys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_PI_CREDENTIAL_KEY', 'NT_STORY_EXPLORER_PASSED']
   const previous = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STATE_DIR = join(root, 'durable')
@@ -121,7 +122,7 @@ for (const [file, id] of [['new.md', 'event.new'], ['draft.md', 'event.draft']])
     path: 'events/' + file, metadata: { type: 'event', id, title: id, status: 'draft' }
   });
 }
-const diagnostics = ${JSON.stringify(diagnostics)};
+const diagnostics = process.env.NT_STORY_EXPLORER_PASSED === '1' ? [] : ${JSON.stringify(diagnostics)};
 const base = args[args.indexOf('--base') + 1];
 const readiness = args.includes('--readiness');
 const context = args.includes('context');
@@ -143,7 +144,7 @@ const payload = context ? { manifest } : {
   ...(readiness ? { readiness: { contractRevision: '0.1', stage: 'review', view: 'design',
     design: { stages: {} }, approved: { stages: {} }, outstanding: [] } } : {}),
 };
-const exit = context ? 0 : 1;
+const exit = context ? 0 : (process.env.NT_STORY_EXPLORER_PASSED === '1' ? 0 : 1);
 process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: exit,
   success: exit === 0, diagnostics: [], ...payload}));
 process.exit(exit);
@@ -200,6 +201,56 @@ process.exit(exit);
     assert.equal(relation.body.graph.validation, 'rejected')
     assert.equal(relation.body.graph.headSha, acquired.headSha)
     assert.doesNotMatch(JSON.stringify(relation.body), /private.yaml|top-secret-inbox-content/)
+
+    // Story-first gateway resolves owner, Story and selected Thread to one
+    // registered pinned Job; the client cannot select a Job or a Git revision.
+    await store.persistence.conversations.reconcileRoots(alice.id, storyId)
+    const threadId = 'root:' + jobId
+    const workspace = async (thread: string | null, kind: 'index' | 'record' | 'graph',
+      suffix = '', session = aliceCookie, story = storyId) => {
+      const response = await storyWorkspaceExplorerRequest(auth, store,
+        new Request(config.baseURL + '/stories/' + story + '/explorer/' + kind + suffix,
+          { headers: session ? { cookie: session } : {} }), story, thread, kind)
+      return { response, body: await response.json() as any }
+    }
+    const base = await workspace(null, 'index')
+    assert.equal(base.response.status, 200)
+    assert.equal(base.body.source, 'base')
+    assert.equal(base.body.baseSha, pinned)
+    assert.equal(base.body.index, null, 'a sparse base is never passed off as native-validated catalog')
+    assert.deepEqual(base.body.story, { title: 'Private Story', provider: 'github', directory: 'story' })
+    assert.equal((await workspace(null, 'index', '', bobCookie)).response.status, 404)
+    assert.equal((await workspace(null, 'index', '', '')).response.status, 401)
+    assert.equal((await workspace(null, 'record', '?id=event.bell')).response.status, 404)
+    assert.equal((await workspace('root:unknown', 'index')).response.status, 404)
+    assert.equal((await workspace(threadId, 'index', '', bobCookie)).response.status, 404)
+    assert.equal((await workspace(threadId, 'index', '', aliceCookie,
+      '00000000-0000-4000-8000-000000000000')).response.status, 404)
+    assert.equal((await workspace(threadId, 'index')).response.status, 409,
+      'rejected native validation is not a verified Story-first revision')
+    process.env.NT_STORY_EXPLORER_PASSED = '1'
+    const selected = await workspace(threadId, 'index')
+    assert.equal(selected.response.status, 200, JSON.stringify(selected.body))
+    assert.equal(selected.body.source, 'thread')
+    assert.equal(selected.body.index.validation, 'passed')
+    assert.equal(selected.body.index.headSha, pinned)
+    assert.equal(selected.body.index.baseSha, pinned)
+    assert.deepEqual(selected.body.index.records.map((r: { id: string }) => r.id),
+      records.map(record => record.metadata.id))
+    assert.equal((await workspace(threadId, 'record', '?id=event.bell')).body.markdown,
+      '# Ring the bell\n\nCanonical source content.\n')
+    assert.equal((await workspace(threadId, 'graph', '?id=event.bell&scope=related'))
+      .body.graph.relationships.length, 2)
+    assert.equal((await workspace(threadId, 'record', '?path=events/bell.md')).response.status, 400)
+    assert.equal((await workspace(threadId, 'graph', '?id=../../secret')).response.status, 404)
+    assert.doesNotMatch(JSON.stringify(selected.body), /top-secret-inbox-content|private.yaml/)
+    writeFileSync(join(acquired.worktreeStoryRoot, 'events', 'draft.md'), 'Unverified draft')
+    assert.equal((await workspace(threadId, 'index')).response.status, 409)
+    assert.equal((await workspace(threadId, 'record', '?id=event.bell')).response.status, 409)
+    assert.equal((await workspace(threadId, 'graph', '?id=event.bell')).response.status, 409)
+    unlinkSync(join(acquired.worktreeStoryRoot, 'events', 'draft.md'))
+    assert.equal((await workspace(threadId, 'index')).response.status, 200)
+    delete process.env.NT_STORY_EXPLORER_PASSED
 
     // Generation configuration is an authenticated, native-catalog-validated
     // job resource. It must never infer writable targets from the UI graph.
@@ -359,6 +410,92 @@ process.exit(exit);
     symlinkSync(join(repo, '.story-inbox', 'ideas', 'private.yaml'), join(acquired.worktreeStoryRoot, 'events', 'bell.md'))
     assert.equal((await api('?id=event.bell', aliceCookie)).response.status, 409)
     assert.equal((await relationships('?id=event.bell', aliceCookie)).response.status, 409)
+
+    // Two independent Thread worktrees keep distinct verified canonical
+    // contents and source-relative change markers. Neither may borrow the
+    // other's draft, authenticated head, or changed-record index.
+    process.env.NT_STORY_EXPLORER_PASSED = '1'
+    const branches = [
+      '44444444-4444-4444-8444-444444444444',
+      '55555555-5555-4555-8555-555555555555',
+    ]
+    const jobs = []
+    for (const id of branches) {
+      const job = await acquireCachedStory({
+        cacheDirectory: process.env.NT_GIT_CACHE_DIR!, ownerId: alice.id,
+        repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: 'unused',
+        commit: pinned, directory: 'story', jobId: id,
+        verifiedSizeBytes: bytes, verifiedBlobCount: records.length + 1,
+      })
+      await store.persistence.generation.jobs.register(alice.id, id,
+        storyId, 'Independent Thread', pinned, '2026-11-01')
+      jobs.push(job)
+    }
+    await store.persistence.conversations.reconcileRoots(alice.id, storyId)
+    writeFileSync(join(jobs[0]!.worktreeStoryRoot, 'events', 'bell.md'),
+      '# Thread A canonical Event\n\nThe bell is broken.\n')
+    writeFileSync(join(jobs[1]!.worktreeStoryRoot, 'arcs', 'warning.md'),
+      '# Thread B canonical Arc\n\nThe warning is restored.\n')
+    for (const [i, job] of jobs.entries()) {
+      git(job.worktreeRoot, 'add', '--', 'story')
+      git(job.worktreeRoot, 'commit', '-qm', 'Verified independent Thread ' + i)
+      const head = git(job.worktreeRoot, 'rev-parse', 'HEAD')
+      mkdirSync(join(job.stateDir, 'revisions'), { recursive: true })
+      writeFileSync(join(job.stateDir, 'revisions', 'verified-head.json'),
+        JSON.stringify({ version: 1, jobId: branches[i], headSha: head, workItemId: 'test' }))
+    }
+    const a = await workspace('root:' + branches[0], 'index')
+    const b = await workspace('root:' + branches[1], 'index')
+    assert.equal(a.response.status, 200, JSON.stringify(a.body))
+    assert.equal(b.response.status, 200, JSON.stringify(b.body))
+    assert.notEqual(a.body.index.headSha, b.body.index.headSha)
+    const entryOf = (view: any, id: string) => view.index.records.find((r: { id: string }) => r.id === id)
+    assert.deepEqual(entryOf(a.body, 'event.bell').change, { committed: 'modified' })
+    assert.equal(entryOf(a.body, 'arc.warning').change, undefined)
+    assert.deepEqual(entryOf(b.body, 'arc.warning').change, { committed: 'modified' })
+    assert.equal(entryOf(b.body, 'event.bell').change, undefined)
+    assert.match((await workspace('root:' + branches[0], 'record', '?id=event.bell')).body.markdown,
+      /Thread A canonical Event/)
+    assert.match((await workspace('root:' + branches[1], 'record', '?id=arc.warning')).body.markdown,
+      /Thread B canonical Arc/)
+    assert.deepEqual((await workspace('root:' + branches[0], 'graph',
+      '?id=event.bell')).body.graph.records.find((r: { id: string }) => r.id === 'event.bell').change,
+    { committed: 'modified' })
+    assert.deepEqual((await workspace('root:' + branches[1], 'graph',
+      '?id=event.bell')).body.graph.records.find((r: { id: string }) => r.id === 'arc.warning').change,
+    { committed: 'modified' })
+
+    await store.testing.records.update('studio_sessions', { id: branches[0] }, { status: 'running' })
+    assert.equal((await workspace('root:' + branches[0], 'index')).response.status, 409,
+      'running or restarted writers cannot expose an unsettled canonical revision')
+    await store.testing.records.update('studio_sessions', { id: branches[0] }, { status: 'paused' })
+    assert.equal((await workspace('root:' + branches[0], 'index')).response.status, 200)
+    await store.testing.records.update('story_threads', { id: 'root:' + branches[1] },
+      { deletedAt: '2026-11-08T00:00:00Z' })
+    assert.equal((await workspace('root:' + branches[1], 'index')).response.status, 404,
+      'deleted Threads cannot be used as explorer sources')
+    await store.testing.records.update('story_threads', { id: 'root:' + branches[1] },
+      { deletedAt: null })
+
+    await store.testing.records.update('stories', { id: storyId }, { sourceCommitSha: 'f'.repeat(40) })
+    assert.equal((await workspace('root:' + branches[0], 'index')).response.status, 409,
+      'a source pin detached from the verified Thread ancestry must fail closed')
+    await store.testing.records.update('stories', { id: storyId }, { sourceCommitSha: pinned })
+    const native = process.env.NT_NATIVE_CLI!
+    process.env.NT_NATIVE_CLI = join(root, 'missing-native-validator')
+    assert.equal((await workspace('root:' + branches[0], 'index')).response.status, 409)
+    process.env.NT_NATIVE_CLI = native
+
+    const reopened = openStudioDatabase(join(root, 'studio.sqlite'))
+    try {
+      const freshAuth = createStudioAuth(reopened, config)
+      const response = await storyWorkspaceExplorerRequest(freshAuth, reopened,
+        new Request(config.baseURL + '/stories/' + storyId + '/explorer/record?id=event.bell',
+          { headers: { cookie: aliceCookie } }),
+        storyId, 'root:' + branches[0], 'record')
+      assert.equal(response.status, 200, 'a verified source remains independently readable after DB reopen')
+      assert.match(JSON.stringify(await response.json()), /Thread A canonical Event/)
+    } finally { reopened.close() }
   } finally {
     store.close()
     for (const key of envKeys) {

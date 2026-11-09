@@ -1,0 +1,52 @@
+import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { test } from 'node:test'
+import type { ExplorerIndex, ExplorerRecord } from '../src/lib/story-explorer.server'
+import { StoryWorkspaceOutline } from '../src/components/story-workspace-outline'
+
+const record = (id: string, type: string, title: string, arcs: string[] = [],
+  events: string[] = []): ExplorerRecord => ({
+  id, type, title, arcs, events, status: 'draft', path: type + 's/' + id + '.md',
+})
+const index: ExplorerIndex = {
+  baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40),
+  validation: 'passed', protection: 'checked', readiness: null,
+  records: [
+    record('creative-direction.story', 'creative-direction', 'Direction'),
+    record('arc.warning', 'arc', 'Warning'),
+    record('milestone.bell', 'milestone', 'Bell milestone', ['arc.warning'], ['event.bell']),
+    { ...record('event.bell', 'event', 'Ring the bell', ['arc.warning']),
+      change: { committed: 'modified' } },
+    record('event.unassigned', 'event', 'Unassigned Event'),
+    record('character.one', 'character', 'Character One'),
+  ],
+  diagnostics: [{ path: 'events/event.bell.md', code: 'missing-field', message: 'Source required' }],
+  deletedRecords: [{ id: 'event.retired', type: 'event', title: 'Retired Event',
+    path: 'events/retired.md', arcs: [], change: { committed: 'deleted' } }],
+  unindexedRecords: [{ path: 'events/unindexed.md', change: { committed: 'added' } }],
+}
+test('selected verified record is shared by Outline and Graph without making deleted or unindexed paths selectable', () => {
+  const markup = renderToStaticMarkup(createElement(StoryWorkspaceOutline, {
+    index, selectedId: 'event.bell', onSelect: () => {},
+  }))
+  assert.match(markup, /aria-label="Canonical Story Outline"/)
+  assert.ok(markup.indexOf('Warning') < markup.indexOf('Bell milestone'))
+  assert.ok(markup.indexOf('Bell milestone') < markup.indexOf('Ring the bell'))
+  assert.match(markup, /aria-current="true"/)
+  assert.match(markup, /modified · verified/)
+  assert.match(markup, /diagnostics/)
+  assert.match(markup, /Retired Event/)
+  assert.match(markup, /unindexed\.md/)
+  assert.doesNotMatch(markup, /data-record-id="event\.retired"/)
+  assert.doesNotMatch(markup, /data-record-id="event\.unindexed"/)
+  const switched = renderToStaticMarkup(createElement(StoryWorkspaceOutline, {
+    index: { ...index, headSha: 'c'.repeat(40), records: index.records.map(r =>
+      r.id === 'event.bell' ? { ...r, title: 'Bell alternate', change: undefined } : r) },
+    selectedId: 'event.bell', onSelect: () => {},
+  }))
+  assert.match(switched, /Bell alternate/)
+  assert.doesNotMatch(switched, /modified · verified/)
+  assert.match(switched, /aria-current="true"/)
+  assert.doesNotMatch(switched, /Ring the bell/)
+})
