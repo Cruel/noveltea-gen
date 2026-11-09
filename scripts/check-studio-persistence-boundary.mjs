@@ -7,6 +7,8 @@ const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web/src'
 const driverExempt = new Set([
   'db/connection.ts', // owns the legacy driver and lifecycle
   'db/kysely-connection.ts', // owns both shared drivers and guarded transaction lifecycle
+  'db/kysely-baseline.ts', // isolated SQLite parity reference for cross-engine schema migration
+  'db/kysely-migrations.ts', // explicit Kysely migration and read-only schema introspection
   'db/migrations.ts', // PRAGMAs and Drizzle migration history
   'db/migrate-cli.ts', // offline operator migration command
   'db/trusted-catalog.ts', // isolated, read-only sandbox authorization

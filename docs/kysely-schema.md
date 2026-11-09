@@ -1,0 +1,88 @@
+# Fresh Studio Kysely schema (#129)
+
+The new Kysely schema is an **explicit, fresh-database** alternative to the
+existing SQLite/Drizzle migration path. It is not a live repository cutover:
+`pnpm --filter @noveltea/studio migrate` and normal Studio startup still use
+Drizzle/SQLite. The PostgreSQL application and controller runtime remains
+blocked until the subsequent persistence and trusted-catalog tickets. Do not
+switch Compose to PostgreSQL merely because its schema migrator now works.
+
+## Explicit maintenance
+
+In the Studio working directory, with the normal Better Auth OAuth
+configuration supplied in `.env` or environment variables:
+
+```sh
+# SQLite (default). NT_STUDIO_DB_PATH must select an EMPTY, separate file.
+pnpm --filter @noveltea/studio migrate:kysely up
+pnpm --filter @noveltea/studio migrate:kysely check
+pnpm --filter @noveltea/studio migrate:kysely down
+```
+
+For PostgreSQL, explicitly set `NT_STUDIO_DB_BACKEND=postgres` and
+`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` to a dedicated
+**empty** database with an authorized migration role; then run the same
+`migrate:kysely up|check|down` command. `up` applies the pending application
+migrations, `check` is a read-only fail-closed readiness check, and `down`
+rolls back one application migration. Rolling back the baseline **deletes
+application data** but preserves Better Auth-owned tables and users.
+Do not target a real Drizzle Studio database: untracked old tables are
+rejected and there is no automatic data migration or adoption.
+
+Better Auth runs its supported native Kysely migrations **before** the Studio
+Kysely Migrator. The application baseline only references auth's `user`
+table; `user`, `session`, `account`, `verification`, and `rateLimit`
+are never created, dropped, or versioned by Studio migrations.
+
+## Schema parity
+
+The immutable `web/kysely-schema/0000_studio_baseline.sql` asset is the
+new application's ordered, logical migration source. It contains 33
+application tables, indexed constraints, and 15 effective triggers from the
+finalized existing schema. The dialect-specific DDL helpers in
+`web/src/db/kysely-baseline.ts` handle only:
+
+- PostgreSQL table/index creation and deferral of composite foreign keys
+  until owner-pair unique indexes exist;
+- integer identity generation rather than SQLite `AUTOINCREMENT`;
+- PL/pgSQL trigger functions, including immutable identity guards,
+  same-Story execution admission, derived Turns and steer-only execution
+  associations;
+- `NO ACTION DEFERRABLE INITIALLY DEFERRED` on PostgreSQL references
+  where multi-branch cascading deletion can otherwise transiently violate
+  an otherwise valid transaction. Cascades/SET NULL actions remain the same.
+
+Per Gate 0, there are two deliberate extensions beyond the old Drizzle
+schema: `thread_queued_message_edits.sequence` and
+`thread_steering_checkpoint_links.sequence` are generated integer keys.
+The original `request_id` and `(message_id, checkpoint_sha)` identities
+remain uniquely indexed, and timestamps are unchanged. Consumers must order
+by those sequence keys, not SQLite `rowid`, UUID, or a potentially tied
+timestamp. A generated identity orders allocation, not commits across
+uncoordinated writers; use the shared transaction guards when porting the
+actual persistence operations.
+
+The runtime checker does not automatically migrate, rebuild indexes,
+repair data, or adopt a Drizzle journal. It inspects the Kysely history and
+physical schema. SQLite verifies exact DDL (including triggers, CHECKs,
+defaults, nullability, indexes) and FK integrity; PostgreSQL verifies
+columns, PKs, owner-qualified FKs and delete actions, CHECK expressions,
+indexes including partial predicates, and enabled trigger bodies. Authentication
+table creation/validation remains Better Auth's responsibility.
+
+## Cross-engine certification
+
+```sh
+pnpm --filter @noveltea/studio exec tsx --test test/kysely-schema.test.ts
+
+# Against a disposable empty PostgreSQL database; never use a live volume:
+NT_TEST_PG_URL=postgresql://... pnpm --filter @noveltea/studio exec tsx --test test/kysely-schema.test.ts
+```
+
+The suite uses the same assertions on both engines: two upward migrations,
+Kysely rollback/reapply, Better Auth user creation, composite ownership,
+CHECK and uniqueness, immutable ancestry, event/queue ordering, derived
+Turn associations, cascade effects, and read-only schema-drift rejection.
+It also rejects untracked Drizzle tables and incompatible/future migration
+histories without modifying them. Existing Drizzle regression tests remain
+in place until the explicit runtime cutover.

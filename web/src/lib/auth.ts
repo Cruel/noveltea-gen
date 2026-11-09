@@ -35,10 +35,10 @@ export function readAuthConfig(env: NodeJS.ProcessEnv = process.env): StudioAuth
 // Use one option source for the migration planner and runtime authentication.
 // Constructing Better Auth itself triggers an asynchronous schema check, so
 // the migrator must access these options without starting the auth runtime.
-export function studioAuthOptions(store: StudioDatabase, config: StudioAuthConfig) {
+export function studioAuthOptionsForDatabase(database: NonNullable<BetterAuthOptions['database']>, config: StudioAuthConfig) {
   return {
     appName: 'NovelTea Studio',
-    database: studioAuthStorage(store),
+    database,
     baseURL: config.baseURL,
     secret: config.secret,
     emailAndPassword: { enabled: false },
@@ -66,6 +66,10 @@ export function studioAuthOptions(store: StudioDatabase, config: StudioAuthConfi
     rateLimit: { enabled: true, storage: 'database' },
     plugins: [lastLoginMethod(), tanstackStartCookies()],
   } satisfies BetterAuthOptions
+}
+
+export function studioAuthOptions(store: StudioDatabase, config: StudioAuthConfig) {
+  return studioAuthOptionsForDatabase(studioAuthStorage(store), config)
 }
 
 export function createStudioAuth(store: StudioDatabase, config: StudioAuthConfig) {
