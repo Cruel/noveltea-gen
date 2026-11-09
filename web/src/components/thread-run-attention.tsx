@@ -11,6 +11,7 @@ import { jobQuery } from '@/lib/jobs.queries'
 import { CheckpointContinueAction } from './checkpoint-timeline'
 import { startConfiguredGeneration } from '@/lib/generation.functions'
 import { AuthorInteractions } from '../routes/_protected/jobs/-AuthorInteractions'
+import { ThreadExecutionDetails } from './thread-execution-details'
 
 type Run = { jobId: string; status: string; queuePhase: string | null }
 
@@ -33,6 +34,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
   const [busy, setBusy] = useState(false)
   const [controlError, setControlError] = useState<string | null>(null)
   const [showEvidence, setShowEvidence] = useState(false)
+  const [showRecoveryReview, setShowRecoveryReview] = useState(false)
   const pendingDecision = authorState?.choice?.phase === 'awaiting-author' ||
     authorState?.items?.some(item => item.phase === 'awaiting-author') ||
     authorState?.decisions?.some(item => item.phase === 'awaiting-author' || item.phase === 'applying')
@@ -64,10 +66,12 @@ export function ThreadRunAttention({ run }: { run: Run }) {
     } finally { setBusy(false) }
   }
 
-  if (run.status === 'running' || run.status === 'queued') return <div role="status"
-    className="flex items-center gap-2 text-xs text-muted-foreground">
-    <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
-    {run.status === 'queued' ? 'Waiting for a generation slot…' : 'NovelTea is working…'}
+  if (run.status === 'running' || run.status === 'queued') return <div className="space-y-2">
+    <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+      <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
+      {run.status === 'queued' ? 'Waiting for a generation slot…' : 'NovelTea is working…'}
+    </div>
+    <ThreadExecutionDetails jobId={run.jobId} />
   </div>
 
   if (!inspectable) return null
@@ -108,6 +112,34 @@ export function ThreadRunAttention({ run }: { run: Run }) {
     {!!verified.length && <p className="text-xs text-muted-foreground">
       {verified.length} verified {verified.length === 1 ? 'stage' : 'stages'} preserved.
     </p>}
+    {blocked && <div className="flex flex-wrap items-center gap-3 text-xs">
+      <Button type="button" size="sm" variant="outline" aria-expanded={showRecoveryReview}
+        onClick={() => setShowRecoveryReview(value => !value)}>
+        {showRecoveryReview ? 'Close recovery review' : 'Review saved recovery'}
+      </Button>
+      <span className="text-muted-foreground">Continue only from an eligible, verified checkpoint.
+        Unfinished specialist edits remain preserved for reconciliation.</span>
+    </div>}
+    {showRecoveryReview && blocked && <section aria-label="Saved recovery evidence"
+      className="space-y-2 rounded-md border border-border/50 bg-background p-3 text-xs">
+      <p>Run: <code>{job.id}</code> · Base SHA: <code>{job.baseSha}</code></p>
+      <p>Last recorded HEAD (not necessarily verified): <code>{job.headSha}</code></p>
+      {point ? <p>Eligible checkpoint: <code>{point.commitSha}</code> ·
+        {point.workItem} · native validation {point.validation.status} ·
+        semantic review {point.semanticReview}</p> :
+        <p>No eligible verified checkpoint was found on this run. An interrupted writer
+          must be inspected, not restarted.</p>}
+      {sourcePoint && <p>Verified original source: <code>{sourcePoint.commitSha}</code></p>}
+      {job.recovery && <div className="space-y-1">
+        <p>{job.recovery.files.length} unverified file(s) in the preserved worktree.
+          {job.recovery.workItem ? ' Interrupted specialist: ' + job.recovery.workItem : ''}
+          The recovery inspection is read-only.</p>
+        {job.recovery.files.length > 0 && <p className="break-all font-mono">
+          {job.recovery.files.join(', ')}</p>}
+        <p>{job.recovery.guidance}</p>
+      </div>}
+      {job.reason && <p className="whitespace-pre-wrap break-words">Saved failure: {job.reason}</p>}
+    </section>}
     {job.recovery && <div className="space-y-2 text-sm">
       <p>Unverified specialist files require manual reconciliation. They cannot be automatically retried or published.</p>
       <details className="text-xs text-muted-foreground">
@@ -165,14 +197,12 @@ export function ThreadRunAttention({ run }: { run: Run }) {
     {authorError && (job.status === 'paused' || blocked) && <p role="alert" className="text-sm text-destructive">Author decisions could not be verified: {authorError.message}</p>}
     {controlError && <p role="alert" className="text-sm text-destructive">{controlError}</p>}
     <div className="flex flex-wrap items-center gap-3 text-xs">
-      <Link to="/jobs/$jobId" params={{ jobId: run.jobId }} className="text-muted-foreground underline-offset-2 hover:underline">
-        View run details
-      </Link>
       {!!job.reason && <button type="button" className="text-muted-foreground underline-offset-2 hover:underline"
         onClick={() => setShowEvidence(value => !value)}>
         {showEvidence ? 'Hide technical reason' : 'Technical reason'}
       </button>}
     </div>
     {showEvidence && job.reason && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs text-muted-foreground">{job.reason}</pre>}
+    <ThreadExecutionDetails jobId={run.jobId} />
   </section>
 }

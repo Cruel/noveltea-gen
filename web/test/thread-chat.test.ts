@@ -129,6 +129,26 @@ test('public Thread submission durably queues rapid messages without authorizing
   } finally { db.close() }
 })
 
+test('a fenced interrupted writer remains blocked across reconnect and denies other owners', async () => {
+  const { db, alice, bob, id, job } = await setup()
+  try {
+    ;(await db.testing.records.update('studio_sessions', { id: job }, { status: 'running' }))
+    ;(await db.testing.records.update('generation_run_queue', { jobId: job },
+      { phase: 'interrupted' }))
+    const before = await readThreadChat(db, alice, id)
+    const after = await readThreadChat(db, alice, id)
+    assert.equal(before.runs[0]?.status, 'interrupted')
+    assert.equal(after.runs[0]?.status, 'interrupted')
+    assert.equal(after.turnReceipts[0]?.executions[0]?.validatedSha, null,
+      'a stale terminal event cannot confer verified completion on an interrupted run')
+    assert.ok(after.messages.every(message => message.phase !== 'running'),
+      'dead worker must not continue appearing as live')
+    await assert.rejects(() => readThreadChat(db, bob, id), /not found/)
+    assert.equal(await db.testing.records.count('story_thread_runs'), 1,
+      'reconnect never allocates or replays a writer')
+  } finally { db.close() }
+})
+
 test('agent restart reconciles a terminal queue receipt without replaying its writer', async () => {
   const { db, alice, id, job } = await setup()
   try {

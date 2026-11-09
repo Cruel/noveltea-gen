@@ -1,6 +1,7 @@
 import { assertNativeVersion } from '../../src/native-cli-version';
 import { withPiStatusReporter } from '../../src/pi-work-status'
 import { validateStoryJob } from '../../src/validator'
+import { trustedHead } from '../../src/revision'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import type { StudioStore as StudioDatabase } from './persistence/store'
@@ -21,6 +22,7 @@ import { appendGenerationEvent, committedStoryFiles } from './lib/generation-pro
 import { queueRecord, type QueueRecord } from './lib/generation-queue.server'
 import { selectedJob, restoreJob, pinnedRequest, verifyTrustedRevision, verifyWebExecution } from './lib/fixture-jobs.server'
 import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint } from './lib/thread-steering-replan.server'
+import { retryReadOnlyPreflight } from './lib/read-only-preflight-retry'
 
 /** Verify the queued identity and resume the pinned graph, never browser inputs. */
 export async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
@@ -50,8 +52,23 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   }).trim()) throw new Error('Job has uncommitted work; manual reconciliation required.')
   let runtime: ModelRuntime | undefined
   if (selected) {
-    await assertUserPiSelection(store, item.ownerId, selected)
-    runtime = await createUserPiRuntime(store, item.ownerId)
+    // This is an entirely read-only preflight: no Pi call, Git write, sandbox
+    // writer, graph stream, or server generation claim has occurred yet.
+    const verify = async () => {
+      const state = await store.persistence.generation.jobs.state(item.ownerId, row.id)
+      const lease = await queueRecord(store, row.id)
+      if (state?.status !== 'paused' || state.requestJson !== row.requestJson ||
+          state.threadId !== row.threadId || lease?.phase !== 'running' ||
+          lease.workerId !== item.workerId || await trustedHead(job) !== job.headSha ||
+          execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+            cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+          }).trim())
+        throw new Error('Preflight source changed; retain job for explicit reconciliation.')
+    }
+    runtime = await retryReadOnlyPreflight(async () => {
+      await assertUserPiSelection(store, item.ownerId, selected)
+      return createUserPiRuntime(store, item.ownerId)
+    }, verify)
   }
   const threadId = row.threadId!
   // Resolve the durable Turn->execution association once, owner-scoped, so

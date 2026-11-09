@@ -245,8 +245,8 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
       </label>
       {isFetching && <LoaderCircle aria-label="Updating chat" className="size-3.5 animate-spin motion-reduce:animate-none" />}
       {latest && <span aria-label="Latest run status">{latest.queuePhase === 'queued' ? 'Queued' : latest.status.replaceAll('-', ' ')}</span>}
-      {latest && <Link to="/jobs/$jobId" params={{ jobId: latest.jobId }}
-        className="underline-offset-2 hover:underline">Run details</Link>}
+      {latest && <a href="#thread-execution-details"
+        className="underline-offset-2 hover:underline">Execution Details</a>}
     </div>
     {error && <p role="alert" className="px-4 text-sm text-destructive">{error.message}</p>}
     <div ref={scrollRegion} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
@@ -377,7 +377,7 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
                   {event.status ? ' · ' + event.status : ''}
                   {event.files.length ? ' · ' + event.files.join(', ') : ''}
                 </p>)}
-              <Link to="/jobs/$jobId" params={{ jobId: item.jobId }}>Inspect saved job and receipts</Link>
+              <Link to="/jobs/$jobId" params={{ jobId: item.jobId }}>Inspect this run's saved job and receipts</Link>
             </div>
           </details>}
       </li>

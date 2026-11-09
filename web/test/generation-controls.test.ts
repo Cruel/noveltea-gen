@@ -144,9 +144,20 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
     assert.match(unsafe.body.error, /Uncommitted files/)
     assert.equal((await queueRecord(store, id))?.phase, 'interrupted')
     assert.ok(existsSync(join(job.worktreeStoryRoot, 'unverified.md')))
-    assert.equal((await generationJobRequest(auth, store,
+    const interruptedInspection = await generationJobRequest(auth, store,
       new Request(config.baseURL + '/api/jobs/' + id, { headers: { cookie: authorCookie } }),
-      id, config.baseURL)).status, 200, 'interrupted recovery must remain inspectable')
+      id, config.baseURL)
+    assert.equal(interruptedInspection.status, 200, 'interrupted recovery must remain inspectable')
+    const interruptedJob = (await interruptedInspection.json() as any).job
+    assert.equal(interruptedJob.status, 'interrupted')
+    assert.equal(interruptedJob.revisionVerified, undefined,
+      'fenced queue cannot manufacture completion proof')
+    assert.ok(interruptedJob.recovery.files.some((path: string) => path.endsWith('unverified.md')),
+      'authenticated inspection reports preserved dirty files')
+    assert.equal((await generationJobRequest(auth, store,
+      new Request(config.baseURL + '/api/jobs/' + id, { headers: { cookie: strangerCookie } }),
+      id, config.baseURL)).status, 404,
+      'another owner may not inspect the preserved draft')
     assert.equal((await control('POST', authorCookie, { action: 'cancel' })).status, 202)
     assert.equal(await readJobControl(job), 'cancelled')
     assert.equal((await control('POST', authorCookie, { action: 'resume' })).status, 409)

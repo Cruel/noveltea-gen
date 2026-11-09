@@ -178,10 +178,28 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
   if (row.status === 'cancelled') return { ...base, status: 'cancelled',
     threadId: row.threadId, task: pinned.task, contract: pinned.contract,
     reason: 'Generation was cancelled. Saved files and receipts were retained.', completedStages: [] }
-  if (queued?.phase === 'interrupted') return { ...base, status: 'interrupted',
-    threadId: row.threadId, task: pinned.task, contract: pinned.contract,
-    reason: 'Previous worker stopped without clean completion. Inspect preserved files and receipts; no replay is permitted.',
-    completedStages: [] }
+  if (queued?.phase === 'interrupted') {
+    // A fenced dead writer is never resumed on a GET. Expose only the names of
+    // its uncommitted files to the authenticated owner, not draft content,
+    // private Pi transcripts, environment data or a guessed completed state.
+    const env = { ...process.env }
+    for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
+    let files: string[] = []
+    try {
+      const status = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+        cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      files = status.split(/\r?\n/).filter(Boolean).map(line => line.slice(3))
+        .filter(path => path.length <= 1024).slice(0, 64)
+    } catch { /* Missing worktree evidence must not fabricate a clean revision. */ }
+    return { ...base, status: 'interrupted',
+      threadId: row.threadId, task: pinned.task, contract: pinned.contract,
+      reason: 'Previous worker stopped without clean completion. Inspect preserved files and receipts; no replay is permitted.',
+      recovery: { kind: 'operator-reconciliation' as const, stage: 'interrupted',
+        workItem: null, files, candidateDigest: null,
+        guidance: 'Review the original dirty worktree and Pi session, reconcile the original writer and verified checkpoint, then continue from the exact eligible checkpoint. Never replay the interrupted specialist.' },
+      completedStages: [] }
+  }
   let revisionVerified = true
   try {
     await verifyTrustedRevision(job)

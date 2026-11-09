@@ -102,11 +102,11 @@ export function CheckpointContinueAction({ job, point, suggestedGuidance = '',
       {expectedLatestJobId
         ? <Button type="button" size="sm" disabled={busy || !job.storyThreadId}
             onClick={() => void submit()}>
-            {busy ? 'Retrying…' : 'Retry'}
+            {busy ? 'Continuing…' : 'Continue from verified source'}
           </Button>
         : <Button type="button" size="sm" disabled={busy || !job.storyThreadId}
             onClick={() => setOpen(value => !value)}>
-            {open ? 'Cancel' : 'Resolve and continue'}
+            {open ? 'Cancel' : 'Continue from verified checkpoint'}
           </Button>}
       {expectedLatestJobId && <button type="button" disabled={busy}
         aria-expanded={open} aria-controls={'continuation-' + job.id}
