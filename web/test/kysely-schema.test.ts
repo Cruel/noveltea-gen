@@ -14,6 +14,7 @@ import {
   inspectStudioMigrationHistory,
   migrateStudioKysely,
   assertKyselyStudioSchemaCurrent,
+  studioMigrationNames,
   type StudioSchemaOptions,
 } from '../src/db/kysely-migrations'
 import { studioAuthOptionsForDatabase } from '../src/lib/auth'
@@ -32,6 +33,52 @@ async function selectedTables(connection: ReturnType<typeof openStudioSchemaConn
   return tables.filter((table) => table.schema === result.rows[0]?.schema)
 }
 
+async function assertNativeGitForeignKeys(connection: ReturnType<typeof openStudioSchemaConnection>) {
+  if (connection.backend === 'postgres') {
+    const constraints = await sql<{ conname: string; definition: string }>`
+      SELECT c.conname, pg_get_constraintdef(c.oid) AS definition
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = current_schema() AND c.contype = 'f'
+        AND c.conname IN ('repositories_connection_owner_provider_fk', 'github_install_connection_owner_provider_fk')
+    `.execute(connection.db)
+    assert.equal(constraints.rows.length, 2, 'Git associations must use native composite PG foreign keys')
+    for (const constraint of constraints.rows) {
+      assert.match(constraint.definition, /FOREIGN KEY \(connection_id, owner_user_id, provider\)/i)
+      assert.match(constraint.definition, /REFERENCES git_connections\(id, owner_user_id, provider\)/i)
+    }
+  } else {
+    for (const table of ['repositories', 'github_install_flows']) {
+      const fks = await sql<{
+        id: number
+        seq: number
+        from: string
+        to: string
+        table: string
+        onDelete: string
+      }>`${sql.raw(`PRAGMA foreign_key_list("${table}")`)}`.execute(connection.db)
+      const grouped = new Map<number, typeof fks.rows>()
+      for (const fk of fks.rows) grouped.set(fk.id, [...(grouped.get(fk.id) ?? []), fk])
+      assert.ok(
+        [...grouped.values()].some(
+          (group) =>
+            group.length === 3 &&
+            group.every(
+              (fk) => fk.table === 'git_connections' && fk.onDelete.toUpperCase() === 'NO ACTION',
+            ) &&
+            group
+              .sort((a, b) => a.seq - b.seq)
+              .map((fk) => fk.from)
+              .join(',') === 'connection_id,owner_user_id,provider' &&
+            group.map((fk) => fk.to).join(',') === 'id,owner_user_id,provider',
+        ),
+        `${table} must declare a native composite SQLite foreign key`,
+      )
+    }
+  }
+}
+
 async function certify(options: StudioSchemaOptions) {
   const connection = openStudioSchemaConnection(options)
   try {
@@ -45,7 +92,8 @@ async function certify(options: StudioSchemaOptions) {
     )
     await migrateStudioKysely(connection, config)
     await migrateStudioKysely(connection, config)
-    assert.equal(await inspectStudioMigrationHistory(connection), 1)
+    await assertNativeGitForeignKeys(connection)
+    assert.equal(await inspectStudioMigrationHistory(connection), studioMigrationNames().length)
     await assertKyselyStudioSchemaCurrent(connection)
     const readOnly = openStudioSchemaConnection(options, 'read')
     try {
@@ -469,6 +517,13 @@ async function certify(options: StudioSchemaOptions) {
       'owned Story and Thread cascades are preserved',
     )
     await migrateStudioKysely(connection, config, 'down')
+    assert.equal(
+      await inspectStudioMigrationHistory(connection),
+      1,
+      'first rollback reverses only the Git binding migration',
+    )
+    await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /migrations are pending/)
+    await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 0)
     assert.ok(!(await selectedTables(connection)).some((row) => row.name === 'repositories'))
     assert.ok(
@@ -544,7 +599,9 @@ test('readiness rejects future and incompatible Kysely histories without auto-re
     try {
       await migrateStudioKysely(connection, config)
       if (mismatch === 'unknown') {
-        await sql.raw("UPDATE kysely_migration SET name = '0000_unknown'").execute(connection.db)
+        await sql
+          .raw("UPDATE kysely_migration SET name = '0000_unknown' WHERE name = '0000_studio_baseline'")
+          .execute(connection.db)
       } else {
         await sql
           .raw("INSERT INTO kysely_migration (name, timestamp) VALUES ('9999_future', '2099-01-01')")

@@ -91,6 +91,36 @@ local developer PostgreSQL configuration.
 - Live Drizzle SQLite operation and PostgreSQL fail-closed runtime selection
   remain in place pending the **single** #141 application cutover.
 
+## S07 Git persistence implementation (#132, 2026-11-09)
+
+- `git-kysely.ts` implements the existing Git identities, repository catalog,
+  Story onboarding and Pi credential ports once against `SharedDatabase<StudioDb>`;
+  live Drizzle repositories stay in use until the atomic #141 runtime cutover.
+- The common disposable SQLite/PostgreSQL fixture runs the same owner-scoped
+  conformance cases for login accounts, repository import/rebind, OAuth and
+  installation single-use states, credential CAS, refresh-lease fencing, Story
+  initialization/import rollback, duplicate identities, and restart persistence.
+  No live provider credentials or network calls are needed.
+- `0001_git_connection_scope` adds **native composite foreign keys** for
+  `(connection_id, owner_user_id, provider)` on repositories and GitHub install
+  flows, backed by a unique Git connection candidate key. A constrained
+  `provider = 'github'` field on install flows prevents cross-provider links.
+  Existing single-column connection FKs retain `ON DELETE SET NULL`; the
+  complementary composite `NO ACTION` FK validates references without nulling
+  the required owner/provider fields when a connection is deleted. PostgreSQL
+  uses deferrable referential checks, matching its existing cascade strategy.
+  SQLite transactionally rebuilds the two tables from the canonical baseline,
+  while PostgreSQL uses `ALTER TABLE`; **both require the target tables to be
+  empty**, failing closed rather than silently discarding records. These are
+  staged, fresh Kysely databases; live Drizzle data and volumes are untouched.
+  Both directions of the migration are tested, as are owner/provider isolation
+  and nullable connection deletion on both engines. The application port also
+  validates active, owned connection bindings before import/rebind.
+- Local evidence: new Git conformance 10/10 across both engines; Studio offline
+  suite 149 passed, 0 failed, 2 optional skips; PostgreSQL transaction-guard
+  suite 14/14 separately; schema/rollback/parity, generated type, TypeScript,
+  and persistence-boundary checks passed. CI still needs to verify the commit.
+
 ## Gate ownership
 
 - #128: shared executor/guard correctness and mandatory SQLite/PostgreSQL CI

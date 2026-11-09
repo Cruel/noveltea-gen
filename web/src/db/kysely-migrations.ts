@@ -107,12 +107,17 @@ export function studioMigrationNames(migrationFolder = studioMigrationFolder): s
 const expected = studioDdl()
 
 function sameCheckSemantics(expectedExpression: string, actualDefinition: string): boolean {
-  // The authored checks are limited to IN, IS NULL, <> and OR.
+  // The authored checks are limited to IN, literal equality, IS NULL, <> and OR.
   // Compare the canonical PostgreSQL expression, not just literals or names.
   const unqualified = expectedExpression.replace(/"[^"]+"\."([^"]+)"/g, '$1')
   const clauses = unqualified.split(/\s+or\s+/i).map((clause) => {
     const membership = /^\s*([a-z_]+)\s+in\s*\((.+)\)\s*$/i.exec(clause)
-    if (!membership) return clause.trim()
+    if (!membership) {
+      const equality = /^\s*([a-z_]+)\s*=\s*('(?:[^']*)'|\d+)\s*$/i.exec(clause)
+      if (equality)
+        return `${equality[1]} = ${equality[2]!.startsWith("'") ? equality[2] + '::text' : equality[2]}`
+      return clause.trim()
+    }
     const values = membership[2]!.split(',').map((value) => {
       const token = value.trim()
       if (!/^'(?:[^']*)'$|^\d+$/.test(token)) throw new Error('Unsupported baseline CHECK value')

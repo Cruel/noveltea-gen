@@ -15,6 +15,14 @@ import {
 import { studioAuthOptionsForDatabase } from '../../src/lib/auth'
 import { createKyselyCollectionCatalog } from '../../src/persistence/collection-kysely'
 import { createKyselyPublicationRecords } from '../../src/persistence/publication-kysely'
+import { createKyselyGitPersistence } from '../../src/persistence/git-kysely'
+import type {
+  GitIdentities,
+  RepositoryCatalogWrites,
+  StoryOnboarding,
+  PiCredentialVault,
+  GitProvider,
+} from '../../src/persistence/git-contracts'
 import type { CollectionCatalog } from '../../src/persistence/collection-contracts'
 import type { PublicationRecords } from '../../src/persistence/publication-contracts'
 import type { TestFields, TestPersistence } from './test-persistence'
@@ -29,6 +37,13 @@ const authConfig = {
 export interface KyselyFeatureFixture {
   collections: CollectionCatalog
   publications: PublicationRecords
+  git: GitIdentities
+  repositories: RepositoryCatalogWrites
+  onboarding: StoryOnboarding
+  piCredentials: PiCredentialVault
+  account(owner: string, provider: GitProvider): Promise<void>
+  /** Reopen the same backing database with a new connection to prove persistence. */
+  reopenGit(): Promise<ReturnType<typeof createKyselyGitPersistence>>
   /** Exactly one test-only records surface for SQLite and PostgreSQL. */
   records: TestPersistence['records']
   owner(): Promise<string>
@@ -108,7 +123,20 @@ export async function openKyselyFeatureFixture(
     return {
       collections: createKyselyCollectionCatalog(database),
       publications: createKyselyPublicationRecords(database),
+      ...createKyselyGitPersistence(database),
       records: fixtureRecords,
+      async account(owner, provider) {
+        await authContext.internalAdapter.createAccount({
+          userId: owner,
+          providerId: provider,
+          accountId: randomUUID(),
+        })
+      },
+      async reopenGit() {
+        await database!.close()
+        database = openKyselyDatabase<StudioDb>(options)
+        return createKyselyGitPersistence(database)
+      },
       async owner() {
         const id = randomUUID()
         const user = await authContext.internalAdapter.createUser(

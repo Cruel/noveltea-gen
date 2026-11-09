@@ -79,6 +79,7 @@ export interface GithubInstallFlows {
   desiredRepository: string | null
   expiresAt: number
   ownerUserId: string
+  provider: Generated<string>
   stateHash: string
   status: string
 }

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assertPersistenceBoundary, sourceViolations } from '../../scripts/check-studio-persistence-boundary.mjs'
+import {
+  assertPersistenceBoundary,
+  sourceViolations,
+} from '../../scripts/check-studio-persistence-boundary.mjs'
 
 test('Studio application source cannot import or access the raw SQLite driver', () => {
   assertPersistenceBoundary()
@@ -11,6 +14,7 @@ test('Studio application source cannot import or access the raw SQLite driver', 
     "import { sql } from 'kysely'",
     "import { createKyselyCollectionCatalog } from '../persistence/collection-kysely'",
     "import { createKyselyPublicationRecords } from '../persistence/publication-kysely'",
+    "import { createKyselyGitPersistence } from '../persistence/git-kysely'",
     "import { openKyselyDatabase } from '../db/kysely-connection'",
     "const Database = require('better-sqlite3')",
     "await import('drizzle-orm/better-sqlite3')",
@@ -18,24 +22,26 @@ test('Studio application source cannot import or access the raw SQLite driver', 
     "store?.sqlite.prepare('SELECT 1')",
     "store['sqlite'].prepare('SELECT 1')",
     "store.sqlite.prepare('SELECT 1')",
-    "database.sqlite.transaction(() => {})",
+    'database.sqlite.transaction(() => {})',
     "import { ownedThreadMessageSqlite } from '../persistence/thread-message-sqlite'",
-    "studioSqliteDriver(store)",
-    "studioDrizzleForMigrations(store)",
+    'studioSqliteDriver(store)',
+    'studioDrizzleForMigrations(store)',
     "import { assertStudioSchemaCurrent } from '../db/migrations'",
     "store.persistence.generation.queue.sqliteTransactionBridge.claim('id', 1, 'now')",
-    "store.persistence.generation.events.sqliteBridge.after(owner, jobId, 0, 1)",
+    'store.persistence.generation.events.sqliteBridge.after(owner, jobId, 0, 1)',
   ]) {
     assert.ok(sourceViolations('lib/application.server.ts', source).length > 0, source)
   }
-  assert.deepEqual(sourceViolations('lib/application.server.ts',
-    'await store.persistence.messages.owned(owner, threadId, id)'), [])
-  assert.ok(sourceViolations('lib/auth.ts',
-    'database: studioSqliteDriver(store)').length > 0)
-  assert.deepEqual(sourceViolations('persistence/collection-kysely.ts',
-    "import { sql } from 'kysely'"), [])
-  assert.ok(sourceViolations('persistence/unconverted.ts',
-    "import { sql } from 'kysely'").length > 0)
-  assert.ok(sourceViolations('persistence/collection-kysely.ts',
-    "import { Pool } from 'pg'").length > 0)
+  assert.deepEqual(
+    sourceViolations(
+      'lib/application.server.ts',
+      'await store.persistence.messages.owned(owner, threadId, id)',
+    ),
+    [],
+  )
+  assert.ok(sourceViolations('lib/auth.ts', 'database: studioSqliteDriver(store)').length > 0)
+  assert.deepEqual(sourceViolations('persistence/collection-kysely.ts', "import { sql } from 'kysely'"), [])
+  assert.deepEqual(sourceViolations('persistence/git-kysely.ts', "import { sql } from 'kysely'"), [])
+  assert.ok(sourceViolations('persistence/unconverted.ts', "import { sql } from 'kysely'").length > 0)
+  assert.ok(sourceViolations('persistence/collection-kysely.ts', "import { Pool } from 'pg'").length > 0)
 })
