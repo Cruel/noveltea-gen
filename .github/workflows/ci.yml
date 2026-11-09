@@ -88,11 +88,20 @@ jobs:
           pnpm --filter @noveltea/studio schema:parity
 
   native-integration:
-    name: Native Story integration (private skills access)
+    name: Native Story (${{ matrix.label }})
     # Secrets aren't available to forks. The mandatory offline job still runs.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: root-1-of-4, suite: root, shard: "1/4", certify: true }
+          - { label: root-2-of-4, suite: root, shard: "2/4", certify: false }
+          - { label: root-3-of-4, suite: root, shard: "3/4", certify: false }
+          - { label: root-4-of-4, suite: root, shard: "4/4", certify: false }
+          - { label: studio, suite: studio, shard: "", certify: false }
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: noveltea-gen
@@ -174,12 +183,27 @@ jobs:
           pnpm --dir ../noveltea-skills install --frozen-lockfile
           echo "Native CLI: Cruel/nt Build run ${{ steps.native-build.outputs.run_id }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Skills commit: $(git -C ../noveltea-skills rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      # Certification runs once; the four root shards collectively cover every
+      # test/*.test.ts file, while Studio runs independently on its own runner.
       - name: Certify native Story contract (no skipped native gate)
-        if: steps.skills-access.outputs.enabled == 'true'
+        if: steps.skills-access.outputs.enabled == 'true' && matrix.certify
         run: pnpm certify:story
-      - name: Run full root tests with native CLI and skills
-        if: steps.skills-access.outputs.enabled == 'true'
-        run: pnpm test
+      - name: Run root test shard with native CLI and skills
+        if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'root'
+        run: pnpm exec tsx --test --test-shard=${{ matrix.shard }} test/*.test.ts
       - name: Run full Studio tests with native CLI and skills
-        if: steps.skills-access.outputs.enabled == 'true'
+        if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'studio'
         run: pnpm --filter @noveltea/studio test
+
+  native-integration-gate:
+    # Preserve the existing required-check name while all five matrix entries
+    # must complete successfully. A failed or cancelled shard fails this gate.
+    name: Native Story integration (private skills access)
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: native-integration
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all native Story and Studio test jobs
+        env:
+          RESULT: ${{ needs.native-integration.result }}
+        run: test "$RESULT" = success
