@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { Pool } from 'pg'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,12 +25,19 @@ const config = {
   gitlab: { clientId: 'test', clientSecret: 'test-secret' },
 }
 
+async function selectedTables(connection: ReturnType<typeof openStudioSchemaConnection>) {
+  const tables = await connection.db.introspection.getTables()
+  if (connection.backend === 'sqlite') return tables
+  const result = await sql<{ schema: string }>`SELECT current_schema() AS schema`.execute(connection.db)
+  return tables.filter((table) => table.schema === result.rows[0]?.schema)
+}
+
 async function certify(options: StudioSchemaOptions) {
   const connection = openStudioSchemaConnection(options)
   try {
     assert.equal(await inspectStudioMigrationHistory(connection), 0)
     await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /migrations are pending/)
-    const before = await connection.db.introspection.getTables()
+    const before = await selectedTables(connection)
     assert.equal(
       before.some((table) => table.name === 'user'),
       false,
@@ -49,7 +58,7 @@ async function certify(options: StudioSchemaOptions) {
       await readOnly.close()
     }
 
-    const tables = await connection.db.introspection.getTables()
+    const tables = await selectedTables(connection)
     for (const name of [
       'user',
       'account',
@@ -461,9 +470,9 @@ async function certify(options: StudioSchemaOptions) {
     )
     await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 0)
-    assert.ok(!(await connection.db.introspection.getTables()).some((row) => row.name === 'repositories'))
+    assert.ok(!(await selectedTables(connection)).some((row) => row.name === 'repositories'))
     assert.ok(
-      (await connection.db.introspection.getTables()).some((row) => row.name === 'user'),
+      (await selectedTables(connection)).some((row) => row.name === 'user'),
       'Kysely rollback must not drop Better Auth tables',
     )
     await migrateStudioKysely(connection, config)
@@ -567,8 +576,8 @@ test('Kysely CLI up/down/check operates on isolated SQLite without changing the 
     GITLAB_CLIENT_SECRET: config.gitlab.clientSecret,
   }
   const cwd = fileURLToPath(new URL('..', import.meta.url))
-  const invoke = (command: string) =>
-    spawnSync(process.execPath, ['--import', 'tsx', 'src/db/kysely-migrate-cli.ts', command], {
+  const invoke = (...commands: string[]) =>
+    spawnSync(process.execPath, ['--import', 'tsx', 'src/db/kysely-migrate-cli.ts', ...commands], {
       cwd,
       env,
       encoding: 'utf8',
@@ -584,6 +593,14 @@ test('Kysely CLI up/down/check operates on isolated SQLite without changing the 
       assert.equal(result.status, 0, `Kysely CLI ${action}: ${result.stderr}`)
       assert.match(result.stdout, /Kysely migration|Kysely schema is current/)
     }
+    for (const target of ['baseline', 'none', '0000_studio_baseline', 'latest']) {
+      const result = invoke('to', target)
+      assert.equal(result.status, 0, `Kysely CLI to ${target}: ${result.stderr}`)
+    }
+    assert.equal(invoke('check').status, 0)
+    const unknown = invoke('to', 'unrecognized_version')
+    assert.notEqual(unknown.status, 0)
+    assert.match(unknown.stderr, /Unknown Studio migration target/)
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
@@ -592,9 +609,24 @@ test('Kysely CLI up/down/check operates on isolated SQLite without changing the 
 test(
   'Kysely PostgreSQL baseline: real database parity, FKs, auth, rollback and drift',
   {
-    skip: !process.env.NT_TEST_PG_URL && 'Set NT_TEST_PG_URL to a disposable PostgreSQL database',
+    skip: !process.env.NT_TEST_PG_URL && 'Set NT_TEST_PG_URL for PostgreSQL schema tests',
   },
   async () => {
-    await certify({ backend: 'postgres', connection: { connectionString: process.env.NT_TEST_PG_URL } })
+    const connectionString = process.env.NT_TEST_PG_URL!
+    const schema = 'studio_baseline_' + randomUUID().replace(/-/g, '')
+    const admin = new Pool({ connectionString })
+    try {
+      await admin.query(`CREATE SCHEMA "${schema}"`)
+      await certify({
+        backend: 'postgres',
+        connection: { connectionString, options: `-c search_path=${schema}` },
+      })
+    } finally {
+      try {
+        await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      } finally {
+        await admin.end()
+      }
+    }
   },
 )

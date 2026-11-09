@@ -37,6 +37,23 @@ jobs:
     name: Typecheck, offline tests and builds
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    # Fresh, throwaway service for the mandatory dual-backend schema gate.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: noveltea_test
+          POSTGRES_PASSWORD: noveltea_test_only
+          POSTGRES_DB: noveltea_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U noveltea_test -d noveltea_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NT_TEST_PG_URL: postgresql://noveltea_test:noveltea_test_only@127.0.0.1:5432/noveltea_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,7 +81,9 @@ jobs:
           pnpm build
           pnpm --filter @noveltea/studio db:check
           pnpm --filter @noveltea/studio typecheck
+          pnpm --filter @noveltea/studio typegen:check
           pnpm --filter @noveltea/studio test:offline
+          pnpm --filter @noveltea/studio schema:parity
 
   native-integration:
     name: Native Story integration (private skills access)

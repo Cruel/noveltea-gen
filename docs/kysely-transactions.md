@@ -13,10 +13,10 @@ Selection is an explicit discriminated option: `{ backend: 'sqlite', path }` or
 migration. Both use `CamelCasePlugin`. PostgreSQL pools default to four clients,
 are bounded to 1–32, and have a five-second acquisition timeout.
 
-`StudioDb` is currently a **type-only bridge** to the legacy schema, excluding
-Better Auth. It accounts for the physical `studio_sessions` table and SQLite's
-integer boolean representation. #129/#130 must replace this bridge with canonical
-migration/codegen types and certify value normalization before application use.
+`StudioDb` is now committed **kysely-codegen output** from fresh SQLite
+Kysely migrations (#130), excluding Better Auth. It accounts for the physical
+`studio_sessions` table and SQLite's integer boolean representation. Use
+`kysely-values.ts` for explicit cross-driver conversions at domain boundaries.
 Do not apply this plugin to Better Auth's mixed-case physical column names.
 
 The returned interface exposes:

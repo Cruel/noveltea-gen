@@ -1,8 +1,9 @@
 import Database from 'better-sqlite3'
-import { chmodSync, existsSync, mkdirSync } from 'node:fs'
-import { dirname, isAbsolute } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, promises as fs } from 'node:fs'
+import { dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { CamelCasePlugin, Kysely, PostgresDialect, SqliteDialect, sql } from 'kysely'
-import { Migrator } from 'kysely/migration'
+import { FileMigrationProvider, Migrator, NO_MIGRATIONS, type Migration } from 'kysely/migration'
 import { Pool, type PoolConfig } from 'pg'
 import { betterAuth } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
@@ -15,6 +16,7 @@ export type StudioSchemaOptions =
 
 type Connection = {
   backend: 'sqlite' | 'postgres'
+  migrationFolder: string
   db: Kysely<any>
   authDatabase: Database.Database | Pool
   close(): Promise<void>
@@ -27,6 +29,7 @@ type Connection = {
 export function openStudioSchemaConnection(
   options: StudioSchemaOptions,
   mode: 'migrate' | 'read' = 'migrate',
+  migrationFolder = studioMigrationFolder,
 ): Connection {
   if (options.backend === 'sqlite') {
     if (options.path !== ':memory:' && !isAbsolute(options.path))
@@ -51,6 +54,7 @@ export function openStudioSchemaConnection(
     })
     return {
       backend: 'sqlite',
+      migrationFolder,
       db,
       authDatabase: sqlite,
       async close() {
@@ -77,10 +81,28 @@ export function openStudioSchemaConnection(
     dialect: new PostgresDialect({ pool }),
     plugins: [new CamelCasePlugin()],
   })
-  return { backend: 'postgres', db, authDatabase: pool, close: () => db.destroy() }
+  return { backend: 'postgres', migrationFolder, db, authDatabase: pool, close: () => db.destroy() }
 }
 
-const migrationNames = ['0000_studio_baseline'] as const
+export const studioMigrationFolder = fileURLToPath(
+  new URL('../../kysely-schema/migrations/', import.meta.url),
+)
+export const studioBaselineName = '0000_studio_baseline'
+
+/** File-based, ordered, handwritten migrations; never infer a schema diff. */
+export function studioMigrationNames(migrationFolder = studioMigrationFolder): string[] {
+  const authored = readdirSync(migrationFolder)
+    .filter((file) => file.endsWith('.ts') && !file.endsWith('.d.ts'))
+    .map((file) => {
+      if (!/^\d{4,}_[a-z][a-z0-9_]*\.ts$/.test(file))
+        throw new StudioSchemaError(`Invalid Studio migration filename: ${file}`)
+      return file.slice(0, -3)
+    })
+    .sort()
+  if (authored.some((name) => name <= studioBaselineName) || new Set(authored).size !== authored.length)
+    throw new StudioSchemaError('Studio migration filenames must be unique and newer than the baseline')
+  return [studioBaselineName, ...authored]
+}
 const expected = studioDdl()
 
 function sameCheckSemantics(expectedExpression: string, actualDefinition: string): boolean {
@@ -116,12 +138,50 @@ function normalizedIndexPredicate(predicate: string): string {
 const expectedTableNames = new Set(expected.tables.keys())
 const authTables = new Set(['user', 'session', 'account', 'verification', 'rateLimit'])
 
-function migrator(connection: Connection): Migrator {
+async function migrator(connection: Connection): Promise<Migrator> {
+  const files = new FileMigrationProvider({ fs, path: { join }, migrationFolder: connection.migrationFolder })
+  // Kysely's unqualified table-existence test sees migration journals in
+  // unrelated PostgreSQL schemas. Pin the journal to the selected schema so
+  // a disposable test schema cannot inherit an existing public journal.
+  const migrationTableSchema =
+    connection.backend === 'postgres'
+      ? (await sql<{ name: string }>`SELECT current_schema() AS name`.execute(connection.db)).rows[0]?.name
+      : undefined
+  if (connection.backend === 'postgres' && !migrationTableSchema)
+    throw new StudioSchemaError('PostgreSQL schema is not selected for Studio migrations')
   return new Migrator({
     db: connection.db,
+    ...(migrationTableSchema ? { migrationTableSchema } : {}),
     provider: {
       async getMigrations() {
-        return { [migrationNames[0]]: studioBaselineFor(connection.backend) }
+        const authored = await files.getMigrations()
+        const result: Record<string, Migration> = {
+          [studioBaselineName]: studioBaselineFor(connection.backend),
+        }
+        for (const name of studioMigrationNames(connection.migrationFolder).slice(1)) {
+          const migration = authored[name]
+          if (!migration || typeof migration.up !== 'function')
+            throw new StudioSchemaError(`Missing or invalid Studio migration: ${name}`)
+          const template = readFileSync(join(connection.migrationFolder, `${name}.ts`), 'utf8')
+          result[name] = {
+            up: (db) => {
+              if (template.includes('up migration code goes here...'))
+                throw new StudioSchemaError(`Migration ${name} has an unimplemented up() scaffold`)
+              return migration.up(db)
+            },
+            down: (db) => {
+              if (
+                typeof migration.down !== 'function' ||
+                template.includes('down migration code goes here...')
+              )
+                throw new StudioSchemaError(
+                  `Migration ${name} is irreversible: implement down() or explicitly throw`,
+                )
+              return migration.down(db)
+            },
+          }
+        }
+        return result
       },
     },
   })
@@ -157,6 +217,7 @@ export async function inspectStudioMigrationHistory(connection: Connection): Pro
   const history = await sql<{ name: string }>`SELECT name FROM kysely_migration ORDER BY name`.execute(
     connection.db,
   )
+  const migrationNames = studioMigrationNames(connection.migrationFolder)
   if (history.rows.length > migrationNames.length)
     throw new StudioSchemaError('Studio database was created by a newer application; refusing downgrade')
   for (let i = 0; i < history.rows.length; i++) {
@@ -168,8 +229,7 @@ export async function inspectStudioMigrationHistory(connection: Connection): Pro
   return history.rows.length
 }
 
-function compareDefinitions(actual: Map<string, string>) {
-  const expectedSql = expectedSqliteDefinitions()
+function compareDefinitions(actual: Map<string, string>, expectedSql: Map<string, string>) {
   for (const [key, definition] of expectedSql) {
     if (actual.get(key) !== definition)
       throw new StudioSchemaError(
@@ -187,13 +247,52 @@ function assertAuthAndAppTables(tables: Set<string>) {
   }
 }
 
-async function assertSqliteSchema(db: Kysely<any>): Promise<void> {
-  const result = await sql<{ type: string; name: string; sql: string }>`
-    SELECT type, name, sql FROM sqlite_master
-    WHERE sql IS NOT NULL AND type IN ('table', 'index', 'trigger')
-  `.execute(db)
-  compareDefinitions(new Map(result.rows.map((row) => [row.type + ':' + row.name, row.sql])))
-  const violations = await sql`PRAGMA foreign_key_check`.execute(db)
+type SqliteDefinition = { type: string; name: string; sql: string }
+const schemaDefinitionsSql = `SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table', 'index', 'trigger')`
+const internalTables = new Set(['user', 'kysely_migration', 'kysely_migration_lock', 'sqlite_sequence'])
+
+/** Replay the authored migration history into an empty in-memory SQLite DB.
+ * This is only an expectation for read-only schema checks; never auto-repairs
+ * the inspected database, and never maintains a second handwritten schema.
+ */
+async function expectedSqliteSnapshot<T>(
+  connection: Connection,
+  check: (sqlite: Database.Database) => Promise<T> | T,
+): Promise<T> {
+  const scratch = openStudioSchemaConnection(
+    { backend: 'sqlite', path: ':memory:' },
+    'migrate',
+    connection.migrationFolder,
+  )
+  try {
+    const sqlite = scratch.authDatabase as Database.Database
+    sqlite.exec('CREATE TABLE user (id TEXT PRIMARY KEY NOT NULL)')
+    const runner = await migrator(scratch)
+    const result = await runner.migrateToLatest()
+    if (result.error) throw result.error
+    return await check(sqlite)
+  } finally {
+    await scratch.close()
+  }
+}
+function appDefinitions(sqlite: Database.Database): Map<string, string> {
+  const entries = sqlite.prepare(schemaDefinitionsSql).all() as SqliteDefinition[]
+  return new Map(
+    entries
+      .filter((row) => !internalTables.has(row.name) && !row.name.startsWith('sqlite_autoindex'))
+      .map((row) => [row.type + ':' + row.name, row.sql]),
+  )
+}
+
+async function assertSqliteSchema(connection: Connection): Promise<void> {
+  const result = await sql<SqliteDefinition>`${sql.raw(schemaDefinitionsSql)}`.execute(connection.db)
+  const actual = new Map(result.rows.map((row) => [row.type + ':' + row.name, row.sql]))
+  const expectedSql =
+    studioMigrationNames(connection.migrationFolder).length === 1
+      ? expectedSqliteDefinitions()
+      : await expectedSqliteSnapshot(connection, appDefinitions)
+  compareDefinitions(actual, expectedSql)
+  const violations = await sql`PRAGMA foreign_key_check`.execute(connection.db)
   if (violations.rows.length) throw new StudioSchemaError('Studio SQLite foreign-key violations')
 }
 
@@ -222,7 +321,8 @@ type PgConstraint = {
 type PgTrigger = { tableName: string; tgname: string; tgenabled: string; prosrc: string; triggerDef: string }
 
 /** Catalog inspection contains no DDL or mutating probes, including on a read-only PG role. */
-async function assertPostgresSchema(db: Kysely<any>): Promise<void> {
+async function assertPostgresSchema(connection: Connection): Promise<void> {
+  const db = connection.db
   const [columnsResult, indexesResult, constraintsResult, triggersResult] = await Promise.all([
     sql<PgColumn>`SELECT table_name, column_name, data_type, is_nullable, column_default, is_identity
       FROM information_schema.columns WHERE table_schema = current_schema()`.execute(db),
@@ -247,14 +347,13 @@ async function assertPostgresSchema(db: Kysely<any>): Promise<void> {
   for (const row of columnsResult.rows) {
     byTable.set(row.tableName, [...(byTable.get(row.tableName) ?? []), row])
   }
-  // SQLite's own parser is the reference for final columns, defaults,
-  // nullability and foreign-key groups. This avoids two handwritten schemas.
-  const sqlite = new Database(':memory:')
-  try {
-    sqlite.exec('CREATE TABLE user (id TEXT PRIMARY KEY NOT NULL)')
-    const { baselineStatements } = await import('./kysely-baseline')
-    for (const statement of baselineStatements) sqlite.exec(statement)
-    for (const table of expectedTableNames) {
+  // Replay authored SQLite migrations instead of maintaining an independent
+  // type/schema engine. This also includes future added columns and tables.
+  await expectedSqliteSnapshot(connection, async (sqlite) => {
+    const appTables = [...appDefinitions(sqlite).keys()]
+      .filter((key) => key.startsWith('table:'))
+      .map((key) => key.slice('table:'.length))
+    for (const table of appTables) {
       const cols = sqlite.prepare(`PRAGMA table_info("${table}")`).all() as Array<{
         name: string
         type: string
@@ -282,11 +381,15 @@ async function assertPostgresSchema(db: Kysely<any>): Promise<void> {
         ) {
           throw new StudioSchemaError(`Studio PostgreSQL schema column drift (${table}.${col.name})`)
         }
-        if (
-          ['generation_events', 'generation_run_queue'].includes(table) &&
-          ['id', 'sequence'].includes(col.name) &&
-          found.isIdentity !== 'YES'
-        )
+        // Generated ordering keys must be true PG identity columns, not merely
+        // integer columns with a replaceable or missing default.
+        const tableSql = (
+          sqlite.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`).get(table) as {
+            sql: string
+          }
+        ).sql
+        const generatedBySqlite = col.pk === 1 && /\bAUTOINCREMENT\b/i.test(tableSql)
+        if ((found.isIdentity === 'YES') !== generatedBySqlite)
           throw new StudioSchemaError(`Studio PostgreSQL identity drift (${table}.${col.name})`)
       }
       const primaryColumns = cols
@@ -338,7 +441,12 @@ async function assertPostgresSchema(db: Kysely<any>): Promise<void> {
         )
           throw new StudioSchemaError(`Studio PostgreSQL foreign-key drift (${table}.${from})`)
       }
-      const checks = [...expected.tables.get(table)!.matchAll(/CONSTRAINT\s+"([^"]+)"\s+CHECK\(([^\n]*)\)/gi)]
+      const tableSql = (
+        sqlite.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`).get(table) as {
+          sql: string
+        }
+      ).sql
+      const checks = [...tableSql.matchAll(/CONSTRAINT\s+"([^"]+)"\s+CHECK\(([^\n]*)\)/gi)]
       for (const [, name, expression] of checks) {
         const found = constraintsResult.rows.find(
           (c) => c.tableName === table && c.conname === name && c.contype === 'c',
@@ -347,9 +455,7 @@ async function assertPostgresSchema(db: Kysely<any>): Promise<void> {
           throw new StudioSchemaError(`Studio PostgreSQL CHECK constraint drift (${name})`)
       }
     }
-  } finally {
-    sqlite.close()
-  }
+  })
   for (const [table, definitions] of expected.indexes) {
     for (const ddl of definitions) {
       const match =
@@ -380,7 +486,7 @@ async function assertPostgresSchema(db: Kysely<any>): Promise<void> {
       definition
         .toLowerCase()
         .replace(/"/g, '')
-        .replace(/\bpublic\./g, '')
+        .replace(/\b[a-z][a-z0-9_]*\.(?=[a-z][a-z0-9_]*\b)/g, '')
         .replace(/\s+/g, '')
     if (
       !row ||
@@ -394,14 +500,15 @@ async function assertPostgresSchema(db: Kysely<any>): Promise<void> {
 
 export async function assertKyselyStudioSchemaCurrent(connection: Connection): Promise<void> {
   const applied = await inspectStudioMigrationHistory(connection)
+  const migrationNames = studioMigrationNames(connection.migrationFolder)
   if (applied !== migrationNames.length)
     throw new StudioSchemaError(
       `Studio Kysely migrations are pending (requires ${migrationNames.length}, found ${applied}). Run the explicit Kysely migration command.`,
     )
   const tables = await listedTables(connection)
   assertAuthAndAppTables(tables)
-  if (connection.backend === 'sqlite') await assertSqliteSchema(connection.db)
-  else await assertPostgresSchema(connection.db)
+  if (connection.backend === 'sqlite') await assertSqliteSchema(connection)
+  else await assertPostgresSchema(connection)
 }
 
 /** Explicit migration entrypoint. Better Auth owns its own tables and always
@@ -411,16 +518,30 @@ export async function assertKyselyStudioSchemaCurrent(connection: Connection): P
 export async function migrateStudioKysely(
   connection: Connection,
   config: StudioAuthConfig,
-  target: 'latest' | 'down' = 'latest',
+  target: string | typeof NO_MIGRATIONS = 'latest',
 ): Promise<void> {
-  await inspectStudioMigrationHistory(connection)
+  const names = studioMigrationNames(connection.migrationFolder)
+  if (
+    target !== 'latest' &&
+    target !== 'down' &&
+    target !== NO_MIGRATIONS &&
+    (typeof target !== 'string' || !names.includes(target))
+  )
+    throw new StudioSchemaError(`Unknown Studio migration target: ${target}`)
+  const applied = await inspectStudioMigrationHistory(connection)
+  if (applied === names.length && target !== NO_MIGRATIONS) await assertKyselyStudioSchemaCurrent(connection)
   const authOptions = studioAuthOptionsForDatabase(connection.authDatabase, config)
   const { runMigrations } = await getMigrations(authOptions)
   await runMigrations()
-  const runner = migrator(connection)
-  const result = target === 'down' ? await runner.migrateDown() : await runner.migrateToLatest()
+  const runner = await migrator(connection)
+  const result =
+    target === 'down'
+      ? await runner.migrateDown()
+      : target === 'latest'
+        ? await runner.migrateToLatest()
+        : await runner.migrateTo(target)
   if (result.error) throw result.error
-  if (target === 'latest') {
+  if (target === 'latest' || target === names.at(-1)) {
     await assertKyselyStudioSchemaCurrent(connection)
     const context = await betterAuth(authOptions).$context
     if (!context.checkSchema) throw new Error('Better Auth schema validation unavailable')
@@ -428,4 +549,4 @@ export async function migrateStudioKysely(
   }
 }
 
-export { migrationNames }
+export { NO_MIGRATIONS }

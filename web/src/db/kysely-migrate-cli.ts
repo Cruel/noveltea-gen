@@ -5,6 +5,8 @@ import {
   assertKyselyStudioSchemaCurrent,
   migrateStudioKysely,
   openStudioSchemaConnection,
+  studioMigrationNames,
+  NO_MIGRATIONS,
   type StudioSchemaOptions,
 } from './kysely-migrations'
 
@@ -13,8 +15,14 @@ import {
 const mode = process.env.NODE_ENV === 'production' ? 'production' : 'development'
 const env = loadEnv(mode, process.cwd(), '')
 const operation = process.argv[2] ?? 'up'
-if (!['up', 'down', 'check'].includes(operation) || process.argv.length > 3) {
-  throw new Error('Usage: pnpm --filter @noveltea/studio migrate:kysely [up|down|check]')
+const target = process.argv[3]
+if (
+  !['up', 'down', 'check', 'to'].includes(operation) ||
+  (operation === 'to'
+    ? !target || process.argv.length !== 4
+    : process.argv.length !== 3 && process.argv.length !== 2)
+) {
+  throw new Error('Usage: migrate:kysely [up|down|check|to <baseline|latest|migration-name|none>]')
 }
 const backend = env.NT_STUDIO_DB_BACKEND ?? 'sqlite'
 let options: StudioSchemaOptions
@@ -47,8 +55,20 @@ try {
     await assertKyselyStudioSchemaCurrent(connection)
     console.log(`NovelTea Studio ${backend} Kysely schema is current (read-only check).`)
   } else {
-    await migrateStudioKysely(connection, readAuthConfig(env), operation === 'down' ? 'down' : 'latest')
-    console.log(`NovelTea Studio ${backend} Kysely migration ${operation} completed.`)
+    const requested =
+      operation === 'to'
+        ? target === 'baseline'
+          ? studioMigrationNames()[0]!
+          : target === 'none'
+            ? NO_MIGRATIONS
+            : target!
+        : operation === 'down'
+          ? 'down'
+          : 'latest'
+    await migrateStudioKysely(connection, readAuthConfig(env), requested)
+    console.log(
+      `NovelTea Studio ${backend} Kysely migration ${operation}${target ? ' ' + target : ''} completed.`,
+    )
   }
 } finally {
   await connection.close()
