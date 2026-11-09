@@ -111,8 +111,10 @@ test('base Compose can resolve without a developer env file, with runtime valida
   const base = config(false)
   for (const name of ['init', 'web', 'web-dev', 'agent']) {
     const files = service(base, name).env_file ?? []
-    assert.equal(files.length, 1)
-    assert.equal((files[0] as { required?: boolean }).required, false)
+    // Compose versions differ: some omit absent optional files from
+    // resolved config; others retain an entry with required=false.
+    assert.ok(files.length <= 1)
+    for (const file of files) assert.equal((file as { required?: boolean }).required, false)
   }
 })
 
