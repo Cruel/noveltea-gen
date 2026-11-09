@@ -25,7 +25,15 @@ export const STORY_HEIGHT_MIN = 20
 export const STORY_HEIGHT_MAX = 70
 
 export function clampStoryHeight(height: number): number {
-  return Math.min(STORY_HEIGHT_MAX, Math.max(STORY_HEIGHT_MIN, Math.round(height)))
+  // Preserve fractional percentages: rounding to whole points made dragging jump
+  // by roughly 8px in an 800px workspace instead of following the pointer.
+  return Math.min(STORY_HEIGHT_MAX, Math.max(STORY_HEIGHT_MIN, Math.round(height * 100) / 100))
+}
+
+export function storyHeightForPointer(startHeight: number, startY: number,
+  currentY: number, viewportHeight: number): number {
+  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return startHeight
+  return clampStoryHeight(startHeight + 100 * (currentY - startY) / viewportHeight)
 }
 
 export function storyHeightForKey(height: number, key: string, shift: boolean): number | null {
@@ -92,9 +100,8 @@ export function StoryDesktopWorkspace({ outline, graph, threads, chat }: Props) 
   const pointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (!dragging.current || dragging.current.pointer !== event.pointerId || !viewport.current) return
     const pixels = viewport.current.getBoundingClientRect().height
-    if (pixels <= 0) return
-    change({ height: clampStoryHeight(dragging.current.height +
-      100 * (event.clientY - dragging.current.y) / pixels) })
+    change({ height: storyHeightForPointer(dragging.current.height,
+      dragging.current.y, event.clientY, pixels) })
   }
   const pointerEnd = (event: PointerEvent<HTMLDivElement>) => {
     if (dragging.current?.pointer !== event.pointerId) return

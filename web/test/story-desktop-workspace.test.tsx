@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { test } from 'node:test'
 import { StudioSelect } from '../src/components/studio-select'
 import { StoryDesktopWorkspace, StoryMobileWorkspace, DEFAULT_STORY_LAYOUT, STORY_LAYOUT_KEY,
-  clampStoryHeight, parseStoryLayout, storyHeightForKey } from '../src/components/story-desktop-workspace'
+  clampStoryHeight, parseStoryLayout, storyHeightForKey, storyHeightForPointer } from '../src/components/story-desktop-workspace'
 
 test('Story desktop layout has two full-width stacked regions with aligned independent sidebars', () => {
   const markup = renderToStaticMarkup(createElement(StoryDesktopWorkspace, {
@@ -71,9 +71,22 @@ test('site-wide layout storage restores only valid bounded panel state', () => {
   assert.equal(parseStoryLayout('{"height":100000}').height, 70)
   assert.equal(parseStoryLayout('{"height":-9}').height, 20)
   assert.equal(parseStoryLayout('{"height":"99"}').height, 42)
-  assert.equal(clampStoryHeight(21.7), 22)
+  assert.equal(clampStoryHeight(21.7), 21.7)
+  assert.equal(clampStoryHeight(21.735), 21.74)
   assert.equal(clampStoryHeight(0), 20)
   assert.equal(clampStoryHeight(100), 70)
+})
+
+test('splitter follows single-pixel pointer moves smoothly without whole-percent snapping', () => {
+  // One percent of an 800px workspace is 8px. Each pixel must still move the splitter.
+  assert.equal(storyHeightForPointer(42, 200, 201, 800), 42.13)
+  assert.equal(storyHeightForPointer(42, 200, 202, 800), 42.25)
+  assert.equal(storyHeightForPointer(42, 200, 207, 800), 42.88)
+  assert.equal(storyHeightForPointer(42, 200, 199, 800), 41.88)
+  assert.equal(storyHeightForPointer(42, 200, 5000, 800), 70)
+  assert.equal(storyHeightForPointer(42, 200, -5000, 800), 20)
+  assert.equal(storyHeightForPointer(42, 200, 205, 0), 42)
+  assert.equal(parseStoryLayout('{"height":42.13}').height, 42.13)
 })
 
 test('focused splitter keyboard controls are bounded and ignore unrelated keys', () => {
