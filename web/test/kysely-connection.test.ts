@@ -66,12 +66,12 @@ test('factories reject invalid configuration, close before first query and rejec
   )
 })
 
-test('unmigrated application and controller reject PostgreSQL rather than opening SQLite', () => {
+test('unmigrated application rejects PostgreSQL; absent controller SQLite catalog fails closed', async () => {
   const previous = process.env.NT_STUDIO_DB_BACKEND
   try {
     process.env.NT_STUDIO_DB_BACKEND = 'postgres'
     assert.throws(() => openStudioDatabase(':memory:'), /not yet migrated.*refusing SQLite fallback/)
-    assert.throws(() => readTrustedControllerJob('/does-not-exist.sqlite', 'job'), /not yet migrated/)
+    await assert.rejects(readTrustedControllerJob({ backend: 'sqlite', path: '/does-not-exist.sqlite' }, 'job'), /open database|unable to open database/)
     process.env.NT_STUDIO_DB_BACKEND = 'typo'
     assert.throws(() => openStudioDatabase(':memory:'), /Unsupported NT_STUDIO_DB_BACKEND/)
   } finally {

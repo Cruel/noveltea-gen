@@ -28,10 +28,10 @@ docker compose -f compose.yaml -f compose.postgres.yaml logs postgres
 This initializes a dedicated `noveltea-postgres` persistent volume via
 `deploy/postgres-bootstrap.sh`, checks PostgreSQL health with an authenticated
 query, and publishes **no database host port**. The database-only service
-is ready now. Full `up -d` with this override is **intentionally blocked**:
-`init` rejects `NT_STUDIO_DB_BACKEND=postgres` until #128 introduces the
-shared database factory, #129 establishes the real Kysely/Better Auth schema,
-and later persistence/controller cutover tickets make it usable end-to-end.
+is ready now. Full `up -d` with this override remains **intentionally blocked**:
+`init` rejects `NT_STUDIO_DB_BACKEND=postgres` until the remaining application
+store cutover. The shared Kysely migrations, PostgreSQL schema and dedicated
+controller reader are implemented, but the legacy Studio runtime still uses SQLite.
 It must not quietly migrate or run an SQLite Studio while PG is selected.
 
 Once the downstream migration/cutover lands, the same override will supply
@@ -57,10 +57,10 @@ The PostgreSQL bootstrap creates `noveltea_app` (application migration
 owner) and `noveltea_controller` (login-only, no table/DDL/temp privileges).
 It denies default public database/schema access and grants the controller
 only `USAGE` on the dedicated `controller_catalog` schema plus `SELECT`
-on `controller_catalog.trusted_jobs`. The view is initially **empty** and
-cannot expose user credentials. The schema migration/cutover must replace its
-definition with the joined, owner-scoped trusted-job projection before the
-controller can authorize actual PostgreSQL-backed jobs. The controller must
+on `controller_catalog.trusted_jobs`. The bootstrap view is initially **empty** and cannot expose user credentials.
+The explicit `0002_trusted_catalog` Kysely migration replaces it with the
+same typed owner-scoped job projection used to build the SQLite catalog view.
+Until that migration is applied, the PostgreSQL controller authorizes no jobs. The controller must
 never read `pi_credentials`, `git_connections`, or Better Auth tables.
 The bootstrap owns a new empty data volume; changing passwords later requires
 a deliberate PostgreSQL role-rotation procedure, not simply editing `.env`.
@@ -85,8 +85,10 @@ pulls the official PostgreSQL image. It generates fresh per-run roles/passwords,
 a unique Compose project and one uniquely named PostgreSQL volume. It starts
 **only PostgreSQL and network probes**, not Studio, model sessions, real
 OAuth credentials or private skills. It verifies network reachability and
-Web/Agent isolation; view SELECT; actual denied private reads, writes and DDL;
-absence of a published port; and restart/full down-up persistence. It removes
+Web/Agent isolation; populated owner-joined view SELECT; the actual Kysely
+controller reader and cross-owner/malicious-ID rejection inside the restricted
+network; denied private reads, writes and DDL; absence of a published port;
+and reader/restart/full down-up persistence. It removes
 only its unique volume. **Never run `docker compose down -v` on the ordinary
 deployment**: that would destroy live SQLite, state and controller volumes.
 

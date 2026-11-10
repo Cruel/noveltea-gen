@@ -87,6 +87,21 @@ function docker() {
   return { calls, run, setImage: (next: string | null) => { image = next } }
 }
 
+test('asynchronous catalog admission holds the job lock through acquire and dispose', async () => {
+  const { config } = fixture()
+  const { calls, run } = docker()
+  const controller = new SandboxController(config, run)
+  const pendingAcquire = controller.acquire(ID)
+  await assert.rejects(controller.acquire(ID), /already in progress/)
+  await assert.rejects(controller.dispose(ID), /executing or being acquired/)
+  await pendingAcquire
+  const pendingDispose = controller.dispose(ID)
+  await assert.rejects(controller.acquire(ID), /already in progress/)
+  await assert.rejects(controller.execute(ID, ['true'], () => {}), /active operation/)
+  assert.equal((await pendingDispose).status, 'disposed')
+  assert.equal(calls.filter(args => args[0] === 'create').length, 1)
+})
+
 test('registered Story job derives one trusted worktree and never mounts git or inbox', async () => {
   const { config, story } = fixture()
   mkdirSync(join(story, '..', '.story-inbox', 'ideas'), { recursive: true })
@@ -114,8 +129,8 @@ test('registered Story job derives one trusted worktree and never mounts git or 
   mkdirSync(join(story, 'new-record-type'))
   writeFileSync(join(story, 'new-record-type', 'note.md'), 'new')
   await controller.acquire(ID)
-  assert.deepEqual(controller.inspect(ID), { jobId: ID, status: 'running' })
-  assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+  assert.deepEqual(await controller.inspect(ID), { jobId: ID, status: 'running' })
+  assert.deepEqual((await controller.dispose(ID)), { jobId: ID, status: 'disposed' })
 })
 
 const pinnedDraft = (limits: unknown, headSha = 'a'.repeat(40)) =>
@@ -125,7 +140,7 @@ test('controller derives per-job Docker ceilings only from pinned owner records,
   const { config } = fixture('story', ID,
     pinnedDraft({ cpu: 6, memoryMiB: 4096, pids: 900, activeSeconds: 30 }))
   config.maximums = { cpu: 2, memoryMiB: 768, pids: 200 }
-  const resolved = resolveTrustedJob(config, ID, IMAGE)
+  const resolved = await resolveTrustedJob(config, ID, IMAGE)
   assert.deepEqual(resolved.resources, { cpu: 2, memoryMiB: 768, pids: 200 })
   const { calls, run } = docker()
   const controller = new SandboxController(config, run)
@@ -146,7 +161,7 @@ test('controller derives per-job Docker ceilings only from pinned owner records,
     maximums: { cpu: 1, memoryMiB: 512, pids: 128 } }
   const restarted = new SandboxController(tightened, run)
   await assert.rejects(restarted.acquire(ID), /occupied by another identity/)
-  assert.equal(restarted.dispose(ID).status, 'disposed')
+  assert.equal((await restarted.dispose(ID)).status, 'disposed')
   await restarted.acquire(ID)
   const second = calls.filter(args => args[0] === 'create').at(-1)!
   assert.equal(second[second.indexOf('--cpus') + 1], '1')
@@ -185,8 +200,8 @@ test('Compose controller mounts only the vetted Story subpath of its named rootl
   config.sandboxCacheVolume = 'noveltea-cache'
   const { calls, run } = docker()
   const expected = story.slice(config.cacheVolume.length + 1).split('/').join('/')
-  assert.equal(resolveTrustedJob(config, ID, IMAGE).storyRoot, story)
-  assert.equal(resolveTrustedJob(config, ID, IMAGE).volumeSubpath, expected)
+  assert.equal((await resolveTrustedJob(config, ID, IMAGE)).storyRoot, story)
+  assert.equal((await resolveTrustedJob(config, ID, IMAGE)).volumeSubpath, expected)
   await new SandboxController(config, run).acquire(ID)
   const create = calls.find(call => call[0] === 'create')!
   assert.ok(create.includes(`type=volume,source=noveltea-cache,target=/story,volume-subpath=${expected}`))
@@ -215,7 +230,7 @@ test('arbitrary UUID, mutated manifest and protected symlinks fail closed before
   const { config, story, manifest, manifestPath } = fixture()
   const { run, calls } = docker()
   const controller = new SandboxController(config, run)
-  assert.throws(() => resolveTrustedJob(config, 'ffffffff-ffff-4fff-8fff-ffffffffffff', IMAGE),
+  await assert.rejects(resolveTrustedJob(config, 'ffffffff-ffff-4fff-8fff-ffffffffffff', IMAGE),
     (e: unknown) => e instanceof SandboxError && e.status === 404)
   writeFileSync(manifestPath, JSON.stringify({ ...manifest, worktreeStoryRoot: '/etc' }))
   await assert.rejects(controller.acquire(ID), /trusted identity/)
@@ -271,12 +286,12 @@ test('old per-record container layouts are rejected, disposable, and never reuse
   await controller.acquire(ID)
   legacy = true
   await assert.rejects(controller.acquire(ID), /occupied by another identity/)
-  assert.throws(() => controller.inspect(ID), /occupied by another identity/)
-  assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+  await assert.rejects(controller.inspect(ID), /occupied by another identity/)
+  assert.deepEqual((await controller.dispose(ID)), { jobId: ID, status: 'disposed' })
   legacy = false
   assert.equal((await controller.acquire(ID)).status, 'running')
   assert.equal(calls.filter(args => args[0] === 'create').length, 2)
-  controller.dispose(ID)
+  await controller.dispose(ID)
 })
 
 test('a Git pointer to another job branch cannot authorize a mount', async () => {
@@ -315,8 +330,26 @@ test('operator-only rootless controller settings validate resource maximums befo
         args[2] === 'state-operator-test' ? config.stateVolume : config.cacheVolume }
     return { status: 1, stdout: '', stderr: 'Unexpected Docker call' }
   }
-  assert.deepEqual(loadControllerConfig(env, run).maximums,
-    { cpu: 1.25, memoryMiB: 640, pids: 96 })
+  const normal = loadControllerConfig(env, run)
+  assert.deepEqual(normal.maximums, { cpu: 1.25, memoryMiB: 640, pids: 96 })
+  assert.equal(normal.catalog, undefined, 'SQLite retains its own read-only volume catalog')
+  const postgres = {
+    ...env, NT_STUDIO_DB_BACKEND: 'postgres', PGHOST: 'postgres', PGPORT: '5432',
+    PGDATABASE: 'noveltea', PGUSER: 'noveltea_controller', PGPASSWORD: 'reader-secret',
+  }
+  assert.deepEqual(loadControllerConfig(postgres, run).catalog, {
+    backend: 'postgres', connection: {
+      host: 'postgres', port: 5432, database: 'noveltea',
+      user: 'noveltea_controller', password: 'reader-secret',
+    },
+  })
+  for (const override of [
+    { PGUSER: 'noveltea_app' }, { PGPASSWORD: '' }, { PGHOST: '' },
+    { PGPORT: '0' }, { PGPORT: 'malicious' },
+  ]) {
+    assert.throws(() => loadControllerConfig({ ...postgres, ...override }, run),
+      /restricted PostgreSQL catalog role|Invalid PostgreSQL trusted catalog port/)
+  }
   for (const setting of [
     { NT_SANDBOX_MAX_CPUS: '0' }, { NT_SANDBOX_MAX_CPUS: '64.01' },
     { NT_SANDBOX_MAX_MEMORY_MIB: '1.5' }, { NT_SANDBOX_MAX_PIDS: '0' },
@@ -380,6 +413,15 @@ class FakeDockerExec extends EventEmitter {
   kill() { return true }
 }
 
+/** Authorization now awaits the separate catalog before spawning Docker. */
+async function waitForDockerExec(child: FakeDockerExec) {
+  for (let i = 0; i < 200; i++) {
+    if (child.stdout.listenerCount('data') && child.stderr.listenerCount('data')) return
+    await new Promise<void>(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('Fake Docker exec never attached its output listeners')
+}
+
 test('exec terminates all container descendants before reporting a writer boundary; streams UTF-8 safely', async () => {
   const { config } = fixture()
   const { calls, run } = docker()
@@ -391,9 +433,10 @@ test('exec terminates all container descendants before reporting a writer bounda
   const err: string[] = []
   const execution = controller.execute(ID, ['sh', '-c', '(sleep 60; echo late >> /story/events/x.md) &'],
     (stream, data) => (stream === 'stdout' ? out : err).push(data))
+  await waitForDockerExec(child)
 
   await assert.rejects(controller.execute(ID, ['true'], () => {}), /active operation/)
-  assert.throws(() => controller.dispose(ID), /executing or being acquired/)
+  await assert.rejects(controller.dispose(ID), /executing or being acquired/)
   const accent = Buffer.from('café')
   const emoji = Buffer.from('🍵')
   child.stdout.write(accent.subarray(0, 4))
@@ -412,7 +455,7 @@ test('exec terminates all container descendants before reporting a writer bounda
   assert.ok(stop > 0)
   assert.deepEqual(calls[stop]!.slice(0, 4), ['stop', '--time', '0', 'noveltea-job-' + ID])
   assert.ok(calls.slice(stop + 1).some(args => args[0] === 'start'))
-  assert.deepEqual(controller.inspect(ID), { jobId: ID, status: 'running' })
+  assert.deepEqual(await controller.inspect(ID), { jobId: ID, status: 'running' })
 })
 
 test('sandbox output overflow destroys the container and fails closed before reacquisition', async () => {
@@ -422,12 +465,13 @@ test('sandbox output overflow destroys the container and fails closed before rea
   const controller = new SandboxController(config, run, (() => child) as unknown as typeof spawn)
   await controller.acquire(ID)
   const execution = controller.execute(ID, ['sh', '-c', 'yes'], () => {})
+  await waitForDockerExec(child)
   child.stdout.write(Buffer.alloc(65 * 1024, 'x'))
   await assert.rejects(execution, /output limit/)
   assert.ok(calls.some(args => args[0] === 'rm' && args[2] === 'noveltea-job-' + ID))
-  assert.throws(() => controller.inspect(ID), /has not been acquired/)
+  await assert.rejects(controller.inspect(ID), /has not been acquired/)
   assert.equal((await controller.acquire(ID)).status, 'running')
-  controller.dispose(ID)
+  await controller.dispose(ID)
 })
 
 test('failed Docker stop cannot turn a foreground exit into a successful execution boundary', async () => {
@@ -440,12 +484,13 @@ test('failed Docker stop cannot turn a foreground exit into a successful executi
     (() => child) as unknown as typeof spawn)
   await controller.acquire(ID)
   const execution = controller.execute(ID, ['sh', '-c', 'true'], () => {})
+  await waitForDockerExec(child)
   child.stdout.end()
   child.stderr.end()
   child.emit('close', 0)
   await assert.rejects(execution, /stopped writer boundary/)
   assert.ok(calls.some(args => args[0] === 'rm' && args[2] === 'noveltea-job-' + ID))
-  assert.throws(() => controller.inspect(ID), /has not been acquired/)
+  await assert.rejects(controller.inspect(ID), /has not been acquired/)
 })
 
 test('dispose checks the job identity, not the current image tag, after rebuild/removal', async () => {
@@ -454,11 +499,11 @@ test('dispose checks the job identity, not the current image tag, after rebuild/
   const controller = new SandboxController(config, run)
   await controller.acquire(ID)
   setImage('sha256:' + 'b'.repeat(64))
-  assert.throws(() => controller.inspect(ID), /occupied by another identity/)
-  assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+  await assert.rejects(controller.inspect(ID), /occupied by another identity/)
+  assert.deepEqual((await controller.dispose(ID)), { jobId: ID, status: 'disposed' })
   await controller.acquire(ID)
   setImage(null)
-  assert.deepEqual(controller.dispose(ID), { jobId: ID, status: 'disposed' })
+  assert.deepEqual((await controller.dispose(ID)), { jobId: ID, status: 'disposed' })
   assert.equal(calls.filter(args => args[0] === 'rm').length, 2)
 })
 
@@ -584,20 +629,20 @@ test('real rootless Docker stops delayed background writers before returning suc
     assert.equal(status, 0)
     await new Promise<void>(resolve => setTimeout(resolve, 2400))
     assert.equal(readFileSync(join(story, 'events', 'late.md'), 'utf8'), '')
-    assert.equal(controller.inspect(ID).status, 'running')
+    assert.equal((await controller.inspect(ID)).status, 'running')
     execFileSync('docker', ['kill', name])
-    assert.equal(controller.inspect(ID).status, 'stopped')
+    assert.equal((await controller.inspect(ID)).status, 'stopped')
     assert.equal((await controller.acquire(ID)).status, 'running', 'Restart stopped sandbox')
     assert.equal(await controller.execute(ID, ['true'], () => {}), 0)
     execFileSync('docker', ['rm', '-f', name])
-    assert.throws(() => controller.inspect(ID), /has not been acquired/)
+    await assert.rejects(controller.inspect(ID), /has not been acquired/)
     await assert.rejects(controller.execute(ID, ['true'], () => {}), /has not been acquired/)
     assert.equal((await controller.acquire(ID)).status, 'running', 'Recreate lost sandbox')
     assert.equal(await controller.execute(ID, ['sh', '-c', 'test -f /story/events/allowed.md'], () => {}), 0)
-    assert.equal(controller.dispose(ID).status, 'disposed')
-    assert.equal(controller.dispose(ID).status, 'absent')
+    assert.equal((await controller.dispose(ID)).status, 'disposed')
+    assert.equal((await controller.dispose(ID)).status, 'absent')
     assert.equal((await controller.acquire(ID)).status, 'running', 'Reacquire disposed sandbox')
-  } finally { controller.dispose(ID) }
+  } finally { (await controller.dispose(ID)) }
 })
 
 test('controller HTTP rejects missing bearer, only accepts registered opaque job ids', async () => {

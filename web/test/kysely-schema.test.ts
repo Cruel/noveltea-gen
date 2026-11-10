@@ -517,12 +517,12 @@ async function certify(options: StudioSchemaOptions) {
       'owned Story and Thread cascades are preserved',
     )
     await migrateStudioKysely(connection, config, 'down')
-    assert.equal(
-      await inspectStudioMigrationHistory(connection),
-      1,
-      'first rollback reverses only the Git binding migration',
-    )
+    assert.equal(await inspectStudioMigrationHistory(connection), 2,
+      'first rollback removes only the trusted-catalog view')
     await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /migrations are pending/)
+    await migrateStudioKysely(connection, config, 'down')
+    assert.equal(await inspectStudioMigrationHistory(connection), 1,
+      'second rollback reverses only the Git binding migration')
     await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 0)
     assert.ok(!(await selectedTables(connection)).some((row) => row.name === 'repositories'))

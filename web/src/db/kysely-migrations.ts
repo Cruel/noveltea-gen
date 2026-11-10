@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CamelCasePlugin, Kysely, SqliteDialect, sql } from 'kysely'
 import { StudioPostgresDialect } from './studio-postgres-dialect'
+import { trustedCatalogViewName } from './trusted-catalog-definition'
 import { FileMigrationProvider, Migrator, NO_MIGRATIONS, type Migration } from 'kysely/migration'
 import { Pool, type PoolConfig } from 'pg'
 import { betterAuth } from 'better-auth'
@@ -177,6 +178,12 @@ function migrationChecksum(name: string, folder: string): string {
     hash.update(readFileSync(new URL('./kysely-baseline.ts', import.meta.url)))
   } else {
     hash.update(readFileSync(join(folder, name + '.ts')))
+    // This migration creates a view from the canonical typed projection.
+    // Its imported source is part of the applied schema contract, just as
+    // the baseline interpreter is part of baseline migration provenance.
+    if (name === '0002_trusted_catalog') {
+      hash.update(readFileSync(new URL('./trusted-catalog-definition.ts', import.meta.url)))
+    }
   }
   return hash.digest('hex')
 }
@@ -690,6 +697,17 @@ export async function assertKyselyStudioSchemaCurrent(connection: Connection): P
   assertAuthAndAppTables(tables)
   if (connection.backend === 'sqlite') await assertSqliteSchema(connection)
   else await assertPostgresSchema(connection)
+  // Custom migration certification fixtures deliberately exclude the hosted
+  // catalog migration. Enforce this view only where it is an authored part of
+  // the checked schema history, never add DDL during runtime readiness.
+  if (!migrationNames.includes('0002_trusted_catalog')) return
+  const view = await trustedCatalogViewName(connection.db, connection.backend)
+  try {
+    await sql.raw(`SELECT job_id, owner_id, provider, provider_id, directory, pin, config_json FROM ${view} LIMIT 0`)
+      .execute(connection.db)
+  } catch {
+    throw new StudioSchemaError('Studio trusted catalog view is missing or inaccessible; explicit migration required')
+  }
 }
 
 /** Explicit migration entrypoint. Better Auth owns its own tables and always

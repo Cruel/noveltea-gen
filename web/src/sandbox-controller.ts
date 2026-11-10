@@ -12,7 +12,7 @@ import { existsSync, lstatSync, realpathSync, readdirSync, readFileSync, chmodSy
 import { mkdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { readTrustedControllerJob, type TrustedControllerJobRow } from './db/trusted-catalog'
+import { readTrustedControllerJob, type TrustedCatalogOptions, type TrustedControllerJobRow } from './db/trusted-catalog'
 import { parseJobLimits } from '../../src/job-limits'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -39,6 +39,8 @@ export interface ControllerConfig {
   containerCache: string
   /** Trusted environment only; HTTP and agent commands never set these. */
   maximums?: { cpu: number; memoryMiB: number; pids: number }
+  /** A separate read-only Kysely catalog, never the Studio application store. */
+  catalog?: TrustedCatalogOptions
 }
 
 export type CommandResult = { stdout: string; stderr: string; status: number }
@@ -148,11 +150,11 @@ type Manifest = {
  * Only the read-only trusted catalog + the independently checked job manifest
  * can authorize a mount. A UUID by itself does not authorize any host path.
  */
-export function resolveTrustedJob(config: ControllerConfig, jobId: string, imageId: string): TrustedJob {
+export async function resolveTrustedJob(config: ControllerConfig, jobId: string, imageId: string): Promise<TrustedJob> {
   if (!UUID.test(jobId)) throw new SandboxError(400, 'Invalid job identity.')
   const dbPath = join(config.appVolume, 'studio.sqlite')
   let row: JobRow | null
-  try { row = readTrustedControllerJob(dbPath, jobId) }
+  try { row = await readTrustedControllerJob(config.catalog ?? { backend: 'sqlite', path: dbPath }, jobId) }
   catch { throw new SandboxError(503, 'Studio catalog is unavailable or its schema is incomplete.') }
   if (!row) throw new SandboxError(404, 'Registered job was not found.')
   if (!SHA.test(row.pin) || !canonicalStoryPath(row.directory)) {
@@ -282,8 +284,25 @@ export function loadControllerConfig(env: NodeJS.ProcessEnv = process.env, run: 
       throw new Error('Invalid operator sandbox maximum: ' + key)
     return value
   }
+  const backend = env.NT_STUDIO_DB_BACKEND ?? 'sqlite'
+  if (backend !== 'sqlite' && backend !== 'postgres')
+    throw new Error('Unsupported NT_STUDIO_DB_BACKEND for sandbox controller')
+  let catalog: TrustedCatalogOptions | undefined
+  if (backend === 'postgres') {
+    const port = Number(env.PGPORT ?? '5432')
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535)
+      throw new Error('Invalid PostgreSQL trusted catalog port')
+    catalog = { backend: 'postgres', connection: {
+      host: env.PGHOST ?? '', port, database: env.PGDATABASE ?? '',
+      user: env.PGUSER ?? '', password: env.PGPASSWORD ?? '',
+    } }
+    if (catalog.connection.user !== 'noveltea_controller' || !catalog.connection.host ||
+        !catalog.connection.database || !catalog.connection.password)
+      throw new Error('Controller requires the restricted PostgreSQL catalog role and credentials')
+  }
   return {
     socket, token,
+    ...(catalog ? { catalog } : {}),
     appVolume: inCompose ? '/var/lib/noveltea/app' : hostApp,
     stateVolume: inCompose ? '/var/lib/noveltea/state' : hostState,
     cacheVolume: inCompose ? '/var/lib/noveltea/cache' : hostCache,
@@ -322,7 +341,7 @@ export class SandboxController {
     return id
   }
 
-  private trusted(id: string, requireCurrentImage = true) {
+  private async trusted(id: string, requireCurrentImage = true) {
     // Disposal must work even when an image tag has moved or been deleted.
     // Worktree, catalog, and registered Git identity remain mandatory.
     return resolveTrustedJob(this.config, id, requireCurrentImage ? this.imageId() : '')
@@ -343,10 +362,12 @@ export class SandboxController {
   }
 
   async acquire(id: string) {
-    const job = this.trusted(id)
     if (this.locked.has(id)) throw new SandboxError(409, 'Sandbox acquisition is already in progress.')
+    // Lock before the asynchronous authorization query. Otherwise concurrent
+    // acquire/execute/dispose could race while the catalog is being read.
     this.locked.add(id)
     try {
+      const job = await this.trusted(id)
       const exists = this.verifyRunning(job)
       // The selected canonical Story content directory is the sole bind mount.
       // Author-only inbox and Git metadata must live outside this directory.
@@ -380,20 +401,23 @@ export class SandboxController {
     } finally { this.locked.delete(id) }
   }
 
-  inspect(id: string) {
-    const job = this.trusted(id)
+  async inspect(id: string) {
+    const job = await this.trusted(id)
     if (!this.verifyRunning(job)) throw new SandboxError(404, 'Job sandbox has not been acquired.')
     const running = dockerRequired(this.run, ['inspect', containerName(id), '--format', '{{.State.Running}}'])
     return { jobId: id, status: running === 'true' ? 'running' : 'stopped' }
   }
 
-  dispose(id: string) {
+  async dispose(id: string) {
     if (this.locked.has(id)) throw new SandboxError(409, 'Job sandbox is executing or being acquired.')
-    const job = this.trusted(id, false)
-    // A retired per-directory sandbox can be removed but never reused.
-    if (!this.verifyRunning(job, false, false)) return { jobId: id, status: 'absent' }
-    dockerRequired(this.run, ['rm', '-f', containerName(id)])
-    return { jobId: id, status: 'disposed' }
+    this.locked.add(id)
+    try {
+      const job = await this.trusted(id, false)
+      // A retired per-directory sandbox can be removed but never reused.
+      if (!this.verifyRunning(job, false, false)) return { jobId: id, status: 'absent' }
+      dockerRequired(this.run, ['rm', '-f', containerName(id)])
+      return { jobId: id, status: 'disposed' }
+    } finally { this.locked.delete(id) }
   }
 
   /**
@@ -406,7 +430,7 @@ export class SandboxController {
     if (this.locked.has(id)) throw new SandboxError(409, 'Job sandbox already has an active operation.')
     this.locked.add(id)
     try {
-      const job = this.trusted(id)
+      const job = await this.trusted(id)
       if (!this.verifyRunning(job)) throw new SandboxError(404, 'Job sandbox has not been acquired.')
       if (!Array.isArray(argv) || argv.length === 0 || argv.length > 64 ||
           argv.some(a => typeof a !== 'string' || a.length > 4096 || a.includes('\0'))) {
@@ -525,8 +549,8 @@ export function createControllerServer(controller: SandboxController) {
       const match = /^\/v1\/sandboxes\/([a-f0-9-]+)(?:\/(exec))?$/i.exec(url.pathname)
       if (!match || !UUID.test(match[1]!)) return send(res, 404, { error: 'Not found' })
       const id = match[1]!
-      if (req.method === 'GET' && !match[2]) return send(res, 200, controller.inspect(id))
-      if (req.method === 'DELETE' && !match[2]) return send(res, 200, controller.dispose(id))
+      if (req.method === 'GET' && !match[2]) return send(res, 200, await controller.inspect(id))
+      if (req.method === 'DELETE' && !match[2]) return send(res, 200, await controller.dispose(id))
       if (req.method === 'POST' && match[2] === 'exec') {
         const payload = await body(req) as { argv?: unknown } | null
         if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
@@ -537,7 +561,7 @@ export function createControllerServer(controller: SandboxController) {
             payload.argv.some(v => typeof v !== 'string' || v.length > 4096 || v.includes('\0'))) {
           throw new SandboxError(400, 'Invalid sandbox command argv.')
         }
-        if (controller.inspect(id).status !== 'running') throw new SandboxError(409, 'Sandbox is not running.')
+        if ((await controller.inspect(id)).status !== 'running') throw new SandboxError(409, 'Sandbox is not running.')
         res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' })
         try {
           const code = await controller.execute(id, payload.argv as string[], (stream, data) =>

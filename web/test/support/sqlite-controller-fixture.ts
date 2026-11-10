@@ -19,3 +19,27 @@ export function createControllerFixtureDatabase(appVolume: string, jobId: string
     db.close()
   }
 }
+
+/** Mutate only the deliberately isolated controller fixture. Feature tests
+ * must exercise the catalog port, not open a second raw SQLite client. */
+function changeControllerFixture(appVolume: string, statement: string, ownerId?: string) {
+  const db = new Database(join(appVolume, 'studio.sqlite'))
+  try { db.prepare(statement).run(...(ownerId === undefined ? [] : [ownerId])) }
+  finally { db.close() }
+}
+export function createEmptyControllerFixtureDatabase(appVolume: string) {
+  const db = new Database(join(appVolume, 'studio.sqlite'))
+  db.close()
+}
+export function changeControllerFixtureStoryOwner(appVolume: string, ownerId: string) {
+  changeControllerFixture(appVolume, 'UPDATE stories SET owner_user_id=?', ownerId)
+}
+export function changeControllerFixtureRepositoryOwner(appVolume: string, ownerId: string) {
+  changeControllerFixture(appVolume, 'UPDATE repositories SET owner_user_id=?', ownerId)
+}
+export function unpinControllerFixtureJob(appVolume: string) {
+  changeControllerFixture(appVolume, 'UPDATE studio_sessions SET source_commit_sha=NULL')
+}
+export function deleteControllerFixtureJob(appVolume: string) {
+  changeControllerFixture(appVolume, 'DELETE FROM studio_sessions')
+}

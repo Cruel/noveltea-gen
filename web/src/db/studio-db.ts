@@ -362,6 +362,16 @@ export interface ThreadSteeringIntents {
   workItem: string | null
 }
 
+export interface TrustedJobs {
+  configJson: string | null
+  directory: string | null
+  jobId: string | null
+  ownerId: string | null
+  pin: string | null
+  provider: string | null
+  providerId: string | null
+}
+
 export interface UserPreferences {
   defaultModelJson: string | null
   ownerUserId: string
@@ -406,6 +416,7 @@ export interface StudioDb {
   threadRestarts: ThreadRestarts
   threadSteeringCheckpointLinks: ThreadSteeringCheckpointLinks
   threadSteeringIntents: ThreadSteeringIntents
+  trustedJobs: TrustedJobs
   userPreferences: UserPreferences
   userStorySelection: UserStorySelection
 }
