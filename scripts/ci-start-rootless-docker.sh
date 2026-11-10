@@ -10,16 +10,20 @@ fi
 if ! command -v dockerd-rootless.sh >/dev/null 2>&1 &&
    [[ ! -x /usr/bin/dockerd-rootless.sh ]] &&
    [[ ! -x /usr/share/docker.io/contrib/dockerd-rootless.sh ]]; then
+  # GitHub's runner ships containerd.io and a rootful Docker engine.
+  # Ubuntu's docker.io conflicts with that package, so add Docker's official
+  # apt repository for the standalone rootless extras instead of replacing
+  # the preinstalled Docker engine and CLI.
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  sudo chmod a+r /etc/apt/keyrings/docker.asc
+  . /etc/os-release
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
+    "$(dpkg --print-architecture)" "$VERSION_CODENAME" |
+    sudo tee /etc/apt/sources.list.d/docker-rootless-ci.list >/dev/null
   sudo apt-get update -qq
-  # apt-cache show can succeed with metadata but NO installable candidate
-  # on GitHub's Ubuntu runner (Docker CE extras not in its active apt repos).
-  if apt-cache policy docker-ce-rootless-extras | grep -Eq '^  Candidate: [0-9]'; then
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      docker-ce-rootless-extras uidmap slirp4netns fuse-overlayfs
-  else
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      docker.io rootlesskit uidmap slirp4netns fuse-overlayfs
-  fi
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    docker-ce-rootless-extras uidmap slirp4netns fuse-overlayfs
 fi
 if command -v dockerd-rootless.sh >/dev/null 2>&1; then
   runner=$(command -v dockerd-rootless.sh)
