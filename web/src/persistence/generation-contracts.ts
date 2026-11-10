@@ -1,6 +1,6 @@
-/** Durable generation persistence. All application consumers use asynchronous,
- * owner-scoped ports. The SQLite adapter alone chooses its transaction model.
- * A PostgreSQL implementation must serialize capacity and claim with row locks.
+/** Durable generation persistence. Consumers use the same async, owner-scoped
+ * contracts on SQLite and PostgreSQL. Shared Kysely writer transactions serialize
+ * capacity and FIFO claims using their audited per-engine locking primitives.
  */
 export type QueueIntent = 'start' | 'resume'
 export type QueuePhase = 'queued' | 'running' | 'finished' | 'interrupted'
@@ -27,7 +27,7 @@ export type ProgressRow = {
   status: string | null; createdAt: string
 }
 export interface GenerationQueueStore {
-  /** Single SQLite BEGIN IMMEDIATE operation; limit and oldest claim share one lock. */
+  /** Capacity count and FIFO claim share the same serialized write transaction. */
   claim(workerId: string, limit: number, now: string): Promise<QueueRecord | null>
   record(jobId: string): Promise<QueueRecord | null>
   enqueue(owner: string, jobId: string, intent: QueueIntent, expected: 'prepared' | 'paused',

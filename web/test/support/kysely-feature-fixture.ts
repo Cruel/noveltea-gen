@@ -15,6 +15,7 @@ import {
 import { studioAuthOptionsForDatabase } from '../../src/lib/auth'
 import { createKyselyCollectionCatalog } from '../../src/persistence/collection-kysely'
 import { createKyselyPublicationRecords } from '../../src/persistence/publication-kysely'
+import { createKyselyGenerationPersistence } from '../../src/persistence/generation-kysely'
 import { createKyselyApprovalRevisionPersistence } from '../../src/persistence/approval-revision-kysely'
 import { createKyselyGitPersistence } from '../../src/persistence/git-kysely'
 import { createKyselyConversationCatalog } from '../../src/persistence/conversation-kysely'
@@ -24,6 +25,7 @@ import { createKyselyAdvancedThreads } from '../../src/persistence/advanced-thre
 import { createKyselySteeringPersistence } from '../../src/persistence/steering-kysely'
 import { createKyselyContinuationPersistence } from '../../src/persistence/continuation-kysely'
 import type { ContinuationPersistence } from '../../src/persistence/continuation-contracts'
+import type { GenerationPersistence } from '../../src/persistence/generation-contracts'
 import type { SteeringPersistence } from '../../src/persistence/steering-contracts'
 import type { AdvancedThreadPersistence } from '../../src/persistence/advanced-thread-contracts'
 import type { ThreadMessagePersistence } from '../../src/persistence/thread-message-contracts'
@@ -67,6 +69,7 @@ export interface KyselyFeatureFixture {
   advancedThreads: AdvancedThreadPersistence
   steering: SteeringPersistence
   continuation: ContinuationPersistence
+  generation: GenerationPersistence
   dashboard: DashboardCatalog
   settings: SettingsPreferences
   account(owner: string, provider: GitProvider): Promise<void>
@@ -76,6 +79,7 @@ export interface KyselyFeatureFixture {
   openIndependentAdvancedThreads(): Promise<{ advancedThreads: AdvancedThreadPersistence; close(): Promise<void> }>
   openIndependentSteering(): Promise<{ steering: SteeringPersistence; close(): Promise<void> }>
   openIndependentContinuation(): Promise<{ continuation: ContinuationPersistence; close(): Promise<void> }>
+  openIndependentGeneration(): Promise<{ generation: GenerationPersistence; close(): Promise<void> }>
   openIndependentApprovals(): Promise<{
     protectedDecisions: ProtectedDecisionRecords; revisions: RevisionRecords; close(): Promise<void>
   }>
@@ -173,6 +177,7 @@ export async function openKyselyFeatureFixture(
       advancedThreads: createKyselyAdvancedThreads(database),
       steering: createKyselySteeringPersistence(database),
       continuation: createKyselyContinuationPersistence(database),
+      generation: createKyselyGenerationPersistence(database),
       ...createKyselyCatalogPersistence(database),
       publications: createKyselyPublicationRecords(database),
       ...createKyselyApprovalRevisionPersistence(database),
@@ -205,6 +210,10 @@ export async function openKyselyFeatureFixture(
       async openIndependentContinuation() {
         const other = openKyselyDatabase<StudioDb>(options)
         return { continuation: createKyselyContinuationPersistence(other), close: () => other.close() }
+      },
+      async openIndependentGeneration() {
+        const other = openKyselyDatabase<StudioDb>(options)
+        return { generation: createKyselyGenerationPersistence(other), close: () => other.close() }
       },
       async openIndependentApprovals() {
         const other = openKyselyDatabase<StudioDb>(options)

@@ -9,6 +9,7 @@ import {
   boundarySteeringReviewsKysely, deferUndeliveredSteeringKysely,
 } from './steering-boundary-kysely'
 import { consumeProtectedDecisionKysely } from './approval-revision-kysely'
+import { enqueueGenerationKysely } from './generation-kysely'
 import type {
   ContinuationAdmission, ContinuationPersistence, ContinuationRequest,
   ContinuationRun, QueuedContinuation,
@@ -147,17 +148,10 @@ async function enqueuePrepared(tx: Write, data: ContinuationRequest): Promise<vo
   const existing = await tx.selectFrom('generationRunQueue').select('jobId')
     .where('jobId', '=', data.claim.id).executeTakeFirst()
   if (existing) throw new Error('This continuation is already queued or executing.')
-  const updated = await tx.updateTable('studioSessions').set({
-    generationRequestJson: data.requestJson, generationThreadId: data.generationThread,
-    updatedAt: data.at,
-  }).where('id', '=', data.claim.id).where('ownerUserId', '=', data.owner)
-    .where('status', '=', 'paused').where('generationRequestJson', 'is', null)
-    .where('generationThreadId', 'is', null).executeTakeFirst()
-  if (count(updated) !== 1) throw new Error('Job state changed before scheduling.')
-  await tx.insertInto('generationRunQueue').values({
-    jobId: data.claim.id, ownerUserId: data.owner, intent: 'start', phase: 'queued',
-    createdAt: data.at, updatedAt: data.at,
-  }).execute()
+  await enqueueGenerationKysely(
+    tx, data.owner, data.claim.id, 'start', 'prepared',
+    data.at, data.requestJson, data.generationThread,
+  )
 }
 
 /** Single domain implementation for both database engines. External Git,
@@ -236,7 +230,6 @@ export function createKyselyContinuationPersistence(
       await db.withWriteTransaction([thread(data.threadId), job(data.claim.source), job(data.claim.id)], async tx => {
         await verifyClaim(tx, data, 'Thread admission changed during worktree preparation.')
         await registerChild(tx, data, 'paused', ' (follow-up)')
-        await enqueuePrepared(tx, data)
         await finishReview(tx, data)
         const updated = await tx.updateTable('storyThreadMessages')
           .set({ phase: 'running', jobId: data.claim.id })
@@ -244,7 +237,9 @@ export function createKyselyContinuationPersistence(
           .where('threadId', '=', data.threadId).where('phase', '=', 'preparing')
           .executeTakeFirst()
         if (count(updated) !== 1) throw new Error('Continuation admission changed; inspect the saved Thread.')
-        await seedThreadMessagesKysely(tx, data.owner, data.threadId)
+        // Queue admission seeds Thread messages, so link the author's Turn to
+        // the new execution first; otherwise it creates an extra initial Turn.
+        await enqueuePrepared(tx, data)
       })
     },
 

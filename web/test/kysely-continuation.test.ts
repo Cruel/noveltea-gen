@@ -122,6 +122,8 @@ for (const backend of ['sqlite', 'postgres'] as const) {
     await assert.rejects(f.continuation.beginFollowUp(data), /admission changed|already registered/)
     assert.equal(await f.records.count('studio_sessions', { id: first }), 1)
     assert.equal(await f.records.count('generation_run_queue', { jobId: first }), 1)
+    assert.equal(await f.records.count('story_thread_messages', { id: 'initial:' + first }), 0,
+      'the original admitted author Turn must not be duplicated during queue seeding')
     assert.equal((await f.records.first<{ phase: string }>('generation_run_queue', {
       jobId: first,
     }))?.phase, 'queued')
