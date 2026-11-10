@@ -160,10 +160,18 @@ export function openKyselyDatabase<DB = StudioDb>(options: DatabaseOptions): Sha
               db.transaction().execute(async (tx) => {
                 if (backend === 'postgres') {
                   await sql`set local lock_timeout = '5s'`.execute(tx)
+                  // PostgreSQL advisory locks do not isolate schemas. Partition
+                  // by the actual database and schema, not just a job/thread key:
+                  // otherwise independent Studio schemas contend in CI and
+                  // deployments with multiple isolated tenants.
+                  const scope = (await sql<{ namespace: string }>`
+                    select current_database() || ':' || current_schema() as namespace
+                  `.execute(tx)).rows[0]?.namespace
+                  if (!scope) throw new Error('PostgreSQL Studio write schema is not selected')
                   // Mandatory for EVERY writer, including empty guard lists and formerly autocommit DML.
                   // Queue capacity, absent identities and event publication are covered by this fallback.
                   for (const key of ['0:exclusive', ...keys]) {
-                    await sql`select pg_advisory_xact_lock(${lockId(key)}::bigint)`.execute(tx)
+                    await sql`select pg_advisory_xact_lock(${lockId(scope + ':' + key)}::bigint)`.execute(tx)
                   }
                 }
                 return await work(tx)

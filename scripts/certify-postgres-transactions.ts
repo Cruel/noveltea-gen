@@ -313,6 +313,7 @@ SELECT count(*) FROM audit_queue WHERE phase='running';`);
           "kysely-schema-hardening", "kysely-schema", "kysely-steering",
           "kysely-story-navigation", "kysely-thread-messages", "kysely-workflow",
           "shared-studio-store", "studio", "oauth", "thread-chat", "studio-readiness",
+          "studio-store-conformance",
         ].map(name => `test/${name}.test.ts`);
         const result = spawnSync("pnpm", [
           "--filter", "@noveltea/studio", "exec", "tsx", "--test",

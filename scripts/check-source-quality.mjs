@@ -28,6 +28,7 @@ const backendTestFiles = new Set([
   "web/test/support/kysely-proof-worker.ts",
   "web/test/support/kysely-proof.ts",
   "web/test/support/kysely-steering-worker.ts",
+  "web/test/support/studio-conformance-worker.ts",
 ]);
 
 export function featureTestImportViolations(path, source) {
