@@ -167,6 +167,34 @@ local developer PostgreSQL configuration.
   composition remains unchanged until #141; independent staged repositories
   never participate in a mixed live transaction.
 
+## S10 advanced Thread lifecycle implementation (#135, 2026-11-09)
+
+- `advanced-thread-kysely.ts` implements the existing
+  `AdvancedThreadPersistence` contract once for both SQLite and PostgreSQL:
+  owner-scoped identity/ancestry, exact fork and restart reservations, child
+  and in-place recovery registration, pinned Story source, historical message
+  boundaries, prepared restart receipts and imported author updates.
+- Source job/Thread association and pinned baseline are verified **inside the
+  reservation transaction**. Parent deletion, archived recovery, stale run
+  status/queue admission, pending requests and failed continuations with new
+  verified work are denied without partially creating child sessions.
+  Replay of an applied message cannot conceal a conflicting owner or payload.
+  Existing fork/restart receipt reads now require an authenticated owner in
+  the shared contract, both adapters and their server consumers, so a known
+  child ID cannot reveal another owner's checkpoint or restart details.
+- Every multi-table mutation uses the approved shared guarded transaction;
+  all nested reads and inserts receive its executor. Recovery reuses the
+  transaction-scoped reconciliation in `thread-message-kysely.ts` instead of
+  duplicating seeding or creating a nested root transaction. The original
+  SQLite live adapter remains active until #141.
+- `kysely-advanced-threads.test.ts` certifies the **same** behavior on
+  independently migrated SQLite and PostgreSQL: owner isolation, immutable
+  ancestry, restart/advance pinning, rollback, recovery, archive/deletion
+  fences and replay. Independent OS-process clients contend for the same
+  fork/restart reservation and child/recovery registration, including two
+  different recoveries racing to advance one blocked Thread. Required in
+  the Studio offline test gate; PostgreSQL proof is mandatory in CI.
+
 ## Schema parity and certification hardening (2026-11-09)
 
 - SQLite INTEGER accommodates 64-bit epoch milliseconds. PostgreSQL's

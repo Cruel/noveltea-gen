@@ -245,7 +245,7 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
   const input = requestBody(await readJsonInput(request, 2048))
   // Owner and Thread lookup precedes all resource acquisition. A repeated
   // child ID can only refer to this exact operation, never a foreign claim.
-  const existing = () => store.persistence.advancedThreads.restartIntent(input.childId)
+  const existing = () => store.persistence.advancedThreads.restartIntent(actor.id, input.childId)
   const saved = await existing()
   // A deletion reservation makes the old Thread noninteractive. The exact
   // already-prepared replacement may nevertheless finish its cleanup.
@@ -272,7 +272,7 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
   let intent = await existing()
   if (intent && !intentMatches(intent) ||
       !intent && await store.persistence.advancedThreads.jobClaimed(input.childId) ||
-      !intent && await store.persistence.advancedThreads.forkIntent(input.childId))
+      !intent && await store.persistence.advancedThreads.forkIntent(actor.id, input.childId))
     throw new ThreadRestartError(409, 'Child ID is already assigned to a different operation.')
   if (intent?.preparedAt) {
     const registered = await selectedJob(store, actor.id, input.childId)

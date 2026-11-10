@@ -71,7 +71,7 @@ async function checkpointRecoveryRequest(auth: StudioAuth, store: StudioDatabase
         return reply({ error: 'The Thread advanced after recovery was requested. Refresh the conversation.' }, 409)
     }
     const existing = await store.persistence.advancedThreads.jobClaimed(input.childId)
-    const readIntent = () => store.persistence.advancedThreads.forkIntent(input.childId as string)
+    const readIntent = () => store.persistence.advancedThreads.forkIntent(user.id, input.childId as string)
     let intent = await readIntent()
     const matches = (saved: Intent) => saved.owner === user.id && saved.source === sourceId &&
       saved.base === input.sourceBaseSha && saved.commitSha === input.commitSha &&

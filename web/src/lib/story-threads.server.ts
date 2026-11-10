@@ -68,8 +68,8 @@ async function ancestry(
       if (parent) {
         const first = await store.persistence.advancedThreads.run(owner, thread.id, 'first')
         if (first) {
-          const fork = await store.persistence.advancedThreads.forkIntent(first.jobId)
-          const restart = fork ? null : await store.persistence.advancedThreads.restartIntent(first.jobId)
+          const fork = await store.persistence.advancedThreads.forkIntent(owner, first.jobId)
+          const restart = fork ? null : await store.persistence.advancedThreads.restartIntent(owner, first.jobId)
           if (fork) {
             if (fork.owner !== owner || fork.sourceThreadId !== parent.id)
               throw new Error('Thread ancestry is invalid.')

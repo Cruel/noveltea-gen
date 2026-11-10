@@ -77,9 +77,9 @@ export interface AdvancedThreadPersistence {
   inspectJob(owner: string, jobId: string): Promise<JobInspection>
   forkDraft(owner: string, childId: string): Promise<{ bundle: string; original: string } | null>
   jobClaimed(childId: string): Promise<boolean>
-  forkIntent(childId: string): Promise<ForkIntent | null>
+  forkIntent(owner: string, childId: string): Promise<ForkIntent | null>
   reserveFork(data: ForkReservation): Promise<ForkIntent>
-  restartIntent(childId: string): Promise<RestartIntent | null>
+  restartIntent(owner: string, childId: string): Promise<RestartIntent | null>
   reserveRestart(data: RestartReservation): Promise<RestartIntent>
   preparedRestart(owner: string, childId: string, threadId: string): Promise<boolean>
   registerChild(data: NewThreadChild): Promise<ChildRegistration>

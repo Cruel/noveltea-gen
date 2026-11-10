@@ -152,7 +152,11 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
         .where(and(eq(forks.childId, childId), eq(forks.ownerUserId, owner))).get() ?? null
     },
     async jobClaimed(id) { return jobClaimed(id) },
-    async forkIntent(id) { return forkIntent(id) },
+    async forkIntent(owner, id) {
+      requireOwner(owner)
+      const receipt = forkIntent(id)
+      return receipt?.owner === owner ? receipt : null
+    },
     async reserveFork(data: ForkReservation) {
       requireOwner(data.owner)
       return db.transaction(() => {
@@ -187,7 +191,11 @@ export function createSqliteAdvancedThreads(db: Db): AdvancedThreadPersistence {
         return receipt!
       }, { behavior: 'immediate' })
     },
-    async restartIntent(id) { return restartIntent(id) },
+    async restartIntent(owner, id) {
+      requireOwner(owner)
+      const receipt = restartIntent(id)
+      return receipt?.owner === owner ? receipt : null
+    },
     async reserveRestart(data: RestartReservation) {
       requireOwner(data.owner)
       return db.transaction(() => {

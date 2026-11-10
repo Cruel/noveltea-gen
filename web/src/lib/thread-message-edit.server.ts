@@ -203,7 +203,7 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
   const sourceStoryId = sourceThread?.story
   if (!sourceThread || sourceStoryId !== row.storyId)
     throw new ThreadEditError(409, 'Edit source does not belong to this Story.')
-  const readIntent = () => store.persistence.advancedThreads.forkIntent(data.childId)
+  const readIntent = () => store.persistence.advancedThreads.forkIntent(owner, data.childId)
   let intent = await readIntent()
   const matchesMode = (saved: Intent) => {
     try {

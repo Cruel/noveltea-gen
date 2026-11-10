@@ -197,10 +197,11 @@ async function recoveryJobs(db: Executor, owner: string, threadId: string): Prom
     .execute()).map(row => row.childId))
 }
 
-/** Seed historical root requests and terminal summaries under the same
- * transaction as chat reading, so another writer cannot allocate a duplicate
- * sequence or claim an uncommitted synthetic message. */
-async function reconcile(tx: Write, owner: string, threadId: string): Promise<Set<string>> {
+/** Shared transaction-scoped reconciliation for chat reads and recovery
+ * registration. Historical requests and terminal summaries are inserted under
+ * the caller's write guard, never through a separate root transaction. */
+export async function seedThreadMessagesKysely(tx: Write, owner: string, threadId: string,
+  includeSummaries = true): Promise<Set<string>> {
   const recoveries = await recoveryJobs(tx, owner, threadId)
   const runs = await tx.selectFrom('storyThreadRuns')
     .innerJoin('studioSessions', join => join
@@ -246,7 +247,7 @@ async function reconcile(tx: Write, owner: string, threadId: string): Promise<Se
     const unsettled = await tx.selectFrom('storyThreadMessages').select('id')
       .where('ownerUserId', '=', owner).where('jobId', '=', run.jobId)
       .where('role', '=', 'user').where('phase', '=', 'running').executeTakeFirst()
-    if (!unsettled && run.queuePhase === 'finished' &&
+    if (includeSummaries && !unsettled && run.queuePhase === 'finished' &&
       ['completed', 'paused', 'blocked', 'cancelled'].includes(run.status))
       await insertAssistant(tx, owner, threadId, run.jobId)
   }
@@ -286,7 +287,7 @@ export function createKyselyThreadMessages(db: SharedDatabase<StudioDb>): Thread
       required(owner)
       return db.withWriteTransaction([{ kind: 'thread', id: threadId }], async tx => {
         await membership(tx, owner, threadId)
-        const recoveries = await reconcile(tx, owner, threadId)
+        const recoveries = await seedThreadMessagesKysely(tx, owner, threadId)
         const messageRows = await messagesQuery(tx)
           .where('storyThreadMessages.ownerUserId', '=', owner)
           .where('storyThreadMessages.threadId', '=', threadId)
@@ -397,7 +398,7 @@ export function createKyselyThreadMessages(db: SharedDatabase<StudioDb>): Thread
       required(owner)
       return db.withWriteTransaction([{ kind: 'thread', id: threadId }], async tx => {
         const member = await membership(tx, owner, threadId)
-        await reconcile(tx, owner, threadId)
+        await seedThreadMessagesKysely(tx, owner, threadId)
         if (member.archivedAt) throw new ThreadMessageConflict(409, 'Restore the archived Thread before sending.')
         const existing = await messagesQuery(tx).where('storyThreadMessages.id', '=', id)
           .executeTakeFirst()

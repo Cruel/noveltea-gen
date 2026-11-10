@@ -19,6 +19,8 @@ import { createKyselyGitPersistence } from '../../src/persistence/git-kysely'
 import { createKyselyConversationCatalog } from '../../src/persistence/conversation-kysely'
 import { createKyselyNaturalStoryPersistence } from '../../src/persistence/natural-story-kysely'
 import { createKyselyThreadMessages } from '../../src/persistence/thread-message-kysely'
+import { createKyselyAdvancedThreads } from '../../src/persistence/advanced-thread-kysely'
+import type { AdvancedThreadPersistence } from '../../src/persistence/advanced-thread-contracts'
 import type { ThreadMessagePersistence } from '../../src/persistence/thread-message-contracts'
 import { createKyselyCatalogPersistence } from '../../src/persistence/catalog-kysely'
 import type { ConversationCatalog } from '../../src/persistence/conversation-contracts'
@@ -54,12 +56,15 @@ export interface KyselyFeatureFixture {
   conversations: ConversationCatalog
   naturalStory: NaturalStoryPersistence
   messages: ThreadMessagePersistence
+  advancedThreads: AdvancedThreadPersistence
   dashboard: DashboardCatalog
   settings: SettingsPreferences
   account(owner: string, provider: GitProvider): Promise<void>
   /** Reopen the same backing database with a new connection to prove persistence. */
   reopenGit(): Promise<ReturnType<typeof createKyselyGitPersistence>>
   openIndependentMessages(): Promise<{ messages: ThreadMessagePersistence; close(): Promise<void> }>
+  openIndependentAdvancedThreads(): Promise<{ advancedThreads: AdvancedThreadPersistence; close(): Promise<void> }>
+  reopenAdvancedThreads(): Promise<AdvancedThreadPersistence>
   reopenMessages(): Promise<ThreadMessagePersistence>
   reopenNavigation(): Promise<{
     conversations: ConversationCatalog
@@ -150,6 +155,7 @@ export async function openKyselyFeatureFixture(
       conversations: createKyselyConversationCatalog(database),
       naturalStory: createKyselyNaturalStoryPersistence(database),
       messages: createKyselyThreadMessages(database),
+      advancedThreads: createKyselyAdvancedThreads(database),
       ...createKyselyCatalogPersistence(database),
       publications: createKyselyPublicationRecords(database),
       ...createKyselyGitPersistence(database),
@@ -169,6 +175,15 @@ export async function openKyselyFeatureFixture(
       async openIndependentMessages() {
         const other = openKyselyDatabase<StudioDb>(options)
         return { messages: createKyselyThreadMessages(other), close: () => other.close() }
+      },
+      async openIndependentAdvancedThreads() {
+        const other = openKyselyDatabase<StudioDb>(options)
+        return { advancedThreads: createKyselyAdvancedThreads(other), close: () => other.close() }
+      },
+      async reopenAdvancedThreads() {
+        await database!.close()
+        database = openKyselyDatabase<StudioDb>(options)
+        return createKyselyAdvancedThreads(database)
       },
       async reopenMessages() {
         await database!.close()

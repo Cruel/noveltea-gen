@@ -238,7 +238,8 @@ test('restart source identity and reservation stay pinned across interrupt, conc
     assert.deepEqual(await b.reserveRestart(data), await a.reserveRestart(data))
     await assert.rejects(a.reserveRestart({ ...data, selected: nextSha }),
       /reservation changed/)
-    assert.equal((await b.restartIntent(id))?.preparedAt, null)
+    assert.equal((await b.restartIntent(f.owner, id))?.preparedAt, null)
+    assert.equal(await b.restartIntent(f.stranger, id), null)
     const newerRun = randomUUID()
     ;(await pair.a.testing.records.insert('studio_sessions', { id: newerRun, ownerUserId: f.owner,
       storyId: f.story, title: 'Later job', status: 'completed', sourceCommitSha: sha,
@@ -253,14 +254,14 @@ test('restart source identity and reservation stay pinned across interrupt, conc
     }
     await assert.rejects(b.registerChild(register), /Thread advanced/)
     assert.equal(await b.jobClaimed(id), false)
-    assert.equal((await b.restartIntent(id))?.preparedAt, null)
+    assert.equal((await b.restartIntent(f.owner, id))?.preparedAt, null)
     ;(await pair.a.testing.records.delete('story_thread_runs', { jobId: newerRun }))
     ;(await pair.a.testing.records.delete('studio_sessions', { id: newerRun }))
     assert.equal((await b.registerChild(register)).inserted, true)
     assert.equal((await a.registerChild(register)).inserted, false)
-    assert.equal((await a.restartIntent(id))?.preparedAt, at)
+    assert.equal((await a.restartIntent(f.owner, id))?.preparedAt, at)
     assert.equal((await b.registerChild({ ...register, at: '2026-11-06T00:00:00Z' })).inserted, false)
-    assert.equal((await a.restartIntent(id))?.preparedAt, at,
+    assert.equal((await a.restartIntent(f.owner, id))?.preparedAt, at,
       'idempotent registration must not rewrite the original preparation timestamp')
     assert.equal(await a.preparedRestart(f.owner, id, 'restart:' + id), true)
     assert.equal(await a.preparedRestart(f.stranger, id, 'restart:' + id), false)
