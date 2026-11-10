@@ -20,7 +20,11 @@ type Connection = {
   backend: 'sqlite' | 'postgres'
   migrationFolder: string
   db: Kysely<any>
-  authDatabase: Database.Database | Pool
+  authDatabase: Database.Database | {
+    dialect: StudioPostgresDialect
+    type: 'postgres'
+    transaction: true
+  }
   close(): Promise<void>
 }
 
@@ -83,7 +87,13 @@ export function openStudioSchemaConnection(
     dialect: new StudioPostgresDialect({ pool }),
     plugins: [new CamelCasePlugin()],
   })
-  return { backend: 'postgres', migrationFolder, db, authDatabase: pool, close: () => db.destroy() }
+  // Better Auth accepts a Kysely dialect config. Pass our schema-scoped
+  // PostgreSQL introspector instead of the raw pool (which makes Better Auth
+  // construct the stock, all-schema introspector). Auth runs without Studio's
+  // CamelCasePlugin and retains transaction support on the same owned pool.
+  const authDatabase = { dialect: new StudioPostgresDialect({ pool }), type: 'postgres' as const,
+    transaction: true as const }
+  return { backend: 'postgres', migrationFolder, db, authDatabase, close: () => db.destroy() }
 }
 
 export const studioMigrationFolder = fileURLToPath(

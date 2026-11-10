@@ -186,9 +186,16 @@ local developer PostgreSQL configuration.
 - Studio's PostgreSQL dialect limits catalog introspection at query time to
   `current_schema()`, so concurrent test-schema teardown cannot make
   another fixture's objects disappear mid-query. The same scoped dialect is
-  used by maintenance and shared persistence connections.
-- `kysely-schema-hardening.test.ts` and real-millisecond cases in
-  `kysely-git.test.ts` are mandatory in the offline test gate. Run with
+  used by maintenance and shared persistence connections. Better Auth also
+  receives this dialect through its supported `{ dialect, type: 'postgres',
+  transaction: true }` database configuration, not a raw `pg.Pool`: its own
+  Kysely instance must never fall back to the stock all-schema introspector.
+  Auth intentionally does not inherit Studio's `CamelCasePlugin` or change
+  Better Auth's physical table and column casing.
+- `kysely-schema-hardening.test.ts` exercises both Studio introspection and
+  **200 actual Better Auth migration plans** under 65 unrelated PostgreSQL
+  schema create/drop cycles, alongside real-millisecond cases in
+  `kysely-git.test.ts`. These are mandatory in the offline test gate. Run with
   `NT_TEST_PG_URL`, `NT_KYSELY_PROOF_URL` (for guarded transaction tests),
   and `NT_REQUIRE_KYSELY_PROOF=1` for both engines.
 
