@@ -120,6 +120,9 @@ export function createSqliteSteeringSync(db: Db): SynchronousSteering {
               AND t.pi_token=thread_live_inputs.target_pi_token)
           AND EXISTS (SELECT 1 FROM story_thread_messages m
             WHERE m.id=thread_live_inputs.message_id AND m.phase='queued'
+              AND m.body=${item.content} AND m.sequence=${item.sequence}
+              AND m.owner_user_id=thread_live_inputs.owner_user_id
+              AND m.thread_id=thread_live_inputs.thread_id
             AND NOT EXISTS (SELECT 1 FROM story_thread_message_cancellations c WHERE c.message_id=m.id))`).changes === 1
     },
     deferUnsent(messageId, token) {

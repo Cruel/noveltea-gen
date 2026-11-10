@@ -197,6 +197,8 @@ export function createKyselySteeringPersistence(db: SharedDatabase<StudioDb>): S
             .whereRef('m.ownerUserId', '=', 'threadLiveInputs.ownerUserId')
             .whereRef('m.threadId', '=', 'threadLiveInputs.threadId')
             .where('m.phase', '=', 'queued')
+            .where('m.body', '=', item.content)
+            .where('m.sequence', '=', item.sequence)
             .where(eb2 => eb2.not(eb2.exists(
               eb2.selectFrom('storyThreadMessageCancellations as c')
                 .select('c.messageId').whereRef('c.messageId', '=', 'm.id'),

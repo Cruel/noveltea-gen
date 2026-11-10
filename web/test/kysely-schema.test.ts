@@ -18,6 +18,7 @@ import {
   type StudioSchemaOptions,
 } from '../src/db/kysely-migrations'
 import { studioAuthOptionsForDatabase } from '../src/lib/auth'
+import { trustedCatalogProjectionSql, trustedCatalogViewName } from '../src/db/trusted-catalog-definition'
 
 const config = {
   baseURL: 'http://localhost:3000',
@@ -79,6 +80,31 @@ async function assertNativeGitForeignKeys(connection: ReturnType<typeof openStud
   }
 }
 
+async function certifyCatalogViewAttestation(connection: ReturnType<typeof openStudioSchemaConnection>) {
+  const view = await trustedCatalogViewName(connection.db, connection.backend)
+  const canonical = trustedCatalogProjectionSql(connection.db)
+  const update = async (projection: string) => {
+    if (connection.backend === 'sqlite') await sql.raw(`DROP VIEW ${view}`).execute(connection.db)
+    await sql.raw(`${connection.backend === 'postgres' ? 'CREATE OR REPLACE' : 'CREATE'} VIEW ${view} AS ${projection}`)
+      .execute(connection.db)
+  }
+  const mutations = [
+    canonical.replace('"repository"."provider" as "provider"', '"repository"."id" as "provider"'),
+    canonical.replace('"story"."owner_user_id" = "job"."owner_user_id"',
+      '"story"."owner_user_id" = "story"."owner_user_id"'),
+  ]
+  for (const mutation of mutations) {
+    assert.notEqual(mutation, canonical, 'Expected canonical projection expression in compiled SQL')
+    try {
+      await update(mutation)
+      await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /trusted catalog view definition drift/i)
+    } finally {
+      await update(canonical)
+    }
+  }
+  await assertKyselyStudioSchemaCurrent(connection)
+}
+
 async function certify(options: StudioSchemaOptions) {
   const connection = openStudioSchemaConnection(options)
   try {
@@ -95,6 +121,7 @@ async function certify(options: StudioSchemaOptions) {
     await assertNativeGitForeignKeys(connection)
     assert.equal(await inspectStudioMigrationHistory(connection), studioMigrationNames().length)
     await assertKyselyStudioSchemaCurrent(connection)
+    await certifyCatalogViewAttestation(connection)
     const readOnly = openStudioSchemaConnection(options, 'read')
     try {
       await assertKyselyStudioSchemaCurrent(readOnly)

@@ -108,6 +108,19 @@ sessions. It removes only its own uniquely named volume and never starts Studio.
 See [the Gate 0 audit addendum](kysely-transaction-audit.md) for evidence and
 remaining #128 proof requirements.
 
-Shared Kysely concurrency, schema, controller query and end-to-end deployment
-certification still belong to the downstream #128 onward gates described in
-[ADR 0001](adr/0001-kysely-sqlite-first-studio-persistence.md).
+For the full **SQLite/PostgreSQL common-port and schema** certification, run:
+
+```sh
+pnpm certify:postgres-conformance
+```
+
+This extends the same disposable Gate 0 environment with the shared Kysely
+feature suites, schema hardening, migration rollback and steering race tests.
+It uses a randomly assigned **loopback-only** PostgreSQL port for the
+isolated test process, never the application Compose deployment. The test
+fixture uses the disposable bootstrap role for temporary schema creation;
+production application and controller grants remain restricted. Both the
+test project and its uniquely named volume are cleaned up afterward.
+
+End-to-end Web/Agent PostgreSQL startup remains a distinct #141 cutover gate,
+as described in [ADR 0001](adr/0001-kysely-sqlite-first-studio-persistence.md).

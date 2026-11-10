@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CamelCasePlugin, Kysely, SqliteDialect, sql } from 'kysely'
 import { StudioPostgresDialect } from './studio-postgres-dialect'
-import { trustedCatalogViewName } from './trusted-catalog-definition'
+import { trustedCatalogProjectionSql, trustedCatalogViewName } from './trusted-catalog-definition'
 import { FileMigrationProvider, Migrator, NO_MIGRATIONS, type Migration } from 'kysely/migration'
 import { Pool, type PoolConfig } from 'pg'
 import { betterAuth } from 'better-auth'
@@ -448,7 +448,11 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
   const db = connection.db
   const [columnsResult, indexesResult, constraintsResult, triggersResult] = await Promise.all([
     sql<PgColumn>`SELECT table_name, column_name, data_type, is_nullable, column_default, is_identity
-      FROM information_schema.columns WHERE table_schema = current_schema()`.execute(db),
+      FROM information_schema.columns AS col
+      WHERE col.table_schema = current_schema()
+        AND EXISTS (SELECT 1 FROM information_schema.tables AS t
+          WHERE t.table_schema = col.table_schema AND t.table_name = col.table_name
+            AND t.table_type = 'BASE TABLE')`.execute(db),
     sql<PgIndex>`SELECT t.relname AS tablename, i.relname AS indexname,
         pg_get_indexdef(x.indexrelid) AS indexdef, x.indisunique,
         (c.oid IS NOT NULL) AS constraint_index
@@ -686,6 +690,43 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
   }
 }
 
+/** Compare the physical, persisted view with the one typed authorization query.
+ * PostgreSQL deparses view SQL with join parentheses and optional AS tokens.
+ * Removing only those syntactic differences preserves all projected columns,
+ * source tables, identifiers, equality operands and join conditions. */
+function comparableTrustedViewSql(source: string): string {
+  return source.toLowerCase().replace(/["`]/g, '')
+    // PostgreSQL omits a redundant projected alias like provider AS provider.
+    .replace(/\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s+as\s+\2\b/g, '$1.$2')
+    .replace(/\b(?:inner|as)\b/g, '')
+    .replace(/[\s();]/g, '')
+}
+
+export async function assertTrustedCatalogView(connection: Connection): Promise<void> {
+  const view = await trustedCatalogViewName(connection.db, connection.backend)
+  const projection = trustedCatalogProjectionSql(connection.db)
+  let actual: string | undefined
+  if (connection.backend === 'sqlite') {
+    const result = await sql<{ definition: string }>`SELECT sql AS definition FROM sqlite_master
+      WHERE type = 'view' AND name = 'trusted_jobs'`.execute(connection.db)
+    actual = result.rows[0]?.definition
+    if (actual !== `CREATE VIEW trusted_jobs AS ${projection}`)
+      throw new StudioSchemaError('Studio trusted catalog view definition drift (SQLite)')
+  } else {
+    const result = await sql<{ definition: string }>`SELECT pg_get_viewdef(c.oid, false) AS definition
+      FROM pg_class c WHERE c.oid = to_regclass(${view}) AND c.relkind = 'v'`.execute(connection.db)
+    actual = result.rows[0]?.definition
+    if (!actual || comparableTrustedViewSql(actual) !== comparableTrustedViewSql(projection))
+      throw new StudioSchemaError('Studio trusted catalog view definition drift (PostgreSQL)')
+  }
+  try {
+    await sql.raw(`SELECT job_id, owner_id, provider, provider_id, directory, pin, config_json FROM ${view} LIMIT 0`)
+      .execute(connection.db)
+  } catch {
+    throw new StudioSchemaError('Studio trusted catalog view is missing or inaccessible; explicit migration required')
+  }
+}
+
 export async function assertKyselyStudioSchemaCurrent(connection: Connection): Promise<void> {
   const applied = await inspectStudioMigrationHistory(connection)
   const migrationNames = studioMigrationNames(connection.migrationFolder)
@@ -701,13 +742,7 @@ export async function assertKyselyStudioSchemaCurrent(connection: Connection): P
   // catalog migration. Enforce this view only where it is an authored part of
   // the checked schema history, never add DDL during runtime readiness.
   if (!migrationNames.includes('0002_trusted_catalog')) return
-  const view = await trustedCatalogViewName(connection.db, connection.backend)
-  try {
-    await sql.raw(`SELECT job_id, owner_id, provider, provider_id, directory, pin, config_json FROM ${view} LIMIT 0`)
-      .execute(connection.db)
-  } catch {
-    throw new StudioSchemaError('Studio trusted catalog view is missing or inaccessible; explicit migration required')
-  }
+  await assertTrustedCatalogView(connection)
 }
 
 /** Explicit migration entrypoint. Better Auth owns its own tables and always

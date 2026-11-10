@@ -172,6 +172,27 @@ for (const backend of ['sqlite', 'postgres'] as const) {
     await a.recoverOrphaned()
   })
 
+  test(backend + ': edit-versus-dispatch rejects the stale instruction snapshot', {
+    skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
+    timeout: 90_000,
+  }, async t => {
+    const f = await openKyselyFeatureFixture(backend)
+    t.after(() => f.close())
+    const x = await setup(f)
+    const id = await message(f, x, 0)
+    await f.steering.registerTurn(x.job, 'token-1', 'session-1', 'focus:character', base, at)
+    const stale = (await f.steering.dispatchable())[0]!
+    const revised = 'Author replaced this instruction'
+    assert.equal((await f.messages.edit(x.owner, x.thread, id, randomUUID(),
+      stale.content, revised, later)).content, revised)
+    assert.equal(await f.steering.claim(stale, 'token-1', 'session-1'), false,
+      'stale dispatchable result must never claim a replaced author message')
+    const fresh = (await f.steering.dispatchable())[0]!
+    assert.equal(fresh.content, revised)
+    assert.equal(await f.steering.claim(fresh, 'token-1', 'session-1'), true)
+    assert.equal(await f.steering.claim(stale, 'token-1', 'session-1'), false)
+  })
+
   test(backend + ': boundary review authorization, implementation idempotency and restart recovery', {
     skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
     timeout: 90_000,

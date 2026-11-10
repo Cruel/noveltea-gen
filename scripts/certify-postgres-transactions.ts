@@ -290,7 +290,9 @@ SELECT count(*) FROM audit_queue WHERE phase='running';`);
           cwd: root,
           env: {
             ...env,
-            NT_KYSELY_PROOF_URL: `postgresql://noveltea_app:${credentials.NT_PG_APP_PASSWORD}@${address}/noveltea`,
+            // The isolated-schema test creates/drops schemas. Its setup must use
+            // the disposable bootstrap role, not expand app production grants.
+            NT_KYSELY_PROOF_URL: `postgresql://noveltea_bootstrap:${encodeURIComponent(credentials.NT_PG_ADMIN_PASSWORD)}@${address}/noveltea`,
           },
           encoding: "utf8",
           timeout: 120_000,
@@ -300,6 +302,36 @@ SELECT count(*) FROM audit_queue WHERE phase='running';`);
       process.stderr.write(result.stderr ?? "");
       assert.equal(result.status, 0, "Shared Kysely proof failed");
     });
+
+    if (process.argv.includes("--conformance")) {
+      await t.test("full isolated-schema SQLite/PostgreSQL Kysely conformance", () => {
+        const address = compose("port", "postgres", "5432");
+        assert.match(address, /^127\.0\.0\.1:\d+$/);
+        const suite = [
+          "kysely-advanced-threads", "kysely-approvals", "kysely-continuation",
+          "kysely-features", "kysely-generation", "kysely-git",
+          "kysely-schema-hardening", "kysely-schema", "kysely-steering",
+          "kysely-story-navigation", "kysely-thread-messages", "kysely-workflow",
+        ].map(name => `test/${name}.test.ts`);
+        const result = spawnSync("pnpm", [
+          "--filter", "@noveltea/studio", "exec", "tsx", "--test",
+          "--test-concurrency=2", ...suite,
+        ], {
+          cwd: root,
+          env: {
+            ...env,
+            NT_TEST_PG_URL: `postgresql://noveltea_bootstrap:${encodeURIComponent(credentials.NT_PG_ADMIN_PASSWORD)}@${address}/noveltea`,
+            NT_REQUIRE_KYSELY_PROOF: "1",
+          },
+          encoding: "utf8",
+          timeout: 240_000,
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        process.stdout.write(result.stdout ?? "");
+        process.stderr.write(result.stderr ?? "");
+        assert.equal(result.status, 0, "Mandatory dual-backend Kysely conformance failed");
+      });
+    }
   } finally {
     try {
       if (started) {
