@@ -11,7 +11,9 @@ if ! command -v dockerd-rootless.sh >/dev/null 2>&1 &&
    [[ ! -x /usr/bin/dockerd-rootless.sh ]] &&
    [[ ! -x /usr/share/docker.io/contrib/dockerd-rootless.sh ]]; then
   sudo apt-get update -qq
-  if apt-cache show docker-ce-rootless-extras >/dev/null 2>&1; then
+  # apt-cache show can succeed with metadata but NO installable candidate
+  # on GitHub's Ubuntu runner (Docker CE extras not in its active apt repos).
+  if apt-cache policy docker-ce-rootless-extras | grep -Eq '^  Candidate: [0-9]'; then
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       docker-ce-rootless-extras uidmap slirp4netns fuse-overlayfs
   else
