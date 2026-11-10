@@ -3,13 +3,14 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, promises as fs } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CamelCasePlugin, Kysely, PostgresDialect, SqliteDialect, sql } from 'kysely'
+import { CamelCasePlugin, Kysely, SqliteDialect, sql } from 'kysely'
+import { StudioPostgresDialect } from './studio-postgres-dialect'
 import { FileMigrationProvider, Migrator, NO_MIGRATIONS, type Migration } from 'kysely/migration'
 import { Pool, type PoolConfig } from 'pg'
 import { betterAuth } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
 import { StudioSchemaError } from './schema-error'
-import { expectedSqliteDefinitions, postgresTrigger, studioBaselineFor, studioDdl } from './kysely-baseline'
+import { expectedSqliteDefinitions, postgresColumnType, postgresTrigger, studioBaselineFor, studioDdl } from './kysely-baseline'
 import { studioAuthOptionsForDatabase, type StudioAuthConfig } from '../lib/auth'
 
 export type StudioSchemaOptions =
@@ -79,7 +80,7 @@ export function openStudioSchemaConnection(
   })
   pool.on('error', () => {})
   const db = new Kysely<any>({
-    dialect: new PostgresDialect({ pool }),
+    dialect: new StudioPostgresDialect({ pool }),
     plugins: [new CamelCasePlugin()],
   })
   return { backend: 'postgres', migrationFolder, db, authDatabase: pool, close: () => db.destroy() }
@@ -129,16 +130,26 @@ function sameCheckSemantics(expectedExpression: string, actualDefinition: string
     clauses.length === 1
       ? `CHECK ((${clauses[0]}))`
       : `CHECK ((${clauses.map((part) => `(${part})`).join(' OR ')}))`
-  const normalized = (source: string) => source.toLowerCase().replace(/["\s]/g, '')
+  const normalized = (source: string) =>
+    normalizeSqlOutsideLiterals(source, (part) => part.toLowerCase().replace(/["\s]/g, ''))
   return normalized(canonical) === normalized(actualDefinition)
 }
+
+/** SQL keywords and identifiers are case-insensitive; string literals are not.
+ * Keeping quoted text intact prevents false schema-parity witnesses. */
+function normalizeSqlOutsideLiterals(source: string, normalize: (part: string) => string): string {
+  return source.split(/('(?:''|[^'])*')/g)
+    .map((part, index) => index % 2 ? part : normalize(part))
+    .join('')
+}
+
 function normalizedIndexPredicate(predicate: string): string {
-  return predicate
+  return normalizeSqlOutsideLiterals(predicate, (part) => part
     .toLowerCase()
     .replace(/["`]/g, '')
     .replace(/\b[a-z_]+\./g, '')
     .replace(/::(?:text|character varying)/g, '')
-    .replace(/[();\s]/g, '')
+    .replace(/[();\s]/g, ''))
 }
 
 const expectedTableNames = new Set(expected.tables.keys())
@@ -311,6 +322,12 @@ function compareDefinitions(actual: Map<string, string>, expectedSql: Map<string
         `Studio Kysely schema definition drift (${key}); restore the matching schema or explicitly reset.`,
       )
   }
+  for (const key of actual.keys()) {
+    if (!expectedSql.has(key))
+      throw new StudioSchemaError(
+        `Studio Kysely unexpected schema definition drift (${key}); restore the matching schema or explicitly reset.`,
+      )
+  }
 }
 
 function assertAuthAndAppTables(tables: Set<string>) {
@@ -322,8 +339,8 @@ function assertAuthAndAppTables(tables: Set<string>) {
   }
 }
 
-type SqliteDefinition = { type: string; name: string; sql: string }
-const schemaDefinitionsSql = `SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table', 'index', 'trigger')`
+type SqliteDefinition = { type: string; name: string; tableName: string; sql: string }
+const schemaDefinitionsSql = `SELECT type, name, tbl_name AS tableName, sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table', 'index', 'trigger')`
 const internalTables = new Set([
   'user',
   'kysely_migration',
@@ -367,7 +384,13 @@ function appDefinitions(sqlite: Database.Database): Map<string, string> {
 
 async function assertSqliteSchema(connection: Connection): Promise<void> {
   const result = await sql<SqliteDefinition>`${sql.raw(schemaDefinitionsSql)}`.execute(connection.db)
-  const actual = new Map(result.rows.map((row) => [row.type + ':' + row.name, row.sql]))
+  // Compare the complete Studio-owned inventory, not just expected object
+  // names. Auth, the migration journal, and SQLite's own objects are managed
+  // independently and must not cause false positive drift.
+  const actual = new Map(result.rows
+    .filter((row) => !internalTables.has(row.tableName) &&
+      !authTables.has(row.tableName) && !row.name.startsWith('sqlite_'))
+    .map((row) => [row.type + ':' + row.name, row.sql]))
   const expectedSql =
     studioMigrationNames(connection.migrationFolder).length === 1
       ? expectedSqliteDefinitions()
@@ -399,6 +422,7 @@ type PgConstraint = {
   definition: string
   condeferrable: boolean
   condeferred: boolean
+  convalidated: boolean
 }
 type PgTrigger = { tableName: string; tgname: string; tgenabled: string; prosrc: string; triggerDef: string }
 
@@ -416,7 +440,7 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
       LEFT JOIN pg_constraint c ON c.conindid=x.indexrelid AND c.contype IN ('p','u')
       WHERE n.nspname=current_schema()`.execute(db),
     sql<PgConstraint>`SELECT t.relname AS table_name, c.conname, c.contype,
-        c.condeferrable, c.condeferred, pg_get_constraintdef(c.oid) AS definition
+        c.condeferrable, c.condeferred, c.convalidated, pg_get_constraintdef(c.oid) AS definition
       FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
       JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname=current_schema()`.execute(db),
@@ -451,7 +475,7 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
         throw new StudioSchemaError(`Studio PostgreSQL schema column drift (${table})`)
       for (const col of cols) {
         const found = actual.find((row) => row.columnName === col.name)
-        const type = col.type.toLowerCase() === 'integer' ? 'integer' : 'text'
+        const type = postgresColumnType(table, col.name, col.type)
         const nullable = col.notnull === 0 && col.pk === 0
         const expectedDefault = col.dflt_value?.replace(/^\((.*)\)$/, '$1') ?? null
         const actualDefault =
@@ -514,7 +538,7 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
         const relation = normalized(`FOREIGN KEY (${from}) REFERENCES ${group[0]!.table}(${to})`)
         const found = pgKeys.find((key) => normalized(key.definition).startsWith(relation))
         if (
-          !found ||
+          !found || !found.convalidated ||
           (group[0]!.on_delete.toLowerCase() === 'cascade' && !/ON DELETE CASCADE/i.test(found.definition)) ||
           (group[0]!.on_delete.toLowerCase() === 'set null' &&
             !/ON DELETE SET NULL/i.test(found.definition)) ||
@@ -538,7 +562,7 @@ async function assertPostgresSchema(connection: Connection): Promise<void> {
         const found = constraintsResult.rows.find(
           (c) => c.tableName === table && c.conname === name && c.contype === 'c',
         )
-        if (!found || !sameCheckSemantics(expression!, found.definition))
+        if (!found || !found.convalidated || !sameCheckSemantics(expression!, found.definition))
           throw new StudioSchemaError(`Studio PostgreSQL CHECK constraint drift (${name})`)
       }
       for (const row of constraintsResult.rows.filter((c) => c.tableName === table && c.contype === 'c')) {

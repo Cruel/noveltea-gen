@@ -63,10 +63,10 @@ function connectionRow(row: {
     login: row.login,
     credentials: row.credentials,
     revision: studioSafeInteger(row.revision),
-    accessExpiresAt: row.accessExpiresAt,
-    refreshExpiresAt: row.refreshExpiresAt,
+    accessExpiresAt: row.accessExpiresAt === null ? null : studioSafeInteger(row.accessExpiresAt),
+    refreshExpiresAt: row.refreshExpiresAt === null ? null : studioSafeInteger(row.refreshExpiresAt),
     refreshLeaseId: row.refreshLeaseId,
-    refreshLeaseUntil: row.refreshLeaseUntil,
+    refreshLeaseUntil: row.refreshLeaseUntil === null ? null : studioSafeInteger(row.refreshLeaseUntil),
     status: row.status as GitConnectionStatus,
   }
 }
@@ -159,7 +159,7 @@ export function createKyselyGitPersistence(db: SharedDatabase<StudioDb>): Ports 
         accountId: row.providerAccountId,
         login: row.login,
         status: row.status as GitConnectionStatus,
-        accessExpiresAt: row.accessExpiresAt,
+        accessExpiresAt: row.accessExpiresAt === null ? null : studioSafeInteger(row.accessExpiresAt),
       }))
     },
     async read(owner, id) {

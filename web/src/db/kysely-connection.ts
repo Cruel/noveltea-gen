@@ -9,13 +9,13 @@ import {
   CamelCasePlugin,
   CompiledQuery,
   Kysely,
-  PostgresDialect,
   SqliteDialect,
   sql,
   type Transaction,
 } from 'kysely'
 import { Pool, type PoolConfig } from 'pg'
 import type { StudioDb } from './studio-db'
+import { StudioPostgresDialect } from './studio-postgres-dialect'
 
 export type WriteGuard = { kind: 'thread' | 'job'; id: string }
 export type QueryExecutor<DB> = Pick<Kysely<DB>, 'selectFrom' | 'selectNoFrom'>
@@ -105,7 +105,7 @@ export function openKyselyDatabase<DB = StudioDb>(options: DatabaseOptions): Sha
       // backend is terminated. pg marks it unqueryable; the next query rejects.
       client.on('error', () => {})
     })
-    db = new Kysely<DB>({ dialect: new PostgresDialect({ pool }), plugins: [new CamelCasePlugin()] })
+    db = new Kysely<DB>({ dialect: new StudioPostgresDialect({ pool }), plugins: [new CamelCasePlugin()] })
   } else {
     throw new Error('Unsupported Studio database backend')
   }

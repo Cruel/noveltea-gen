@@ -167,6 +167,31 @@ local developer PostgreSQL configuration.
   composition remains unchanged until #141; independent staged repositories
   never participate in a mixed live transaction.
 
+## Schema parity and certification hardening (2026-11-09)
+
+- SQLite INTEGER accommodates 64-bit epoch milliseconds. PostgreSQL's
+  32-bit INTEGER does not. The frozen-baseline translator maps only the six
+  OAuth/credential/install timestamp columns to PostgreSQL BIGINT; all
+  unrelated counters, booleans and generated identity keys retain their
+  existing logical type. Git record/summary reads convert BIGINT strings to
+  validated safe JavaScript integers at the shared domain boundary. Previously
+  generated PostgreSQL development schemas with 32-bit timestamp columns must
+  be explicitly recreated; readiness rejects their incompatible column types.
+- PostgreSQL readiness requires `convalidated` for the expected foreign keys
+  and CHECK constraints. CHECK and partial-index normalization retains
+  case-sensitive SQL string literals while canonicalizing syntax.
+- SQLite readiness compares the complete application-owned tables, indexes
+  and triggers against the authored snapshot, rejecting additional objects
+  without confusing Better Auth, Kysely journals or SQLite internal objects.
+- Studio's PostgreSQL dialect limits catalog introspection at query time to
+  `current_schema()`, so concurrent test-schema teardown cannot make
+  another fixture's objects disappear mid-query. The same scoped dialect is
+  used by maintenance and shared persistence connections.
+- `kysely-schema-hardening.test.ts` and real-millisecond cases in
+  `kysely-git.test.ts` are mandatory in the offline test gate. Run with
+  `NT_TEST_PG_URL`, `NT_KYSELY_PROOF_URL` (for guarded transaction tests),
+  and `NT_REQUIRE_KYSELY_PROOF=1` for both engines.
+
 ## Gate ownership
 
 - #128: shared executor/guard correctness and mandatory SQLite/PostgreSQL CI

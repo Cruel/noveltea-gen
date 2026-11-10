@@ -469,6 +469,41 @@ for (const backend of ['sqlite', 'postgres'] as const) {
           assert.equal(flow?.connectionId, null)
           assert.equal(flow?.ownerUserId, alice)
           assert.equal(flow?.provider, 'github')
+
+          // Epoch milliseconds exceed PostgreSQL int4. Exercise the real
+          // shared Git ports on both drivers, including bigint readback,
+          // compare/lease predicates, installation timestamps and reconnect.
+          const nowMs = 1_800_000_000_000
+          const expires = nowMs + 3_600_000
+          await after.git.startFlow(alice, 'github', 'epoch-flow', 'pkce-epoch', expires, nowMs)
+          assert.deepEqual(await after.git.consumeFlow('epoch-flow', 'github', nowMs + 100), {
+            owner: alice, verifier: 'pkce-epoch',
+          })
+          const epochConnectionId = randomUUID()
+          await after.git.connect({
+            id: epochConnectionId, owner: alice, provider: 'github',
+            providerAccountId: 'epoch-provider', login: 'epoch-login',
+            credentials: 'encrypted:epoch', accessExpiresAt: expires,
+            refreshExpiresAt: expires + 60_000, now: at,
+          })
+          assert.equal((await after.git.read(alice, epochConnectionId))?.accessExpiresAt, expires)
+          assert.equal((await after.git.read(alice, epochConnectionId))?.refreshExpiresAt, expires + 60_000)
+          assert.equal((await after.git.list(alice)).find(row =>
+            row.id === epochConnectionId)?.accessExpiresAt, expires)
+          assert.equal(await after.git.acquireRefreshLease(alice, epochConnectionId, 1,
+            'epoch-lease', nowMs + 10_000, nowMs), true)
+          assert.equal((await after.git.read(alice, epochConnectionId))?.refreshLeaseUntil, nowMs + 10_000)
+          assert.equal(await after.git.acquireRefreshLease(alice, epochConnectionId, 1,
+            'another-lease', nowMs + 20_000, nowMs + 9_999), false)
+          await after.repositories.beginInstall({
+            stateHash: 'epoch-install', owner: alice, desired: 'epoch/story',
+            connectionId: epochConnectionId, createdAt: nowMs, expiresAt: expires,
+          }, nowMs)
+          assert.deepEqual(await after.repositories.consumeInstall(alice, 'epoch-install', nowMs + 1),
+            { desired: 'epoch/story', connectionId: epochConnectionId })
+          await after.repositories.deferInstall(alice, 'epoch-install', expires + 60_000)
+          assert.ok((await after.repositories.pendingInstallNames(alice, nowMs + 2))
+            .includes('epoch/story'))
         },
       )
     },
