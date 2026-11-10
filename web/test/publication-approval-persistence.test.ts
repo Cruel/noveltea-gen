@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import type { PublicationReceipt, ProtectedDecisionGrant } from '../src/persistence/publication-contracts'
 
 const config = {

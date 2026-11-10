@@ -10,7 +10,7 @@ import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
 import { advanceThread, readThreadChat, cancelQueuedThreadMessage,

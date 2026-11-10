@@ -7,9 +7,8 @@ import type { StudioDb } from './studio-db'
 import { trustedCatalogProjection } from './trusted-catalog-definition'
 
 /** PostgreSQL exposes only the restricted projection view. SQLite reads the
- * identical typed join directly so the currently deployed Drizzle schema
- * remains usable before the application Kysely cutover. Neither executor
- * escapes the read-only reader API. */
+ * identical owner-scoped join directly. Neither executor escapes the
+ * read-only reader API. */
 type TrustedCatalogDb = Pick<StudioDb, 'trustedJobs'>
 export type TrustedControllerJobRow = {
   ownerId: string; provider: string; providerId: string; directory: string

@@ -14,7 +14,6 @@ import {
 } from '../../src/db/kysely-migrations'
 import { studioAuthOptionsForDatabase } from '../../src/lib/auth'
 import { createKyselyCollectionCatalog } from '../../src/persistence/collection-kysely'
-import { createKyselyPublicationRecords } from '../../src/persistence/publication-kysely'
 import { createKyselyGenerationPersistence } from '../../src/persistence/generation-kysely'
 import { createKyselyApprovalRevisionPersistence } from '../../src/persistence/approval-revision-kysely'
 import { createKyselyGitPersistence } from '../../src/persistence/git-kysely'
@@ -30,6 +29,8 @@ import type { SteeringPersistence } from '../../src/persistence/steering-contrac
 import type { AdvancedThreadPersistence } from '../../src/persistence/advanced-thread-contracts'
 import type { ThreadMessagePersistence } from '../../src/persistence/thread-message-contracts'
 import { createKyselyCatalogPersistence } from '../../src/persistence/catalog-kysely'
+import { openSharedStudioStore } from '../../src/db/shared-studio-store'
+import type { StudioStore } from '../../src/persistence/store'
 import type { ConversationCatalog } from '../../src/persistence/conversation-contracts'
 import type { NaturalStoryPersistence } from '../../src/persistence/natural-story-contracts'
 import type { DashboardCatalog, SettingsPreferences } from '../../src/persistence/contracts'
@@ -52,6 +53,10 @@ const authConfig = {
 }
 
 export interface KyselyFeatureFixture {
+  /** Actual live composition used by web service integration tests. */
+  store: StudioStore
+  /** Intentionally corrupts a disposable PostgreSQL index for readiness certification. */
+  dropReadinessIndex(): Promise<void>
   /** Disposable-only connection options for independent OS-process conformance workers. */
   databaseOptions: DatabaseOptions
   collections: CollectionCatalog
@@ -157,6 +162,7 @@ export async function openKyselyFeatureFixture(
       : { backend, connection: { connectionString: url, options: `-c search_path=${schema}` } }
   let maintenance: ReturnType<typeof openStudioSchemaConnection> | undefined
   let database: SharedDatabase<StudioDb> | undefined
+  let sharedStore: StudioStore | undefined
   try {
     if (admin) {
       await admin.query(`CREATE SCHEMA "${schema}"`)
@@ -164,24 +170,20 @@ export async function openKyselyFeatureFixture(
     }
     maintenance = openStudioSchemaConnection(options)
     await migrateStudioKysely(maintenance, authConfig)
-    database = openKyselyDatabase<StudioDb>(options)
+    sharedStore = openSharedStudioStore(options)
+    await sharedStore.assertReady()
     const auth = betterAuth(studioAuthOptionsForDatabase(maintenance.authDatabase, authConfig))
     const authContext = await auth.$context
     const fixtureRecords = records(maintenance.db)
     return {
+      store: sharedStore,
+      async dropReadinessIndex() {
+        if (!admin) throw new Error('PostgreSQL test schema required')
+        await admin.query(`DROP INDEX "${schema}"."story_thread_messages_one_preparing"`)
+      },
       databaseOptions: options,
-      collections: createKyselyCollectionCatalog(database),
-      conversations: createKyselyConversationCatalog(database),
-      naturalStory: createKyselyNaturalStoryPersistence(database),
-      messages: createKyselyThreadMessages(database),
-      advancedThreads: createKyselyAdvancedThreads(database),
-      steering: createKyselySteeringPersistence(database),
-      continuation: createKyselyContinuationPersistence(database),
-      generation: createKyselyGenerationPersistence(database),
-      ...createKyselyCatalogPersistence(database),
-      publications: createKyselyPublicationRecords(database),
-      ...createKyselyApprovalRevisionPersistence(database),
-      ...createKyselyGitPersistence(database),
+      // Exercise the actual Studio runtime composition on both backends.
+      ...sharedStore.persistence,
       records: fixtureRecords,
       async account(owner, provider) {
         await authContext.internalAdapter.createAccount({
@@ -191,7 +193,7 @@ export async function openKyselyFeatureFixture(
         })
       },
       async reopenGit() {
-        await database!.close()
+        await database?.close()
         database = openKyselyDatabase<StudioDb>(options)
         return createKyselyGitPersistence(database)
       },
@@ -220,17 +222,17 @@ export async function openKyselyFeatureFixture(
         return { ...createKyselyApprovalRevisionPersistence(other), close: () => other.close() }
       },
       async reopenAdvancedThreads() {
-        await database!.close()
+        await database?.close()
         database = openKyselyDatabase<StudioDb>(options)
         return createKyselyAdvancedThreads(database)
       },
       async reopenMessages() {
-        await database!.close()
+        await database?.close()
         database = openKyselyDatabase<StudioDb>(options)
         return createKyselyThreadMessages(database)
       },
       async reopenNavigation() {
-        await database!.close()
+        await database?.close()
         database = openKyselyDatabase<StudioDb>(options)
         return {
           collections: createKyselyCollectionCatalog(database),
@@ -252,7 +254,8 @@ export async function openKyselyFeatureFixture(
         return user.id
       },
       async close() {
-        await database!.close()
+        await database?.close()
+        await sharedStore!.close()
         await maintenance!.close()
         if (createdSchema) await admin!.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
         await admin?.end()
@@ -261,6 +264,7 @@ export async function openKyselyFeatureFixture(
     }
   } catch (error) {
     await database?.close()
+    await sharedStore?.close()
     await maintenance?.close()
     if (createdSchema) await admin?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
     await admin?.end()

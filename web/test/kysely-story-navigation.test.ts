@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
-import { openKyselyFeatureFixture } from './support/kysely-feature-fixture'
+import { openKyselyFeatureFixture } from './support/studio-database'
 
 const at = '2026-11-09T12:00:00Z'
 const later = '2026-11-09T13:00:00Z'

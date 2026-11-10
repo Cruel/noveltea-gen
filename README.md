@@ -1843,7 +1843,7 @@ it remains a deferred steer, not an automatic next Turn. An author can edit
 or withdraw it while unsent. Independently queued next Turns remain eligible
 only for fresh verified canonical impact analysis and bounded scope review;
 they never prevent a separate, safe current-session steer from being delivered.
-The queued Turn/active steer provenance trigger is corrected by Drizzle migration
+The queued Turn/active steer provenance trigger was corrected by schema migration
 `0003_queued_turn_isolation`; run `pnpm --filter @noveltea/studio migrate`
 with Studio stopped before starting the updated application.
 

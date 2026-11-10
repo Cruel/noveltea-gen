@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { fenceAbandonedRuns } from '../src/lib/generation-queue.server'
 
 const auth = {
@@ -58,7 +58,9 @@ test('two WAL connections claim one FIFO queue without duplicate slots or excess
       queueA.claim('host:100:worker-1', 2, stamp),
       queueB.claim('host:200:worker-2', 2, stamp),
     ])
-    assert.deepEqual(claims.map(c => c?.jobId ?? null), [ids[0], ids[1], null, null])
+    assert.deepEqual(claims.filter(c => c !== null).map(c => c.jobId).sort(),
+      [ids[0]!, ids[1]!].sort(), 'only the oldest two queued jobs are admitted')
+    assert.equal(claims.filter(c => c === null).length, 2)
     assert.equal((await queueB.record(ids[0]!))?.phase, 'running')
     assert.equal(await queueB.finish(ids[0]!, 'host:200:worker-2', true, stamp), false,
       'one worker cannot terminate another worker lease')

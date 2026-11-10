@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio, assertStudioSchemaCurrent } from '../src/db/migrations'
+import { migrateStudio, assertStudioSchemaCurrent } from './support/studio-database'
 import { readThreadChat, enqueueThreadMessage } from '../src/lib/thread-chat.server'
 import { setThreadCreativeMode } from '../src/lib/threads.server'
 import { planRevision, planWholeStory, verifyTurnPlan } from '../src/lib/turn-plan'
@@ -86,7 +86,7 @@ test('Thread creative mode default, independent per-Turn snapshots, retries, iso
   try {
     const restarted = openStudioDatabase(filename)
     try {
-      assertStudioSchemaCurrent(restarted)
+      await assertStudioSchemaCurrent(restarted)
       const chat = await readThreadChat(restarted, owner, threadId)
       assert.equal(chat.creativePolicy.mode, 'autonomous')
       assert.deepEqual(chat.turnReceipts.filter(turn => turn.id !== 'initial:' + jobId)

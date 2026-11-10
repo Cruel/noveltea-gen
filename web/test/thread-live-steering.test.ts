@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { submitThreadRevision, previewThreadRevision } from '../src/lib/story-revision.server'
 import { readThreadChat, cancelQueuedThreadMessage, editQueuedThreadMessage,
   settleThreadRun, recoverSettledThreadRuns } from '../src/lib/thread-chat.server'

@@ -27,14 +27,11 @@ docker compose -f compose.yaml -f compose.postgres.yaml logs postgres
 
 This initializes a dedicated `noveltea-postgres` persistent volume via
 `deploy/postgres-bootstrap.sh`, checks PostgreSQL health with an authenticated
-query, and publishes **no database host port**. The database-only service
-is ready now. Full `up -d` with this override remains **intentionally blocked**:
-`init` rejects `NT_STUDIO_DB_BACKEND=postgres` until the remaining application
-store cutover. The shared Kysely migrations, PostgreSQL schema and dedicated
-controller reader are implemented, but the legacy Studio runtime still uses SQLite.
-It must not quietly migrate or run an SQLite Studio while PG is selected.
-
-Once the downstream migration/cutover lands, the same override will supply
+query, and publishes **no database host port**. The initializer, Web and Agent
+now select the same Kysely backend explicitly; PostgreSQL never falls back to
+SQLite. The initializer runs the Kysely schema migration before the Web and
+Agent perform their strict, read-only startup readiness checks. Keep using
+both Compose files for all PostgreSQL operations. The override supplies
 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` to the
 initializer, production Web, development Web, agent, and controller. The
 initializer retains the existing one-shot migration order and the Web/Agent
@@ -122,5 +119,5 @@ fixture uses the disposable bootstrap role for temporary schema creation;
 production application and controller grants remain restricted. Both the
 test project and its uniquely named volume are cleaned up afterward.
 
-End-to-end Web/Agent PostgreSQL startup remains a distinct #141 cutover gate,
+End-to-end Web/Agent PostgreSQL startup remains a distinct #141 certification gate,
 as described in [ADR 0001](adr/0001-kysely-sqlite-first-studio-persistence.md).

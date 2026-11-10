@@ -6,17 +6,17 @@ import { dirname } from 'node:path'
 /** One-shot Compose prerequisite: initialize a durable controller secret and
  * migrate the app catalog before independent web/agent/controller processes.
  * No host Docker socket is mounted into this service. */
-// Do not silently run SQLite when the explicitly selected PostgreSQL
-// transport is configured. #128 will replace this guard after the shared
-// Kysely connection/migration path is implemented.
-if (process.env.NT_STUDIO_DB_BACKEND && process.env.NT_STUDIO_DB_BACKEND !== 'sqlite') {
-  throw new Error('PostgreSQL Studio persistence is not yet installed; complete #128 before starting the full PostgreSQL Compose stack.')
+// The migration CLI selects the same explicit Kysely backend as Web/Agent.
+// An invalid selection must fail before touching credentials or volumes.
+if (!['sqlite', 'postgres'].includes(process.env.NT_STUDIO_DB_BACKEND ?? 'sqlite')) {
+  throw new Error('Unsupported NT_STUDIO_DB_BACKEND; expected sqlite or postgres')
 }
 // Fail at deployment startup, not halfway through a paid generation job,
 // when a bind mount is missing or the native CLI cannot run in this image.
 const binary = '/opt/noveltea/noveltea'
 const skills = '/opt/noveltea-skills/skills'
-if (!statSync(binary).isFile() || !statSync(skills).isDirectory())
+if (!existsSync(binary) || !existsSync(skills) ||
+    !statSync(binary).isFile() || !statSync(skills).isDirectory())
   throw new Error('Native NovelTea CLI and skills checkout must be mounted before startup.')
 const cli = spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: 15_000 })
 if (cli.error || cli.status !== 0)

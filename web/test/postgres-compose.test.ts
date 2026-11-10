@@ -61,14 +61,15 @@ function network(manifest: ComposeConfig, name: string) {
   return found
 }
 
-test('PostgreSQL selection fails closed until shared Kysely startup is available', () => {
+test('PostgreSQL selection reaches native CLI prerequisite instead of obsolete backend gate', () => {
   const result = spawnSync(process.execPath, ['deploy/compose-init.mjs'], {
     cwd: root,
     encoding: 'utf8',
     env: { ...process.env, NT_STUDIO_DB_BACKEND: 'postgres' },
   })
   assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /PostgreSQL Studio persistence is not yet installed/)
+  assert.match(result.stderr, /Native NovelTea CLI and skills checkout must be mounted/)
+  assert.doesNotMatch(result.stderr, /persistence is not yet installed/)
 })
 
 test('default Compose keeps SQLite and a networkless rootless Docker controller', () => {

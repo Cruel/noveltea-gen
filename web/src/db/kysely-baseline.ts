@@ -5,7 +5,7 @@ import type { Migration } from 'kysely/migration'
 
 /**
  * Fresh-schema Kysely baseline. The SQL asset is an independent frozen snapshot
- * of the final Drizzle application schema, not a runtime call into Drizzle.
+ * of the application schema, not generated from a runtime database.
  * Auth tables are deliberately absent: Better Auth owns those migrations.
  *
  * The two dialects share tables, columns, indexes and invariants. PostgreSQL

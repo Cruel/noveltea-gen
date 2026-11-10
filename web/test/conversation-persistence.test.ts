@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { archiveThread, listStoryNavigation, restoreThread } from '../src/lib/threads.server'
 import { cancelQueuedThreadMessage, editQueuedThreadMessage,
   enqueueThreadMessage, readThreadChat } from '../src/lib/thread-chat.server'
@@ -56,7 +56,8 @@ test('Story and Thread writes serialize across Studio connections and survive re
       enqueueThreadMessage(b, owner, threadId, two, 'Second edit'),
       enqueueThreadMessage(a, owner, threadId, three, 'Third edit'),
     ])
-    assert.deepEqual([postedOne.sequence, postedTwo.sequence, postedThree.sequence], [2, 3, 4])
+    assert.deepEqual([postedOne.sequence, postedTwo.sequence, postedThree.sequence].sort((a, b) => a - b),
+      [2, 3, 4], 'concurrent writers receive distinct, gapless sequences')
     assert.deepEqual(await enqueueThreadMessage(b, owner, threadId, one, 'First edit'), postedOne)
     await assert.rejects(() => enqueueThreadMessage(b, owner, threadId, one, 'Different text'),
       /already in use/)
@@ -68,7 +69,7 @@ test('Story and Thread writes serialize across Studio connections and survive re
     const edited = await editQueuedThreadMessage(b, owner, threadId, one, editId,
       'First edit', 'First updated')
     assert.equal(edited.content, 'First updated')
-    assert.equal(edited.sequence, 2)
+    assert.equal(edited.sequence, postedOne.sequence)
     assert.deepEqual(await editQueuedThreadMessage(a, owner, threadId, one, editId,
       'First edit', 'First updated'), edited)
     assert.deepEqual(await enqueueThreadMessage(a, owner, threadId, one, 'First edit'), edited,
@@ -95,9 +96,11 @@ test('Story and Thread writes serialize across Studio connections and survive re
     try {
       const result = await readThreadChat(reopened, owner, threadId)
       assert.deepEqual(result.messages.map(message => message.sequence), [0, 1, 2, 3, 4])
-      assert.deepEqual(result.messages.filter(message => message.role === 'user')
-        .map(message => message.content),
-      ['Opening request', 'First updated', 'Second edit', 'Third edit'])
+      const byId = new Map(result.messages.map(message => [message.id, message.content]))
+      assert.equal(result.messages.find(message => message.sequence === 0)?.content, 'Opening request')
+      assert.equal(byId.get(one), 'First updated')
+      assert.equal(byId.get(two), 'Second edit')
+      assert.equal(byId.get(three), 'Third edit')
       const history = result.messages.find(message => message.id === one)?.editHistory
       assert.equal(history?.length, 1)
       assert.equal(history[0]?.old, 'First edit')

@@ -12,7 +12,7 @@ import { selectNavigationThreads } from '../src/lib/thread-navigation'
 import { selectedJob, restoreJob } from '../src/lib/fixture-jobs.server'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 
 const config = {
   baseURL: 'http://localhost:3000',

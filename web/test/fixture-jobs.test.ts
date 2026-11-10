@@ -8,9 +8,9 @@ import { removeTestTree } from '../../test/helpers'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openStudioDatabase, openCutoverTestStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { openStudioSchemaConnection, migrateStudioKysely } from '../src/db/kysely-migrations'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
 import { fixtureJobRequest } from '../src/lib/fixture-jobs.server'
@@ -67,7 +67,11 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
   let store = openStudioDatabase(join(root, 'studio.sqlite'))
   let worker: ChildProcess | undefined
   try {
-    await migrateStudio(store, config)
+    const maintenance = openStudioSchemaConnection({ backend: 'sqlite', path: join(root, 'studio.sqlite') })
+    try { await migrateStudioKysely(maintenance, config) }
+    finally { await maintenance.close() }
+    await store.close()
+    store = openCutoverTestStudioDatabase(join(root, 'studio.sqlite'))
     const auth = createStudioAuth(store, config)
     const ctx = await auth.$context
     const alice = await ctx.internalAdapter.createUser({
@@ -337,8 +341,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal((await api('POST', { ...payload, task: 'Changed task' }, aliceCookie)).status, 409)
 
     // Simulate a new application process using the same on-disk catalog and graph checkpoint.
-    store.close()
-    store = openStudioDatabase(join(root, 'studio.sqlite'))
+    await store.close()
+    store = openCutoverTestStudioDatabase(join(root, 'studio.sqlite'))
     // A reconnect must use the saved request and immutable skill snapshot;
     // the current deployment's optional checkout path is not an authority.
     delete process.env.NT_STUDIO_SKILLS_SOURCE
@@ -514,8 +518,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(proposed.detail?.review, undefined)
     assert.equal(proposed.detail?.diagnostics, undefined)
     assert.deepEqual(await listGenerationEvents(store, bob.id, jobId, newest.events.at(-1)!.id), [])
-    store.close()
-    store = openStudioDatabase(join(root, 'studio.sqlite'))
+    await store.close()
+    store = openCutoverTestStudioDatabase(join(root, 'studio.sqlite'))
     assert.deepEqual((await listGenerationEvents(store, alice.id, jobId, newest.events.at(-1)!.id))
       .map(event => event.id), [proposed.id], 'restart preserves exact Pi status cursor')
   } finally {
@@ -523,7 +527,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       worker.kill('SIGKILL')
       await once(worker, 'exit')
     }
-    store.close()
+    await store.close()
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value

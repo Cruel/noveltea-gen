@@ -73,9 +73,7 @@ async function receipt(
   return { ...row, phase: row.phase }
 }
 
-/** A single domain implementation for both engines; not wired into live
- * Drizzle StudioStore until the complete shared cutover (#141).
- */
+/** Single publication domain implementation for both SQL engines. */
 export function createKyselyPublicationRecords(db: SharedDatabase<StudioDb>): PublicationRecords {
   return {
     async job(owner, jobId, provider) {

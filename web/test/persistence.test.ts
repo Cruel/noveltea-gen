@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
 import { getDashboardData, dashboardResponse } from '../src/lib/access.server'
 import { readUserDashboard } from '../src/lib/catalog'
@@ -79,7 +79,7 @@ test('dashboard and preferences ports share fresh SQLite schema with unconverted
       { provider: 'openai', id: 'model-a', thinking: 'medium' })
     assert.equal(await prefs.getDefaultModel(bob), null)
     assert.equal((await store.testing.records.first<{ ownerUserId: string }>('user_preferences'))?.ownerUserId,
-      alice, 'test reader observes the persisted Drizzle upsert')
+      alice, 'test reader observes the persisted repository upsert')
     await prefs.putDefaultModel(alice, null, '2026-11-06')
     assert.equal(await readDefaultModel(prefs, alice), null)
     assert.equal((await store.testing.records.first<{ defaultModelJson: string | null }>('user_preferences'))?.defaultModelJson,

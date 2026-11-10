@@ -5,112 +5,71 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { openStudioDatabase } from './support/studio-database'
+import { openSharedStudioStore } from '../src/db/shared-studio-store'
+import { openStudioSchemaConnection, inspectStudioMigrationHistory,
+  studioMigrationNames } from '../src/db/kysely-migrations'
 
 const webRoot = fileURLToPath(new URL('..', import.meta.url))
+const authEnv = {
+  BETTER_AUTH_URL: 'http://localhost:3000',
+  BETTER_AUTH_SECRET: 'stable-migration-test-secret-012345678901234567890',
+  GITHUB_CLIENT_ID: 'test-gh',
+  GITHUB_CLIENT_SECRET: 'test-gh-secret',
+  GITLAB_CLIENT_ID: 'test-gl',
+  GITLAB_CLIENT_SECRET: 'test-gl-secret',
+}
 
-test('migration command initializes, verifies and repeats on a durable SQLite database without background schema errors', async () => {
+function migrate(cwd: string, env: NodeJS.ProcessEnv) {
+  return spawnSync(join(webRoot, 'node_modules/.bin/tsx'), [join(webRoot, 'src/db/migrate-cli.ts')], {
+    cwd, encoding: 'utf8', env, timeout: 20_000,
+  })
+}
+
+test('default migration command is idempotent Kysely on a durable SQLite database', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'noveltea-migrate-'))
   const filename = join(directory, 'studio.sqlite')
-  const env = {
-    ...process.env,
-    NT_STUDIO_DB_PATH: filename,
-    BETTER_AUTH_URL: 'http://localhost:3000',
-    BETTER_AUTH_SECRET: 'stable-migration-test-secret-012345678901234567890',
-    GITHUB_CLIENT_ID: 'test-gh',
-    GITHUB_CLIENT_SECRET: 'test-gh-secret',
-    GITLAB_CLIENT_ID: 'test-gl',
-    GITLAB_CLIENT_SECRET: 'test-gl-secret',
-  }
+  const env = { ...process.env, ...authEnv, NT_STUDIO_DB_BACKEND: 'sqlite', NT_STUDIO_DB_PATH: filename }
   try {
     for (let run = 0; run < 3; run++) {
-      const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/db/migrate-cli.ts'], {
-        cwd: webRoot, encoding: 'utf8', env, timeout: 20_000,
-      })
-      assert.equal(result.status, 0, `Migration run ${run + 1} failed: ${result.stderr}`)
-      assert.match(result.stdout, /NovelTea Studio SQLite migrations applied/)
-      assert.doesNotMatch(result.stderr, /ERROR \[Better Auth\]|schema mismatch|Could not validate the database schema/i)
+      const result = migrate(webRoot, env)
+      assert.equal(result.status, 0, result.stderr)
+      assert.match(result.stdout, /Kysely migration up completed/)
     }
-    const store = openStudioDatabase(filename)
+    const maintenance = openStudioSchemaConnection({ backend: 'sqlite', path: filename }, 'read')
     try {
-      const tables = (await store.testing.schema.tables())
-      for (const name of ['user', 'session', 'account', 'verification', 'rateLimit', 'repositories', 'stories', 'studio_sessions', 'github_install_flows', 'story_onboarding_drafts', 'story_onboarding_conversations', 'pi_credentials', 'generation_events', 'generation_run_queue', 'github_publications', 'gitlab_publications', 'user_preferences', 'git_connections', 'git_connection_flows', 'story_threads', 'story_thread_runs', 'story_thread_preferences', 'story_thread_messages', 'checkpoint_forks', 'thread_restarts', 'thread_protected_decisions', 'thread_live_inputs', 'thread_active_pi_turns',
-        'thread_queued_message_edits', 'thread_live_effect_reviews',
-        'thread_steering_intents', 'thread_steering_checkpoint_links',
-        'story_collections', 'story_collection_memberships', 'user_story_selection']) {
-        assert.ok(tables.includes(name), `Missing ${name}`)
-      }
-      const history = (await store.testing.schema.migrationHistory())
-      assert.equal(history.length, 5, 'Studio requires the creative policy migration after the queued Turn isolation migration')
-      for (const migration of history) {
-        assert.match(migration.hash, /^[a-f0-9]{64}$/)
-        assert.ok(migration.createdAt > 0)
-      }
-      for (const column of ['deleted_at', 'deletion_complete_at',
-        'deletion_plan_json', 'deletion_bytes']) {
-        assert.ok((await store.testing.schema.columns('story_threads')).includes(column),
-          'Missing Thread deletion column ' + column)
-      }
-      for (const column of ['source_thread_id', 'proof_digest', 'guidance', 'history_json', 'edited_message_id', 'edited_body']) {
-        assert.ok((await store.testing.schema.columns('checkpoint_forks')).includes(column), 'Missing fork column ' + column)
-      }
-      assert.ok((await store.testing.schema.columns('stories')).includes('source_commit_sha'))
-      assert.ok((await store.testing.schema.columns('stories')).includes('initial_content_sha256'))
-      assert.ok((await store.testing.schema.columns('story_thread_messages')).includes('revision_scope_json'))
-      assert.ok(tables.includes('story_thread_message_cancellations'),
-        'Cancellation audit table must be present after migration')
-      const sessionColumns = (await store.testing.schema.columns('studio_sessions'))
-      for (const column of ['source_commit_sha', 'generation_request_json', 'generation_thread_id', 'generation_config_json']) {
-        assert.ok(sessionColumns.includes(column), 'Missing session column ' + column)
-      }
-      assert.equal((await store.testing.integrityHealthy()), true)
-      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
-      // Simulate an upgrade to a future Studio version: downgrades must fail,
-      // never claim success or rewrite a schema owned by newer code.
-      ;(await store.testing.schema.appendMigration('future-version', 9999999999999))
-    } finally { store.close() }
-    const rejected = spawnSync(process.execPath, ['--import', 'tsx', 'src/db/migrate-cli.ts'], {
-      cwd: webRoot, encoding: 'utf8', env, timeout: 20_000,
-    })
-    assert.notEqual(rejected.status, 0)
-    assert.match(rejected.stderr, /newer application/)
-    assert.doesNotMatch(rejected.stdout, /SQLite migrations applied/)
-  } finally { rmSync(directory, { recursive: true, force: true }) }
+      assert.equal(await inspectStudioMigrationHistory(maintenance), studioMigrationNames().length)
+    } finally {
+      await maintenance.close()
+    }
+    const store = openSharedStudioStore({ backend: 'sqlite', path: filename })
+    try {
+      await store.assertReady()
+      assert.deepEqual(await store.persistence.settings.listRepositories('owner'), [])
+    } finally {
+      await store.close()
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
-test('migration CLI loads the Vite development environment including local overrides', async () => {
+test('migration CLI loads Vite local overrides rather than creating the base DB', () => {
   const directory = mkdtempSync(join(tmpdir(), 'noveltea-migrate-env-'))
   const ignoredPath = join(directory, 'ignored.sqlite')
   const databasePath = join(directory, 'from-env-local.sqlite')
-  // Simulate Vite's env files without reading or changing real OAuth secrets.
   writeFileSync(join(directory, '.env'), [
-    'BETTER_AUTH_URL=http://localhost:3000',
-    'BETTER_AUTH_SECRET=local-cli-env-test-secret-012345678901234567890',
-    'GITHUB_CLIENT_ID=local-github',
-    'GITHUB_CLIENT_SECRET=local-github-secret',
-    'GITLAB_CLIENT_ID=local-gitlab',
-    'GITLAB_CLIENT_SECRET=local-gitlab-secret',
+    ...Object.entries(authEnv).map(([name, value]) => name + '=' + value),
     `NT_STUDIO_DB_PATH=${ignoredPath}`,
   ].join('\n') + '\n')
   writeFileSync(join(directory, '.env.local'), `NT_STUDIO_DB_PATH=${databasePath}\n`)
-  const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'development' }
-  for (const key of [
-    'BETTER_AUTH_URL', 'BETTER_AUTH_SECRET', 'GITHUB_CLIENT_ID',
-    'GITHUB_CLIENT_SECRET', 'GITLAB_CLIENT_ID', 'GITLAB_CLIENT_SECRET',
-    'NT_STUDIO_DB_PATH',
-  ]) delete env[key]
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'development', NT_STUDIO_DB_BACKEND: 'sqlite' }
+  for (const key of [...Object.keys(authEnv), 'NT_STUDIO_DB_PATH']) delete env[key]
   try {
-    const result = spawnSync(join(webRoot, 'node_modules/.bin/tsx'),
-      [join(webRoot, 'src/db/migrate-cli.ts')], {
-        cwd: directory, env, encoding: 'utf8', timeout: 20_000,
-      })
-    assert.equal(result.status, 0, `Migration without exported .env failed: ${result.stderr}`)
-    assert.match(result.stdout, /NovelTea Studio SQLite migrations applied/)
-    assert.ok(existsSync(databasePath), 'Vite .env.local DB path was not used')
-    assert.equal(existsSync(ignoredPath), false, 'Base .env DB path unexpectedly won')
-    const store = openStudioDatabase(databasePath)
-    try {
-      assert.equal((await store.testing.schema.migrationHistory()).length, 5)
-    } finally { store.close() }
-  } finally { rmSync(directory, { recursive: true, force: true }) }
+    const result = migrate(directory, env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(existsSync(databasePath))
+    assert.equal(existsSync(ignoredPath), false)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })

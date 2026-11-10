@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/kysely-feature-fixture'
+import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/studio-database'
 import type { PendingPiInput } from '../src/persistence/steering-contracts'
 
 const at = '2026-11-09T10:00:00Z'

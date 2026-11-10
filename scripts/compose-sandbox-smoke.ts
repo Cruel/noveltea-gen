@@ -8,7 +8,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { openStudioDatabase, studioSqliteDriver } from '../web/src/db/connection'
+import Database from 'better-sqlite3'
+import { openSharedStudioStore } from '../web/src/db/shared-studio-store'
 import { startStoryJob } from '../src/job'
 import { SandboxClient } from '../src/sandbox-client'
 
@@ -41,8 +42,12 @@ git('commit', '-qm', 'Disposable Compose baseline')
 const pin = git('rev-parse', 'HEAD')
 const job = await startStoryJob({ story, job: id, worktreeCacheRoot: repo })
 assert.equal(job.baseSha, pin)
-const store = openStudioDatabase('/var/lib/noveltea/app/studio.sqlite')
-const db = studioSqliteDriver(store)
+const studioPath = '/var/lib/noveltea/app/studio.sqlite'
+const store = openSharedStudioStore({ backend: 'sqlite', path: studioPath })
+await store.assertReady()
+// Certification-only data seeding for the isolated controller witness.
+const db = new Database(studioPath, { fileMustExist: true })
+db.pragma('foreign_keys = ON')
 try {
   db.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
     .run(owner, 'Compose Certification', 'cert-' + id + '@example.invalid', 1, Date.now(), Date.now())
@@ -52,7 +57,7 @@ try {
     .run(storyId, owner, repositoryId, 'story', 'Controller certification fixture', date, pin)
   db.prepare('INSERT INTO studio_sessions (id,owner_user_id,story_id,title,source_commit_sha,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
     .run(id, owner, storyId, 'Controller certification job', pin, 'paused', date, date)
-} finally { store.close() }
+} finally { db.close(); await store.close() }
 const client = new SandboxClient()
 try {
   assert.equal((await client.acquire(id)).status, 'running')

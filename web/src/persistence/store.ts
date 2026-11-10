@@ -10,5 +10,7 @@ export interface StudioStore {
   readonly persistence: StudioPersistence
   /** Read-only validation before serving app requests; never run migrations. */
   assertReady(): Promise<void>
+  /** Invalidate successful readiness after explicit schema maintenance. */
+  invalidateReadiness(): void
   close(): void | Promise<void>
 }

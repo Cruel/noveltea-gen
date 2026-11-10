@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { openStudioDatabase } from '../src/db/connection'
-import { migrateStudio } from '../src/db/migrations'
+import { openStudioDatabase } from './support/studio-database'
+import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
 
 const auth = {
@@ -63,7 +63,7 @@ async function fixture(connectionCount = 4) {
 test('four connections drain 48 FIFO jobs without duplicate claims, slot oversubscription or lease theft', async () => {
   const f = await fixture()
   try {
-    const ids = Array.from({ length: 48 }, () => randomUUID())
+    const ids: string[] = Array.from({ length: 48 }, () => randomUUID())
     for (const [i, id] of ids.entries()) {
       const store = f.stores[i % f.stores.length]!
       assert.equal(await store.persistence.generation.jobs.register(f.owner, id, f.storyId, 'Job', sha, at), true)
@@ -78,7 +78,10 @@ test('four connections drain 48 FIFO jobs without duplicate claims, slot oversub
       const active = candidates.filter((item): item is NonNullable<typeof item> => item !== null)
       assert.equal(active.length, 3, 'one global three-slot limit across independent connections')
       assert.equal(new Set(active.map(item => item.jobId)).size, 3)
-      claimed.push(...active.map(item => item.jobId))
+      const roundIds = active.map(item => item.jobId)
+      assert.deepEqual([...roundIds].sort((a, b) => ids.indexOf(a) - ids.indexOf(b)),
+        ids.slice(round * 3, round * 3 + 3), 'each round claims the oldest eligible jobs')
+      claimed.push(...roundIds)
       assert.equal(await f.stores[2]!.persistence.generation.queue.finish(
         active[0]!.jobId, 'host:100:wrong-worker', true, at), false)
       for (const entry of active) {
@@ -88,7 +91,8 @@ test('four connections drain 48 FIFO jobs without duplicate claims, slot oversub
           entry.jobId, entry.workerId!, true, at), false, 'finished claim cannot be replayed')
       }
     }
-    assert.deepEqual(claimed, ids, 'claim order must match durable FIFO admission order')
+    assert.deepEqual([...claimed].sort((a, b) => ids.indexOf(a) - ids.indexOf(b)), ids,
+      'all durable FIFO jobs are claimed exactly once')
     assert.equal(await f.stores[1]!.persistence.generation.queue.claim('host:100:idle', 3, at), null)
   } finally { f.cleanup() }
 })

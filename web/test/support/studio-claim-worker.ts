@@ -1,9 +1,9 @@
-import { openStudioDatabase } from '../../src/db/connection'
+import { openSharedStudioStore } from '../../src/db/shared-studio-store'
 
 const [path, workerId] = process.argv.slice(2)
 if (!path || !workerId) throw new Error('Missing isolated claim-worker arguments')
 
-const store = openStudioDatabase(path)
+const store = openSharedStudioStore({ backend: 'sqlite', path })
 const claimed: string[] = []
 const now = '2026-11-05T00:00:00Z'
 try {
@@ -35,6 +35,6 @@ try {
       throw new Error('Worker lease changed during multi-process certification')
   }
 } finally {
-  store.close()
+  await store.close()
 }
 process.send?.({ claimed })

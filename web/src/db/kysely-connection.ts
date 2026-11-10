@@ -29,9 +29,28 @@ export interface SharedDatabase<DB> {
   close(): Promise<void>
 }
 export type DatabaseOptions = (
-  | { backend: 'sqlite'; path: string; busyTimeoutMs?: number; contentionBudgetMs?: number }
+  | { backend: 'sqlite'; path: string; busyTimeoutMs?: number; contentionBudgetMs?: number;
+      serializeLocalWrites?: boolean }
   | { backend: 'postgres'; connection: Omit<PoolConfig, 'max'>; poolSize?: number }
 ) & { maxAttempts?: number }
+
+/** Never block the Node event loop on a competing local SQLite transaction.
+ * Each process has its own FIFO queue; BEGIN IMMEDIATE remains the cross-process
+ * authority. This queue covers the whole replayable transaction callback.
+ */
+const localWrites = new Map<string, Promise<void>>()
+async function serializeLocalWrite<T>(path: string, work: () => Promise<T>): Promise<T> {
+  const previous = localWrites.get(path)
+  let release!: () => void
+  const next = new Promise<void>(resolve => { release = resolve })
+  localWrites.set(path, next)
+  if (previous) await previous
+  try { return await work() }
+  finally {
+    if (localWrites.get(path) === next) localWrites.delete(path)
+    release()
+  }
+}
 
 function bounded(value: number, name: string, min: number, max: number): number {
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`Invalid ${name}`)
@@ -133,34 +152,39 @@ export function openKyselyDatabase<DB = StudioDb>(options: DatabaseOptions): Sha
           }),
         ),
       ].sort()
-      const deadline = contentionBudgetMs === undefined ? undefined : performance.now() + contentionBudgetMs
-      for (let attempt = 1; ; attempt++) {
-        try {
-          const run = () =>
-            db.transaction().execute(async (tx) => {
-              if (backend === 'postgres') {
-                await sql`set local lock_timeout = '5s'`.execute(tx)
-                // Mandatory for EVERY writer, including empty guard lists and formerly autocommit DML.
-                // Queue capacity, absent identities and event publication are covered by this fallback.
-                for (const key of ['0:exclusive', ...keys]) {
-                  await sql`select pg_advisory_xact_lock(${lockId(key)}::bigint)`.execute(tx)
+      const perform = async () => {
+        const deadline = contentionBudgetMs === undefined ? undefined : performance.now() + contentionBudgetMs
+        for (let attempt = 1; ; attempt++) {
+          try {
+            const run = () =>
+              db.transaction().execute(async (tx) => {
+                if (backend === 'postgres') {
+                  await sql`set local lock_timeout = '5s'`.execute(tx)
+                  // Mandatory for EVERY writer, including empty guard lists and formerly autocommit DML.
+                  // Queue capacity, absent identities and event publication are covered by this fallback.
+                  for (const key of ['0:exclusive', ...keys]) {
+                    await sql`select pg_advisory_xact_lock(${lockId(key)}::bigint)`.execute(tx)
+                  }
                 }
-              }
-              return await work(tx)
-            })
-          return await (sqliteDeadline && deadline !== undefined ? sqliteDeadline.run(deadline, run) : run())
-        } catch (error) {
-          const code = (error as { code?: string } | null)?.code
-          const retry =
-            backend === 'postgres'
-              ? code === '40P01' || code === '40001'
-              : code === 'SQLITE_BUSY' || code === 'SQLITE_BUSY_SNAPSHOT'
-          if (!retry || attempt >= attempts) throw error
-          const backoff = 10 * attempt
-          if (deadline !== undefined && performance.now() + backoff >= deadline) throw error
-          await delay(backoff)
+                return await work(tx)
+              })
+            return await (sqliteDeadline && deadline !== undefined ? sqliteDeadline.run(deadline, run) : run())
+          } catch (error) {
+            const code = (error as { code?: string } | null)?.code
+            const retry =
+              backend === 'postgres'
+                ? code === '40P01' || code === '40001'
+                : code === 'SQLITE_BUSY' || code === 'SQLITE_BUSY_SNAPSHOT'
+            if (!retry || attempt >= attempts) throw error
+            const backoff = 10 * attempt
+            if (deadline !== undefined && performance.now() + backoff >= deadline) throw error
+            await delay(backoff)
+          }
         }
       }
+      return options.backend === 'sqlite' && options.serializeLocalWrites
+        ? serializeLocalWrite(options.path, perform)
+        : perform()
     },
     close() {
       closed = true

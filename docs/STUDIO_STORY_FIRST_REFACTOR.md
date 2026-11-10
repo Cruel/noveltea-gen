@@ -97,7 +97,7 @@ Two full-width, vertically stacked workspaces sharing aligned left sidebars:
 ## Dependency-ordered implementation workstreams
 
 1. **Model and controller contracts:** Story–Thread–Turn–Execution identities; optional Collections; revision lineage; per-Turn intent; modes as policy; validated/reviewed state and typed activity events.
-2. **Persistence clean cutover:** New Drizzle schema and repository adapters; clean isolated dev DB reset; owner isolation and durable lifecycle invariants; no legacy Conversation parent.
+2. **Persistence clean cutover:** New application schema and repository adapters; clean isolated dev DB reset; owner isolation and durable lifecycle invariants; no legacy Conversation parent.
 3. **Unified Turn orchestration:** Chat-first Story/Thread creation; natural-language planning for arbitrary scope; queued follow-ups and explicit steering; incremental verified revision advancement; sessions and recovery.
 4. **Review orchestration:** Shared assignment-to-diff receipts, deterministic gate, adaptive semantic-review policy and bounded group reviews, same-session repairs, disagreement interrupts, independent plan-level fulfillment check.
 5. **Author interaction and activity:** Unified choice types (binary, multi-choice, free-text + Other), durable resume; report_status and controller events; concise chat activity, historical file associations.

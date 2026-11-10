@@ -3,7 +3,7 @@
  *
  * Uses #127's opt-in Compose topology with a unique project and volume.
  * Tests native PostgreSQL primitives and the shared Kysely transaction boundary.
- * Full StudioStore domain migration/certification remains a separate gate.
+ * The conformance mode additionally exercises the composed StudioStore on both backends.
  * Never starts Studio or touches an existing developer DB.
  */
 import assert from "node:assert/strict";
@@ -312,6 +312,7 @@ SELECT count(*) FROM audit_queue WHERE phase='running';`);
           "kysely-features", "kysely-generation", "kysely-git",
           "kysely-schema-hardening", "kysely-schema", "kysely-steering",
           "kysely-story-navigation", "kysely-thread-messages", "kysely-workflow",
+          "shared-studio-store", "studio", "oauth", "thread-chat", "studio-readiness",
         ].map(name => `test/${name}.test.ts`);
         const result = spawnSync("pnpm", [
           "--filter", "@noveltea/studio", "exec", "tsx", "--test",

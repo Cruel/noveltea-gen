@@ -8,6 +8,7 @@ import { StudioPostgresDialect } from './studio-postgres-dialect'
 import { trustedCatalogProjectionSql, trustedCatalogViewName } from './trusted-catalog-definition'
 import { FileMigrationProvider, Migrator, NO_MIGRATIONS, type Migration } from 'kysely/migration'
 import { Pool, type PoolConfig } from 'pg'
+import { register } from 'tsx/esm/api'
 import { betterAuth } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
 import { StudioSchemaError } from './schema-error'
@@ -30,8 +31,8 @@ type Connection = {
 }
 
 /** Dedicated explicit-maintenance connection, never exposed through StudioStore.
- * This is not the web application's persistence switch: legacy Drizzle keeps
- * serving SQLite until the later repository cutover.
+ * Runtime startup uses this only for read-only readiness; migration requires
+ * a separate, explicit operator invocation.
  */
 export function openStudioSchemaConnection(
   options: StudioSchemaOptions,
@@ -211,7 +212,19 @@ function withSourceLedger(name: string, folder: string, migration: Migration): M
   }
 }
 
+let migrationLoaderRegistered = false
+function ensureMigrationTypeScriptLoader() {
+  if (migrationLoaderRegistered) return
+  register()
+  migrationLoaderRegistered = true
+}
+
 async function migrator(connection: Connection): Promise<Migrator> {
+  // Vite's dev SSR imports migrations through native Node ESM, while the
+  // migration CLI already runs under tsx. Register one shared TS resolver
+  // before importing authored files so immutable extensionless imports work
+  // without creating a second Kysely module identity.
+  ensureMigrationTypeScriptLoader()
   const files = new FileMigrationProvider({ fs, path: { join }, migrationFolder: connection.migrationFolder })
   // Kysely's unqualified table-existence test sees migration journals in
   // unrelated PostgreSQL schemas. Pin the journal to the selected schema so
@@ -277,7 +290,7 @@ async function listedTables(connection: Connection): Promise<Set<string>> {
   return new Set(tables.rows.map((table) => table.name))
 }
 
-/** Reject legacy Drizzle and partial/future Kysely journals before any write.
+/** Reject incompatible legacy and partial/future Kysely journals before any write.
  * Kysely Migrator must never infer adoption from pre-existing tables.
  */
 export async function inspectStudioMigrationHistory(connection: Connection): Promise<number> {
@@ -747,7 +760,7 @@ export async function assertKyselyStudioSchemaCurrent(connection: Connection): P
 
 /** Explicit migration entrypoint. Better Auth owns its own tables and always
  * migrates them before the application baseline. Both checks are fail closed;
- * migrate never tries to adopt Drizzle or repair altered application DDL.
+ * migrate never tries to adopt old schemas or repair altered application DDL.
  */
 export async function migrateStudioKysely(
   connection: Connection,

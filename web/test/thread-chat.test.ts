@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { submitThreadRevision } from '../src/lib/story-revision.server'
-import { migrateStudio, assertStudioSchemaCurrent } from '../src/db/migrations'
+import { migrateStudio, assertStudioSchemaCurrent, openStudioBusinessFixture } from './support/studio-database'
 import {
   readThreadChat, enqueueThreadMessage, advanceThread, settleThreadRun, recoverSettledThreadRuns,
 } from '../src/lib/thread-chat.server'
@@ -44,10 +44,64 @@ async function setup() {
   return { db, alice, bob, id, story, job }
 }
 
+for (const backend of ['sqlite', 'postgres'] as const) {
+  test(backend + ': Thread chat service supports owner-scoped reads, queueing and reconnect', {
+    skip: backend === 'postgres' && !process.env.NT_TEST_PG_URL && 'Set NT_TEST_PG_URL',
+    timeout: 60_000,
+  }, async () => {
+    const fixture = await openStudioBusinessFixture(backend)
+    try {
+      const db = fixture.store
+      const alice = await fixture.owner(), bob = await fixture.owner()
+      const repo = randomUUID(), story = randomUUID(), thread = randomUUID(), job = randomUUID()
+      const at = '2026-11-10T00:00:00Z'
+      await fixture.records.insert('repositories', {
+        id: repo, ownerUserId: alice, provider: 'github',
+        providerRepositoryId: repo, name: 'Owner/Novel', createdAt: at,
+      })
+      await fixture.records.insert('stories', {
+        id: story, ownerUserId: alice, repositoryId: repo, directory: 'novel',
+        title: 'Novel', sourceCommitSha: 'a'.repeat(40), createdAt: at,
+      })
+      await fixture.records.insert('story_threads', {
+        id: thread, ownerUserId: alice, storyId: story, title: 'Root',
+        activityAt: at, createdAt: at,
+      })
+      await fixture.records.insert('studio_sessions', {
+        id: job, ownerUserId: alice, storyId: story, title: 'Original',
+        status: 'completed', sourceCommitSha: 'a'.repeat(40), createdAt: at, updatedAt: at,
+        generationRequestJson: JSON.stringify({ task: 'Original request', fixture: true }),
+      })
+      await fixture.records.insert('story_thread_runs', {
+        jobId: job, ownerUserId: alice, threadId: thread, runOrder: 0,
+      })
+      await fixture.records.insert('generation_run_queue', {
+        jobId: job, ownerUserId: alice, intent: 'start', phase: 'finished',
+        createdAt: at, updatedAt: at,
+      })
+      await fixture.records.insert('generation_events', {
+        jobId: job, ownerUserId: alice, kind: 'finished', status: 'completed', createdAt: at,
+      })
+      const initial = await readThreadChat(db, alice, thread)
+      assert.deepEqual(initial.messages.map(message => message.role), ['user', 'assistant'])
+      await assert.rejects(readThreadChat(db, bob, thread), /not found/)
+      const messageId = randomUUID()
+      const sent = await enqueueThreadMessage(db, alice, thread, messageId, 'Continue the novel')
+      assert.equal(sent.phase, 'queued')
+      await assert.rejects(enqueueThreadMessage(db, bob, thread, randomUUID(), 'Unauthorized'), /not found/)
+      const reopened = await readThreadChat(db, alice, thread)
+      assert.equal(reopened.messages.at(-1)?.content, 'Continue the novel')
+      assert.equal(reopened.turnReceipts.find(turn => turn.id === messageId)?.outcome, 'queued')
+    } finally {
+      await fixture.close()
+    }
+  })
+}
+
 test('Thread chat is immutable, ordered, owner-scoped, reconnectable and honest about fixture evidence', async () => {
   const { db, alice, bob, id, job } = await setup()
   try {
-    assertStudioSchemaCurrent(db)
+    await assertStudioSchemaCurrent(db)
     const initial = (await readThreadChat(db, alice, id))
     assert.deepEqual(initial.messages.map(message => message.role), ['user', 'assistant'])
     assert.equal(initial.messages[0]?.content, 'Original author request')

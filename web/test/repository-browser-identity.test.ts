@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
 import { resolveRepositoryForBrowser } from '../src/lib/repository-browser.server'
 

@@ -4,6 +4,28 @@ import {
   assertPersistenceBoundary,
   sourceViolations,
 } from '../../scripts/check-studio-persistence-boundary.mjs'
+import { featureTestImportViolations } from '../../scripts/check-source-quality.mjs'
+
+test('ordinary feature tests cannot bypass shared persistence ports', () => {
+  for (const source of [
+    "import { Pool } from 'pg'",
+    "import { Kysely } from 'kysely'",
+    "import type { Transaction } from 'kysely'",
+    "import { openKyselyDatabase } from '../src/db/kysely-connection'",
+    "const pg = require('pg')",
+    "await import('kysely')",
+    "export { sql } from 'kysely'",
+    "import Database from 'better-sqlite3'",
+  ]) {
+    assert.ok(featureTestImportViolations('web/test/studio.test.ts', source).length > 0, source)
+  }
+  assert.deepEqual(featureTestImportViolations('web/test/studio.test.ts',
+    "import { openStudioDatabase } from './support/studio-database'"), [])
+  assert.deepEqual(featureTestImportViolations('web/test/kysely-schema.test.ts',
+    "import { Pool } from 'pg'"), [])
+  assert.deepEqual(featureTestImportViolations('web/test/support/kysely-feature-fixture.ts',
+    "import { openKyselyDatabase } from '../../src/db/kysely-connection'"), [])
+})
 
 test('Studio application source cannot import or access the raw SQLite driver', () => {
   assertPersistenceBoundary()
@@ -17,18 +39,10 @@ test('Studio application source cannot import or access the raw SQLite driver', 
     "import { createKyselyGitPersistence } from '../persistence/git-kysely'",
     "import { openKyselyDatabase } from '../db/kysely-connection'",
     "const Database = require('better-sqlite3')",
-    "await import('drizzle-orm/better-sqlite3')",
-    "import { drizzle } from 'drizzle-orm/better-sqlite3'",
     "store?.sqlite.prepare('SELECT 1')",
     "store['sqlite'].prepare('SELECT 1')",
     "store.sqlite.prepare('SELECT 1')",
     'database.sqlite.transaction(() => {})',
-    "import { ownedThreadMessageSqlite } from '../persistence/thread-message-sqlite'",
-    'studioSqliteDriver(store)',
-    'studioDrizzleForMigrations(store)',
-    "import { assertStudioSchemaCurrent } from '../db/migrations'",
-    "store.persistence.generation.queue.sqliteTransactionBridge.claim('id', 1, 'now')",
-    'store.persistence.generation.events.sqliteBridge.after(owner, jobId, 0, 1)',
   ]) {
     assert.ok(sourceViolations('lib/application.server.ts', source).length > 0, source)
   }
@@ -39,7 +53,6 @@ test('Studio application source cannot import or access the raw SQLite driver', 
     ),
     [],
   )
-  assert.ok(sourceViolations('lib/auth.ts', 'database: studioSqliteDriver(store)').length > 0)
   assert.deepEqual(sourceViolations('persistence/collection-kysely.ts', "import { sql } from 'kysely'"), [])
   assert.deepEqual(sourceViolations('persistence/git-kysely.ts', "import { sql } from 'kysely'"), [])
   assert.ok(sourceViolations('persistence/unconverted.ts', "import { sql } from 'kysely'").length > 0)

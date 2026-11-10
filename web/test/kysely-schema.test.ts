@@ -606,7 +606,7 @@ test('Kysely SQLite baseline: independent auth, parity, checks, idempotency, rol
   }
 })
 
-test('legacy Drizzle application tables are never silently adopted by Kysely', async () => {
+test('incompatible legacy application tables are never silently adopted by Kysely', async () => {
   const connection = openStudioSchemaConnection({ backend: 'sqlite', path: ':memory:' })
   try {
     await sql.raw('CREATE TABLE repositories (id text PRIMARY KEY)').execute(connection.db)

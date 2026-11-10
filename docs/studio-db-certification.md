@@ -1,233 +1,111 @@
-# Studio persistence certification and PostgreSQL readiness
+# Studio persistence certification
 
-Status: **SQLite certified for credential-free Studio workflows**, 2026-11-05, issue #101.
-This is a certification of the Drizzle-backed Studio application database, **not**
-a certification of a PostgreSQL deployment or live Git provider/Pi execution.
+This guide describes the shared Kysely Studio persistence implementation on
+SQLite and PostgreSQL. The older SQLite-only certification (#101, November 5,
+2026) established fixture coverage and concurrency requirements before the
+shared persistence cutover. It does not certify live Git provider publishing,
+paid-model execution, or production deployment.
 
-## Repeatable certification
+For schema maintenance see [Kysely schema](kysely-schema.md); for deployment
+and operator-controlled database reset see [Studio Kysely cutover](studio-kysely-cutover.md)
+and [PostgreSQL Compose](postgres-compose.md).
+
+## Required gates
 
 From the repository root, with dependencies installed:
 
 ```sh
-pnpm --filter @noveltea/studio db:check
+pnpm lint
+pnpm --filter @noveltea/studio typegen:check
 pnpm --filter @noveltea/studio persistence:boundary
-pnpm --filter @noveltea/studio typecheck
-pnpm --filter @noveltea/studio test
-pnpm check
+pnpm --filter @noveltea/studio check
+pnpm typecheck
+pnpm test:offline
+pnpm certify:postgres-conformance
 git diff --check
 ```
 
-The Studio `check` script (also invoked by root `pnpm check` and
-`.github/workflows/ci.yml`) checks migration metadata, enforces the
-source boundary, builds/typechecks and runs credential-free tests. Root
-`pnpm lint` also checks general authored-source hygiene (JavaScript/TypeScript
-parse errors, merge markers, unchecked TypeScript suppressions, line endings,
-trailing whitespace, debugger and eval); `pnpm format` is an opt-in Prettier
-command. `pnpm format:check` currently covers the formatter configuration
-and new lint/fixture infrastructure, **not** all legacy authored files, to
-avoid an unrelated repository-wide formatting diff. Do not claim a complete
-Prettier formatting pass on the entire repository.
+The Studio `check` script verifies generated types, source boundaries, build
+and TypeScript types, and credential-free tests. The PostgreSQL conformance
+gate provisions or uses an isolated disposable PostgreSQL fixture; a skipped
+backend test is not evidence of certification. Root `pnpm lint` enforces
+source hygiene and prevents application code from bypassing shared persistence
+ports. Formatter coverage is narrower than all historical authored files.
 
-| Capability | Credential-free evidence |
+## Shared architecture
+
+`web/src/db/shared-studio-store.ts` composes one
+`createKyselyPersistence` implementation for both database engines. Application
+services, HTTP handlers, and agent workflows access asynchronous,
+owner-scoped `StudioStore.persistence` ports, not drivers or SQL builders.
+The selected backend also supplies the Better Auth storage adapter. Better
+Auth owns its authentication tables; Kysely migrations own the Studio
+application tables. No application-level dual-write mechanism exists.
+
+Schema changes are made using immutable migrations in
+`web/kysely-schema/migrations/`, followed by type generation and certification.
+The operator explicitly runs `pnpm --filter @noveltea/studio migrate`
+before startup. Startup calls read-only `assertReady()` and refuses missing
+migrations, drift, partial or untracked old schemas, and incompatible histories.
+It never creates, repairs, imports, or deletes an existing database.
+Successful readiness attestations are cached per store for at most five seconds,
+with immediate SQLite `schema_version` invalidation. PostgreSQL is
+revalidated at the bounded lease expiry. Errors and concurrent DDL changes
+are never cached; closing the store fences pending inspections.
+`web/test/studio-readiness.test.ts` and `web/test/shared-studio-store.test.ts`
+cover cache reuse, bounded revalidation, fail-closed invalidation and
+warm-request latency.
+
+SQLite uses WAL, foreign keys, guarded `BEGIN IMMEDIATE` transactions, and
+process-local write serialization. PostgreSQL uses guarded awaited transactions
+and advisory locks. In either engine, multi-statement changes remain in a
+single transaction, with nested helpers using the transaction executor and
+no external Git/model/network side effects in replayable callbacks.
+
+The sandbox controller has a separate restricted, read-only trusted catalog.
+Graph checkpoints, Pi sessions, Git worktrees and recovery receipts are
+independent of the Studio database; no Studio reset or migration may erase them.
+
+## Regression and certification evidence
+
+| Behavior | Evidence |
 | --- | --- |
-| Fresh initialization, Better Auth-first migration ordering, idempotent CLI, journal mismatch and structural drift refusal | `web/test/db-schema-baseline.test.ts`, `web/test/migrate-cli.test.ts` |
-| Better Auth login/account linking, encrypted credentials and restart | `web/test/studio.test.ts`, `web/test/oauth.test.ts`, `web/test/pi-models.test.ts` |
-| Catalog, onboarding, provider fixtures, job acquisition | `web/test/onboarding.test.ts`, `web/test/git-persistence.test.ts`, `web/test/github-*.test.ts`, `web/test/gitlab-*.test.ts` |
-| Queue, generation state and events, publication, protected decisions | `web/test/generation-persistence.test.ts`, `web/test/publication-approval-persistence.test.ts`, `web/test/github-publication.test.ts`, `web/test/gitlab-publication.test.ts` |
-| Conversations, Threads, steering, continuation, archive, checkpoint fork and restart | `web/test/conversation-persistence.test.ts`, `web/test/advanced-thread-persistence.test.ts`, `web/test/thread-*.test.ts`, `web/test/checkpoint-fork.test.ts` |
-| Four SQLite connections; 48 FIFO jobs under capacity three; four separate OS worker processes contending for 60 jobs; 80 interleaved Thread writes; restart, conflicting retries, rollback, fenced recovery; reset isolation | `web/test/studio-db-certification.test.ts`, `web/test/support/studio-claim-worker.ts` |
-| Raw driver confinement and CI enforcement | `scripts/check-studio-persistence-boundary.mjs`, `web/test/persistence-boundary.test.ts` |
-| Full table and index DDL drift detection (types, nullability, defaults, CHECK and FK constraints, partial-index predicates) | `web/test/db-schema-baseline.test.ts`, live comparison against a pristine reference database |
-| Backend-neutral fixture records and introspection for feature tests; SQLite logic isolated in a test adapter | `web/test/support/studio-database.ts`, `web/test/support/studio-seed.ts`, `web/test/support/sqlite-test-records.ts` |
+| Fresh migration, authentication-first sequencing, journal/readiness drift rejection | `web/test/db-schema-baseline.test.ts`, `web/test/migrate-cli.test.ts`, `web/test/kysely-schema.test.ts` |
+| SQLite/PostgreSQL query equivalence, schema parity, transaction retries, owner isolation | `web/test/kysely-*.test.ts`, `web/test/shared-studio-store.test.ts` |
+| Better Auth account linking, encrypted credentials and restart | `web/test/studio.test.ts`, `web/test/oauth.test.ts`, `web/test/pi-models.test.ts` |
+| Queue acquisition, session fencing, publication, protected decisions | `web/test/generation-persistence.test.ts`, `web/test/publication-approval-persistence.test.ts` |
+| Story navigation, conversations, Threads, steering and restart | `web/test/conversation-persistence.test.ts`, `web/test/advanced-thread-persistence.test.ts`, `web/test/thread-*.test.ts` |
+| SQLite multi-connection and multi-process queue contention, rollback and restart | `web/test/studio-db-certification.test.ts`, `web/test/support/studio-claim-worker.ts` |
+| Source isolation of raw drivers and forbidden application adapters | `scripts/check-studio-persistence-boundary.mjs`, `web/test/persistence-boundary.test.ts` |
+| Backend-selectable Studio business fixtures against the real composition, plus isolated SQLite schema fault injection | `web/test/support/studio-database.ts`, `web/test/support/kysely-feature-fixture.ts`, `web/test/support/kysely-test-records.ts` |
 
-Fixture-based provider tests do not prove that a real GitHub App/GitLab
-installation, OAuth callback, remote push, or merge-request creation will
-work in a deployed environment. Optional real Pi, native validator and
-rootless Docker tests remain explicit opt-ins; skipped tests must be reported.
+Feature tests use `store.persistence` for business operations and
+`store.testing` for fixture records, counts, integrity assertions and
+controlled fault injection. Backend-specific test drivers must not leak
+into application code or normal feature tests.
 
-### Targeted live Pi Story-owned Thread certification (2026-11-08)
+## Live Pi witness (November 8, 2026)
 
-At base commit `dd9f4579ff8100a6d8a2870065a134c9802502ca`, the opt-in
-`web/test/real-pi-generation.test.ts` completed **1 pass, 0 failures, 0 skips**
-(43.3 s test duration) with a real `openai-codex/gpt-6-luna` model invocation.
-The credential was read **read-only** from the pre-cutover Compose Studio
-volume, using an unexpired access token with refresh disabled in the isolated
-test copy. The test generated a schema-0.1 Foundation with the pinned native
-validator in a rootless Docker sandbox, committed it in a disposable Git
-worktree and paused after the verified Foundation boundary. The expanded #104
-witness checked exactly one Story-owned root Thread, the initial author Turn
-linked to that actual execution, no Conversation table, surviving Thread/Turn/
-execution association after reopening the disposable SQLite database,
-cross-owner denial, and zero foreign-key violations. The source Compose database
-file was not modified by the certification.
+The opt-in `web/test/real-pi-generation.test.ts` previously passed one
+real model invocation using a read-only copy of a credential from a stopped
+Studio development database, with refresh disabled. The isolated rootless
+Docker run generated and native-validated a Foundation, committed it to a
+disposable worktree, and verified a Story-owned Thread and durable execution
+association. The source database was not modified. That witness does **not**
+prove live provider publishing, token refresh, or crash recovery under
+production writers. Paid-model, native validator and rootless Docker tests
+remain separately opted in and must be reported as skipped when not run.
 
-This is **not** certification of first-message Thread creation (#105), the
-entire Story-first refactor (#102), real GitHub/GitLab publishing, model token
-refresh, or production crash/recovery under an active writer. The regular
-credential-free suite continues to skip this explicit paid-model test.
-The race suite uses both independent SQLite WAL handles within one process
-and four independent OS worker processes. It does not measure PostgreSQL
-contention or multi-host network behavior.
+## Safety and operator procedure
 
-## Schema ownership and fresh SQLite procedure
+For an empty Studio database, stop Studio and Agent, configure the intended
+backend and stable auth settings, run `pnpm --filter @noveltea/studio migrate`,
+then start Studio and Agent. Old application schemas are **not** automatically
+upgraded or imported. A destructive reset requires identifying the exact
+selected database and taking a verified, consistent backup with every writer
+stopped. Never remove the parent state directory, other services' checkpoints,
+Pi data, Git worktrees or Docker volumes as part of Studio schema maintenance.
 
-There is **one** Studio application database, selected by the absolute
-`NT_STUDIO_DB_PATH` (default `$XDG_STATE_HOME/noveltea-gen/studio.sqlite`).
-`web/src/persistence/store.ts` defines the driver-independent `StudioStore`
-contract (`persistence`, asynchronous `assertReady()`, and potentially asynchronous `close()`).
-Application requests and agent startup await the store's own read-only schema
-readiness guard, not a SQLite migration helper. The Better Auth database
-binding is supplied through `db/auth-storage.ts` by the backend.
-`web/src/db/connection.ts` implements that contract for SQLite; the legacy
-`StudioDatabase` type name is an alias, not a factory-derived type. Better Auth receives backend-selected
-storage via `studioAuthStorage()` rather than importing the SQLite driver
-in its service. Each Promise-returning persistence
-port in `web/src/persistence/*-contracts.ts` is implemented by a Drizzle
-SQLite adapter in `web/src/persistence/*-sqlite.ts`; a port method is the
-atomic business operation. This includes the formerly synchronous Pi steering
-ports. Pi lifecycle registration awaits its durable fence before exposing a
-live turn to dispatch, and settlement awaits the SDK call's durable receipt.
-Within SQLite, continuation and steering still compose synchronous operations
-inside one transaction; no `await` occurs inside a SQLite transaction callback. No application-level dual write exists.
-
-### Test persistence boundary
-
-Feature tests use `store.persistence` for application operations and
-`store.testing` for fixture inserts, updates, reads, counts, integrity
-assertions and deliberate fault injection. The test factory in
-`web/test/support/studio-database.ts` exposes **no** driver or dialect-specific
-Drizzle connection; `studio-seed.ts` uses the same records interface for
-typed fixtures. `web/test/support/test-persistence.ts` defines the
-backend-independent, Promise-returning `TestPersistence` contract, with plain
-record values instead of dialect-specific Drizzle insert types. All feature
-fixture operations and assertions must await their results. Better Auth-owned auth fixtures and isolated schema-mutation
-helpers are also behind that port.
-
-The current implementation of the test port is
-`web/test/support/sqlite-test-records.ts`. Special-purpose minimal controller
-and read-only OAuth SQLite fixtures live in separate backend-specific support
-modules. The root `pnpm lint` source scanner rejects direct SQLite handles
-and driver imports from ordinary feature tests; raw driver access is confined
-to these backend test adapters.
-
-A future PostgreSQL implementation needs PostgreSQL persistence adapters,
-migrations and a matching test-port implementation. Feature tests and their
-business assertions should not need SQL rewrites. These changes do **not**
-imply that a PostgreSQL backend is implemented or certified.
-
-Better Auth exclusively owns `user`, `session`, `account`, `verification`
-and `rateLimit`. `web/src/db/schema.ts` and `web/drizzle/` own the 30
-application tables (Story-owned Threads, Turns and Turn-to-execution links;
-no mandatory Conversation table). `auth-reference.ts` is only an FK target,
-not a second user-table owner. The single explicit `migrate` command runs Better Auth's
-supported migration planner first, then the immutable generated Drizzle
-migration(s), then auth schema and SQLite integrity/foreign-key checks.
-Runtime startup checks the migration journal and compares each application
-`CREATE TABLE`, named `CREATE INDEX` and controller-invariant
-`CREATE TRIGGER` definitions to a pristine SQLite reference constructed
-from the committed Drizzle migration set. This fails closed on
-constraint and type drift as well as column/index omissions; equivalent but
-textually rewritten DDL may be rejected. Expected definitions are cached per
-immutable deployed migration directory. Runtime startup only **validates**;
-it must never run migrations or silently repair a mismatch.
-
-For a **new** database, stop Studio/worker processes, configure the same
-stable auth secret and provider IDs as runtime, then run:
-
-```sh
-pnpm --filter @noveltea/studio migrate
-pnpm --filter @noveltea/studio dev
-```
-
-For a **deliberate destructive reset**, stop all Studio/agent writers, back up
-the stopped Studio database including WAL data, then remove only the Studio
-file and its `-wal` and `-shm` companions at the configured absolute path.
-Run `migrate` and restart. See [the Studio setup and reset guide](../web/README.md)
-for the exact guarded command and Docker Compose procedure. Do **not**
-remove the parent `NT_STATE_DIR`, job directories, graph checkpoints or
-Pi session transcripts; do not run `docker compose down -v`. Application
-tables without Drizzle history and incompatible Drizzle journals are deliberately
-refused, not adopted or automatically erased.
-
-When changing the schema, modify `web/src/db/schema.ts`, run
-`pnpm --filter @noveltea/studio db:generate`, review and commit the new SQL,
-snapshot and journal together, then run `db:check`. Never rewrite an already
-applied migration. Deploy `web/drizzle/` and migrate while writers are stopped.
-
-## PostgreSQL readiness: localized work still required
-
-**Conclusion:** App services depend on asynchronous, owner-scoped persistence
-ports and avoid raw SQLite handles. A PostgreSQL cutover therefore requires
-dialect-specific adapters rather than a rewrite of routes or UI. It is **not**
-an environment-variable-only switch.
-
-**PostgreSQL is deliberately out of scope for this foundation.**
-No PostgreSQL driver, schema, migration, or persistence implementation is
-included. SQLite remains the only supported Studio backend. The async
-contracts, backend-owned authentication adapter, and schema readiness port
-allow a separate backend to be implemented later without modifying feature
-services.
-
-1. **Schema/dialect.** Add a PostgreSQL Drizzle schema and adapter-specific
-   column mappings for SQLite `sqliteTable`, `integer` auto-increment keys,
-   text timestamps/JSON, boolean representations, checks, composite FK
-   constraints, partial/unique indexes and conflict targets. Preserve DB-level
-   tenant isolation, durable FIFO ordering, one-active-state constraints and
-   delete cascades. The SQLite `rowid` ordering of queued-message edit history
-   in `persistence/thread-message-sqlite.ts` needs an explicit durable
-   sequence/key instead of a PostgreSQL analogue. Examine raw Drizzle
-   ``sql`...` `` fragments in the SQLite adapters for dialect-specific
-   expressions before translating.
-2. **Async driver and transactions.** Add a PostgreSQL connection factory
-   (e.g. a supported `pg` pool with Drizzle's PostgreSQL driver) and implement
-   every `StudioPersistence` port in a PostgreSQL-specific module.
-   SQLite's synchronous `.run()/.get()/.all()` and `BEGIN IMMEDIATE` stay in
-   the SQLite adapter; PostgreSQL ports must await queries and perform
-   multi-statement operations within one awaited transaction. Do not expose a
-   generic cross-database transaction callback to application services.
-   Revisit the sandbox controller's separate read-only
-   `db/trusted-catalog.ts` lookup, which currently opens SQLite directly.
-3. **Claims and lock semantics.** Port queue admission, capacity checks,
-   FIFO claim, state transitions, worker leases and interrupted-run
-   reconciliation as indivisible operations. Use transaction-scoped global
-   capacity locking (for example a lock row or advisory lock) **and**
-   `SELECT ... FOR UPDATE SKIP LOCKED` on pending jobs; row locking alone
-   does not stop two schedulers from each counting a free global slot.
-   Similarly serialize each Thread's `MAX(sequence)+1` message allocation,
-   one preparing continuation and one-shot Pi/approval claim. Preserve
-   idempotency keys, comparison-and-swap updates and stale-worker fencing
-   across process crashes. Repeat stress tests with genuinely concurrent
-   PostgreSQL connections and transaction retries.
-4. **Migrations and drift.** Introduce a PostgreSQL Drizzle migration journal
-   and generated migrations. `db/migrations.ts` currently introspects
-   `sqlite_master`, PRAGMA `schema_version`, `table_info`, `index_list`,
-   integrity and foreign-key checks; none can be reused as-is. Build a
-   PostgreSQL-native inspection and migration strategy, retain the
-   independent Better Auth-first ordering and refuse incompatible histories.
-   Since no backward compatibility is required, a fresh PostgreSQL database
-   and explicit data-cutover policy are acceptable.
-5. **Better Auth.** `lib/auth.ts` receives backend-selected storage through
-   `db/auth-storage.ts`. A future PostgreSQL backend would register its
-   supported database adapter and verify both migration ownership and
-   authentication semantics (OAuth state, account linking, encrypted token
-   persistence, sessions and rate-limit storage). Keep one shared Studio
-   database with two *disjoint* schema owners.
-6. **Separate LangGraph/Pi state.** The `SqliteSaver` instances in
-   `src/generation.ts`, `src/checkpoint.ts`,
-   `src/web-fixture-runtime.ts` and other graph controllers store **graph
-   checkpoints**, not Studio application rows. Pi sessions and trusted
-   work-item receipts are separate durable state as well. A Studio
-   PostgreSQL migration does **not** require or authorize changing,
-   deleting or migrating them. Decide whether to migrate the LangGraph
-   checkpointer to its own PostgreSQL backend in an independent project.
-
-### Suggested PostgreSQL gate
-
-Implement a second `StudioPersistence` adapter while keeping the public
-ports and their owner/idempotency semantics unchanged. Run the same
-behavioral fixtures against both adapters, plus a real PostgreSQL
-multi-process race suite, before enabling any deployment switch. Explicitly
-test empty migrations, auth migrations and login, stale worker leases,
-transaction rollback, ambiguous crashes, and restart/recovery. Only then
-consider production cutover. The existing CI restriction on SQLite access
-must remain active, with **new dialect access confined to the new adapter**.
+A credential-free test pass does not certify live GitHub/GitLab installations,
+OAuth callbacks, remote pushes, real model execution, or a production
+migration. Those require independent, explicitly opted-in witnesses.

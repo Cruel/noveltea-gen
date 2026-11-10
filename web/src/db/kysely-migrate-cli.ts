@@ -1,5 +1,5 @@
 import { loadEnv } from 'vite'
-import { defaultStudioPath } from './connection'
+import { selectedStudioDatabaseOptions } from './studio-options'
 import { readAuthConfig } from '../lib/auth'
 import {
   assertKyselyStudioSchemaCurrent,
@@ -7,11 +7,10 @@ import {
   openStudioSchemaConnection,
   studioMigrationNames,
   NO_MIGRATIONS,
-  type StudioSchemaOptions,
 } from './kysely-migrations'
 
-// Explicit fresh-schema path. The existing `migrate` command intentionally
-// remains the legacy Drizzle initializer until the application cutover.
+// This is the only Studio migration runner. Both `migrate` and `migrate:kysely`
+// use the same explicit backend, independent of runtime schema readiness.
 const mode = process.env.NODE_ENV === 'production' ? 'production' : 'development'
 const env = loadEnv(mode, process.cwd(), '')
 const operation = process.argv[2] ?? 'up'
@@ -24,30 +23,8 @@ if (
 ) {
   throw new Error('Usage: migrate:kysely [up|down|check|to <baseline|latest|migration-name|none>]')
 }
-const backend = env.NT_STUDIO_DB_BACKEND ?? 'sqlite'
-let options: StudioSchemaOptions
-if (backend === 'sqlite') {
-  options = { backend, path: defaultStudioPath(env) }
-} else if (backend === 'postgres') {
-  for (const name of ['PGHOST', 'PGDATABASE', 'PGUSER', 'PGPASSWORD']) {
-    if (!env[name]) throw new Error(`Missing ${name} for PostgreSQL Kysely migration`)
-  }
-  const port = Number(env.PGPORT ?? '5432')
-  if (!Number.isInteger(port) || port < 1 || port > 65535)
-    throw new Error('Invalid PGPORT for PostgreSQL Kysely migration')
-  options = {
-    backend,
-    connection: {
-      host: env.PGHOST,
-      port,
-      database: env.PGDATABASE,
-      user: env.PGUSER,
-      password: env.PGPASSWORD,
-    },
-  }
-} else {
-  throw new Error('Unsupported NT_STUDIO_DB_BACKEND; expected sqlite or postgres')
-}
+const options = selectedStudioDatabaseOptions(env)
+const { backend } = options
 
 const connection = openStudioSchemaConnection(options, operation === 'check' ? 'read' : 'migrate')
 try {

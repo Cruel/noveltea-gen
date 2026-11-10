@@ -8,6 +8,49 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sourceDirectories = ["src", "web/src", "test", "web/test", "scripts"];
 const errors = [];
 const extensions = /\.(?:[cm]?[jt]s|tsx)$/;
+const backendTestFiles = new Set([
+  "web/test/kysely-connection.test.ts",
+  "web/test/kysely-guards.test.ts",
+  "web/test/kysely-schema-hardening.test.ts",
+  "web/test/kysely-schema.test.ts",
+  "web/test/kysely-workflow.test.ts",
+  "web/test/support/kysely-feature-fixture.ts",
+  "web/test/support/kysely-test-records.ts",
+  "web/test/support/studio-database.ts",
+  "web/test/support/sqlite-controller-fixture.ts",
+  "web/test/support/sqlite-oauth-source.ts",
+  "web/test/support/sqlite-lock-holder.ts",
+  "web/test/support/trusted-catalog-postgres-migrate.ts",
+  "web/test/support/kysely-advanced-worker.ts",
+  "web/test/support/kysely-continuation-worker.ts",
+  "web/test/support/kysely-generation-worker.ts",
+  "web/test/support/kysely-message-worker.ts",
+  "web/test/support/kysely-proof-worker.ts",
+  "web/test/support/kysely-proof.ts",
+  "web/test/support/kysely-steering-worker.ts",
+]);
+
+export function featureTestImportViolations(path, source) {
+  if (!path.startsWith("web/test/") || backendTestFiles.has(path)) return [];
+  const parsed = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
+  const violations = [];
+  const check = (node) => {
+    const moduleName = ts.isImportDeclaration(node) || ts.isExportDeclaration(node)
+      ? node.moduleSpecifier
+      : ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+        ? node.arguments[0] : undefined;
+    if (moduleName && ts.isStringLiteral(moduleName) &&
+        (/^(?:pg|pg\/|kysely(?:\/|$)|better-sqlite3$|node:sqlite$)/.test(moduleName.text) ||
+         /\/db\/kysely-connection(?:\.ts)?$/.test(moduleName.text))) {
+      violations.push("raw driver/Kysely import outside approved backend test infrastructure");
+    }
+    ts.forEachChild(node, check);
+  };
+  check(parsed);
+  return violations;
+}
 
 /** General source hygiene lint, independent of the DB-specific boundary lint.
  * The repo has mixed legacy formatting styles, so no automatic reformat is
@@ -18,6 +61,7 @@ function inspect(file) {
   const path = relative(root, file).split(sep).join("/");
   if (path === "web/src/routeTree.gen.ts") return; // TanStack-generated, not authored source
   const fail = (reason) => errors.push(path + ": " + reason);
+  for (const reason of featureTestImportViolations(path, content)) fail(reason);
   if (content.includes("\r")) fail("CRLF/CR line endings are prohibited");
   if (!content.endsWith("\n")) fail("missing final newline");
   if (/[ \t]+$/m.test(content)) fail("trailing whitespace");
@@ -39,21 +83,14 @@ function inspect(file) {
     // belongs only in the test SQLite adapter, not in feature tests.
     if (
       path.startsWith("web/test/") &&
-      path !== "web/test/support/sqlite-test-records.ts" &&
+      path !== "web/test/support/studio-database.ts" &&
+      path !== "web/test/support/kysely-test-records.ts" &&
       path !== "web/test/support/sqlite-controller-fixture.ts" &&
       path !== "web/test/support/sqlite-oauth-source.ts" &&
       path !== "web/test/support/sqlite-lock-holder.ts"
     ) {
       if (ts.isPropertyAccessExpression(node) && node.name.text === "sqlite")
         fail("direct SQLite driver access in test: use store.testing or StudioPersistence");
-      if (ts.isIdentifier(node) && ["studioSqliteDriver", "studioDrizzleForMigrations"].includes(node.text))
-        fail("internal SQLite driver/Drizzle accessor in test");
-      if (
-        ts.isStringLiteral(node) &&
-        ts.isImportDeclaration(node.parent) &&
-        (/^better-sqlite3$/.test(node.text) || node.text.includes("drizzle-orm/better-sqlite3"))
-      )
-        fail("SQLite import in test outside isolated backend test adapter");
     }
     if (node.kind === ts.SyntaxKind.DebuggerStatement) fail("debugger statement");
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "eval")

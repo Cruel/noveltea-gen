@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
 import { openStudioDatabase } from './support/studio-database'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { githubStoryRequest, STORY_LIMIT_BYTES } from '../src/lib/github-stories.server'
 import { errorResponse } from '../src/lib/github-repositories.server'
 
@@ -168,14 +168,14 @@ test('GitHub Story preflight is owner-scoped, commit-pinned, bounded and avoids 
     ;(await store.testing.schema.removeMigrationHistory())
     const outdated = await post(base)
     assert.equal(outdated.status, 503)
-    assert.match((await outdated.json()).error, /migrations are pending/i)
+    assert.match((await outdated.json()).error, /migration|source integrity|schema/i)
     for (const migration of migrations)
       await store.testing.schema.appendMigration(migration.hash, migration.createdAt)
     // Restore exact DDL with a savepoint: DROP + ADD changes the generated schema.
     ;(await store.testing.schema.beginTemporaryColumnDrop('stories', 'source_commit_sha'))
     const inconsistent = await post(base)
     assert.equal(inconsistent.status, 503)
-    assert.match((await inconsistent.json()).error, /journal.*schema|reset/i)
+    assert.match((await inconsistent.json()).error, /schema|drift|reset/i)
     ;(await store.testing.schema.rollbackTemporaryColumnDrop())
     assert.equal((await post({ ...base, commit: null })).status, 400)
     assert.equal((await post(base, 'https://attacker.invalid')).status, 403)

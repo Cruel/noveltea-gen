@@ -98,8 +98,8 @@ async function run(db: Executor, owner: string, threadId: string, position: 'fir
     .orderBy('runOrder', position === 'first' ? 'asc' : 'desc').executeTakeFirst() ?? null
 }
 
-/** Staged common implementation: no live Drizzle/Kysely cross-transaction calls.
- * Each operation uses the same guarded executor and awaits every nested write. */
+/** Shared implementation across both databases. Each operation uses the same
+ * guarded executor and awaits every nested write. */
 export function createKyselyAdvancedThreads(db: SharedDatabase<StudioDb>): AdvancedThreadPersistence {
   return {
     async importHistory(owner, threadId, history, guidance, at) {

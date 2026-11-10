@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { prepareCachedJob } from '../src/lib/cached-jobs.server'
 import { allowedGitRemote, gitEnvironment } from '../src/lib/git-cache.server'
 import { gitlabJobRequest } from '../src/lib/gitlab-jobs.server'
@@ -134,9 +134,17 @@ test('GitLab job API rejects foreign jobs and revoked or mismatched revisions be
     assert.equal((await post(request(aliceCookie, sha('a'), 'bad-job'))).status, 400)
     const migrations = await store.testing.schema.migrationHistory()
     ;(await store.testing.schema.removeMigrationHistory())
-    const unmigrated = await post(request())
-    assert.equal(unmigrated.status, 503)
-    assert.match((await unmigrated.json()).error, /migrations are pending/)
+    // A fresh runtime must reject a missing journal immediately. An already
+    // attested runtime revalidates non-DDL journal changes at the bounded TTL.
+    const drifted = openStudioDatabase(join(root, 'studio.sqlite'))
+    try {
+      const driftedAuth = createStudioAuth(drifted, config)
+      const unmigrated = await gitlabJobRequest(driftedAuth, drifted, request(), origin)
+      assert.equal(unmigrated.status, 503)
+      assert.match((await unmigrated.json()).error, /migration|source integrity|schema/i)
+    } finally {
+      await drifted.close()
+    }
     for (const migration of migrations)
       await store.testing.schema.appendMigration(migration.hash, migration.createdAt)
 

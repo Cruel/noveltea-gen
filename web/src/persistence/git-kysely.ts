@@ -139,8 +139,7 @@ async function savedRepository(db: Read | Write, owner: string, provider: GitPro
 
 /** One owner-scoped Git persistence implementation for SQLite and PostgreSQL.
  * Every write (including CAS and multi-statement flows) uses the shared,
- * rollback-safe transaction and its executor. This staged port is not mixed
- * with Drizzle until the coordinated application cutover (#141).
+ * rollback-safe transaction and its executor. This port is composed with all other domains in the shared Studio store.
  */
 export function createKyselyGitPersistence(db: SharedDatabase<StudioDb>): Ports {
   const git: GitIdentities = {

@@ -25,7 +25,7 @@ Studio uses TanStack Start/Router, React, **Tailwind CSS v4** and **shadcn with 
 
 ## Story Conversations and Thread navigation (#78)
 
-After initializing the current Drizzle Studio schema with the web services stopped, choose a Story on the Dashboard to open its **Conversations**. New generation jobs receive a stable root Thread within an automatically created Conversation. The prior Studio database is intentionally not migrated. Authors can create additional Conversations, edit Conversation and Thread titles, and switch between a compact ancestry-aware tree and an activity-sorted flat Thread list. The selected Conversation is shareable through the URL. Tree/flat and expansion preferences are stored per owner and Story.
+After initializing the current Kysely Studio schema with the web services stopped, choose a Story on the Dashboard to open its **Conversations**. New generation jobs receive a stable root Thread within an automatically created Conversation. The prior Studio database is intentionally not migrated. Authors can create additional Conversations, edit Conversation and Thread titles, and switch between a compact ancestry-aware tree and an activity-sorted flat Thread list. The selected Conversation is shareable through the URL. Tree/flat and expansion preferences are stored per owner and Story.
 
 The navigation reads the existing owner-scoped catalog, durable generation events and execution queue. Meaningful work and status transitions affect activity ordering; HTTP polling and SSE heartbeats do not. Running work shows the most recent specialist work item. Status distinguishes queued, running, paused, blocked, author attention, completed and archived where applicable. No existing LangGraph execution identity or job worktree is changed, and the legacy root mapping **does not** reconstruct historical forkable recovery checkpoints. Creating child Threads, branching and continuing runs are separate follow-up milestones of spec #73.
 
@@ -160,7 +160,7 @@ GitHub installation/user permissions block new browsing and selection, but
 existing catalog records are retained. API rate limits or missing access
 surface as retry/reconnect errors. New Story catalog records do not clone or validate canonical Markdown
 contents. Job acquisition is an explicit separate action; it does not run an
-agent or replace native narrative validation. Story registration requires the current Drizzle Studio baseline (`source_commit_sha`). On an
+agent or replace native narrative validation. Story registration requires the current Kysely Studio schema (`source_commit_sha`). On an
 unmigrated Studio database, POST returns a specific HTTP 503 explaining how to run
 the explicit migration, rather than misreporting a GitHub outage. An inconsistent
 migration journal/schema is rejected without attempting a runtime repair.
@@ -371,7 +371,7 @@ verify and register the selected Story without cloning or downloading unrelated
 project assets. The server revalidates the owner-scoped catalog record and
 current GitLab project membership at every request. New registration is
 idempotent per Story directory, records the selected commit, and requires
-the current Studio Drizzle schema for Story selection and job acquisition.
+the current Studio Kysely schema for Story selection and job acquisition.
 
 GitLab's paginated REST tree entries do **not** include blob sizes. The 100 MB
 (decimal, inclusive) preflight uses commit-pinned GraphQL `repository.blobs`
@@ -399,6 +399,13 @@ failures rather than a generic GitLab outage for internal server errors.
 Future GitHub installation-token issuance also requires the App ID and private key;
 those are not needed by the #40 sign-in screen.
 
+**Current persistence cutover (#141):** Studio Web, Agent and the default
+migration command now use Kysely on SQLite or PostgreSQL. The historical
+reset notes below describe a former schema, **not** current deployment instructions.
+See [Kysely cutover and manual reset](../docs/studio-kysely-cutover.md)
+for backup and initialization requirements. The migration command does not
+adopt or rewrite incompatible legacy databases.
+
 From the repository root:
 
 ```sh
@@ -410,101 +417,39 @@ pnpm --filter @noveltea/studio start
 ```
 
 For the repeatable fresh-database certification matrix, enforced source
-boundary and concrete PostgreSQL porting backlog, see
+boundary and PostgreSQL validation requirements, see
 [Studio persistence certification](../docs/studio-db-certification.md) (#101).
 
-Migrations have two deliberate schema owners, orchestrated by **one**
-`pnpm --filter @noveltea/studio migrate` command. Better Auth's supported
-Kysely migration planner owns `user`, `account`, `session`, `verification`,
-and `rateLimit`. Drizzle Kit generates versioned, immutable SQL for the 29
-application-owned tables from `web/src/db/schema.ts`; it deliberately does
-not create Better Auth tables. `web/src/db/auth-reference.ts` supplies only a
-foreign-key target for Better Auth's `user` table.
+Migrations have two deliberate owners: Better Auth retains its supported auth
+schema, while Kysely owns the Studio application schema. The explicit
+`pnpm --filter @noveltea/studio migrate` command migrates both and validates
+the schema. Runtime startup never creates or migrates tables; stale history,
+missing objects, ownership constraints or incompatible database state fail
+closed. The canonical Kysely migration files live in
+`web/kysely-schema/migrations/`, and the Studio runtime exposes only
+owner-scoped asynchronous persistence ports.
 
-The command runs Better Auth's migrator **first**, then Drizzle's
-`web/drizzle/` migrations, then Better Auth's runtime schema check and
-SQLite integrity/foreign-key checks. The application migration journal is
-`__drizzle_migrations`. The public `StudioDatabase` API exposes only the
-Drizzle-backed persistence ports and a lifecycle `close()` method. Raw SQLite
-handles are confined to the adapter, Better Auth's required embedded-driver
-configuration, migration/schema maintenance, and the controller's isolated
-read-only catalog. Normal Studio startup is read-only with respect to schema;
-missing, stale or incompatible migrations (or schema drift) fail closed.
+Both SQLite and PostgreSQL use the same `createKyselyPersistence` domain
+implementation. SQLite serializes local writes and uses
+`BEGIN IMMEDIATE` for cross-process safety. PostgreSQL uses guarded
+transactions and advisory locks. No application-facing service may use raw
+SQLite, PostgreSQL or Kysely connections. Better Auth storage, explicit schema
+maintenance, the controller's read-only catalog and test-only fixture
+inspection are contained within dedicated infrastructure boundaries.
 
-**Persistence expand (#94):** `web/src/persistence/contracts.ts` defines focused,
-owner-scoped, Promise-returning ports for dashboard/catalog reads and settings
-(default model, repository listings, legacy-login guard, and per-Story Thread
-view preferences). `web/src/persistence/sqlite.ts` implements these contracts
-with Drizzle and is assembled by `openStudioDatabase`. HTTP handlers obtain the
-owner from the authenticated session; callers cannot supply a different owner
-through request bodies. For tests, inject a contract implementation directly
-into `readUserDashboard` or as the optional preferences dependency to
-`settingsRequest`. These converted consumers do not read the SQLite driver.
+To change the schema, author a new immutable Kysely migration, run
+`pnpm --filter @noveltea/studio typegen`, then validate with
+`pnpm --filter @noveltea/studio check` and
+`pnpm certify:postgres-conformance`. See
+[the canonical migration guide](../docs/kysely-schema.md) and
+[the cutover guide](../docs/studio-kysely-cutover.md) for the complete
+workflow and explicit reset precautions.
 
-**Transaction convention:** a port method is the unit of work. SQLite methods
-perform all reads/writes synchronously and only return an already-settled
-Promise; a multi-statement atomic method must use a synchronous Drizzle
-transaction callback with **no `await` or asynchronous work inside it**.
-Do not expose a generic cross-adapter async transaction callback: PostgreSQL
-may implement the same owner-scoped business method using its own async
-transaction internally. All application persistence targets the same Studio
-SQLite database through Drizzle-backed ports. There is no separate application
-storage, dual-write, or data synchronization mechanism.
-
-**Generation persistence (#96):** `web/src/persistence/generation-contracts.ts`
-defines queue admission/claim/recovery, owner-scoped job metadata and status,
-configuration CAS, and paginated progress-event interfaces. The
-`generation-sqlite.ts` Drizzle implementation uses `BEGIN IMMEDIATE` before
-counting active slots and claiming the oldest queued sequence, preventing two
-WAL connections from oversubscribing the concurrency limit. Each admission
-pins the request and queue entry atomically; reconciliation conditionally
-replaces an interrupted receipt in the same transaction. Start/finish require
-the worker's exact durable lease, request, Thread and owner, and a stale lease
-cannot finalize another worker's run. Crash fencing never auto-replays a writer.
-
-The Promise-returning ports isolate SQLite-specific locking. A future
-PostgreSQL implementation must serialize capacity reservation (for example
-with dedicated slot/advisory locks) and claim FIFO rows with row locks such as
-`FOR UPDATE SKIP LOCKED` in one transaction. Never count slots outside that
-transaction. The queue/claim/recovery, progress events, and continuation
-interfaces are now entirely Promise-returning. The SQLite implementations
-remain synchronous *inside* their adapters to preserve `BEGIN IMMEDIATE`,
-CAS conditions and multi-record atomicity, including the combined follow-up
-session and queue admission. The agent queue serializes overlapping asynchronous
-polls; SSE rechecks disconnect state after awaiting event reads.
-LangGraph checkpoints and saved Pi sessions remain separate from Studio DB.
-`web/test/generation-persistence.test.ts` exercises two independent WAL
-connections and shared claim/cancel/recovery behavior.
-
-**Persistence boundary (#100):** Studio's runtime database type exposes
-`persistence` and `close()` only. The source check
-`pnpm --filter @noveltea/studio persistence:boundary` runs within `pnpm check`
-and rejects raw SQLite imports, raw statements, migration handles, or direct
-SQLite-adapter imports in application services and routes. Its exemptions are
-confined to `web/src/persistence/*-sqlite.ts` and `persistence/sqlite.ts` implementations, `db/connection.ts`,
-`db/migrations.ts`, `db/migrate-cli.ts`, and `db/trusted-catalog.ts` (the
-rootless controller's read-only host catalog); `lib/auth.ts` uses only the
-internal driver accessor required by Better Auth. Test-only legacy white-box
-fixtures live in `web/test/support/studio-database.ts` and cannot be imported
-by application code. New normal-behavior tests should use the public ports,
-with SQL assertions reserved for explicit schema/adapter certification.
-
-For later schema changes: edit only the Drizzle application schema, run
-`pnpm --filter @noveltea/studio db:generate`, inspect and commit the
-generated SQL, snapshot and journal together. Run
-`pnpm --filter @noveltea/studio db:check` before release. Never edit the
-applied baseline or add Better Auth's tables to the Drizzle schema.
-Deploy `web/drizzle/` with the application; set `NT_STUDIO_MIGRATIONS_DIR`
-to an explicit directory if the deployment working directory is different.
-Always stop Studio writers and run `migrate` as a separate deployment step.
-Keep Better Auth pinned, and use the same stable secret and database path
-on migration and runtime.
-
-**Story-first development schema reset (#104):** The fresh Drizzle baseline
-stores Threads directly under Stories and durable Turns under Threads; it has
+**Story-first development schema reset (#104):** The historical development baseline
+stored Threads directly under Stories and durable Turns under Threads; it had
 no `story_conversations` table or mandatory Conversation relation. This is
 an intentionally incompatible, disposable-development-database cutover, **not**
-an in-place upgrade. Existing application tables and incompatible Drizzle
+an in-place upgrade. Existing application tables and incompatible legacy migration
 histories cannot be adopted automatically. Back up any data you wish to keep
 before resetting; this operation discards only the selected Studio SQLite
 users, connections, repositories, Stories, jobs, and credentials. The
@@ -700,7 +645,7 @@ are enforced server-side. Refresh the job to see the latest validation and
 committed changes independently of activity messages.
 
 **Deploy:** stop Studio and run `pnpm --filter @noveltea/studio migrate` to
-initialize the Studio Drizzle schema before startup. Keep the Studio database on a
+initialize the Studio Kysely schema before startup. Keep the Studio database on a
 durable volume alongside its existing checkpoint and job-state requirements.
 The `fixture-jobs.test.ts` integration covers real fixture graph transitions,
 ordered persisted events, owner isolation, SSE cursor replay, restart,
@@ -721,7 +666,7 @@ active status against the original native report, runs the authoritative
 `resolveFocusedScope`. The server does not silently widen write targets from
 the relationship graph or dependency context.
 
-The Studio Drizzle schema stores durable `generation_config_json` on job sessions.
+The Studio Kysely schema stores durable `generation_config_json` on job sessions.
 Run `pnpm --filter @noveltea/studio migrate` with the Studio server stopped
 before deploying the UI. A saved draft survives a restart and is only
 editable before generation. If a draft exists, fixture launch must match its
@@ -860,7 +805,7 @@ The native catalog/owner-scoped integration cases are covered in
 
 ## Job queue, controls, and crash recovery (#67)
 
-Initialize the Studio Drizzle schema while Studio is stopped:
+Initialize the Studio Kysely schema while Studio is stopped:
 `pnpm --filter @noveltea/studio migrate`. The durable SQLite
 `generation_run_queue` reserves at most **two** active generation runs by default.
 Set `NT_STUDIO_MAX_ACTIVE_JOBS=1..32` in the host environment to change that

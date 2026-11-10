@@ -1,4 +1,4 @@
-import { openStudioDatabase } from './db/connection'
+import { openSharedStudioStore, selectedStudioDatabaseOptions } from './db/shared-studio-store'
 import { startAgentServer } from './agent-service'
 
 process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
@@ -12,7 +12,7 @@ if (!process.env.NT_SANDBOX_SOCKET?.startsWith('/') ||
 }
 const port = Number(process.env.NT_AGENT_PORT ?? '7001')
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid agent port.')
-const database = openStudioDatabase()
+const database = openSharedStudioStore(selectedStudioDatabaseOptions())
 const service = await startAgentServer(database, token, port)
 console.log('NovelTea agent queue and private command endpoint ready.')
 let closing = false

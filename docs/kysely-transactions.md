@@ -1,9 +1,9 @@
 # Shared Kysely transaction infrastructure (#128)
 
-This is the S03 driver/guard layer, **not a migrated PostgreSQL StudioStore**.
-Existing Drizzle SQLite repositories continue to run unchanged. Application and
-read-only controller entry points reject `NT_STUDIO_DB_BACKEND=postgres` until
-their repositories are migrated; an unknown backend also fails closed.
+This began as the S03 driver/guard layer. The application-level Kysely
+composition now uses the same guarded persistence ports on SQLite and PostgreSQL;
+backend selection is explicit and unsupported values fail closed. The #141 cleanup retires the obsolete SQLite-specific application repositories and
+migration artifacts; schema maintenance and both runtimes use Kysely.
 
 ## Interface and ownership
 
@@ -43,9 +43,8 @@ PostgreSQL currently uses the audit's **global serialization fallback**. EVERY
 write callback first acquires the same transaction-scoped advisory guard, even
 with an empty guard list. This includes queue admission and formerly autocommit
 INSERT, UPDATE/CAS, DELETE, reconciliation and read-side seeding. The common
-interface intentionally has no unguarded write method. No application writer has
-been ported yet: each future conversion must use this boundary, not expose a
-root Kysely pool. The existing SQLite repositories are not PostgreSQL writers.
+interface intentionally has no unguarded write method. Application writers now use this boundary through the shared Kysely ports.
+No ordinary application route or service may expose a root Kysely pool.
 
 Optional Thread/Job identity guards follow the global guard. They are de-duplicated
 and acquired in deterministic order: all sorted Thread identities, then all

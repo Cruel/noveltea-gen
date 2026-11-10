@@ -17,10 +17,8 @@ async function ownedStory(db: Read, owner: string, storyId: string): Promise<boo
     .executeTakeFirst())
 }
 
-/** Isolated new-stack repository: do not combine this with Drizzle-backed
- * StudioPersistence until the atomic application cutover (#141).
- * All decisions and mutations run in the shared transaction executor.
- */
+/** Shared cross-dialect repository. All decisions and mutations run in the
+ * guarded transaction executor. */
 export function createKyselyCollectionCatalog(db: SharedDatabase<StudioDb>): CollectionCatalog {
   return {
     async list(owner, storyId) {

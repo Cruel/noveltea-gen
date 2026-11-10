@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openStudioDatabase } from './support/studio-database'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio, openStudioBusinessFixture } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
 import { dashboardResponse, getRepositoryToken } from '../src/lib/access.server'
 
@@ -49,6 +49,47 @@ async function begin(auth: ReturnType<typeof createStudioAuth>, endpoint: string
   const data = await response.json() as { url: string }
   assert.ok(data.url, 'OAuth must provide an authorization URL')
   return { response, data }
+}
+
+for (const backend of ['sqlite', 'postgres'] as const) {
+  test(backend + ': OAuth callback authenticates, persists protected token, and serves dashboard', {
+    skip: backend === 'postgres' && !process.env.NT_TEST_PG_URL && 'Set NT_TEST_PG_URL',
+    timeout: 60_000,
+  }, async () => {
+    const fixture = await openStudioBusinessFixture(backend)
+    const oldFetch = globalThis.fetch
+    globalThis.fetch = async (input) => {
+      const url = String(input)
+      const value = url.includes('github.com/login/oauth/access_token') ? providerResponses.github.token
+        : url.includes('api.github.com/user/emails') ? providerResponses.github.emails
+        : url.includes('api.github.com/user') ? providerResponses.github.profile : null
+      if (!value) throw Error('Unexpected OAuth endpoint ' + url)
+      return Response.json(value)
+    }
+    try {
+      const store = fixture.store
+      const auth = createStudioAuth(store, config)
+      const started = await begin(auth, 'sign-in/social')
+      const state = new URL(started.data.url).searchParams.get('state')
+      assert.ok(state)
+      const callback = await auth.handler(new Request(
+        origin + '/api/auth/callback/github?code=good&state=' + encodeURIComponent(state), {
+          headers: headersForCookies([started.response]),
+        }))
+      assert.equal(callback.status, 302)
+      const headers = headersForCookies([started.response, callback])
+      const response = await dashboardResponse(auth, store, new Request(origin + '/api/dashboard', { headers }))
+      assert.equal(response.status, 200)
+      assert.equal(await getRepositoryToken(auth, store, headers, 'github'), 'github-access-sensitive')
+      assert.equal(await getRepositoryToken(auth, store, new Headers(), 'github'), null)
+      const persistedAuth = createStudioAuth(store, config)
+      assert.equal((await persistedAuth.api.getSession({ headers }))?.user.id,
+        (await auth.api.getSession({ headers }))?.user.id)
+    } finally {
+      globalThis.fetch = oldFetch
+      await fixture.close()
+    }
+  })
 }
 
 test('OAuth callback persists encrypted GitHub token, explicit GitLab link and session across restart', async () => {

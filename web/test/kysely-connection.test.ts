@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fork } from 'node:child_process'
 import { performance } from 'node:perf_hooks'
 import { openKyselyDatabase } from '../src/db/kysely-connection'
-import { openStudioDatabase } from '../src/db/connection'
+import { selectedStudioDatabaseOptions } from '../src/db/studio-options'
 import { readTrustedControllerJob } from '../src/db/trusted-catalog'
 
 interface ProofDb {
@@ -66,18 +66,10 @@ test('factories reject invalid configuration, close before first query and rejec
   )
 })
 
-test('unmigrated application rejects PostgreSQL; absent controller SQLite catalog fails closed', async () => {
-  const previous = process.env.NT_STUDIO_DB_BACKEND
-  try {
-    process.env.NT_STUDIO_DB_BACKEND = 'postgres'
-    assert.throws(() => openStudioDatabase(':memory:'), /not yet migrated.*refusing SQLite fallback/)
-    await assert.rejects(readTrustedControllerJob({ backend: 'sqlite', path: '/does-not-exist.sqlite' }, 'job'), /open database|unable to open database/)
-    process.env.NT_STUDIO_DB_BACKEND = 'typo'
-    assert.throws(() => openStudioDatabase(':memory:'), /Unsupported NT_STUDIO_DB_BACKEND/)
-  } finally {
-    if (previous === undefined) delete process.env.NT_STUDIO_DB_BACKEND
-    else process.env.NT_STUDIO_DB_BACKEND = previous
-  }
+test('PostgreSQL selection is explicit; absent controller SQLite catalog fails closed', async () => {
+  assert.throws(() => selectedStudioDatabaseOptions({ NT_STUDIO_DB_BACKEND: 'postgres' }), /Missing PGHOST/)
+  assert.throws(() => selectedStudioDatabaseOptions({ NT_STUDIO_DB_BACKEND: 'typo' }), /Unsupported NT_STUDIO_DB_BACKEND/)
+  await assert.rejects(readTrustedControllerJob({ backend: 'sqlite', path: '/does-not-exist.sqlite' }, 'job'), /open database|unable to open database/)
 })
 
 test('shared SQLite executor uses immediate admission, awaits callbacks and rolls back', async () => {

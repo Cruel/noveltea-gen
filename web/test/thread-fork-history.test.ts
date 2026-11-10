@@ -9,7 +9,7 @@ import type { JobStartResult } from '../../src/job'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { snapshotForkBoundaryHistory, recordForkBoundaryHistory } from '../src/lib/thread-fork-history.server'
 
 const config = {

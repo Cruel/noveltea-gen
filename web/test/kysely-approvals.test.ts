@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import type { ProtectedDecisionGrant, RevisionRun } from '../src/persistence/publication-contracts'
 import { ThreadMessageConflict } from '../src/persistence/thread-message-contracts'
-import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/kysely-feature-fixture'
+import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/studio-database'
 
 const now = '2026-11-09T12:00:00Z'
 const base = 'a'.repeat(40)

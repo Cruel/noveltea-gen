@@ -81,7 +81,6 @@ jobs:
           pnpm typecheck
           pnpm test:offline
           pnpm build
-          pnpm --filter @noveltea/studio db:check
           pnpm --filter @noveltea/studio typecheck
           pnpm --filter @noveltea/studio typegen:check
           pnpm --filter @noveltea/studio test:offline

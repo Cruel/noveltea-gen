@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
-import { openStudioDatabase } from '../src/db/connection'
-import { migrateStudio } from '../src/db/migrations'
+import { openStudioDatabase } from './support/studio-database'
+import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
 import { ensureRootThreads } from '../src/lib/threads.server'
 
@@ -13,7 +13,7 @@ const config = {
   gitlab: { clientId: 'test', clientSecret: 'test' },
 }
 
-test('Drizzle ports atomically associate Story roots and only deliver messages after admitted queue', async () => {
+test('Shared persistence ports atomically associate Story roots and only deliver messages after admitted queue', async () => {
   const store = openStudioDatabase(':memory:')
   try {
     await migrateStudio(store, config)

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/kysely-feature-fixture'
+import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/studio-database'
 import type { QueueRecord, QueueIntent } from '../src/persistence/generation-contracts'
 
 const now = '2026-11-09T12:00:00Z'

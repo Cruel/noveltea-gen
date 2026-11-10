@@ -2,7 +2,7 @@ import type { BetterAuthOptions } from 'better-auth'
 import type { StudioStore } from '../persistence/store'
 
 /** Authentication storage is registered by its backend, never inferred by
- * the auth service from a SQLite path, driver, or Drizzle dialect.
+ * the auth service from a SQLite path or driver.
  * Better Auth still migrates its tables separately from the Studio schema.
  */
 type AuthStorage = NonNullable<BetterAuthOptions['database']>

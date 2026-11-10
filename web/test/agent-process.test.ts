@@ -8,8 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
-import { openStudioDatabase } from './support/studio-database'
-import { migrateStudio } from '../src/db/migrations'
+import { openStudioSchemaConnection, migrateStudioKysely } from '../src/db/kysely-migrations'
 
 const config = { baseURL: 'http://localhost:3000',
   secret: 'worker-process-test-secret-01234567890123456789',
@@ -36,9 +35,9 @@ test('dedicated agent is a real independent process with private authenticated c
   let child: ChildProcess | undefined
   try {
     const path = join(root, 'studio.sqlite')
-    const database = openStudioDatabase(path)
-    try { await migrateStudio(database, config) }
-    finally { database.close() }
+    const database = openStudioSchemaConnection({ backend: 'sqlite', path })
+    try { await migrateStudioKysely(database, config) }
+    finally { await database.close() }
 
     const port = await unusedPort()
     const token = randomBytes(48).toString('hex')

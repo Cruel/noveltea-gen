@@ -84,8 +84,7 @@ export async function consumeProtectedDecisionKysely(
   return changed(await query.executeTakeFirst())
 }
 
-/** Shared SQLite/PostgreSQL authorization persistence. The legacy Drizzle
- * adapter remains wired until the application-wide cutover (#141). */
+/** Shared SQLite/PostgreSQL authorization persistence. */
 export function createKyselyApprovalRevisionPersistence(db: SharedDatabase<StudioDb>): {
   approvalJobs: ApprovalJobCatalog
   protectedDecisions: ProtectedDecisionRecords

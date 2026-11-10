@@ -1,6 +1,6 @@
 # Opt-in PostgreSQL topology. The default compose.yaml remains SQLite-only.
 # The Kysely migration now installs the restricted trusted-catalog view.
-# Application runtime startup remains gated until the PostgreSQL store cutover.
+# Web, Agent and init now select the same Kysely PostgreSQL backend.
 # Keep this override separate from the normal deployment command.
 services:
   postgres:

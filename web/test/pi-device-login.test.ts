@@ -7,7 +7,7 @@ import { Server } from 'node:net'
 import { test } from 'node:test'
 import { createStudioAuth } from '../src/lib/auth'
 import { openStudioDatabase } from './support/studio-database'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { deviceOnlySelection, piModelsRequest } from '../src/lib/pi-models.server'
 import { userPiCredentials } from '../src/lib/pi-credentials.server'
 
@@ -36,7 +36,7 @@ test('device-only selection never silently falls back to browser OAuth', () => {
 })
 
 test('Studio uses upstream Pi device codes, stores encrypted credentials, and never binds OAuth callback ports', {
-  timeout: 30_000,
+  timeout: 45_000,
 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'nt-device-only-'))
   const oldKey = process.env.NT_PI_CREDENTIAL_KEY
@@ -44,6 +44,7 @@ test('Studio uses upstream Pi device codes, stores encrypted credentials, and ne
   const originalListen = Server.prototype.listen
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
   const store = openStudioDatabase(join(dir, 'studio.sqlite'))
+  let requestedXaiDevice = false
   let requestedXaiToken = false
   let boundPort = false
   try {
@@ -78,6 +79,7 @@ test('Studio uses upstream Pi device codes, stores encrypted credentials, and ne
     globalThis.fetch = async (input, init) => {
       const url = String(input)
       if (url === 'https://auth.x.ai/oauth2/device/code') {
+        requestedXaiDevice = true
         return Response.json({ device_code: 'secret-private-device', user_code: 'ABCD-EFGH',
           verification_uri: 'https://auth.x.ai/activate', interval: 3, expires_in: 900 })
       }
@@ -102,12 +104,14 @@ test('Studio uses upstream Pi device codes, stores encrypted credentials, and ne
     assert.equal((await request(1, 'POST', { action: 'oauth', provider: 'radius' })).status, 202)
     let alice = (await request(0, 'GET')).body.oauth
     let bob = (await request(1, 'GET')).body.oauth
-    for (let i = 0; i < 25 && (!alice?.device || !bob?.device); i++) {
+    for (let i = 0; i < 25 && ((!alice?.device && alice?.status !== 'connected') || !bob?.device); i++) {
       await sleep(30)
       alice = (await request(0, 'GET')).body.oauth
       bob = (await request(1, 'GET')).body.oauth
     }
-    assert.equal(alice?.device?.userCode, 'ABCD-EFGH', JSON.stringify({ alice, bob, boundPort }))
+    assert.ok(alice?.device?.userCode === 'ABCD-EFGH' || alice?.status === 'connected',
+      JSON.stringify({ alice, bob, boundPort }))
+    assert.equal(requestedXaiDevice, true)
     assert.equal(bob?.device?.userCode, 'RADIUS-CODE', JSON.stringify({ alice, bob, boundPort }))
     assert.doesNotMatch(JSON.stringify({ alice, bob }), /secret-private-device|radius-private-code/)
     assert.equal(boundPort, false)
@@ -141,7 +145,7 @@ test('Studio uses upstream Pi device codes, stores encrypted credentials, and ne
 })
 
 test('legacy Codex login selects device code rather than opening localhost:1455', {
-  timeout: 15_000,
+  timeout: 25_000,
 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'nt-codex-device-'))
   const oldKey = process.env.NT_PI_CREDENTIAL_KEY

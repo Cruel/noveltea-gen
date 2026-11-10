@@ -5,17 +5,16 @@ import { fileURLToPath } from 'node:url'
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web/src')
 const driverExempt = new Set([
-  'db/connection.ts', // owns the legacy driver and lifecycle
   'db/kysely-connection.ts', // owns both shared drivers and guarded transaction lifecycle
+  'db/shared-studio-store.ts', // owns backend selection, auth connection, and domain composition
   'db/kysely-baseline.ts', // isolated SQLite parity reference for cross-engine schema migration
   'db/kysely-migrations.ts', // explicit Kysely migration and read-only schema introspection
-  'db/migrations.ts', // PRAGMAs and Drizzle migration history
   'db/migrate-cli.ts', // offline operator migration command
   'db/trusted-catalog.ts', // isolated, read-only sandbox authorization
 ])
 
 const driverPatterns = [
-  { pattern: /['"](?:better-sqlite3|drizzle-orm\/better-sqlite3|node:sqlite)(?:\/[^'"]*)?['"]/,
+  { pattern: /['"](?:better-sqlite3|node:sqlite)(?:\/[^'"]*)?['"]/,
     reason: 'raw SQLite module import' },
   { pattern: /\b(?:store|database|connection|db)\s*(?:(?:\?\.|\.)\s*sqlite\b|\[\s*['"]sqlite['"]\s*\])/,
     reason: 'raw SQLite handle access' },
@@ -23,11 +22,6 @@ const driverPatterns = [
     reason: 'raw SQLite driver call' },
   { pattern: /\.prepare\s*\(|\.pragma\s*\(/,
     reason: 'raw SQLite statement or PRAGMA' },
-  { pattern: /\b(?:sqliteBridge|sqliteTransactionBridge|studioDrizzleForMigrations)\b/,
-    reason: 'Drizzle migration handle outside infrastructure' },
-  { pattern: /from\s*['"][^'"]*\/db\/migrations['"]/, reason: 'schema maintenance import outside database adapter' },
-  { pattern: /from\s*['"][^'"]*\/persistence\/[^'"]+-sqlite['"]/,
-    reason: 'direct SQLite persistence implementation import' },
 ]
 
 /** Run on every Studio source file, including routes and server functions.
@@ -36,10 +30,11 @@ const driverPatterns = [
  * asynchronous schema-readiness method.
  */
 export function sourceViolations(path, source) {
-  if ((path.startsWith('persistence/') && (path.endsWith('-sqlite.ts') || path === 'persistence/sqlite.ts')) || driverExempt.has(path)) return []
+  if (driverExempt.has(path)) return []
   const errors = driverPatterns.filter(({ pattern }) => pattern.test(source)).map(x => x.reason)
   const databaseAdapter = path.startsWith('db/')
-  const sharedRepository = path.startsWith('persistence/') && path.endsWith('-kysely.ts')
+  const sharedRepository = path === 'persistence/kysely.ts' ||
+    (path.startsWith('persistence/') && path.endsWith('-kysely.ts'))
   if (!databaseAdapter && !sharedRepository &&
       /(?:['"](?:pg|kysely(?:\/[^'"]*)?)['"]|from\s*['"][^'"]*\/db\/kysely-connection['"])/.test(source)) {
     errors.push('shared database infrastructure outside persistence adapter')
@@ -51,9 +46,6 @@ export function sourceViolations(path, source) {
   if (!databaseAdapter && !path.startsWith('persistence/') &&
       /from\s*['"][^'"]*\/persistence\/[^'"]+-kysely['"]/.test(source)) {
     errors.push('Kysely repository imported by application caller')
-  }
-  if (/\bstudioSqliteDriver\b/.test(source)) {
-    errors.push('raw SQLite accessor outside Better Auth adapter')
   }
   if (/from\s*['"][^'"]*\/db\/trusted-catalog['"]/.test(source) &&
       path !== 'sandbox-controller.ts') {

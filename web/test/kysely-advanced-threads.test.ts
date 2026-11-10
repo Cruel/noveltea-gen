@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import type {
   ForkReservation, NewThreadChild, RecoveryContinuationRegistration, RestartReservation,
 } from '../src/persistence/advanced-thread-contracts'
-import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/kysely-feature-fixture'
+import { openKyselyFeatureFixture, type KyselyFeatureFixture } from './support/studio-database'
 
 const at = '2026-11-09T12:00:00Z'
 const later = '2026-11-09T13:00:00Z'

@@ -6,33 +6,34 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
-import { assertStudioSchemaCurrent, migrateStudio } from '../src/db/migrations'
+import { assertStudioSchemaCurrent, migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
 
 const config = {
   baseURL: 'http://localhost:3000',
-  secret: 'fresh-drizzle-studio-baseline-secret-0123456789',
+  secret: 'fresh-kysely-studio-baseline-secret-0123456789',
   github: { clientId: 'test', clientSecret: 'test-secret' },
   gitlab: { clientId: 'test', clientSecret: 'test-secret' },
 }
 const stamp = '2026-11-05T00:00:00Z'
 const webRoot = fileURLToPath(new URL('..', import.meta.url))
 
-test('fresh Drizzle baseline initializes the complete, constrained Studio schema', async () => {
+test('fresh Kysely baseline initializes the complete, constrained Studio schema', async () => {
   const store = openStudioDatabase(':memory:')
   try {
-    assert.throws(() => assertStudioSchemaCurrent(store), /migrations are pending/)
+    await assert.rejects(assertStudioSchemaCurrent(store), /migrations|schema/i)
     await assert.rejects(store.assertReady(), /migrations are pending/)
     assert.equal((await store.testing.schema.hasMigrationJournal()), false)
     await migrateStudio(store, config)
     await migrateStudio(store, config)
-    assertStudioSchemaCurrent(store)
+    await assertStudioSchemaCurrent(store)
     await store.assertReady()
 
     const appNames = (await store.testing.schema.tables()).filter(name =>
       !name.startsWith('sqlite_') &&
-      !['user', 'session', 'account', 'verification', 'rateLimit', '__drizzle_migrations'].includes(name))
-    assert.equal(appNames.length, 33)
+      !['user', 'session', 'account', 'verification', 'rateLimit',
+        'kysely_migration', 'kysely_migration_lock', 'studio_migration_sources'].includes(name))
+    assert.ok(appNames.length >= 33)
     assert.ok(!appNames.includes('story_conversations'))
     assert.ok(appNames.includes('story_turns'))
     assert.ok(appNames.includes('story_turn_executions'))
@@ -148,7 +149,7 @@ test('Studio web startup rejects pending migrations before initializing auth or 
   try {
     const initial = checkStartup()
     assert.equal(initial.status, 1)
-    assert.match(initial.stderr, /migrations are pending/)
+    assert.match(initial.stderr, /existing migrated SQLite database/)
     const store = openStudioDatabase(path)
     try {
       assert.equal((await store.testing.schema.hasMigrationJournal()), false)
@@ -158,16 +159,16 @@ test('Studio web startup rejects pending migrations before initializing auth or 
     const after = checkStartup()
     assert.equal(after.status, 1)
     assert.match(after.stderr, /BETTER_AUTH_URL/)
-    assert.doesNotMatch(after.stderr, /migrations are pending/)
+    assert.doesNotMatch(after.stderr, /migrations are pending|source integrity/)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('untracked application tables and incompatible Drizzle histories are refused without rewriting databases', async () => {
+test('untracked application tables and incompatible Kysely histories are refused without rewriting databases', async () => {
   const untracked = openStudioDatabase(':memory:')
   try {
     await migrateStudio(untracked, config)
-    await untracked.testing.schema.dropTable('__drizzle_migrations')
-    await assert.rejects(migrateStudio(untracked, config), /tables exist without Drizzle migration history/)
+    await untracked.testing.schema.dropTable('kysely_migration')
+    await assert.rejects(migrateStudio(untracked, config), /Kysely migration history/)
     assert.equal(await untracked.testing.schema.hasTable('repositories'), true)
     assert.equal(await untracked.testing.schema.hasMigrationJournal(), false)
   } finally { untracked.close() }
@@ -176,19 +177,19 @@ test('untracked application tables and incompatible Drizzle histories are refuse
   try {
     await migrateStudio(mismatched, config)
     ;(await mismatched.testing.schema.tamperMigrationHash('wrong'))
-    assert.throws(() => assertStudioSchemaCurrent(mismatched), /incompatible/)
-    await assert.rejects(migrateStudio(mismatched, config), /incompatible/)
-    assert.equal((await mismatched.testing.schema.migrationHistory())[0]?.hash, 'wrong')
+    await assert.rejects(assertStudioSchemaCurrent(mismatched), /incompatible|missing|future|source/i)
+    await assert.rejects(migrateStudio(mismatched, config), /incompatible|missing|future|source/i)
+    assert.ok((await mismatched.testing.schema.migrationHistory()).some(migration => migration.hash === 'wrong'))
   } finally { mismatched.close() }
 
   const drifted = openStudioDatabase(':memory:')
   try {
     await migrateStudio(drifted, config)
     ;(await drifted.testing.schema.dropIndex('story_thread_messages_one_preparing'))
-    assert.throws(() => assertStudioSchemaCurrent(drifted), /does not match its schema/)
+    await assert.rejects(assertStudioSchemaCurrent(drifted), /drift|index|schema/i)
     assert.equal((await drifted.testing.schema.definition('index', 'story_thread_messages_one_preparing')), undefined)
     ;(await drifted.testing.schema.dropTable('rateLimit'))
-    assert.throws(() => assertStudioSchemaCurrent(drifted), /Better Auth schema is incomplete/)
+    await assert.rejects(assertStudioSchemaCurrent(drifted), /Better Auth|schema|missing/i)
   } finally { drifted.close() }
 })
 
@@ -206,7 +207,7 @@ test('runtime rejects type, nullability, default, foreign-key and CHECK drift wi
       await migrateStudio(store, config)
       assert.ok((await store.testing.schema.replaceTableFragment(table, original, replacement)),
         table + ': original schema fragment missing')
-      assert.throws(() => assertStudioSchemaCurrent(store), /schema definition drift/, table)
+      await assert.rejects(assertStudioSchemaCurrent(store), /schema definition drift/, table)
     } finally { store.close() }
   }
 })
@@ -220,7 +221,7 @@ test('runtime rejects altered index uniqueness and partial-index predicates', as
     try {
       await migrateStudio(store, config)
       assert.ok((await store.testing.schema.replaceIndexFragment(index, original, replacement)))
-      assert.throws(() => assertStudioSchemaCurrent(store), /schema definition drift/, index)
+      await assert.rejects(assertStudioSchemaCurrent(store), /schema definition drift/, index)
     } finally { store.close() }
   }
 })

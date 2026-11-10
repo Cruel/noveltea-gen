@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { migrateStudio } from '../src/db/migrations'
+import { migrateStudio } from './support/studio-database'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import {
@@ -99,14 +99,12 @@ test('Collections group Story Threads without changing fork ancestry, activity o
     await assignThreadCollection(db, alice, story, child, drafts.id)
     await assignThreadCollection(db, alice, story, peer, research.id)
     const grouped = await listStoryNavigation(db, alice, story)
-    assert.deepEqual(
-      grouped.threads.map((t) => [t.id, t.collectionId]),
-      [
+    assert.deepEqual(new Map(grouped.threads.map((t) => [t.id, t.collectionId])),
+      new Map([
         [root, research.id],
         [child, drafts.id],
         [peer, research.id],
-      ],
-    )
+      ]))
     assert.deepEqual(
       orderThreads(grouped.threads, 'tree').map((t) => t.id),
       [root, child, peer],

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
-import { openKyselyFeatureFixture } from './support/kysely-feature-fixture'
+import { openKyselyFeatureFixture } from './support/studio-database'
 import { PublicationStateConflict } from '../src/persistence/publication-contracts'
 import type { PublicationReceipt } from '../src/persistence/publication-contracts'
 
