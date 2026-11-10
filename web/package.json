@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build && node ../scripts/check-studio-oauth-bundle.mjs",
+    "build": "vite build && node ../scripts/stage-studio-kysely-assets.mjs && node ../scripts/check-studio-oauth-bundle.mjs",
     "start": "node .output/server/index.mjs",
     "typecheck": "vite build && tsc --noEmit -p tsconfig.json",
     "test": "tsx --test test/*.test.ts test/*.test.tsx",

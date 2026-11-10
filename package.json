@@ -21,6 +21,7 @@
     "certify:self-hosted": "node scripts/certify-self-hosted.mjs",
     "certify:compose": "tsx scripts/certify-compose.ts",
     "certify:postgres-compose": "tsx scripts/certify-postgres-compose.ts",
+    "certify:studio-compose": "tsx scripts/certify-studio-compose.ts",
     "certify:postgres-transactions": "tsx scripts/certify-postgres-transactions.ts",
     "certify:postgres-conformance": "tsx scripts/certify-postgres-transactions.ts --conformance",
     "test:live": "NT_LIVE_TEST=1 tsx --test test/live.test.ts",

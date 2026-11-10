@@ -82,6 +82,9 @@ jobs:
           pnpm test:offline
           pnpm build
           pnpm --filter @noveltea/studio typecheck
+          # Nitro must ship byte-identical immutable migration assets: the
+          # production bundle runs its own read-only schema certification.
+          pnpm --filter @noveltea/studio build
           pnpm --filter @noveltea/studio typegen:check
           pnpm --filter @noveltea/studio test:offline
           pnpm --filter @noveltea/studio schema:parity

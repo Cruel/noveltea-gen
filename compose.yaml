@@ -223,7 +223,7 @@ networks:
   backend: {}
 
 volumes:
-  noveltea-app: { name: noveltea-app }
-  noveltea-state: { name: noveltea-state }
-  noveltea-cache: { name: noveltea-cache }
-  noveltea-controller: { name: noveltea-controller }
+  noveltea-app: { name: "${NT_APP_VOLUME_NAME:-noveltea-app}" }
+  noveltea-state: { name: "${NT_STATE_VOLUME_NAME:-noveltea-state}" }
+  noveltea-cache: { name: "${NT_CACHE_VOLUME_NAME:-noveltea-cache}" }
+  noveltea-controller: { name: "${NT_CONTROLLER_VOLUME_NAME:-noveltea-controller}" }

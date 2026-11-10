@@ -6,7 +6,8 @@ SQLite and PostgreSQL. The older SQLite-only certification (#101, November 5,
 shared persistence cutover. It does not certify live Git provider publishing,
 paid-model execution, or production deployment.
 
-For schema maintenance see [Kysely schema](kysely-schema.md); for deployment
+For the final #125 acceptance mapping and full-stack S18 certificates, see
+[the #143 closeout matrix](kysely-s18-closeout.md). For schema maintenance see [Kysely schema](kysely-schema.md); for deployment
 and operator-controlled database reset see [Studio Kysely cutover](studio-kysely-cutover.md)
 and [PostgreSQL Compose](postgres-compose.md).
 

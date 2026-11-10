@@ -119,5 +119,18 @@ fixture uses the disposable bootstrap role for temporary schema creation;
 production application and controller grants remain restricted. Both the
 test project and its uniquely named volume are cleaned up afterward.
 
-End-to-end Web/Agent PostgreSQL startup remains a distinct #141 certification gate,
-as described in [ADR 0001](adr/0001-kysely-sqlite-first-studio-persistence.md).
+The full-stack #143 certificate now verifies **both** SQLite and PostgreSQL
+on a fresh, disposable Compose project (real init, compiled Web, Agent,
+Controller and persisted Better Auth/Studio records), including service
+restarts, full down/up and PostgreSQL read-only Controller permissions:
+
+```sh
+pnpm certify:studio-compose sqlite
+pnpm certify:studio-compose postgres
+```
+
+These require local rootless Docker, the native CLI and skills checkout, but
+no real model/provider credentials. Generated disposable OAuth placeholders
+are used only to validate startup and schema/auth storage. The two projects
+use independently named volumes and never remove operator data; see the
+[#143 acceptance matrix](kysely-s18-closeout.md).

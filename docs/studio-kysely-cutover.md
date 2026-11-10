@@ -34,6 +34,26 @@ credentials, registered repositories, Stories, Threads and queue catalog; it
 is not an in-place upgrade. If continuity is needed, retain the backup and
 plan a separate controlled data migration instead of resetting.
 
+For a **disposable default Docker Compose SQLite deployment only**, after
+backing up the stopped database and verifying that no other service uses
+the selected volume, a deliberate operator reset can delete only the Studio
+SQLite file and its sidecars without deleting job state, controller data or
+cached Git worktrees:
+
+```sh
+docker compose --profile dev down
+APP_VOLUME="${NT_APP_VOLUME_NAME:-noveltea-app}"
+docker run --rm -v "$APP_VOLUME:/data" alpine:3.22 \
+  sh -c 'rm -f /data/studio.sqlite /data/studio.sqlite-wal /data/studio.sqlite-shm'
+docker compose --profile dev up -d --scale web=0 --build
+```
+
+**Destructive:** this loses Studio users, login sessions, credentials, Stories
+and jobs. Only run against a disposable or explicitly authorized backed-up
+Studio database. Do not run against an unknown/custom volume; ensure
+`NT_APP_VOLUME_NAME` matches the Compose configuration. Compose's one-shot
+`init` service applies migrations before runtime startup on the new file.
+
 For PostgreSQL, explicitly configure `NT_STUDIO_DB_BACKEND=postgres` and
 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` for the existing
 migration role, then run the same `migrate` and `migrate:kysely check`

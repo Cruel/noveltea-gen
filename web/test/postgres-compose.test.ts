@@ -61,6 +61,53 @@ function network(manifest: ComposeConfig, name: string) {
   return found
 }
 
+test('S18 isolated Compose certificate cannot mount developer state or leak auth secrets to controller', () => {
+  for (const backend of ['sqlite', 'postgres'] as const) {
+    const tag = 'nt-s18-static-' + backend
+    const values = {
+      ...process.env,
+      ...credentials,
+      NT_STUDIO_HOST_PORT: '38721',
+      NT_APP_VOLUME_NAME: tag + '-app',
+      NT_STATE_VOLUME_NAME: tag + '-state',
+      NT_CACHE_VOLUME_NAME: tag + '-cache',
+      NT_CONTROLLER_VOLUME_NAME: tag + '-controller',
+      NT_PG_VOLUME_NAME: tag + '-postgres',
+      NT_AGENT_RPC_TOKEN: 'test-only-rpc-secret-not-an-actual-token',
+      NT_PI_CREDENTIAL_KEY: 'test-only-encryption-secret-not-an-actual-key',
+      BETTER_AUTH_URL: 'http://localhost:38721',
+      BETTER_AUTH_SECRET: 'test-only-better-auth-session-secret-0123456789',
+      GITHUB_CLIENT_ID: 'fake', GITHUB_CLIENT_SECRET: 'fake',
+      GITLAB_CLIENT_ID: 'fake', GITLAB_CLIENT_SECRET: 'fake',
+    }
+    const manifest = JSON.parse(execFileSync('docker', [
+      'compose', '--profile', 'dev', '-p', tag, '-f', 'compose.yaml',
+      ...(backend === 'postgres' ? ['-f', 'compose.postgres.yaml'] : []),
+      '-f', 'compose.studio-cert.yaml', 'config', '--format', 'json',
+    ], { cwd: root, encoding: 'utf8', env: values })) as ComposeConfig
+    for (const key of ['app', 'state', 'cache', 'controller']) {
+      assert.equal(manifest.volumes['noveltea-' + key]?.name, tag + '-' + key)
+    }
+    if (backend === 'postgres') {
+      assert.equal(manifest.volumes['noveltea-postgres']?.name, tag + '-postgres')
+      assert.equal(service(manifest, 'init').depends_on?.postgres?.condition, 'service_healthy')
+      assert.ok(!service(manifest, 'postgres').ports?.length)
+      assert.deepEqual(Object.keys(service(manifest, 'controller').networks ?? {}), ['pg-controller'])
+    } else {
+      assert.equal(service(manifest, 'controller').network_mode, 'none')
+    }
+    for (const name of ['init', 'web', 'web-dev', 'agent']) {
+      const current = service(manifest, name)
+      assert.deepEqual(current.env_file ?? [], [], 'certificate must not inherit web/.env')
+      assert.equal(current.environment?.NT_AGENT_RPC_TOKEN, values.NT_AGENT_RPC_TOKEN)
+    }
+    const controller = service(manifest, 'controller')
+    assert.ok(!('NT_AGENT_RPC_TOKEN' in (controller.environment ?? {})))
+    assert.ok(!('NT_PI_CREDENTIAL_KEY' in (controller.environment ?? {})))
+    assert.ok(!('GITHUB_CLIENT_SECRET' in (controller.environment ?? {})))
+  }
+})
+
 test('PostgreSQL selection reaches native CLI prerequisite instead of obsolete backend gate', () => {
   const result = spawnSync(process.execPath, ['deploy/compose-init.mjs'], {
     cwd: root,

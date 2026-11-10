@@ -1,0 +1,26 @@
+# Disposable S18 full-stack certification overlay. Never use in production.
+# Unlike compose.postgres.test.yaml, these services actually start, and must
+# receive generated credentials without reading a developer's private web/.env.
+x-cert-auth: &cert-auth
+  NT_AGENT_RPC_TOKEN: ${NT_AGENT_RPC_TOKEN:?Set a disposable RPC token}
+  NT_PI_CREDENTIAL_KEY: ${NT_PI_CREDENTIAL_KEY:?Set a disposable credential key}
+  BETTER_AUTH_URL: ${BETTER_AUTH_URL:?Set a loopback test URL}
+  BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set an isolated session secret}
+  GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?}
+  GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?}
+  GITLAB_CLIENT_ID: ${GITLAB_CLIENT_ID:?}
+  GITLAB_CLIENT_SECRET: ${GITLAB_CLIENT_SECRET:?}
+
+services:
+  init:
+    env_file: !reset []
+    environment: *cert-auth
+  web:
+    env_file: !reset []
+    environment: *cert-auth
+  web-dev:
+    env_file: !reset []
+    environment: *cert-auth
+  agent:
+    env_file: !reset []
+    environment: *cert-auth
