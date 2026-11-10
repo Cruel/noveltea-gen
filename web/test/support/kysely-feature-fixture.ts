@@ -15,6 +15,7 @@ import {
 import { studioAuthOptionsForDatabase } from '../../src/lib/auth'
 import { createKyselyCollectionCatalog } from '../../src/persistence/collection-kysely'
 import { createKyselyPublicationRecords } from '../../src/persistence/publication-kysely'
+import { createKyselyApprovalRevisionPersistence } from '../../src/persistence/approval-revision-kysely'
 import { createKyselyGitPersistence } from '../../src/persistence/git-kysely'
 import { createKyselyConversationCatalog } from '../../src/persistence/conversation-kysely'
 import { createKyselyNaturalStoryPersistence } from '../../src/persistence/natural-story-kysely'
@@ -38,7 +39,7 @@ import type {
   GitProvider,
 } from '../../src/persistence/git-contracts'
 import type { CollectionCatalog } from '../../src/persistence/collection-contracts'
-import type { PublicationRecords } from '../../src/persistence/publication-contracts'
+import type { ApprovalJobCatalog, ProtectedDecisionRecords, PublicationRecords, RevisionRecords } from '../../src/persistence/publication-contracts'
 import type { TestFields, TestPersistence } from './test-persistence'
 
 const authConfig = {
@@ -53,6 +54,9 @@ export interface KyselyFeatureFixture {
   databaseOptions: DatabaseOptions
   collections: CollectionCatalog
   publications: PublicationRecords
+  approvalJobs: ApprovalJobCatalog
+  protectedDecisions: ProtectedDecisionRecords
+  revisions: RevisionRecords
   git: GitIdentities
   repositories: RepositoryCatalogWrites
   onboarding: StoryOnboarding
@@ -72,6 +76,9 @@ export interface KyselyFeatureFixture {
   openIndependentAdvancedThreads(): Promise<{ advancedThreads: AdvancedThreadPersistence; close(): Promise<void> }>
   openIndependentSteering(): Promise<{ steering: SteeringPersistence; close(): Promise<void> }>
   openIndependentContinuation(): Promise<{ continuation: ContinuationPersistence; close(): Promise<void> }>
+  openIndependentApprovals(): Promise<{
+    protectedDecisions: ProtectedDecisionRecords; revisions: RevisionRecords; close(): Promise<void>
+  }>
   reopenAdvancedThreads(): Promise<AdvancedThreadPersistence>
   reopenMessages(): Promise<ThreadMessagePersistence>
   reopenNavigation(): Promise<{
@@ -168,6 +175,7 @@ export async function openKyselyFeatureFixture(
       continuation: createKyselyContinuationPersistence(database),
       ...createKyselyCatalogPersistence(database),
       publications: createKyselyPublicationRecords(database),
+      ...createKyselyApprovalRevisionPersistence(database),
       ...createKyselyGitPersistence(database),
       records: fixtureRecords,
       async account(owner, provider) {
@@ -197,6 +205,10 @@ export async function openKyselyFeatureFixture(
       async openIndependentContinuation() {
         const other = openKyselyDatabase<StudioDb>(options)
         return { continuation: createKyselyContinuationPersistence(other), close: () => other.close() }
+      },
+      async openIndependentApprovals() {
+        const other = openKyselyDatabase<StudioDb>(options)
+        return { ...createKyselyApprovalRevisionPersistence(other), close: () => other.close() }
       },
       async reopenAdvancedThreads() {
         await database!.close()

@@ -8,6 +8,7 @@ import {
 import {
   boundarySteeringReviewsKysely, deferUndeliveredSteeringKysely,
 } from './steering-boundary-kysely'
+import { consumeProtectedDecisionKysely } from './approval-revision-kysely'
 import type {
   ContinuationAdmission, ContinuationPersistence, ContinuationRequest,
   ContinuationRun, QueuedContinuation,
@@ -207,13 +208,11 @@ export function createKyselyContinuationPersistence(
           jobId: data.claim.id, ownerUserId: data.owner, intent: 'start', phase: 'finished',
           createdAt: data.at, updatedAt: data.at,
         }).execute()
-        const consumed = await tx.updateTable('threadProtectedDecisions')
-          .set({ consumedSha: committedSha })
-          .where('messageId', '=', data.claim.id).where('ownerUserId', '=', data.owner)
-          .where('threadId', '=', data.threadId).where('sourceJobId', '=', data.claim.source)
-          .where('sourceSha', '=', data.sourceHead).where('decision', '=', 'approved')
-          .where('consumedSha', 'is', null).executeTakeFirst()
-        if (count(consumed) !== 1)
+        const consumed = await consumeProtectedDecisionKysely(
+          tx, data.owner, data.claim.id, committedSha, {
+            threadId: data.threadId, sourceJobId: data.claim.source, sourceSha: data.sourceHead,
+          })
+        if (!consumed)
           throw new Error('Protected approval was already consumed or its commit identity changed.')
         await finishReview(tx, data)
         const finished = await tx.updateTable('storyThreadMessages').set({
