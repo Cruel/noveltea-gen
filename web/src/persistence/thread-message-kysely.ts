@@ -19,7 +19,7 @@ const required = (owner: string): void => {
 
 /** The caller must hold the shared Thread write guard before allocating a
  * sequence. The unique (thread_id, sequence) index is the final backstop. */
-async function nextSequence(tx: Write, threadId: string): Promise<number> {
+export async function nextThreadSequenceKysely(tx: Write, threadId: string): Promise<number> {
   const row = await tx.selectFrom('storyThreadMessages')
     .select(sql<number>`COALESCE(MAX("sequence"), -1) + 1`.as('next'))
     .where('threadId', '=', threadId).executeTakeFirstOrThrow()
@@ -162,7 +162,7 @@ async function jobSummary(db: Executor, owner: string, jobId: string): Promise<s
 }
 
 /** Stable settlement ids retain old summaries rather than rewriting history. */
-async function insertAssistant(tx: Write, owner: string, threadId: string, jobId: string): Promise<string> {
+export async function insertThreadAssistantKysely(tx: Write, owner: string, threadId: string, jobId: string): Promise<string> {
   const content = await jobSummary(tx, owner, jobId)
   const latest = await tx.selectFrom('storyThreadMessages')
     .select(['id', 'body']).where('ownerUserId', '=', owner)
@@ -176,7 +176,7 @@ async function insertAssistant(tx: Write, owner: string, threadId: string, jobId
   const signature = createHash('sha256').update(content).digest('hex').slice(0, 12)
   const candidateId = latest ? `assistant:${jobId}:${event?.id ?? 'settlement'}:${signature}`
     : 'assistant:' + jobId
-  const sequence = await nextSequence(tx, threadId)
+  const sequence = await nextThreadSequenceKysely(tx, threadId)
   // Returning to a previous status must append another immutable settlement,
   // rather than silently collide with the old content-derived message ID.
   // Guarded sequence allocation makes this suffix deterministic on retry.
@@ -238,7 +238,7 @@ export async function seedThreadMessagesKysely(tx: Write, owner: string, threadI
         if (!existing)
           await tx.insertInto('storyThreadMessages').values({
             id: 'initial:' + run.jobId, ownerUserId: owner, threadId,
-            sequence: await nextSequence(tx, threadId), role: 'user',
+            sequence: await nextThreadSequenceKysely(tx, threadId), role: 'user',
             status: 'delivered', body: task, phase: 'finished', jobId: run.jobId,
             verifiedCommitSha: run.sourceSha, createdAt: run.createdAt,
           }).onConflict(oc => oc.doNothing()).execute()
@@ -249,7 +249,7 @@ export async function seedThreadMessagesKysely(tx: Write, owner: string, threadI
       .where('role', '=', 'user').where('phase', '=', 'running').executeTakeFirst()
     if (includeSummaries && !unsettled && run.queuePhase === 'finished' &&
       ['completed', 'paused', 'blocked', 'cancelled'].includes(run.status))
-      await insertAssistant(tx, owner, threadId, run.jobId)
+      await insertThreadAssistantKysely(tx, owner, threadId, run.jobId)
   }
   return recoveries
 }
@@ -429,7 +429,7 @@ export function createKyselyThreadMessages(db: SharedDatabase<StudioDb>): Thread
           throw new ThreadMessageConflict(409,
             'Steer is available only while a generation run is active.')
         await tx.insertInto('storyThreadMessages').values({
-          id, ownerUserId: owner, threadId, sequence: await nextSequence(tx, threadId),
+          id, ownerUserId: owner, threadId, sequence: await nextThreadSequenceKysely(tx, threadId),
           role: 'user', status: 'queued', body, phase: 'queued', createdAt: at,
           creativePolicyJson: JSON.stringify(creativeMode ? creativePolicy(creativeMode) :
             parseCreativePolicy(member.creativePolicyJson)),

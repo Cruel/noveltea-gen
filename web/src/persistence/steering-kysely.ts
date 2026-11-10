@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto'
 import { sql, type Transaction } from 'kysely'
 import type { QueryExecutor, SharedDatabase, WriteGuard } from '../db/kysely-connection'
 import type { StudioDb } from '../db/studio-db'
+import { boundarySteeringReviewsKysely, deferUndeliveredSteeringKysely } from './steering-boundary-kysely'
 import { studioSafeInteger } from '../db/kysely-values'
 import type {
   ClaimedPiInput, PendingPiInput, SteeringActivity, SteeringCheckpoint,
@@ -305,23 +305,8 @@ export function createKyselySteeringPersistence(db: SharedDatabase<StudioDb>): S
     },
     async deferUndelivered(owner, jobId) {
       requireOwner(owner)
-      await db.withWriteTransaction([job(jobId)], async tx => {
-        await tx.updateTable('threadLiveInputs').set({ state: 'deferred' })
-          .where('ownerUserId', '=', owner).where('sourceJobId', '=', jobId)
-          .where('state', '=', 'pending').execute()
-        const stuck = await tx.selectFrom('threadLiveInputs').select('messageId')
-          .where('ownerUserId', '=', owner).where('sourceJobId', '=', jobId)
-          .where('state', 'in', ['dispatching', 'sdk-queued']).execute()
-        for (const row of stuck) {
-          await tx.updateTable('threadLiveInputs').set({ state: 'blocked' })
-            .where('messageId', '=', row.messageId)
-            .where('ownerUserId', '=', owner)
-            .where('state', 'in', ['dispatching', 'sdk-queued']).execute()
-          await tx.updateTable('storyThreadMessages').set({ phase: 'blocked' })
-            .where('id', '=', row.messageId).where('ownerUserId', '=', owner)
-            .where('phase', '=', 'queued').execute()
-        }
-      })
+      await db.withWriteTransaction([job(jobId)], tx =>
+        deferUndeliveredSteeringKysely(tx, owner, jobId))
     },
     async consider(messageId, owner, threadId, jobId, content, workItem, disposition, at) {
       await db.withWriteTransaction([job(jobId), thread(threadId)], tx =>
@@ -427,44 +412,8 @@ export function createKyselySteeringPersistence(db: SharedDatabase<StudioDb>): S
     },
     async boundaryReviews(owner, jobId, threadId, verifiedHead, at) {
       requireOwner(owner)
-      if (!validSha(verifiedHead)) return 0
-      return db.withWriteTransaction([job(jobId), thread(threadId)], async tx => {
-        const rows = await tx.selectFrom('threadSteeringIntents as i')
-          .innerJoin('storyThreadMessages as m', join => join
-            .onRef('m.id', '=', 'i.messageId').onRef('m.ownerUserId', '=', 'i.ownerUserId')
-            .onRef('m.threadId', '=', 'i.threadId'))
-          .innerJoin('generationRunQueue as q', join => join
-            .onRef('q.jobId', '=', 'i.sourceJobId').onRef('q.ownerUserId', '=', 'i.ownerUserId'))
-          .innerJoin('studioSessions as s', join => join
-            .onRef('s.id', '=', 'i.sourceJobId').onRef('s.ownerUserId', '=', 'i.ownerUserId'))
-          .select(['i.messageId as id', 'm.body as content'])
-          .where('i.ownerUserId', '=', owner).where('i.sourceJobId', '=', jobId)
-          .where('i.threadId', '=', threadId).where('i.reviewState', '=', 'pending-boundary')
-          .where('i.reviewMessageId', 'is', null)
-          .where('i.disposition', 'in', ['scope-review', 'protected-review'])
-          .where('q.phase', '=', 'finished').where('s.status', '=', 'completed')
-          .where('m.status', '=', 'delivered')
-          .orderBy('m.sequence').execute()
-        for (const row of rows) {
-          const sequence = await tx.selectFrom('storyThreadMessages')
-            .select(sql<number>`COALESCE(MAX("sequence"), -1) + 1`.as('next'))
-            .where('threadId', '=', threadId).where('ownerUserId', '=', owner)
-            .executeTakeFirstOrThrow()
-          const id = randomUUID()
-          await tx.insertInto('storyThreadMessages').values({
-            id, ownerUserId: owner, threadId, sequence: studioSafeInteger(sequence.next),
-            role: 'user', status: 'queued', body: row.content,
-            originMessageId: row.id, phase: 'queued', createdAt: at,
-          }).execute()
-          const result = await tx.updateTable('threadSteeringIntents').set({
-            reviewMessageId: id, reviewState: 'awaiting-review',
-          }).where('messageId', '=', row.id).where('ownerUserId', '=', owner)
-            .where('threadId', '=', threadId).where('reviewState', '=', 'pending-boundary')
-            .where('reviewMessageId', 'is', null).executeTakeFirst()
-          if (changed(result) !== 1) throw new Error('Steering boundary review was already claimed')
-        }
-        return rows.length
-      })
+      return db.withWriteTransaction([job(jobId), thread(threadId)], tx =>
+        boundarySteeringReviewsKysely(tx, owner, jobId, threadId, verifiedHead, at))
     },
     async activity(owner, threadId): Promise<SteeringActivity[]> {
       requireOwner(owner)

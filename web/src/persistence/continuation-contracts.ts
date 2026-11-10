@@ -1,6 +1,6 @@
 /** Durable same-Thread single-writer continuation and terminal reconciliation.
- * All methods are synchronous because the caller runs Git/native validation
- * outside each transaction. The adapter holds the SQLite writer lock. */
+ * Git/native validation runs outside each transaction. Both backends hold
+ * the same guarded write boundary around approval, registration and recovery. */
 export type ContinuationRun = {
   jobId: string; status: string; queuePhase: string | null; runOrder: number
 }
@@ -14,8 +14,8 @@ export type ContinuationRequest = {
   sourceHead: string; generationThread: string
   draftJson: string; requestJson: string; at: string
 }
-// Every consumer uses the asynchronous port. The SQLite implementation alone
-// owns its synchronous transactions; other adapters may await within theirs.
+// Every consumer uses the asynchronous port; transaction-scoped helpers
+// compose under one shared executor instead of opening a separate connection.
 export interface ContinuationPersistence {
   current(owner: string, threadId: string): Promise<ContinuationRun | null>
   pending(owner: string, threadId: string): Promise<QueuedContinuation | null>

@@ -21,6 +21,8 @@ import { createKyselyNaturalStoryPersistence } from '../../src/persistence/natur
 import { createKyselyThreadMessages } from '../../src/persistence/thread-message-kysely'
 import { createKyselyAdvancedThreads } from '../../src/persistence/advanced-thread-kysely'
 import { createKyselySteeringPersistence } from '../../src/persistence/steering-kysely'
+import { createKyselyContinuationPersistence } from '../../src/persistence/continuation-kysely'
+import type { ContinuationPersistence } from '../../src/persistence/continuation-contracts'
 import type { SteeringPersistence } from '../../src/persistence/steering-contracts'
 import type { AdvancedThreadPersistence } from '../../src/persistence/advanced-thread-contracts'
 import type { ThreadMessagePersistence } from '../../src/persistence/thread-message-contracts'
@@ -60,6 +62,7 @@ export interface KyselyFeatureFixture {
   messages: ThreadMessagePersistence
   advancedThreads: AdvancedThreadPersistence
   steering: SteeringPersistence
+  continuation: ContinuationPersistence
   dashboard: DashboardCatalog
   settings: SettingsPreferences
   account(owner: string, provider: GitProvider): Promise<void>
@@ -68,6 +71,7 @@ export interface KyselyFeatureFixture {
   openIndependentMessages(): Promise<{ messages: ThreadMessagePersistence; close(): Promise<void> }>
   openIndependentAdvancedThreads(): Promise<{ advancedThreads: AdvancedThreadPersistence; close(): Promise<void> }>
   openIndependentSteering(): Promise<{ steering: SteeringPersistence; close(): Promise<void> }>
+  openIndependentContinuation(): Promise<{ continuation: ContinuationPersistence; close(): Promise<void> }>
   reopenAdvancedThreads(): Promise<AdvancedThreadPersistence>
   reopenMessages(): Promise<ThreadMessagePersistence>
   reopenNavigation(): Promise<{
@@ -161,6 +165,7 @@ export async function openKyselyFeatureFixture(
       messages: createKyselyThreadMessages(database),
       advancedThreads: createKyselyAdvancedThreads(database),
       steering: createKyselySteeringPersistence(database),
+      continuation: createKyselyContinuationPersistence(database),
       ...createKyselyCatalogPersistence(database),
       publications: createKyselyPublicationRecords(database),
       ...createKyselyGitPersistence(database),
@@ -188,6 +193,10 @@ export async function openKyselyFeatureFixture(
       async openIndependentSteering() {
         const other = openKyselyDatabase<StudioDb>(options)
         return { steering: createKyselySteeringPersistence(other), close: () => other.close() }
+      },
+      async openIndependentContinuation() {
+        const other = openKyselyDatabase<StudioDb>(options)
+        return { continuation: createKyselyContinuationPersistence(other), close: () => other.close() }
       },
       async reopenAdvancedThreads() {
         await database!.close()
