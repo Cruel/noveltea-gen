@@ -129,8 +129,13 @@ pnpm certify:studio-compose sqlite
 pnpm certify:studio-compose postgres
 ```
 
-These require local rootless Docker, the native CLI and skills checkout, but
-no real model/provider credentials. Generated disposable OAuth placeholders
+Locally these require rootless Docker, the native CLI and skills checkout;
+no real model/provider credentials are needed. The mandatory `compose-certification`
+GitHub Actions job runs both modes using a temporary rootless daemon and
+explicit CI-only CLI `--version`/skills fixtures, so production database,
+service, and network behavior is enforced on every push and pull request.
+The fixture does not certify native Story execution, which remains a separate
+integration gate. Generated disposable OAuth placeholders
 are used only to validate startup and schema/auth storage. The two projects
 use independently named volumes and never remove operator data; see the
 [#143 acceptance matrix](kysely-s18-closeout.md).

@@ -14,20 +14,21 @@ open for maintainer review.
 | Controller network boundary | **PASS**: PostgreSQL Controller belongs only to `pg-controller`, PostgreSQL also to `pg-app`, and Web/Agent cannot enter `pg-controller`; live DNS denies Web/Agent resolution from Controller. SQLite Controller retains `network_mode: none` |
 | Controller read-only role and restricted catalog | **PASS**: Controller can query its intended catalog, but cannot select app jobs/credential tables, create temp or app tables, or mutate catalog; `scripts/certify-postgres-compose.ts` additionally verifies the actual Kysely reader and populated owner-joined projection |
 | Database exposure and state safety | **PASS**: no PostgreSQL host port; unique Compose project, generated passwords and isolated volumes for every run; teardown never calls `down -v` or touches operator volumes, Pi sessions, worktrees or checkpoints |
-| Credential-free CI | **PASS locally**, CI on next push: `.github/workflows/ci.yml` provisions PostgreSQL unconditionally for the offline job with `NT_REQUIRE_KYSELY_PROOF=1`; runs SQLite and PostgreSQL conformance, Compose configuration tests, type generation, and the production build/immutable asset staging |
+| Credential-free CI | **Mandatory gates**: `.github/workflows/ci.yml` provisions PostgreSQL unconditionally for the offline job with `NT_REQUIRE_KYSELY_PROOF=1`, runs `pnpm lint`, both database conformance suites, Compose configuration tests, type generation and production build; separate required `compose-certification` runs the full SQLite and PostgreSQL production Compose lifecycle on an independent rootless Docker daemon |
 | Single shared Kysely persistence and no obsolete application adapters | **PASS**: `web/src/persistence/kysely.ts`, `web/src/db/shared-studio-store.ts`, `scripts/check-studio-persistence-boundary.mjs` and source lint. Better Auth's transitive Drizzle packages are not application imports |
 | Migration and reset documentation | **PASS**: `docs/kysely-schema.md`, `docs/studio-kysely-cutover.md`, `docs/postgres-compose.md`, `docs/studio-db-certification.md` |
 | Parent closure policy | **PASS**: parent #125 intentionally remains open for maintainer acceptance |
 
-The full Compose witness requires a **rootless** Docker daemon, the local native
-NovelTea executable, and a local skills checkout; it generates disposable
-OAuth/Agent/Pi *configuration placeholders* but never contacts a model,
-provider, or live OAuth endpoint. It runs locally as an additional rootless
-deployment certificate. GitHub's credential-free offline job runs both database
-engines and the static configuration and schema certification; it does not
-pretend to run a live native-cli/skills-equipped Docker host. Opt-in live Pi,
-provider publishing, native-story execution, and full rootless deployment are
-separate checks, not optional skips for the required DB conformance.
+The full Compose witness requires a **rootless** Docker daemon. Local runs
+use the real native NovelTea executable and skills checkout. Mandatory CI runs
+both modes on an independent rootless Docker daemon and injects a deliberately
+restricted CLI `--version` fixture and isolated skills directory. This proves
+compiled production Web/Agent/Controller startup, migration order, persistence,
+networking and database permissions, **not native Story execution**. The
+separate native integration job covers native behavior when private artifacts
+are available. Both CI gates generate disposable OAuth/Agent/Pi configuration
+values without contacting any model, provider or live OAuth endpoint. Opt-in
+live Pi and provider publishing remain separate certification scopes.
 
 ## #125 user stories
 

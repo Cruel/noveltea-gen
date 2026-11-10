@@ -13,8 +13,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-# Live Pi/provider calls, hosted tracing and rootless-Docker certification are
-# deliberately excluded. None of the jobs receives model credentials.
+# Live Pi/provider calls and hosted tracing are deliberately excluded.
+# Rootless full-stack SQLite/PostgreSQL certification is mandatory and uses
+# generated local fixtures, never model credentials.
 env:
   CI: "true"
   NT_LIVE_TEST: "0"
@@ -78,6 +79,7 @@ jobs:
       # full root and Studio suites against a real native CLI when available.
       - name: Typecheck, build and run offline-safe root and Studio tests
         run: |
+          pnpm lint
           pnpm typecheck
           pnpm test:offline
           pnpm build
@@ -88,6 +90,52 @@ jobs:
           pnpm --filter @noveltea/studio typegen:check
           pnpm --filter @noveltea/studio test:offline
           pnpm --filter @noveltea/studio schema:parity
+
+  compose-certification:
+    name: Rootless Compose (SQLite + PostgreSQL)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: "11.15.0"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Start an independent rootless Docker daemon
+        run: bash scripts/ci-start-rootless-docker.sh
+      - name: Prepare credential-free native prerequisites
+        run: |
+          # Database/Compose startup only needs an executable CLI --version
+          # and skills directory. Other native commands fail explicitly.
+          fixtures="$RUNNER_TEMP/noveltea-compose-fixtures"
+          mkdir -p "$fixtures/skills/skills/nt-story-architecture"
+          printf '%s\n' '# Disposable Compose certification skills directory' > "$fixtures/skills/skills/nt-story-architecture/SKILL.md"
+          printf '%s\n' '#!/bin/sh' 'if [ "$1" = "--version" ]; then echo "noveltea 1.0.0"; else echo "CI fixture: native CLI execution prohibited" >&2; exit 64; fi' > "$fixtures/noveltea"
+          chmod 0755 "$fixtures/noveltea"
+          echo "NT_NATIVE_CLI_HOST=$fixtures/noveltea" >> "$GITHUB_ENV"
+          echo "NT_SKILLS_HOST=$fixtures/skills" >> "$GITHUB_ENV"
+      - name: Build disposable trusted and sandbox images
+        run: docker compose build init sandbox-image
+      - name: Certify SQLite production Compose lifecycle
+        env:
+          NT_CERT_REUSE_LOCAL_IMAGES: "1"
+        run: pnpm certify:studio-compose sqlite
+      - name: Certify PostgreSQL production Compose lifecycle and controller boundary
+        env:
+          NT_CERT_REUSE_LOCAL_IMAGES: "1"
+        run: pnpm certify:studio-compose postgres
+      - name: Record independent Compose certification
+        if: success()
+        run: |
+          echo 'Both full-stack database Compose modes booted and persisted across service restart and project recreation.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Native CLI execution is covered by separate native integration jobs, not the Compose-only CLI version fixture.' >> "$GITHUB_STEP_SUMMARY"
 
   native-integration:
     name: Native Story (${{ matrix.label }})
