@@ -102,6 +102,10 @@ test('S18 isolated Compose certificate cannot mount developer state or leak auth
       assert.equal(current.environment?.NT_AGENT_RPC_TOKEN, values.NT_AGENT_RPC_TOKEN)
     }
     const controller = service(manifest, 'controller')
+    for (const key of ['app', 'state', 'cache']) {
+      assert.equal(controller.environment?.['NT_SANDBOX_' + key.toUpperCase() + '_VOLUME'],
+        tag + '-' + key, 'Controller must never inspect an operator volume')
+    }
     assert.ok(!('NT_AGENT_RPC_TOKEN' in (controller.environment ?? {})))
     assert.ok(!('NT_PI_CREDENTIAL_KEY' in (controller.environment ?? {})))
     assert.ok(!('GITHUB_CLIENT_SECRET' in (controller.environment ?? {})))

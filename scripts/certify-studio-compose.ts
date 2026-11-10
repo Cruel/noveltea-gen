@@ -135,11 +135,16 @@ async function main() {
   compose('config', '--quiet')
   const plan = JSON.parse(compose('config', '--format', 'json')) as {
     volumes: Record<string, { name: string }>
+    services: Record<string, { environment?: Record<string, string> }>
   }
   for (const [key, value] of Object.entries(volumes)) {
     if (key === 'postgres' && backend === 'sqlite') continue
     assert.equal(plan.volumes['noveltea-' + key]?.name, value,
       'Certification may not attach a developer volume: ' + key)
+  }
+  for (const key of ['app', 'state', 'cache']) {
+    assert.equal(plan.services.controller?.environment?.['NT_SANDBOX_' + key.toUpperCase() + '_VOLUME'],
+      volumes[key], 'Controller must inspect its own disposable ' + key + ' volume')
   }
   let attempted = false
   try {

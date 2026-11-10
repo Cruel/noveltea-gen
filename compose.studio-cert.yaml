@@ -24,3 +24,10 @@ services:
   agent:
     env_file: !reset []
     environment: *cert-auth
+  controller:
+    # The controller inspects Docker daemon mountpoints directly, not the
+    # Compose service volume aliases. Never fall back to developer volumes.
+    environment:
+      NT_SANDBOX_APP_VOLUME: ${NT_APP_VOLUME_NAME:?Set an isolated app volume}
+      NT_SANDBOX_STATE_VOLUME: ${NT_STATE_VOLUME_NAME:?Set an isolated state volume}
+      NT_SANDBOX_CACHE_VOLUME: ${NT_CACHE_VOLUME_NAME:?Set an isolated cache volume}
