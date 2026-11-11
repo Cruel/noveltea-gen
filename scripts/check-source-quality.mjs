@@ -37,15 +37,20 @@ export function featureTestImportViolations(path, source) {
   const parsed = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
   const violations = [];
   const check = (node) => {
-    const moduleName = ts.isImportDeclaration(node) || ts.isExportDeclaration(node)
-      ? node.moduleSpecifier
-      : ts.isCallExpression(node) &&
-        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-          (ts.isIdentifier(node.expression) && node.expression.text === "require"))
-        ? node.arguments[0] : undefined;
-    if (moduleName && ts.isStringLiteral(moduleName) &&
-        (/^(?:pg|pg\/|kysely(?:\/|$)|better-sqlite3$|node:sqlite$)/.test(moduleName.text) ||
-         /\/db\/kysely-connection(?:\.ts)?$/.test(moduleName.text))) {
+    const moduleName =
+      ts.isImportDeclaration(node) || ts.isExportDeclaration(node)
+        ? node.moduleSpecifier
+        : ts.isCallExpression(node) &&
+            (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+              (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+          ? node.arguments[0]
+          : undefined;
+    if (
+      moduleName &&
+      ts.isStringLiteral(moduleName) &&
+      (/^(?:pg|pg\/|kysely(?:\/|$)|better-sqlite3$|node:sqlite$)/.test(moduleName.text) ||
+        /\/db\/kysely-connection(?:\.ts)?$/.test(moduleName.text))
+    ) {
       violations.push("raw driver/Kysely import outside approved backend test infrastructure");
     }
     ts.forEachChild(node, check);
