@@ -18,7 +18,8 @@ async function selected(db: Read | Write, owner: string, storyId: string) {
       .onRef('repositories.ownerUserId', '=', 'stories.ownerUserId'))
     .select([
       'stories.id as id', 'stories.id as storyId', 'stories.repositoryId as repositoryId',
-      'stories.sourceCommitSha as headSha',
+      'stories.sourceCommitSha as headSha', 'stories.title as title',
+      'stories.initialContentSha256 as initialContentSha256',
       'repositories.provider as provider', 'repositories.providerRepositoryId as providerId',
       'stories.directory as directory',
     ])
@@ -39,6 +40,23 @@ export function createKyselyNaturalStoryPersistence(db: SharedDatabase<StudioDb>
     async story(owner, storyId) {
       required(owner)
       return selected(db.read, owner, storyId)
+    },
+    async originalInitializationJob(owner, storyId) {
+      required(owner)
+      // GitHub initialization commits its Story registration and original job
+      // with the same creation timestamp in one transaction. An ambiguous
+      // historical match is not reusable authorization.
+      const rows = await db.read.selectFrom('stories as st')
+        .innerJoin('studioSessions as s', join => join
+          .onRef('s.storyId', '=', 'st.id')
+          .onRef('s.ownerUserId', '=', 'st.ownerUserId')
+          .onRef('s.createdAt', '=', 'st.createdAt')
+          .onRef('s.sourceCommitSha', '=', 'st.sourceCommitSha'))
+        .select(['s.id as jobId'])
+        .where('st.id', '=', storyId).where('st.ownerUserId', '=', owner)
+        .where('s.generationRequestJson', 'is', null)
+        .limit(2).execute()
+      return rows.length === 1 ? rows[0]!.jobId : null
     },
     async previousJob(owner, jobId) {
       required(owner)
@@ -129,6 +147,18 @@ export function createKyselyNaturalStoryPersistence(db: SharedDatabase<StudioDb>
           throw new Error(
             'The first Turn lifecycle is incompatible with a new admission. Inspect the saved Thread.',
           )
+        const accepted = await tx.selectFrom('generationRunQueue').select('jobId')
+          .where('jobId', '=', jobId).where('ownerUserId', '=', owner).executeTakeFirst()
+        if (accepted) {
+          const linked = await tx.selectFrom('storyThreadRuns').select('jobId')
+            .where('jobId', '=', jobId).where('ownerUserId', '=', owner)
+            .where('threadId', '=', threadId).executeTakeFirst()
+          if (!linked) throw new Error('Admitted first Turn has no linked execution.')
+          await tx.updateTable('storyThreadMessages')
+            .set({ phase: 'running', status: 'delivered', jobId })
+            .where('id', '=', jobId).where('ownerUserId', '=', owner).execute()
+          return { headSha: member.headSha, state: 'admitted' as const }
+        }
         await tx.updateTable('storyThreadMessages').set({ phase: 'preparing' })
           .where('id', '=', jobId).where('ownerUserId', '=', owner).execute()
         return { headSha: member.headSha, state: 'claimed' as const }
@@ -148,18 +178,54 @@ export function createKyselyNaturalStoryPersistence(db: SharedDatabase<StudioDb>
           .where('storyThreads.ownerUserId', '=', owner).executeTakeFirst()
         if (!message || (message.phase !== 'preparing' && message.phase !== 'running'))
           throw new Error('First Turn reservation changed; inspect the saved Thread.')
-        if (admitted) {
+        const queue = await tx.selectFrom('generationRunQueue').select('jobId')
+          .where('jobId', '=', jobId).where('ownerUserId', '=', owner).executeTakeFirst()
+        const accepted = admitted || !!queue
+        if (accepted) {
           const run = await tx.selectFrom('storyThreadRuns').select('jobId')
             .where('jobId', '=', jobId).where('ownerUserId', '=', owner)
             .where('threadId', '=', threadId).executeTakeFirst()
-          const queue = await tx.selectFrom('generationRunQueue').select('jobId')
-            .where('jobId', '=', jobId).where('ownerUserId', '=', owner).executeTakeFirst()
           if (!run || !queue) throw new Error('First Turn execution was not durably admitted.')
         }
         await tx.updateTable('storyThreadMessages')
-          .set(admitted ? { phase: 'running', status: 'delivered', jobId } :
+          .set(accepted ? { phase: 'running', status: 'delivered', jobId } :
             { phase: 'blocked', status: 'queued' })
           .where('id', '=', jobId).where('ownerUserId', '=', owner).execute()
+      })
+    },
+    async finishFoundationOnly(owner, storyId, jobId) {
+      required(owner)
+      await db.withWriteTransaction([{ kind: 'job', id: jobId }], async tx => {
+        const threadId = 'root:' + jobId
+        const saved = await tx.selectFrom('storyThreadMessages as m')
+          .innerJoin('storyThreads as t', join => join.onRef('t.id', '=', 'm.threadId')
+            .onRef('t.ownerUserId', '=', 'm.ownerUserId'))
+          .innerJoin('storyThreadRuns as r', join => join.onRef('r.threadId', '=', 't.id')
+            .onRef('r.ownerUserId', '=', 't.ownerUserId').onRef('r.jobId', '=', 'm.id'))
+          .innerJoin('studioSessions as s', join => join.onRef('s.id', '=', 'r.jobId')
+            .onRef('s.ownerUserId', '=', 'r.ownerUserId'))
+          .select(['m.phase as phase', 'm.jobId as messageJobId',
+            's.status as status', 's.generationRequestJson as requestJson'])
+          .where('m.id', '=', jobId).where('m.ownerUserId', '=', owner)
+          .where('m.threadId', '=', threadId).where('t.storyId', '=', storyId)
+          .where('t.deletedAt', 'is', null).where('r.runOrder', '=', 0)
+          .executeTakeFirst()
+        const queue = await tx.selectFrom('generationRunQueue').select('jobId')
+          .where('jobId', '=', jobId).where('ownerUserId', '=', owner).executeTakeFirst()
+        if (!saved || queue || saved.requestJson ||
+            (saved.phase === 'finished'
+              ? saved.status !== 'completed' || saved.messageJobId !== jobId
+              : saved.phase !== 'preparing' || saved.status !== 'paused'))
+          throw new Error('Foundation-only completion has an incompatible saved execution.')
+        if (saved.phase === 'finished') return
+        await tx.updateTable('studioSessions').set({
+          status: 'completed', updatedAt: new Date().toISOString(),
+        }).where('id', '=', jobId).where('ownerUserId', '=', owner)
+          .where('status', '=', 'paused').where('generationRequestJson', 'is', null).execute()
+        await tx.updateTable('storyThreadMessages')
+          .set({ phase: 'finished', status: 'delivered', jobId })
+          .where('id', '=', jobId).where('ownerUserId', '=', owner)
+          .where('phase', '=', 'preparing').execute()
       })
     },
     async associateRoot(owner, storyId, jobId, title, at) {

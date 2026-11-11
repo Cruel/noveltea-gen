@@ -1,8 +1,49 @@
+import { createHash } from 'node:crypto'
+import { readFile, mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import type { JobStartResult } from '../../../src/job'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
-import { acquireCachedStory, GitCacheError, initializeStoryBranch } from './git-cache.server'
+import { acquireCachedStory, GitCacheError, initialStoryDocument, initializeStoryBranch } from './git-cache.server'
 import { ensureRootThreads } from './threads.server'
 
 type Provider = 'github' | 'gitlab'
+
+/** Only a provider-verified reopening of the *single exact* unpublished
+ * initialization commit may establish this read-only trusted HEAD. A later
+ * generation writer still needs its own approval, native validation and
+ * work-item receipt; this marker never proves that placeholder canon is ready. */
+async function attestInitializedHead(job: JobStartResult) {
+  if (job.headSha === job.baseSha)
+    throw new GitCacheError(409, 'Missing isolated initialization commit.')
+  const folder = join(job.stateDir, 'revisions')
+  const path = join(folder, 'verified-head.json')
+  const marker = { version: 1, jobId: job.jobId, headSha: job.headSha,
+    workItemId: 'story-initialization' }
+  await mkdir(folder, { recursive: true })
+  try {
+    await writeFile(path, JSON.stringify(marker, null, 2) + '\n', {
+      flag: 'wx', mode: 0o600,
+    })
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+    let saved: unknown
+    try { saved = JSON.parse(await readFile(path, 'utf8')) }
+    catch { throw new GitCacheError(409, 'Initialization HEAD receipt is corrupt.') }
+    if (JSON.stringify(saved) !== JSON.stringify(marker))
+      throw new GitCacheError(409, 'Initialization HEAD differs from trusted job history.')
+  }
+}
+
+/** The sole exception for a new Story's unpublished initial Git commit. */
+export async function isVerifiedInitializedDraft(job: JobStartResult): Promise<boolean> {
+  if (job.headSha === job.baseSha) return false
+  try {
+    const saved = JSON.parse(await readFile(join(job.stateDir, 'revisions', 'verified-head.json'),
+      'utf8')) as { version?: number; jobId?: string; headSha?: string; workItemId?: string }
+    return saved.version === 1 && saved.jobId === job.jobId &&
+      saved.headSha === job.headSha && saved.workItemId === 'story-initialization'
+  } catch { return false }
+}
 export type CachedCatalogStory = {
   id: string
   directory: string
@@ -13,8 +54,9 @@ export type CachedCatalogStory = {
   providerId: string
 }
 type VerifiedSource =
-  | { remoteUrl: string; sizeBytes: number; blobCount: number; reopenDraft?: false }
-  | { remoteUrl: string; reopenDraft: true }
+  | { remoteUrl: string; sizeBytes: number; blobCount: number; reopenDraft?: false; initializeDraft?: false }
+  | { remoteUrl: string; reopenDraft: true; initializeDraft?: false }
+  | { remoteUrl: string; initializeDraft: true; reopenDraft?: false; foundationMarkdown?: string }
 
 // Shared, trusted job-registration boundary for both Git providers. Browser
 // input is only a catalog Story UUID, a retry-safe job UUID and a SHA assertion.
@@ -57,13 +99,34 @@ export async function prepareCachedJob(
     directory: row.directory, commit: pinned, jobId: input.jobId,
   }
   // An unpublished GitHub initialization draft is absent at its pinned base.
-  // Only an already-registered job may reopen its exact saved one-commit draft;
-  // never use this fallback to create a new job or skip identity validation.
-  const job = verified.reopenDraft
-    ? await initializeStoryBranch({ ...source, title: row.title, requireExistingCommit: true,
-      ...(row.contentSha256 ? { foundationSha256: row.contentSha256 } : {}) })
-    : await acquireCachedStory({ ...source,
-      verifiedSizeBytes: verified.sizeBytes, verifiedBlobCount: verified.blobCount })
+  // Reopen an existing job at its exact saved one-file commit, or reconstruct
+  // the separately authorized first Chat job from content-bound initialization
+  // bytes. Both paths are verified before any trusted HEAD is established.
+  const placeholderDigest = createHash('sha256').update(initialStoryDocument(row.title)).digest('hex')
+  if (verified.initializeDraft && (existing || provider !== 'github' ||
+      !row.contentSha256 ||
+      (row.contentSha256 !== placeholderDigest && (!verified.foundationMarkdown ||
+        createHash('sha256').update(verified.foundationMarkdown).digest('hex') !== row.contentSha256))))
+    throw new GitCacheError(409, 'Only exact saved initialization content may be materialized in a new Chat job.')
+  const initialization = verified.reopenDraft || verified.initializeDraft
+    ? { ...source, title: row.title,
+        ...(row.contentSha256 ? { foundationSha256: row.contentSha256 } : {}) }
+    : null
+  // The first write is always independently reopened against the committed
+  // blob digest before a trusted-head marker is published. No Git filter,
+  // symlink or unexpected file may silently change the initial draft bytes.
+  if (verified.initializeDraft) {
+    await initializeStoryBranch({ ...initialization!, foundationMarkdown:
+      verified.foundationMarkdown ?? initialStoryDocument(row.title) })
+  }
+  if (!initialization && !('sizeBytes' in verified))
+    throw new GitCacheError(409, 'Verified Story acquisition has no bounded Git tree evidence.')
+  const job = initialization
+    ? await initializeStoryBranch({ ...initialization, requireExistingCommit: true })
+    : 'sizeBytes' in verified
+      ? await acquireCachedStory({ ...source,
+        verifiedSizeBytes: verified.sizeBytes, verifiedBlobCount: verified.blobCount })
+      : (() => { throw new GitCacheError(409, 'Missing verified source tree.') })()
   const now = new Date().toISOString()
   const saved = await store.persistence.generation.jobs.register(
     ownerId, input.jobId, row.id, row.title, pinned, now)
@@ -73,6 +136,10 @@ export async function prepareCachedJob(
   if (!saved) {
     throw new GitCacheError(409, 'Job ID was assigned concurrently to another Story or revision.')
   }
+  // initializeStoryBranch has just independently verified the exact one-commit
+  // diff and saved foundation content digest against the original source.
+  // Preserve that safe predecessor for the subsequent approved writer.
+  if (verified.reopenDraft || verified.initializeDraft) await attestInitializedHead(job)
   await ensureRootThreads(store, ownerId, row.id)
   return { id: input.jobId, storyId: row.id, status: 'paused' as const,
     baseSha: job.baseSha, headSha: job.headSha }

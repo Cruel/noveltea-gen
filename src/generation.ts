@@ -11,6 +11,7 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
 import { runFoundationJob } from "./foundation.js";
+import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob } from "./character-world.js";
 import { runEventWorkItem } from "./event-work.js";
 import { runInteractiveWorkItem } from "./interactive-work.js";
@@ -300,6 +301,20 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
     if (e.stage === "review") return version === plan.version && e.headSha === head;
     return hasPlanContinuity(job, receipt, e.milestone ? `${e.stage}:${e.milestone}` : e.stage, version);
   });
+  // A new full-Story Turn on a verified existing Story preserves its already
+  // approved Creative Direction. The original author's canon is not a license
+  // for a new discovery interview or a speculative replacement writer.
+  // A pinned Chat handoff or unfinished foundation receipt always takes
+  // precedence over this read-only reuse test.
+  if (!isFocusedScope(request.contract) &&
+      !completedStages.some(e => e.stage === "foundation") &&
+      !existsSync(join(job.stateDir, "foundation.json")) &&
+      !existsSync(join(job.stateDir, "chat-approved-foundation.json"))) {
+    const baseline = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
+      { ...job, baseSha: head });
+    if (await reusableExistingFoundation(job, baseline))
+      completedStages = [{ stage: "foundation", headSha: head, status: "committed" }, ...completedStages];
+  }
   // A focused request starts from committed canonical Story context. Never
   // dispatch whole-Story discovery to fill a missing prerequisite implicitly.
   if (isFocusedScope(request.contract) && !completedStages.some(e => e.stage === "foundation")) {

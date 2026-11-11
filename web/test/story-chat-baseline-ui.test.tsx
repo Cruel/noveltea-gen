@@ -52,9 +52,9 @@ test('exact proposed foundation and author-decision provenance are reviewable be
   assert.doesNotMatch(markup, /Publish|Initialize Story/)
 })
 
-test('approved baseline does not imply an automatically authorized Story writer', () => {
+test('approved baseline preserves the exact review while its original Turn continues', () => {
   const markup = render('approved')
   assert.match(markup, /native-validated/)
-  assert.match(markup, /nothing else was authorized or published/)
+  assert.match(markup, /No later Story edits or publication were approved/)
   assert.doesNotMatch(markup, /Approve baseline/)
 })

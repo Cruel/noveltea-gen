@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { actStoryChatDiscovery, readStoryChatDiscovery } from '@/lib/story-chat-discovery.functions'
-import { StoryChatBaselineView, type BaselineAction, type StoryChatBaselineSession } from './story-chat-baseline-view'
+import { storyNavigationKey } from '@/lib/threads.queries'
+import { StoryChatBaselineView, type BaselineAction, type BaselineContinuation, type StoryChatBaselineSession } from './story-chat-baseline-view'
 
 /** The ordinary first Thread owns discovery. All decisions and model turns are
  * read from its durable, server-authorized pinned session. */
@@ -27,9 +28,13 @@ export function StoryChatBaseline({ storyId, threadId }: {
       const response = await actStoryChatDiscovery({ data: {
         storyId, firstTurnId, action, revision: session.revision,
         ...(action === 'answer' || action === 'revise' ? { text: answer } : {}),
-        ...(action === 'approve' ? { digest: session.digest ?? undefined } : {}),
+        ...(action === 'approve' || action === 'continue' ? { digest: session.digest ?? undefined } : {}),
       } })
       client.setQueryData(key, response)
+      if (response.continuation?.state === 'queued') {
+        await client.invalidateQueries({ queryKey: storyNavigationKey(storyId) })
+        await client.invalidateQueries({ queryKey: ['thread-chat', threadId] })
+      }
       setAnswer('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Discovery could not continue.')
@@ -37,7 +42,8 @@ export function StoryChatBaseline({ storyId, threadId }: {
       setBusy(false)
     }
   }
-  return <StoryChatBaselineView session={session} answer={answer}
+  return <StoryChatBaselineView session={session}
+    continuation={query.data?.continuation as BaselineContinuation | undefined} answer={answer}
     onAnswerChange={setAnswer} busy={busy}
     error={error ?? (query.error instanceof Error ? query.error.message : null)}
     onAction={action => void act(action)} />

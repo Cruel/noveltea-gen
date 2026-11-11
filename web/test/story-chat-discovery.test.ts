@@ -174,7 +174,14 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     })
     assert.equal(approve.status, 200, JSON.stringify(approve.body))
     assert.equal(approve.body.session.phase, 'approved')
+    assert.equal(approve.body.continuation.state, 'blocked',
+      'without a real controller the exact approval persists but no writer starts')
     assert.equal(approve.body.session.proposal.foundation.decisions.length, 3)
+    const blockedContinuation = await req(storyIds[0]!, firstId, 'POST', {
+      action: 'continue', revision: approve.body.session.revision, digest: approve.body.session.digest,
+    })
+    assert.equal(blockedContinuation.status, 200)
+    assert.equal(blockedContinuation.body.continuation.state, 'blocked')
     assert.equal((await req(storyIds[0]!, firstId, 'POST', {
       action: 'approve', revision: proposed.revision, digest: proposed.digest,
     })).status, 409)

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { ModelRuntime, type CreateModelRuntimeOptions } from '@earendil-works/pi-coding-agent'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 
@@ -7,6 +7,15 @@ type Credential = NonNullable<Awaited<ReturnType<Credentials['read']>>>
 export type AvailablePiModel = { provider: string; id: string; reasoning: boolean }
 export type PiSelection = { provider: string; id: string; thinking?: 'low' | 'medium' | 'high' }
 const providerId = /^[a-z][a-z0-9-]{0,63}$/
+/** Cache only the owner-bound in-memory Pi catalog/runtime, never an authorization
+ * decision. Every availability check still re-reads credentials from the DB,
+ * and mutation invalidates this entry before a later request can reuse it. */
+type RuntimeEntry = { fingerprint: string; pending: Promise<ModelRuntime> }
+const runtimeCache = new WeakMap<StudioDatabase, Map<string, RuntimeEntry>>()
+const MAX_OWNER_RUNTIMES = 16
+function invalidateRuntime(store: StudioDatabase, owner: string) {
+  runtimeCache.get(store)?.delete(owner)
+}
 
 function encryptionKey(env: NodeJS.ProcessEnv): Buffer {
   const encoded = env.NT_PI_CREDENTIAL_KEY
@@ -70,19 +79,21 @@ export function userPiCredentials(store: StudioDatabase, owner: string,
       const changed = await store.persistence.piCredentials.compareAndSwap(
         owner, provider, encrypted, current?.revision ?? null)
       if (!changed) throw new Error('Pi credentials changed concurrently; reconnect before retrying')
+      invalidateRuntime(store, owner)
       return next
     },
     async delete(provider, options) {
       options?.signal?.throwIfAborted()
       if (!providerId.test(provider)) throw new Error('Invalid Pi provider')
       await store.persistence.piCredentials.delete(owner, provider)
+      invalidateRuntime(store, owner)
     },
   }
 }
 
 /** Never read ~/.pi/auth.json, ~/.pi/models.json or their model caches. */
-export async function createUserPiRuntime(store: StudioDatabase, owner: string,
-  env: NodeJS.ProcessEnv = process.env) {
+async function buildUserPiRuntime(store: StudioDatabase, owner: string,
+  env: NodeJS.ProcessEnv) {
   const runtime = await ModelRuntime.create({
     credentials: userPiCredentials(store, owner, env),
     modelsPath: null,
@@ -111,6 +122,48 @@ export async function createUserPiRuntime(store: StudioDatabase, owner: string,
   return runtime
 }
 
+/** Runtime initialization rebuilds and checks every built-in Pi provider and
+ * is expensive. Share a bounded, per-owner instance while credentials remain
+ * unchanged; a different StudioStore or explicit environment never inherits
+ * another owner's runtime or model selections. */
+export async function createUserPiRuntime(store: StudioDatabase, owner: string,
+  env: NodeJS.ProcessEnv = process.env): Promise<ModelRuntime> {
+  if (env !== process.env) return buildUserPiRuntime(store, owner, env)
+  let entries = runtimeCache.get(store)
+  if (!entries) {
+    entries = new Map()
+    runtimeCache.set(store, entries)
+  }
+  // The registry may have changed in another server process. Bound the cache
+  // to the current encrypted vault contents and encryption-key identity,
+  // not only in-process writes, so revocation/rotation cannot reuse stale SDK
+  // auth or subscription state across workers.
+  const vault = await store.persistence.piCredentials.list(owner)
+  const fingerprint = createHash('sha256').update(JSON.stringify([
+    env.NT_PI_CREDENTIAL_KEY ?? null,
+    ...vault.map(row => [row.provider, row.ciphertext]).sort((a, b) =>
+      String(a[0]).localeCompare(String(b[0]))),
+  ])).digest('hex')
+  const existing = entries.get(owner)
+  if (existing?.fingerprint === fingerprint) {
+    entries.delete(owner)
+    entries.set(owner, existing)
+    return existing.pending
+  }
+  const pending = buildUserPiRuntime(store, owner, env)
+  const entry: RuntimeEntry = { fingerprint, pending }
+  entries.set(owner, entry)
+  if (entries.size > MAX_OWNER_RUNTIMES) {
+    const oldest = entries.keys().next().value
+    if (oldest !== undefined) entries.delete(oldest)
+  }
+  try { return await pending }
+  catch (error) {
+    if (entries.get(owner) === entry) entries.delete(owner)
+    throw error
+  }
+}
+
 export async function availableUserPiModels(store: StudioDatabase, owner: string,
   env: NodeJS.ProcessEnv = process.env): Promise<AvailablePiModel[]> {
   // Scope configuration remains inspectable before operator Pi key setup.
@@ -125,8 +178,11 @@ export async function availableUserPiModels(store: StudioDatabase, owner: string
     // Only explicitly stored user credentials qualify; runtime's ambient
     // provider capabilities must never become an available user model.
     try {
+      // Credentials are owner-scoped and re-read for each availability check,
+      // but a large provider catalog must not trigger one database read per
+      // *model*. This is a single authorization snapshot of this provider.
+      if (!(await credentials.read(item.providerId))) continue
       for (const model of await runtime.getAvailable(item.providerId)) {
-        if (!(await credentials.read(item.providerId))) continue
         models.push({ provider: item.providerId, id: model.id, reasoning: !!model.reasoning })
       }
     } catch {

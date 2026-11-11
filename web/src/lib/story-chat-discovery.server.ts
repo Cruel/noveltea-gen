@@ -23,8 +23,8 @@ export async function storyChatDiscoveryRequest(
   const message = await store.persistence.messages.owned(actor.id, 'root:' + firstTurnId, firstTurnId)
   const membership = message ? await store.persistence.messages.membership(actor.id,
     'root:' + firstTurnId) : null
-  if (!story || !message || membership?.storyId !== storyId || message.role !== 'user' || message.jobId ||
-      message.phase === 'cancelled' || !story.headSha ||
+  if (!story || !message || membership?.storyId !== storyId || message.role !== 'user' ||
+      (message.jobId && message.jobId !== firstTurnId) || message.phase === 'cancelled' || !story.headSha ||
       message.content.length > 4000)
     return Response.json({ error: 'This Story has no eligible saved first Turn.' }, { status: 404 })
   const binding: ChatDiscoveryBinding = {

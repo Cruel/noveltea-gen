@@ -60,7 +60,7 @@ export function StoryFirstChat({
       })
       if (result.message) setError(result.message)
       await onSubmitted(result.threadId)
-      if (result.state === 'admitted' || result.state === 'discovery') {
+      if (result.state === 'admitted' || result.state === 'discovery' || result.state === 'completed') {
         setRequestId(null)
         setInput('')
       }
@@ -98,7 +98,7 @@ export function StoryFirstChat({
               </p>
               <a className="text-xs underline underline-offset-2" href="/settings#ai-models">Model settings</a>
               <div><Button type="button" size="sm" disabled={sending} onClick={() => void send()}>
-                Retry discovery
+                Retry request
               </Button></div>
             </div>
           )}

@@ -6,7 +6,7 @@ import { storyChatDiscoveryRequest } from './story-chat-discovery.server'
 import type { DiscoverySessionView } from './onboarding-pi.server'
 
 type Identity = { storyId: string; firstTurnId: string }
-type Action = Identity & { action: 'answer' | 'revise' | 'approve' | 'retry' | 'reconcile';
+type Action = Identity & { action: 'answer' | 'revise' | 'approve' | 'retry' | 'reconcile' | 'continue';
   revision: number; text?: string; digest?: string }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 function valid(input: Identity) {
@@ -15,7 +15,7 @@ function valid(input: Identity) {
   return input
 }
 async function unwrap(response: Response) {
-  const body = await response.json() as { session?: DiscoverySessionView | null; error?: string }
+  const body = await response.json() as { session?: DiscoverySessionView | null; continuation?: { state: string; message?: string }; error?: string }
   if (!response.ok) throw new Error(body.error ?? 'Discovery state could not be verified.')
   return body
 }
@@ -31,7 +31,7 @@ export const readStoryChatDiscovery = createServerFn({ method: 'GET' })
 export const actStoryChatDiscovery = createServerFn({ method: 'POST' })
   .validator((data: Action) => {
     valid(data)
-    if (!['answer', 'revise', 'approve', 'retry', 'reconcile'].includes(data.action) ||
+    if (!['answer', 'revise', 'approve', 'retry', 'reconcile', 'continue'].includes(data.action) ||
         !Number.isSafeInteger(data.revision) || data.revision < 1 ||
         (data.text !== undefined && (typeof data.text !== 'string' || data.text.length > 4000)) ||
         (data.digest !== undefined && (typeof data.digest !== 'string' || !/^[a-f0-9]{64}$/.test(data.digest))))

@@ -10,6 +10,7 @@ import { createUserPiRuntime, assertUserPiSelection, validPiSelection, type PiSe
 import { createSkillSnapshot, openSkillSnapshot } from '../../../src/snapshot'
 import { candidate, validateNewStory } from './story-foundation.server'
 import { parseGenerationContract } from '../../../src/generation'
+import { continueApprovedStoryChat, type ContinuationStatus } from './story-approved-continuation.server'
 
 type Turn = { role: 'user' | 'assistant'; text: string }
 type Foundation = {
@@ -233,7 +234,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           story.repositoryId !== repo || story.directory !== chat.directory ||
           story.headSha !== chat.sourceSha || !message ||
           message.content !== chat.originalObjective ||
-          message.role !== 'user' || message.jobId ||
+          message.role !== 'user' || (message.jobId && message.jobId !== chat.firstTurnId) ||
           message.phase === 'cancelled')
         throw new DiscoveryError(409, 'Saved Story discovery identity or source revision changed')
     }
@@ -242,7 +243,20 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       ? JSON.stringify(saved.chat) !== JSON.stringify(chat)
       : !!saved.chat))
       throw new DiscoveryError(409, 'Discovery is bound to another Story or source revision')
-    if (request.method === 'GET') return reply({ session: saved ? scope(saved) : null })
+    const continuation = async (): Promise<ContinuationStatus | undefined> => {
+      if (!chat || saved?.phase !== 'approved') return undefined
+      const message = await store.persistence.messages.owned(actor.id,
+        'root:' + chat.firstTurnId, chat.firstTurnId)
+      const queue = await store.persistence.generation.queue.record(chat.firstTurnId)
+      return queue?.phase === 'interrupted' ? { state: 'blocked',
+        message: 'The original writer was interrupted. Inspect its saved execution.' } :
+        queue ? { state: 'queued' } :
+        message?.phase === 'finished' ? { state: 'completed' } :
+        message?.phase === 'preparing' ? { state: 'pending' } :
+        { state: 'blocked', message: 'Approved baseline is saved but execution is not admitted. Check Settings and continue.' }
+    }
+    if (request.method === 'GET')
+      return reply({ session: saved ? scope(saved) : null, continuation: await continuation() })
     const data = await input(request)
     const action = data.action
     if (action === 'reconcile') {
@@ -267,12 +281,25 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
               ? { ...d, authority: 'user-protected' as const } : d),
         } } }
       approved.digest = sha(approved.proposal)
-      // Persist an exact native-validated baseline, not merely a model's claim
-      // that its generated prose is canonical. The later execution handoff is
-      // responsible for committing it on this same Thread, never on approval.
+      // Exact review is durable before any provider, worktree or queue effect.
       if (chat) await validateNewStory(candidate(approved.proposal!.foundation).file)
       await save(store, actor.id, repo, workspace, approved, saved.revision)
-      return reply({ session: scope(approved) })
+      const handoff = chat ? await continueApprovedStoryChat(auth, store,
+        request.headers, baseURL, {
+          chat, digest: approved.digest!, skillId: approved.skillId,
+          model: approved.model, foundation: approved.proposal!.foundation,
+        }) : undefined
+      return reply({ session: scope(approved), continuation: handoff })
+    }
+    if (action === 'continue') {
+      if (!chat || !saved || saved.phase !== 'approved' ||
+          data.revision !== saved.revision || data.digest !== saved.digest)
+        throw new DiscoveryError(409, 'Approved foundation continuation is stale or unavailable')
+      const handoff = await continueApprovedStoryChat(auth, store, request.headers, baseURL, {
+        chat, digest: saved.digest!, skillId: saved.skillId,
+        model: saved.model, foundation: saved.proposal!.foundation,
+      })
+      return reply({ session: scope(saved), continuation: handoff })
     }
     if (!['start', 'answer', 'revise', 'retry'].includes(String(action))) throw new DiscoveryError(400, 'Invalid discovery action')
     if (action === 'start' && saved) throw new DiscoveryError(409, 'Discovery already exists. Resume it.')

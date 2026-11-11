@@ -9,6 +9,10 @@ import { startStoryJob, type JobStartResult } from '../../../src/job'
 import { parseGenerationContract, type GenerationRequest } from '../../../src/generation'
 import { assertServerClaimPermitted, sameGenerationRequest } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
+import { readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
+import { readReusedFoundation } from '../../../src/chat-reused-foundation'
+import { reusableExistingFoundation } from '../../../src/foundation-readiness'
+import { validateStoryJob } from '../../../src/validator'
 import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
 import { forkSourceSummary, verifyReadyRecoveryFork } from '../../../src/recovery-fork-state'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
@@ -153,7 +157,19 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
         completedStages: [] }
     }
     if (row.status === 'completed') {
-      throw new JobError(409, 'Completed job has no pinned generation request. Inspect its saved state.')
+      // An explicitly limited first Turn completes after one verified Creative
+      // Direction commit, not by fabricating a full-Story generation request.
+      const approval = await readChatApprovedFoundation(job)
+      const reused = await readReusedFoundation(job)
+      if (approval?.scope !== 'foundation-only' && !reused)
+        throw new JobError(409, 'Completed job has no pinned generation request. Inspect its saved state.')
+      const head = await trustedHead(job)
+      const validation = await validateStoryJob(job, undefined, { ...job, baseSha: head })
+      if (!await reusableExistingFoundation(job, validation))
+        throw new JobError(409, 'Foundation-only completion lost its native-verified Creative Direction.')
+      return { ...base, status: 'completed', threadId: null,
+        task: approval?.originalObjective ?? reused!.originalObjective, contract: null, reason: null,
+        completedStages: [{ stage: 'foundation', headSha: head, status: 'committed' }] }
     }
     const status = row.status === 'paused' ? 'prepared' :
       row.status === 'running' ? 'interrupted' : row.status

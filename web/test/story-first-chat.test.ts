@@ -224,7 +224,9 @@ test('one pending first Turn becomes one linked execution only after durable que
       createdAt: at,
       updatedAt: at,
     })
-    await db.persistence.naturalStory.finishFirstTurn(owner, storyId, jobId, true)
+    // A late failure handler cannot turn an already-queued writer back into
+    // a blocked/discoverable first Turn. Queue state is authoritative.
+    await db.persistence.naturalStory.finishFirstTurn(owner, storyId, jobId, false)
     const admitted = await openStoryThread(db, owner, storyId, 'root:' + jobId)
     assert.equal(admitted.state.messages[0]?.status, 'delivered')
     assert.equal(admitted.state.messages[0]?.jobId, jobId)

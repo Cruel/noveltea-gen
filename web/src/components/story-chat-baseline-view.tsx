@@ -15,11 +15,13 @@ export type StoryChatBaselineSession = {
   turns: Array<{ role: 'user' | 'assistant'; text: string }>
   chat: { storyId: string; firstTurnId: string; sourceSha: string; directory: string }
 }
-export type BaselineAction = 'answer' | 'revise' | 'approve' | 'retry' | 'reconcile'
+export type BaselineAction = 'answer' | 'revise' | 'approve' | 'retry' | 'reconcile' | 'continue'
+export type BaselineContinuation = { state: 'queued' | 'pending' | 'blocked' | 'completed'; message?: string }
 
 /** Presentational Chat disclosure; no server runtime is needed to render it. */
-export function StoryChatBaselineView({ session, answer, onAnswerChange, busy, error, onAction }: {
+export function StoryChatBaselineView({ session, continuation, answer, onAnswerChange, busy, error, onAction }: {
   session: StoryChatBaselineSession | null | undefined
+  continuation?: BaselineContinuation | null
   answer: string; onAnswerChange: (text: string) => void
   busy: boolean; error: string | null
   onAction: (action: BaselineAction) => void
@@ -71,10 +73,23 @@ export function StoryChatBaselineView({ session, answer, onAnswerChange, busy, e
           <Button size="sm" disabled={busy || !session.digest}
             onClick={() => onAction('approve')}>Approve baseline</Button>
         </div>
-      </> : <p role="status" className="m-0">
-        This exact Creative Direction is approved and native-validated. The original Turn
-        remains saved for generation handoff; nothing else was authorized or published.
-      </p>}
+      </> : <div className="grid gap-2" role="status">
+        <p className="m-0">Creative Direction approved and native-validated.
+          {continuation?.state === 'queued'
+            ? ' The original request is queued in this Thread.'
+            : continuation?.state === 'completed'
+              ? ' The requested Creative Direction is complete.'
+              : ' The original request remains saved for continuation.'}
+          {' '}No later Story edits or publication were approved.
+        </p>
+        {continuation?.message && <p className="m-0 text-muted-foreground">{continuation.message}</p>}
+        {continuation?.state === 'blocked' && <div className="flex gap-3 items-center">
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('continue')}>
+            Continue
+          </Button>
+          <a href="/settings#ai-models" className="text-xs underline underline-offset-2">Model settings</a>
+        </div>}
+      </div>}
     </>}
     {session?.phase === 'running' && <p role="status" className="m-0">
       A model turn is reserved. Reload to inspect its result. If interrupted, reconcile

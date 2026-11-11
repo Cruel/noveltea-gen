@@ -9,6 +9,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { renderFoundation, type FoundationDraft } from "./demo.js";
 import { hasUserProtectedDecision } from "./foundation-record.js";
+import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
@@ -67,6 +68,8 @@ interface FoundationState {
   skillReads?: string[];
   commitSha?: string;
   validation?: "passed" | "unverified-empty-baseline";
+  /** Exact immutable Chat baseline approval; no additional Pi writer is allowed. */
+  chatApprovalDigest?: string;
 }
 
 export interface FoundationJobOptions {
@@ -513,7 +516,8 @@ export async function runFoundationJob(input: FoundationJobOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "foundation", async () => {
     let state = await existingState(job);
-    if (state?.stage === "writing" && state.writerStarted && !state.authoredSha256) {
+    if (state?.stage === "writing" && state.writerStarted && !state.authoredSha256 &&
+        !state.chatApprovalDigest) {
       // A completed, clean no-write specialist is not a partially authored
       // file. Only an exact authenticated job-scoped author decision can permit
       // one new writer, and the prior session remains archived in its receipt.
@@ -539,14 +543,21 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       const snapshot = await createSkillSnapshot({ ...config, novelteaSkills: input.skillsSource ?? config.novelteaSkills,
         discovery: "explicit-only", requiredSkills: ["nt-story-discovery", "nt-catalog"] });
       if (!snapshot) throw new Error("Foundation generation requires configured pinned NovelTea skills (--skills-source or .local/config.json).");
+      const approved = await readChatApprovedFoundation(job);
+      if (approved && (approved.originalObjective !== input.task ||
+          approved.skillId !== snapshot.id || input.fixture ||
+          approved.provider !== (input.provider ?? "openai") ||
+          approved.model !== (input.model ?? "gpt-6-luna")))
+        throw new Error("Generation differs from the exact approved Chat foundation handoff.");
       state = {
         version: 1, jobId: job.jobId, baseSha: job.baseSha, workHead: verified,
         task: input.task, envelope: input.envelope ?? "",
-        mode: input.mode ?? "autonomous", snapshot,
+        mode: approved?.creativeMode ?? input.mode ?? "autonomous", snapshot,
         workerMode: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
-        stage: input.mode === "collaborative" ? "awaiting-author" : "writing",
+        stage: approved ? "writing" : input.mode === "collaborative" ? "awaiting-author" : "writing",
         writerStarted: false,
+        ...(approved ? { chatApprovalDigest: approved.proposalDigest } : {}),
       };
       await saveState(stateFile(job), state);
     } else {
@@ -626,7 +637,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       assertHead(job, workHead(state));
       assertOnlyTarget(job, target);
       await assertSafeTarget(job, target);
-      if (state.workerMode === "pi") {
+      if (state.workerMode === "pi" && !state.chatApprovalDigest) {
         await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
       }
       const actual = await foundationDigest(job, target);
@@ -656,7 +667,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         (!state.authoredSha256 || await foundationDigest(job, target) !== state.authoredSha256)) {
       throw new Error("Recovered foundation commit lacks exact recorded authored bytes; preserve it for reconciliation.");
     }
-    if (state.writerStarted && state.stage !== "committed" && state.workerMode === "pi") {
+    if (state.writerStarted && state.stage !== "committed" && state.workerMode === "pi" && !state.chatApprovalDigest) {
       await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
     }
     if (state.stage === "committed") {
@@ -695,13 +706,51 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
         if (await foundationDigest(job, target) !== foundation.authoredSha256) {
           throw new Error("Authored foundation bytes changed after interruption; manual reconciliation is required.");
         }
-        if (foundation.workerMode === "pi") {
+        if (foundation.workerMode === "pi" && !foundation.chatApprovalDigest) {
           await verifyJobPiSession(job, "foundation", foundation.piSessionFile, foundation.piSessionId);
         }
         return {};
       }
       if (changedPaths(job).length) {
         throw new Error("Unfinished foundation edits exist. Inspect and reconcile them; the specialist will not blindly rerun.");
+      }
+      if (foundation.chatApprovalDigest) {
+        const approval = await readChatApprovedFoundation(job);
+        if (!approval || approval.proposalDigest !== foundation.chatApprovalDigest ||
+            approval.skillId !== foundation.snapshot.id || approval.originalObjective !== foundation.task)
+          throw new Error("Approved Chat baseline provenance no longer matches this work item.");
+        const path = join(job.worktreeStoryRoot, target);
+        const folder = dirname(path);
+        await mkdir(folder, { recursive: true });
+        const parent = await lstat(folder);
+        if (!parent.isDirectory() || parent.isSymbolicLink() || await realpath(folder) !== folder)
+          throw new Error("Creative Direction parent is not a real Story directory.");
+        const previousTarget = await lstat(path).catch(error => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        });
+        if (previousTarget) {
+          if (!previousTarget.isFile() || previousTarget.isSymbolicLink() ||
+              await realpath(path) !== path)
+            throw new Error("Approved Creative Direction cannot overwrite a linked or unsafe file.");
+          const previous = await readFile(path, "utf8");
+          if (!previous.includes("Pending author discovery") || hasUserProtectedDecision(previous))
+            throw new Error("Existing Creative Direction is not an unapproved initialization draft; preserve its canon.");
+        }
+        // Record the irreversible boundary before changing the Story. A crash
+        // now requires explicit reconciliation, never a second foundation writer.
+        foundation.writerStarted = true;
+        await saveState(stateFile(job), foundation);
+        await writeFile(path, renderFoundation(approval.foundation), {
+          mode: 0o600, flag: previousTarget ? "w" : "wx",
+        });
+        const next = { ...foundation, authoredSha256: await foundationDigest(job, target) };
+        if (next.authoredSha256 !== approval.authoredSha256)
+          throw new Error("Written Creative Direction differs from the exact Chat approval.");
+        await saveState(stateFile(job), next);
+        assertOnlyTarget(job, target);
+        await assertSafeTarget(job, target);
+        return { foundation: next };
       }
       // Budget pauses must happen before the irreversible writerStarted marker.
       await preflightPiAssignment(job, "foundation:write", foundation.workerMode === "pi"

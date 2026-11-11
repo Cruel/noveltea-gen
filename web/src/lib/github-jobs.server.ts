@@ -1,14 +1,18 @@
+import { createHash } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { verifyGithubStorySelection } from './github-stories.server'
+import { verifiedGithubInitialFoundation } from './github-initial-foundation.server'
 import { prepareCachedJob } from './cached-jobs.server'
-import { GitCacheError } from './git-cache.server'
+import { GitCacheError, initialStoryDocument } from './git-cache.server'
 import { repositoryForStory, requireUser } from './access.server'
 
 // GitHub authorization and pinned preflight feed the shared GitHub/GitLab job
-// registration boundary. Only an already saved, unpublished initialization
-// draft may reopen its single local Story-creation commit.
+// registration boundary. An unpublished initial Story is either reopened at
+// its exact saved commit or reconstructed for a distinct first Chat Turn from
+// a content-digested, source-linked initialization; never from an absent
+// remote path alone.
 export async function githubJobRequest(
   auth: StudioAuth, store: StudioDatabase, request: Request, baseURL: string,
 ): Promise<Response> {
@@ -31,12 +35,22 @@ export async function githubJobRequest(
           const preflight = await verifyGithubStorySelection(actor.token, row.repository, commit, row.directory)
           return { remoteUrl, sizeBytes: preflight.sizeBytes, blobCount: preflight.blobCount }
         } catch (error) {
-          // An initial Story may exist only in its own worktree branch until
-          // the review workflow publishes it. A missing source at the original
-          // baseline is acceptable only when reopening the original saved job.
-          // Never bypass a revoked installation or an unrelated provider error.
-          if (!existingJob || !(error instanceof GithubError) ||
-              (error.status !== 404 && error.status !== 422)) throw error
+          // A newly submitted first Chat Turn uses a different UUID from the
+          // original onboarding job. The ONLY new-worktree exception is an
+          // exact saved initialization placeholder absent at the pinned source.
+          // Provider 422 (LFS, unsupported trees) never authorizes a new draft.
+          if (!(error instanceof GithubError)) throw error
+          const initial = row.contentSha256 === createHash('sha256')
+            .update(initialStoryDocument(row.title)).digest('hex')
+          if (!existingJob && error.status === 404 && row.contentSha256) {
+            if (initial) return { remoteUrl, initializeDraft: true as const }
+            const foundationMarkdown = await verifiedGithubInitialFoundation(store,
+              actor.id, row.id, commit, row.contentSha256)
+            return { remoteUrl, initializeDraft: true as const, foundationMarkdown }
+          }
+          // Reopen only the already-registered job's exact saved local commit.
+          if (!existingJob || (error.status !== 404 && error.status !== 422))
+            throw error
           return { remoteUrl, reopenDraft: true as const }
         }
       })

@@ -1,8 +1,18 @@
+import { createHash } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioStore } from '../persistence/store'
 import { requireUser } from './access.server'
 import { interpretNaturalStoryPrompt } from './natural-story-plan'
 import { beginStoryChatDiscovery } from './story-chat-discovery.server'
+import { githubJobRequest } from './github-jobs.server'
+import { gitlabJobRequest } from './gitlab-jobs.server'
+import { authorizedStoryJob } from './fixture-jobs.server'
+import { validatedExplorer } from './story-explorer.server'
+import { verifiedReusableStoryFoundation } from './story-foundation-reuse.server'
+import { launchNaturalStory } from './natural-story.server'
+import { foundationOnlyObjective } from './foundation-intent'
+import { initialStoryDocument } from './git-cache.server'
+import { pinReusedFoundation } from '../../../src/chat-reused-foundation'
 import type { DiscoveryInference } from './onboarding-pi.server'
 import { validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 
@@ -20,7 +30,7 @@ export type FirstStoryTurnResult = {
   storyId: string
   jobId: string
   threadId: string
-  state: 'admitted' | 'pending' | 'attention' | 'discovery'
+  state: 'admitted' | 'pending' | 'attention' | 'discovery' | 'completed'
   message?: string
 }
 
@@ -74,6 +84,70 @@ export async function submitFirstStoryTurn(
         'This request is already being prepared. Refresh the Thread to inspect its saved status; do not start a second writer.',
     }
   try {
+    // A validated existing Creative Direction is already canonical author
+    // context, not a reason to interview the author again. Probe the exact
+    // owner/source-pinned provider job before opening a discovery session.
+    // Failure to inspect a remote is not evidence that its foundation is ready.
+    // A supplied inference driver is used only by deterministic discovery tests;
+    // those tests must not invoke real provider network preflight.
+    if (!infer) {
+      let existing = false
+      try {
+        const story = await store.persistence.naturalStory.story(actor.id, input.storyId)
+        const unapprovedInitialization = story?.initialContentSha256 &&
+          createHash('sha256').update(initialStoryDocument(story.title)).digest('hex') ===
+            story.initialContentSha256
+        // A known initialization placeholder cannot be considered canon, and
+        // there is no reason to fetch or clone it just to ask discovery questions.
+        if (story?.headSha && !unapprovedInitialization) {
+          const reqHeaders = new Headers(headers)
+          reqHeaders.set('origin', baseURL)
+          reqHeaders.set('content-type', 'application/json')
+          const preparedRequest = new Request(baseURL + '/api/stories/job', {
+            method: 'POST', headers: reqHeaders,
+            body: JSON.stringify({ storyId: input.storyId, jobId: input.jobId,
+              commit: story.headSha }),
+          })
+          const response = await (story.provider === 'github'
+            ? githubJobRequest(auth, store, preparedRequest, baseURL)
+            : gitlabJobRequest(auth, store, preparedRequest, baseURL))
+          if (response.ok) {
+            const job = await authorizedStoryJob(store, actor.id, input.jobId)
+            const native = await validatedExplorer(auth, store,
+              new Request(baseURL + '/api/stories/validation', { headers }), input.jobId)
+            existing = await verifiedReusableStoryFoundation(job, native.result)
+          }
+        }
+      } catch { /* Unavailable remote/CLI is not proof of an existing foundation. */ }
+      if (existing) {
+        try {
+          if (foundationOnlyObjective(prompt)) {
+            const job = await authorizedStoryJob(store, actor.id, input.jobId)
+            await pinReusedFoundation(job, prompt)
+            await store.persistence.naturalStory.associateRoot(actor.id, input.storyId,
+              input.jobId, prompt.slice(0, 120), new Date().toISOString())
+            await store.persistence.naturalStory.finishFoundationOnly(actor.id,
+              input.storyId, input.jobId)
+            return { ...result, state: 'completed' }
+          }
+          await launchNaturalStory(auth, store, headers, baseURL, {
+            storyId: input.storyId, jobId: input.jobId,
+            headSha: (await store.persistence.naturalStory.story(actor.id, input.storyId))!.headSha!,
+            prompt, creativeMode: input.creativeMode,
+          })
+          await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
+          return { ...result, state: 'admitted' }
+        } catch {
+          if (await store.persistence.generation.queue.record(input.jobId)) {
+            await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
+            return { ...result, state: 'admitted' }
+          }
+          await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, false)
+          return { ...result, state: 'attention',
+            message: 'This Story already has verified Creative Direction. Check model access and the generation controller, then retry the saved Turn; no new discovery is needed.' }
+        }
+      }
+    }
     // The pinned first Turn is the sole discovery owner. A prior discovery
     // session is reloaded, not restarted or replayed on HTTP retry.
     const session = await beginStoryChatDiscovery(auth, store, headers, baseURL,
