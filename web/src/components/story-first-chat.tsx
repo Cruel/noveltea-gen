@@ -3,8 +3,9 @@ import { useQuery } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import { EmptyStoryContext, EmptyStoryWelcome, StoryChatPrompt } from './story-first-chat-view'
 import { getThreadChat } from '@/lib/thread-chat.functions'
-import { previewStoryPrompt } from '@/lib/natural-story.functions'
 import { sendFirstStoryTurn } from '@/lib/story-first-chat.functions'
+import { readStoryChatDiscovery } from '@/lib/story-chat-discovery.functions'
+import { StoryChatBaseline } from './story-chat-baseline'
 
 /** Used for a Story with zero Threads and for an explicitly saved first Turn
  * that could not be admitted. Both states stay in the same Story workspace. */
@@ -29,13 +30,16 @@ export function StoryFirstChat({
     refetchInterval: threadId ? 5000 : false,
   })
   const saved = chat?.messages.find((message) => message.role === 'user')
-  const { data: preview } = useQuery({
-    queryKey: ['first-turn-clarification', storyId, saved?.content],
-    queryFn: () => previewStoryPrompt({ data: { storyId, prompt: saved!.content } }),
-    enabled: !!saved && saved.phase === 'blocked',
+  const { data: discovery } = useQuery({
+    queryKey: ['story-chat-discovery', storyId, threadId?.slice('root:'.length)],
+    queryFn: () => readStoryChatDiscovery({ data: {
+      storyId, firstTurnId: threadId!.slice('root:'.length),
+    } }),
+    enabled: !!threadId && !!saved,
+    refetchInterval: threadId ? 5000 : false,
   })
   const busy = sending || (!!threadId && !chat)
-  const send = async (confirmed = false) => {
+  const send = async () => {
     const prompt = saved?.content ?? input.trim()
     if (!prompt || busy || (saved && saved.phase !== 'blocked')) return
     // Stable across transport errors and duplicate clicks. The server
@@ -52,12 +56,11 @@ export function StoryFirstChat({
           prompt,
           ...(saved ? saved.creativeModeOverride ? { creativeMode: saved.creativeModeOverride } : {}
             : { creativeMode }),
-          ...(confirmed ? { confirmFullStory: true } : {}),
         },
       })
       if (result.message) setError(result.message)
       await onSubmitted(result.threadId)
-      if (result.state === 'admitted') {
+      if (result.state === 'admitted' || result.state === 'discovery') {
         setRequestId(null)
         setInput('')
       }
@@ -78,39 +81,31 @@ export function StoryFirstChat({
                 <strong className="text-xs">You</strong>
                 <p className="mb-0 mt-1 whitespace-pre-wrap break-words">{saved.content}</p>
                 <p className="mb-0 mt-1 text-xs text-muted-foreground">
-                  {saved.phase === 'preparing' ? 'Preparing admission' : 'Saved · not yet admitted'}
+                  {saved.phase === 'preparing' ? 'Preparing discovery' : 'Original request saved'}
                 </p>
               </li>
             </ol>
           ) : (
             <EmptyStoryWelcome />
           )}
-          {saved?.phase === 'blocked' && (
+          {threadId && saved && <StoryChatBaseline storyId={storyId} threadId={threadId} />}
+          {saved?.phase === 'blocked' && discovery?.session == null && (
             <div className="space-y-2 text-sm" role="status">
               <p className="m-0 text-muted-foreground">
-                {preview?.plan.clarification ??
-                  'Generation has not started. Connect a Pi model and set a default in Settings, check Story repository access and native CLI/sandbox prerequisites, then retry your saved message.'}
+                If discovery has not started, connect a Pi model and select a default in Settings,
+                then retry the saved request. Existing discovery turns must be resumed using their
+                controls above; they are never replayed automatically.
               </p>
-              <a className="text-xs underline underline-offset-2" href="/settings#ai-models">
-                Model settings
-              </a>
-              <div>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={sending}
-                  onClick={() => void send(!!preview?.plan.reviewRequired)}
-                >
-                  {preview?.plan.reviewRequired ? 'Confirm full-Story generation' : 'Retry saved message'}
-                </Button>
-              </div>
+              <a className="text-xs underline underline-offset-2" href="/settings#ai-models">Model settings</a>
+              <div><Button type="button" size="sm" disabled={sending} onClick={() => void send()}>
+                Retry discovery
+              </Button></div>
             </div>
           )}
           {saved?.phase === 'preparing' && (
             <p role="status" className="text-sm text-muted-foreground">
-              The first Turn was saved and preparation is in progress or needs inspection after an
-              interruption. Refresh to check for an admitted run; no second writer will be started
-              automatically.
+              The initial request was reserved. Refresh to inspect its discovery session; no
+              duplicate model turn or writer will start automatically.
             </p>
           )}
           {(error || readError) && (

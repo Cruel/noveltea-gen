@@ -2,8 +2,9 @@ import type { StudioAuth } from './auth'
 import type { StudioStore } from '../persistence/store'
 import { requireUser } from './access.server'
 import { interpretNaturalStoryPrompt } from './natural-story-plan'
-import { launchNaturalStory } from './natural-story.server'
-import { parseCreativePolicy, validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
+import { beginStoryChatDiscovery } from './story-chat-discovery.server'
+import type { DiscoveryInference } from './onboarding-pi.server'
+import { validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 
@@ -19,7 +20,7 @@ export type FirstStoryTurnResult = {
   storyId: string
   jobId: string
   threadId: string
-  state: 'admitted' | 'pending' | 'attention'
+  state: 'admitted' | 'pending' | 'attention' | 'discovery'
   message?: string
 }
 
@@ -32,6 +33,7 @@ export async function submitFirstStoryTurn(
   headers: Headers,
   baseURL: string,
   input: FirstStoryTurnInput,
+  infer?: DiscoveryInference,
 ): Promise<FirstStoryTurnResult> {
   await store.assertReady()
   const actor = await requireUser(auth, headers)
@@ -46,9 +48,11 @@ export async function submitFirstStoryTurn(
     (input.creativeMode !== undefined && !validCreativeMode(input.creativeMode))
   )
     throw new Error('Invalid first Story Turn.')
-  const plan = interpretNaturalStoryPrompt(input.prompt)
-  const prompt = plan.task
-  const { headSha, state } = await store.persistence.naturalStory.beginFirstTurn(
+  // Preserve the original objective, independent of whatever baseline details
+  // Pi subsequently proposes. The full generation contract is planned only
+  // after this exact foundation has been reviewed, never from sparse input.
+  const prompt = interpretNaturalStoryPrompt(input.prompt).task
+  const { state } = await store.persistence.naturalStory.beginFirstTurn(
     actor.id,
     input.storyId,
     input.jobId,
@@ -70,27 +74,13 @@ export async function submitFirstStoryTurn(
         'This request is already being prepared. Refresh the Thread to inspect its saved status; do not start a second writer.',
     }
   try {
-    if (plan.reviewRequired && !input.confirmFullStory) {
-      await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, false)
-      return {
-        ...result,
-        state: 'attention',
-        message: plan.clarification ?? 'Confirm full-Story generation before starting.',
-      }
-    }
-    const pinnedMessage = await store.persistence.messages.owned(actor.id, result.threadId, input.jobId)
-    if (!pinnedMessage) throw new Error('First Turn creative policy receipt is missing.')
-    const pinnedPolicy = parseCreativePolicy(pinnedMessage.creativePolicyJson)
-    await launchNaturalStory(auth, store, headers, baseURL, {
-      creativeMode: pinnedPolicy.mode,
-      storyId: input.storyId,
-      jobId: input.jobId,
-      headSha,
-      prompt,
-      ...(input.confirmFullStory ? { approvedDigest: plan.digest } : {}),
-    })
-    await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
-    return { ...result, state: 'admitted' }
+    // The pinned first Turn is the sole discovery owner. A prior discovery
+    // session is reloaded, not restarted or replayed on HTTP retry.
+    const session = await beginStoryChatDiscovery(auth, store, headers, baseURL,
+      input.storyId, input.jobId, prompt, infer)
+    await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, false)
+    return { ...result, state: 'discovery',
+      ...(session.phase === 'blocked' ? { message: 'Discovery needs explicit recovery in Chat.' } : {}) }
   } catch (cause) {
     await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, false)
     const detail = cause instanceof Error ? cause.message : ''
@@ -99,9 +89,9 @@ export async function submitFirstStoryTurn(
     // actionable, non-secret categories in the Chat response.
     const message = /Connect a Pi model|Pinned Pi credentials|credential/i.test(detail)
       ? 'Connect a Pi model and select a default in Settings, then retry this saved message. No fixture or host credential fallback was used.'
-      : /base revision changed/i.test(detail)
-        ? 'The Story base revision changed. Inspect the Story connection and pinned source before retrying.'
-        : 'Generation was not admitted. Your message is saved; check Story repository access, provider credentials and native CLI/sandbox setup, then retry. If a job was partially prepared, inspect its saved execution before replay.'
+      : /source revision changed|base revision changed/i.test(detail)
+        ? 'The Story base revision changed. Inspect the saved Story before continuing discovery.'
+        : 'Discovery could not finish. Your original message is saved; inspect the pinned discovery session in Chat before explicitly retrying any interrupted model call.'
     return { ...result, state: 'attention', message }
   }
 }

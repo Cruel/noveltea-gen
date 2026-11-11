@@ -17,7 +17,8 @@ async function selected(db: Read | Write, owner: string, storyId: string) {
       .onRef('repositories.id', '=', 'stories.repositoryId')
       .onRef('repositories.ownerUserId', '=', 'stories.ownerUserId'))
     .select([
-      'stories.id as id', 'stories.id as storyId', 'stories.sourceCommitSha as headSha',
+      'stories.id as id', 'stories.id as storyId', 'stories.repositoryId as repositoryId',
+      'stories.sourceCommitSha as headSha',
       'repositories.provider as provider', 'repositories.providerRepositoryId as providerId',
       'stories.directory as directory',
     ])
