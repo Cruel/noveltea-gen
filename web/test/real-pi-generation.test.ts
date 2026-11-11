@@ -10,6 +10,8 @@ import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import type { JobStartResult } from '../../src/job'
 import { SandboxClient } from '../../src/sandbox-client'
+import { loadSelectedStoryOrchestrator } from '../../src/orchestrator-selection'
+import { readPinnedObjectivePlanning } from '../../src/orchestrator-planner'
 import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
@@ -22,6 +24,8 @@ import { listStoryThreads, openStoryThread } from '../src/lib/story-threads.serv
 import { readThreadChat } from '../src/lib/thread-chat.server'
 import { submitThreadRevision } from '../src/lib/story-revision.server'
 import { interpretNaturalStoryPrompt } from '../src/lib/natural-story-plan'
+import { planObjective } from '../src/lib/turn-plan'
+import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
@@ -29,6 +33,7 @@ import { SandboxController, createControllerServer, type ControllerConfig } from
 
 const enabled = process.env.NT_TEST_WEB_REAL_PI === '1'
 const subscriptionTest = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
+const objectivePlannerTest = process.env.NT_TEST_WEB_PI_OBJECTIVE_PLANNER === '1'
 const required = subscriptionTest
   ? ['NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE', 'NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY',
       'NT_TEST_WEB_PI_PROVIDER', 'NT_TEST_WEB_PI_MODEL'] as const
@@ -144,6 +149,12 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
     const { task, contract } = interpretNaturalStoryPrompt(
       'Write a concise mystery visual novel about an archivist on a stranded train. You can decide unspecified details.')
     const request = { task, contract }
+    if (objectivePlannerTest) {
+      // #149: exercise the real authenticated web queue and the same immutable
+      // first-Turn objective admission used by the normal Chat composer.
+      await saveJobTurnPlan(job, planObjective({ kind: 'full-story', request: task,
+        contract, base: commit }))
+    }
     // Two specialist steps cannot complete the skill-read + authoring +
     // native-validation sequence with a real model. Keep a bounded budget
     // without forcing a premature stop before the first verified commit.
@@ -318,6 +329,29 @@ test('opt-in authenticated real Pi writes native-validated Story foundation insi
       }))
     }
     assert.ok(verified, 'real Pi foundation must validate and commit before the safe-boundary pause')
+    if (objectivePlannerTest) {
+      const plan = await readJobTurnPlan(job)
+      assert.ok(plan?.objective, 'real first Turn must persist its source-bound objective')
+      assert.equal(plan.objective.breadth, 'whole-story')
+      assert.equal(plan.source.verifiedSha, commit)
+      assert.equal(plan.assignments.length, 7)
+      const selectionRaw = JSON.parse(readFileSync(join(job.stateDir,
+        'orchestrator-selection.json'), 'utf8')) as { graphThreadId: string }
+      const selection = await loadSelectedStoryOrchestrator(job, selectionRaw.graphThreadId,
+        { task, kind: 'full-story', turnPlanDigest: plan.digest })
+      const receipt = await readPinnedObjectivePlanning(job, selection, plan, provider, selected.id)
+      assert.equal(receipt.phase, 'planned')
+      assert.equal(receipt.sourceSha, commit)
+      assert.equal(receipt.turnDigest, plan.digest)
+      assert.equal(receipt.proposal?.assignments.length, plan.assignments.length)
+      assert.deepEqual(receipt.proposal?.assignments.map(a => a.id),
+        plan.assignments.map(a => a.id), 'real Pi cannot drop, add or invert assigned work')
+      assert.ok(receipt.sessionFile && existsSync(receipt.sessionFile),
+        'live orchestration transcript must survive the planner turn')
+      await assert.rejects(readPinnedObjectivePlanning(job, selection, plan,
+        provider, 'not-the-authorized-model'), /corrupt|stale/i)
+      console.log('Live #149 objective planner: pinned skill reads, proposal, receipt and source verified')
+    }
     const terminal = (await listGenerationEvents(store, user.id, jobId, 0))
     assert.equal(terminal.find(e => e.kind === 'finished')?.status, 'paused',
       'Foundation-only certification must stop at the first verified boundary')

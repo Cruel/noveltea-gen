@@ -43,7 +43,11 @@ export NT_TEST_WEB_PI_MODEL=the-exact-connected-model-id
 # export NT_TEST_WEB_PI_SOURCE_USER_ID=the-signed-in-user-id
 # Set NT_PI_CREDENTIAL_KEY in the trusted shell/environment, not in Git.
 pnpm certify:self-hosted --live-pi
+# Also certify the modern #149 source-bound, read-only orchestrator Turn:
+NT_TEST_WEB_PI_OBJECTIVE_PLANNER=1 pnpm certify:self-hosted --live-pi
 ```
+
+The opt-in objective-planner variant saves an immutable whole-Story Turn before authenticated admission and requires a pinned orchestrator selection, all prescribed methodology/catalog reads, a complete authorized assignment proposal, a source/model-bound replay receipt and the same native-verified Foundation commit. Without this flag, the legacy Foundation-only live gate does not certify objective planning.
 
 The test opens the source database **read-only** and copies only the currently valid device-code OAuth **access token** into a disposable encrypted test database, replacing its refresh token with an unusable sentinel. It refuses an expiring login; this preserves the real Studio connection even if the test crashes or tries to refresh credentials. It runs a separate dedicated agent process, real sandbox, pinned native validator and authenticated Studio queue admission. The certification job pins a trusted `pauseAfter: foundation` stage boundary, verifies that Foundation was validated and committed, and stops before launching paid-model work for Architecture or subsequent stages. It never uses shared host `~/.pi` files. Reconnect through device code if the source token is too close to expiry.
 

@@ -425,13 +425,14 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
           ...config, requiredSkills: ["nt-narrative-review", "nt-catalog"] });
         if (!snapshot) throw Error("Mandatory semantic review lacks pinned narrative-review skills.");
         const { policy } = await inspectPiPolicy(job);
-        await runPiAssignmentReview(job, [point], {
-          snapshot, provider: s.request.provider ?? policy.profile.provider,
-          model: s.request.model ?? policy.profile.model,
-          thinking: policy.profile.thinking === "low" || policy.profile.thinking === "high"
-            ? policy.profile.thinking : undefined,
-          reviewer: "independent-pi-assignment-review", onSession: async () => {},
-        });
+        await withStoryJobLock(job, "independent-assignment-review", () =>
+          runPiAssignmentReview(job, [point], {
+            snapshot, provider: s.request.provider ?? policy.profile.provider,
+            model: s.request.model ?? policy.profile.model,
+            thinking: policy.profile.thinking === "low" || policy.profile.thinking === "high"
+              ? policy.profile.thinking : undefined,
+            reviewer: "independent-pi-assignment-review", onSession: async () => {},
+          }));
       }
       const reviewed = (await inspectRecoveryCheckpoints(job))
         .find(saved => saved.eligible && saved.commitSha === point.commitSha);
@@ -701,9 +702,9 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         });
         if (preflight.stopped) return preflight.stopped;
         const preliminary = preflight.report!;
-        // Never keep the Story writer lease across a long-running, read-only
-        // independent Pi evaluation. The source-bound receipt rechecks HEAD
-        // and approval history before it can become authoritative.
+        // The independent reviewer has no write tools or authority, but its
+        // cancellable Pi turn must retain the same per-Story lease until settled.
+        // Its source-bound receipt independently checks HEAD and approvals.
         if (preliminary.generation.scopeFulfillment === "complete-in-scope" &&
             preliminary.generation.planFulfillment.status === "required") {
           const record = JSON.parse(await readFile(join(job.stateDir, "narrative-review.json"),
@@ -713,9 +714,10 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
               await openSkillSnapshot(record.snapshot.id) !== record.snapshot.path)
             throw new Error("Independent Turn completeness requires the pinned real Pi reviewer, not a fixture.");
           const { reviewTurnCompleteness } = await import("./narrative-review-specialist.js");
-          await assessTurnFulfillment(job, preliminary, "independent-turn-completeness/v1",
-            (packet, onSession) => reviewTurnCompleteness(job, record.snapshot!, packet,
-              record.provider, record.model, record.thinking, onSession));
+          await withStoryJobLock(job, "independent-turn-completeness", () =>
+            assessTurnFulfillment(job, preliminary, "independent-turn-completeness/v1",
+              (packet, onSession) => reviewTurnCompleteness(job, record.snapshot!, packet,
+                record.provider, record.model, record.thinking, onSession)));
         }
         return await withStoryJobLock(job, "generation-completion", async () => {
           clean(job); await trustedHead(job); await checkPlan(job, s.request, s.planVersion);

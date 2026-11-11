@@ -19,6 +19,7 @@ import { preparePiContext } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { withStoryJobLock } from "./job-lock.js";
 import { trustedHead } from "./revision.js";
 
 const REQUIRED = [
@@ -185,12 +186,19 @@ export async function runPinnedObjectivePlanner(
   }
   const project = await openStoryProject(job.worktreeStoryRoot);
   const snapshot = selection.receipt.skillSnapshot;
-  const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
-    discovery: "explicit-only",
-    novelteaSkills: snapshot.path,
-    skillDirs: [],
-    requiredSkills: ["nt-story-orchestrate", "nt-catalog", "nt-story-discovery"],
-  });
+  const { loader, settingsManager } = createProjectResourceLoader(
+    project,
+    undefined,
+    true,
+    {
+      discovery: "explicit-only",
+      novelteaSkills: snapshot.path,
+      skillDirs: [],
+      requiredSkills: ["nt-story-orchestrate", "nt-catalog", "nt-story-discovery"],
+    },
+    [],
+    "orchestrator",
+  );
   await loader.reload();
   const { skills, diagnostics } = loader.getSkills();
   if (
@@ -253,35 +261,34 @@ export async function runPinnedObjectivePlanner(
     });
     await context.beforeTurn(file);
     const currentHead = await trustedHead(job);
-    await promptStorySpecialist(
-      session,
+    const prompt =
       context.contextNote +
-        "You are the read-only NovelTea objective orchestrator, not a Story writer. " +
-        "Read these exact pinned methods and references using read before planning:\n" +
-        REQUIRED.map((p) => "skill://" + p).join("\n") +
-        "\nInspect relevant existing canonical Story through read/find/grep without touching " +
-        "the private .story-inbox or another Thread. You have NO file write, shell, reviewer, " +
-        "or approval authority. Follow the pinned methodology to identify which of the " +
-        "controller-authorized assignments are currently relevant and their causal order. " +
-        "You may explain a missing prerequisite in a reason; you may NOT add, remove, " +
-        "rename, modify or invent an assignment. The controller will revalidate and " +
-        "enforce all dependencies and the complete delivery obligation.\n" +
-        "Source base SHA: " +
-        job.baseSha +
-        "\nCurrent verified HEAD: " +
-        currentHead +
-        "\nAuthor objective: " +
-        plan.goal +
-        "\nDelivery requirements: " +
-        JSON.stringify(plan.objective) +
-        "\nAuthorized bounded plan: " +
-        JSON.stringify(plan.assignments) +
-        "\nReturn ONLY JSON with fields sourceSha (the source base SHA), turnDigest " +
-        "(the exact plan digest), assignments (every authorized assignment, in causal order, " +
-        "each as an object with id and a concise source-grounded reason). No other keys.\n" +
-        "Plan digest: " +
-        plan.digest,
-    );
+      "You are the read-only NovelTea objective orchestrator, not a Story writer. " +
+      "Read these exact pinned methods and references using read before planning:\n" +
+      REQUIRED.map((p) => "skill://" + p).join("\n") +
+      "\nInspect relevant existing canonical Story through read/find/grep without touching " +
+      "the private .story-inbox or another Thread. You have NO file write, shell, reviewer, " +
+      "or approval authority. Follow the pinned methodology to identify which of the " +
+      "controller-authorized assignments are currently relevant and their causal order. " +
+      "You may explain a missing prerequisite in a reason; you may NOT add, remove, " +
+      "rename, modify or invent an assignment. The controller will revalidate and " +
+      "enforce all dependencies and the complete delivery obligation.\n" +
+      "Source base SHA: " +
+      job.baseSha +
+      "\nCurrent verified HEAD: " +
+      currentHead +
+      "\nAuthor objective: " +
+      plan.goal +
+      "\nDelivery requirements: " +
+      JSON.stringify(plan.objective) +
+      "\nAuthorized bounded plan: " +
+      JSON.stringify(plan.assignments) +
+      "\nReturn ONLY JSON with fields sourceSha (the source base SHA), turnDigest " +
+      "(the exact plan digest), assignments (every authorized assignment, in causal order, " +
+      "each as an object with id and a concise source-grounded reason). No other keys.\n" +
+      "Plan digest: " +
+      plan.digest;
+    await withStoryJobLock(job, "orchestrator:objective", () => promptStorySpecialist(session, prompt));
     const last = [...session.messages].reverse().find((m) => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
       throw new Error("Pinned orchestrator planning turn did not complete successfully.");
