@@ -264,6 +264,63 @@ test('unsettled continuation and Pi delivery block deletion before worktree clea
   } finally { await f.dispose() }
 })
 
+test('terminal blocked Turn with saved assistant settlement permits safe original deletion after restart', async () => {
+  const f = await fixture()
+  try {
+    const original = await f.job()
+    const thread = (await listStoryNavigation(f.store, f.owner, f.story)).threads[0]!
+    const messageId = randomUUID()
+    await f.store.testing.records.update('studio_sessions', { id: original.jobId }, { status: 'blocked' })
+    await f.seed.queue({
+      jobId: original.jobId, ownerUserId: f.owner,
+      intent: 'start', phase: 'finished', createdAt: at, updatedAt: at,
+    })
+    await f.seed.message({
+      id: messageId, ownerUserId: f.owner, threadId: thread.id, sequence: 0,
+      role: 'user', status: 'delivered', phase: 'blocked', jobId: original.jobId,
+      body: 'Write dialogue', createdAt: at,
+    })
+    assert.equal((await f.store.persistence.conversations.deletion(f.owner, thread.id))?.unsettledMessages, 1,
+      'a blocked Turn without saved final settlement cannot be deleted')
+    await assert.rejects(deleteThread(f.store, f.owner, thread.id), /Unsettled Thread continuation/i)
+    await f.seed.message({
+      id: 'assistant:' + original.jobId, ownerUserId: f.owner, threadId: thread.id, sequence: 1,
+      role: 'assistant', status: 'delivered', phase: 'finished', jobId: original.jobId,
+      body: 'Generation stopped without a verified Story revision.', createdAt: at,
+    })
+    assert.equal((await f.store.persistence.conversations.deletion(f.owner, thread.id))?.unsettledMessages, 0,
+      'saved assistant settlement plus terminal queue proves the blocked prompt is historical')
+
+    // A prepared restart is an independent child, and the original's
+    // immutable ancestor receipts must survive when its private state is purged.
+    const replacement = await f.job()
+    const replacementThread = 'restart:' + replacement.jobId
+    await f.seed.thread({
+      id: replacementThread, ownerUserId: f.owner, storyId: f.story,
+      parentThreadId: thread.id, title: 'Restarted', activityAt: at, createdAt: at,
+    })
+    await f.store.testing.records.insert('thread_restarts', {
+      childId: replacement.jobId, ownerUserId: f.owner,
+      sourceThreadId: thread.id, sourceJobId: original.jobId, rootJobId: original.jobId,
+      originalSha: original.baseSha, mode: 'original', selectedSha: replacement.baseSha,
+      targetBranch: null, draftJson: '{}', createdAt: at, preparedAt: at,
+    })
+    await f.seed.threadRun({
+      jobId: replacement.jobId, ownerUserId: f.owner, threadId: replacementThread, runOrder: 0,
+    })
+    const removed = await deleteThread(f.store, f.owner, thread.id)
+    assert.equal(removed.state, 'complete')
+    assert.equal(removed.preservedReceipts, true)
+    assert.equal(existsSync(original.worktreeRoot), false)
+    assert.equal(existsSync(original.stateDir), true)
+    assert.equal(existsSync(replacement.worktreeRoot), true)
+    assert.equal((await f.store.persistence.conversations.deletion(f.owner, thread.id))?.completedAt !== null, true)
+    assert.equal((await listStoryNavigation(f.store, f.owner, f.story)).threads
+      .find(item => item.id === replacementThread)?.parentThreadId, thread.id)
+    assert.deepEqual(await f.store.testing.foreignKeyViolations(), [])
+  } finally { await f.dispose() }
+})
+
 test('archived checkpoints remain recoverable while deleted runs cannot be re-enqueued', async () => {
   const f = await fixture()
   try {

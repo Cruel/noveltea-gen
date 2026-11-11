@@ -73,7 +73,7 @@ test('record highlights remain separate from canonical selection, with explicit 
 })
 
 test('desktop/mobile Story panes share Thread-scoped overlays without forced viewport changes', () => {
-  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/conversations.tsx', import.meta.url), 'utf8')
+  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/index.tsx', import.meta.url), 'utf8')
   const graph = readFileSync(new URL('../src/routes/_protected/jobs/-StoryRelationshipGraph.tsx', import.meta.url), 'utf8')
   const activity = readFileSync(new URL('../src/components/thread-run-activity.tsx', import.meta.url), 'utf8')
   const chat = readFileSync(new URL('../src/components/thread-chat.tsx', import.meta.url), 'utf8')
@@ -98,7 +98,7 @@ test('desktop/mobile Story panes share Thread-scoped overlays without forced vie
 })
 
 test('explicit View in Graph focuses the selected record; ordinary Outline selection and live updates do not navigate', () => {
-  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/conversations.tsx', import.meta.url), 'utf8')
+  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/index.tsx', import.meta.url), 'utf8')
   const graph = readFileSync(new URL('../src/routes/_protected/jobs/-StoryRelationshipGraph.tsx', import.meta.url), 'utf8')
   const styles = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
   assert.match(route, /const viewInGraph = \(\) =>/)
@@ -119,7 +119,7 @@ test('explicit View in Graph focuses the selected record; ordinary Outline selec
 })
 
 test('Story Graph owns the viewport and canonical record inspection is on demand', () => {
-  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/conversations.tsx', import.meta.url), 'utf8')
+  const route = readFileSync(new URL('../src/routes/_protected/stories/$storyId/index.tsx', import.meta.url), 'utf8')
   const inspector = readFileSync(new URL('../src/components/story-workspace-explorer.tsx', import.meta.url), 'utf8')
   const graph = readFileSync(new URL('../src/routes/_protected/jobs/-StoryRelationshipGraph.tsx', import.meta.url), 'utf8')
   const styles = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')

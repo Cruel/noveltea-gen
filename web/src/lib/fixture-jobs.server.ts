@@ -7,7 +7,7 @@ import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { startStoryJob, type JobStartResult } from '../../../src/job'
 import { parseGenerationContract, type GenerationRequest } from '../../../src/generation'
-import { assertServerClaimPermitted } from '../../../src/generation-owner'
+import { assertServerClaimPermitted, sameGenerationRequest } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
 import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
 import { forkSourceSummary, verifyReadyRecoveryFork } from '../../../src/recovery-fork-state'
@@ -258,7 +258,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
         reason: 'No saved generation request. Inspect the preserved checkpoint before recovery.',
         completedStages: [] }
     }
-    if (JSON.stringify(state.request) !== JSON.stringify(pinned) ||
+    if (!sameGenerationRequest(state.request, pinned) ||
         !existsSync(join(job.stateDir, 'generation-server-owner.json'))) {
       throw new JobError(409, 'Generation checkpoint or execution owner differs from the pinned request.')
     }

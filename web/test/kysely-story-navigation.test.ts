@@ -11,6 +11,55 @@ if (process.env.NT_REQUIRE_KYSELY_PROOF === '1' && !pg)
   throw new Error('NT_TEST_PG_URL required for cross-backend Story/navigation conformance')
 
 for (const backend of ['sqlite', 'postgres'] as const) {
+  test(`${backend}: a settled blocked Turn is not a live deletion blocker`, {
+    skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL for PostgreSQL conformance',
+    timeout: 90_000,
+  }, async (t) => {
+    const f = await openKyselyFeatureFixture(backend)
+    t.after(async () => f.close())
+    const owner = await f.owner()
+    const repository = randomUUID(), story = randomUUID(), job = randomUUID()
+    const thread = 'root:' + job
+    await f.records.insert('repositories', {
+      id: repository, ownerUserId: owner, provider: 'github',
+      providerRepositoryId: repository, name: 'Author/Story', createdAt: at,
+    })
+    await f.records.insert('stories', {
+      id: story, ownerUserId: owner, repositoryId: repository,
+      directory: 'story', title: 'Story', sourceCommitSha: sha, createdAt: at,
+    })
+    await f.records.insert('studio_sessions', {
+      id: job, ownerUserId: owner, storyId: story, title: 'Blocked',
+      status: 'blocked', sourceCommitSha: sha, createdAt: at, updatedAt: later,
+    })
+    await f.records.insert('story_threads', {
+      id: thread, ownerUserId: owner, storyId: story,
+      title: 'Original', activityAt: at, createdAt: at,
+    })
+    await f.records.insert('story_thread_runs', {
+      jobId: job, ownerUserId: owner, threadId: thread, runOrder: 0,
+    })
+    await f.records.insert('generation_run_queue', {
+      jobId: job, ownerUserId: owner, intent: 'start', phase: 'finished',
+      createdAt: at, updatedAt: later,
+    })
+    await f.records.insert('story_thread_messages', {
+      id: job, ownerUserId: owner, threadId: thread, sequence: 0,
+      role: 'user', status: 'delivered', phase: 'blocked', jobId: job,
+      body: 'Add a conversation', createdAt: at,
+    })
+    assert.equal((await f.conversations.deletion(owner, thread))?.unsettledMessages, 1,
+      'missing assistant settlement keeps the failed message unresolved')
+    await f.records.insert('story_thread_messages', {
+      id: 'assistant:' + job, ownerUserId: owner, threadId: thread, sequence: 1,
+      role: 'assistant', status: 'delivered', phase: 'finished', jobId: job,
+      body: 'Execution blocked before model work.', createdAt: later,
+    })
+    assert.equal((await f.conversations.deletion(owner, thread))?.unsettledMessages, 0)
+    assert.equal(await f.conversations.beginDeletion(owner, thread, [job], '{}', later), true,
+      'the same terminal evidence permits durable deletion reservation')
+  })
+
   test(`${backend}: shared Story, Conversation/Thread and catalog contracts survive restart`, {
     skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL for PostgreSQL conformance',
     timeout: 90_000,

@@ -3,7 +3,7 @@ import { GitProviderIcon } from '@/components/git-provider-icon'
 import { useEffect, useState } from 'react'
 import { NewStoryOnboarding } from './-NewStoryOnboarding'
 import { inspectRepositoryInitialization, readRepositoryStories,
-  selectRepositoryStory, prepareRepositoryJob } from '../../../lib/story-workflows.functions'
+  selectRepositoryStory } from '../../../lib/story-workflows.functions'
 import type { CatalogProvider } from '../../../persistence/contracts'
 import type { RepositoryBrowseSearch } from '../../../lib/repository-story-navigation'
 
@@ -37,8 +37,6 @@ export function RepositoryStoryBrowser({ provider, repositoryId, location, onNav
   const [discovered, setDiscovered] = useState<string[] | null>(null)
   const [discoveryError, setDiscoveryError] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection | null>(null)
-  const [job, setJob] = useState<{ id: string; baseSha: string } | null>(null)
-  const [pendingJobId, setPendingJobId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [refreshRevision, setRefreshRevision] = useState(0)
@@ -66,7 +64,7 @@ export function RepositoryStoryBrowser({ provider, repositoryId, location, onNav
   useEffect(() => {
     if (empty !== false) return
     let cancelled = false
-    setListing(null); setError(null); setSelection(null); setJob(null); setPendingJobId(null)
+    setListing(null); setError(null); setSelection(null)
     void readRepositoryStories({ data: {
       provider, repositoryId, directory, ...(commit ? { commit } : {}),
     } }).then(text => {
@@ -103,7 +101,7 @@ export function RepositoryStoryBrowser({ provider, repositoryId, location, onNav
 
   const select = async () => {
     if (!commit || !listing?.isStory) return
-    setBusy(true); setError(null); setSelection(null); setJob(null); setPendingJobId(null)
+    setBusy(true); setError(null); setSelection(null)
     try {
       setSelection(JSON.parse(await selectRepositoryStory({ data: {
         provider, json: JSON.stringify({ repositoryId, directory, commit }),
@@ -112,24 +110,9 @@ export function RepositoryStoryBrowser({ provider, repositoryId, location, onNav
       setError(cause instanceof Error ? cause.message : 'Story preflight failed')
     } finally { setBusy(false) }
   }
-  const createJob = async () => {
-    if (!selection) return
-    const jobId = pendingJobId ?? crypto.randomUUID()
-    setPendingJobId(jobId); setBusy(true); setError(null)
-    try {
-      const result = JSON.parse(await prepareRepositoryJob({ data: {
-        provider, json: JSON.stringify({ storyId: selection.story.id, jobId,
-          commit: selection.story.commit }),
-      } })) as { job: { id: string; baseSha: string } }
-      setJob(result.job)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Unable to acquire the selected Story')
-    } finally { setBusy(false) }
-  }
-
   const open = (path: string) => {
     if (busy) return
-    setError(null); setSelection(null); setJob(null); setPendingJobId(null)
+    setError(null); setSelection(null)
     onNavigate({ directory: path, commit })
   }
 
@@ -175,11 +158,10 @@ export function RepositoryStoryBrowser({ provider, repositoryId, location, onNav
           {' '}<code>{selection.story.commit}</code>.
           {' '}{selection.sizeBytes.toLocaleString()} / {selection.limitBytes.toLocaleString()}
           {' '}bytes ({selection.blobCount} Git blobs).</p>
-        <Button type="button" disabled={busy || !!job} onClick={() => void createJob()}>
-          {busy ? 'Preparing sparse checkout…' : 'Create isolated job worktree'}
-        </Button>
-        {job && <p role="status">Job <code>{job.id}</code> is prepared at base <code>{job.baseSha}</code>.
-          {' '}<a href={'/jobs/' + job.id}>Open job</a>.</p>}
+        <p><a className="font-medium underline underline-offset-2"
+          href={'/stories/' + encodeURIComponent(selection.story.id) + '/'}>
+          Open Story
+        </a> to start or continue a Thread in Chat. No execution setup is required.</p>
       </div>}
     </section>}
     {empty === false && <section>
@@ -193,9 +175,14 @@ export function RepositoryStoryBrowser({ provider, repositoryId, location, onNav
         </li>)}</ul>
         : <p>No Story records detected at this commit. Browse manually if this is a large repository.</p>)}
     </section>}
-    {(empty !== null || provider === 'github') && <NewStoryOnboarding
-      key={provider + ':' + repositoryId + ':' + directory}
-      provider={provider} repositoryId={repositoryId} initialWorkspace={directory}
-      onCreated={() => setRefreshRevision(n => n + 1)} />}
+    {(empty !== null || provider === 'github') && <details className="mt-5">
+      <summary className="cursor-pointer text-sm font-medium">
+        Create a new Story in this repository
+      </summary>
+      <NewStoryOnboarding
+        key={provider + ':' + repositoryId + ':' + directory}
+        provider={provider} repositoryId={repositoryId} initialWorkspace={directory}
+        onCreated={() => setRefreshRevision(n => n + 1)} />
+    </details>}
   </main>
 }

@@ -24,10 +24,12 @@ test('one owner-resolved route renders the shared browser; old provider routes r
 
   const shared = read('../src/routes/_protected/repositories/-RepositoryStoryBrowser.tsx')
   for (const name of ['Repository Stories', 'Directory browser', 'Detected Story directories',
-    'Verify size and add Story', 'Create isolated job worktree', 'Refresh HEAD']) {
+    'Verify size and add Story', 'Refresh HEAD']) {
     assert.ok(shared.includes(name))
   }
   assert.match(shared, /<NewStoryOnboarding/)
+  assert.match(shared, /Open Story/)
+  assert.doesNotMatch(shared, /prepareRepositoryJob|Create isolated job worktree/)
   const dashboard = read('../src/routes/_protected/dashboard.tsx')
   assert.match(dashboard, /repositoryBrowseHref\(repository\.id, story\.directory, story\.commitSha\)/)
   assert.match(dashboard, /Browse repository/)

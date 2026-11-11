@@ -8,6 +8,8 @@ import { authorizedStoryJob } from './fixture-jobs.server'
 import { queueGeneration, queueRecord, dequeueBeforeStart } from './generation-queue.server'
 import { readJobControl, setJobControl } from '../../../src/job-control'
 import { withStoryJobLock } from '../../../src/job-lock'
+import { sameGenerationRequest } from '../../../src/generation-owner'
+import type { GenerationRequest } from '../../../src/generation'
 import { trustedHead } from '../../../src/revision'
 import { activeSpecialistChoice, verifySpecialistChoice } from '../../../src/specialist-choice'
 import { validateStoryJob } from '../../../src/validator'
@@ -90,7 +92,8 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
       if ((!authorBoundary && !choiceBoundary && saved.status !== 'paused') ||
           (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary) ||
           saved.result || saved.ideaTask || saved.ideaResult ||
-          JSON.stringify(saved.request) !== pinned || state.next.length !== 0)
+          (!saved.request || !sameGenerationRequest(saved.request as GenerationRequest,
+            JSON.parse(pinned) as GenerationRequest)) || state.next.length !== 0)
         throw new Error('Checkpoint is not at a verified, idle safe boundary. Inspect the original specialist receipts.')
       return 'resume'
     } finally { saver.db.close() }

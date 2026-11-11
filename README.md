@@ -1639,8 +1639,8 @@ controls belong to #67, and real provider-to-publication certification to #71.
 
 ### Full-Story generation from a Thread prompt (#83)
 
-Open a connected Story's **Conversations** page, choose a Conversation and
-**New Thread**, and describe the Story in ordinary language. Studio interprets
+Open a connected **Story** from the Dashboard, then describe the Story in Chat.
+The first instruction creates a Thread and Turn; no Conversation is required. Studio interprets
 the prompt into a canonical, inspectable full-Story **composition** contract:
 the complete author brief is retained as constraints, the production envelope
 has an explicit visual-novel presentation, and the planned stages are Creative
@@ -1652,13 +1652,12 @@ control of all writes and protected decisions.
 
 A clear request with a connected default Pi model starts directly. Outline-only,
 question-like or materially undecided prompts display their interpretation and
-require the author to approve the full-Story plan; partial/focused scopes instead
-use the existing explicit configuration path. **Review interpreted plan** shows
+require the author to approve the full-Story plan; focused and multi-record requests are planned per Turn without a permanent manual scope. **Review interpreted plan** shows
 the canonical contract and pinned Story revision. Advanced settings optionally
 adjust the production envelope, constraints, model and per-run budgets. With no
 connected model, execution does not silently fall back to a fixture: authors
 must explicitly select a **fixture-only test run**, whose output is not editorial
-completion. The first run is placed in the selected Conversation as a root
+completion. The first request is placed in the selected Story as a root
 Thread and its immutable prompt, subsequent statuses, and verified evidence
 remain visible on reconnect. Initial requests are idempotently pinned to their
 job UUID; edited payloads cannot repurpose a saved generation run.

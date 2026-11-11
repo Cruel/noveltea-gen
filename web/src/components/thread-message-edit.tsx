@@ -58,7 +58,8 @@ export function ThreadMessageEdit({ threadId, storyId, messageId, original, orig
         queryClient.invalidateQueries({ queryKey: ['thread-chat', threadId] }),
         queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
       ])
-      await navigate({ to: '/jobs/$jobId', params: { jobId: child.id } })
+      await navigate({ to: '/stories/$storyId', params: { storyId: child.storyId },
+        search: { thread: child.threadId } })
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Edited branch could not be prepared.')
     } finally { setBusy(false) }
@@ -105,7 +106,7 @@ export function ThreadMessageEdit({ threadId, storyId, messageId, original, orig
             <p>Other context remains read-only. Protected choices require separate authorization.</p>
           </div> : null}
           <p>Child starts at this verified checkpoint with its own prepared run and fresh budget.
-            Review its settings before selecting Run; the parent stays unchanged.</p>
+            Continue in the new Thread; the parent stays unchanged.</p>
           <Button type="button" size="sm" disabled={busy || !!preview.revision?.clarification}
             onClick={() => void fork()}>
             {busy ? 'Preparing child…' : preview.revision?.reviewRequired

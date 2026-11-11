@@ -68,13 +68,13 @@ export function ThreadList({ threads, view, expandedIds, selectedThreadId, archi
     }
     return true
   })
-  return <ul className="m-0 grid gap-0.5 p-0" role={view === 'tree' ? 'tree' : 'list'} aria-label="Story Threads">
+  return <ul className="m-0 grid w-full min-w-0 gap-0.5 p-0" role={view === 'tree' ? 'tree' : 'list'} aria-label="Story Threads">
     {visible.map(thread => <li key={thread.id}
       role={view === 'tree' ? 'treeitem' : 'listitem'}
       aria-level={view === 'tree' ? thread.depth + 1 : undefined}
       aria-expanded={view === 'tree' && hasChildren.has(thread.id) ? expanded.has(thread.id) : undefined}
-      className="list-none">
-      <div className={'group flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1.5 hover:bg-muted/60 ' +
+      className="min-w-0 list-none">
+      <div className={'group flex w-full min-w-0 items-center gap-1 rounded-md px-1.5 py-1.5 hover:bg-muted/60 ' +
         (thread.id === selectedThreadId ? 'bg-muted text-foreground' : '')}
         style={{ paddingInlineStart: view === 'tree' ? Math.min(thread.depth, 9) * 12 + 6 : 6 }}>
         {view === 'tree' && hasChildren.has(thread.id)
@@ -89,24 +89,24 @@ export function ThreadList({ threads, view, expandedIds, selectedThreadId, archi
           : <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
         <div className="min-w-0 flex-1">
           {onOpen && !thread.deletedAt ? <button type="button" onClick={() => onOpen(thread)}
-            className="block max-w-full truncate text-left text-sm font-medium hover:underline"
+            className="block w-full min-w-0 truncate text-left text-sm font-medium hover:underline"
             aria-current={thread.id === selectedThreadId ? 'page' : undefined}
             title={'Open chat for ' + thread.title}>{thread.title}</button>
             : thread.jobId && !thread.deletedAt ? <a href={'/jobs/' + encodeURIComponent(thread.jobId)}
               aria-current={thread.id === selectedThreadId ? 'page' : undefined}
-              className="block truncate text-sm font-medium" title={thread.title}>{thread.title}</a>
+              className="block w-full min-w-0 truncate text-sm font-medium" title={thread.title}>{thread.title}</a>
               : <span className="block truncate text-sm font-medium">{thread.title}</span>}
-          <div className="flex items-center gap-x-1.5 truncate text-[11px] text-muted-foreground">
-            <span className={thread.status === 'needs-author' ? 'text-amber-400' : ''}>
+          <div className="flex min-w-0 items-center gap-x-1.5 overflow-hidden text-[11px] text-muted-foreground">
+            <span className={'shrink-0 ' + (thread.status === 'needs-author' ? 'text-amber-400' : '')}>
               <span className="inline-flex items-center gap-1"><StatusIcon status={thread.status} />
                 {archivedView && !thread.archivedAt ? 'Ancestor · ' : ''}{statusText(thread.status)}</span></span>
             {thread.parentThreadId && !parents.has(thread.parentThreadId) &&
-              <span>{allById.has(thread.parentThreadId)
+              <span className="min-w-0 truncate">{allById.has(thread.parentThreadId)
                 ? 'Forked from ' + allById.get(thread.parentThreadId)!.title
                 : 'Parent archived'}</span>}
             {view === 'flat' && thread.parentThreadId && threadsById.has(thread.parentThreadId) &&
-              <span>From {threadsById.get(thread.parentThreadId)!.title}</span>}
-            {thread.currentWork && <span className="truncate" title={thread.currentWork}>· {thread.currentWork}</span>}
+              <span className="min-w-0 truncate">From {threadsById.get(thread.parentThreadId)!.title}</span>}
+            {thread.currentWork && <span className="min-w-0 truncate" title={thread.currentWork}>· {thread.currentWork}</span>}
           </div>
         </div>
         {thread.jobId && !thread.deletedAt && <ThreadRestartControl threadId={thread.id} />}

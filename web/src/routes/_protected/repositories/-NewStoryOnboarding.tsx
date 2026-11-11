@@ -254,7 +254,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         <pre className="story-markdown">{draft.body}</pre>
         <p>Initial generation task: {draft.task}</p>
         <p>Initial contract: entire Story, composition depth; {initialContract().constraints.length} constraints.
-          You can refine it in the prepared job's scope editor before execution.</p>
+          Subsequent Story revisions can be requested directly in Chat.</p>
         <p>Commit target: <code>/{target}/creative-direction/foundation.md</code></p>
         {provider === 'gitlab' && verified?.empty && <label>Initial default branch
           <Input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label>}
@@ -271,9 +271,12 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         <p>{existing
           ? 'The existing default branch remains unchanged.'
           : 'The one-time initial commit was made to the previously empty default branch.'}</p>
-        {contractSaved ? <p>Generation contract saved. <a href={'/jobs/' + created.jobId}>Open prepared job</a></p>
+        {contractSaved ? <p>Story initialization is complete. <a
+            href={'/stories/' + encodeURIComponent(created.story.id) + '/'}>
+            Open Story Chat
+          </a> to start a Thread or continue authoring.</p>
           : <p>Story creation succeeded, but job preparation or contract persistence needs attention.
-            {jobReady && <a href={'/jobs/' + created.jobId}> Inspect the job</a>}
+            {jobReady && <a href={'/jobs/' + created.jobId}> Inspect advanced execution details</a>}
             {' '}<Button type="button" disabled={busy} onClick={() => void create()}>Retry remaining setup only</Button></p>}
       </div>}
       {unconfirmedWrite && <p role="alert" className="error">The provider write outcome is unknown.

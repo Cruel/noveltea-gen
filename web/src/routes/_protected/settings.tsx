@@ -97,7 +97,7 @@ function SettingsPage() {
     await setDefaultModel({ data: model
       ? { provider: model.provider, id: model.id, ...(thinking ? { thinking: thinking as 'low' | 'medium' | 'high' } : {}) } : null })
     await refresh()
-    setNotice('Default model saved. Existing job settings are unchanged.')
+    setNotice('Default model saved. Existing Thread executions are unchanged.')
   })
   const linkLogin = (provider: 'github' | 'gitlab') => run(async () => {
     const result = await authClient.linkSocial({
@@ -133,7 +133,7 @@ function SettingsPage() {
     const alsoLogin = settings.loginMethods.some(login =>
       login.provider === entry.provider && login.accountId === entry.accountId)
     if (!window.confirm('Disconnect separate repository authorization for ' +
-      names[entry.provider] + ' · ' + entry.login + '? Stories and jobs are preserved. ' +
+      names[entry.provider] + ' · ' + entry.login + '? Stories and Threads are preserved. ' +
       (alsoLogin ? 'Studio login and login-backed repository access remain available.'
         : 'Remote operations using this connection will stop until it is reconnected.'))) return
     await disconnectGitConnection({ data: entry.id })
@@ -148,7 +148,7 @@ function SettingsPage() {
     <>
       <Card id="ai-models" className="mt-6">
         <CardHeader><CardTitle>AI &amp; models</CardTitle></CardHeader><CardContent>
-        <p>Connect personal model credentials and choose the defaults for new generation jobs.</p>
+        <p>Connect personal model credentials and choose the defaults for new Story Threads.</p>
         {modelsQuery.error && <p role="alert" className="error">Could not load models: {modelsQuery.error.message}</p>}
         <PiConnections onUpdate={async () => {
           await queryClient.invalidateQueries({ queryKey: ['pi-models'] })
@@ -158,7 +158,7 @@ function SettingsPage() {
             <StudioSelect aria-label="Default model" value={selected} disabled={busy}
               onValueChange={value => { setSelected(value); setThinking('') }}
               options={[
-                { value: '', label: 'No default (choose for each job)' },
+                { value: '', label: 'No default (choose when generating)' },
                 ...(selected && !models.some(model => model.provider + '/' + model.id === selected)
                   ? [{ value: selected, label: selected + ' (disconnected)' }] : []),
                 ...models.map(model => ({ value: model.provider + '/' + model.id,

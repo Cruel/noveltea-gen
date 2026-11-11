@@ -13,12 +13,12 @@ export const Route = createFileRoute('/_protected')({
 
 function ProtectedLayout() {
   const { user } = Route.useRouteContext()
-  const conversations = useLocation({ select: location =>
-    /^\/stories\/[^/]+\/conversations\/?$/.test(location.pathname) })
+  const storyWorkspace = useLocation({ select: location =>
+    /^\/stories\/[^/]+\/?$/.test(location.pathname) })
   // Chat owns the viewport at every width. On narrow screens its navigation
-  // moves into a Sheet instead of stacking above the conversation. Other
+  // moves into a Sheet instead of stacking above Chat. Other
   // routes retain ordinary document scrolling.
-  return <div className={conversations ? 'flex h-dvh min-h-0 flex-col overflow-hidden' : ''}>
+  return <div className={storyWorkspace ? 'flex h-dvh min-h-0 flex-col overflow-hidden' : ''}>
     <StudioHeader user={user} />
     <Outlet />
   </div>

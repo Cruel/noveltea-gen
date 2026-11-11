@@ -13,17 +13,11 @@ import { jobEventsQuery } from '../../../lib/job-events.queries'
 import { useJobEventStream } from '@/hooks/use-job-event-stream'
 import { updateJobControl, type JobOverview, type JobControls, type BudgetLimits } from '../../../lib/jobs.functions'
 import { CheckpointTimeline, ThreadHistory } from '@/components/checkpoint-timeline'
-import { StoryExplorer } from './-StoryExplorer'
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity, progressDescription } from './-GenerationActivity'
 import { AuthorInteractions } from './-AuthorInteractions'
-import { GitChanges } from './-GitChanges'
-import { PublishDraft } from './-PublishDraft'
 
 export const Route = createFileRoute('/_protected/jobs/$jobId')({
-  validateSearch: (search: Record<string, unknown>): { tab?: JobTab } => ({
-    ...(search.tab === 'story' ? { tab: 'story' as const } : {}),
-  }),
   loader: ({ context, params }) => Promise.all([
     context.queryClient.ensureQueryData(jobQuery(params.jobId)),
     context.queryClient.ensureQueryData(jobEventsQuery(params.jobId)),
@@ -31,7 +25,7 @@ export const Route = createFileRoute('/_protected/jobs/$jobId')({
   component: JobDetails,
 })
 
-type JobTab = 'overview' | 'activity' | 'review' | 'story' | 'details'
+type JobTab = 'overview' | 'activity' | 'details'
 const activeStatuses = new Set(['queued', 'running'])
 const stopStatuses = new Set(['queued', 'running', 'paused', 'prepared', 'blocked'])
 
@@ -58,20 +52,26 @@ function statusTone(status: string) {
   return 'text-muted-foreground'
 }
 
+function storyThreadHref(job: JobOverview): string {
+  const path = '/stories/' + encodeURIComponent(job.storyId) + '/'
+  return job.storyThreadId
+    ? path + '?' + new URLSearchParams({ thread: job.storyThreadId }).toString()
+    : path
+}
+
 function JobDetails() {
   const { jobId } = Route.useParams()
   return <JobDetailsForId key={jobId} jobId={jobId} />
 }
 
 function JobDetailsForId({ jobId }: { jobId: string }) {
-  const { tab: requestedTab } = Route.useSearch()
   const queryClient = useQueryClient()
   const { data: job, error: jobError, isFetching } = useQuery({
     ...jobQuery(jobId),
     refetchInterval: query => activeStatuses.has(query.state.data?.status ?? '') ? 8000 : false,
   })
   const { data: controls, error: controlsError } = useQuery(jobControlsQuery(jobId))
-  const [tab, setTab] = useState<JobTab>(requestedTab ?? 'overview')
+  const [tab, setTab] = useState<JobTab>('overview')
   const activity = useJobEventStream(jobId, tab === 'activity')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -96,8 +96,8 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
   return <main className="page job-page">
     <div className="mb-4">
       <a className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-        href={job?.storyId ? '/stories/' + encodeURIComponent(job.storyId) + '/conversations' : '/dashboard'}>
-        <ArrowLeft className="size-4" /> {job?.storyId ? 'Back to Conversations' : 'Back to dashboard'}
+        href={job ? storyThreadHref(job) : '/dashboard'}>
+        <ArrowLeft className="size-4" /> {job?.storyId ? 'Back to Story' : 'Back to dashboard'}
       </a>
     </div>
     {(error || jobError) && <Alert variant="destructive" className="mb-4">
@@ -115,8 +115,9 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
             <span className="text-xs text-muted-foreground">{job.fixture ? 'Fixture' : 'Pi generation'}</span>
             <span className="text-xs text-muted-foreground">· {job.provider === 'gitlab' ? 'GitLab' : job.provider === 'github' ? 'GitHub' : job.provider}</span>
           </div>
-          <h1 className="m-0 text-xl font-semibold tracking-tight md:text-2xl">{job.title}</h1>
-          <p className="m-0 mt-1 text-xs text-muted-foreground">Generation job <code>{jobId.slice(0, 8)}</code></p>
+          <h1 className="m-0 text-xl font-semibold tracking-tight md:text-2xl">Advanced Execution Details</h1>
+          <p className="m-0 mt-1 text-sm">{job.title}</p>
+          <p className="m-0 mt-1 text-xs text-muted-foreground">Execution <code>{jobId.slice(0, 8)}</code></p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {job.status === 'paused' && job.threadId &&
@@ -145,61 +146,37 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
         </div>}
       <Tabs value={tab} onValueChange={value => setTab(value as JobTab)} className="mt-5 min-w-0">
         <div className="job-tab-scroll">
-          <TabsList variant="line" aria-label="Job sections" className="min-w-max">
+          <TabsList variant="line" aria-label="Advanced execution sections" className="min-w-max">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="activity">Activity{activity.unread > 0 &&
               <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground" aria-label={activity.unread + ' new events'}>
                 {activity.unread > 99 ? '99+' : activity.unread}
               </span>}</TabsTrigger>
-            <TabsTrigger value="review">Author review</TabsTrigger>
-            <TabsTrigger value="story">Story & changes</TabsTrigger>
             <TabsTrigger value="details"><Settings2 className="size-3.5" /> Details</TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="overview" className="job-tab-body">
-          <JobOverviewPanel job={job} controls={controls} jobId={jobId} onReview={() => setTab('review')} onRefresh={refresh} />
+          <JobOverviewPanel job={job} controls={controls} jobId={jobId} onRefresh={refresh} />
           {controlsError && <p role="alert" className="mt-3 text-sm text-destructive">{controlsError.message}</p>}
-          {job.status === 'prepared' && <Card className="mt-4"><CardHeader><CardTitle>Configure generation</CardTitle></CardHeader>
-            <CardContent><GenerationConfiguration jobId={jobId} onStarted={refresh} immutableContract={!!job.forkSource} /></CardContent>
-          </Card>}
         </TabsContent>
         <TabsContent value="activity" className="job-tab-body">
           <GenerationActivity jobId={jobId} connection={activity.connection} />
         </TabsContent>
-        <TabsContent value="review" className="job-tab-body">
-          <AuthorInteractions jobId={jobId} onChanged={() => void refresh()} />
-        </TabsContent>
-        <TabsContent value="story" className="job-tab-body">
-          {job.revisionVerified === false
-            ? <Card><CardContent className="py-5">
-              <div className="flex items-start gap-3">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-300" />
-                <div><h2 className="font-medium">Story inspection temporarily unavailable</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">An unfinished specialist has unverified changes. The canonical explorer, committed diffs, and publication remain unavailable until the original worktree is reconciled. Existing committed work is preserved.</p>
-                </div>
-              </div>
-            </CardContent></Card>
-            : <div className="grid min-w-0 gap-4">
-              <GitChanges jobId={jobId} revision={job.headSha} />
-              {(job.provider === 'github' || job.provider === 'gitlab') &&
-                <PublishDraft jobId={jobId} provider={job.provider} />}
-              {job.reason && /Foundation requires|Author exception recorded|Author rejected|authorized no-write retry/.test(job.reason)
-                ? <Card><CardContent className="py-4 text-sm text-muted-foreground">
-                  Story explorer is unavailable while Foundation authorization or recovery is pending. Review the original evidence in Author review.
-                </CardContent></Card>
-                : <StoryExplorer jobId={jobId} revision={job.headSha} />}
-            </div>}
-        </TabsContent>
         <TabsContent value="details" className="job-tab-body">
           <JobTechnicalDetails job={job} controls={controls} jobId={jobId} onRefresh={refresh} />
+          {(job.status === 'paused' || job.status === 'blocked' ||
+            job.status === 'interrupted') && <Card className="mt-4">
+            <CardHeader><CardTitle className="text-sm">Saved author decisions and recovery</CardTitle></CardHeader>
+            <CardContent><AuthorInteractions jobId={jobId} onChanged={() => void refresh()} /></CardContent>
+          </Card>}
         </TabsContent>
       </Tabs>
     </>}
   </main>
 }
 
-function JobOverviewPanel({ job, controls, jobId, onReview, onRefresh }: {
-  job: JobOverview; controls?: JobControls; jobId: string; onReview: () => void
+function JobOverviewPanel({ job, controls, jobId, onRefresh }: {
+  job: JobOverview; controls?: JobControls; jobId: string
   onRefresh: () => Promise<void>
 }) {
   const hasRecovery = !!job.recovery
@@ -228,7 +205,10 @@ function JobOverviewPanel({ job, controls, jobId, onReview, onRefresh }: {
                 <Badge variant="outline">{job.recovery!.files.length} files to review</Badge>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" onClick={onReview}>Open author review</Button>
+                <a className="inline-flex rounded-md border border-border px-3 py-1.5 text-xs hover:bg-muted"
+                  href={storyThreadHref(job)}>
+                  Open Story recovery
+                </a>
                 <details className="job-disclosure w-full">
                   <summary>Recovery instructions and preserved files</summary>
                   <div className="mt-3 space-y-3 text-sm">
@@ -349,6 +329,20 @@ function JobTechnicalDetails({ job, controls, jobId, onRefresh }: {
     {job.recoveryCheckpoints.length > 0 && <Card>
       <CardHeader><CardTitle className="text-sm">Verified recovery checkpoints ({job.recoveryCheckpoints.filter(point => point.eligible).length} eligible)</CardTitle></CardHeader>
       <CardContent><CheckpointTimeline job={job} /></CardContent>
+    </Card>}
+    {job.status === 'prepared' && <Card>
+      <CardHeader><CardTitle className="text-sm">Legacy prepared execution</CardTitle></CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">
+          Normal Story authoring starts in Chat. For a saved prepared execution that
+          predates the Story-first workflow, configuration and start remain available here.
+        </p>
+        <details className="job-disclosure mt-3">
+          <summary>Advanced generation configuration</summary>
+          <GenerationConfiguration jobId={jobId} onStarted={onRefresh}
+            immutableContract={!!job.forkSource} />
+        </details>
+      </CardContent>
     </Card>}
     {job.status !== 'prepared' && <Card>
       <CardHeader><CardTitle className="text-sm">Saved generation request</CardTitle></CardHeader>

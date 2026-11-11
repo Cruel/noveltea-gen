@@ -12,8 +12,28 @@ interface Owner {
   requestSha256: string;
 }
 const file = (job: JobStartResult) => join(job.stateDir, "generation-server-owner.json");
-const sha = (request: GenerationRequest) => createHash("sha256")
-  .update(JSON.stringify(request)).digest("hex");
+// LangGraph's Zod validation can reorder object keys without changing the
+// pinned request. A byte-for-byte JSON digest would then mistake the graph's
+// own scheduling step for an unrelated writer. Sort keys at every depth, but
+// retain array order and all serialized values in the ownership identity.
+function canonicalRequestJson(request: GenerationRequest): string {
+  return JSON.stringify(request, (_key, value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const object = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(object).sort().map(key => [key, object[key]]));
+  });
+}
+const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const sha = (request: GenerationRequest) => digest(canonicalRequestJson(request));
+// Existing receipts used the original insertion order. Accept those only for
+// the exact byte-identical legacy request; never reinterpret a preexisting
+// receipt as permission to replay an interrupted writer.
+const legacySha = (request: GenerationRequest) => digest(JSON.stringify(request));
+const matches = (saved: string, request: GenerationRequest) =>
+  saved === sha(request) || saved === legacySha(request);
+
+export const sameGenerationRequest = (left: GenerationRequest, right: GenerationRequest): boolean =>
+  canonicalRequestJson(left) === canonicalRequestJson(right);
 
 /**
  * API/Studio and CLI must not take turns writing one Git job from different
@@ -48,7 +68,7 @@ export async function claimServerGeneration(job: JobStartResult, threadId: strin
     throw new Error("Generation server owner receipt is unreadable; inspect and restore it before retrying.");
   }
   if (saved.schema !== expected.schema || saved.jobId !== expected.jobId ||
-      saved.threadId !== expected.threadId || saved.requestSha256 !== expected.requestSha256) {
+      saved.threadId !== expected.threadId || !matches(saved.requestSha256, request)) {
     throw new Error("Story generation is already bound to another thread or pinned request; no second writer is allowed.");
   }
 }
@@ -64,7 +84,7 @@ export async function assertServerClaimPermitted(job: JobStartResult,
   try { saved = JSON.parse(await readFile(file(job), "utf8")) as Owner; }
   catch { throw new Error("Server ownership receipt unreadable; manual inspection required."); }
   if (saved.schema !== "noveltea-generation-owner/v1" || saved.jobId !== job.jobId ||
-      saved.threadId !== threadId || saved.requestSha256 !== sha(request))
+      saved.threadId !== threadId || !matches(saved.requestSha256, request))
     throw new Error("Existing server owner receipt conflicts with the pinned queue request.");
 }
 export function ensureNotServerOwned(job: JobStartResult): void {

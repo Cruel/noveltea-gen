@@ -48,7 +48,7 @@ export function ThreadExecutionDetails({ jobId }: { jobId: string }) {
           events={history?.events} hasMore={history?.hasMore} />
         <Link to="/jobs/$jobId" params={{ jobId }}
           className="mb-3 inline-block text-muted-foreground underline underline-offset-2">
-          Open full saved Job/session controls
+          Open advanced session and recovery controls
         </Link>
       </> : !jobError && <p className="py-3">Loading saved execution…</p>}
       {olderError && <p role="alert">{olderError}</p>}

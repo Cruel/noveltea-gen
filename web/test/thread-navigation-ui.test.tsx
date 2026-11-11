@@ -57,6 +57,28 @@ test('Thread navigation renders job links, progress and accessible reduced-motio
   assert.ok(flat.indexOf('second-job') < flat.indexOf('first-job'))
 })
 
+test('long Thread titles and ancestry labels fit the sidebar in Tree and Flat views', () => {
+  const name = 'A conversation between two characters that must not make the Thread sidebar scroll horizontally '
+    + 'unbroken'.repeat(35)
+  const parent = { ...thread('parent', null, 'completed', '2026-11-01T00:00:00Z'), title: name }
+  const child = { ...thread('child', parent.id, 'blocked', '2026-11-02T00:00:00Z'),
+    title: name, currentWork: name }
+  const props = { threads: [parent, child], expandedIds: [parent.id], onExpand: () => {},
+    onRename: () => {}, onArchiveChange: () => {}, onOpen: () => {} }
+  for (const view of ['tree', 'flat'] as const) {
+    const markup = renderToStaticMarkup(createElement(ThreadList, { ...props, view }))
+    assert.match(markup, /<ul[^>]*class="[^"]*w-full min-w-0/)
+    assert.match(markup, /<li[^>]*class="min-w-0 list-none"/)
+    assert.match(markup, /class="block w-full min-w-0 truncate text-left/)
+    assert.match(markup, /class="flex min-w-0 items-center gap-x-1\.5 overflow-hidden/)
+    assert.match(markup, /title="Open chat for A conversation between two characters/,
+      'a truncated title remains available on hover')
+    assert.match(markup, /aria-label="Actions for A conversation between two characters/,
+      'the action menu retains its accessible full title')
+    if (view === 'flat') assert.match(markup, /class="min-w-0 truncate">From A conversation/)
+  }
+})
+
 test('archive navigation shows only active Threads by default and retains an archived descendant\'s ancestry', () => {
   const parent = thread('parent', null, 'completed', '2026-11-01T00:00:00Z')
   const child = thread('child', 'parent', 'archived', '2026-11-02T00:00:00Z')

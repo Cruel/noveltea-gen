@@ -11,8 +11,15 @@ import { ThreadRunAttention } from './thread-run-attention'
 import { ThreadRunActivity } from './thread-run-activity'
 import type { ActivityStep } from '@/lib/thread-activity'
 import { canSendThreadFollowUp } from '@/lib/thread-attention'
-import { setCreativeMode } from '@/lib/threads.functions'
 import type { CreativeMode } from '../../../src/creative-policy'
+
+// Preserve immutable historical settlement messages in storage, but avoid
+// suggesting every failed startup left a dirty worktree needing repair.
+const legacyBlockedSummary = 'The execution ended without a verified final Story revision. Its worktree and checkpoints require reconciliation; no writer was replayed.'
+const displayMessage = (item: { role: string; content: string }): string =>
+  item.role === 'assistant' && item.content === legacyBlockedSummary
+    ? 'Generation stopped without a verified Story revision. See Execution Details for the saved failure reason, evidence and recovery options. No writer was automatically replayed.'
+    : item.content
 
 export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedActivity, onReviewTurn }: {
   threadId: string
@@ -23,7 +30,7 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
 }) {
   const key = ['thread-chat', threadId]
   const client = useQueryClient()
-  const { data, error, isFetching } = useQuery({
+  const { data, error } = useQuery({
     queryKey: key,
     queryFn: () => getThreadChat({ data: threadId }),
     refetchInterval: query => query.state.data?.messages.some(message =>
@@ -40,7 +47,6 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
   const [message, setMessage] = useState('')
   const [liveMode, setLiveMode] = useState<'steer' | 'follow-up'>('follow-up')
   const [modeOverride, setModeOverride] = useState<'default' | CreativeMode>('default')
-  const [modeSaving, setModeSaving] = useState(false)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [pendingRetry, setPendingRetry] = useState<{ id: string; content: string;
@@ -225,32 +231,10 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
   }, [data?.messages.length, latest?.status])
   const canSend = canSendThreadFollowUp(latest?.status, !!data?.archived)
   return <section aria-label="Thread chat" className="flex min-h-0 min-w-0 flex-1 flex-col border-0 p-0">
-    <div className="flex flex-wrap items-center justify-end gap-2 px-4 py-2 text-xs text-muted-foreground">
-      <label className="inline-flex items-center gap-2">Thread mode
-        <select aria-label="Thread default creative mode" value={data?.creativePolicy.mode ?? 'autonomous'}
-          disabled={!data || modeSaving || !!data.archived}
-          onChange={async event => {
-            const mode = event.target.value as CreativeMode
-            setModeSaving(true)
-            try {
-              await setCreativeMode({ data: { threadId, mode } })
-              await client.invalidateQueries({ queryKey: key })
-            } catch (cause) {
-              setSendError(cause instanceof Error ? cause.message : 'Creative mode could not be saved.')
-            } finally { setModeSaving(false) }
-          }} className="rounded border border-input bg-background px-2 py-1 text-foreground">
-          <option value="autonomous">Autonomous</option>
-          <option value="collaborative">Collaborative</option>
-        </select>
-      </label>
-      {isFetching && <LoaderCircle aria-label="Updating chat" className="size-3.5 animate-spin motion-reduce:animate-none" />}
-      {latest && <span aria-label="Latest run status">{latest.queuePhase === 'queued' ? 'Queued' : latest.status.replaceAll('-', ' ')}</span>}
-      {latest && <a href="#thread-execution-details"
-        className="underline-offset-2 hover:underline">Execution Details</a>}
-    </div>
+
     {error && <p role="alert" className="px-4 text-sm text-destructive">{error.message}</p>}
-    <div ref={scrollRegion} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-    <ol className="mx-auto grid w-full max-w-3xl gap-4 p-0" aria-label="Delivered messages">
+    <div ref={scrollRegion} className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+    <ol className="mx-auto my-0 grid w-full max-w-3xl gap-3 p-0" aria-label="Delivered messages">
       {data?.messages.filter(item => !(item.role === 'assistant' && item.jobId &&
         data.runs.some(run => run.jobId === item.jobId &&
           ['blocked', 'interrupted'].includes(run.status)) &&
@@ -265,9 +249,8 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
           onActivityHover(item.jobId!, turnActivity(item.id, item.jobId!, item.createdAt)) : undefined}
         onBlur={item.role === 'user' && item.jobId && onActivityHover ? () =>
           onActivityHover(item.jobId!, null) : undefined}
-        className={
-        'list-none rounded-lg px-3 py-2 ' +
-        (item.role === 'user' ? 'ml-6 bg-secondary/70' : 'mr-6 bg-muted/30')}>
+        className={'thread-chat-message min-w-0 w-fit max-w-[92%] list-none rounded-lg ' +
+          (item.role === 'user' ? 'ml-auto bg-secondary/70' : 'mr-auto bg-muted/30')}>
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <strong>{item.role === 'user' ? 'You' : 'Assistant'}</strong>
           {item.role === 'user' && data.turnReceipts.find(turn => turn.id === item.id)?.creativePolicy &&
@@ -284,13 +267,13 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
                 item.liveState === 'delivered' ? 'Pi acknowledged · effect not independently verified' :
                 item.liveState === 'sdk-queued' ? 'Sent to Pi · awaiting acknowledgement' :
                 item.liveState === 'dispatching' ? 'Sending to Pi · delivery unresolved' :
-                item.liveState === 'blocked' ? 'Delivery uncertain — inspect job' :
+                item.liveState === 'blocked' ? 'Delivery uncertain — inspect execution' :
                 item.liveState === 'deferred' ? 'Pending coordinator routing' :
                 'Queued for the current Pi turn'}</span>
             : item.role === 'user' && item.phase !== 'finished' &&
               <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
-        <p className="m-0 whitespace-pre-wrap break-words text-sm">{item.content}</p>
+        <p className="m-0 whitespace-pre-wrap break-words text-sm leading-relaxed">{displayMessage(item)}</p>
         {item.role === 'assistant' && item.jobId && onReviewTurn &&
           data.turnReceipts.filter(turn => turn.outcome === 'finished' &&
             turn.executions.some(execution => execution.jobId === item.jobId &&
@@ -377,7 +360,7 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
                   {event.status ? ' · ' + event.status : ''}
                   {event.files.length ? ' · ' + event.files.join(', ') : ''}
                 </p>)}
-              <Link to="/jobs/$jobId" params={{ jobId: item.jobId }}>Inspect this run's saved job and receipts</Link>
+              <Link to="/jobs/$jobId" params={{ jobId: item.jobId }}>Inspect saved execution and receipts</Link>
             </div>
           </details>}
       </li>

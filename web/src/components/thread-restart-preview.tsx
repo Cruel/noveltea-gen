@@ -1,15 +1,26 @@
 import { useState } from 'react'
-import { useNavigate } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { LoaderCircle } from 'lucide-react'
+import { Info, LoaderCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { getThreadRestartPreview, restartThread, restartAndDiscardThread } from '@/lib/thread-restart.functions'
 import { storyNavigationKey } from '@/lib/threads.queries'
 
-export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; onClose: () => void }) {
+function HelpTip({ label, children }: { label: string; children: string }) {
+  return <Tooltip>
+    <TooltipTrigger render={<button type="button" aria-label={label}
+      className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1" />}>
+      <Info aria-hidden="true" className="size-3.5" />
+    </TooltipTrigger>
+    <TooltipContent>{children}</TooltipContent>
+  </Tooltip>
+}
+
+export function ThreadRestartPreview({ threadId }: { threadId: string }) {
   const navigate = useNavigate()
   const client = useQueryClient()
-  const { data, error, isFetching, refetch } = useQuery({
+  const { data, error, isFetching } = useQuery({
     queryKey: ['thread-restart-preview', threadId],
     queryFn: () => getThreadRestartPreview({ data: threadId }),
     staleTime: 0, refetchOnMount: 'always',
@@ -21,10 +32,14 @@ export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; 
   const [discard, setDiscard] = useState(false)
   const [issue, setIssue] = useState<string | null>(null)
   const [preparedCleanup, setPreparedCleanup] = useState(false)
-  const [preparedId, setPreparedId] = useState<string | null>(null)
+  const [preparedReplacement, setPreparedReplacement] = useState<{
+    storyId: string; threadId: string
+  } | null>(null)
   const newer = data?.upstream && data.upstream.sha !== data.originalSha ? data.upstream : null
+  // If an upstream option disappears, the implicit original revision remains usable.
+  const effectiveMode = newer ? mode : 'original'
   const run = async () => {
-    if (!data || busy || (!preparedCleanup && mode === 'newer' && (!newer ||
+    if (!data || busy || (!preparedCleanup && effectiveMode === 'newer' && (!newer ||
       selectedNewer?.sha !== newer.sha || selectedNewer.branch !== newer.branch))) {
       setIssue('The upstream selection changed. Refresh and explicitly select the new revision.'); return
     }
@@ -32,9 +47,9 @@ export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; 
     try {
       const selection = {
         threadId, childId, sourceJobId: data.sourceJobId,
-        originalSha: data.originalSha, mode,
-        selectedSha: mode === 'newer' ? selectedNewer!.sha : data.originalSha,
-        targetBranch: mode === 'newer' ? selectedNewer!.branch : null,
+        originalSha: data.originalSha, mode: effectiveMode,
+        selectedSha: effectiveMode === 'newer' ? selectedNewer!.sha : data.originalSha,
+        targetBranch: effectiveMode === 'newer' ? selectedNewer!.branch : null,
       }
       const result = discard ? await restartAndDiscardThread({ data: selection })
         : await restartThread({ data: selection })
@@ -43,64 +58,87 @@ export function ThreadRestartPreview({ threadId, onClose }: { threadId: string; 
         'state' in result.cleanup && result.cleanup.state !== 'complete') {
         const message = 'message' in result.cleanup ? String(result.cleanup.message) : 'Retry required.'
         setPreparedCleanup(true)
-        setPreparedId(result.id)
-        setIssue('Replacement Thread ' + result.threadId + ' was prepared, but old Thread cleanup is ' + result.cleanup.state + ': ' + message + ' Retry here, or use Retry Thread cleanup in Conversations after the original writer has stopped.')
+        setPreparedReplacement({ storyId: result.storyId, threadId: result.threadId })
+        setIssue('Old Thread could not be deleted: ' + message)
         return
       }
-      await navigate({ to: '/jobs/$jobId', params: { jobId: result.id } })
+      await navigate({ to: '/stories/$storyId', params: { storyId: result.storyId },
+        search: { thread: result.threadId } })
     } catch (cause) {
       setIssue(cause instanceof Error ? cause.message : 'Restart preparation failed.')
     } finally { setBusy(false) }
   }
-  return <div role="group" aria-label="Restart Thread options"
-    className="min-w-0 rounded-md border border-border p-3 text-xs">
-    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-      <strong className="text-sm">Prepare a restart</strong>
-      <Button type="button" variant="ghost" size="xs" onClick={onClose}>Close</Button>
-    </div>
-    {isFetching && <LoaderCircle aria-label="Refreshing restart revision" className="size-3.5 animate-spin motion-reduce:animate-none" />}
+  return <div role="group" aria-label="Restart Thread options" className="min-w-0 space-y-3 text-sm">
+    {isFetching && <LoaderCircle aria-label="Checking Story revision"
+      className="size-3.5 animate-spin motion-reduce:animate-none" />}
     {error && <p role="alert" className="text-destructive">{error.message}</p>}
     {data && <>
-      <p className="mb-2 text-muted-foreground">Source: {data.provider} · {data.repository}. The existing Thread and its running work remain unchanged.</p>
-      <label className="mb-2 flex cursor-pointer items-start gap-2">
-        <input type="radio" name={'restart-mode-' + threadId} checked={mode === 'original'}
-          disabled={busy || preparedCleanup} onChange={() => { setMode('original'); setSelectedNewer(null); setChildId(crypto.randomUUID()); setIssue(null) }} />
-        <span><strong>Original Story revision (default)</strong>
-          <code className="mt-0.5 block break-all">{data.originalSha}</code>
-          <span className="text-muted-foreground">Replay the original author request from its pinned Story commit.</span>
-        </span>
-      </label>
-      <label className="mb-2 flex cursor-pointer items-start gap-2">
-        <input type="radio" name={'restart-mode-' + threadId} checked={mode === 'newer'}
-          disabled={busy || preparedCleanup || !newer} onChange={() => { setMode('newer'); setSelectedNewer(newer); setChildId(crypto.randomUUID()); setIssue(null) }} />
-        <span><strong>Explicitly select newer upstream revision</strong>
-          {newer ? <>
-            <span className="block text-muted-foreground">Branch: {newer.branch}</span>
-            <code className="block break-all">{newer.sha}</code>
-            <span className="text-muted-foreground">Requires renewed Story, scope, tool and protected-decision validation. Changes to protected canon are refused until separately reviewed.</span>
-          </> : <span className="block text-muted-foreground">{data.upstreamError ?? 'No different upstream revision available.'}</span>}
-        </span>
-      </label>
-      <label className="mb-2 flex items-start gap-2 text-muted-foreground">
-        <input type="checkbox" checked={discard} disabled={busy || preparedCleanup}
-          onChange={event => setDiscard(event.target.checked)} />
-        <span><strong>Restart and discard old Thread</strong> — prepare and verify a replacement first, then permanently delete eligible old resources. Active writers must stop at a safe boundary; dirty work and unresolved dependencies are preserved. Cleanup can require a retry.</span>
-      </label>
+      <div className="min-w-0 rounded-md bg-muted/40 px-3 py-2">
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Request
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-1 text-xs">
+            <span className="text-muted-foreground">Scope: </span>
+            {data.scopeKind === 'full-story' ? 'Entire Story' : 'Selected records'}
+            <HelpTip label="About restart scope">
+              Restart repeats this request and its original scope. To change either, start a New Thread.
+              The replacement is prepared first; generation does not begin automatically.
+            </HelpTip>
+          </span>
+        </div>
+        <p className="mt-1 max-h-36 overflow-y-auto whitespace-pre-wrap break-words font-medium">
+          {data.task}
+        </p>
+      </div>
+      {newer && <fieldset className="min-w-0 space-y-1.5">
+        <legend className="mb-1 text-xs font-medium text-muted-foreground">Story version</legend>
+        <label className="flex cursor-pointer items-center gap-2">
+          <input type="radio" name={'restart-mode-' + threadId} className="shrink-0"
+            checked={mode === 'original'} disabled={busy || preparedCleanup}
+            onChange={() => { setMode('original'); setSelectedNewer(null); setChildId(crypto.randomUUID()); setIssue(null) }} />
+          <span>Original</span>
+          <code className="text-xs text-muted-foreground" title={data.originalSha}>{data.originalSha.slice(0, 12)}</code>
+        </label>
+        <label className="flex cursor-pointer items-center gap-2">
+          <input type="radio" name={'restart-mode-' + threadId} className="shrink-0"
+            checked={mode === 'newer'} disabled={busy || preparedCleanup}
+            onChange={() => { setMode('newer'); setSelectedNewer(newer); setChildId(crypto.randomUUID()); setIssue(null) }} />
+          <span>Latest upstream</span>
+          <code className="text-xs text-muted-foreground" title={newer.sha}>{newer.sha.slice(0, 12)}</code>
+          <HelpTip label="About restarting from a newer Story version">
+            Uses the selected newer upstream commit after checking Story validity and protected decisions.
+          </HelpTip>
+        </label>
+      </fieldset>}
+      <div className="flex items-center gap-1">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input type="checkbox" checked={discard} className="shrink-0"
+            disabled={busy || preparedCleanup} onChange={event => setDiscard(event.target.checked)} />
+          <span>Delete Old Thread</span>
+        </label>
+        <HelpTip label="About deleting the old Thread">
+          By default, the original Thread stays in the list. If selected, the original is permanently deleted
+          only after preparing the replacement. Active or unverified work may delay cleanup;
+          the replacement is kept and cleanup can be retried.
+        </HelpTip>
+      </div>
       <div className="flex flex-wrap items-center gap-2">
-        <Button type="button" size="sm" disabled={busy || (!preparedCleanup && mode === 'newer' && (!newer ||
+        <Button type="button" size="sm" disabled={busy || (!preparedCleanup && effectiveMode === 'newer' && (!newer ||
           selectedNewer?.sha !== newer.sha || selectedNewer.branch !== newer.branch))}
           onClick={() => void run()}>
-          {busy ? 'Preparing…' : discard ? 'Restart and discard old Thread' : 'Create prepared restart Thread'}
-        </Button>
-        <Button type="button" size="sm" variant="outline" disabled={busy || isFetching || preparedCleanup}
-          onClick={() => { setMode('original'); setSelectedNewer(null);
-            setChildId(crypto.randomUUID()); void refetch(); setIssue(null) }}>
-          Refresh upstream
+          {busy ? 'Preparing…' : preparedCleanup ? 'Retry cleanup' : 'Restart'}
         </Button>
       </div>
-      {preparedCleanup && <p className="mt-2 text-muted-foreground">Replacement identity is pinned. Retry cleanup without refreshing or changing the selection. {preparedId && <a className="underline" href={'/jobs/' + encodeURIComponent(preparedId)}>Open prepared replacement</a>}</p>}
-      <p className="mt-2 text-muted-foreground">After preparation, review the task, model and budget, then explicitly Run. {discard ? 'Permanent cleanup is irreversible and may remain pending until the old writer stops.' : 'The old Thread is not deleted.'}</p>
-      {issue && <p role="alert" className="mt-2 whitespace-pre-wrap text-destructive">{issue}</p>}
+      {preparedCleanup && <p className="text-xs text-muted-foreground">
+        The replacement is ready. Retry cleanup, or{' '}
+        {preparedReplacement && <Link className="underline" to="/stories/$storyId"
+          params={{ storyId: preparedReplacement.storyId }}
+          search={{ thread: preparedReplacement.threadId }}>
+          open the replacement Thread
+        </Link>}. If you leave this dialog, delete the original using its Thread menu.
+      </p>}
+      {issue && <p role="alert" className="whitespace-pre-wrap text-sm text-destructive">{issue}</p>}
     </>}
   </div>
 }

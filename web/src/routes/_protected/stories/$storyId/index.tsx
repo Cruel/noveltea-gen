@@ -8,6 +8,7 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/s
 import { StoryCollectionsPanel } from '@/components/story-collections-panel'
 import { StudioSelect } from '@/components/studio-select'
 import { ThreadChat } from '@/components/thread-chat'
+import { ThreadChatHeader } from '@/components/thread-chat-header'
 import { ThreadUsage } from '@/components/thread-usage'
 import { StoryFirstChat } from '@/components/story-first-chat'
 import { StoryWorkspaceOutline } from '@/components/story-workspace-outline'
@@ -20,6 +21,7 @@ import type { ReviewSelection } from '@/lib/thread-review.server'
 import { StoryRelationshipGraph } from '@/routes/_protected/jobs/-StoryRelationshipGraph'
 import { readWorkspaceStoryIndex } from '@/lib/story-data.functions'
 import { getThreadChat } from '@/lib/thread-chat.functions'
+import { getThreadReview } from '@/lib/thread-review.functions'
 import { jobEventsQuery } from '@/lib/job-events.queries'
 import { projectActivity, type ActivityStep } from '@/lib/thread-activity'
 import { activityHighlights, visibleActivityStep } from '@/lib/story-activity-overlay'
@@ -30,17 +32,19 @@ import { addCollection, setCollectionName, deleteCollection, moveThreadToCollect
   saveSelectedStory, changeThreadArchive, deleteThreadResources,
   setThreadPreferences, setThreadTitle } from '@/lib/threads.functions'
 import { selectNavigationThreads } from '@/lib/thread-navigation'
+import { setCreativeMode } from '@/lib/threads.functions'
+import type { CreativeMode } from '../../../../../../src/creative-policy'
 import type { StoryThread } from '@/lib/threads.server'
 import type { StoryCollection } from '@/persistence/collection-contracts'
 
-export const Route = createFileRoute('/_protected/stories/$storyId/conversations')({
+export const Route = createFileRoute('/_protected/stories/$storyId/')({
   validateSearch: (search: Record<string, unknown>): { thread?: string; archived?: boolean } => ({
     ...(typeof search.thread === 'string' ? { thread: search.thread } : {}),
     ...(search.archived === true || search.archived === 'true' ? { archived: true } : {}),
   }),
   loader: ({ context, params }) =>
     context.queryClient.ensureQueryData(storyNavigationQuery(params.storyId)),
-  component: StoryConversations,
+  component: StoryWorkspace,
 })
 
 function TitleEditor({ title, label, onSubmit, onCancel }: {
@@ -65,7 +69,7 @@ function TitleEditor({ title, label, onSubmit, onCancel }: {
   </form>
 }
 
-function StoryConversations() {
+function StoryWorkspace() {
   const { storyId } = Route.useParams()
   const { thread: selectedThreadId, archived } = Route.useSearch()
   const archivedView = archived === true
@@ -93,6 +97,7 @@ function StoryConversations() {
     void saveSelectedStory({ data: storyId }).then(() =>
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })).catch(() => {})
   }, [storyId, queryClient])
+  const [modeSaving, setModeSaving] = useState(false)
   const [usageOpen, setUsageOpen] = useState(false)
   const usage = useQuery({ ...storyUsageQuery(storyId), enabled: usageOpen, refetchInterval: usageOpen ? 15000 : false })
   const [creatingThread, setCreatingThread] = useState(false)
@@ -186,6 +191,22 @@ function StoryConversations() {
     queryFn: () => getThreadChat({ data: explorerThreadId! }),
     enabled: !!explorerThreadId,
   })
+  // An execution is not proof of reviewable changes. The verified review
+  // endpoint compares the actual cumulative Git revisions, including prior
+  // publications; empty or unverified results do not display Review Changes.
+  const reviewRevision = selectedChat.data?.turnReceipts.flatMap(turn =>
+    turn.executions.filter(execution =>
+      execution.status === 'completed' && execution.queuePhase === 'finished' &&
+      !!execution.validatedSha).map(execution => execution.validatedSha!)).at(-1) ?? null
+  const reviewAvailability = useQuery({
+    queryKey: ['thread-review', explorerThreadId, { kind: 'cumulative' }, reviewRevision],
+    queryFn: () => getThreadReview({ data: {
+      threadId: explorerThreadId!, scope: { kind: 'cumulative' },
+    } }),
+    enabled: !!explorerThreadId && !!reviewRevision, retry: false, staleTime: 15_000,
+  })
+  const hasReviewableChanges = !!reviewRevision && !!reviewAvailability.data?.files.length &&
+    reviewAvailability.data.headSha === reviewRevision
   const runJobs = selectedChat.data?.runs.map(run => run.jobId) ?? []
   const activeJobId = selectedChat.data?.runs.at(-1)?.jobId ?? null
   const jobActivity = useQuery({
@@ -292,7 +313,7 @@ function StoryConversations() {
     setNavigationOpen(false)
     setCreatingThread(false)
     void navigate({
-    to: '/stories/$storyId/conversations', params: { storyId },
+    to: '/stories/$storyId', params: { storyId },
     search: { thread: thread.id,
       ...(archivedView ? { archived: true } : {}) },
     })
@@ -308,13 +329,13 @@ function StoryConversations() {
               onClick={() => { setCreatingThread(true); setEditing(null); setNavigationOpen(false) }}><Plus className="size-4" /></Button>
           </div>
           <nav aria-label="Thread visibility" className="flex items-center gap-1 px-1 text-xs">
-            <Link to="/stories/$storyId/conversations" params={{ storyId }}
+            <Link to="/stories/$storyId" params={{ storyId }}
               search={{}}
               onClick={() => setNavigationOpen(false)}
               aria-current={!archivedView ? 'page' : undefined}
               className={'rounded px-2 py-1 no-underline hover:bg-muted ' +
                 (!archivedView ? 'bg-secondary font-medium' : 'text-muted-foreground')}>Active</Link>
-            <Link to="/stories/$storyId/conversations" params={{ storyId }}
+            <Link to="/stories/$storyId" params={{ storyId }}
               search={{ archived: true }}
               onClick={() => setNavigationOpen(false)}
               aria-current={archivedView ? 'page' : undefined}
@@ -332,7 +353,7 @@ function StoryConversations() {
               </div>
             </details>
           </nav>
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
             {editing?.kind === 'thread' && <TitleEditor key={editing.id}
               title={data.threads.find(thread => thread.id === editing.id)?.title ?? ''}
               label="Thread title" onSubmit={rename} onCancel={() => setEditing(null)} />}
@@ -416,20 +437,28 @@ function StoryConversations() {
           onFocusComplete={token => setGraphFocus(current => current?.token === token ? null : current)}
           highlights={highlights} />
       </div>
-      {explorer.data.jobId && <Button type="button" size="sm" variant="outline"
-        className="mt-2 shrink-0 self-start text-xs"
-        onClick={() => openReview({ kind: 'cumulative' })}>Review changes</Button>}
     </>}
 </div>
   const chatPanel = <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
   {data ? <>
-    <header className="flex min-h-12 items-center gap-2 border-b border-border/50 px-4 py-2">
-      <h2 className="m-0 min-w-0 flex-1 truncate text-sm font-semibold">
-        {creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
-      </h2>
-      {explorerThreadId && <Button size="sm" type="button" variant="outline"
-        onClick={() => openReview({ kind: 'cumulative' })}>Review changes</Button>}
-    </header>
+    <ThreadChatHeader
+      title={creatingThread ? 'New Thread' : selectedThread?.title ?? 'New Thread'}
+      mode={creatingThread ? null : selectedChat.data?.creativePolicy.mode ?? null}
+      modeDisabled={modeSaving || !!selectedChat.data?.archived}
+      status={creatingThread ? null : selectedChat.data?.runs.at(-1)?.status ?? null}
+      showReview={!creatingThread && hasReviewableChanges}
+      onReview={() => openReview({ kind: 'cumulative' })}
+      onModeChange={async (mode: CreativeMode) => {
+        if (!explorerThreadId) return
+        setModeSaving(true); setIssue(null)
+        try {
+          await setCreativeMode({ data: { threadId: explorerThreadId, mode } })
+          await queryClient.invalidateQueries({ queryKey: ['thread-chat', explorerThreadId] })
+        } catch (cause) {
+          setIssue(cause instanceof Error ? cause.message : 'Thread mode could not be saved.')
+        } finally { setModeSaving(false) }
+      }}
+    />
     <div className="flex min-h-0 flex-1 flex-col">
     {creatingThread || !data.threads.length ||
       (selectedThread && selectedThread.status === 'prepared' && selectedThread.id.startsWith('root:'))
@@ -439,7 +468,7 @@ function StoryConversations() {
             ? selectedThread.id : undefined}
           onSubmitted={async threadId => {
             setCreatingThread(false); await refresh()
-            await navigate({ to: '/stories/$storyId/conversations', params: { storyId },
+            await navigate({ to: '/stories/$storyId', params: { storyId },
               search: { thread: threadId } })
           }} />
       : selectedThread ? <ThreadChat key={selectedThread.id} threadId={selectedThread.id}
@@ -461,7 +490,7 @@ function StoryConversations() {
       {dashboard?.stories.length ? <div className="min-w-0 flex-1">
         <StudioSelect aria-label="Selected Story" value={storyId}
           onValueChange={next => {
-            if (next !== storyId) void navigate({ to: '/stories/$storyId/conversations',
+            if (next !== storyId) void navigate({ to: '/stories/$storyId',
               params: { storyId: next }, search: {} })
           }}
           options={dashboard.stories.map(story => ({

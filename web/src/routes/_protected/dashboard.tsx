@@ -14,9 +14,8 @@ export const Route = createFileRoute('/_protected/dashboard')({
 })
 
 function threadHref(job: DashboardJob): string {
-  if (!job.threadId) return '/jobs/' + encodeURIComponent(job.id)
-  return '/stories/' + encodeURIComponent(job.storyId) + '/conversations?' +
-    new URLSearchParams({ thread: job.threadId }).toString()
+  const workspace = '/stories/' + encodeURIComponent(job.storyId) + '/'
+  return job.threadId ? workspace + '?' + new URLSearchParams({ thread: job.threadId }).toString() : workspace
 }
 
 function Dashboard() {
@@ -25,7 +24,7 @@ function Dashboard() {
   return <main className="page">
     {savedStory && <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
       <span className="text-muted-foreground">Selected Story</span>
-      <a className="font-semibold" href={'/stories/' + encodeURIComponent(savedStory.id) + '/conversations'}>
+      <a className="font-semibold" href={'/stories/' + encodeURIComponent(savedStory.id) + '/'}>
         {savedStory.title}
       </a>
     </div>}
@@ -38,17 +37,17 @@ function Dashboard() {
             : null
           return <li key={story.id} className="flex flex-wrap items-center gap-2">
             {repository && <GitProviderIcon provider={repository.provider} />}
-            <a href={'/stories/' + encodeURIComponent(story.id) + '/conversations'}>{story.title}</a>
+            <a href={'/stories/' + encodeURIComponent(story.id) + '/'}>{story.title}</a>
             {repository && <span className="text-xs text-muted-foreground">{repository.name}</span>}
             {href && <a href={href} className="text-xs text-muted-foreground">Browse repository</a>}
           </li>
         })}</ul> : <p>No Stories imported yet.</p>}
       </CardContent></Card>
       <Card><CardHeader><CardTitle>Threads requiring attention</CardTitle></CardHeader><CardContent>
-        {dashboard.activeJobs.length ? <ul>{dashboard.activeJobs.map(job => <li key={job.id}><a href={threadHref(job)}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No active jobs.</p>}
+        {dashboard.activeJobs.length ? <ul>{dashboard.activeJobs.map(job => <li key={job.id}><a href={threadHref(job)}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No Threads currently need attention.</p>}
       </CardContent></Card>
       <Card><CardHeader><CardTitle>Recent Threads</CardTitle></CardHeader><CardContent>
-        {dashboard.recentSessions.length ? <ul>{dashboard.recentSessions.map(job => <li key={job.id}><a href={threadHref(job)}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No recent sessions.</p>}
+        {dashboard.recentSessions.length ? <ul>{dashboard.recentSessions.map(job => <li key={job.id}><a href={threadHref(job)}>{job.title}</a> <Badge variant="secondary">{job.status}</Badge></li>)}</ul> : <p>No recent Threads.</p>}
       </CardContent></Card>
     </div>
     <Card className="mt-5"><CardHeader className="flex flex-row items-center justify-between gap-3">

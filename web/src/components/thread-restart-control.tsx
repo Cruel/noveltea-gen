@@ -14,10 +14,10 @@ export function ThreadRestartControl({ threadId }: { threadId: string }) {
       className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2">
       <RotateCcw className="size-3.5" />
     </DialogTrigger>
-    <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
+    <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-lg">
       <DialogTitle>Restart Thread</DialogTitle>
       <Suspense fallback={<p className="text-xs text-muted-foreground">Loading restart options…</p>}>
-        <ThreadRestartPreview threadId={threadId} onClose={() => setOpen(false)} />
+        <ThreadRestartPreview threadId={threadId} />
       </Suspense>
     </DialogContent>
   </Dialog>

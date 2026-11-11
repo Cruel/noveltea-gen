@@ -38,6 +38,13 @@
 .story-graph-filters [data-slot=select-trigger] { min-width: 130px; max-width: 170px; }
 .story-graph-filters .story-graph-checkbox { display: flex; align-items: center; gap: .4rem; padding-bottom: .45rem; }
 .story-graph-canvas { height: 360px; min-width: 0; background: #101820; border: 1px solid #344657; border-radius: 6px; overflow: hidden; }
+/* The legacy, unlayered header/section/li selectors must not override Chat
+   sizing, message padding or the single-row toolbar. */
+header.story-chat-header { display: flex; flex-wrap: nowrap; justify-content: flex-start; gap: .75rem; }
+header.story-chat-header > h2 { margin: 0; font-size: .875rem; }
+section[aria-label="Thread chat"] { padding: 0; border: 0; border-radius: 0; background: transparent; }
+li.thread-chat-message { padding: .7rem 1rem; border: 0; }
+li.thread-chat-message > p { margin: 0; color: var(--foreground); }
 /* Override the global unlayered section/nav rules at mobile workspace scope. */
 .story-mobile-workspace { padding: 0; }
 .story-mobile-tabs { display: flex; gap: .25rem; }

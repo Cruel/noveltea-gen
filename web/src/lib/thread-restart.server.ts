@@ -137,6 +137,7 @@ export async function currentRestartUpstream(auth: StudioAuth, store: StudioData
 export type RestartPreview = {
   threadId: string; sourceJobId: string; originalSha: string; originalJobId: string
   provider: 'github' | 'gitlab'; repository: string; title: string
+  task: string; scopeKind: 'full-story' | 'partial'
   upstream: { branch: string; sha: string } | null; upstreamError: string | null
 }
 export async function previewThreadRestart(auth: StudioAuth, store: StudioDatabase,
@@ -155,7 +156,8 @@ export async function previewThreadRestart(auth: StudioAuth, store: StudioDataba
   }
   return { threadId, sourceJobId: source.sourceJobId, originalSha: source.originalSha,
     originalJobId: source.rootJobId, title: source.sourceTitle, provider: source.provider,
-    repository: source.repository, upstream, upstreamError }
+    repository: source.repository, task: source.task, scopeKind: source.contract.scope.kind,
+    upstream, upstreamError }
 }
 
 function requestBody(value: unknown): RestartSelection {

@@ -91,7 +91,7 @@ export function StoryCollectionsPanel(props: Props) {
   ]
   if (!props.collections.length)
     return (
-      <div className="min-h-0">
+      <div className="min-h-0 min-w-0">
         <div className="mb-1 flex items-center justify-between px-1">
           <span className="text-xs text-muted-foreground">Collections</span>
           <Button
@@ -147,7 +147,7 @@ export function StoryCollectionsPanel(props: Props) {
     )
 
   return (
-    <section aria-label="Story Collections" className="grid gap-1">
+    <section aria-label="Story Collections" className="grid min-w-0 gap-1">
       <div className="flex items-center justify-between px-1">
         <span className="text-xs font-medium text-muted-foreground">Collections</span>
         <Button

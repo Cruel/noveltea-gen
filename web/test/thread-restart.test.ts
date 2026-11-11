@@ -197,6 +197,8 @@ test('owner restarts from the original SHA with new Thread/run while live parent
     const preview = await f.send(f.threadId, 'GET')
     assert.equal(preview.status, 200)
     assert.equal(preview.body.originalSha, f.original)
+    assert.equal(preview.body.task, 'Original creative goal')
+    assert.equal(preview.body.scopeKind, 'full-story', 'preview must disclose the inherited scope')
     assert.equal(preview.body.upstream.sha, newer)
     const selected = { childId: randomUUID(), sourceJobId: f.sourceId, originalSha: f.original,
       selectedSha: f.original, mode: 'original', targetBranch: null }

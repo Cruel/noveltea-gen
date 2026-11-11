@@ -72,12 +72,35 @@ async function deletion(db: Read | Write, owner: string, id: string): Promise<Th
       .where('jobId', 'in', jobs).execute()
     externalPublications = github.length + gitlab.length
   }
-  const messageCount = await db.selectFrom('storyThreadMessages')
+  // An initial/continued Turn can keep phase=blocked after the execution
+  // finishes. That is historical failure evidence, not a pending writer. Only
+  // disregard it when the exact owner-scoped run is terminal AND the assistant
+  // has published its final settlement. Pre-admission failures, missing final
+  // replies and genuinely in-flight author/Pi messages still veto deletion.
+  const activeMessages = await db.selectFrom('storyThreadMessages')
     .select(eb => eb.fn.countAll<number>().as('total'))
     .where('threadId', '=', id).where('ownerUserId', '=', owner)
     .where('role', '=', 'user')
-    .where('phase', 'in', ['preparing', 'running', 'blocked'])
+    .where('phase', 'in', ['preparing', 'running'])
     .executeTakeFirstOrThrow()
+  const blockedMessages = await db.selectFrom('storyThreadMessages')
+    .select(['jobId', 'status'])
+    .where('threadId', '=', id).where('ownerUserId', '=', owner)
+    .where('role', '=', 'user').where('phase', '=', 'blocked').execute()
+  const terminalRuns = new Set(runs.filter(run =>
+    ['blocked', 'completed', 'cancelled'].includes(run.status) && run.queue === 'finished')
+    .map(run => run.id))
+  const finalAssistants = new Set(terminalRuns.size
+    ? (await db.selectFrom('storyThreadMessages').select('jobId')
+      .where('threadId', '=', id).where('ownerUserId', '=', owner)
+      .where('role', '=', 'assistant').where('status', '=', 'delivered')
+      .where('phase', '=', 'finished')
+      .where('jobId', 'in', [...terminalRuns]).execute())
+      .map(message => message.jobId)
+    : [])
+  const blockedPending = blockedMessages.filter(message =>
+    message.status !== 'delivered' || !message.jobId ||
+    !terminalRuns.has(message.jobId) || !finalAssistants.has(message.jobId)).length
   const liveCount = await db.selectFrom('threadLiveInputs')
     .select(eb => eb.fn.countAll<number>().as('total'))
     .where('threadId', '=', id).where('ownerUserId', '=', owner)
@@ -85,7 +108,7 @@ async function deletion(db: Read | Write, owner: string, id: string): Promise<Th
     .executeTakeFirstOrThrow()
   return {
     ...thread, children, pendingForks, externalPublications,
-    unsettledMessages: Number(messageCount.total) + Number(liveCount.total),
+    unsettledMessages: Number(activeMessages.total) + blockedPending + Number(liveCount.total),
     runs,
   }
 }

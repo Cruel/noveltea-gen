@@ -149,25 +149,27 @@ export function ThreadRunAttention({ run }: { run: Run }) {
       </details>
     </div>}
     {job.status === 'prepared' && <p className="text-xs text-muted-foreground">
-      {job.forkSource ? 'The continuation is prepared, but generation has not started yet.' :
-        'Configure this Thread before its first run.'}
+      {job.task && job.contract
+        ? 'This verified, prepared execution can be started from the Thread.'
+        : 'This execution is missing a saved request; inspect advanced details before starting.'}
     </p>}
     {(job.status === 'paused' || blocked) && <AuthorInteractions jobId={run.jobId} presentation="chat"
       onChanged={() => {
         void queryClient.invalidateQueries({ queryKey: ['job', run.jobId] })
         void queryClient.invalidateQueries({ queryKey: ['thread-chat'] })
       }} />}
-    {job.status === 'prepared' && (job.forkSource && job.task && job.contract
+    {job.status === 'prepared' && (job.task && job.contract
       ? <div className="flex flex-wrap items-center gap-3">
           <Button size="sm" onClick={() => void startPrepared()} disabled={busy}>
-            {busy ? 'Starting…' : 'Start prepared continuation'}
+            {busy ? 'Starting…' : job.forkSource ? 'Start prepared continuation' :
+              job.restartSource ? 'Start prepared restart' : 'Start prepared execution'}
           </Button>
           <Link to="/settings" className="text-xs text-muted-foreground underline-offset-2 hover:underline">
             Check model connection
           </Link>
         </div>
       : <Link to="/jobs/$jobId" params={{ jobId: run.jobId }}>
-        Configure initial generation
+        Inspect incomplete prepared execution
       </Link>)}
     {job.status === 'paused' && <Button size="sm" disabled={busy || !!pendingDecision || !authorState}
       onClick={() => void action('resume')}>
