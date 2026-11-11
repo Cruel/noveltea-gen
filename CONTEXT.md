@@ -22,8 +22,20 @@ An optional organizational grouping of Threads within a Story. Collection member
 **Creative mode**:
 A policy for how much creative initiative an agent takes and when it seeks author input during Story work. A Thread has a default mode that individual requests can override; modes do not grant authority to change protected canon or exceed an authorized writing scope.
 
+**Baseline discovery**:
+The initial author–agent discussion that establishes a new Story's minimum Creative Direction before autonomous or collaborative development. It preserves author-established choices, recommendations, and explicit delegation without requiring complete Story design.
+
+**Author objective**:
+The Story outcome an author requests in a Turn, independent of the specialist assignments chosen to achieve it.
+
+**Orchestrator**:
+The agent responsible for interpreting an author objective against existing Story canon, coordinating specialist work, and reassessing remaining obligations as verified Story changes emerge. Its recommendations do not independently grant write authority.
+
+**Work plan**:
+A revisable set of specialist assignments and dependencies intended to fulfill an author objective. Verified Story changes and author direction may alter remaining work without redefining the original objective.
+
 **Specialist assignment**:
-A bounded task derived from a Thread request or generation plan, describing the specific outcome a specialist is responsible for producing. It is the reference for reviewing that specialist's proposed Story changes, rather than the original broad Story brief.
+A bounded task derived from a Thread request or work plan, describing the specific outcome a specialist is responsible for producing. It is the reference for reviewing that specialist's proposed Story changes, rather than the original broad Story brief.
 
 **Specialist review**:
 An independent semantic check of a specialist's proposed changes against its assignment and the relevant Story state. Reviews can cover a bounded group of related assignments; findings require a corrected draft or author-directed resolution of a disagreement, never argument-only approval.
