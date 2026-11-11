@@ -8,11 +8,11 @@
  * served by the trusted worker, not an arbitrary host filesystem read.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { SandboxClient } from "./sandbox-client.js";
-import { createSkillReadTool } from "./skills.js";
+import { createSkillReadTool, roleVisibleSkills, type SkillReadRole } from "./skills.js";
 import { verifiedSkillFiles, type SkillSnapshot } from "./snapshot.js";
 import type { JobStartResult } from "./job.js";
 
@@ -51,12 +51,12 @@ export function blockUnroutedHostedPi(stage: string): void {
  */
 export async function selectSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[],
-  client?: Runner, access: SandboxToolAccess = "writer",
+  client?: Runner, access: SandboxToolAccess = "writer", role: SkillReadRole = "specialist",
 ): Promise<ToolDefinition[] | undefined> {
   if (!process.env.NT_SANDBOX_SOCKET || !process.env.NT_SANDBOX_TOKEN_FILE) {
     throw new Error("Hosted Pi requires a configured private sandbox socket and token; no local tool fallback.");
   }
-  return createSandboxPiTools(job, snapshot, skills, client ?? new SandboxClient(), access);
+  return createSandboxPiTools(job, snapshot, skills, client ?? new SandboxClient(), access, role);
 }
 
 /** The same canonical path boundary applies to Pi's tools and model-requested context reads. */
@@ -123,7 +123,7 @@ export async function readSandboxContextFile(
 
 export async function createSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[], client: Runner,
-  access: SandboxToolAccess = "writer",
+  access: SandboxToolAccess = "writer", role: SkillReadRole = "specialist",
 ): Promise<ToolDefinition[]> {
   // The host controller checks the trusted Studio catalog, worktree manifest,
   // user identity and Docker rootlessness; no model-controlled mount options.
@@ -133,7 +133,9 @@ export async function createSandboxPiTools(
   }
   const verified = await verifiedSkillFiles(snapshot.id);
   if (verified.root !== snapshot.path) throw new Error("Pinned skill snapshot path changed.");
-  const pinnedSkills = skills.filter(s => s.filePath.startsWith(verified.root + sep));
+  const pinnedSkills = roleVisibleSkills(skills, role).filter(s =>
+    s.baseDir === join(verified.root, "skills", s.name) &&
+    s.filePath === join(verified.root, "skills", s.name, "SKILL.md"));
   const pinnedRead = createSkillReadTool(pinnedSkills, verified);
 
   const mapped = (requested: unknown, allowStoryRoot = false): string =>
@@ -284,7 +286,7 @@ export async function createSandboxPiTools(
   // Never expose a mutating entry point, including arbitrary shell, to an
   // editorial reviewer. Pi receives only these declared custom tool names;
   // no built-in file or shell tools are enabled in hosted mode.
-  return access === "read-only"
+  return access === "read-only" || role !== "specialist"
     ? definitions.filter(tool => SANDBOX_READ_ONLY_TOOLS.some(name => name === tool.name))
     : definitions;
 }

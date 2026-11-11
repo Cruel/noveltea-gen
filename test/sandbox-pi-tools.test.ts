@@ -22,6 +22,14 @@ after(() => {
 const source = join(base, "skill-source");
 mkdirSync(join(source, "skills", "nt-catalog"), { recursive: true });
 writeFileSync(join(source, "skills", "nt-catalog", "SKILL.md"), "---\nname: nt-catalog\n---\nPinned rules\n");
+const otherSkillNames = ["nt-worldbuilding", "nt-character-development", "nt-narrative-review",
+  "nt-story-orchestrate", "nt-story-collaborate", "nt-story-generate", "nt-story-import"];
+for (const name of otherSkillNames) {
+  const folder = join(source, "skills", name);
+  mkdirSync(join(folder, "references"), { recursive: true });
+  writeFileSync(join(folder, "SKILL.md"), `---\nname: ${name}\ndescription: Fixture ${name}\n---\n${name} guidance\n`);
+  writeFileSync(join(folder, "references", "craft.md"), `${name} pinned craft reference\n`);
+}
 function git(...args: string[]) {
   const command = spawnSync("git", args, { cwd: source, encoding: "utf8" });
   assert.equal(command.status, 0, command.stderr);
@@ -39,10 +47,10 @@ function fixture() {
       novelteaSkills: source, discovery: "explicit-only", skillDirs: [], requiredSkills: [],
     }))!;
     assert.ok(snapshot);
-    return { snapshot, skills: [{
-      name: "nt-catalog", baseDir: join(snapshot.path, "skills", "nt-catalog"),
-      filePath: join(snapshot.path, "skills", "nt-catalog", "SKILL.md"),
-    } as Skill] };
+    return { snapshot, skills: ["nt-catalog", ...otherSkillNames].map(name => ({
+      name, baseDir: join(snapshot.path, "skills", name),
+      filePath: join(snapshot.path, "skills", name, "SKILL.md"),
+    } as Skill)) };
   })();
 }
 function client() {
@@ -164,6 +172,69 @@ test("pinned skill read is narrow, digest-verified and never sent as an arbitrar
   await assert.rejects(call(tools.read!, { path: join(snapshot.path, "private.txt") }), /denied/);
   assert.equal(runner.calls.length, 0);
   assert.match(readFileSync(skills[0]!.filePath, "utf8"), /Pinned rules/);
+});
+
+test("pinned skill reads are role-aware and cross-domain craft is not a role grant", async () => {
+  const { snapshot, skills } = await fixture();
+  const runner = client();
+  const root = join(snapshot.path, "skills");
+  const path = (name: string, tail = "SKILL.md") => join(root, name, tail);
+  const specialist = Object.fromEntries((await createSandboxPiTools(job, snapshot, skills, runner,
+    "writer", "specialist")).map(t => [t.name, t]));
+  assert.ok(specialist.write && specialist.edit, "the existing specialist tool grant is unaffected");
+  assert.match(JSON.stringify((await call(specialist.read!, { path: path("nt-catalog") })).content), /Pinned rules/);
+  assert.match(JSON.stringify((await call(specialist.read!, { path: path("nt-worldbuilding") })).content), /worldbuilding guidance/);
+  assert.match(JSON.stringify((await call(specialist.read!, { path: path("nt-character-development", "references/craft.md") })).content),
+    /character-development pinned craft reference/);
+  for (const name of ["nt-narrative-review", "nt-story-orchestrate", "nt-story-collaborate",
+    "nt-story-generate", "nt-story-import"]) {
+    await assert.rejects(call(specialist.read!, { path: path(name) }), /Skill read denied/);
+    await assert.rejects(call(specialist.read!, { path: path(name, "references/craft.md") }), /Skill read denied/);
+  }
+  await assert.rejects(call(specialist.read!, { path: path("nt-worldbuilding", "../nt-story-orchestrate/SKILL.md") }),
+    /Skill read denied/);
+  await assert.rejects(call(specialist.read!, { path: "/etc/passwd" }), /denied/);
+  await assert.rejects(call(specialist.read!, { path: join(source, "skills", "nt-catalog", "SKILL.md") }),
+    /denied/, "live skill checkout cannot replace pinned skill bytes");
+
+  const reviewer = Object.fromEntries((await createSandboxPiTools(job, snapshot, skills, runner,
+    "writer", "reviewer")).map(t => [t.name, t]));
+  assert.deepEqual(Object.keys(reviewer), [...SANDBOX_READ_ONLY_TOOLS],
+    "a reviewer remains read-only even if a caller requests writer tools");
+  assert.match(JSON.stringify((await call(reviewer.read!, { path: path("nt-narrative-review") })).content),
+    /narrative-review guidance/);
+  assert.match(JSON.stringify((await call(reviewer.read!, { path: path("nt-worldbuilding") })).content),
+    /worldbuilding guidance/);
+  await assert.rejects(call(reviewer.read!, { path: path("nt-story-orchestrate") }), /Skill read denied/);
+
+  const orchestrator = Object.fromEntries((await createSandboxPiTools(job, snapshot, skills, runner,
+    "writer", "orchestrator")).map(t => [t.name, t]));
+  assert.deepEqual(Object.keys(orchestrator), [...SANDBOX_READ_ONLY_TOOLS],
+    "reading a specialist's method cannot confer its file-writing tools");
+  assert.match(JSON.stringify((await call(orchestrator.read!, { path: path("nt-story-orchestrate") })).content),
+    /story-orchestrate guidance/);
+  assert.match(JSON.stringify((await call(orchestrator.read!, { path: path("nt-story-collaborate") })).content),
+    /story-collaborate guidance/);
+  assert.match(JSON.stringify((await call(orchestrator.read!, { path: path("nt-character-development") })).content),
+    /character-development guidance/);
+  await assert.rejects(call(orchestrator.read!, { path: path("nt-narrative-review") }), /Skill read denied/);
+  assert.equal(runner.calls.length, 0, "skills are read only through the verified host snapshot");
+});
+
+test("forged skill metadata cannot widen pinned reader roots", async () => {
+  const { snapshot, skills } = await fixture();
+  const runner = client();
+  const spoof = skills.find(s => s.name === "nt-story-orchestrate")!;
+  const catalog = skills.find(s => s.name === "nt-catalog")!;
+  const forged = [
+    { ...spoof, name: "nt-catalog" },
+    { ...catalog, baseDir: join(snapshot.path, "skills") },
+  ] as Skill[];
+  const reader = (await createSandboxPiTools(job, snapshot, forged, runner,
+    "read-only", "specialist")).find(t => t.name === "read")!;
+  await assert.rejects(call(reader, { path: spoof.filePath }), /Skill read denied/);
+  await assert.rejects(call(reader, { path: catalog.filePath }), /Skill read denied/);
+  assert.equal(runner.calls.length, 0, "untrusted resource roots never reach sandbox or host");
 });
 
 test("hosted context reads complete verified Markdown only through sandbox, including multi-chunk Unicode", async () => {

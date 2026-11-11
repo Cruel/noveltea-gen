@@ -140,6 +140,51 @@ test("read-only Pi resource tool reads skill and bundled reference, never Story/
   assert.match(await readFile(join(x.catalog, "SKILL.md"), "utf8"), /Catalog contract/);
 });
 
+test("role-aware catalog exposes adjacent crafts but keeps orchestrator and reviewer methods private", async t => {
+  const x = await setup(t);
+  const skillRoot = join(x.checkout, "skills");
+  const craft = await skill(skillRoot, "nt-worldbuilding");
+  await mkdir(join(craft, "references"));
+  await writeFile(join(craft, "references", "facts.md"), "Cross-domain craft details");
+  for (const name of ["nt-character-development", "nt-narrative-review", "nt-story-orchestrate",
+    "nt-story-collaborate", "nt-story-generate", "nt-story-import", "setup-noveltea"]) {
+    await skill(skillRoot, name);
+  }
+  const config = await x.configure();
+  const build = async (role: "specialist" | "reviewer" | "orchestrator") => {
+    const { loader } = createProjectResourceLoader(x.project, x.agentDir, true, config, [], role);
+    await loader.reload();
+    const skills = loader.getSkills().skills;
+    const reader = createSkillReadTool(skills);
+    const read = (path: string) => reader.execute("test", { path }, undefined, undefined, {} as never);
+    return { names: skills.map(s => s.name), read };
+  };
+  const ordinary = await build("specialist");
+  assert.ok(ordinary.names.includes("nt-catalog"));
+  assert.ok(ordinary.names.includes("nt-character-development"));
+  assert.ok(ordinary.names.includes("nt-worldbuilding"));
+  assert.ok(!ordinary.names.includes("nt-narrative-review"));
+  assert.ok(!ordinary.names.includes("nt-story-orchestrate"));
+  assert.ok(!ordinary.names.includes("nt-story-generate"));
+  assert.ok(!ordinary.names.includes("setup-noveltea"));
+  assert.match(JSON.stringify(await ordinary.read(join(craft, "references", "facts.md"))), /Cross-domain craft details/);
+  for (const forbidden of ["nt-story-orchestrate", "nt-narrative-review", "nt-story-import"]) {
+    await assert.rejects(ordinary.read(join(skillRoot, forbidden, "SKILL.md")), /Skill read denied/);
+  }
+  const review = await build("reviewer");
+  assert.ok(review.names.includes("nt-narrative-review"));
+  assert.ok(review.names.includes("nt-worldbuilding"));
+  assert.ok(!review.names.includes("nt-story-orchestrate"));
+  await assert.rejects(review.read(join(skillRoot, "nt-story-orchestrate", "SKILL.md")), /Skill read denied/);
+  const coordinate = await build("orchestrator");
+  assert.ok(coordinate.names.includes("nt-story-orchestrate"));
+  assert.ok(coordinate.names.includes("nt-story-collaborate"));
+  assert.ok(coordinate.names.includes("nt-worldbuilding"));
+  assert.ok(!coordinate.names.includes("nt-narrative-review"));
+  assert.ok(!coordinate.names.includes("setup-noveltea"));
+  await assert.rejects(coordinate.read(join(skillRoot, "nt-narrative-review", "SKILL.md")), /Skill read denied/);
+});
+
 test("configured skill packages with escaping symlinks cannot be discovered", async t => {
   const x = await setup(t);
   const other = join(x.base, "outside-skill");

@@ -5,6 +5,7 @@ import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, wr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import type { Skill } from "@earendil-works/pi-coding-agent";
 import { createSkillSnapshot, openSkillSnapshot, verifiedSkillFiles } from "../src/snapshot.js";
 import { createSkillReadTool, loadSkillConfig } from "../src/skills.js";
 import { createProjectResourceLoader } from "../src/pi.js";
@@ -89,6 +90,14 @@ test("content-addressed immutable snapshots capture git provenance, reuse, chang
   await loader.reload();
   const reader = createSkillReadTool(loader.getSkills().skills, verified);
   const read = (path: string) => reader.execute("test", { path }, undefined, undefined, {} as never);
+  const external = join(base, "external-skill");
+  await mkdir(external);
+  await writeFile(join(external, "SKILL.md"), "External host-only instructions");
+  const mixedReader = createSkillReadTool([...loader.getSkills().skills, {
+    name: "external-skill", baseDir: external, filePath: join(external, "SKILL.md"),
+  } as Skill], verified);
+  await assert.rejects(mixedReader.execute("test", { path: join(external, "SKILL.md") },
+    undefined, undefined, {} as never), /outside the verified pinned snapshot/);
   const verifiedFile = join(f.path, "skills", "nt-catalog", "references", "new.md");
   assert.match(JSON.stringify(await read(verifiedFile)), /new/);
   const sealedCatalog = join(f.path, "skills", "nt-catalog");

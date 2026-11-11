@@ -244,7 +244,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
     discovery: "explicit-only", novelteaSkills: snapshot.path, skillDirs: [], requiredSkills: [skill, "nt-catalog"],
-  });
+  }, [], writable ? "specialist" : "reviewer");
   await loader.reload();
   const loaded = loader.getSkills();
   if (loaded.diagnostics.some(d => d.type === "error") ||
@@ -268,7 +268,7 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
     paths: required, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
   const sandboxTools = await selectSandboxPiTools(job, snapshot, loaded.skills, undefined,
-    writable ? "writer" : "read-only");
+    writable ? "writer" : "read-only", writable ? "specialist" : "reviewer");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking,
     resourceLoader: loader, settingsManager,

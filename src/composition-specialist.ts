@@ -88,7 +88,8 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: ["nt-narrative-composition", "nt-catalog"] };
-  const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, config);
+  const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true,
+    config, [], phase === "review" ? "reviewer" : "specialist");
   await loader.reload();
   const { skills, diagnostics } = loader.getSkills();
   for (const diag of diagnostics) if (diag.type === "error") throw new Error("Composition skill discovery: " + diag.message);
@@ -107,7 +108,7 @@ async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assig
     provider, model: modelId, thinking, directory: dir, insideWriter,
   }, runtime);
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills, undefined,
-    phase === "review" ? "read-only" : "writer");
+    phase === "review" ? "read-only" : "writer", phase === "review" ? "reviewer" : "specialist");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager,

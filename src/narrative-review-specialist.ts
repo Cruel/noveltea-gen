@@ -106,7 +106,8 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: role === "review"
       ? ["nt-narrative-review", "nt-catalog"] : ["nt-narrative-composition", "nt-catalog"] };
-  const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, config);
+  const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true,
+    config, [], role === "review" ? "reviewer" : "specialist");
   await loader.reload();
   const required = role === "review" ? ["nt-narrative-review", "nt-catalog"] : ["nt-narrative-composition", "nt-catalog"];
   if (loader.getSkills().diagnostics.some(d => d.type === "error") ||
@@ -129,7 +130,7 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   const selectedThinking = context?.thinking ?? resolved?.resolution.thinking;
   await mkdir(dir, { recursive: true });
   const sandboxTools = await selectSandboxPiTools(job, snapshot, loader.getSkills().skills, undefined,
-    role === "review" ? "read-only" : "writer");
+    role === "review" ? "read-only" : "writer", role === "review" ? "reviewer" : "specialist");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model, thinkingLevel: selectedThinking,
     resourceLoader: loader, settingsManager,

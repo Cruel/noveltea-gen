@@ -1,3 +1,4 @@
+import { join, sep } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -20,7 +21,7 @@ import {
 } from "./graph.js";
 import { openPersistedSession } from "./checkpoint.js";
 import { projectInstructions, projectSessionDir, type StoryProject } from "./project.js";
-import { createSkillReadTool, resolveConfiguredSkills, type SkillConfig } from "./skills.js";
+import { createSkillReadTool, resolveConfiguredSkills, roleVisibleSkills, type SkillConfig, type SkillReadRole } from "./skills.js";
 import { verifiedSkillFiles, type SkillSnapshot } from "./snapshot.js";
 import { DirectModelStopError, piTraceExtensions, traceDirectModel } from "./tracing.js";
 import type { Client } from "langsmith";
@@ -36,6 +37,7 @@ export function createProjectResourceLoader(
   includeProjectInstructions = true,
   config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] },
   traceExtensions: InlineExtension[] = [],
+  role: SkillReadRole = "specialist",
 ) {
   const settingsManager = SettingsManager.inMemory();
   return {
@@ -47,9 +49,16 @@ export function createProjectResourceLoader(
       noExtensions: true,
       extensionFactories: traceExtensions,
       noSkills: !includeProjectInstructions || config.discovery === "explicit-only",
-      skillsOverride: (base) => includeProjectInstructions
-        ? resolveConfiguredSkills(base, config, project.root, agentDir)
-        : { skills: [], diagnostics: [] },
+      skillsOverride: (base) => {
+        if (!includeProjectInstructions) return { skills: [], diagnostics: [] };
+        const found = resolveConfiguredSkills(base, config, project.root, agentDir);
+        if (!config.novelteaSkills) return found;
+        const pinnedRoot = join(config.novelteaSkills, "skills") + sep;
+        const pinned = found.skills.filter(skill => skill.filePath.startsWith(pinnedRoot));
+        const visible = new Set(roleVisibleSkills(pinned, role));
+        return { ...found, skills: found.skills.filter(skill =>
+          visible.has(skill) || (!skill.filePath.startsWith(pinnedRoot) && !skill.name.startsWith("nt-"))) };
+      },
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,

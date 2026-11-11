@@ -4,10 +4,33 @@ import type { VerifiedSkillFiles } from "./snapshot.js";
 import { execFileSync } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSkills, type Skill, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ResourceDiagnostic } from "@earendil-works/pi-coding-agent";
+
+/** A trusted controller grant, never inferred from model text or skill frontmatter. */
+export type SkillReadRole = "specialist" | "orchestrator" | "reviewer";
+
+/** Only portable craft/reference packages can be consulted across domains. */
+const CROSS_DOMAIN_GUIDANCE = new Set([
+  "nt-catalog", "nt-worldbuilding", "nt-character-development", "nt-story-architecture",
+  "nt-event-design", "nt-interactive-narrative", "nt-puzzle-design",
+  "nt-narrative-composition", "nt-story-discovery",
+]);
+
+/** Skill visibility is knowledge, never a grant to invoke a role or write Story records. */
+export function roleVisibleSkills(skills: readonly Skill[], role: SkillReadRole): Skill[] {
+  return skills.filter(skill =>
+    // The controller binds a portable role to its package location, never
+    // only to forgeable SKILL.md frontmatter or invocation metadata.
+    basename(skill.baseDir) === skill.name &&
+    dirname(skill.filePath) === skill.baseDir && basename(skill.filePath) === "SKILL.md" &&
+    (CROSS_DOMAIN_GUIDANCE.has(skill.name) ||
+      (role === "reviewer" && skill.name === "nt-narrative-review") ||
+      (role === "orchestrator" &&
+        (skill.name === "nt-story-orchestrate" || skill.name === "nt-story-collaborate"))));
+}
 
 export interface SkillConfig {
   discovery: "standard" | "explicit-only";
@@ -198,6 +221,9 @@ export function createSkillReadTool(skills: Skill[], snapshot?: VerifiedSkillFil
       const canonical = await realpath(path);
       if (!roots.some(root => contained(root, canonical))) {
         throw new Error("Skill read denied: resource resolves outside an advertised skill.");
+      }
+      if (snapshot && !contained(snapshot.root, canonical)) {
+        throw new Error("Skill read denied: resource is outside the verified pinned snapshot.");
       }
       const info = await stat(canonical);
       if (!info.isFile() || info.size > 128 * 1024) {
