@@ -21,6 +21,13 @@ export interface TurnEvidence {
   goal: string;
   source: { jobId: string | null; verifiedSha: string };
   contract: CompletionContract;
+  /** Controller-interpreted outcome for this Turn, never inherited as Thread authority. */
+  objective?: {
+    breadth: "whole-story" | "focused" | "protected-amendment";
+    requestedTargets: string[];
+    deliveryDepth: CompletionContract["scope"]["depth"];
+    obligations: string[];
+  };
   assignments: TurnAssignmentEvidence[];
   reviewRequired: boolean;
   creativePolicy?: CreativePolicy;
@@ -55,6 +62,16 @@ export async function readTurnEvidence(job: JobStartResult, contract: Completion
     (originalRequest !== undefined && plan.originalRequest !== originalRequest) ||
     (plan.creativePolicy !== undefined && !validSavedPolicy(plan.creativePolicy)) ||
     JSON.stringify(plan.contract) !== JSON.stringify(contract) ||
+    (plan.objective !== undefined && (
+      plan.objective.breadth !== (plan.kind === "full-story" ? "whole-story" :
+        plan.kind === "revision" ? "focused" : "protected-amendment") ||
+      !Array.isArray(plan.objective.requestedTargets) ||
+      JSON.stringify(plan.objective.requestedTargets) !== JSON.stringify(
+        plan.kind === "revision" ? [...new Set(plan.contract.scope.targets)].sort() : []) ||
+      plan.objective.deliveryDepth !== plan.contract.scope.depth ||
+      !Array.isArray(plan.objective.obligations) || !plan.objective.obligations.length ||
+      plan.objective.obligations.length > 32 ||
+      plan.objective.obligations.some(o => typeof o !== "string" || !o.trim() || o.length > 2000))) ||
     !Array.isArray(assignments) || !assignments.length || assignments.length > 129 ||
     new Set(assignments.map(a => a.id)).size !== assignments.length ||
     assignments.some(a => !a.id || !a.outcome?.trim() ||

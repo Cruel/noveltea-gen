@@ -144,6 +144,11 @@ test("hosted editorial reviewers receive only sandbox-backed read/search tools",
   await call(tools.grep!, { pattern: "scene", path: "choice-points" });
   await call(tools.find!, { pattern: "*.md", path: "puzzles" });
   await call(tools.ls!, { path: "authored-content" });
+  assert.ok(runner.calls.find(args => args.join(" ").includes('find "$1"'))
+    ?.join(" ").includes('-type d -name ".*" -prune'),
+    "read-only discovery does not descend into private inbox or hidden project files");
+  assert.ok(runner.calls.find(args => args.join(" ").includes('ls -1 -- "$1"')),
+    "read-only directory listings hide private dot-directories");
   assert.equal(runner.calls.length, 4);
   assert.ok(runner.calls.every(argv => argv[0] === "sh"));
 });

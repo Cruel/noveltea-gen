@@ -34,7 +34,10 @@ import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { loadSkillConfig } from "./skills.js";
 import { hasStoryOrchestratorSelection, loadSelectedStoryOrchestrator,
-  selectStoryOrchestrator, type StoryOrchestratorReceipt } from "./orchestrator-selection.js";
+  selectStoryOrchestrator, type StoryOrchestratorReceipt,
+  type StoryOrchestratorSelection } from "./orchestrator-selection.js";
+import { runPinnedObjectivePlanner, readPinnedObjectivePlanning,
+  type OrchestratorPlanningReceipt } from "./orchestrator-planner.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
 import { generationStages, reconcileInventory, nextExecutionItem, type GenerationStage as Stage,
@@ -167,6 +170,8 @@ const Channels = Annotation.Root({
   escalation: Annotation<GenerationEscalation | null>(),
   /** Independently checkpointed identity prevents reselecting after receipt loss. */
   orchestratorSnapshotId: Annotation<string | null>(),
+  /** Only a dependency-safe preference over the same pinned assignments. */
+  orchestratorOrder: Annotation<string[] | null>(),
 });
 type State = typeof Channels.State;
 const openJob = async (s: State) => {
@@ -340,13 +345,15 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
   if (plan && receipt.phase !== "committed") {
     const inventory = await reviewGatedInventory(job, reconcileInventory(plan, undefined, head,
       completedStages, failures, s.inventory));
-    return { request, planVersion: plan.version, completedStages, failures, inventory, active: nextExecutionItem(inventory) ?? null };
+    return { request, planVersion: plan.version, completedStages, failures, inventory,
+      active: nextExecutionItem(inventory, s.orchestratorOrder ?? undefined) ?? null };
   }
   const validation = plan && completedStages.some(e => e.stage === "architecture")
     ? await validateStoryJob(job, request.validatorSource ?? request.skillsSource, { ...job, baseSha: head }) : undefined;
   const inventory = await reviewGatedInventory(job,
     reconcileInventory(plan, validation, head, completedStages, failures, s.inventory));
-  return { request, planVersion: plan?.version ?? null, completedStages, failures, inventory, active: nextExecutionItem(inventory) ?? null };
+  return { request, planVersion: plan?.version ?? null, completedStages, failures, inventory,
+    active: nextExecutionItem(inventory, s.orchestratorOrder ?? undefined) ?? null };
 }
 async function dispatch(s: State) {
   const input = s.request;
@@ -488,17 +495,18 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         if (s.orchestratorSnapshotId && !hasSelection)
           throw new Error("Previously selected orchestrator receipt is missing; restore its original pin before resuming.");
         let orchestratorSnapshotId: string | null = null;
+        let selection: StoryOrchestratorSelection | null = null;
         if (hasSelection) {
-          const selected = await loadSelectedStoryOrchestrator(job, graphThreadId, sourceIdentity);
-          orchestratorSnapshotId = selected.receipt.skillSnapshot.id;
+          selection = await loadSelectedStoryOrchestrator(job, graphThreadId, sourceIdentity);
+          orchestratorSnapshotId = selection.receipt.skillSnapshot.id;
         } else if (request.orchestrationPolicy === "explicit") {
           const checkout = request.skillsSource ?? process.env.NT_STUDIO_SKILLS_SOURCE ??
             (await loadSkillConfig()).novelteaSkills;
           if (!checkout) throw new Error(
             "Explicit Studio orchestration requires a trusted NovelTea skills checkout; " +
             "nt-story-generate cannot be substituted.");
-          const selected = await selectStoryOrchestrator(job, graphThreadId, sourceIdentity, checkout);
-          orchestratorSnapshotId = selected.receipt.skillSnapshot.id;
+          selection = await selectStoryOrchestrator(job, graphThreadId, sourceIdentity, checkout);
+          orchestratorSnapshotId = selection.receipt.skillSnapshot.id;
         } else if (request.orchestrationPolicy === "fixture-legacy" && !request.fixture) {
           throw new Error("Legacy fixture orchestration cannot run a real Pi writer.");
         } else if (!request.orchestrationPolicy && !request.fixture && !s.cursor &&
@@ -508,7 +516,23 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         }
         if (s.orchestratorSnapshotId && orchestratorSnapshotId !== s.orchestratorSnapshotId)
           throw new Error("Pinned orchestrator snapshot changed during generation resume.");
-        return { request, orchestratorSnapshotId,
+        let orchestratorOrder: string[] | null = null;
+        if (selection && request.turnPlanDigest && !request.fixture) {
+          const plan = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
+          if (!plan) throw new Error("A selected objective lacks the controller's pinned Turn plan.");
+          // A previously started, pre-#149 Turn retains its original receipt and
+          // stage graph; it must not acquire a new Pi planning step on resume.
+          if (plan.objective) {
+            const { inspectPiPolicy } = await import("./job-pi-policy.js");
+            const { policy } = await inspectPiPolicy(job);
+            const receipt = await runPinnedObjectivePlanner(job, selection, plan,
+              request.provider ?? policy.profile.provider, request.model ?? policy.profile.model);
+            orchestratorOrder = receipt.proposal!.assignments.map(a => a.id);
+          }
+        }
+        if (s.orchestratorOrder && JSON.stringify(s.orchestratorOrder) !== JSON.stringify(orchestratorOrder))
+          throw new Error("Pinned orchestration assignment order changed during resume.");
+        return { request, orchestratorSnapshotId, orchestratorOrder,
           status: "running" as const, reason: null, failures: s.failures ?? {} };
       } catch (error) { return blocked(error); }
     })
@@ -758,7 +782,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         state = { request, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
-          orchestratorSnapshotId: null };
+          orchestratorSnapshotId: null, orchestratorOrder: null };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)
@@ -794,6 +818,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
       // An otherwise valid receipt from a different snapshot is not this
       // Thread's selected methodology, and corrupt receipts remain diagnosable.
       let orchestrationSelection: StoryOrchestratorReceipt | null = null;
+      let orchestrationPlanning: OrchestratorPlanningReceipt | null = null;
       let selectionFailure: Error | null = null;
       try {
         if (await hasStoryOrchestratorSelection(job)) {
@@ -805,6 +830,23 @@ export async function runStoryGeneration(options: GenerationOptions) {
               selected.receipt.skillSnapshot.id !== state.orchestratorSnapshotId)
             throw new Error("Pinned orchestrator snapshot changed since the generation checkpoint.");
           orchestrationSelection = selected.receipt;
+          if (state.orchestratorOrder) {
+            if (!state.request.turnPlanDigest || state.request.fixture)
+              throw new Error("Checkpointed model planning lacks its real-Pi Turn authority.");
+            const plan = await readTurnEvidence(job, state.request.contract,
+              state.request.task, state.request.turnPlanDigest);
+            if (!plan) throw new Error("Checkpointed objective plan lacks its Turn receipt.");
+            const { inspectPiPolicy } = await import("./job-pi-policy.js");
+            const { policy } = await inspectPiPolicy(job);
+            const saved = await readPinnedObjectivePlanning(job, selected, plan,
+              state.request.provider ?? policy.profile.provider,
+              state.request.model ?? policy.profile.model);
+            if (saved.phase !== "planned" ||
+                JSON.stringify(saved.proposal?.assignments.map(a => a.id)) !==
+                  JSON.stringify(state.orchestratorOrder))
+              throw new Error("Orchestrator planning receipt disagrees with the checkpointed assignment order.");
+            orchestrationPlanning = saved;
+          }
         } else if (state.orchestratorSnapshotId) {
           throw new Error("Pinned orchestrator selection receipt is missing; restore it before inspection.");
         }
@@ -832,11 +874,12 @@ export async function runStoryGeneration(options: GenerationOptions) {
         reason: current.reason ?? state.reason, checkpointStatus: state.status,
         jobId: job.jobId, threadId: config.configurable.thread_id, checkpointPath: path,
         nextStage: visible.ideaTask ? "idea-integration" : visible.active?.stage ??
-          (visible.inventory ? nextExecutionItem(visible.inventory)?.stage : undefined) ?? null,
+          (visible.inventory ? nextExecutionItem(visible.inventory,
+            visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
         recoveryCheckpoints: await inspectRecoveryCheckpoints(await startStoryJob({ story: job.storyRoot, job: job.jobId }, false)),
-        orchestrationSelection,
+        orchestrationSelection, orchestrationPlanning,
         escalation: visible.escalation ?? (state.status === "completed" ? null : reviewEscalation(report, visible.inventory ?? null)),
         pendingNodes: (await graph.getState(config)).next, request: visible.request, report };
     } finally { saver.db.close(); }

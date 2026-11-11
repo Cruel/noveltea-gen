@@ -4,11 +4,11 @@ import { selectedJob, restoreJob, pinnedRequest, inspectRegisteredJob } from './
 import { trustedHead } from '../../../src/revision'
 import { validateStoryJob } from '../../../src/validator'
 import type { CanonicalScopeRecord } from '../../../src/focused-scope'
-import { inferStoryRevision, applyCreativeModeToRevision,
+import { inferStoryObjective, applyCreativeModeToRevision,
   type RevisionPreview, type ProtectedDecisionChange } from './story-revision-plan'
 import { assertProtectedThreadApproval } from './thread-protected-decision.server'
 import { enqueueThreadMessage, type ThreadMessage, ThreadChatError } from './thread-chat.server'
-import { planRevision, assertTurnPlan, type TurnPlan } from './turn-plan'
+import { planObjective, assertTurnPlan, type TurnPlan } from './turn-plan'
 import { DEFAULT_CREATIVE_POLICY, parseCreativePolicy,
   type CreativeMode, type CreativePolicy } from '../../../src/creative-policy'
 
@@ -92,10 +92,15 @@ export async function revisionFromSource(store: StudioDatabase, owner: string,
       report.protection.warnings?.length)
     throw new ThreadChatError(409, 'The pinned canonical validator cannot verify the complete Story and protected decisions at this HEAD.')
   const preview = applyCreativeModeToRevision(
-    inferStoryRevision(prompt, report.records, headSha, pinned.contract, selectedTargets), policy)
+    inferStoryObjective(prompt, report.records, headSha, pinned.contract, selectedTargets), policy)
   return { ...preview, turnPlan: preview.clarification ? null :
-    planRevision(preview.request, preview.contract, headSha, sourceJobId, report.records,
-      preview.targets, preview.writePaths, preview.protectedChange, policy) }
+    preview.contract.scope.kind === 'full-story'
+      ? planObjective({ kind: 'full-story', request: preview.request,
+          contract: preview.contract, base: headSha, sourceJobId, policy })
+      : planObjective({ kind: 'revision', request: preview.request,
+          contract: preview.contract, base: headSha, sourceJobId, catalog: report.records,
+          targetIds: preview.targets, allowedPaths: preview.writePaths,
+          protectedChange: preview.protectedChange, policy }) }
 }
 export async function previewThreadRevision(store: StudioDatabase, owner: string,
   threadId: string, prompt: string, selectedTargets?: string[], messageId?: string) {

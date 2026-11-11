@@ -140,7 +140,8 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     const savedTurn = await store.persistence.messages.owned(owner, threadId, claim.id)
     if (!savedTurn) throw new ThreadChatError(409, 'Admitted Turn is missing its pinned policy.')
     const refreshed = await revisionFromSource(store, owner, claim.source, claim.content,
-      scope.protectedChange ? undefined : scope.selectedTargets,
+      scope.protectedChange || scope.contract.scope.kind === 'full-story'
+        ? undefined : scope.selectedTargets,
       parseCreativePolicy(savedTurn.creativePolicyJson))
     assertPinnedRevision(scope, refreshed, claim.source, head)
     if (scope.protectedChange)

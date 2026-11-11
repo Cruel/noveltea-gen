@@ -10,7 +10,7 @@ import { generationConfigurationRequest } from './generation-config.server'
 import { generationJobRequest, authorizedStoryJob, verifyWebExecution } from './fixture-jobs.server'
 import { validatedExplorer } from './story-explorer.server'
 import { interpretNaturalStoryPrompt } from './natural-story-plan'
-import { planWholeStory } from './turn-plan'
+import { planObjective } from './turn-plan'
 import { saveJobTurnPlan } from './turn-plan-receipt.server'
 import { pinChatApprovedFoundation, readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
 import { pinReusedFoundation } from '../../../src/chat-reused-foundation'
@@ -63,8 +63,9 @@ async function admitWholeApprovedStory(auth: StudioAuth, store: StudioStore,
   plan: ReturnType<typeof interpretNaturalStoryPrompt>): Promise<ContinuationStatus> {
   const { chat } = approval
   const job = await authorizedStoryJob(store, owner, chat.firstTurnId)
-  await saveJobTurnPlan(job, planWholeStory(chat.originalObjective,
-    plan.contract, chat.sourceSha, null, parseCreativePolicy(creativePolicyJson)))
+  await saveJobTurnPlan(job, planObjective({ kind: 'full-story',
+    request: chat.originalObjective, contract: plan.contract, base: chat.sourceSha,
+    policy: parseCreativePolicy(creativePolicyJson) }))
   await store.persistence.naturalStory.associateRoot(owner, chat.storyId,
     chat.firstTurnId, chat.originalObjective.slice(0, 120), new Date().toISOString())
   await responseData(await generationConfigurationRequest(auth, store, internalRequest(

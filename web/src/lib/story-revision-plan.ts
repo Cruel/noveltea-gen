@@ -51,6 +51,8 @@ const contentWords = (text: string): Set<string> => new Set(text.toLowerCase()
   ]).has(word)) ?? [])
 const includesName = (text: string, name: string) => name.length >= 2 &&
   new RegExp('(^|[^a-z0-9])' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-z0-9])', 'i').test(text)
+const conversationWords = /\b(?:conversation|conversations|dialogue|dialog|exchange)\b/i
+const wholeStoryRequest = /^(?:please\s+)?(?:make|create|write|generate|build|develop)\s+(?:me\s+)?(?:(?:a|an|the)\s+)?(?:(?:complete|full|whole|playable|interactive)\s+)*(?:(?:mystery|fantasy|horror|romance|detective|sci-fi|science-fiction|comedy|dramatic)\s+)*(?:game|story|visual\s+novel)\b/i
 const depthFor = (targets: string[]): CompletionContract['scope']['depth'] =>
   targets.some(id => id.startsWith('authored-content.')) ? 'composition' :
   targets.some(id => /^(event|choice-point|puzzle)\./.test(id)) ? 'interactive' : 'architecture'
@@ -173,21 +175,27 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
   // coordinated assignments rather than a demand to name one file up front.
   // Only catalog-backed existing records may become writable.
   const generalStoryGoal = !explicit.length && !names.length &&
-    /\b(?:story|plot|narrative|pacing|ending|dialogue|scenes|characters|choices)\b/i.test(request) &&
-    /\b(?:improve|revise|rewrite|tighten|polish|change|adjust|fix|make)\b/i.test(request)
+    /\b(?:story|plot|narrative|pacing|ending|dialogue|dialog|conversation|conversations|scenes|characters|choices)\b/i.test(request) &&
+    /\b(?:improve|revise|rewrite|tighten|polish|change|adjust|fix|make|edit)\b/i.test(request)
   const broad = /\b(?:entire|whole|all|every)\s+(?:story|characters|events|scenes|dialogue)\b/i.test(request) ||
     generalStoryGoal
   const coordinated = (explicit.length > 1 || (!explicit.length && names.length > 1)) &&
     /\b(?:and|both|across|each|all)\b/i.test(request)
   const broadTypes = /\bcharacters\b/i.test(request) ? ['character'] :
     /\bevents\b/i.test(request) ? ['event'] :
-    /\b(?:scenes|dialogue)\b/i.test(request) ? ['authored-content'] :
+    /\b(?:scenes|dialogue|dialog|conversation|conversations|exchange)\b/i.test(request) ? ['authored-content'] :
     /\b(?:choices|puzzles)\b/i.test(request) ? ['choice-point', 'puzzle'] :
     /\b(?:pacing|plot|ending)\b/i.test(request) ? ['event', 'authored-content'] :
     [...writingTypes]
   const broadTargets = broad ? active.filter(r => broadTypes.includes(r.metadata.type))
     .map(r => r.metadata.id) : []
-  const multiple = coordinated || broad
+  // An unnamed singular conversation is an existing-record revision only when
+  // canon identifies a unique authored-content target. Otherwise ask rather
+  // than grant writes to every unrelated scene (or invent a new record).
+  const singularConversation = conversationWords.test(request) &&
+    /\b(?:the|this|that|a|an)\s+(?:conversation|dialogue|dialog|exchange)\b/i.test(request) &&
+    !explicit.length && !names.length
+  const multiple = coordinated || broad && !singularConversation
   const explicitMilestones = explicit.filter(id => id.startsWith('milestone.'))
   const isMilestone = /\bmilestone(?:-wide)?\b/i.test(request) || !!explicitMilestones.length
   const isEvent = /\b(?:this|the|an?) (?:event|beat)\b/i.test(request) ||
@@ -198,8 +206,10 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
     isCharacter ? candidate.filter(id => id.startsWith('character.')) :
     candidate.filter(id => writingTypes.has(id.split('.')[0]!))
   const type = isMilestone ? 'milestone' : isEvent ? 'event' : isCharacter ? 'character' : null
-  const matches = multiple ? unique([...candidate.filter(id => writingTypes.has(id.split('.')[0]!)),
-    ...broadTargets]) : relevant.length ? relevant : type
+  const matches = singularConversation
+    ? active.filter(r => r.metadata.type === 'authored-content').map(r => r.metadata.id)
+    : multiple ? unique([...candidate.filter(id => writingTypes.has(id.split('.')[0]!)),
+      ...broadTargets]) : relevant.length ? relevant : type
       ? active.filter(r => r.metadata.type === type).map(r => r.metadata.id) : []
   const anchor = !multiple && matches.length === 1 ? matches[0] : null
   const rationale: string[] = []
@@ -308,6 +318,41 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
   if (!rationale.length) rationale.push('A single existing canonical record is writable; its related Story records remain read-only.')
   const data = { headSha, request, targets, writePaths, contextIds, readOnlyIds,
     dependencies, depth, contract, rationale, reviewRequired, clarification,
+    protectedChange: null, protectedConflict: null }
+  return { ...data, digest: hash(data) }
+}
+
+/** Interpret broad and targeted objectives against the same verified Story.
+ * Existing-Turn generation never inherits the preceding Turn's target list.
+ * A requested new whole Story is a separately reviewed scope expansion, not
+ * an authorization to overwrite any protected Creative Direction. */
+export function inferStoryObjective(prompt: string, catalog: CanonicalScopeRecord[],
+  headSha: string, previous: CompletionContract, selectedTargets?: string[]): RevisionPreview {
+  if (!wholeStoryRequest.test(prompt.trim()))
+    return inferStoryRevision(prompt, catalog, headSha, previous, selectedTargets)
+  if (selectedTargets !== undefined)
+    throw new Error('A whole-Story objective cannot silently inherit focused record selections.')
+  if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 4000 ||
+      unsafe.test(prompt) || !SHA.test(headSha))
+    throw new Error('Invalid author objective or verified Story source.')
+  const request = prompt.trim()
+  const parsed = parseGenerationContract({
+    scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
+    constraints: ['Honor this author objective: ' + request],
+    envelope: previous.envelope,
+  })
+  // No writable paths are inferred from broad prose. The existing graph
+  // separately verifies its Story, foundation, protection and stage grants.
+  const data = { headSha, request, targets: [] as string[], writePaths: [] as string[],
+    contextIds: [] as string[], readOnlyIds: [] as string[],
+    dependencies: [] as RevisionPreview['dependencies'],
+    depth: 'composition' as const, contract: parsed,
+    rationale: ['Create a complete Story through independently authorized specialist assignments; preserve verified existing canon.'],
+    reviewRequired: true,
+    clarification: protectedIntent.test(request) ||
+      /\b(?:ignore|override|retcon|erase|delete|remove)\b.{0,100}\b(?:canon|protected|foundation|decision)\b/i.test(request)
+      ? 'A new whole-Story objective cannot override existing canon or protected decisions. Request an exact, separately reviewed amendment first.'
+      : null,
     protectedChange: null, protectedConflict: null }
   return { ...data, digest: hash(data) }
 }

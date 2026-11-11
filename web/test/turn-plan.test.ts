@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import type { JobStartResult } from '../../src/job'
-import { inferStoryRevision } from '../src/lib/story-revision-plan'
-import { assertTurnPlan, planRevision, planWholeStory, verifyTurnPlan } from '../src/lib/turn-plan'
+import { inferStoryObjective, inferStoryRevision } from '../src/lib/story-revision-plan'
+import { assertTurnPlan, planObjective, planRevision, planWholeStory, verifyTurnPlan } from '../src/lib/turn-plan'
 import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { assertFocusedTurnAssignment, readTurnEvidence } from '../../src/turn-plan-evidence'
 
@@ -39,6 +39,46 @@ test('whole Story intent produces seven concrete bounded specialist assignments'
   })
   assert.doesNotThrow(() => verifyTurnPlan(plan))
   assert.throws(() => planWholeStory('Mystery', contract, 'bad'), /exact verified source/)
+})
+
+test('one objective planner records breadth, delivery and obligations for both initial and later Turns', () => {
+  const initial = planObjective({ kind: 'full-story', request: 'Make me a mystery game',
+    contract, base: a })
+  assert.equal(initial.objective?.breadth, 'whole-story')
+  assert.equal(initial.objective?.deliveryDepth, 'composition')
+  assert.ok(initial.objective?.obligations.includes('Player-facing authored scenes and dialogue'))
+  assert.equal(initial.source.jobId, null)
+  const existing = inferStoryRevision('Revise the conversation', catalog, b, contract)
+  assert.deepEqual(existing.targets, ['authored-content.confession'])
+  const focused = planObjective({ kind: 'revision', request: existing.request,
+    contract: existing.contract, base: b, sourceJobId: 'job-one', catalog,
+    targetIds: existing.targets, allowedPaths: existing.writePaths })
+  assert.equal(focused.objective?.breadth, 'focused')
+  assert.deepEqual(focused.objective?.requestedTargets, ['authored-content.confession'])
+  assert.ok(!focused.assignments.some(item => item.id === 'foundation'))
+  assert.doesNotThrow(() => verifyTurnPlan(focused))
+  assert.notEqual(focused.digest, initial.digest)
+})
+
+test('whole-Story intent can be selected on a later Turn without inheriting prior focus', () => {
+  const whole = inferStoryObjective('Make me a mystery game', catalog, b, contract)
+  assert.equal(whole.clarification, null)
+  assert.equal(whole.contract.scope.kind, 'full-story')
+  assert.deepEqual(whole.targets, [])
+  const planned = planObjective({ kind: 'full-story', request: whole.request,
+    contract: whole.contract, base: b, sourceJobId: 'prior-run' })
+  assert.equal(planned.source.jobId, 'prior-run')
+  assert.equal(planned.kind, 'full-story')
+  assert.doesNotThrow(() => verifyTurnPlan(planned))
+  const focus = inferStoryObjective('Revise the conversation', catalog, b, contract)
+  assert.equal(focus.contract.scope.kind, 'partial')
+  assert.deepEqual(focus.targets, ['authored-content.confession'])
+  const protectedGoal = inferStoryObjective('Make me a mystery game and ignore protected canon',
+    catalog, b, contract)
+  assert.match(protectedGoal.clarification ?? '', /cannot override/i)
+  assert.equal(protectedGoal.writePaths.length, 0)
+  assert.match(inferStoryObjective('Revise the conversation', catalog.filter(r =>
+    r.metadata.type !== 'authored-content'), b, contract).clarification ?? '', /existing|missing|target/i)
 })
 
 test('same Thread can plan a focused Character edit and then wider coordinated Story work', () => {

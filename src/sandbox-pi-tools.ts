@@ -268,7 +268,7 @@ export async function createSandboxPiTools(
         const path = mapped(input.path ?? ".", true);
         const limit = number(input.limit, 300, 1000);
         // Fixed script, with pattern and search path only as positional data.
-        const script = 'find "$1" -type f -path "*/$2" -print | head -n "$3" | head -c 48000';
+        const script = 'find "$1" -type d -name ".*" -prune -o -type f -path "*/$2" -print | head -n "$3" | head -c 48000';
         const output = await checked(["sh", "-c", script, "nt-find", path, input.pattern, String(limit)]);
         return text(output || "(no files)");
       },
@@ -279,7 +279,7 @@ export async function createSandboxPiTools(
       async execute(_id, input: Input) {
         const path = mapped(input.path ?? ".", true);
         const limit = number(input.limit, 300, 1000);
-        const script = 'ls -A -1 -- "$1" | head -n "$2" | head -c 48000';
+        const script = 'ls -1 -- "$1" | head -n "$2" | head -c 48000';
         return text(await checked(["sh", "-c", script, "nt-ls", path, String(limit)]));
       },
     },

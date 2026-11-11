@@ -134,6 +134,8 @@ export async function prepareTurnFulfillment(job: JobStartResult,
     ...turn.contract.constraints.map((text, i) => ({ id: "constraint:" + i, text })),
     ...turn.contract.envelope.hardLimits.map((text, i) => ({ id: "hard-limit:" + i, text })),
     { id: "presentation", text: turn.contract.envelope.presentation },
+    ...(turn.objective?.obligations.map((text, i) =>
+      ({ id: "delivery-obligation:" + i, text })) ?? []),
     // Explicitly approved plan changes add obligations; they do not erase
     // original author intent or secretly make it "fulfilled".
     ...arch.plan.contract.constraints.map((text, i) => ({ id: "approved-constraint:" + i, text })),

@@ -65,6 +65,13 @@ export function planWholeStory(request: string, contract: CompletionContract, ba
   const body = { version: 1 as const, kind: 'full-story' as const,
     originalRequest: request, goal: request,
     source: { jobId: sourceJobId, verifiedSha: base }, contract, assignments,
+    objective: { breadth: 'whole-story' as const, requestedTargets: [] as string[],
+      deliveryDepth: contract.scope.depth,
+      obligations: ['Coherent Creative Direction and protected author choices',
+        'Connected Arcs, Milestones, Characters and causal Events',
+        'Meaningful choices and branch consequences',
+        'Player-facing authored scenes and dialogue',
+        'Independent assessment of the original author goal'] },
     creativePolicy: parseCreativePolicy(policy), reviewRequired: false }
   return { ...body, digest: digest(body) }
 }
@@ -126,9 +133,35 @@ export function planRevision(request: string, contract: CompletionContract, base
     kind: protectedChange ? 'protected-amendment' as const : 'revision' as const,
     originalRequest: request, goal: request,
     source: { jobId: sourceJobId, verifiedSha: base },
-    contract, assignments, creativePolicy: parseCreativePolicy(policy), reviewRequired: targetIds.length > 1 ||
+    contract, assignments,
+    objective: { breadth: protectedChange ? 'protected-amendment' as const : 'focused' as const,
+      requestedTargets: protectedChange ? [] : [...new Set(targetIds)].sort(),
+      deliveryDepth: contract.scope.depth,
+      obligations: protectedChange
+        ? ['Apply only the separately authorized exact protected decision']
+        : ['Deliver the requested changes to ' + [...new Set(targetIds)].sort().join(', '),
+          'Preserve existing Story canon and unrelated verified records',
+          'Independently check the selected changes against the Turn objective'] },
+    creativePolicy: parseCreativePolicy(policy), reviewRequired: targetIds.length > 1 ||
       !!contract.scope.supportingTargets?.length || !!protectedChange }
   return { ...body, digest: digest(body) }
+}
+
+/** One controller-owned objective planning seam for first and subsequent Turns.
+ * The requested breadth belongs to this Turn, never to the containing Thread.
+ * Assignment authority is only a proposal; native/Git/owner checks still decide writes. */
+export type ObjectivePlanningInput =
+  | { kind: 'full-story'; request: string; contract: CompletionContract; base: string;
+      sourceJobId?: string | null; policy?: CreativePolicy }
+  | { kind: 'revision'; request: string; contract: CompletionContract; base: string;
+      sourceJobId: string; catalog: CanonicalScopeRecord[]; targetIds: string[];
+      allowedPaths: string[]; protectedChange?: { path: string } | null; policy?: CreativePolicy }
+
+export function planObjective(input: ObjectivePlanningInput): TurnPlan {
+  if (input.kind === 'full-story') return planWholeStory(input.request, input.contract,
+    input.base, input.sourceJobId ?? null, input.policy)
+  return planRevision(input.request, input.contract, input.base, input.sourceJobId,
+    input.catalog, input.targetIds, input.allowedPaths, input.protectedChange, input.policy)
 }
 
 export function assertTurnPlan(saved: TurnPlan, expected: TurnPlan): void {
@@ -143,6 +176,16 @@ function validSavedPolicy(value: unknown): boolean {
 
 export function verifyTurnPlan(plan: TurnPlan): void {
   if (!plan || plan.version !== 1 || !sha.test(plan.source?.verifiedSha) ||
+      (plan.objective !== undefined && (
+        plan.objective.breadth !== (plan.kind === 'full-story' ? 'whole-story' :
+          plan.kind === 'revision' ? 'focused' : 'protected-amendment') ||
+        !Array.isArray(plan.objective.requestedTargets) ||
+        JSON.stringify(plan.objective.requestedTargets) !== JSON.stringify(
+          plan.kind === 'revision' ? [...new Set(plan.contract.scope.targets)].sort() : []) ||
+        plan.objective.deliveryDepth !== plan.contract.scope.depth ||
+        !Array.isArray(plan.objective.obligations) || !plan.objective.obligations.length ||
+        plan.objective.obligations.length > 32 ||
+        plan.objective.obligations.some(o => typeof o !== 'string' || !o.trim() || o.length > 2000))) ||
       (plan.creativePolicy !== undefined && !validSavedPolicy(plan.creativePolicy)) ||
       !Array.isArray(plan.assignments) || plan.assignments.length < 1 ||
       plan.assignments.length > 129 || !plan.originalRequest?.trim() ||

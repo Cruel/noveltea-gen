@@ -165,7 +165,16 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
       ? "Accepted architecture plan changed; reconcile authorized scope and retained work."
       : "Reconciled current canonical coverage, dependencies and verified specialist results." };
 }
-export function nextExecutionItem(inventory: GenerationInventory) {
-  return inventory.items.find(item => item.status === "pending" && item.dependencies.every(id =>
+/** Controller checks readiness first; the read-only orchestrator may only
+ * prioritize already-runnable, controller-authorized assignments. */
+export function nextExecutionItem(inventory: GenerationInventory, order?: readonly string[]) {
+  const ready = inventory.items.filter(item => item.status === "pending" && item.dependencies.every(id =>
     inventory.items.some(parent => parent.id === id && parent.status === "verified")));
+  if (!order?.length) return ready[0];
+  const priority = (item: ExecutionItem) => order.indexOf(item.stage === "focus"
+    ? "focus:" + item.milestone : item.stage);
+  return ready.sort((a, b) => {
+    const left = priority(a), right = priority(b);
+    return (left < 0 ? order.length : left) - (right < 0 ? order.length : right);
+  })[0];
 }

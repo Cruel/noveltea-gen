@@ -47,7 +47,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
@@ -132,6 +132,8 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
 
     const task = kind === 'broad' || kind === 'redirect'
       ? 'Rewrite milestone.confession for better emotional pacing'
+      : kind === 'whole' ? 'Make me a mystery game'
+      : kind === 'conversation' ? 'Revise the conversation'
       : kind === 'cancel' ? 'Change this Event' : 'Make character.nia less confrontational'
     await assert.rejects(previewThreadRevision(store, stranger, threadId, task), /no source generation|has no source|not found/i)
     const plan = await previewThreadRevision(store, owner, threadId, task)
@@ -414,6 +416,45 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       return
     }
+    if (kind === 'whole' || kind === 'conversation') {
+      assert.equal(plan.clarification, null)
+      assert.equal(plan.reviewRequired, kind === 'whole')
+      assert.equal(plan.contract.scope.kind, kind === 'whole' ? 'full-story' : 'partial')
+      assert.deepEqual(plan.targets, kind === 'whole' ? [] : ['authored-content.confession'])
+      assert.deepEqual(plan.writePaths, kind === 'whole' ? [] : ['authored-content/confession.md'])
+      assert.equal(plan.turnPlan?.objective?.breadth, kind === 'whole' ? 'whole-story' : 'focused')
+      const id = randomUUID()
+      const first = await submitThreadRevision(store, owner, threadId, id, task)
+      assert.equal(first.hasRevisionScope, kind === 'whole' ? 0 : 1,
+        'widened entire-Story scope requires explicit approval; narrow dialogue does not')
+      if (kind === 'whole') {
+        await assert.rejects(submitThreadRevision(store, owner, threadId, id, task,
+          undefined, 'f'.repeat(64)), /changed since review/i)
+        const admitted = await submitThreadRevision(store, owner, threadId, id, task,
+          undefined, plan.digest)
+        assert.equal(admitted.hasRevisionScope, 1)
+      }
+      await advanceThread(store, owner, threadId)
+      const messages = (await readThreadChat(store, owner, threadId)).messages
+      const continuation = messages.find(item => item.id === id)
+      assert.equal(continuation?.phase, 'running', JSON.stringify(messages.find(item => item.id === 'assistant:' + id)))
+      const child = await restoreJob(await selectedJob(store, owner, id), owner)
+      const pinned = pinnedRequest(await selectedJob(store, owner, id), child)!
+      const turn = (await readJobTurnPlan(child))!
+      assert.equal(turn.kind, kind === 'whole' ? 'full-story' : 'revision')
+      assert.equal(turn.source.verifiedSha, sha)
+      assert.equal(turn.source.jobId, sourceId)
+      assert.equal(turn.digest, pinned.turnPlanDigest)
+      assert.equal(turn.objective?.deliveryDepth, 'composition')
+      assert.equal(pinned.contract.scope.kind, kind === 'whole' ? 'full-story' : 'partial')
+      assert.ok(kind !== 'whole' || turn.objective?.obligations.some(item => item.includes('authored scenes')))
+      assert.deepEqual(turn.assignments.filter(item => item.id.startsWith('focus:'))
+        .flatMap(item => item.authority.existingPaths), kind === 'whole' ? [] : ['authored-content/confession.md'])
+      assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
+      assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), sha)
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+      return
+    }
     assert.equal(plan.reviewRequired, kind === 'broad')
     assert.deepEqual(plan.writePaths, kind === 'broad'
       ? ['authored-content/confession.md', 'events/confession.md']
@@ -484,6 +525,10 @@ test('out-of-scope Character steering requires reviewed Milestone continuation w
   { timeout: 60_000 }, () => exerciseRevisionAdmission('redirect'))
 test('reviewed Milestone expansion admits a scoped child and rejects changed approval',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('broad'))
+test('whole-story request in an existing Thread requires exact scope approval without inheriting old targets',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('whole'))
+test('conversation revision in the same authenticated Thread grants only authored-content',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('conversation'))
 test('unambiguous Character revision admits only its one focused path without a form',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('narrow'))
 test('simultaneous completed-Thread submissions both persist; only the first receives a scope',

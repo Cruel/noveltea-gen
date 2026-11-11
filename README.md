@@ -88,9 +88,33 @@ new untagged real-Pi request is rejected unless there is prior checkpointed
 specialist progress. Fixture-only generation without a configured skills checkout
 uses the explicit `fixture-legacy` policy, which cannot authorize a real writer.
 New live requests require the compatible skill checkout configured via
-`--skills-source`, `NT_STUDIO_SKILLS_SOURCE`, or trusted local config. A later
-orchestration refactor will consume the selected procedure for adaptive planning;
-this slice does not claim to have replaced the legacy scheduling nodes.
+`--skills-source`, `NT_STUDIO_SKILLS_SOURCE`, or trusted local config.
+
+## Source-bound objective planning (#149)
+
+Both new Story creation and subsequent Thread requests enter the same trusted
+`planObjective` contract. Each immutable, job-private `turn-plan.json` records
+its exact source SHA, originating Turn, requested full-Story or focused breadth,
+delivery depth, bounded specialist assignments and explicit delivery obligations.
+The final independent Turn assessment checks those obligations, not just the
+completion of individual writers. A subsequent Turn can choose a different
+breadth; the Thread does not hold a permanent writable scope. Existing-record
+conversation requests resolve only their relevant authored content; missing
+record creation remains a separate, controller-authorized planning step (#150).
+
+For **real Pi Turns with a pinned plan**, the controller now runs a read-only
+orchestrator session using the selected `nt-story-orchestrate` skill and pinned
+catalog guidance before specialist execution. Its proposal may prioritize only
+the controller's *existing* specialist assignments, with their prerequisites
+intact: it cannot create write grants, skip delivery obligations, or approve
+protected canon. The job-private `objective-planning.json` binds the proposal,
+model and transcript to the exact Story source, plan digest, method snapshot
+and skill reads. `job generate inspect` verifies this receipt against the
+checkpointed order and reports `orchestrationPlanning` when present; a missing,
+interrupted or altered receipt blocks resumption instead of replaying the Pi
+planner. Historical and fixture-only runs do not retroactively gain a new
+model planner. Later tickets (#150–#153) add verified creation and amendment of
+assignments and safe-boundary replanning; #149 does not grant these implicitly.
 
 ## Checkpointed scope-driven Story generation (#32, #33)
 

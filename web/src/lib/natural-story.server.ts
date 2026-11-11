@@ -10,7 +10,7 @@ import { generationConfigurationRequest } from './generation-config.server'
 import { generationJobRequest, verifyWebExecution } from './fixture-jobs.server'
 import { parseJobLimits, type JobLimits } from '../../../src/job-limits'
 import { authorizedStoryJob } from './fixture-jobs.server'
-import { planWholeStory } from './turn-plan'
+import { planObjective } from './turn-plan'
 import { creativePolicy, validCreativeMode, type CreativeMode } from '../../../src/creative-policy'
 import { saveJobTurnPlan } from './turn-plan-receipt.server'
 
@@ -51,7 +51,7 @@ export async function previewNaturalStory(store: StudioDatabase, owner: string,
   await store.assertReady()
   const story = await selectedStory(store, owner, storyId)
   const plan = interpretNaturalStoryPrompt(prompt, edits)
-  return { plan, turnPlan: planWholeStory(plan.task, plan.contract, story.headSha!),
+  return { plan, turnPlan: planObjective({ kind: 'full-story', request: plan.task, contract: plan.contract, base: story.headSha! }),
     storyId: story.storyId, headSha: story.headSha!,
     ...await modelOptions(store, owner) }
 }
@@ -139,8 +139,8 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   if (!job?.headSha || !SHA.test(job.headSha)) throw new Error('Provider did not return a pinned job revision.')
   if (job.headSha !== story.headSha) throw new Error('Acquired Story differs from the approved source revision.')
   await saveJobTurnPlan(await authorizedStoryJob(store, actor.id, input.jobId),
-    planWholeStory(plan.task, plan.contract, story.headSha!, null,
-      creativePolicy(input.creativeMode ?? 'autonomous')))
+    planObjective({ kind: 'full-story', request: plan.task, contract: plan.contract,
+      base: story.headSha!, policy: creativePolicy(input.creativeMode ?? 'autonomous') }))
   const threadId = await associateNaturalThread(store, actor.id, input.storyId,
     input.jobId, plan.task.slice(0, 120))
   if (input.creativeMode && !await store.persistence.conversations.setCreativePolicy(
