@@ -204,15 +204,29 @@ test("single-Milestone generation checkpoints foundation then resumes all specia
   const paused = f.cli([...f.start, "--pause-after", "foundation"]);
   assert.equal(paused.status, "paused", JSON.stringify(paused));
   assert.equal(paused.nextStage, "architecture");
+  const selected = paused.orchestrationSelection;
+  assert.equal(selected.schema, "noveltea-orchestrator-selection/v1");
+  assert.equal(selected.role, "orchestrator");
+  assert.equal(selected.skillName, "nt-story-orchestrate");
+  assert.equal(selected.objectiveKind, "partial");
+  assert.equal(selected.storySourceSha, f.initial);
+  assert.equal(selected.graphThreadId, f.job.threadId + ":generation");
+  assert.equal(selected.skillSnapshot.commit, git(source, "rev-parse", "HEAD"));
+  assert.equal(selected.skillSnapshot.id, selected.skillSnapshot.digest);
+  assert.equal(selected.skillEntrypointSha256, createHash("sha256").update(
+    readFileSync(join(selected.skillSnapshot.path, selected.skillEntrypoint))).digest("hex"));
+  assert.deepEqual(JSON.parse(readFileSync(join(f.job.stateDir, "orchestrator-selection.json"), "utf8")), selected);
   assert.ok(existsSync(join(dirname(f.job.worktreeRoot), "generation.sqlite")));
   const foundationHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   assert.notEqual(foundationHead, f.initial);
   const inspected = f.cli(["generate", "inspect"]);
   assert.equal(inspected.status, "paused");
+  assert.deepEqual(inspected.orchestrationSelection, selected);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), foundationHead);
   const result = f.cli(["generate", "resume"]);
   assert.equal(result.status, "blocked", JSON.stringify(result));
   assert.equal(result.reason, "editorial-unverified");
+  assert.deepEqual(result.orchestrationSelection, selected);
   assert.equal(result.report.generation.review.phase, "completed");
   assert.equal(result.report.evidence.scope.deterministic, "passed");
   assert.equal(result.completedStages.length, 7);
@@ -223,6 +237,57 @@ test("single-Milestone generation checkpoints foundation then resumes all specia
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
   assert.equal(git(f.repo, "status", "--porcelain"), "");
+});
+
+test("generation rejects a lost orchestrator selection after checkpoint without repinning or replay", { skip: !available }, () => {
+  const f = setup("missing-orchestrator-selection");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  const initialPin = paused.orchestrationSelection.skillSnapshot.id;
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const receiptPath = join(f.job.stateDir, "orchestrator-selection.json");
+  unlinkSync(receiptPath);
+  const resumed = f.cli(["generate", "resume"]);
+  assert.equal(resumed.status, "blocked");
+  assert.match(resumed.reason, /orchestrator receipt is missing|selection receipt is missing/i);
+  assert.equal(existsSync(receiptPath), false, "a lost pin must not be replaced");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
+    "no specialist can run after missing source-bound selection");
+  assert.notEqual(initialPin, "", "checkpoint originally recorded an immutable pin");
+});
+
+test("inspection rejects a different valid pinned method and never displays its forged provenance", { skip: !available }, () => {
+  const f = setup("swapped-orchestrator-snapshot");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+
+  const changedSource = join(root, "second-method-checkout");
+  git(root, "clone", "-q", source, changedSource);
+  const entry = join(changedSource, "skills/nt-story-orchestrate/SKILL.md");
+  writeFileSync(entry, readFileSync(entry, "utf8") + "\nTest method revision\n");
+  git(changedSource, "add", ".");
+  git(changedSource, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "-qm", "Revise portable method");
+  const next = setup("other-orchestrator-snapshot");
+  const other = next.cli([...next.start.slice(0, -1), changedSource, "--pause-after", "foundation"]);
+  assert.equal(other.status, "paused", JSON.stringify(other));
+  assert.notEqual(other.orchestrationSelection.skillSnapshot.id,
+    paused.orchestrationSelection.skillSnapshot.id);
+
+  const receiptPath = join(f.job.stateDir, "orchestrator-selection.json");
+  const forged = JSON.parse(readFileSync(receiptPath, "utf8"));
+  forged.skillSnapshot = other.orchestrationSelection.skillSnapshot;
+  forged.skillEntrypointSha256 = other.orchestrationSelection.skillEntrypointSha256;
+  writeFileSync(receiptPath, JSON.stringify(forged));
+  const inspected = f.cli(["generate", "inspect"]);
+  assert.equal(inspected.status, "blocked");
+  assert.match(inspected.reason, /Pinned orchestrator snapshot changed/);
+  assert.equal(inspected.orchestrationSelection, null, "a mismatched receipt is not trusted provenance");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  const resumed = f.cli(["generate", "resume"]);
+  assert.equal(resumed.status, "blocked");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
 test("independent World and Character checkpoints survive restart and reconcile a lost finalization without writer replay", { skip: !available }, () => {
@@ -373,6 +438,8 @@ test("full-Story scope discovers multiple canonical Arc clusters rather than sto
   writeFileSync(f.contract, JSON.stringify(contract));
   const result = f.cli(f.start);
   assert.equal(result.reason, "editorial-unverified", JSON.stringify(result));
+  assert.equal(result.orchestrationSelection.skillName, "nt-story-orchestrate");
+  assert.equal(result.orchestrationSelection.objectiveKind, "full-story");
   assert.deepEqual(result.inventory.items.filter((i: any) => i.stage === "composition").map((i: any) => [i.milestone, i.status]),
     [["milestone.disclosure", "verified"], ["milestone.reckoning", "verified"]]);
   assert.equal(result.inventory.audit.deterministic, "passed");

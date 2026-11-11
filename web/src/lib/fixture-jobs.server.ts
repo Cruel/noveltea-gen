@@ -449,6 +449,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     }).trim()) throw new JobError(409, 'Uncommitted files require manual reconciliation.')
     const pinned: GenerationRequest = {
       story: job.storyRoot, job: row.id, task: input.task, contract: input.contract, fixture: !selected,
+      orchestrationPolicy: selected || process.env.NT_STUDIO_SKILLS_SOURCE ? 'explicit' : 'fixture-legacy',
       ...(turn ? { turnPlanDigest: turn.digest } : {}),
       ...(process.env.NT_STUDIO_SKILLS_SOURCE ? { skillsSource: process.env.NT_STUDIO_SKILLS_SOURCE } : {}),
       ...(selected ? { provider: selected.provider, model: selected.id } : {}),

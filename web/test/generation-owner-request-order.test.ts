@@ -70,6 +70,42 @@ test('one graph request may reorder JSON keys but never acquire a second writer'
   }
 })
 
+test('pre-cutover owner receipt can adopt only its exact request with the new explicit method policy', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'nt-owner-policy-migration-'))
+  const job = { stateDir, jobId: pinned.job } as JobStartResult
+  const thread = 'pinned:generation:web'
+  try {
+    await claimServerGeneration(job, thread, pinned)
+    const original = readFileSync(join(stateDir, 'generation-server-owner.json'), 'utf8')
+    const explicit: GenerationRequest = { ...pinned, orchestrationPolicy: 'explicit' }
+    await assertServerClaimPermitted(job, thread, explicit)
+    await claimServerGeneration(job, thread, explicit)
+    assert.equal(readFileSync(join(stateDir, 'generation-server-owner.json'), 'utf8'), original)
+    await assert.rejects(() => assertServerClaimPermitted(job, thread, {
+      ...explicit, task: 'Different objective',
+    }), /conflicts/)
+    await assert.rejects(() => assertServerClaimPermitted(job, 'other:thread', explicit), /conflicts/)
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('new explicit-policy owner receipt rejects a changed orchestration policy', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'nt-owner-policy-locked-'))
+  const job = { stateDir, jobId: pinned.job } as JobStartResult
+  const thread = 'pinned:generation:web'
+  try {
+    const explicit: GenerationRequest = { ...pinned, orchestrationPolicy: 'explicit' }
+    await claimServerGeneration(job, thread, explicit)
+    await assert.rejects(() => assertServerClaimPermitted(job, thread, {
+      ...explicit, orchestrationPolicy: 'fixture-legacy',
+    }), /conflicts/)
+    await assert.rejects(() => assertServerClaimPermitted(job, thread, pinned), /conflicts/)
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
 test('existing byte-order owner receipts remain inspectable without broadening admission', async () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'nt-owner-legacy-'))
   const job = { stateDir, jobId: pinned.job } as JobStartResult

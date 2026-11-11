@@ -58,6 +58,40 @@ pnpm studio                  # Local graph visualization; no LangSmith API key
 
 Look in **`.local/traces/*.jsonl`** for saved local traces. Each `--trace-local` run reports its exact `localTrace` path; `pnpm trace:show --file <path>` opens a specific saved run. Other important state lives outside the Story project: checkpoints under `~/.local/state/noveltea-gen/<project-id>/`, real Pi sessions under the Pi agent session directory, and pinned skills under `~/.cache/noveltea-gen/skill-snapshots/`. Local configuration and optional LangSmith credentials live in the repo's ignored `.local/` directory. Consult **`AGENTS.md`** for the full storage map and overrides. Cloud tracing is off unless explicitly enabled via `--trace`; `--trace-local` does not upload traces. Real Pi runs may consume model usage, so use `--fixture` for deterministic graph checks.
 
+## Portable Story orchestration selection (#145)
+
+New Studio Pi-backed Story Turns (and explicitly configured CLI generations)
+select the portable `nt-story-orchestrate` methodology by a **trusted controller
+role**, not by a specialist's prompt or the skill's invocation metadata.
+Selection loads the method from a digest-verified immutable NovelTea skills
+snapshot; there is no second standalone scheduler. The existing LangGraph
+controller continues to own all work planning, specialist dispatch, Story writes,
+independent reviews, validation, protection, and Git checkpoints. The portable
+method is available to the orchestrator's planning seam; its presence does not
+make a specialist into an orchestrator or autonomously change the old stage graph.
+
+The controller writes `orchestrator-selection.json` in the job-private state
+directory before dispatch. Its `noveltea-orchestrator-selection/v1` receipt
+binds the selected skill name, its pinned snapshot digest and skills Git commit,
+entrypoint SHA-256, the Story **source** SHA, author objective digest and
+full/partial scope, the exact generation graph Thread, and the separate
+orchestrator/reviewer and controller-only write roles. The graph independently
+checkpoints the chosen snapshot ID. Resume always verifies and loads the original
+pinned method, even when the live checkout changes; missing or corrupt receipts,
+incompatible/old `nt-story-generate` snapshots, and changed pinned bytes fail
+closed. `job generate inspect` returns `orchestrationSelection` with that
+source-bound evidence; it does not confer additional authoring permissions.
+
+Requests saved before this selection contract (no `orchestrationPolicy`) retain
+their historical generation path without silently adopting a new method. A
+new untagged real-Pi request is rejected unless there is prior checkpointed
+specialist progress. Fixture-only generation without a configured skills checkout
+uses the explicit `fixture-legacy` policy, which cannot authorize a real writer.
+New live requests require the compatible skill checkout configured via
+`--skills-source`, `NT_STUDIO_SKILLS_SOURCE`, or trusted local config. A later
+orchestration refactor will consume the selected procedure for adaptive planning;
+this slice does not claim to have replaced the legacy scheduling nodes.
+
 ## Checkpointed scope-driven Story generation (#32, #33)
 
 Start a Git-backed job once, then give the production parent graph an explicit
