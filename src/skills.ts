@@ -202,20 +202,33 @@ export function resolveConfiguredSkills(
  */
 export function createSkillReadTool(skills: Skill[], snapshot?: VerifiedSkillFiles): ToolDefinition {
   const roots = [...new Set(skills.map(skill => realpathSync(skill.baseDir)))];
+  const namedRoots = new Map(skills.map(skill => [skill.name, realpathSync(skill.baseDir)]));
   return {
     name: "read",
     label: "Read skill resource",
-    description: "Read a SKILL.md or a referenced text resource by absolute path, only inside one of the advertised skill directories. No Story or other filesystem access.",
+    description: "Read a skill or reference by a short skill://nt-name/SKILL.md or skill://nt-name/references/file.md address, or its advertised absolute path. Only loaded, authorized skill packages are accessible; no Story or host file access.",
     parameters: {
       type: "object",
-      properties: { path: { type: "string", description: "Absolute file path from an advertised skill or its references" } },
+      properties: { path: { type: "string", description: "Authorized skill://name/file address (preferred) or advertised absolute skill path" } },
       required: ["path"],
       additionalProperties: false,
     } as ToolDefinition["parameters"],
     executionMode: "sequential",
     async execute(_id, args) {
-      const path = (args as { path: string }).path;
-      if (typeof path !== "string" || !isAbsolute(path) || !roots.some(root => contained(root, path))) {
+      const requested = (args as { path: string }).path;
+      if (typeof requested !== "string") throw new Error("Skill read denied: expected a skill resource path.");
+      let path = requested;
+      if (requested.startsWith("skill://")) {
+        const alias = /^skill:\/\/([a-z][a-z0-9-]*)\/(.+)$/.exec(requested);
+        const root = alias && namedRoots.get(alias[1]!);
+        const segments = alias?.[2]?.split("/");
+        if (!root || !segments?.length || segments.some(segment =>
+          !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(segment) || segment === "..")) {
+          throw new Error("Skill read denied: invalid or unauthorized pinned skill address.");
+        }
+        path = join(root, ...segments);
+      }
+      if (!isAbsolute(path) || !roots.some(root => contained(root, path))) {
         throw new Error("Skill read denied: absolute path must be inside an advertised skill.");
       }
       const canonical = await realpath(path);

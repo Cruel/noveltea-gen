@@ -7,6 +7,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { completedContextReads } from "./story-context.js";
+import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import type { JobStartResult } from "./job.js";
@@ -154,7 +155,7 @@ function lastReply(session: Awaited<ReturnType<typeof sessionFor>>["session"]) {
     throw new Error("Narrative Pi turn failed or produced no answer.");
   return last.content.filter(c => c.type === "text").map(c => c.text).join("\n");
 }
-function completedReads(session: Awaited<ReturnType<typeof sessionFor>>["session"], root: string) {
+function completedReads(session: Awaited<ReturnType<typeof sessionFor>>["session"], root: string, snapshotRoot: string) {
   const completed = new Set(session.messages.filter(
     (m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult" && !m.isError)
     .map(m => m.toolCallId));
@@ -162,7 +163,7 @@ function completedReads(session: Awaited<ReturnType<typeof sessionFor>>["session
     ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
       c.type === "toolCall" && c.name === "read" &&
       completed.has(c.id) && typeof c.arguments?.path === "string")
-      .map(c => resolve(root, c.arguments.path as string)) : []);
+      .map(c => canonicalPinnedReadPath(c.arguments.path as string, root, snapshotRoot)) : []);
   return [...direct, ...completedContextReads(session.messages, root).map(path => resolve(root, path))];
 }
 
@@ -204,7 +205,7 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "PINNED REFERENCES:\n" + pinned.join("\n") + "\nSTORY PATHS:\n" +
       assignment.paths.join("\n") + "\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
     const missingReads = () => {
-      const reads = new Set(completedReads(session, project.root));
+      const reads = new Set(completedReads(session, project.root, snapshot.path));
       return [...pinned, ...assignment.paths.map(p => resolve(project.root, p))]
         .filter(path => !reads.has(path));
     };

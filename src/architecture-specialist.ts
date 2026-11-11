@@ -13,6 +13,7 @@ import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
+import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 
 const REQUIRED = [
@@ -74,8 +75,10 @@ export async function authorArchitecture(
     await context.beforeTurn(sessionFile);
     await promptStorySpecialist(session,
       context.contextNote + "You are the NovelTea Story architecture specialist, working on an isolated Git-backed Story. " +
-      "Read the following pinned skill instructions using the read tool before writing:\n" +
-      REQUIRED.map(path => join(snapshot.path, "skills", path)).join("\n") +
+      "Read every pinned skill and catalog reference below using the read tool BEFORE writing. " +
+      "These stable skill:// addresses resolve to role-authorized files in the verified immutable snapshot; " +
+      "do not construct or copy long snapshot hash paths:\n" +
+      REQUIRED.map(path => "skill://" + path).join("\n") +
       "\nRead the actual canonical Creative Direction and any relevant existing Story records. " +
       "Do not read or search the noncanonical .story-inbox/ideas directory (including via git grep/show or rg --hidden); " +
       "dormant author concepts and dialogue must not influence early architecture. Only use explicitly supplied scoped constraints. " +
@@ -110,7 +113,7 @@ export async function authorArchitecture(
       : []);
     const reads = calls.filter(c => completed.has(c.id) && c.name === "read" &&
       typeof c.arguments?.path === "string")
-      .map(c => resolve(project.root, c.arguments.path as string));
+      .map(c => canonicalPinnedReadPath(c.arguments.path as string, project.root, snapshot.path));
     const required = REQUIRED.map(p => join(snapshot.path, "skills", p));
     if (required.some(path => !reads.includes(path))) {
       throw new Error("Architecture specialist did not read all required pinned skill references.");

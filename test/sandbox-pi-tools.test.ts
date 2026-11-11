@@ -183,6 +183,9 @@ test("pinned skill reads are role-aware and cross-domain craft is not a role gra
     "writer", "specialist")).map(t => [t.name, t]));
   assert.ok(specialist.write && specialist.edit, "the existing specialist tool grant is unaffected");
   assert.match(JSON.stringify((await call(specialist.read!, { path: path("nt-catalog") })).content), /Pinned rules/);
+  assert.match(JSON.stringify((await call(specialist.read!, { path: "skill://nt-catalog/SKILL.md" })).content), /Pinned rules/);
+  assert.match(JSON.stringify((await call(specialist.read!, { path: "skill://nt-character-development/references/craft.md" })).content),
+    /character-development pinned craft reference/);
   assert.match(JSON.stringify((await call(specialist.read!, { path: path("nt-worldbuilding") })).content), /worldbuilding guidance/);
   assert.match(JSON.stringify((await call(specialist.read!, { path: path("nt-character-development", "references/craft.md") })).content),
     /character-development pinned craft reference/);
@@ -193,6 +196,11 @@ test("pinned skill reads are role-aware and cross-domain craft is not a role gra
   }
   await assert.rejects(call(specialist.read!, { path: path("nt-worldbuilding", "../nt-story-orchestrate/SKILL.md") }),
     /Skill read denied/);
+  for (const denied of ["skill://nt-story-orchestrate/SKILL.md", "skill://nt-narrative-review/SKILL.md",
+    "skill://nt-catalog/../nt-story-orchestrate/SKILL.md", "skill://nt-catalog/%2e%2e/secret.md",
+    "skill://nt-catalog//SKILL.md", "skill://nt-catalog/references/../../nt-story-orchestrate/SKILL.md"]) {
+    await assert.rejects(call(specialist.read!, { path: denied }), /Skill read denied/);
+  }
   await assert.rejects(call(specialist.read!, { path: "/etc/passwd" }), /denied/);
   await assert.rejects(call(specialist.read!, { path: join(source, "skills", "nt-catalog", "SKILL.md") }),
     /denied/, "live skill checkout cannot replace pinned skill bytes");
@@ -212,6 +220,8 @@ test("pinned skill reads are role-aware and cross-domain craft is not a role gra
   assert.deepEqual(Object.keys(orchestrator), [...SANDBOX_READ_ONLY_TOOLS],
     "reading a specialist's method cannot confer its file-writing tools");
   assert.match(JSON.stringify((await call(orchestrator.read!, { path: path("nt-story-orchestrate") })).content),
+    /story-orchestrate guidance/);
+  assert.match(JSON.stringify((await call(orchestrator.read!, { path: "skill://nt-story-orchestrate/SKILL.md" })).content),
     /story-orchestrate guidance/);
   assert.match(JSON.stringify((await call(orchestrator.read!, { path: path("nt-story-collaborate") })).content),
     /story-collaborate guidance/);

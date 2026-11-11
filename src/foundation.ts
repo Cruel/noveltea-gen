@@ -25,6 +25,7 @@ import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { createStoryValidateTool, validateStoryJob, type ValidationResult } from "./validator.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
+import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 
 type Mode = "autonomous" | "collaborative";
 type Stage = "awaiting-author" | "writing" | "committed";
@@ -316,7 +317,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       message.role === "toolResult" && !message.isError).map(message => message.toolCallId));
     reads = calls.filter(call => completedCalls.has(call.id) && call.name === "read" &&
       typeof call.arguments?.path === "string")
-      .map(call => resolve(project.root, call.arguments.path as string));
+      .map(call => canonicalPinnedReadPath(call.arguments.path as string, project.root, state.snapshot.path));
     const requiredPaths = REQUIRED.map(name => join(state.snapshot.path, "skills", name));
     wrote = calls.some(call => completedCalls.has(call.id) &&
       (call.name === "write" || call.name === "edit") &&
@@ -396,7 +397,7 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
     const reads = session.messages.flatMap(m => m.role === "assistant"
       ? m.content.filter((c): c is Extract<typeof c, {type: "toolCall"}> => c.type === "toolCall")
       : []).filter(c => completedCalls.has(c.id) && c.name === "read" && typeof c.arguments?.path === "string")
-      .map(c => resolve(project.root, c.arguments.path as string));
+      .map(c => canonicalPinnedReadPath(c.arguments.path as string, project.root, state.snapshot.path));
     if (REQUIRED.some(name => !reads.includes(join(state.snapshot.path, "skills", name)))) {
       throw new Error("Pi collaborative discovery did not read the pinned narrative skill guidance.");
     }

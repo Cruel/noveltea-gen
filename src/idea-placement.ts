@@ -9,6 +9,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
+import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -312,7 +313,8 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
       return new Set(session.messages.flatMap(m => m.role === "assistant" ? m.content
         .filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
           c.type === "toolCall" && done.has(c.id) && c.name === "read")
-        .map(c => typeof c.arguments?.path === "string" ? resolve(project.root, c.arguments.path) : "") : []));
+        .map(c => typeof c.arguments?.path === "string"
+          ? canonicalPinnedReadPath(c.arguments.path, project.root, snapshot.path) : "") : []));
     };
     let response = latest();
     for (let retry = 0; retry < 2; retry++) {

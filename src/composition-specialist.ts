@@ -5,7 +5,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
-import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
+import { canonicalPinnedReadPath, requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -130,16 +130,17 @@ function lastReply(session: Awaited<ReturnType<typeof createSession>>["session"]
   }
   return last.content.filter(c => c.type === "text").map(c => c.text).join("\n");
 }
-function toolPaths(session: Awaited<ReturnType<typeof createSession>>["session"], projectRoot: string) {
+function toolPaths(session: Awaited<ReturnType<typeof createSession>>["session"], projectRoot: string, snapshotRoot: string) {
   const done = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
     m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
   const direct = session.messages.flatMap(m => m.role === "assistant"
     ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
       c.type === "toolCall" && done.has(c.id) &&
-      typeof c.arguments?.path === "string").map(c => ({
-        tool: c.name, path: resolve(projectRoot, c.arguments.path as string),
-        relative: relative(projectRoot, resolve(projectRoot, c.arguments.path as string)).split(sep).join("/"),
-      })) : []);
+      typeof c.arguments?.path === "string").map(c => {
+        const path = canonicalPinnedReadPath(c.arguments.path as string, projectRoot, snapshotRoot);
+        return { tool: c.name, path,
+          relative: relative(projectRoot, path).split(sep).join("/") };
+      }) : []);
   return [...direct, ...completedContextReads(session.messages, projectRoot).map(relativePath => ({
     tool: "read", path: resolve(projectRoot, relativePath), relative: relativePath,
   }))];
@@ -205,7 +206,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
         }
       }
       if (!parsed) throw new Error("Composition specialist manifest was not provided.");
-      const calls = toolPaths(session, project.root);
+      const calls = toolPaths(session, project.root, snapshot.path);
       if (assignment.mandatoryReads.some(p => !calls.some(c => c.tool === "read" && c.relative === p))) {
         throw new Error("Composition specialist omitted pinned skill or essential source reads.");
       }
@@ -267,7 +268,7 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
       "A pass requires explicit source-linked evidence for EVERY choice outcome and BOTH puzzle endings. " +
       "If uncertain, block.\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
     const missingReads = () => {
-      const calls = toolPaths(session, project.root);
+      const calls = toolPaths(session, project.root, snapshot.path);
       return [...pinned, ...[...assignment.mandatoryReads, ...paths].map(p => resolve(project.root, p))]
         .filter(path => !calls.some(c => c.tool === "read" && c.path === path));
     };

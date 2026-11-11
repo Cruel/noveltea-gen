@@ -182,7 +182,8 @@ export async function createSandboxPiTools(
       async execute(_id, input: Input) {
         const path = input.path;
         if (typeof path !== "string") throw new Error("Read needs a path.");
-        if (isAbsolute(path) && (path === verified.root || path.startsWith(verified.root + sep))) {
+        if (path.startsWith("skill://") ||
+            (isAbsolute(path) && (path === verified.root || path.startsWith(verified.root + sep)))) {
           return pinnedRead.execute(_id, { path }, undefined as never, undefined as never, undefined as never);
         }
         const offset = number(input.offset, 1, 1_000_000);

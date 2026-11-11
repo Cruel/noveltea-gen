@@ -20,6 +20,7 @@ import { openStoryProject } from "./project.js";
 import { preparePiContext, piNarrativeGroup, preflightPiAssignment } from "./job-pi-policy.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
+import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { resolveFocusedScope, type CanonicalScopeRecord } from "./focused-scope.js";
 import { readTurnEvidence, assertFocusedTurnAssignment } from "./turn-plan-evidence.js";
 import { creativePolicyInstruction, DEFAULT_CREATIVE_POLICY, type CreativePolicy } from "./creative-policy.js";
@@ -132,7 +133,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
     const reads = session.messages.flatMap(m => m.role === "assistant" ?
       m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
         c.type === "toolCall" && c.name === "read" && completed.has(c.id)) : [])
-      .map(c => String(c.arguments.path ?? ""));
+      .map(c => canonicalPinnedReadPath(String(c.arguments.path ?? ""), project.root, receipt.snapshot!.path));
     if (required.some(path => !reads.includes(path)))
       throw new Error("Focused Pi specialist failed to read pinned skill guidance.");
   } finally { session.dispose(); }

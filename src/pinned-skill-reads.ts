@@ -5,20 +5,34 @@ import { resolve } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 
-export function completedPinnedSkillReads(messages: AgentSession["messages"], root: string): string[] {
+/** Canonicalize a successful pinned skill read for source-bound evidence. */
+export function canonicalPinnedReadPath(requested: string, storyRoot: string, snapshotRoot: string): string {
+  if (!requested.startsWith("skill://")) return resolve(storyRoot, requested);
+  const segments = requested.slice("skill://".length).split("/");
+  if (segments.length < 2 || segments.some(part =>
+    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(part) || part === "..")) return "";
+  return resolve(snapshotRoot, "skills", ...segments);
+}
+
+export function completedPinnedSkillReads(messages: AgentSession["messages"], root: string,
+  snapshotRoot?: string): string[] {
   const successful = new Set(messages.filter(m => m.role === "toolResult" && !m.isError)
     .map(m => m.role === "toolResult" ? m.toolCallId : ""));
   return [...new Set(messages.flatMap(m => m.role === "assistant"
     ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
         c.type === "toolCall" && c.name === "read" && successful.has(c.id) &&
         typeof c.arguments?.path === "string")
-      .map(c => resolve(root, c.arguments.path as string))
+      .map(c => snapshotRoot
+        ? canonicalPinnedReadPath(c.arguments.path as string, root, snapshotRoot)
+        : resolve(root, c.arguments.path as string))
     : []))];
 }
 
 export async function requirePinnedSkillReads(session: AgentSession, root: string,
   required: string[], stage: string): Promise<string[]> {
-  const missing = () => required.filter(path => !completedPinnedSkillReads(session.messages, root).includes(path));
+  const snapshotRoot = required.find(path => path.includes("/skills/"))?.split("/skills/")[0];
+  const reads = () => completedPinnedSkillReads(session.messages, root, snapshotRoot);
+  const missing = () => required.filter(path => !reads().includes(path));
   if (missing().length) {
     await promptStorySpecialist(session,
       "Your previous attempt did NOT successfully read every mandatory pinned skill reference. " +
@@ -35,5 +49,5 @@ export async function requirePinnedSkillReads(session: AgentSession, root: strin
   }
   if (missing().length) throw new Error(stage + " did not read every required pinned skill reference: " +
     missing().map(path => path.slice(path.lastIndexOf("/skills/") + 8)).join(", "));
-  return completedPinnedSkillReads(session.messages, root).filter(path => required.includes(path));
+  return reads().filter(path => required.includes(path));
 }

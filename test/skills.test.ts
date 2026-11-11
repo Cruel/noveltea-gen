@@ -129,6 +129,8 @@ test("read-only Pi resource tool reads skill and bundled reference, never Story/
   assert.match(skillResult.content[0]!.type === "text" ? skillResult.content[0].text : "", /Catalog contract/);
   const reference = await read(join(x.catalog, "references", "records.md"));
   assert.match(reference.content[0]!.type === "text" ? reference.content[0].text : "", /Approved records/);
+  assert.match(JSON.stringify(await read("skill://nt-catalog/references/records.md")), /Approved records/);
+  await assert.rejects(read("skill://nt-catalog/../other/SKILL.md"), /Skill read denied/);
   const secret = join(x.project.root, "secret.md");
   await writeFile(secret, "Story private");
   await assert.rejects(read(secret), /Skill read denied/);

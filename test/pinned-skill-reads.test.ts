@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { completedPinnedSkillReads } from "../src/pinned-skill-reads.js";
+import { canonicalPinnedReadPath, completedPinnedSkillReads } from "../src/pinned-skill-reads.js";
 
 test("counts only completed exact skill reads, never typo paths or failed tool calls", () => {
   const root = "/story/job";
@@ -25,4 +25,20 @@ test("counts only completed exact skill reads, never typo paths or failed tool c
   messages.push({ role: "toolResult", toolCallId: "retry", isError: false } as AgentSession["messages"][number]);
   assert.deepEqual(completedPinnedSkillReads(messages, root), [correct,
     "/snapshots/known/skills/nt-catalog/references/progression.md"]);
+});
+
+test("successful short-address reads record original pinned paths, not model-visible aliases", () => {
+  const root = "/story/job", snapshot = "/snapshots/known";
+  const messages = [
+    { role: "assistant", content: [
+      { type: "toolCall", name: "read", id: "short", arguments: { path: "skill://nt-catalog/references/records.md" } },
+      { type: "toolCall", name: "read", id: "rejected", arguments: { path: "skill://nt-catalog/../nt-story-orchestrate/SKILL.md" } },
+    ] },
+    { role: "toolResult", toolCallId: "short", isError: false },
+    { role: "toolResult", toolCallId: "rejected", isError: true },
+  ] as unknown as AgentSession["messages"];
+  assert.deepEqual(completedPinnedSkillReads(messages, root, snapshot),
+    ["/snapshots/known/skills/nt-catalog/references/records.md"]);
+  assert.equal(canonicalPinnedReadPath("skill://nt-catalog/../nt-story-orchestrate/SKILL.md", root, snapshot), "");
+  assert.equal(canonicalPinnedReadPath("events/opening.md", root, snapshot), "/story/job/events/opening.md");
 });
