@@ -20,6 +20,10 @@ import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
 import { reconcilePendingWork } from "./pending-work.js";
+import { currentSteeringBoundary } from "./steering-boundary.js";
+import { proposeSteeringAmendment, readSteeringPlan, saveSteeringAmendment,
+  steeringForAssignment, steeringSourceIsAncestor } from "./steering-amendments.js";
+import { dependencyGit } from "./dependency-state.js";
 import { readPendingState, verifyPinnedPendingWork } from "./pending-work-state.js";
 import { inspectDependencyPlan, dependencyDigest, verifyDependencyHistory,
   type DependencyHistoryPin } from "./dependency-state.js";
@@ -374,17 +378,110 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     inventory: pending.inventory, pendingOrder, pendingVersion: pending.stateVersion,
     active: nextExecutionItem(pending.inventory, pendingOrder ?? s.orchestratorOrder ?? undefined) ?? null };
 }
+/** The DB receipt and the private graph amendment must never diverge. A
+ * missing file after an applied receipt cannot silently restore the old plan;
+ * an unacknowledged file cannot be dispatched before crash reconciliation. */
+async function assertSteeringReceipts(job: JobStartResult, turnDigest: string,
+  pendingMessages?: Set<string>): Promise<void> {
+  const adapter = currentSteeringBoundary();
+  if (!adapter) return;
+  const saved = await readSteeringPlan(job, turnDigest);
+  const receipts = await adapter.receipts(job);
+  for (const receipt of receipts) {
+    const entry = saved?.entries.find(item => item.messageId === receipt.messageId);
+    if (!entry || entry.digest !== receipt.amendmentDigest ||
+        entry.sourceSha !== receipt.sourceSha)
+      throw Error('A committed steering amendment is missing or mismatched after restart; preserve the Story for reconciliation.');
+  }
+  if (saved?.entries.some(entry => !receipts.some(row => row.messageId === entry.messageId) &&
+      !pendingMessages?.has(entry.messageId)))
+    throw Error('An unacknowledged steering amendment has lost its author message; manual reconciliation is required.');
+  if (pendingMessages === undefined && saved?.entries.some(entry =>
+    !receipts.some(row => row.messageId === entry.messageId)))
+    throw Error('A pending steering receipt must settle before another writer can dispatch.');
+}
+
+/** The only plan-affecting steering intake: an idle, locked, native-verified
+ * generation boundary. The active Pi writer has already settled, and neither
+ * a delivered SDK message nor an unsent queued steer grants new write scope. */
+async function applyLiveSteeringAtBoundary(job: JobStartResult, request: GenerationRequest,
+  inventory: GenerationInventory | null): Promise<Partial<State> | null> {
+  const adapter = currentSteeringBoundary();
+  if (!adapter || !request.turnPlanDigest || !inventory ||
+      !inventory.items.some(item => item.stage === "architecture" && item.status === "verified"))
+    return null;
+  const inputs = await adapter.pending(job);
+  await assertSteeringReceipts(job, request.turnPlanDigest,
+    new Set(inputs.map(input => input.messageId)));
+  if (!inputs.length) return null;
+  const head = await trustedHead(job);
+  if (head !== inventory.headSha)
+    throw Error("Steering boundary inventory changed before author direction was admitted.");
+  const turn = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
+  if (!turn?.objective) throw Error("Live steering requires a pinned objective and Turn plan.");
+  const validation = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
+    { ...job, baseSha: head });
+  const report = validation.report as { records?: import("./focused-scope.js").CanonicalScopeRecord[];
+    diagnostics?: unknown[]; protection?: { status?: string; base?: string;
+      changes?: unknown[]; warnings?: unknown[] } } | undefined;
+  if (validation.status !== "passed" || !Array.isArray(report?.records) ||
+      !Array.isArray(report.diagnostics) || report.diagnostics.length ||
+      report.protection?.status !== "checked" || report.protection.base !== head ||
+      report.protection.changes?.length || report.protection.warnings?.length)
+    throw Error("Live steering cannot amend an unverified canonical or protected Story boundary.");
+  for (const input of inputs) {
+    const isAncestor = input.submittedHead === null ||
+      steeringSourceIsAncestor(job, input.submittedHead, head);
+    const diff = isAncestor && input.submittedHead && input.submittedHead !== head
+      ? dependencyGit(job, "diff", "--name-only", input.submittedHead, head, "--")
+        .split("\n").filter(Boolean).map(path => job.storyRelativePath &&
+          path.startsWith(job.storyRelativePath + "/")
+          ? path.slice(job.storyRelativePath.length + 1) : path)
+      : [];
+    const prior = await readSteeringPlan(job, turn.digest);
+    const proposed = proposeSteeringAmendment({
+      steering: input, jobId: job.jobId, threadId: input.threadId,
+      headSha: head, inventory, turn, catalog: report.records,
+      changedSinceSubmission: diff, prior,
+    });
+    const decision = isAncestor ? proposed.decision : {
+      messageId: input.messageId, content: input.content, kind: "review-required" as const,
+      sourceSha: head, amendmentDigest: null,
+      reason: "Steering submission does not belong to the current verified Story ancestry.",
+    };
+    if (isAncestor && proposed.amendment)
+      await saveSteeringAmendment(job, turn, proposed.amendment);
+    await adapter.settle(job, decision);
+    if (decision.kind === "review-required")
+      return { status: "paused", reason: "Author approval required for live steering: " +
+        decision.reason + " The original scope and verified work remain preserved." };
+  }
+  return null;
+}
+
 async function dispatch(s: State) {
   const input = s.request;
+  // Pre-cutover jobs retain their exact historical dispatch path. Modern
+  // pinned Turns load their saved amendment even on CLI recovery, so bypassing
+  // the Studio adapter can never silently discard applied author steering.
+  const turnDigest = input.turnPlanDigest;
+  const steering = turnDigest
+    ? await (async () => {
+      const job = await openJob(s);
+      await assertSteeringReceipts(job, turnDigest);
+      return steeringForAssignment(job, turnDigest, s.active!.id, await trustedHead(job));
+    })()
+    : "";
+  const guidedTask = steering ? input.task + "\n\nSAFE-BOUNDARY AUTHOR PLAN AMENDMENT:\n" + steering : input.task;
   const milestone = s.active?.milestone!;
   switch (s.active?.stage) {
     case "foundation": return runFoundationJob({ ...input, envelope: JSON.stringify(input.contract.envelope) });
     case "architecture": return runArchitectureJob({ ...input, action: "run" });
-    case "foundations": return runCharacterWorldJob({ ...input, action: "run" });
-    case "event": return runEventWorkItem({ ...input, milestone, action: "run" });
-    case "interactive": return runInteractiveWorkItem({ ...input, milestone, action: "run" });
-    case "composition": return runCompositionWorkItem({ ...input, milestone, action: "run" });
-    case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task });
+    case "foundations": return runCharacterWorldJob({ ...input, steering, action: "run" });
+    case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
+    case "interactive": return runInteractiveWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
+    case "composition": return runCompositionWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
+    case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task, steering });
     case "review": return runNarrativeReview({ ...input, action: "run" });
     default: throw new Error("Invalid generation stage.");
   }
@@ -585,6 +682,8 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
           clean(job);
           const next = await reconcile(s, job);
+          const boundary = await applyLiveSteeringAtBoundary(job, s.request, next.inventory ?? null);
+          if (boundary) return { ...next, ...boundary, ideaTask: null, escalation: null };
           const head = await trustedHead(job);
           // An independently approved focused revision grants only its listed
           // existing files. Do not dispatch unrelated deferred idea integrations

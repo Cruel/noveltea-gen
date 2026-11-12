@@ -2,6 +2,7 @@ import { createDependencyTool } from "./dependency-tool.js";
 import { authorizedDependency, dependencyDigest, inspectDependencyPlan } from "./dependency-state.js";
 import { parseDependencyReport, type DependencyReport } from "./dependency-amendments.js";
 import { focusedSpecialist } from "./focused-specialist.js";
+import { steeringForAssignment } from "./steering-amendments.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -35,7 +36,7 @@ interface Receipt {
   dependencyReport?: DependencyReport; resolvedDependency?: string;
   target: string; paths: string[]; context: string[]; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot; piSessionFile?: string;
-  sha256?: string; commitSha?: string; assignmentDigest?: string;
+  sha256?: string; commitSha?: string; assignmentDigest?: string; steeringDigest?: string;
   validation?: { status: "passed"; validatorVersion: string; baseSha: string };
 }
 const receiptPath = (job: JobStartResult, receipt: Pick<Receipt, "workItemId" | "target">) =>
@@ -155,7 +156,7 @@ function creationReferenceInstructions(create: PlannedFocusCreate): string {
 
 async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
-  create?: PlannedFocusCreate, obligations: string[] = []) {
+  create?: PlannedFocusCreate, obligations: string[] = [], steering = "") {
   let dependencyReport: DependencyReport | undefined;
   const dependencyTool = receipt.assignmentDigest && obligations.length > 0 &&
     !receipt.workItemId.startsWith("dependency:")
@@ -261,7 +262,8 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
       creativePolicyInstruction(policy) +
       "Original Turn goal: " + task + "\nSpecialist assignment outcome: " +
-      (outcome ?? "Revise only the authorized record against the user request."));
+      (outcome ?? "Revise only the authorized record against the user request.") +
+      (steering ? "\nSAFE-BOUNDARY AUTHOR PLAN AMENDMENT (additional, not replacement authority):\n" + steering : ""));
     const completedReads = () => {
       const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
         m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
@@ -289,6 +291,7 @@ export interface FocusedWorkOptions {
   story: string; job: string; target: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string; provider?: string; model?: string;
   turnPlanDigest?: string;
+  steering?: string;
   /** Internal controller lookup only; caller-supplied IDs never grant authority. */
   dependencyAssignmentId?: string;
 }
@@ -327,6 +330,9 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       .filter(r => input.contract.scope.supportingTargets?.includes(r.metadata.id)).map(r => r.path) : [])].sort();
     const types = [...new Set(paths.map(path => selection.selected.find(r => r.path === path)?.metadata.type))];
     if (types.some(type => !type)) throw new Error("A specialist path has no canonical record type.");
+    const trustedSteering = await steeringForAssignment(job, input.turnPlanDigest, workItemId, current);
+    if ((input.steering ?? "") !== trustedSteering)
+      throw Error("Focused author steering differs from the controller-amended pending plan.");
     const turnPlan = await readTurnEvidence(job, input.contract, input.task, input.turnPlanDigest);
     if (create && (!turnPlan || !input.turnPlanDigest))
       throw new Error("Focused creation requires the original source-bound authenticated Turn assignment.");
@@ -347,7 +353,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           receipt.contractDigest !== contractDigest || receipt.planVersion !== plan.version ||
           JSON.stringify(receipt.paths) !== JSON.stringify(paths) ||
           receipt.worker !== (input.fixture ? "fixture" : "pi") ||
-          receipt.assignmentDigest !== turnAssignmentDigest)
+          receipt.assignmentDigest !== turnAssignmentDigest ||
+          receipt.steeringDigest !== (input.steering ? digest(input.steering) : undefined))
         throw new Error("Focused work-item provenance differs from the original authorization.");
       if (receipt.resolvedDependency) {
         const history = await inspectDependencyPlan(job);
@@ -385,7 +392,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         context: selection.context.filter(r => r.metadata.status !== "planned")
           .map(r => r.path).sort(), worker: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
-        ...(turnAssignmentDigest ? { assignmentDigest: turnAssignmentDigest } : {}) };
+        ...(turnAssignmentDigest ? { assignmentDigest: turnAssignmentDigest } : {}),
+        ...(input.steering ? { steeringDigest: digest(input.steering) } : {}) };
       await save(file, receipt);
     }
     if (receipt.expectedHead !== current)
@@ -427,7 +435,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
             fixtureCreatedRecord(create, input.contract, selection.context), { flag: "wx" });
         } else {
           const original = await readFile(join(job.worktreeStoryRoot, path), "utf8");
-          await writeFile(join(job.worktreeStoryRoot, path), original + "\nFocused revision: " + input.task + "\n");
+          await writeFile(join(job.worktreeStoryRoot, path), original + "\nFocused revision: " + input.task +
+            (input.steering ? "\nAuthor steering: " + input.steering : "") + "\n");
         }
       }
       if (process.env.NT_FOCUS_FIXTURE_CASE === "unauthorized-edit") {
@@ -438,7 +447,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");
       }
     } else if (!input.fixture) missing = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
-      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations);
+      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
+      input.steering);
     if (missing) {
       if (changes(job).length || git(job, "rev-parse", "HEAD").trim() !== current ||
           missing.sourceSha !== current || missing.turnDigest !== turnAssignmentDigest ||

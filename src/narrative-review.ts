@@ -14,6 +14,7 @@ import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { steeringForAssignment } from "./steering-amendments.js";
 import type { PlanHistoryStep } from "./plan-continuity.js";
 import { deferredCompletionObligations } from "./ideas.js";
 import type { auditIdeasUnderJobLock } from "./idea-placement.js";
@@ -412,12 +413,14 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
     verifyPlanHistory(job, arch);
     const plan = arch.plan;
     const turnEvidence = await readTurnEvidence(job, plan.contract, undefined, input.turnPlanDigest);
-    const withTurnAssignments = (audit: ScopeAudit): ScopeAudit => {
+    const withTurnAssignments = async (audit: ScopeAudit, headSha: string): Promise<ScopeAudit> => {
       if (turnEvidence) {
         audit.assignment.turnGoal = turnEvidence.goal;
-        audit.assignment.specialistAssignments = turnEvidence.assignments.map(a => ({
-          id: a.id, specialist: a.specialist, outcome: a.outcome, targets: a.targets,
-          authority: a.authority,
+        audit.assignment.specialistAssignments = await Promise.all(turnEvidence.assignments.map(async a => {
+          const steering = await steeringForAssignment(job, turnEvidence.digest, a.id, headSha);
+          return { id: a.id, specialist: a.specialist,
+            outcome: a.outcome + (steering ? "\nSource-bound author amendment to review:\n" + steering : ""),
+            targets: a.targets, authority: a.authority };
         }));
       }
       return audit;
@@ -505,7 +508,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
             receipt.provider, receipt.model, receipt.thinking,
             async session => { receipt.sessionFiles.push(session); await save(file, receipt); });
         };
-        let audit = withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred));
+        let audit = await withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred), receipt.headSha);
         receipt.audit = audit;
         if (audit.deterministic === "blocked") {
           receipt.phase = "blocked"; receipt.failure = "Objective scoped validation/coverage is not complete.";
@@ -546,7 +549,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
             if (after === before || receipt.seen.includes(after))
               throw new Error("Editorial repair stagnated or oscillated between prior drafts.");
             receipt.seen.push(after);
-            audit = withTurnAssignments(auditNarrativeScope(plan, await validate(priorHead), priorHead, deferred));
+            audit = await withTurnAssignments(auditNarrativeScope(plan, await validate(priorHead), priorHead, deferred), priorHead);
             receipt.audit = audit;
             // Never certify invalid text; preserve the exact draft for inspection.
             if (audit.deterministic !== "passed") throw new Error("Repaired prose failed canonical scoped revalidation.");
@@ -580,7 +583,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
               await save(file, receipt);
               await publishVerifiedHead(job, priorHead, receipt.headSha);
               clean(job, receipt.headSha);
-              audit = withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred));
+              audit = await withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred), receipt.headSha);
               receipt.audit = audit;
               if (audit.deterministic !== "passed")
                 throw new Error("Post-commit scoped repair validation failed; preserve commit for review.");

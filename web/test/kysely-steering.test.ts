@@ -81,6 +81,78 @@ async function message(f: KyselyFeatureFixture, x: Awaited<ReturnType<typeof set
 }
 
 for (const backend of ['sqlite', 'postgres'] as const) {
+  test(backend + ': authenticated safe-boundary plan admission is source-bound and restart-idempotent', {
+    skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
+    timeout: 90_000,
+  }, async t => {
+    const f = await openKyselyFeatureFixture(backend)
+    t.after(() => f.close())
+    const x = await setup(f)
+    const other = await f.openIndependentSteering()
+    t.after(() => other.close())
+    const first = await message(f, x, 0)
+    const second = await message(f, x, 1)
+    // A Pi influence checkpoint may already occupy this exact Git SHA.
+    await f.records.insert("thread_steering_checkpoint_links", {
+      messageId: first, ownerUserId: x.owner, threadId: x.thread,
+      sourceJobId: x.job, checkpointSha: head, proofDigest: "e".repeat(64),
+      workItem: "focus:character", association: "verified-influence", recordedAt: at,
+    })
+    assert.deepEqual((await f.steering.pendingBoundary(x.owner, x.job, x.thread))
+      .map(item => item.messageId), [first, second])
+    assert.deepEqual(await f.steering.pendingBoundary(x.stranger, x.job, x.thread), [])
+    const decision = { messageId: first, content: 'Author instruction 0',
+      kind: 'applied' as const, sourceSha: head,
+      amendmentDigest: proof, reason: 'Controller verified pending assignment' }
+    await assert.rejects(f.steering.settleBoundary(x.stranger, x.job, x.thread, decision, later),
+      /ownership|changed|ended/i)
+    await f.steering.settleBoundary(x.owner, x.job, x.thread, decision, later)
+    await other.steering.settleBoundary(x.owner, x.job, x.thread, decision, later)
+    assert.equal((await f.steering.activity(x.owner, x.thread))
+      .find(activity => activity.messageId === first)?.state, 'applied-boundary')
+    assert.equal((await f.records.first<{ state: string }>('thread_live_inputs',
+      { messageId: first }))?.state, 'deferred')
+    assert.equal((await f.records.first<{ phase: string }>('story_thread_messages',
+      { id: first }))?.phase, 'finished')
+    assert.deepEqual(await f.records.first<{ sourceSha: string; amendmentDigest: string }>(
+      'thread_steering_plan_amendments', { messageId: first }).then(row =>
+        row && { sourceSha: row.sourceSha, amendmentDigest: row.amendmentDigest }),
+      { sourceSha: head, amendmentDigest: proof })
+    assert.equal((await f.records.first<{ proofDigest: string }>(
+      'thread_steering_checkpoint_links', { messageId: first }))?.proofDigest, 'e'.repeat(64),
+      'Pi influence provenance cannot be overwritten by a plan amendment')
+    assert.deepEqual((await other.steering.pendingBoundary(x.owner, x.job, x.thread))
+      .map(item => item.messageId), [second])
+    await assert.rejects(other.steering.settleBoundary(x.owner, x.job, x.thread, {
+      ...decision, sourceSha: finalHead,
+    }, later), /source/)
+    await assert.rejects(f.steering.settleBoundary(x.owner, x.job, x.thread, {
+      ...decision, content: 'Tampered author instruction',
+    }, later), /changed/)
+    await other.steering.settleBoundary(x.owner, x.job, x.thread, {
+      messageId: second, content: 'Author instruction 1', kind: 'review-required',
+      sourceSha: head, amendmentDigest: null, reason: 'Outside originally approved scope',
+    }, later)
+    assert.equal((await f.steering.activity(x.owner, x.thread))
+      .find(activity => activity.messageId === second)?.state, 'pending-boundary')
+    assert.deepEqual((await f.steering.pendingBoundary(x.owner, x.job, x.thread))
+      .map(item => item.messageId), [],
+      'a blocked instruction is durably review-only; resuming cannot repeatedly pause the same source')
+    assert.equal((await f.steering.activity(x.owner, x.thread))
+      .find(activity => activity.messageId === second)?.disposition, 'scope-review')
+    await f.records.update('generation_run_queue', { jobId: x.job }, { phase: 'finished' })
+    await f.records.update('studio_sessions', { id: x.job }, { status: 'completed' })
+    assert.equal(await f.steering.boundaryReviews(x.owner, x.job, x.thread, head, later), 1)
+    assert.equal(await f.steering.boundaryReviews(x.owner, x.job, x.thread, head, later), 0,
+      'review handoff is replay-safe')
+    assert.equal((await f.steering.activity(x.owner, x.thread))
+      .find(activity => activity.messageId === second)?.state, 'awaiting-review')
+    assert.ok((await f.steering.activity(x.owner, x.thread))
+      .find(activity => activity.messageId === second)?.reviewMessageId)
+    assert.deepEqual((await f.steering.boundaryReceipts(x.owner, x.job, x.thread))
+      .map(receipt => receipt.messageId), [first])
+  })
+
   test(backend + ': shared Pi Turn lifecycle, dispatch fences, recovery and checkpoint ordering', {
     skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
     timeout: 90_000,

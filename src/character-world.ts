@@ -14,6 +14,7 @@ import { recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice
   completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { steeringForAssignment } from "./steering-amendments.js";
 import { assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { DEFAULT_CREATIVE_POLICY } from "./creative-policy.js";
 import { trustedHead } from "./revision.js";
@@ -58,6 +59,7 @@ interface Receipt {
   startHead?: string;
   planVersion: number;
   contractDigest: string;
+  steeringDigest?: string;
   worker: "fixture" | "pi";
   provider: string;
   model: string;
@@ -92,6 +94,8 @@ export interface CharacterWorldOptions {
   provider?: string;
   model?: string;
   turnPlanDigest?: string;
+  /** Controller-reviewed source-bound direction for pending work only. */
+  steering?: string;
 }
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -512,6 +516,15 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       ? await readTurnEvidence(job, plan.contract, input.task, input.turnPlanDigest) : null;
     const policy = turnEvidence?.creativePolicy ?? DEFAULT_CREATIVE_POLICY;
     const contractDigest = digest(JSON.stringify(plan.contract));
+    const trustedSteering = await steeringForAssignment(job, input.turnPlanDigest, "foundations",
+      await trustedHead(job));
+    if ((input.steering ?? "") !== trustedSteering)
+      throw Error("Foundation author steering differs from the controller-amended plan.");
+    // The saved original Turn request remains immutable. Steering is appended
+    // only to pending specialist instructions, never substituted for authority.
+    const steeredTask = input.task && input.steering
+      ? input.task + "\n\nSAFE-BOUNDARY AUTHOR PLAN AMENDMENT:\n" + input.steering
+      : input.task;
     let receipt: Receipt;
     if (existsSync(file)) {
       receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
@@ -519,7 +532,9 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           (receipt.branch !== undefined && receipt.branch !== job.branch) ||
           (receipt.worktreeRoot !== undefined && receipt.worktreeRoot !== job.worktreeRoot) ||
           (receipt.threadId !== undefined && receipt.threadId !== job.threadId) ||
-          receipt.architectureHead !== arch.expectedHead || receipt.units?.length !== 2 ||
+          receipt.architectureHead !== arch.expectedHead ||
+          receipt.steeringDigest !== (input.steering ? digest(input.steering) : undefined) ||
+          receipt.units?.length !== 2 ||
           receipt.units[0]?.domain !== "world" || receipt.units[1]?.domain !== "character") {
         throw new Error("Foundation receipt differs from the authorized architecture plan; reconcile explicitly.");
       }
@@ -532,6 +547,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha, startHead,
         branch: job.branch, worktreeRoot: job.worktreeRoot, threadId: job.threadId,
         architectureHead: arch.expectedHead, planVersion: plan.version, contractDigest,
+        ...(input.steering ? { steeringDigest: digest(input.steering) } : {}),
         worker: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         units: [{ id: "world-foundations", domain: "world", phase: "pending" },
@@ -678,7 +694,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         : { ...deriveFoundationAssignment(unit.domain, plan,
           reportOf(await validate(before), before),
           state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/"))),
-          ...(input.task ? { authorTask: input.task } : {}),
+          ...(steeredTask ? { authorTask: steeredTask } : {}),
           creativePolicy: policy };
       if (JSON.stringify(assign?.creativePolicy ?? DEFAULT_CREATIVE_POLICY) !== JSON.stringify(policy))
         throw new Error("Foundation assignment creative policy differs from the original Turn receipt.");

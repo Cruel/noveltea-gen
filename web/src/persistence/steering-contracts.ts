@@ -2,6 +2,8 @@
  * Every port is Promise-returning. The Pi SDK lifecycle waits for durable
  * ownership registration before exposing an active turn, and all writer
  * fences remain atomic inside each backend adapter. */
+import type { SteeringInput, SteeringBoundaryDecision } from "../../../src/steering-boundary";
+
 export type PendingPiInput = {
   id: string; owner: string; threadId: string; jobId: string; content: string;
   sequence: number; mode: 'steer' | 'follow-up'
@@ -19,6 +21,8 @@ export type SteeringActivity = {
   verifiedEffectAt: string | null
   implementationSha: string | null
   implementationCount: number
+  amendmentSha: string | null
+  amendmentDigest: string | null
 }
 export interface SteeringPersistence {
   registerTurn(jobId: string, piToken: string, piSessionId: string,
@@ -44,5 +48,10 @@ export interface SteeringPersistence {
   approvedReplan(owner: string, jobId: string, point: SteeringCheckpoint,
     files: string[], at: string): Promise<number>
   boundaryReviews(owner: string, jobId: string, threadId: string, verifiedHead: string, at: string): Promise<number>
+  pendingBoundary(owner: string, jobId: string, threadId: string): Promise<SteeringInput[]>
+  boundaryReceipts(owner: string, jobId: string, threadId: string): Promise<Array<{
+    messageId: string; sourceSha: string; amendmentDigest: string }>>
+  settleBoundary(owner: string, jobId: string, threadId: string,
+    decision: SteeringBoundaryDecision, at: string): Promise<void>
   activity(owner: string, threadId: string): Promise<SteeringActivity[]>
 }

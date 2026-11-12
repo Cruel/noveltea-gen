@@ -1,9 +1,9 @@
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import type { SteeringActivity, SteeringCheckpoint } from '../persistence/steering-contracts'
+import { steeringCanonicalTargets } from '../../../src/steering-intent'
 export type { SteeringActivity } from '../persistence/steering-contracts'
 
 type Disposition = 'within-scope' | 'scope-review' | 'protected-review' | 'unresolved'
-const canonicalIds = /\b(?:milestone|character|event|authored-content|choice-point|puzzle|world-entity|relationship|fact|revelation)\.[a-z][a-z0-9-]*/gi
 const now = () => new Date().toISOString()
 
 /** This is *triage*, not narrative interpretation or a grant. Unknown and
@@ -12,7 +12,7 @@ const now = () => new Date().toISOString()
 export function classifySteeringIntent(text: string, workItem: string | null): Disposition {
   if (/\b(?:protected\s+(?:creative\s+)?decision|creative[- ]direction|retcon|override\s+canon)\b/i.test(text))
     return 'protected-review'
-  const targets = [...new Set([...text.matchAll(canonicalIds)].map(match => match[0]!.toLowerCase()))]
+  const targets = steeringCanonicalTargets(text)
   if (!workItem) return 'unresolved'
   const scoped = workItem.startsWith('focus:') ? workItem.slice(6) : null
   if (workItem === 'character-foundations' && targets.length &&

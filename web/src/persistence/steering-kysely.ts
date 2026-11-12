@@ -2,6 +2,7 @@ import { sql, type Transaction } from 'kysely'
 import type { QueryExecutor, SharedDatabase, WriteGuard } from '../db/kysely-connection'
 import type { StudioDb } from '../db/studio-db'
 import { boundarySteeringReviewsKysely, deferUndeliveredSteeringKysely } from './steering-boundary-kysely'
+import { createKyselySteeringPlanPersistence } from './steering-plan-kysely'
 import { studioSafeInteger } from '../db/kysely-values'
 import type {
   ClaimedPiInput, PendingPiInput, SteeringActivity, SteeringCheckpoint,
@@ -62,6 +63,7 @@ async function consider(tx: Write, messageId: string, owner: string, threadId: s
  * Transient Pi calls are never performed inside replayable transactions. */
 export function createKyselySteeringPersistence(db: SharedDatabase<StudioDb>): SteeringPersistence {
   return {
+    ...createKyselySteeringPlanPersistence(db),
     async registerTurn(jobId, piToken, piSessionId, workItem, expectedHead, at) {
       await db.withWriteTransaction([job(jobId)], async tx => {
         const running = await tx.selectFrom('generationRunQueue').select('jobId')
@@ -430,9 +432,17 @@ export function createKyselySteeringPersistence(db: SharedDatabase<StudioDb>): S
           .onRef('r.ownerUserId', '=', 'i.ownerUserId'))
         .select([
           'i.messageId as messageId', 'i.disposition as disposition',
-          'i.reviewState as state', 'i.reviewMessageId as reviewMessageId',
+          sql<string>`CASE WHEN EXISTS (
+            SELECT 1 FROM thread_steering_plan_amendments p
+            WHERE p.message_id="i"."message_id"
+          ) THEN 'applied-boundary' ELSE "i"."review_state" END`.as('state'),
+          'i.reviewMessageId as reviewMessageId',
           'i.sourceJobId as sourceJobId', 'i.checkpointSha as checkpointSha',
           'l.workItem as checkpointWorkItem', 'l.proofDigest as checkpointProof',
+          sql<string | null>`(SELECT p.source_sha FROM thread_steering_plan_amendments p
+            WHERE p.message_id="i"."message_id")`.as('amendmentSha'),
+          sql<string | null>`(SELECT p.amendment_digest FROM thread_steering_plan_amendments p
+            WHERE p.message_id="i"."message_id")`.as('amendmentDigest'),
           'i.consideredAt as consideredAt', 'r.verifiedAt as verifiedEffectAt',
           sql<string | null>`(SELECT cp.checkpoint_sha FROM thread_steering_checkpoint_links cp
             WHERE cp.message_id="i"."message_id" AND cp.association='verified-implementation'
@@ -447,6 +457,8 @@ export function createKyselySteeringPersistence(db: SharedDatabase<StudioDb>): S
         .select([
           'l.messageId as messageId', 'l.state as state',
           'l.sourceJobId as sourceJobId', 'l.createdAt as consideredAt',
+          sql<string | null>`NULL`.as('amendmentSha'),
+          sql<string | null>`NULL`.as('amendmentDigest'),
           sql<string | null>`(SELECT p.checkpoint_sha FROM thread_steering_checkpoint_links p
             WHERE p.message_id="l"."message_id" AND p.association='pending-unresolved'
             ORDER BY p.sequence DESC LIMIT 1)`.as('checkpointSha'),

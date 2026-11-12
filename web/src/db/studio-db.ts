@@ -362,6 +362,16 @@ export interface ThreadSteeringIntents {
   workItem: string | null
 }
 
+export interface ThreadSteeringPlanAmendments {
+  amendmentDigest: string
+  messageId: string
+  ownerUserId: string
+  recordedAt: string
+  sourceJobId: string
+  sourceSha: string
+  threadId: string
+}
+
 export interface TrustedJobs {
   configJson: string | null
   directory: string | null
@@ -416,6 +426,7 @@ export interface StudioDb {
   threadRestarts: ThreadRestarts
   threadSteeringCheckpointLinks: ThreadSteeringCheckpointLinks
   threadSteeringIntents: ThreadSteeringIntents
+  threadSteeringPlanAmendments: ThreadSteeringPlanAmendments
   trustedJobs: TrustedJobs
   userPreferences: UserPreferences
   userStorySelection: UserStorySelection

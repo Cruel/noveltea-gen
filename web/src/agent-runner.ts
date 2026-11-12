@@ -1,5 +1,6 @@
 import { assertNativeVersion } from '../../src/native-cli-version';
 import { withPiStatusReporter } from '../../src/pi-work-status'
+import { withSteeringBoundary } from '../../src/steering-boundary'
 import { validateStoryJob } from '../../src/validator'
 import { trustedHead } from '../../src/revision'
 import { execFileSync } from 'node:child_process'
@@ -192,10 +193,27 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   }
   try {
     await withActiveExecutionTime(job, async () => {
-      const executeWithStatus = () => withPiStatusReporter(
+      const executeWithStatus = () => withSteeringBoundary({
+        receipts: async source => {
+          if (!ownerThreadId || source.jobId !== row.id)
+            throw new Error('Steering amendment receipts require the exact authenticated Thread.')
+          return store.persistence.steering.boundaryReceipts(item.ownerId, row.id, ownerThreadId)
+        },
+        pending: async source => {
+          if (!ownerThreadId || source.jobId !== row.id)
+            throw new Error('Live steering requires the exact authenticated Thread source.')
+          return store.persistence.steering.pendingBoundary(item.ownerId, row.id, ownerThreadId)
+        },
+        settle: async (source, decision) => {
+          if (!ownerThreadId || source.jobId !== row.id)
+            throw new Error('Steering amendment does not belong to the active Thread.')
+          await store.persistence.steering.settleBoundary(item.ownerId, row.id,
+            ownerThreadId, decision, new Date().toISOString())
+        },
+      }, () => withPiStatusReporter(
         status => appendGenerationEvent(store, item.ownerId, row.id, {
           kind: 'working', piStatus: status, turnId }),
-        execute)
+        execute))
       if (runtime) await withJobModelRuntime(runtime, executeWithStatus)
       else await executeWithStatus()
     })

@@ -286,7 +286,15 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
             <p className="m-0">Controller: {activity.disposition === 'within-scope' ? 'Within assigned scope' :
               activity.disposition === 'scope-review' ? 'Additional Story scope needs approval' :
               activity.disposition === 'protected-review' ? 'Protected decision requires separate authorization' :
-              'Intent unresolved; no additional scope authorized'} · {activity.state.replaceAll('-', ' ')}</p>
+              'Intent unresolved; no additional scope authorized'} · {activity.state === 'applied-boundary'
+                ? 'Pending plan amended; separate Story verification required'
+                : activity.state === 'pending-boundary'
+                  ? 'Explicit author review required; no new write grant'
+                  : activity.state.replaceAll('-', ' ')}</p>
+            {activity.amendmentSha && <p className="mt-1">
+              Plan amendment at verified source {activity.amendmentSha.slice(0, 12)} ·
+              receipt {activity.amendmentDigest?.slice(0, 12)} · plan authorization only, not editorial fulfillment
+            </p>}
             {activity.checkpointSha ? <p className="mt-1">
               Verified checkpoint {activity.checkpointSha.slice(0, 12)} · {activity.checkpointWorkItem} ·
               causal influence only, not editorial fulfillment

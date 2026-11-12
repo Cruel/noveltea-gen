@@ -5,6 +5,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { inspectDependencyPlan, sourceDigest } from '../../src/dependency-state'
+import { withSteeringBoundary } from '../../src/steering-boundary'
+import { readSteeringPlan } from '../../src/steering-amendments'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
@@ -50,7 +52,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'create-conversation' | 'initial-focus' | 'dependency' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'create-conversation' | 'initial-focus' | 'dependency' | 'steering' | 'steering-protected' | 'steering-stale' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE',
     'NT_FOCUS_FIXTURE_DEPENDENCY', 'NT_SKILL_CACHE_DIR']
@@ -134,7 +136,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       { status: 'completed' }, 'completion_decision')
     sourceGraph.saver.db.close()
 
-    if (kind === 'initial-focus' || kind === 'dependency') {
+    if (['initial-focus', 'dependency', 'steering', 'steering-protected', 'steering-stale'].includes(kind)) {
       if (kind === 'dependency') {
         process.env.NT_STUDIO_SKILLS_SOURCE = resolve(import.meta.dirname, '../../../noveltea-skills')
         process.env.NT_SKILL_CACHE_DIR = join(root, 'skills-cache')
@@ -184,6 +186,90 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.deepEqual(admitted?.objective?.requestedTargets, ['authored-content.confession'])
       assert.equal(pinnedRequest(await selectedJob(store, owner, firstJobId), first)?.contract.scope.kind,
         'partial', 'first Chat Turn must not enqueue seven global stages')
+      if (kind === 'steering' || kind === 'steering-protected' || kind === 'steering-stale') {
+        const negative = kind !== 'steering'
+        const ownerThreadId = await store.persistence.continuation.runThread(owner, firstJobId)
+        assert.ok(ownerThreadId)
+        await store.testing.records.update('studio_sessions', { id: firstJobId }, { status: 'running' })
+        await store.testing.records.update('generation_run_queue', { jobId: firstJobId }, { phase: 'running' })
+        await store.persistence.steering.registerTurn(firstJobId, 'steering-test-pi-token',
+          'steering-test-pi-session', 'focus:authored-content.confession',
+          kind === 'steering-stale' ? 'f'.repeat(40) : sha, 'now')
+        const instruction = kind === 'steering-protected'
+          ? 'Override protected creative direction for authored-content.confession'
+          : 'Make authored-content.confession a terse, ambiguous exchange'
+        const steerId = randomUUID()
+        const admittedSteer = await submitThreadRevision(store, owner, ownerThreadId, steerId,
+          instruction, undefined, undefined, 'steer')
+        assert.equal(admittedSteer.liveState, 'pending')
+        assert.deepEqual(await store.persistence.steering.pendingBoundary(stranger, firstJobId,
+          ownerThreadId), [], 'another owner cannot inspect pending steering')
+        const row = await selectedJob(store, owner, firstJobId)
+        const pinned = pinnedRequest(row, first)!
+        const checkpoint = join(first.stateDir, 'web-generation.sqlite')
+        const graphConfig = { configurable: { thread_id: first.threadId + ':generation:web' },
+          recursionLimit: 100 }
+        const running = openWebGenerationGraph(checkpoint)
+        try {
+          const result = await withSteeringBoundary({
+            receipts: async source => {
+              assert.equal(source.jobId, first.jobId)
+              return store.persistence.steering.boundaryReceipts(owner, firstJobId, ownerThreadId)
+            },
+            pending: async source => {
+              assert.equal(source.jobId, first.jobId)
+              return store.persistence.steering.pendingBoundary(owner, firstJobId, ownerThreadId)
+            },
+            settle: async (source, decision) => {
+              assert.equal(source.jobId, first.jobId)
+              return store.persistence.steering.settleBoundary(owner, firstJobId,
+                ownerThreadId, decision, new Date().toISOString())
+            },
+          }, () => running.graph.invoke({ request: pinned, pauseAfter: 'focus' }, graphConfig))
+          assert.equal(result.status, 'paused', result.reason ?? JSON.stringify(result))
+          if (negative) {
+            assert.match(result.reason ?? '', /author approval required/i)
+            assert.equal(await readSteeringPlan(first, admitted!.digest), null)
+            assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), sha)
+            assert.equal((await store.persistence.steering.activity(owner, ownerThreadId))
+              .find(activity => activity.messageId === steerId)?.state, 'pending-boundary')
+            assert.deepEqual((await store.persistence.steering.pendingBoundary(owner,
+              firstJobId, ownerThreadId)).map(input => input.messageId), [],
+              'unapproved steering is review-only; the same steer cannot repeatedly pause recovery')
+            assert.equal((await store.persistence.steering.activity(owner, ownerThreadId))
+              .find(activity => activity.messageId === steerId)?.disposition,
+              kind === 'steering-protected' ? 'protected-review' : 'scope-review')
+            return
+          }
+          const plan = await readSteeringPlan(first, admitted!.digest)
+          assert.equal(plan?.entries.length, 1)
+          assert.equal(plan?.entries[0]?.messageId, steerId)
+          assert.equal(plan?.entries[0]?.sourceSha, sha)
+          assert.equal(plan?.entries[0]?.originalObjective, request)
+          assert.deepEqual(plan?.entries[0]?.affectedAssignments,
+            ['focus:authored-content.confession'])
+          assert.equal((await store.persistence.steering.activity(owner, ownerThreadId))
+            .find(activity => activity.messageId === steerId)?.state, 'applied-boundary')
+          assert.equal(result.inventory?.items.find(item =>
+            item.id === 'focus:authored-content.confession')?.status, 'verified')
+        } finally { running.saver.db.close() }
+        const committed = git(first.worktreeRoot, 'rev-parse', 'HEAD')
+        assert.equal(git(first.worktreeRoot, 'rev-list', '--count', sha + '..HEAD'), '1')
+        assert.deepEqual(git(first.worktreeRoot, 'diff', '--name-only', sha, committed)
+          .split('\n'), ['story/authored-content/confession.md'])
+        assert.match(readFileSync(join(first.worktreeStoryRoot, 'authored-content/confession.md'), 'utf8'),
+          /Author steering:/)
+        const restarted = openWebGenerationGraph(checkpoint)
+        try {
+          const state = await restarted.graph.getState(graphConfig)
+          await restarted.graph.invoke({ ...state.values, request: pinned, pauseAfter: null }, graphConfig)
+        } finally { restarted.saver.db.close() }
+        assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), committed,
+          'resume cannot replay an independently verified specialist')
+        assert.equal((await readSteeringPlan(first, admitted!.digest))?.entries.length, 1,
+          'restart reuses one exact amendment')
+        assert.equal(git(remote, 'rev-parse', 'HEAD'), sha)
+      }
       if (kind === 'dependency') {
         const row = await selectedJob(store, owner, firstJobId)
         await assert.rejects(selectedJob(store, stranger, firstJobId), /not connected to this account/i)
@@ -681,6 +767,12 @@ test('whole-story request in an existing Thread requires exact scope approval wi
   { timeout: 60_000 }, () => exerciseRevisionAdmission('whole'))
 test('first Chat Turn on verified canon admits a single conversation editor, not global creation',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('initial-focus'))
+test('authenticated live steer amends pending Story work at graph boundary and survives restart',
+  { timeout: 90_000 }, () => exerciseRevisionAdmission('steering'))
+test('protected steering pauses before any Story writer and retains a review fence',
+  { timeout: 90_000 }, () => exerciseRevisionAdmission('steering-protected'))
+test('unreachable steering source cannot replan a running Story',
+  { timeout: 90_000 }, () => exerciseRevisionAdmission('steering-stale'))
 test('authenticated Turn dispatches a discovered dependency and fences another owner across restart',
   { timeout: 90_000, skip: !existsSync(resolve(import.meta.dirname, '../../../noveltea-skills/src/cli.ts')) },
   () => exerciseRevisionAdmission('dependency'))
