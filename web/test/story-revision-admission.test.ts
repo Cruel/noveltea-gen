@@ -49,7 +49,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'initial-focus' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'create-conversation' | 'initial-focus' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
@@ -186,6 +186,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       ? 'Rewrite milestone.confession for better emotional pacing'
       : kind === 'whole' ? 'Make me a mystery game'
       : kind === 'conversation' ? 'Revise the conversation'
+      : kind === 'create-conversation' ? 'Write a conversation between Nia and Sol about rebuilding trust after the sealed letter'
       : kind === 'cancel' ? 'Change this Event' : 'Make character.nia less confrontational'
     await assert.rejects(previewThreadRevision(store, stranger, threadId, task), /no source generation|has no source|not found/i)
     const plan = await previewThreadRevision(store, owner, threadId, task)
@@ -468,6 +469,55 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       return
     }
+    if (kind === 'create-conversation') {
+      assert.equal(plan.clarification, null)
+      assert.equal(plan.reviewRequired, true)
+      assert.equal(plan.contract.scope.kind, 'partial')
+      const creates = plan.contract.scope.creates ?? []
+      assert.deepEqual(creates.map(item => item.id.split('.')[0]),
+        ['character', 'relationship', 'event', 'authored-content'])
+      assert.ok(!plan.writePaths.includes('arcs/trust.md'))
+      assert.ok(!plan.writePaths.includes('characters/nia.md'))
+      const id = randomUUID()
+      await assert.rejects(submitThreadRevision(store, stranger, threadId, randomUUID(), task),
+        /not found|owner/i, 'a different owner cannot authorize new Story files')
+      const held = await submitThreadRevision(store, owner, threadId, id, task)
+      assert.equal(held.hasRevisionScope, 0, 'new supporting records need exact author review')
+      await assert.rejects(submitThreadRevision(store, owner, threadId, id, task,
+        undefined, 'f'.repeat(64)), /changed since review/)
+      await assert.rejects(previewThreadRevision(store, owner, threadId, task,
+        ['character.sol'], id), /required typed support/,
+      'author review may not remove required causal support and retain a purported complete goal')
+      const refreshed = await previewThreadRevision(store, owner, threadId, task, undefined, id)
+      assert.equal(refreshed.digest, plan.digest)
+      const admitted = await submitThreadRevision(store, owner, threadId, id, task,
+        undefined, plan.digest)
+      assert.equal(admitted.hasRevisionScope, 1)
+      await advanceThread(store, owner, threadId)
+      await advanceThread(store, owner, threadId)
+      const messages = (await readThreadChat(store, owner, threadId)).messages
+      assert.equal(messages.find(item => item.id === id)?.phase, 'running')
+      const child = await restoreJob(await selectedJob(store, owner, id), owner)
+      const pinned = pinnedRequest(await selectedJob(store, owner, id), child)!
+      const turn = (await readJobTurnPlan(child))!
+      assert.equal(turn.digest, plan.turnPlan?.digest)
+      assert.equal(turn.digest, pinned.turnPlanDigest)
+      assert.equal(turn.source.verifiedSha, sha)
+      assert.equal(turn.source.jobId, sourceId)
+      assert.deepEqual(turn.contract.scope.creates, creates)
+      assert.deepEqual(turn.assignments.filter(item => item.id.startsWith('focus:'))
+        .map(item => [item.id, item.authority.existingPaths,
+          item.authority.newPaths, item.authority.mayCreate]),
+      creates.map(item => ['focus:' + item.id, [], [item.path], true]))
+      assert.deepEqual((await readThreadChat(store, owner, threadId)).runs.map(run => run.jobId),
+        [sourceId, id], 'retry/recovery does not duplicate the authorized writer')
+      assert.equal((await readJobTurnPlan(await restoreJob(
+        await selectedJob(store, owner, id), owner)))?.digest, turn.digest)
+      assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
+      assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), sha)
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+      return
+    }
     if (kind === 'whole' || kind === 'conversation') {
       assert.equal(plan.clarification, null)
       assert.equal(plan.reviewRequired, kind === 'whole')
@@ -583,6 +633,8 @@ test('first Chat Turn on verified canon admits a single conversation editor, not
   { timeout: 60_000 }, () => exerciseRevisionAdmission('initial-focus'))
 test('conversation revision in the same authenticated Thread grants only authored-content',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('conversation'))
+test('authenticated focused conversation creates only pinned missing support after review and reconnect',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('create-conversation'))
 test('unambiguous Character revision admits only its one focused path without a form',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('narrow'))
 test('simultaneous completed-Thread submissions both persist; only the first receives a scope',

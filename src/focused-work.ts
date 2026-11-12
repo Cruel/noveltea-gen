@@ -7,7 +7,7 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join, sep } from "node:path";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
-import type { CompletionContract } from "./architecture.js";
+import type { CompletionContract, PlannedFocusCreate } from "./architecture.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { startStoryJob } from "./job.js";
 import { trustedHead } from "./revision.js";
@@ -70,8 +70,59 @@ function skillFor(target: string) {
   if (type === "choice-point" || type === "puzzle") return "nt-interactive-narrative";
   throw new Error("A direct focus specialist is not available for " + target + "; select an Arc or Milestone scope.");
 }
+/** Deterministic fixture output exercises the same canonical/native/Git gates.
+ * It is never evidence of model-authored literary quality. */
+function fixtureCreatedRecord(create: PlannedFocusCreate, contract: CompletionContract,
+  catalog: CanonicalScopeRecord[]): string {
+  const type = create.id.split(".")[0]!;
+  const base = ["---", "schema: '0.1'", "type: " + type, "id: " + create.id,
+    "title: " + JSON.stringify(create.title), "status: draft", "decisions: []"];
+  const list = (values: string[]) => "[" + values.join(", ") + "]";
+  const title = (id: string) => {
+    const record = catalog.find(item => item.metadata.id === id);
+    const planned = contract.scope.creates?.find(item => item.id === id);
+    return String(record?.metadata.title ?? planned?.title ?? id.split(".")[1]);
+  };
+  if (type === "character") return [...base, "motivation: Seek an honest, consequential exchange.",
+    "---", "# " + create.title,
+    "This Character wants to be heard without sacrificing trust. They enter the conversation with a concrete reason to listen.\n"].join("\n");
+  if (type === "relationship") return [...base,
+    "characters: " + list(create.references), "initial: estranged", "---", "# " + create.title,
+    "The speakers must negotiate trust rather than assume it. Their conversation can establish mutual understanding.\n"].join("\n");
+  if (type === "event") return [...base,
+    "participants: " + list(create.references.filter(id => id.startsWith("character."))),
+    "arcs: " + list(create.references.filter(id => id.startsWith("arc."))),
+    "after: []", "prerequisites:", "  any_of:", "    - completed: []", "      not_completed: []",
+    "consequences:", "  - Both speakers confront what they have withheld.",
+    "steps:", "  - id: exchange", "    branches:", "      - id: continue",
+    "        conditions: []",
+    "        effects: " + (create.references.some(id => id.startsWith("relationship."))
+      ? "[{kind: relationship, relationship: " +
+        create.references.find(id => id.startsWith("relationship.")) + ", value: trusting}]"
+      : "[]"), "---", "# The conversation",
+    "Both Characters choose to meet and trade information. The encounter has a discernible beginning and consequence.\n"].join("\n");
+  if (type === "authored-content") {
+    const event = contract.scope.creates?.find(item => item.id === create.references[0]);
+    const eventRecord = catalog.find(item => item.metadata.id === create.references[0]);
+    const speakers = (event?.references.filter(id => id.startsWith("character.")) ??
+      (Array.isArray(eventRecord?.metadata.participants)
+        ? eventRecord.metadata.participants.filter((id): id is string => typeof id === "string") : []))
+      .slice(0, 2).map(title);
+    const first = speakers[0] ?? "First speaker", second = speakers[1] ?? "Second speaker";
+    return [...base, "events: " + list(create.references), "revelations: []", "---",
+      "# " + create.title,
+      "A quiet moment settles between " + first + " and " + second + " before either speaks.",
+      "", "**" + first + ":** “I wanted to ask what you really knew.”",
+      "", "**" + second + ":** “I was waiting for someone willing to listen.”",
+      "", "**" + first + ":** “Then we should begin with the truth.”",
+      "", "The silence that follows is different from the one that came before.\n"].join("\n");
+  }
+  throw Error("No focused creation fixture for " + create.id);
+}
+
 async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
-  outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY) {
+  outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
+  create?: PlannedFocusCreate) {
   const skill = skillFor(receipt.target);
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config = { discovery: "explicit-only" as const, novelteaSkills: receipt.snapshot!.path,
@@ -98,7 +149,8 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
     sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool, createPiStatusTool()],
-    noTools: "all", tools: ["read", "edit", "grep", "find", "ls", "story_context", "report_status"],
+    noTools: "all", tools: [...(create ? ["write"] : []),
+      "read", "edit", "grep", "find", "ls", "story_context", "report_status"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking)
@@ -116,9 +168,12 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       receipt.context.join("\n") + "\nYou may use read, grep, find, ls and story_context to inspect " +
       "additional canonical Story records and discover typed dependencies. Discovery is READ-ONLY, " +
       "never write authority; do not inspect private inboxes.\n" +
-      "Only edit these PREEXISTING canonical Markdown files:\n" +
-      receipt.paths.join("\n") + "\nAll other files are READ-ONLY context (including upstream prerequisites, milestones, Arcs, and all sibling records). " +
-      "Do not create files, use git commands, invoke untrusted shell commands, or change protected author decisions. " +
+      (create ? "Create ONLY this new canonical Markdown file with schema 0.1, exact type/id/title and typed references:\n" +
+        JSON.stringify(create) + "\nDo not alter any preexisting files. Write substantive narrative content, " +
+        "not a placeholder, including actual in-scene character dialogue for Authored Content. " :
+        "Only edit these PREEXISTING canonical Markdown files:\n" + receipt.paths.join("\n")) +
+      "\nAll other files are READ-ONLY context (including upstream prerequisites, milestones, Arcs, and all sibling records). " +
+      "Do not create any other files, use git commands, invoke untrusted shell commands, or change protected author decisions. " +
       "Preserve typed references and branch behavior. If a requested change requires additional records or upstream decisions, " +
       "report that obstacle and stop without touching unauthorized files. Do not claim incomplete/delegated work is finished. " +
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
@@ -162,6 +217,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     if (changes(job).length || actual !== current) throw new Error("Focused worktree has changes requiring explicit reconciliation.");
     const validation = await validateStoryJob(job, input.validatorSource ?? input.skillsSource, { ...job, baseSha: current });
     const selection = resolveFocusedScope(reportOf(validation, current), input.contract);
+    const create = input.contract.scope.creates?.find(item => item.id === input.target);
     const own = selection.selected.find(r => r.metadata.id === input.target);
     if (!own) throw new Error("Unknown focused target: " + input.target);
     // Shared supporting targets are authorized exactly once, with the first target.
@@ -170,11 +226,14 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     const types = [...new Set(paths.map(path => selection.selected.find(r => r.path === path)?.metadata.type))];
     if (types.some(type => !type)) throw new Error("A specialist path has no canonical record type.");
     const turnPlan = await readTurnEvidence(job, input.contract, input.task, input.turnPlanDigest);
+    if (create && (!turnPlan || !input.turnPlanDigest))
+      throw new Error("Focused creation requires the original source-bound authenticated Turn assignment.");
     const turnAssignment = turnPlan ? assertFocusedTurnAssignment(turnPlan, input.target, paths,
       types as string[]) : null;
     const turnAssignmentDigest = turnPlan?.digest;
     // Refuse symlinked / substituted records BEFORE Pi receives editing tools.
     for (const path of paths) {
+      if (create && path === create.path) continue;
       const full = join(job.worktreeStoryRoot, path);
       if (await realpath(full) !== full || !(await lstat(full)).isFile())
         throw new Error("Focused record is not a safe regular canonical file: " + path);
@@ -202,13 +261,23 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       receipt = { version: 1, jobId: job.jobId, workItemId: "focus:" + input.target,
         planVersion: plan.version, contractDigest, expectedHead: current,
         phase: "pending", target: input.target, paths,
-        context: selection.context.map(r => r.path).sort(), worker: input.fixture ? "fixture" : "pi",
+        context: selection.context.filter(r => r.metadata.status !== "planned")
+          .map(r => r.path).sort(), worker: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         ...(turnAssignmentDigest ? { assignmentDigest: turnAssignmentDigest } : {}) };
       await save(file, receipt);
     }
     if (receipt.expectedHead !== current)
       throw new Error("Focused work was initialized against a different verified HEAD; inspect before writing.");
+    if (create) {
+      const full = join(job.worktreeStoryRoot, create.path);
+      if (existsSync(full))
+        throw new Error("Focused creation path already exists; never overwrite canonical Story bytes.");
+      // Only the preauthorized canonical record directory may be materialized.
+      await mkdir(dirname(full), { recursive: true });
+      if (await realpath(dirname(full)) !== dirname(full))
+        throw new Error("Focused creation directory is a symlink or unsafe path.");
+    }
     const config = input.skillsSource
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
       : await loadSkillConfig(undefined, false);
@@ -225,8 +294,13 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     receipt.phase = "writing"; await save(file, receipt);
     if (input.fixture) {
       for (const path of paths) {
-        const original = await readFile(join(job.worktreeStoryRoot, path), "utf8");
-        await writeFile(join(job.worktreeStoryRoot, path), original + "\nFocused revision: " + input.task + "\n");
+        if (create && path === create.path) {
+          await writeFile(join(job.worktreeStoryRoot, path),
+            fixtureCreatedRecord(create, input.contract, selection.context), { flag: "wx" });
+        } else {
+          const original = await readFile(join(job.worktreeStoryRoot, path), "utf8");
+          await writeFile(join(job.worktreeStoryRoot, path), original + "\nFocused revision: " + input.task + "\n");
+        }
       }
       if (process.env.NT_FOCUS_FIXTURE_CASE === "unauthorized-edit") {
         const outside = selection.context.find(r => !paths.includes(r.path));
@@ -235,10 +309,14 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");
       }
     } else await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
-      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY);
+      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create);
     const edited = changes(job);
-    if (!edited.length || edited.some(entry => entry.slice(0, 2) !== " M" ||
-        !paths.includes(entry.slice(3).replace(job.storyRelativePath ? job.storyRelativePath + "/" : "", ""))))
+    const statusPath = (entry: string) => entry.slice(3).replace(
+      job.storyRelativePath ? job.storyRelativePath + "/" : "", "");
+    if (!edited.length || edited.some(entry =>
+      !paths.includes(statusPath(entry)) ||
+      entry.slice(0, 2) !== (create && statusPath(entry) === create.path ? "??" : " M")) ||
+      (create && !edited.some(entry => statusPath(entry) === create.path && entry.startsWith("??"))))
       throw new Error("Focused work changed a file outside its explicit authority; preserve edits for manual reconciliation.");
     if (git(job, "rev-parse", "HEAD").toString().trim() !== current)
       throw new Error("Focused Story HEAD changed during writer execution.");
@@ -250,13 +328,17 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     }
     const after = await validateStoryJob(job, input.validatorSource ?? input.skillsSource, { ...job, baseSha: current });
     const accepted = reportOf(after, current);
+    if (create && !accepted.some(item => item.metadata.id === create.id &&
+        item.metadata.type === create.id.split(".")[0] && item.path === create.path &&
+        item.metadata.status !== "superseded"))
+      throw new Error("Native canonical validation did not recognize the exact new focused record.");
     resolveFocusedScope(accepted, input.contract);
     receipt.sha256 = digest(JSON.stringify(await Promise.all(paths.map(async path =>
       [path, digest(await readFile(join(job.worktreeStoryRoot, path), "utf8"))]))));
     receipt.phase = "authored"; await save(file, receipt);
     git(job, "add", "--", ...paths.map(path => repoPath(job, path)));
     git(job, "-c", "user.name=NovelTea Generator", "-c", "user.email=noveltea-gen@users.noreply.github.com",
-      "commit", "-m", "Revise focused Story record " + input.target + "\n\n" +
+      "commit", "-m", (create ? "Create" : "Revise") + " focused Story record " + input.target + "\n\n" +
       "NovelTea-Job: " + job.jobId + "\nNovelTea-Work-Item: " + receipt.workItemId +
       "\nNovelTea-Plan-Version: " + plan.version + "\nNovelTea-Focused-Digest: " + receipt.sha256);
     if (changes(job).length) throw new Error("Focused commit left unexpected dirty worktree.");

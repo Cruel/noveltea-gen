@@ -25,6 +25,35 @@ const catalog = [
   { path: 'authored-content/confession.md', metadata: { id: 'authored-content.confession', type: 'authored-content', status: 'draft', events: ['event.confession'] } },
 ]
 
+test('new focused conversation pins exact create-vs-edit authority and prerequisite order', () => {
+  const preview = inferStoryObjective('Write a conversation between Nia and Sol about a forgotten promise',
+    catalog, b, contract)
+  assert.equal(preview.clarification, null)
+  const planned = planObjective({ kind: 'revision', request: preview.request,
+    contract: preview.contract, base: b, sourceJobId: 'source-one', catalog,
+    targetIds: preview.targets, allowedPaths: preview.writePaths })
+  const creates = preview.contract.scope.creates ?? []
+  assert.deepEqual(planned.assignments.filter(item => item.id.startsWith('focus:'))
+    .map(item => item.id), creates.map(item => 'focus:' + item.id))
+  for (const create of creates) {
+    const assignment = planned.assignments.find(item => item.id === 'focus:' + create.id)!
+    assert.equal(assignment.authority.mayCreate, true)
+    assert.deepEqual(assignment.authority.newPaths, [create.path])
+    assert.deepEqual(assignment.authority.existingPaths, [])
+    assert.deepEqual(assignment.dependsOn, create.dependsOn.map(id => 'focus:' + id))
+    assert.doesNotThrow(() => assertFocusedTurnAssignment(planned,
+      create.id, [create.path], [create.id.split('.')[0]!]))
+    assert.throws(() => assertFocusedTurnAssignment(planned,
+      create.id, ['arcs/trust.md'], ['arc']), /does not authorize/)
+  }
+  assert.deepEqual(planned.objective?.requestedTargets, [...preview.targets].sort())
+  assert.ok(planned.objective?.obligations.some(text => text.includes('player-facing dialogue')))
+  assert.doesNotThrow(() => verifyTurnPlan(planned))
+  const forged = structuredClone(planned)
+  forged.assignments[0]!.authority.newPaths = ['arcs/trust.md']
+  assert.throws(() => verifyTurnPlan(forged), /integrity|Invalid/)
+})
+
 test('whole Story intent produces seven concrete bounded specialist assignments', () => {
   const plan = planWholeStory('Make a mystery Story', contract, a)
   assert.equal(plan.kind, 'full-story')

@@ -99,28 +99,39 @@ export function planRevision(request: string, contract: CompletionContract, base
     const support = (contract.scope.supportingTargets ?? []).map(id => active.get(id))
     if (support.some(record => !record || !permitted.has(record.path)))
       throw new Error('Supporting Story path was not verified in the canonical scope.')
+    const creates = new Map((contract.scope.creates ?? []).map(item => [item.id, item]))
+    if ([...creates.keys()].some(id => active.has(id) || !targetIds.includes(id)))
+      throw new Error('New specialist creation target collides with existing verified canon.')
     for (const target of targetIds) {
       const record = active.get(target), type = target.split('.')[0]!
-      if (!record || record.metadata.type !== type || !writable.has(type) ||
-          !permitted.has(record.path))
+      const create = creates.get(target)
+      if (!writable.has(type) || !!record === !!create ||
+          (record && (record.metadata.type !== type || !permitted.has(record.path))) ||
+          (create && !permitted.has(create.path)))
         throw new Error('Unverified specialist assignment target: ' + target)
-      const relatedEvents = type === 'authored-content' &&
+      const relatedEvents = type === 'authored-content' && record &&
         Array.isArray(record.metadata.events) ? record.metadata.events.filter(
           (id): id is string => typeof id === 'string' && targetIds.includes(id)) : []
       const supportOwned = target === targetIds[0] ? support.filter(
-        (record): record is NonNullable<typeof record> => !!record) : []
-      const ownedPaths = [record.path, ...supportOwned.map(item => item.path)].sort()
+        (item): item is NonNullable<typeof item> => !!item) : []
+      const ownedPaths = [...(record ? [record.path] : []), ...supportOwned.map(item => item.path)].sort()
       assignments.push({ id: 'focus:' + target, specialist: specialist[type] ?? 'nt-event-design',
-        outcome: 'Deliver the author-requested change to ' + target +
-          ' while preserving Story continuity and protected canon',
-        targets: [target], dependsOn: relatedEvents.map(id => 'focus:' + id),
+        outcome: (create ? 'Create connected canonical ' + target + ' (' + create.title +
+          '), preserving the exact approved typed references and all existing canon' :
+          'Deliver the author-requested change to ' + target +
+          ' while preserving Story continuity and protected canon'),
+        targets: [target], dependsOn: [...new Set([
+          ...(relatedEvents ?? []).map(id => 'focus:' + id),
+          ...(create?.dependsOn ?? []).map(id => 'focus:' + id)])],
         discovery: 'canonical-story-read-only',
         authority: { recordTypes: [...new Set([type, ...supportOwned.map(item => item.metadata.type)])].sort(),
-          existingPaths: ownedPaths, mayCreate: false } })
+          existingPaths: ownedPaths, mayCreate: !!create,
+          ...(create ? { newPaths: [create.path] } : {}) } })
     }
     // Supporting records must be explicitly resolved by the focused-scope
     // authorizer, never inferred from read/search activity.
-    const assigned = new Set(assignments.flatMap(a => a.authority.existingPaths))
+    const assigned = new Set(assignments.flatMap(a =>
+      [...a.authority.existingPaths, ...(a.authority.newPaths ?? [])]))
     if (allowedPaths.some(path => !assigned.has(path)) || assigned.size !== permitted.size)
       throw new Error('A supporting Story write requires a typed, explicitly reviewed assignment.')
     assignments.push({ id: 'review', specialist: 'nt-narrative-review',
@@ -140,9 +151,11 @@ export function planRevision(request: string, contract: CompletionContract, base
       obligations: protectedChange
         ? ['Apply only the separately authorized exact protected decision']
         : ['Deliver the requested changes to ' + [...new Set(targetIds)].sort().join(', '),
+          ...(contract.scope.creates?.length ?
+            ['Create only the necessary causally linked support and actual player-facing dialogue'] : []),
           'Preserve existing Story canon and unrelated verified records',
           'Independently check the selected changes against the Turn objective'] },
-    creativePolicy: parseCreativePolicy(policy), reviewRequired: targetIds.length > 1 ||
+    creativePolicy: parseCreativePolicy(policy), reviewRequired: !!contract.scope.creates?.length || targetIds.length > 1 ||
       !!contract.scope.supportingTargets?.length || !!protectedChange }
   return { ...body, digest: digest(body) }
 }
@@ -182,7 +195,14 @@ export function verifyTurnPlan(plan: TurnPlan): void {
       plan.assignments.length > 129 || !plan.originalRequest?.trim() ||
       !plan.goal?.trim() || !plan.assignments.every(a =>
         a.discovery === 'canonical-story-read-only' && Array.isArray(a.authority?.existingPaths) &&
-        a.authority.existingPaths.every(path => /^[a-z][a-z-]*\/[a-z0-9-]+\.md$/.test(path)))) {
+        a.authority.existingPaths.every(path => /^[a-z][a-z-]*\/[a-z0-9-]+\.md$/.test(path)) &&
+        (a.authority.newPaths === undefined ||
+          (Array.isArray(a.authority.newPaths) &&
+            a.authority.newPaths.every(path => /^[a-z][a-z-]*\/[a-z0-9-]+\.md$/.test(path)))) &&
+        (plan.kind !== 'revision' || !a.id.startsWith('focus:') ||
+          a.authority.mayCreate === !!plan.contract.scope.creates?.some(create =>
+            a.id === 'focus:' + create.id &&
+            JSON.stringify(a.authority.newPaths) === JSON.stringify([create.path]))))) {
     throw new Error('Invalid persisted Turn plan.')
   }
   const { digest: signature, ...body } = plan

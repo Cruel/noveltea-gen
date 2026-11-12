@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { inferStoryRevision, applyCreativeModeToRevision } from '../src/lib/story-revision-plan'
+import { inferStoryObjective, inferStoryRevision, applyCreativeModeToRevision } from '../src/lib/story-revision-plan'
 import { creativePolicy } from '../../src/creative-policy'
 import { resolveFocusedScope, type CanonicalScopeRecord } from '../../src/focused-scope'
 import { reconcileInventory, nextExecutionItem } from '../../src/generation-plan'
@@ -33,6 +33,102 @@ const catalog: CanonicalScopeRecord[] = [
   record('authored-content', 'escape', { title: 'Escape scene', events: ['event.escape'] }),
   record('character', 'sol', { title: 'Sol' }),
 ]
+test('new focused conversation reuses verified speakers, Arc and foundation while assigning only missing support', () => {
+  const preview = inferStoryObjective('Write a conversation between Nia and Sol about the hidden note.',
+    catalog, sha, previous)
+  assert.equal(preview.clarification, null)
+  assert.equal(preview.reviewRequired, true)
+  assert.equal(preview.contract.scope.kind, 'partial')
+  const creates = preview.contract.scope.creates ?? []
+  assert.deepEqual(creates.map(item => item.id), [
+    'event.conversation-nia-sol-the-hidden-note',
+    'authored-content.conversation-nia-sol-the-hidden-note',
+  ])
+  assert.deepEqual(creates[0]?.references, ['arc.trust', 'character.nia', 'character.sol'])
+  assert.deepEqual(creates[0]?.dependsOn, [])
+  assert.deepEqual(creates[1]?.dependsOn, [creates[0]?.id])
+  assert.deepEqual(preview.writePaths, creates.map(item => item.path).sort())
+  assert.ok(preview.readOnlyIds.includes('creative-direction.foundation'))
+  assert.ok(preview.readOnlyIds.includes('character.nia'))
+  assert.ok(preview.readOnlyIds.includes('character.sol'))
+  assert.ok(!preview.targets.includes('arc.trust'))
+  assert.ok(!preview.targets.includes('event.escape'))
+  const resolved = resolveFocusedScope(catalog, preview.contract)
+  assert.deepEqual(resolved.allowedPaths, preview.writePaths)
+  assert.ok(resolved.context.some(item => item.metadata.id === 'arc.trust'))
+})
+
+test('a trust-focused conversation connects an otherwise missing Relationship to its Event', () => {
+  const preview = inferStoryObjective('Write a conversation between Nia and Sol about rebuilding trust',
+    catalog, sha, previous)
+  const creates = preview.contract.scope.creates ?? []
+  assert.deepEqual(creates.map(item => item.id.split('.')[0]),
+    ['relationship', 'event', 'authored-content'])
+  assert.deepEqual(creates[0]?.references, ['character.nia', 'character.sol'])
+  assert.ok(creates[1]?.references.includes('relationship.nia-sol'))
+  assert.deepEqual(creates[1]?.dependsOn, ['relationship.nia-sol'])
+  assert.deepEqual(creates[2]?.dependsOn, creates.slice(0, 2).map(item => item.id))
+  assert.deepEqual(preview.writePaths, creates.map(item => item.path).sort())
+})
+
+test('focused conversation creates only missing Character and support, not adjacent Story branches', () => {
+  const preview = inferStoryObjective('Write a conversation between Nia and Orin about the missing key.',
+    catalog, sha, previous)
+  const creates = preview.contract.scope.creates ?? []
+  assert.deepEqual(creates.map(item => item.id.slice(0, item.id.indexOf('.'))),
+    ['character', 'event', 'authored-content'])
+  assert.deepEqual(creates[0]?.dependsOn, [])
+  assert.deepEqual(creates[1]?.dependsOn, ['character.orin'])
+  assert.deepEqual(creates[2]?.dependsOn, ['character.orin', creates[1]?.id])
+  assert.equal(preview.clarification, null)
+  assert.throws(() => inferStoryObjective('Write a conversation between Nia and Orin about the missing key.',
+    catalog, sha, previous, [creates[0]!.id]), /required typed support/)
+  const withSiblingArc = [...catalog, record('arc', 'another')]
+  const unclear = inferStoryObjective('Write a conversation between Nia and Orin about the missing key.',
+    withSiblingArc, sha, previous)
+  assert.match(unclear.clarification ?? '', /existing arc/)
+  assert.deepEqual(unclear.targets, [])
+  assert.deepEqual(unclear.writePaths, [])
+})
+
+test('focused conversation reuses a typed existing Event but never silently edits it', () => {
+  const known = catalog.filter(item => item.metadata.id !== 'authored-content.confession')
+    .map(item => item.metadata.id === 'event.confession'
+      ? { ...item, metadata: { ...item.metadata,
+          participants: ['character.nia', 'character.sol'] } } : item)
+  const preview = inferStoryObjective('Write a conversation between Nia and Sol for event.confession',
+    known, sha, previous)
+  assert.equal(preview.clarification, null)
+  assert.deepEqual(preview.contract.scope.creates?.map(item => item.id),
+    ['authored-content.confession'])
+  assert.ok(preview.readOnlyIds.includes('event.confession'))
+  assert.ok(!preview.writePaths.includes('events/confession.md'))
+  assert.deepEqual(preview.contract.scope.creates?.at(-1)?.references, ['event.confession'])
+  const mismatch = inferStoryObjective('Write a conversation between Nia and Sol for event.confession',
+    catalog.filter(item => item.metadata.id !== 'authored-content.confession'), sha, previous)
+  assert.match(mismatch.clarification ?? '', /does not include both speakers/)
+  assert.deepEqual(mismatch.writePaths, [])
+})
+
+test('focused support creation cannot authorize unrelated records or unsafe protected changes', () => {
+  const protectedRequest = inferStoryObjective('Create a conversation between Nia and Orin that overrides canon',
+    catalog, sha, previous)
+  assert.ok(protectedRequest.clarification)
+  assert.deepEqual(protectedRequest.writePaths, [])
+  const unknown = inferStoryObjective('Write a conversation between Nia and Orin in arc.nonexistent',
+    catalog, sha, previous)
+  assert.match(unknown.clarification ?? '', /Unknown named canonical record/)
+  assert.deepEqual(unknown.targets, [])
+  const unsafe = inferStoryObjective('Write a conversation between Nia and Sol in arc.trust',
+    catalog, sha, previous)
+  const tampered = { ...unsafe.contract, scope: { ...unsafe.contract.scope,
+    creates: [...(unsafe.contract.scope.creates ?? []), {
+      id: 'arc.secret-subplot', path: 'arcs/secret-subplot.md', title: 'Secret subplot',
+      references: [], dependsOn: [],
+    }] } }
+  assert.throws(() => resolveFocusedScope(catalog, tampered), /Invalid canonical focused creation grant/)
+})
+
 test('Collaborative mode asks about open creative alternatives while Autonomous mode can proceed', () => {
   const preview = inferStoryRevision('Make character.nia either less trusting or more guarded',
     catalog, sha, previous)

@@ -62,6 +62,7 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
       // The first target owns explicitly listed supporting-record edits; all
       // other targets remain independent work units.
       const selected = new Set(plan.contract.scope.targets);
+      const plannedCreates = new Map((plan.contract.scope.creates ?? []).map(item => [item.id, item]));
       const records = (validation?.report as { records?: Array<{ metadata?: {
         id?: string; type?: string; events?: string[] } }> } | undefined)?.records ?? [];
       for (const target of plan.contract.scope.targets) {
@@ -72,7 +73,9 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
         const parents = metadata?.type === "authored-content" && Array.isArray(metadata.events)
           ? metadata.events.filter(id => selected.has(id) && id.startsWith("event."))
           : [];
-        add("focus", ["architecture", ...parents.map(id => "focus:" + id)], target);
+        const creationDependencies = plannedCreates.get(target)?.dependsOn.map(id => "focus:" + id) ?? [];
+        add("focus", [...new Set(["architecture", ...parents.map(id => "focus:" + id),
+          ...creationDependencies])], target);
       }
       add("review", plan.contract.scope.targets.map(target => "focus:" + target));
     } else if (plan.contract.scope.depth !== "architecture") {

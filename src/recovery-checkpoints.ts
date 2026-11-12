@@ -253,7 +253,11 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
   const approved = stageRank[plan.contract.scope.depth ?? "composition"] ?? 4;
   const depth = Math.max(approved, requested);
   if (plan.items.some(i => i.id.startsWith("focus-"))) {
-    for (const target of plan.contract.scope.targets) add("focus:" + target, ["global-architecture"]);
+    for (const target of plan.contract.scope.targets) {
+      const create = plan.contract.scope.creates?.find(item => item.id === target);
+      add("focus:" + target, ["global-architecture",
+        ...(create?.dependsOn.map(id => "focus:" + id) ?? [])]);
+    }
     add("review", plan.contract.scope.targets.map(target => "focus:" + target));
     return { order, dependencies: deps };
   }

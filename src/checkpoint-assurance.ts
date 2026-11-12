@@ -313,15 +313,31 @@ function exactDiff(job: JobStartResult, parentSha: string, commitSha: string) {
     removedLines += Number(deleted);
   }
   if (!paths.length) throw new Error("Assurance cannot certify an empty specialist diff.");
-  return { paths: paths.sort(), addedLines, removedLines,
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const changes = git(job, "diff", "--name-status", "--no-renames", "--no-ext-diff",
+    parentSha, commitSha).split("\n").filter(Boolean).map(line => {
+    const [status, name, extra] = line.split("\t");
+    if (extra || (status !== "A" && status !== "M") || !name?.startsWith(prefix) ||
+        !canonicalPath(name.slice(prefix.length)))
+      throw new Error("Assurance refuses noncanonical, deleted or moved specialist files.");
+    return { path: name.slice(prefix.length), status };
+  });
+  if (changes.length !== paths.length ||
+      JSON.stringify(changes.map(c => c.path).sort()) !== JSON.stringify([...paths].sort()))
+    throw new Error("Assurance requires matching Git path and change-kind evidence.");
+  return { paths: paths.sort(), changes, addedLines, removedLines,
     diffDigest: createHash("sha256").update(git(job, "diff", "--binary", "--no-ext-diff",
       parentSha, commitSha)).digest("hex") };
 }
-function assertAuthority(assignment: TurnAssignmentEvidence, paths: string[], plan: TurnEvidence) {
+function assertAuthority(assignment: TurnAssignmentEvidence,
+  changes: Array<{ path: string; status: string }>, plan: TurnEvidence, repair: boolean) {
   if (plan.kind !== "revision") return;
-  if (paths.some(path => !assignment.authority.existingPaths.includes(path) ||
-      !assignment.authority.recordTypes.includes(directories[path.split("/")[0]!]!)))
-    throw new Error("Specialist Git diff exceeds the controller-authorized Turn assignment.");
+  if (changes.some(({ path, status }) =>
+      !assignment.authority.recordTypes.includes(directories[path.split("/")[0]!]!) ||
+      (assignment.authority.existingPaths.includes(path) ? status !== "M" :
+        (assignment.authority.newPaths ?? []).includes(path) ?
+          status !== (repair ? "M" : "A") : true)))
+    throw new Error("Specialist Git diff exceeds the controller-authorized create/edit assignment.");
 }
 
 /** Only invoked after native validation, receipt identity, and Git ancestry
@@ -338,7 +354,7 @@ export async function checkpointAssurance(job: JobStartResult,
   if (!assignment || point.baseSha !== turn.source.verifiedSha || point.jobId !== job.jobId)
     throw new Error("Checkpoint has no original, source-bound specialist assignment.");
   const diff = exactDiff(job, point.parentSha, point.commitSha);
-  assertAuthority(assignment, diff.paths, turn);
+  assertAuthority(assignment, diff.changes, turn, !!proof);
   if (proof && (proof.commitSha !== point.commitSha || proof.beforeHead !== point.parentSha ||
       JSON.stringify([...proof.paths].sort()) !== JSON.stringify(diff.paths)))
     throw Error("Repair checkpoint differs from the recorded authorized correction.");

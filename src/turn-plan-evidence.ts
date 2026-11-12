@@ -12,7 +12,8 @@ export interface TurnAssignmentEvidence {
   targets: string[];
   dependsOn: string[];
   discovery: "canonical-story-read-only";
-  authority: { recordTypes: string[]; existingPaths: string[]; mayCreate: boolean };
+  authority: { recordTypes: string[]; existingPaths: string[]; mayCreate: boolean;
+    newPaths?: string[] };
 }
 export interface TurnEvidence {
   version: 1;
@@ -89,8 +90,18 @@ export async function readTurnEvidence(job: JobStartResult, contract: Completion
       !Array.isArray(a.authority?.recordTypes) ||
       !Array.isArray(a.authority?.existingPaths) ||
       a.authority.existingPaths.some(p => !safePath.test(p)) ||
+      (a.authority.newPaths !== undefined && (!Array.isArray(a.authority.newPaths) ||
+        a.authority.newPaths.some(p => !safePath.test(p)))) ||
       a.dependsOn?.some(parent => !assignments.some(b => b.id === parent)) ||
-      typeof a.authority?.mayCreate !== "boolean") ||
+      typeof a.authority?.mayCreate !== "boolean" ||
+      (plan.kind === "revision" && a.id.startsWith("focus:") && (() => {
+        const target = a.id.slice("focus:".length);
+        const create = plan.contract.scope.creates?.find(item => item.id === target);
+        return a.authority.mayCreate !== !!create ||
+          JSON.stringify(a.authority.newPaths ?? []) !== JSON.stringify(create ? [create.path] : []) ||
+          (create && (a.targets.length !== 1 || a.targets[0] !== target ||
+            !create.dependsOn.every(parent => a.dependsOn.includes("focus:" + parent))));
+      })())) ||
     digest !== hash(body) || (requiredDigest && digest !== requiredDigest)) {
     throw new Error("Saved Turn plan, specialist assignments or source base are corrupt/stale.");
   }
@@ -101,12 +112,16 @@ export function assertFocusedTurnAssignment(plan: TurnEvidence, target: string,
   paths: string[], recordTypes: string[] = [target.split(".")[0]!]): TurnAssignmentEvidence {
   const assignment = plan.assignments.find(a => a.id === "focus:" + target);
   const type = target.split(".")[0]!;
+  const create = plan.contract.scope.creates?.find(item => item.id === target);
   if (plan.kind !== "revision" || !assignment || assignment.targets.length !== 1 ||
-    assignment.targets[0] !== target || assignment.authority.mayCreate ||
+    assignment.targets[0] !== target || assignment.authority.mayCreate !== !!create ||
+    JSON.stringify(assignment.authority.newPaths ?? []) !==
+      JSON.stringify(create ? [create.path] : []) ||
     !assignment.authority.recordTypes.includes(type) ||
     JSON.stringify([...assignment.authority.recordTypes].sort()) !==
       JSON.stringify([...new Set(recordTypes)].sort()) ||
-    JSON.stringify([...assignment.authority.existingPaths].sort()) !==
+    JSON.stringify([...assignment.authority.existingPaths,
+      ...(assignment.authority.newPaths ?? [])].sort()) !==
       JSON.stringify([...paths].sort())) {
     throw new Error("Specialist assignment does not authorize this focused record write.");
   }

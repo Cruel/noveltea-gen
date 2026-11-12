@@ -41,7 +41,7 @@ const ids = (value: unknown) => Array.isArray(value)
 const unique = <T>(values: T[]) => [...new Set(values)]
 const exactId = /\b(?:arc|milestone|character|relationship|world-entity|fact|revelation|event|authored-content|choice-point|puzzle)\.[a-z][a-z0-9-]*\b/gi
 const protectedEdit = /^(?:please\s+)?(?:change|replace|revise|update)\s+(?:the\s+)?(?:protected\s+)?(?:creative\s+)?decision\s+(creative-direction\.[a-z][a-z0-9-]*#[a-z][a-z0-9-]*)\s+(?:to|with)\s+("(?:[^"\\]|\\.)*")\s*\.?$/i
-const protectedIntent = /\b(?:protected\s+(?:creative\s+)?decision|creative[-\s]+direction|override\s+canon|retcon|change\s+(?:the\s+)?(?:genre|tone|premise|scope|foundation)|ignore\s+(?:the\s+)?(?:original|author|canon))\b/i
+const protectedIntent = /\b(?:protected\s+(?:creative\s+)?decision|creative[-\s]+direction|overrid(?:e|es|ing)\s+(?:the\s+)?canon|retcon|change\s+(?:the\s+)?(?:genre|tone|premise|scope|foundation)|ignore\s+(?:the\s+)?(?:original|author|canon))\b/i
 const contrast = /\b(?:instead\s+of|rather\s+than|no\s+longer|opposite|reverse|replace|swap|contrary|never|not|over)\b/i
 const contentWords = (text: string): Set<string> => new Set(text.toLowerCase()
   .match(/[a-z]{4,}/g)?.filter(word => !new Set([
@@ -330,6 +330,133 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
   return { ...data, digest: hash(data) }
 }
 
+/** A new focused conversation is a bounded creation goal, not an unnamed
+ * revision of every scene or a request for the whole-Story graph. Typed links
+ * come from verified canon and explicit named speakers only. */
+function inferFocusedConversation(prompt: string, catalog: CanonicalScopeRecord[],
+  headSha: string, previous: CompletionContract, selectedTargets?: string[]): RevisionPreview | null {
+  if (!/\b(?:write|create|add|draft|generate|make)\b.{0,140}\b(?:a|an|new|another|fresh)\s+(?:conversation|dialogue|scene|exchange)\b/i.test(prompt)) return null
+  if (!prompt.trim() || prompt.length > 4000 || unsafe.test(prompt) || !SHA.test(headSha))
+    throw new Error('Invalid focused conversation objective or verified Story source.')
+  const request = prompt.trim()
+  const active = catalog.filter(r => r.metadata.status !== 'superseded') as RecordItem[]
+  const byId = new Map(active.map(r => [r.metadata.id, r]))
+  const blocked = (clarification: string): RevisionPreview => {
+    const data = { headSha, request, targets: [] as string[], writePaths: [] as string[],
+      contextIds: [] as string[], readOnlyIds: [] as string[],
+      dependencies: [] as RevisionPreview['dependencies'], depth: 'composition' as const,
+      contract: previous, rationale: ['New conversational content needs verified, connected canonical prerequisites.'],
+      reviewRequired: true, clarification, protectedChange: null, protectedConflict: null }
+    return { ...data, digest: hash(data) }
+  }
+  if (protectedIntent.test(request))
+    return blocked('Protected Story decisions require a separately approved exact before/after amendment; conversation creation cannot override canon.')
+  const names = /\bbetween\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)(?=\s|[.,!?]|$)/.exec(request)
+  if (!names) return blocked('Name the two speakers explicitly, for example: Write a conversation between Nia and Sol about their secret.')
+  const speakers = [names[1]!, names[2]!]
+  if (speakers[0]!.toLowerCase() === speakers[1]!.toLowerCase())
+    return blocked('Conversation speakers must identify two distinct Characters.')
+  const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 58).replace(/-$/, '')
+  const explicitIds = unique([...request.matchAll(exactId)].map(m => m[0]!.toLowerCase()))
+  if (explicitIds.some(id => !byId.has(id))) return blocked('Unknown named canonical record: ' +
+    explicitIds.filter(id => !byId.has(id)).join(', '))
+  const characterIds: string[] = []
+  const creates: NonNullable<CompletionContract['scope']['creates']> = []
+  for (const name of speakers) {
+    const matches = active.filter(r => r.metadata.type === 'character' &&
+      (String(r.metadata.title ?? '').toLowerCase() === name.toLowerCase() ||
+        r.metadata.id === 'character.' + slug(name)))
+    if (matches.length > 1) return blocked('More than one canonical Character matches ' + name + '.')
+    if (matches.length === 1) characterIds.push(matches[0]!.metadata.id)
+    else {
+      const id = 'character.' + slug(name)
+      if (!/^(character)\.[a-z][a-z0-9-]*$/.test(id) || byId.has(id))
+        return blocked('The new speaker has no unambiguous canonical Character identity.')
+      characterIds.push(id)
+      creates.push({ id, path: 'characters/' + id.split('.')[1] + '.md', title: name,
+        references: [], dependsOn: [] })
+    }
+  }
+  const arcIds = explicitIds.filter(id => id.startsWith('arc.'))
+  if (arcIds.length > 1) return blocked('A new conversation requires one specific existing Arc, not multiple unrelated Arcs.')
+  const arcs = active.filter(r => r.metadata.type === 'arc')
+  const shared = arcs.filter(r => characterIds.every(id => ids(r.metadata.characters).includes(id)))
+  const arc = arcIds[0] ?? (shared.length === 1 ? shared[0]!.metadata.id : arcs.length === 1 ? arcs[0]!.metadata.id : null)
+  if (!arc || !byId.has(arc))
+    return blocked('Select the existing arc.<id> this conversation belongs to; unrelated subplot creation is not authorized.')
+  const linkedRelationship = active.filter(r => r.metadata.type === 'relationship' &&
+    characterIds.every(id => ids(r.metadata.characters).includes(id)) &&
+    ids(r.metadata.characters).length === 2)
+  if (linkedRelationship.length > 1) return blocked('Multiple existing Relationships connect the speakers; choose the intended canonical relationship.')
+  let relationshipId = linkedRelationship[0]?.metadata.id
+  // Ordinary spoken dialogue does not require manufacturing a Relationship.
+  // Explicit trust/bond dynamics do, and are represented by a typed Event effect.
+  const relationalGoal = /\b(?:relationship|reconcil\w*|trust|betray\w*|estrang\w*|friendship|rival\w*|bond|romance|enmity)\b/i.test(request)
+  if (!relationshipId && relationalGoal) {
+    const id = 'relationship.' + [...characterIds].map(id => id.slice('character.'.length)).join('-')
+    if (byId.has(id)) return blocked('A different existing Relationship uses the proposed identity; select the correct one.')
+    relationshipId = id
+    creates.push({ id, path: 'relationships/' + id.split('.')[1] + '.md',
+      title: speakers.join(' and '), references: [...characterIds],
+      dependsOn: creates.filter(c => c.id.startsWith('character.')).map(c => c.id) })
+  }
+  const existingEvents = explicitIds.filter(id => id.startsWith('event.'))
+  if (existingEvents.length > 1) return blocked('A focused conversation may be anchored to only one explicit Event.')
+  let eventId = existingEvents[0]
+  if (eventId) {
+    const event = byId.get(eventId)!
+    const participants = ids(event.metadata.participants)
+    if (!characterIds.every(id => participants.includes(id)))
+      return blocked('The existing Event does not include both speakers; separately review an Event revision before authoring dialogue.')
+  } else {
+    const topic = /\babout\s+(.+?)(?:[.!?]|$)/i.exec(request)?.[1] ?? ''
+    const stem = slug('conversation-' + speakers.join('-') + (topic ? '-' + topic : ''))
+    eventId = 'event.' + stem
+    if (!/^[a-z][a-z0-9-]*$/.test(stem) || byId.has(eventId))
+      return blocked('A canonical Event already uses this conversation identity; specify its Event ID to reuse it.')
+    creates.push({ id: eventId, path: 'events/' + stem + '.md',
+      title: 'Conversation between ' + speakers.join(' and '),
+      references: [arc, ...characterIds,
+        ...(relationalGoal && relationshipId ? [relationshipId] : [])],
+      dependsOn: creates.map(c => c.id) })
+  }
+  const contentId = 'authored-content.' + eventId.slice('event.'.length)
+  if (byId.has(contentId)) return blocked('Authored Content already exists for this conversation identity; select a focused revision.')
+  creates.push({ id: contentId, path: 'authored-content/' + contentId.split('.')[1] + '.md',
+    title: 'Dialogue between ' + speakers.join(' and '), references: [eventId],
+    dependsOn: creates.map(c => c.id) })
+  if (selectedTargets && (selectedTargets.length !== creates.length ||
+      selectedTargets.some(id => !creates.some(c => c.id === id))))
+    throw new Error('A focused creation may not drop its required typed support assignments.')
+  const targets = creates.map(c => c.id)
+  const contract = parseGenerationContract({
+    scope: { kind: 'partial', depth: 'composition', targets, branches: [], creates },
+    constraints: unique([...previous.constraints,
+      'Author only the connected conversation and supporting canonical records: ' + request]),
+    envelope: previous.envelope,
+  })
+  const relevantFacts = active.filter(r =>
+    ['fact', 'revelation', 'world-entity'].includes(r.metadata.type) &&
+    typeof r.metadata.title === 'string' && includesName(request, r.metadata.title))
+    .map(r => r.metadata.id)
+  const contextIds = unique([arc, ...characterIds.filter(id => byId.has(id)),
+    ...(relationshipId && byId.has(relationshipId) ? [relationshipId] : []),
+    ...(eventId && byId.has(eventId) ? [eventId] : []),
+    ...explicitIds.filter(id => byId.has(id)), ...relevantFacts,
+    ...active.filter(r => r.metadata.type === 'creative-direction').map(r => r.metadata.id)]).sort()
+  const dependencies = creates.flatMap(c => [
+    ...c.dependsOn.map(id => ({ from: id, to: c.id, relation: 'new-record-prerequisite' })),
+    ...c.references.filter(id => byId.has(id)).map(id =>
+      ({ from: id, to: c.id, relation: 'canonical-reference' })),
+  ])
+  const data = { headSha, request, targets, writePaths: creates.map(c => c.path).sort(),
+    contextIds, readOnlyIds: contextIds, dependencies, depth: 'composition' as const,
+    contract, rationale: ['Create only the necessary Character, Relationship, Event and player-facing dialogue; reuse verified Story canon unchanged.'],
+    reviewRequired: true, clarification: null,
+    protectedChange: null, protectedConflict: null }
+  return { ...data, digest: hash(data) }
+}
+
 /** Interpret broad and targeted objectives against the same verified Story.
  * Existing-Turn generation never inherits the preceding Turn's target list.
  * A requested new whole Story is a separately reviewed scope expansion, not
@@ -337,7 +464,8 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
 export function inferStoryObjective(prompt: string, catalog: CanonicalScopeRecord[],
   headSha: string, previous: CompletionContract, selectedTargets?: string[]): RevisionPreview {
   if (!isWholeStoryCreationRequest(prompt))
-    return inferStoryRevision(prompt, catalog, headSha, previous, selectedTargets)
+    return inferFocusedConversation(prompt, catalog, headSha, previous, selectedTargets) ??
+      inferStoryRevision(prompt, catalog, headSha, previous, selectedTargets)
   if (selectedTargets !== undefined)
     throw new Error('A whole-Story objective cannot silently inherit focused record selections.')
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 4000 ||

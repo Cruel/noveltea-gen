@@ -6,6 +6,15 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { parseGenerationContract } from "../src/generation.js";
+import { startStoryJob } from "../src/job.js";
+import { validateStoryJob } from "../src/validator.js";
+import { runArchitectureJob, type CompletionContract } from "../src/architecture.js";
+import { runFocusedWorkItem } from "../src/focused-work.js";
+import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import type { CanonicalScopeRecord } from "../src/focused-scope.js";
+import { planObjective } from "../web/src/lib/turn-plan.js";
+import { inferStoryObjective } from "../web/src/lib/story-revision-plan.js";
+import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
 
 const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
 const available = existsSync(join(source, "src/cli.ts"));
@@ -41,6 +50,89 @@ function fixture(name: string) {
   };
   return { repo, story, env, contract, cli, contractPath };
 }
+
+test("bounded conversation creation commits only canonical new support with preserved source Story", {
+  skip: !available, timeout: 300_000,
+}, async () => {
+  const f = fixture("focused-conversation-creation");
+  f.cli("seed", ["start"]);
+  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
+  const seeded = f.cli("seed", ["generate", "start", "--task", "Seed a witness mystery",
+    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
+  assert.equal(seeded.reason, "editorial-unverified");
+  git(f.repo, "merge", "--ff-only", seeded.report.identity.branch);
+  const canonical = git(f.repo, "rev-parse", "HEAD");
+  f.cli("conversation", ["start"]);
+  const oldState = process.env.NT_STATE_DIR, oldCache = process.env.NT_SKILL_CACHE_DIR;
+  process.env.NT_STATE_DIR = f.env.NT_STATE_DIR;
+  process.env.NT_SKILL_CACHE_DIR = f.env.NT_SKILL_CACHE_DIR;
+  try {
+    const job = await startStoryJob({ story: f.story, job: "conversation" }, false);
+    assert.equal(job.baseSha, canonical);
+    const before = await validateStoryJob(job, source, { ...job, baseSha: canonical });
+    assert.equal(before.status, "passed");
+    const catalog = (before.report as { records: CanonicalScopeRecord[] }).records;
+    const prior = JSON.parse(readFileSync(f.contractPath, "utf8")) as CompletionContract;
+    const task = "Write a conversation between Ada and Neri about rebuilding trust after the forgotten promise";
+    const preview = inferStoryObjective(task, catalog, canonical, prior);
+    assert.equal(preview.clarification, null);
+    assert.ok(preview.contract.scope.creates?.length);
+    assert.equal(preview.reviewRequired, true);
+    const plan = planObjective({ kind: "revision", request: task, contract: preview.contract,
+      base: canonical, sourceJobId: "seed", catalog,
+      targetIds: preview.targets, allowedPaths: preview.writePaths });
+    await saveJobTurnPlan(job, plan);
+    const architecture = await runArchitectureJob({ story: f.story, job: "conversation",
+      action: "run", fixture: true, contract: preview.contract, skillsSource: source });
+    assert.equal(architecture.status, "architecture-committed");
+    const created = preview.contract.scope.creates!;
+    for (const item of created) {
+      const result = await runFocusedWorkItem({ story: f.story, job: "conversation",
+        target: item.id, task, contract: preview.contract, fixture: true,
+        turnPlanDigest: plan.digest, skillsSource: source });
+      assert.equal(result.status, "focused-committed");
+      const after = await runFocusedWorkItem({ story: f.story, job: "conversation",
+        target: item.id, task, contract: preview.contract, fixture: true,
+        turnPlanDigest: plan.digest, skillsSource: source });
+      assert.equal(after.headSha, result.headSha, "completed assignment replays must be idempotent");
+    }
+    const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p =>
+      p.workItem.startsWith("focus:"));
+    assert.equal(checkpoints.length, created.length);
+    for (const item of created) {
+      const point = checkpoints.find(p => p.workItem === "focus:" + item.id)!;
+      assert.equal(point.eligible, true, point.reason ?? "checkpoint eligible");
+      assert.equal(point.assurance?.assignmentId, "focus:" + item.id);
+      assert.deepEqual(point.assurance?.changedPaths, [item.path]);
+      assert.deepEqual(point.dependencies["focus:" + item.id], ["global-architecture",
+        ...item.dependsOn.map(id => "focus:" + id)]);
+      if (item.id.startsWith("event.")) {
+        assert.equal(point.assurance?.reviewSelection.status, "required-pending",
+          "a new causal Event must wait for independent semantic review in production");
+        assert.equal(point.semanticReview, "required-pending",
+          "fixture validation does not manufacture an independent reviewer pass");
+      }
+    }
+    const final = git(job.worktreeRoot, "rev-parse", "HEAD");
+    const changed = git(job.worktreeRoot, "diff", "--name-only", canonical, final)
+      .split("\n").filter(Boolean).map(path => path.replace(/^story\//, "")).sort();
+    assert.deepEqual(changed, preview.writePaths);
+    const verified = await validateStoryJob(job, source, { ...job, baseSha: canonical });
+    assert.equal(verified.status, "passed");
+    const after = (verified.report as { records: CanonicalScopeRecord[] }).records;
+    for (const create of created) {
+      const record = after.find(item => item.metadata.id === create.id);
+      assert.equal(record?.path, create.path);
+    }
+    assert.equal(git(f.repo, "rev-parse", "HEAD"), canonical);
+    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+  } finally {
+    if (oldState === undefined) delete process.env.NT_STATE_DIR;
+    else process.env.NT_STATE_DIR = oldState;
+    if (oldCache === undefined) delete process.env.NT_SKILL_CACHE_DIR;
+    else process.env.NT_SKILL_CACHE_DIR = oldCache;
+  }
+});
 
 test("completion contract accepts typed deep targets, presets, and rejects ambiguous or invalid scope", () => {
   const input = { scope: { kind: "partial", preset: "interactive-development",
