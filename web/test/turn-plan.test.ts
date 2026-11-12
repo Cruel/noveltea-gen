@@ -10,6 +10,7 @@ import { inferStoryObjective, inferStoryRevision, isWholeStoryCreationRequest,
 import { assertTurnPlan, planObjective, planRevision, planWholeStory, verifyTurnPlan } from '../src/lib/turn-plan'
 import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { assertFocusedTurnAssignment, readTurnEvidence } from '../../src/turn-plan-evidence'
+import { GenerationInputSchema } from '../../src/generation'
 
 const a = 'a'.repeat(40), b = 'b'.repeat(40)
 const contract = {
@@ -33,6 +34,14 @@ test('new focused conversation pins exact create-vs-edit authority and prerequis
     contract: preview.contract, base: b, sourceJobId: 'source-one', catalog,
     targetIds: preview.targets, allowedPaths: preview.writePaths })
   const creates = preview.contract.scope.creates ?? []
+  const accepted = GenerationInputSchema.parse({ request: {
+    story: '/isolated/story', job: 'focused-job', task: preview.request,
+    contract: preview.contract, fixture: false,
+    provider: 'openai-codex', model: 'gpt-6-luna',
+    orchestrationPolicy: 'explicit', turnPlanDigest: planned.digest,
+  } })
+  assert.deepEqual(accepted.request.contract, preview.contract,
+    'graph input must preserve source-bound creation grants or it will reject the authorized writer')
   assert.deepEqual(planned.assignments.filter(item => item.id.startsWith('focus:'))
     .map(item => item.id), creates.map(item => 'focus:' + item.id))
   for (const create of creates) {

@@ -76,8 +76,10 @@ export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: C
     if (existing) {
       const found = new Set(references(existing.metadata,
         new Set([...byId.keys(), ...creates.keys()])));
-      if (item.references.some(ref => !found.has(ref)))
-        throw new Error("Created Story record omitted a pinned typed reference: " + item.id);
+      const missing = item.references.filter(ref => !found.has(ref));
+      if (missing.length)
+        throw new Error("Created Story record omitted a pinned typed reference: " + item.id +
+          " (" + missing.join(", ") + ")");
     } else {
       byId.set(item.id, { path: item.path, metadata: {
         id: item.id, type: item.id.split(".")[0]!, status: "planned",

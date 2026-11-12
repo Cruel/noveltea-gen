@@ -746,17 +746,21 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
       if (!point?.assurance) throw Error("Repair successor checkpoint was lost.");
       const profile = (await inspectRejectedRepair(job, state.sourceCommitSha)).reviewer;
       if (!profile) throw Error("Original independent-review profile was not pinned.");
-      await runPiAssignmentReview(job, [point], {
-        snapshot: profile.snapshot, provider: profile.provider, model: profile.model,
-        thinking: profile.thinking, reviewer: "independent-pi-assignment-review",
-        onSession: async file => {
-          const current = await inspectRejectedRepair(job, state.sourceCommitSha);
-          if (!current.reviewer || current.phase !== "reviewing")
-            throw Error("Reviewer session cannot attach to an unrelated repair.");
-          current.reviewer.sessionFiles.push(file);
-          await save(job, current);
-        },
-      });
+      // A read-only Pi reviewer still owns an active cancellable Story turn.
+      // The original review takes this lease; a post-repair rereview must do
+      // the same or it fails the active-writer guard after expensive model work.
+      await withStoryJobLock(job, "rejected-review-rereview", () =>
+        runPiAssignmentReview(job, [point], {
+          snapshot: profile.snapshot, provider: profile.provider, model: profile.model,
+          thinking: profile.thinking, reviewer: "independent-pi-assignment-review",
+          onSession: async file => {
+            const current = await inspectRejectedRepair(job, state.sourceCommitSha);
+            if (!current.reviewer || current.phase !== "reviewing")
+              throw Error("Reviewer session cannot attach to an unrelated repair.");
+            current.reviewer.sessionFiles.push(file);
+            await save(job, current);
+          },
+        }));
     },
     finishReview: sha => withStoryJobLock(job, "rejected-review-seal", () =>
       finishRejectedRepairReview(job, sha)),

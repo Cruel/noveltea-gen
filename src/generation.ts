@@ -132,6 +132,10 @@ export const GenerationInputSchema = z.object({
         targets: z.array(z.string()),
         branches: z.array(z.string()),
         supportingTargets: z.array(z.string()).optional(),
+        creates: z.array(z.object({
+          id: z.string(), path: z.string(), title: z.string(),
+          references: z.array(z.string()), dependsOn: z.array(z.string()),
+        })).optional(),
       }).refine(scope => scope.depth !== undefined || scope.preset !== undefined,
         "Provide scope.depth or scope.preset"),
       constraints: z.array(z.string()),

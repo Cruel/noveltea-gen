@@ -49,6 +49,14 @@ NT_TEST_WEB_PI_OBJECTIVE_PLANNER=1 pnpm certify:self-hosted --live-pi
 
 The opt-in objective-planner variant saves an immutable whole-Story Turn before authenticated admission and requires a pinned orchestrator selection, all prescribed methodology/catalog reads, a complete authorized assignment proposal, a source/model-bound replay receipt and the same native-verified Foundation commit. Without this flag, the legacy Foundation-only live gate does not certify objective planning.
 
+For **#150 focused conversation creation**, run a separate opt-in test using the same trusted environment above:
+
+```sh
+NT_TEST_WEB_PI_FOCUSED=1 pnpm --filter @noveltea/studio exec tsx --test test/real-pi-focused-conversation.test.ts
+```
+
+This test creates a disposable native-valid Story with existing Characters, Relationship, Arc, Milestone and Foundation, then authenticates an author and admits a reviewed conversation Turn with exact creation grants. A dedicated agent and rootless sandbox must use real Pi to write only the new Event and Authored Content. Native validation, unchanged preexisting bytes, Git receipts, durable checkpoint inspection after Studio reconnect, independent Event review, independent literary verdict, and completed Thread status are required. Interrupted-writer replay refusal is separately exercised by `test/focused-generation.test.ts`; this live test does not kill an active agent. It is not part of the Foundation-only `--live-pi` gate; it requires a paid model and does not certify real provider publication or all of #71's broader release scenarios.
+
 The test opens the source database **read-only** and copies only the currently valid device-code OAuth **access token** into a disposable encrypted test database, replacing its refresh token with an unusable sentinel. It refuses an expiring login; this preserves the real Studio connection even if the test crashes or tries to refresh credentials. It runs a separate dedicated agent process, real sandbox, pinned native validator and authenticated Studio queue admission. The certification job pins a trusted `pauseAfter: foundation` stage boundary, verifies that Foundation was validated and committed, and stops before launching paid-model work for Architecture or subsequent stages. It never uses shared host `~/.pi` files. Reconnect through device code if the source token is too close to expiry.
 
 For API-key certification, set `NT_TEST_WEB_PI_AUTH=api-key`, `NT_TEST_WEB_PI_API_KEY`, `NT_TEST_WEB_PI_PROVIDER` and `NT_TEST_WEB_PI_MODEL` instead. Both modes require an explicit provider and model. Its success is evidence of a **real** model call and a canonical commit, not of published narrative quality. Use the actual test logs and private LangGraph traces to verify Pi tools, reasoning/provider selection, and that untrusted paths remain inaccessible; do not store private transcripts in the evidence JSON.

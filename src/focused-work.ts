@@ -120,6 +120,39 @@ function fixtureCreatedRecord(create: PlannedFocusCreate, contract: CompletionCo
   throw Error("No focused creation fixture for " + create.id);
 }
 
+/** Turn creation grants describe typed IDs; translate them into actual schema
+ * fields so the model cannot mistake a relationship link for freeform prose. */
+function creationReferenceInstructions(create: PlannedFocusCreate): string {
+  const ofType = (type: string) => create.references.filter(id => id.startsWith(type + "."));
+  const yaml = (refs: string[]) => "[" + refs.join(", ") + "]";
+  if (create.id.startsWith("event.")) {
+    const relationships = ofType("relationship");
+    return "For this Event, YAML frontmatter MUST contain these exact typed references:\n" +
+      "participants: " + yaml(ofType("character")) + "\n" +
+      "arcs: " + yaml(ofType("arc")) + "\n" +
+      (relationships.length ? "Every required Relationship MUST be represented by an actual typed " +
+        "branch effect (a mention in the body is insufficient). In the YAML Event steps[].branches[] use " +
+        "the supported effects syntax, for example:\n" +
+        "effects: [{kind: relationship, relationship: " + relationships[0] +
+        ", value: trusting}]\n" +
+        "Include every required Relationship ID: " + yaml(relationships) + "\n" : "") +
+      "Include valid prerequisites, consequences, and a playable Step/branch. " +
+      "Do not introduce references to unrelated Event or Milestone IDs.\n";
+  }
+  if (create.id.startsWith("authored-content."))
+    return "Use exactly these supported frontmatter keys for this Authored Content record " +
+      "(NEVER add references or dependsOn — those are controller-only planning properties):\n" +
+      "---\nschema: '0.1'\ntype: authored-content\nid: " + create.id +
+      "\ntitle: " + JSON.stringify(create.title) +
+      "\nstatus: draft\ndecisions: []\nevents: " + yaml(ofType("event")) +
+      "\nrevelations: []\n---\n" +
+      "Then write actual attributed dialogue with the named speakers and concrete stakes.\n";
+  if (create.id.startsWith("relationship."))
+    return "YAML frontmatter MUST include characters: " + yaml(ofType("character")) +
+      " and an initial relationship state.\n";
+  return "Preserve the exact Character ID and write a concrete motivation and substantive prose.\n";
+}
+
 async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
   create?: PlannedFocusCreate) {
@@ -169,7 +202,12 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       "additional canonical Story records and discover typed dependencies. Discovery is READ-ONLY, " +
       "never write authority; do not inspect private inboxes.\n" +
       (create ? "Create ONLY this new canonical Markdown file with schema 0.1, exact type/id/title and typed references:\n" +
-        JSON.stringify(create) + "\nDo not alter any preexisting files. Write substantive narrative content, " +
+        JSON.stringify(create) + "\n" +
+        "IMPORTANT: references and dependsOn in this JSON are controller-only dependency grants, NOT canonical YAML keys. " +
+        "NEVER add references: or dependsOn: to the new record's frontmatter. " +
+        "Translate them only into the permitted typed schema fields below, following nt-catalog.\n" +
+        creationReferenceInstructions(create) +
+        "Do not alter any preexisting files. Write substantive narrative content, " +
         "not a placeholder, including actual in-scene character dialogue for Authored Content. " :
         "Only edit these PREEXISTING canonical Markdown files:\n" + receipt.paths.join("\n")) +
       "\nAll other files are READ-ONLY context (including upstream prerequisites, milestones, Arcs, and all sibling records). " +
