@@ -18,6 +18,7 @@ import { cancelQueuedThreadMessage, advanceThread, readThreadChat,
   settleThreadRun, recoverSettledThreadRuns } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
 import { assertProtectedThreadApproval, recordProtectedThreadDecision } from '../src/lib/thread-protected-decision.server'
+import { readJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { runRevisionAction, trustedHead } from '../../src/revision'
 import { requestTrustedApproval, recordTrustedControllerDecision } from '../../src/trusted-approval'
 import { snapshotForkBoundaryHistory } from '../src/lib/thread-fork-history.server'
@@ -117,6 +118,9 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
       assert.equal(plan.reviewRequired, true)
       assert.deepEqual(plan.targets, [])
       assert.deepEqual(plan.writePaths, ['creative-direction/last-bell.md'])
+      assert.equal(plan.turnPlan?.kind, 'protected-amendment')
+      assert.equal(plan.turnPlan?.objective?.breadth, 'protected-amendment')
+      assert.deepEqual(plan.turnPlan?.assignments.map(a => a.id), ['protected-decision'])
       await assert.rejects(previewThreadRevision(f.store, f.stranger, f.threadId, message),
         /no source|not found/i)
       const held = await submitThreadRevision(f.store, f.owner, f.threadId,
@@ -161,6 +165,10 @@ test('protected conversation amendment needs a new owner-bound exact receipt and
         JSON.stringify(current.messages))
       assert.deepEqual(current.runs.map(r => r.jobId), [f.sourceId, childId])
       const child = await restoreJob(await selectedJob(f.store, f.owner, childId), f.owner)
+      const persisted = await readJobTurnPlan(child)
+      assert.equal(persisted?.kind, 'protected-amendment')
+      assert.deepEqual(persisted?.assignments.map(a => a.id), ['protected-decision'])
+      assert.equal(persisted?.digest, preview.turnPlan?.digest)
       assert.equal(child.baseSha, f.sha)
       assert.notEqual(child.headSha, f.sha)
       const changedFile = readFileSync(join(child.worktreeStoryRoot,

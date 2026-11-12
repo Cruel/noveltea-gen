@@ -9,15 +9,17 @@ import { validCreativeMode } from '../../../src/creative-policy'
 
 const ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 export const previewStoryPrompt = createServerFn({ method: 'POST' })
-  .validator((data: { storyId: string; prompt: string; edits?: PlanEdits }) => {
-    if (!data || !ID.test(data.storyId) || typeof data.prompt !== 'string' ||
-        data.prompt.length > 4000) throw new Error('Invalid Story prompt.')
+  .validator((data: { storyId: string; prompt: string; edits?: PlanEdits; jobId?: string }) => {
+    if (!data || !ID.test(data.storyId) || data.jobId !== undefined && !ID.test(data.jobId) ||
+        typeof data.prompt !== 'string' || data.prompt.length > 4000) throw new Error('Invalid Story prompt.')
     return data
   })
   .handler(async ({ data }) => {
     const actor = await requireUser(auth, getRequestHeaders())
     if (!actor) throw new Error('Sign in required.')
-    return previewNaturalStory(database, actor.id, data.storyId, data.prompt, data.edits)
+    return previewNaturalStory(database, actor.id, data.storyId, data.prompt, data.edits,
+      data.jobId ? { auth, headers: new Headers(getRequestHeaders()),
+        baseURL: readAuthConfig().baseURL, jobId: data.jobId } : undefined)
   })
 
 export const startStoryPrompt = createServerFn({ method: 'POST' })

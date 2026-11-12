@@ -40,6 +40,24 @@ const validSavedPolicy = (value: unknown): boolean => {
 };
 const safePath = /^[a-z][a-z-]*\/[a-z0-9-]+\.md$/;
 
+/** Shared, structural objective attestation for web admission and worker replay.
+ * Per-boundary ownership, Git and contract integrity checks remain with callers. */
+export function validTurnObjective(plan: TurnEvidence): boolean {
+  if (plan.objective === undefined) return true; // Pre-#149 saved receipts.
+  const objective = plan.objective;
+  if (!objective || typeof objective !== "object" || Array.isArray(objective) ||
+      !plan.contract?.scope || !Array.isArray(plan.contract.scope.targets)) return false;
+  return objective.breadth === (plan.kind === "full-story" ? "whole-story" :
+      plan.kind === "revision" ? "focused" : "protected-amendment") &&
+    Array.isArray(objective.requestedTargets) &&
+    JSON.stringify(objective.requestedTargets) === JSON.stringify(
+      plan.kind === "revision" ? [...new Set(plan.contract.scope.targets)].sort() : []) &&
+    objective.deliveryDepth === plan.contract.scope.depth &&
+    Array.isArray(objective.obligations) && objective.obligations.length > 0 &&
+    objective.obligations.length <= 32 &&
+    objective.obligations.every(o => typeof o === "string" && !!o.trim() && o.length <= 2000);
+}
+
 /** Controller-owned private evidence; a model's claim is never permission. */
 export async function readTurnEvidence(job: JobStartResult, contract: CompletionContract,
   originalRequest?: string, requiredDigest?: string): Promise<TurnEvidence | null> {
@@ -62,16 +80,7 @@ export async function readTurnEvidence(job: JobStartResult, contract: Completion
     (originalRequest !== undefined && plan.originalRequest !== originalRequest) ||
     (plan.creativePolicy !== undefined && !validSavedPolicy(plan.creativePolicy)) ||
     JSON.stringify(plan.contract) !== JSON.stringify(contract) ||
-    (plan.objective !== undefined && (
-      plan.objective.breadth !== (plan.kind === "full-story" ? "whole-story" :
-        plan.kind === "revision" ? "focused" : "protected-amendment") ||
-      !Array.isArray(plan.objective.requestedTargets) ||
-      JSON.stringify(plan.objective.requestedTargets) !== JSON.stringify(
-        plan.kind === "revision" ? [...new Set(plan.contract.scope.targets)].sort() : []) ||
-      plan.objective.deliveryDepth !== plan.contract.scope.depth ||
-      !Array.isArray(plan.objective.obligations) || !plan.objective.obligations.length ||
-      plan.objective.obligations.length > 32 ||
-      plan.objective.obligations.some(o => typeof o !== "string" || !o.trim() || o.length > 2000))) ||
+    !validTurnObjective(plan) ||
     !Array.isArray(assignments) || !assignments.length || assignments.length > 129 ||
     new Set(assignments.map(a => a.id)).size !== assignments.length ||
     assignments.some(a => !a.id || !a.outcome?.trim() ||

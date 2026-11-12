@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JobStartResult } from "../src/job.js";
@@ -10,6 +10,7 @@ import { planWholeStory, planRevision } from "../web/src/lib/turn-plan.js";
 import {
   verifyOrchestratorProposal,
   readPinnedObjectivePlanning,
+  restoreCheckpointedObjectivePlanning,
   type OrchestratorPlanningReceipt,
 } from "../src/orchestrator-planner.js";
 import { nextExecutionItem, type GenerationInventory } from "../src/generation-plan.js";
@@ -136,6 +137,13 @@ test("signed planning receipt survives reconnect and rejects tampering, source a
     };
     write(body);
     const accepted = await readPinnedObjectivePlanning(job, selection, plan, "openai", "gpt-6-luna");
+    const order = proposal.assignments.map(a => a.id);
+    const restore = (digest: string | null = accepted.digest) =>
+      restoreCheckpointedObjectivePlanning(job, selection, plan, "openai", "gpt-6-luna",
+        digest, order);
+    assert.equal((await restore()).digest, accepted.digest);
+    await assert.rejects(restore(null), /model replay refused/i);
+    await assert.rejects(restore("0".repeat(64)), /differs/i);
     assert.equal(accepted.proposal?.assignments.length, plan.assignments.length);
     assert.equal(accepted.sourceSha, a);
     await assert.rejects(
@@ -158,10 +166,13 @@ test("signed planning receipt survives reconnect and rejects tampering, source a
       /assignment set/i,
     );
     write(body);
-    assert.equal(
-      (await readPinnedObjectivePlanning(job, selection, plan, "openai", "gpt-6-luna")).phase,
-      "planned",
-    );
+    assert.equal((await restore()).phase, "planned");
+    // The parent graph calls restore, never runPinnedObjectivePlanner, once
+    // its order and digest have been checkpointed. Deletion must not create
+    // another model session, even if a new proposal would have the same order.
+    rmSync(join(stateDir, "objective-planning.json"));
+    await assert.rejects(restore(), /missing, corrupt or stale; model replay refused/i);
+    assert.equal(existsSync(join(stateDir, "objective-planning.json")), false);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

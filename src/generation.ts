@@ -36,7 +36,7 @@ import { loadSkillConfig } from "./skills.js";
 import { hasStoryOrchestratorSelection, loadSelectedStoryOrchestrator,
   selectStoryOrchestrator, type StoryOrchestratorReceipt,
   type StoryOrchestratorSelection } from "./orchestrator-selection.js";
-import { runPinnedObjectivePlanner, readPinnedObjectivePlanning,
+import { runPinnedObjectivePlanner, restoreCheckpointedObjectivePlanning,
   type OrchestratorPlanningReceipt } from "./orchestrator-planner.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
@@ -172,6 +172,8 @@ const Channels = Annotation.Root({
   orchestratorSnapshotId: Annotation<string | null>(),
   /** Only a dependency-safe preference over the same pinned assignments. */
   orchestratorOrder: Annotation<string[] | null>(),
+  /** Exact model proposal, rationale and transcript identity across replay. */
+  orchestratorPlanningDigest: Annotation<string | null>(),
 });
 type State = typeof Channels.State;
 const openJob = async (s: State) => {
@@ -518,6 +520,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         if (s.orchestratorSnapshotId && orchestratorSnapshotId !== s.orchestratorSnapshotId)
           throw new Error("Pinned orchestrator snapshot changed during generation resume.");
         let orchestratorOrder: string[] | null = null;
+        let orchestratorPlanningDigest: string | null = null;
         if (selection && request.turnPlanDigest && !request.fixture) {
           const plan = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
           if (!plan) throw new Error("A selected objective lacks the controller's pinned Turn plan.");
@@ -526,14 +529,25 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           if (plan.objective) {
             const { inspectPiPolicy } = await import("./job-pi-policy.js");
             const { policy } = await inspectPiPolicy(job);
-            const receipt = await runPinnedObjectivePlanner(job, selection, plan,
-              request.provider ?? policy.profile.provider, request.model ?? policy.profile.model);
+            const provider = request.provider ?? policy.profile.provider;
+            const model = request.model ?? policy.profile.model;
+            if (s.orchestratorPlanningDigest && !s.orchestratorOrder)
+              throw new Error("Checkpointed objective planning digest lacks its assignment order.");
+            if (s.orchestratorPlanningDigest && !s.orchestratorOrder)
+              throw new Error("Checkpointed orchestrator receipt digest has no assignment order; model replay refused.");
+            const receipt = s.orchestratorOrder
+              ? await restoreCheckpointedObjectivePlanning(job, selection, plan, provider, model,
+                  s.orchestratorPlanningDigest, s.orchestratorOrder)
+              : await runPinnedObjectivePlanner(job, selection, plan, provider, model);
             orchestratorOrder = receipt.proposal!.assignments.map(a => a.id);
+            orchestratorPlanningDigest = receipt.digest;
           }
         }
         if (s.orchestratorOrder && JSON.stringify(s.orchestratorOrder) !== JSON.stringify(orchestratorOrder))
           throw new Error("Pinned orchestration assignment order changed during resume.");
-        return { request, orchestratorSnapshotId, orchestratorOrder,
+        if (s.orchestratorPlanningDigest && s.orchestratorPlanningDigest !== orchestratorPlanningDigest)
+          throw new Error("Pinned orchestration planning receipt changed during resume.");
+        return { request, orchestratorSnapshotId, orchestratorOrder, orchestratorPlanningDigest,
           status: "running" as const, reason: null, failures: s.failures ?? {} };
       } catch (error) { return blocked(error); }
     })
@@ -784,7 +798,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         state = { request, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
-          orchestratorSnapshotId: null, orchestratorOrder: null };
+          orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)
@@ -840,14 +854,10 @@ export async function runStoryGeneration(options: GenerationOptions) {
             if (!plan) throw new Error("Checkpointed objective plan lacks its Turn receipt.");
             const { inspectPiPolicy } = await import("./job-pi-policy.js");
             const { policy } = await inspectPiPolicy(job);
-            const saved = await readPinnedObjectivePlanning(job, selected, plan,
+            orchestrationPlanning = await restoreCheckpointedObjectivePlanning(job, selected, plan,
               state.request.provider ?? policy.profile.provider,
-              state.request.model ?? policy.profile.model);
-            if (saved.phase !== "planned" ||
-                JSON.stringify(saved.proposal?.assignments.map(a => a.id)) !==
-                  JSON.stringify(state.orchestratorOrder))
-              throw new Error("Orchestrator planning receipt disagrees with the checkpointed assignment order.");
-            orchestrationPlanning = saved;
+              state.request.model ?? policy.profile.model,
+              state.orchestratorPlanningDigest, state.orchestratorOrder);
           }
         } else if (state.orchestratorSnapshotId) {
           throw new Error("Pinned orchestrator selection receipt is missing; restore it before inspection.");

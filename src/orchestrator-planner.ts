@@ -150,6 +150,38 @@ export async function readPinnedObjectivePlanning(
   return verifyReceipt(raw, job, selection, plan, provider, model);
 }
 
+/** A durable parent checkpoint is proof a model turn already settled. Only
+ * restore its exact receipt; missing evidence cannot authorize another call. */
+export async function restoreCheckpointedObjectivePlanning(
+  job: JobStartResult,
+  selection: StoryOrchestratorSelection,
+  plan: TurnEvidence,
+  provider: string,
+  model: string,
+  checkpointDigest: string | null | undefined,
+  checkpointOrder: string[],
+): Promise<OrchestratorPlanningReceipt> {
+  if (!checkpointDigest || !/^[a-f0-9]{64}$/.test(checkpointDigest))
+    throw new Error(
+      "Checkpointed objective planner lacks its original receipt digest; model replay refused.",
+    );
+  let saved: OrchestratorPlanningReceipt;
+  try {
+    saved = await readPinnedObjectivePlanning(job, selection, plan, provider, model);
+  } catch {
+    throw new Error(
+      "Checkpointed objective planning receipt is missing, corrupt or stale; model replay refused.",
+    );
+  }
+  if (
+    saved.phase !== "planned" ||
+    saved.digest !== checkpointDigest ||
+    JSON.stringify(saved.proposal?.assignments.map((a) => a.id)) !== JSON.stringify(checkpointOrder)
+  )
+    throw new Error("Checkpointed objective planning receipt differs from the original model turn.");
+  return saved;
+}
+
 function parseText(text: string): unknown {
   const raw = text
     .trim()

@@ -3,6 +3,7 @@ import type { StudioAuth } from './auth'
 import type { StudioStore } from '../persistence/store'
 import { requireUser } from './access.server'
 import { interpretNaturalStoryPrompt } from './natural-story-plan'
+import { isExistingStoryModificationRequest } from './story-revision-plan'
 import { beginStoryChatDiscovery } from './story-chat-discovery.server'
 import { githubJobRequest } from './github-jobs.server'
 import { gitlabJobRequest } from './gitlab-jobs.server'
@@ -83,6 +84,28 @@ export async function submitFirstStoryTurn(
       message:
         'This request is already being prepared. Refresh the Thread to inspect its saved status; do not start a second writer.',
     }
+  if (!infer && isExistingStoryModificationRequest(prompt)) {
+    // No discovery or Foundation creation for a first-Turn edit. The shared
+    // admission obtains an owner-bound native catalog and rejects ambiguity.
+    try {
+      const story = await store.persistence.naturalStory.story(actor.id, input.storyId)
+      if (!story?.headSha) throw new Error('Story source is not verified')
+      await launchNaturalStory(auth, store, headers, baseURL, {
+        storyId: input.storyId, jobId: input.jobId,
+        headSha: story.headSha, prompt, creativeMode: input.creativeMode,
+      })
+      await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
+      return { ...result, state: 'admitted' }
+    } catch {
+      if (await store.persistence.generation.queue.record(input.jobId)) {
+        await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
+        return { ...result, state: 'admitted' }
+      }
+      await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, false)
+      return { ...result, state: 'attention', message:
+        'Review the focused target against the existing native-verified Story and confirm model access. No whole-Story generation or new Foundation was authorized.' }
+    }
+  }
   try {
     // A validated existing Creative Direction is already canonical author
     // context, not a reason to interview the author again. Probe the exact

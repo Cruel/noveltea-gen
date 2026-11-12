@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
+import { createStudioAuth } from '../src/lib/auth'
+import { previewNaturalStory, launchNaturalStory } from '../src/lib/natural-story.server'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
@@ -47,7 +49,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'initial-focus' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
@@ -129,6 +131,56 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     await sourceGraph.graph.updateState({ configurable: { thread_id: parent.threadId + ':generation:web' } },
       { status: 'completed' }, 'completion_decision')
     sourceGraph.saver.db.close()
+
+    if (kind === 'initial-focus') {
+      const firstJobId = randomUUID()
+      const first = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
+        ownerId: owner, repositoryId: 'github:124', remoteUrl: 'file://' + remote,
+        token: '', directory: 'story', commit: sha, jobId: firstJobId })
+      await store.persistence.generation.jobs.register(owner, firstJobId, storyId,
+        'First focused Turn', sha, 'now')
+      await ensureRootThreads(store, owner, storyId)
+      const auth = createStudioAuth(store, config)
+      const session = await (await auth.$context).internalAdapter.createSession(owner)
+      const headers = new Headers({ cookie: 'better-auth.session_token=' + session.token + '.' +
+        createHmac('sha256', config.secret).update(session.token).digest('base64') })
+      const options = { auth, headers, baseURL: config.baseURL, jobId: firstJobId }
+      const request = 'Revise the conversation'
+      await assert.rejects(previewNaturalStory(store, stranger, storyId, request,
+        undefined, options), /not found/)
+      const preview = await previewNaturalStory(store, owner, storyId, request,
+        undefined, options)
+      assert.equal(preview.plan.contract.scope.kind, 'partial')
+      assert.deepEqual(preview.plan.contract.scope.targets, ['authored-content.confession'])
+      assert.deepEqual(preview.turnPlan?.assignments.map(a => a.id),
+        ['focus:authored-content.confession', 'review'])
+      assert.deepEqual(preview.turnPlan?.assignments[0]?.authority.existingPaths,
+        ['authored-content/confession.md'])
+      assert.equal(preview.plan.reviewRequired, false)
+      const started = await launchNaturalStory(auth, store, headers, config.baseURL, {
+        storyId, jobId: firstJobId, headSha: sha, prompt: request, fixture: true, model: null,
+      })
+      assert.equal(started.jobId, firstJobId)
+      assert.equal((await launchNaturalStory(auth, store, headers, config.baseURL, {
+        storyId, jobId: firstJobId, headSha: sha, prompt: request, fixture: true, model: null,
+      })).jobId, firstJobId, 'idempotent first-Turn retry reuses the saved scope')
+      await assert.rejects(launchNaturalStory(auth, store, headers, config.baseURL, {
+        storyId, jobId: firstJobId, headSha: sha,
+        prompt: 'Make the story more suspenseful', fixture: true, model: null,
+      }), /different original objective/i)
+      await assert.rejects(launchNaturalStory(auth, store, headers, config.baseURL, {
+        storyId, jobId: firstJobId, headSha: sha, prompt: request,
+        edits: { constraints: ['Forged scope from an HTTP retry'] }, fixture: true, model: null,
+      }), /different original objective/i)
+      const admitted = await readJobTurnPlan(first)
+      assert.equal(admitted?.kind, 'revision')
+      assert.equal(admitted?.digest, preview.turnPlan?.digest)
+      assert.deepEqual(admitted?.objective?.requestedTargets, ['authored-content.confession'])
+      assert.equal(pinnedRequest(await selectedJob(store, owner, firstJobId), first)?.contract.scope.kind,
+        'partial', 'first Chat Turn must not enqueue seven global stages')
+      assert.deepEqual((await store.testing.foreignKeyViolations()), [])
+      return
+    }
 
     const task = kind === 'broad' || kind === 'redirect'
       ? 'Rewrite milestone.confession for better emotional pacing'
@@ -527,6 +579,8 @@ test('reviewed Milestone expansion admits a scoped child and rejects changed app
   { timeout: 60_000 }, () => exerciseRevisionAdmission('broad'))
 test('whole-story request in an existing Thread requires exact scope approval without inheriting old targets',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('whole'))
+test('first Chat Turn on verified canon admits a single conversation editor, not global creation',
+  { timeout: 60_000 }, () => exerciseRevisionAdmission('initial-focus'))
 test('conversation revision in the same authenticated Thread grants only authored-content',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('conversation'))
 test('unambiguous Character revision admits only its one focused path without a form',

@@ -10,7 +10,8 @@ import { generationConfigurationRequest } from './generation-config.server'
 import { generationJobRequest, authorizedStoryJob, verifyWebExecution } from './fixture-jobs.server'
 import { validatedExplorer } from './story-explorer.server'
 import { interpretNaturalStoryPrompt } from './natural-story-plan'
-import { planObjective } from './turn-plan'
+import { isExistingStoryModificationRequest } from './story-revision-plan'
+import { interpretFirstObjective } from './natural-story.server'
 import { saveJobTurnPlan } from './turn-plan-receipt.server'
 import { pinChatApprovedFoundation, readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
 import { pinReusedFoundation } from '../../../src/chat-reused-foundation'
@@ -59,23 +60,24 @@ async function responseData(response: Response) {
  * alternative author request. */
 async function admitWholeApprovedStory(auth: StudioAuth, store: StudioStore,
   owner: string, headers: Headers, baseURL: string,
-  approval: ApprovedChatContinuation, creativePolicyJson: string,
-  plan: ReturnType<typeof interpretNaturalStoryPrompt>): Promise<ContinuationStatus> {
+  approval: ApprovedChatContinuation, creativePolicyJson: string): Promise<ContinuationStatus> {
   const { chat } = approval
   const job = await authorizedStoryJob(store, owner, chat.firstTurnId)
-  await saveJobTurnPlan(job, planObjective({ kind: 'full-story',
-    request: chat.originalObjective, contract: plan.contract, base: chat.sourceSha,
-    policy: parseCreativePolicy(creativePolicyJson) }))
+  const objective = interpretFirstObjective(chat.originalObjective, undefined, chat.sourceSha,
+    undefined, undefined, parseCreativePolicy(creativePolicyJson))
+  if (!objective.turnPlan || objective.turnPlan.kind !== 'full-story')
+    throw new Error('An approved Foundation cannot grant a focused or protected Story writer.')
+  await saveJobTurnPlan(job, objective.turnPlan)
   await store.persistence.naturalStory.associateRoot(owner, chat.storyId,
     chat.firstTurnId, chat.originalObjective.slice(0, 120), new Date().toISOString())
   await responseData(await generationConfigurationRequest(auth, store, internalRequest(
     baseURL, headers, '/api/jobs/' + chat.firstTurnId + '/configuration', 'PUT', {
-      version: 1, headSha: job.headSha, task: chat.originalObjective,
-      contract: plan.contract, limits: {}, model: approval.model,
+      version: 1, headSha: job.headSha, task: objective.plan.task,
+      contract: objective.plan.contract, limits: {}, model: approval.model,
     }), chat.firstTurnId, baseURL))
   await responseData(await generationJobRequest(auth, store, internalRequest(
     baseURL, headers, '/api/jobs/' + chat.firstTurnId, 'POST', {
-      task: chat.originalObjective, contract: plan.contract,
+      task: objective.plan.task, contract: objective.plan.contract,
     }), chat.firstTurnId, baseURL))
   await store.persistence.naturalStory.finishFirstTurn(owner,
     chat.storyId, chat.firstTurnId, true)
@@ -116,6 +118,9 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
   if (first.phase === 'preparing')
     return { state: 'pending', message: 'Admission is already reserved. Inspect its state; an uncertain writer is never replayed.' }
   const foundationOnly = foundationOnlyObjective(chat.originalObjective)
+  if (!foundationOnly && isExistingStoryModificationRequest(chat.originalObjective))
+    return { state: 'blocked', message:
+      'A request to revise existing canon needs a native-verified focused Turn, not an approved whole-Story Foundation continuation.' }
   // A foundation-only Turn uses the already reviewed proposal: no second Pi
   // model or generation controller is necessary. Full Stories require both.
   if (!foundationOnly) {
@@ -154,7 +159,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
           inspected.commitSha === await trustedHead(job)) {
         if (!foundationOnly) {
           return await admitWholeApprovedStory(auth, store, actor.id, headers,
-            baseURL, approval, first.creativePolicyJson, plan)
+            baseURL, approval, first.creativePolicyJson)
         }
         await store.persistence.naturalStory.associateRoot(actor.id, chat.storyId,
           chat.firstTurnId, chat.originalObjective.slice(0, 120), new Date().toISOString())
@@ -221,7 +226,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
       return { state: 'completed' }
     }
     return await admitWholeApprovedStory(auth, store, actor.id, headers,
-      baseURL, approval, first.creativePolicyJson, plan)
+      baseURL, approval, first.creativePolicyJson)
   } catch {
     const finished = await store.persistence.messages.owned(actor.id,
       'root:' + chat.firstTurnId, chat.firstTurnId)

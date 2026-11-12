@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import type { JobStartResult } from '../../src/job'
-import { inferStoryObjective, inferStoryRevision } from '../src/lib/story-revision-plan'
+import { inferStoryObjective, inferStoryRevision, isWholeStoryCreationRequest,
+  isExistingStoryModificationRequest } from '../src/lib/story-revision-plan'
 import { assertTurnPlan, planObjective, planRevision, planWholeStory, verifyTurnPlan } from '../src/lib/turn-plan'
 import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { assertFocusedTurnAssignment, readTurnEvidence } from '../../src/turn-plan-evidence'
@@ -79,6 +80,42 @@ test('whole-Story intent can be selected on a later Turn without inheriting prio
   assert.equal(protectedGoal.writePaths.length, 0)
   assert.match(inferStoryObjective('Revise the conversation', catalog.filter(r =>
     r.metadata.type !== 'authored-content'), b, contract).clarification ?? '', /existing|missing|target/i)
+})
+
+test('new Story intent differs from edits to an existing Story', () => {
+  assert.equal(isWholeStoryCreationRequest('Make me a mystery game'), true)
+  assert.equal(isWholeStoryCreationRequest('Create a new mystery story'), true)
+  assert.equal(isWholeStoryCreationRequest('Write a branching mystery visual novel about a train'), true)
+  assert.equal(isWholeStoryCreationRequest('Write a new scene for this story'), false)
+  for (const request of ['Make the story more suspenseful', 'Make a mystery story more suspenseful', 'Make the story longer',
+    'Write the conversation differently', 'Revise the conversation']) {
+    assert.equal(isWholeStoryCreationRequest(request), false)
+    assert.equal(isExistingStoryModificationRequest(request), true)
+    const inferred = inferStoryObjective(request, catalog, a, contract)
+    assert.equal(inferred.contract.scope.kind, 'partial', request)
+    assert.ok(!inferred.contract.scope.targets.includes('creative-direction.direction'))
+  }
+  const suspense = inferStoryObjective('Make the story more suspenseful', catalog, a, contract)
+  assert.deepEqual(suspense.targets, ['authored-content.confession', 'event.confession'])
+  assert.equal(suspense.reviewRequired, true)
+})
+
+test('protected amendment retains its exact controller assignment despite a historical full Story contract', () => {
+  const canon = catalog.map(item => item.metadata.id === 'creative-direction.direction'
+    ? { ...item, metadata: { ...item.metadata, decisions: [{ id: 'tone',
+        statement: 'Quiet mystery', origin: 'user', authority: 'user-protected' }] } }
+    : item)
+  const preview = inferStoryObjective('Change protected decision creative-direction.direction#tone to "Bright mystery"',
+    canon, a, contract)
+  assert.equal(preview.protectedChange?.path, 'creative-direction/direction.md')
+  assert.equal(preview.contract.scope.kind, 'full-story', 'old scope remains historical only')
+  const receipt = planObjective({ kind: 'revision', request: preview.request,
+    contract: preview.contract, base: a, sourceJobId: 'prior', catalog: canon,
+    targetIds: [], allowedPaths: preview.writePaths, protectedChange: preview.protectedChange })
+  assert.equal(receipt.kind, 'protected-amendment')
+  assert.equal(receipt.objective?.breadth, 'protected-amendment')
+  assert.deepEqual(receipt.assignments.map(item => item.id), ['protected-decision'])
+  assert.doesNotThrow(() => verifyTurnPlan(receipt))
 })
 
 test('same Thread can plan a focused Character edit and then wider coordinated Story work', () => {

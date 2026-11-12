@@ -94,7 +94,7 @@ export async function revisionFromSource(store: StudioDatabase, owner: string,
   const preview = applyCreativeModeToRevision(
     inferStoryObjective(prompt, report.records, headSha, pinned.contract, selectedTargets), policy)
   return { ...preview, turnPlan: preview.clarification ? null :
-    preview.contract.scope.kind === 'full-story'
+    !preview.protectedChange && preview.contract.scope.kind === 'full-story'
       ? planObjective({ kind: 'full-story', request: preview.request,
           contract: preview.contract, base: headSha, sourceJobId, policy })
       : planObjective({ kind: 'revision', request: preview.request,

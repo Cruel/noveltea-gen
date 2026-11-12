@@ -52,7 +52,15 @@ const contentWords = (text: string): Set<string> => new Set(text.toLowerCase()
 const includesName = (text: string, name: string) => name.length >= 2 &&
   new RegExp('(^|[^a-z0-9])' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-z0-9])', 'i').test(text)
 const conversationWords = /\b(?:conversation|conversations|dialogue|dialog|exchange)\b/i
-const wholeStoryRequest = /^(?:please\s+)?(?:make|create|write|generate|build|develop)\s+(?:me\s+)?(?:(?:a|an|the)\s+)?(?:(?:complete|full|whole|playable|interactive)\s+)*(?:(?:mystery|fantasy|horror|romance|detective|sci-fi|science-fiction|comedy|dramatic)\s+)*(?:game|story|visual\s+novel)\b/i
+// Creation must name a NEW Story artifact, not an existing definite 'the story'
+// followed by a modification. Unknown broad edits must go through canon scope
+// inference and reviewed target selection, never a global stage grant.
+const wholeStoryRequest = /^(?:please\s+)?(?:make|create|write|generate|build|develop|start)\s+(?:me\s+)?(?:a|an)\s+(?:(?!(?:for|of|in|to|within|existing|current|the|this)\b)[a-z-]+\s+){0,8}(?:game|story|visual\s+novel)\b(?!\s+(?:more|less|differently|instead|again)\b)/i
+export const isWholeStoryCreationRequest = (prompt: string) => wholeStoryRequest.test(prompt.trim())
+export const isExistingStoryModificationRequest = (prompt: string) =>
+  !isWholeStoryCreationRequest(prompt) && (
+    /^(?:please\s+)?(?:make|write|create|generate|build|develop|revise|edit|fix|improve|tighten|polish|adjust|change|rewrite|update|rework)\b/i.test(prompt.trim()) ||
+    /\b(?:change|revise|edit|improve|tighten)\b.*\b(?:character|event|authored-content|choice-point|puzzle)\.[a-z][a-z0-9-]*\b/i.test(prompt))
 const depthFor = (targets: string[]): CompletionContract['scope']['depth'] =>
   targets.some(id => id.startsWith('authored-content.')) ? 'composition' :
   targets.some(id => /^(event|choice-point|puzzle)\./.test(id)) ? 'interactive' : 'architecture'
@@ -185,7 +193,7 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
     /\bevents\b/i.test(request) ? ['event'] :
     /\b(?:scenes|dialogue|dialog|conversation|conversations|exchange)\b/i.test(request) ? ['authored-content'] :
     /\b(?:choices|puzzles)\b/i.test(request) ? ['choice-point', 'puzzle'] :
-    /\b(?:pacing|plot|ending)\b/i.test(request) ? ['event', 'authored-content'] :
+    /\b(?:pacing|plot|ending|suspense|suspenseful|tension)\b/i.test(request) ? ['event', 'authored-content'] :
     [...writingTypes]
   const broadTargets = broad ? active.filter(r => broadTypes.includes(r.metadata.type))
     .map(r => r.metadata.id) : []
@@ -328,7 +336,7 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
  * an authorization to overwrite any protected Creative Direction. */
 export function inferStoryObjective(prompt: string, catalog: CanonicalScopeRecord[],
   headSha: string, previous: CompletionContract, selectedTargets?: string[]): RevisionPreview {
-  if (!wholeStoryRequest.test(prompt.trim()))
+  if (!isWholeStoryCreationRequest(prompt))
     return inferStoryRevision(prompt, catalog, headSha, previous, selectedTargets)
   if (selectedTargets !== undefined)
     throw new Error('A whole-Story objective cannot silently inherit focused record selections.')
@@ -338,7 +346,7 @@ export function inferStoryObjective(prompt: string, catalog: CanonicalScopeRecor
   const request = prompt.trim()
   const parsed = parseGenerationContract({
     scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
-    constraints: ['Honor this author objective: ' + request],
+    constraints: unique([...previous.constraints, 'Honor this author objective: ' + request]),
     envelope: previous.envelope,
   })
   // No writable paths are inferred from broad prose. The existing graph

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { CompletionContract } from '../../../src/architecture'
 import type { CanonicalScopeRecord } from '../../../src/focused-scope'
-import type { TurnAssignmentEvidence, TurnEvidence } from '../../../src/turn-plan-evidence'
+import { validTurnObjective, type TurnAssignmentEvidence, type TurnEvidence } from '../../../src/turn-plan-evidence'
 import { DEFAULT_CREATIVE_POLICY, parseCreativePolicy, type CreativePolicy } from '../../../src/creative-policy'
 
 export type TurnSpecialistAssignment = TurnAssignmentEvidence
@@ -176,16 +176,7 @@ function validSavedPolicy(value: unknown): boolean {
 
 export function verifyTurnPlan(plan: TurnPlan): void {
   if (!plan || plan.version !== 1 || !sha.test(plan.source?.verifiedSha) ||
-      (plan.objective !== undefined && (
-        plan.objective.breadth !== (plan.kind === 'full-story' ? 'whole-story' :
-          plan.kind === 'revision' ? 'focused' : 'protected-amendment') ||
-        !Array.isArray(plan.objective.requestedTargets) ||
-        JSON.stringify(plan.objective.requestedTargets) !== JSON.stringify(
-          plan.kind === 'revision' ? [...new Set(plan.contract.scope.targets)].sort() : []) ||
-        plan.objective.deliveryDepth !== plan.contract.scope.depth ||
-        !Array.isArray(plan.objective.obligations) || !plan.objective.obligations.length ||
-        plan.objective.obligations.length > 32 ||
-        plan.objective.obligations.some(o => typeof o !== 'string' || !o.trim() || o.length > 2000))) ||
+      !validTurnObjective(plan) ||
       (plan.creativePolicy !== undefined && !validSavedPolicy(plan.creativePolicy)) ||
       !Array.isArray(plan.assignments) || plan.assignments.length < 1 ||
       plan.assignments.length > 129 || !plan.originalRequest?.trim() ||

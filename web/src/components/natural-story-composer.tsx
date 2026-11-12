@@ -9,7 +9,7 @@ import type { PlanEdits, NaturalStoryPlan } from '@/lib/natural-story-plan'
 import type { PiSelection } from '@/lib/pi-credentials.server'
 
 type Preview = {
-  plan: NaturalStoryPlan; headSha: string; storyId: string
+  plan: NaturalStoryPlan; headSha: string; storyId: string; jobId?: string
   models: Array<{ provider: string; id: string; reasoning: boolean }>
   defaultModel: PiSelection | null
 }
@@ -77,7 +77,9 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
     if (!prompt.trim() || busy) return
     setBusy(true); setError(null)
     try {
-      const result = await previewStoryPrompt({ data: { storyId, prompt, edits } })
+      const id = pendingId ?? crypto.randomUUID()
+      setPendingId(id)
+      const result = await previewStoryPrompt({ data: { storyId, jobId: id, prompt, edits } })
       setPreview(result)
       if (!startImmediately || result.plan.reviewRequired || advanced) {
         setApproved(false)
@@ -91,7 +93,7 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
     const model = selectedModel(result)
     if (!model && modelChoice !== 'fixture')
       throw new Error('Connect a Pi model in Settings to generate a Story, or explicitly choose a fixture test run.')
-    const id = pendingId ?? crypto.randomUUID()
+    const id = result.jobId ?? pendingId ?? crypto.randomUUID()
     setPendingId(id)
     const response = await startStoryPrompt({ data: {
       storyId, jobId: id, headSha: result.headSha, prompt, edits, model,
@@ -118,8 +120,8 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
   return <section aria-label="New Story Thread" className="mt-4 space-y-3 rounded-md border border-border p-3">
     <h3 className="m-0 text-sm font-semibold">New Story Thread</h3>
     <p className="m-0 text-xs text-muted-foreground">
-      Describe the Story you want. NovelTea derives a full-Story plan and uses the existing verified
-      generation pipeline. Outlines and focused changes can still be configured on a prepared job.
+      Describe a new Story or a change to existing canon. NovelTea checks the verified Story
+      before assigning work; focused edits do not trigger unrelated generation stages.
     </p>
     <form onSubmit={event => { event.preventDefault(); void inspect(true) }} className="space-y-3">
       <Textarea aria-label="Creative Story prompt" rows={4} maxLength={4000}
@@ -144,11 +146,12 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
       {preview.plan.clarification && <p role="alert" className="font-medium">
         {preview.plan.clarification}
       </p>}
-      <p className="m-0"><strong>Interpreted plan:</strong> Entire Story · full composition ·
-        all branches · {preview.plan.stages.length} expected stages</p>
+      <p className="m-0"><strong>Interpreted plan:</strong>{' '}
+        {contract?.scope.kind === 'partial'
+          ? 'Focused revision · ' + contract.scope.targets.join(', ')
+          : 'Whole Story · full composition'} · {preview.plan.stages.length} expected stages</p>
       <p className="m-0 text-xs text-muted-foreground">
-        Scope is full-Story only; the actual Milestone inventory is resolved after canonical architecture validation.
-        No specialist work is considered verified by this preview.</p>
+        Only reviewed, source-verified assignments are eligible; a preview is not proof of specialist completion.</p>
       <ol className="grid gap-1 pl-5 text-xs">
         {preview.plan.stages.map(stage => <li key={stage.id}>{stage.description}</li>)}
       </ol>
@@ -161,8 +164,8 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
     </div>}
     {advanced && <div className="space-y-3 border-t border-border pt-3 text-sm">
       <p className="m-0 text-xs text-muted-foreground">
-        Edit the production envelope or choose a connected model and per-run budget. The full-Story
-        scope is fixed; focused revisions require an explicitly authorized scope.
+        Edit the production envelope or choose a connected model and per-run budget. Focused scope
+        is derived from the verified canonical Story, never from a permanent Thread setting.
       </p>
       <label className="block space-y-1">Presentation
         <Input value={editText.presentation ?? contract?.envelope.presentation ?? ''} disabled={busy}
@@ -221,9 +224,9 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
         Active time excludes author-approval waits; sandbox limits are clamped by operator maximums.
         Budgets pause at safe boundaries; fixture output is not independently verified editorial completion.</p>
     </div>}
-    {preview && <div className="flex items-center gap-2">
+    {preview && !preview.plan.clarification && preview.plan.stages.length > 0 && <div className="flex items-center gap-2">
       <Button type="button" size="sm" disabled={busy} onClick={() => { setApproved(true); void approve() }}>
-        {busy ? 'Starting…' : preview.plan.reviewRequired ? 'Approve full-Story plan and run' : 'Start with this plan'}
+        {busy ? 'Starting…' : preview.plan.reviewRequired ? 'Approve scope and run' : 'Start with this plan'}
       </Button>
       {approved && busy && <span role="status" className="text-xs text-muted-foreground">Submitting pinned plan…</span>}
     </div>}
