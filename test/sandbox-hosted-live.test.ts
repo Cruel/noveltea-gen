@@ -5,6 +5,8 @@
  * Studio job with the exact catalog/worktree identity checked by #51.
  *
  * NT_LIVE_HOSTED_SANDBOX=1: real Pi calls (paid; requires configured Pi auth)
+ * NT_LIVE_REVIEW_REPAIR=1: actual independent semantic rejection, original-session
+ * Foundation correction, native validation, immutable Git receipt and Pi rereview
  * NT_TEST_HOSTED_FIXTURE=1: same Docker/controller plumbing, fixture authors
  * NT_TEST_HOSTED_STAGES=1: extend either mode through Character/World and Event
  * NT_TEST_HOSTED_RESUME_DIR=/tmp/preserved-fixture: recover interrupted live
@@ -30,9 +32,19 @@ import { inspectTrustedApproval, requestTrustedApproval } from "../src/trusted-a
 import { runCharacterWorldJob } from "../src/character-world.js";
 import { runEventWorkItem } from "../src/event-work.js";
 import { hasUserProtectedDecision } from "../src/foundation-record.js";
+import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
+import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { createSkillSnapshot } from "../src/snapshot.js";
+import { readIndependentReview } from "../src/checkpoint-assurance.js";
+import type { RecoveryCheckpoint } from "../src/recovery-checkpoints.js";
+import { runPiAssignmentReview } from "../src/semantic-assignment-review.js";
+import { withStoryJobLock } from "../src/job-lock.js";
+import { advanceRejectedRepair, inspectRejectedRepair } from "../src/rejected-review-repair.js";
 import { removeTestTree } from "./helpers.js";
 
-const live = process.env.NT_LIVE_HOSTED_SANDBOX === "1";
+const repair = process.env.NT_LIVE_REVIEW_REPAIR === "1";
+const live = process.env.NT_LIVE_HOSTED_SANDBOX === "1" || repair;
 const fixture = process.env.NT_TEST_HOSTED_FIXTURE === "1";
 const includeStages = process.env.NT_TEST_HOSTED_STAGES === "1";
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -43,8 +55,10 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.trim();
 }
 
-test("registered rootless Docker controller supports Foundation through Event stages", {
-  skip: !(live || fixture) ? "Set NT_LIVE_HOSTED_SANDBOX=1 for paid Pi or NT_TEST_HOSTED_FIXTURE=1 for plumbing-only smoke" : false,
+test(repair
+  ? "real Pi reviewer rejects, repairs and rereviews an exact Foundation assignment"
+  : "registered rootless Docker controller supports Foundation through Event stages", {
+  skip: !(live || fixture) ? "Set NT_LIVE_HOSTED_SANDBOX=1 or NT_LIVE_REVIEW_REPAIR=1 for paid Pi; NT_TEST_HOSTED_FIXTURE=1 for plumbing-only smoke" : false,
   timeout: 900_000,
 }, async () => {
   const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
@@ -146,18 +160,97 @@ test("registered rootless Docker controller supports Foundation through Event st
     assert.equal(code, 0);
     assert.equal(emitted.join("").trim(), "/story");
 
-    if (!resumeDir) {
-      const foundation = await runFoundationJob({
-        story, job: id, task: "Write an intimate mystery about an archivist on a stranded midnight train. Invent unspecified details.",
-        envelope: "Dialogue-led visual novel; a small cast and two reusable locations; no fixed ending count.",
-        skillsSource: source, validatorSource: source,
-        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL, fixture: !live,
-      });
-      assert.equal(foundation.status, "committed", JSON.stringify(foundation));
-      assert.equal((foundation as { skillReads?: unknown[] }).skillReads?.length, 5);
+    if (repair && !resumeDir) {
+      const contract = {
+        scope: { kind: "full-story" as const, depth: "composition" as const,
+          targets: [], branches: [] }, constraints: [],
+        envelope: { presentation: "Dialogue-led visual novel", hardLimits: [], preferences: [] },
+      };
+      // The writer deliberately omits one binding author requirement below.
+      // The real reviewer must detect the defect from the committed diff.
+      const request = "Write a midnight train mystery. The archivist must learn from a green ticket " +
+        "that the missing passenger departed at 11:47 PM; preserve this causal clue in Creative Direction.";
+      const plan = planWholeStory(request, contract, job.baseSha, job.jobId);
+      plan.assignments[0]!.outcome = "Establish a coherent Creative Direction in which the archivist " +
+        "learns from a green ticket that the missing passenger departed at exactly 11:47 PM. " +
+        "Preserve user-protected decisions and include this specific causal clue in the prose.";
+      const { digest: _old, ...planBody } = plan;
+      plan.digest = hash(JSON.stringify(planBody));
+      await saveJobTurnPlan(job, plan);
+    }
+
+    if (!resumeDir || repair) {
+      const foundation = resumeDir
+        ? JSON.parse(readFileSync(join(job.stateDir, "foundation.json"), "utf8")) as {
+          stage: string; piSessionFile: string; skillReads: string[]; commitSha: string;
+        }
+        : await runFoundationJob({
+          story, job: id, task: "Write an intimate mystery about an archivist on a stranded midnight train. Invent unspecified details.",
+          envelope: "Dialogue-led visual novel; a small cast and two reusable locations; no fixed ending count.",
+          skillsSource: source, validatorSource: source,
+          provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL, fixture: !live,
+        });
+      assert.equal("stage" in foundation ? foundation.stage : foundation.status, "committed");
+      assert.ok((foundation as { skillReads?: unknown[] }).skillReads?.length! >= 5);
       const foundationFile = join(job.worktreeStoryRoot, "creative-direction/foundation.md");
       assert.ok(hasUserProtectedDecision(readFileSync(foundationFile, "utf8")));
 
+      if (repair) {
+        const point = resumeDir
+          ? JSON.parse(readFileSync(join(job.stateDir, "recovery-checkpoints",
+            foundation.commitSha + ".json"), "utf8")) as RecoveryCheckpoint
+          : (await inspectRecoveryCheckpoints(job)).find(point =>
+            point.eligible && point.workItem === "foundation")!;
+        assert.equal(point.assurance?.reviewSelection.status, "required-pending");
+        let findings: Array<{ requiredCorrection?: string; affectedPaths?: string[] }>;
+        if (resumeDir) {
+          const savedReview = await readIndependentReview(job, point.assurance!);
+          assert.equal(savedReview.status, "failed");
+          findings = savedReview.result!.findings;
+        } else {
+          const reviewerSnapshot = await createSkillSnapshot({
+            discovery: "explicit-only", novelteaSkills: source,
+            skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"],
+          });
+          assert.ok(reviewerSnapshot);
+          const firstReview = await withStoryJobLock(job, "independent-assignment-review", () =>
+            runPiAssignmentReview(job, [point], {
+              snapshot: reviewerSnapshot, provider: process.env.NT_PROVIDER ?? "openai",
+              model: process.env.NT_MODEL ?? "gpt-6-luna",
+              reviewer: "independent-pi-assignment-review", onSession: async () => {},
+            }));
+          assert.equal(firstReview.verdict.verdict, "fail",
+            JSON.stringify({ reason: "Reviewer should catch omitted 11:47 green-ticket clue",
+              verdict: firstReview.verdict }));
+          findings = firstReview.verdict.findings;
+        }
+        assert.ok(findings.some(f => f.requiredCorrection &&
+          f.affectedPaths?.includes("creative-direction/foundation.md")));
+        const result = await advanceRejectedRepair(job, point!.commitSha, {
+          skillsSource: source, provider: process.env.NT_PROVIDER ?? "openai",
+          model: process.env.NT_MODEL ?? "gpt-6-luna",
+        });
+        assert.equal(result.next, "completed", JSON.stringify(result));
+        const receipt = await inspectRejectedRepair(job, point!.commitSha);
+        assert.equal(receipt.phase, "passed");
+        assert.equal(receipt.origin.sessionFile, foundation.piSessionFile,
+          "Correction must reopen the original Foundation writer session");
+        assert.ok(receipt.repairedCommitSha && receipt.repairedCommitSha !== point!.commitSha);
+        const completed = (await inspectRecoveryCheckpoints(job)).find(p =>
+          p.commitSha === receipt.repairedCommitSha);
+        assert.equal(completed?.semanticReview, "passed");
+        assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), receipt.repairedCommitSha);
+        const repairedText = readFileSync(foundationFile, "utf8");
+        assert.match(repairedText, /green ticket/i);
+        assert.match(repairedText, /11:47/);
+        assert.ok(hasUserProtectedDecision(repairedText));
+        console.error("LIVE_REPAIR_CERTIFICATION " + JSON.stringify({
+          firstReview: "fail", findings,
+          originalCommit: point!.commitSha, repairedCommit: receipt.repairedCommitSha,
+          amendmentDigest: receipt.planAmendment.digest,
+          reviewerSessions: receipt.reviewer?.sessionFiles.length,
+        }));
+      } else {
       const architecture = await runArchitectureJob({
         story, job: id, action: "run", fixture: !live,
         provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL,
@@ -177,8 +270,9 @@ test("registered rootless Docker controller supports Foundation through Event st
       assert.ok(existsSync(join(job.worktreeStoryRoot, "milestones")));
       assert.ok((architecture as { skillReads?: unknown[] }).skillReads?.length === 6 || !live,
         "Real Architecture Pi must read all pinned skill references");
+      }
     }
-    if (includeStages) {
+    if (includeStages && !repair) {
       const foundations = await runCharacterWorldJob({ story, job: id, action: "run", fixture: !live,
         skillsSource: source, validatorSource: source,
         provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL });
@@ -196,7 +290,7 @@ test("registered rootless Docker controller supports Foundation through Event st
       // No model shell access to the host is necessary for either specialist.
       assert.equal((await client.inspect(id)).status, "running");
     }
-    if (!resumeDir) {
+    if (!resumeDir && !repair) {
       // Exercise a genuine suspended author-update interrupt against the same
       // job that Pi (or its deterministic fixture) just authored.
       const current = await runArchitectureJob({ story, job: id, action: "inspect" });

@@ -7,7 +7,8 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { trustedHead } from "./revision.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
-import { checkpointAssurance, inspectCheckpointReview, type CheckpointAssurance, type SemanticReviewStatus } from "./checkpoint-assurance.js";
+import { checkpointAssurance, inspectCheckpointReview, readRepairCommitProof,
+  type CheckpointAssurance, type SemanticReviewStatus } from "./checkpoint-assurance.js";
 
 /**
  * Recovery checkpoints are *logical* continuation records, not copies of a live
@@ -364,8 +365,21 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
         .find(id => (planned.dependencies[id] ?? []).every(dep => completed.includes(dep))) ?? null)) {
     throw new Error("Recovery continuation inventory or plan has been modified.");
   }
-  if (point.workItem === "foundation" ? point.plan !== null :
-      point.plan === null || (point.plan as Plan).version !== point.planVersion)
+  // A Foundation correction can be committed and independently reviewed
+  // before Architecture has authored any plan. The repair proof must bind it
+  // to an actual previously finalized Foundation (not an arbitrary no-plan
+  // specialist). Its own plan version is independently checked below against
+  // the original controller-owned repair proof.
+  let initialFoundationRepair = false;
+  if (point.plan === null && point.workItem.startsWith("repair-")) {
+    const proof = await readRepairCommitProof(job, point.workItem);
+    const original = JSON.parse(await readFile(join(job.stateDir, "recovery-checkpoints",
+      proof.sourceCommitSha + ".json"), "utf8")) as RecoveryCheckpoint;
+    initialFoundationRepair = original.workItem === "foundation" && original.plan === null;
+  }
+  if (point.plan === null
+    ? point.workItem !== "foundation" && !initialFoundationRepair
+    : (point.plan as Plan).version !== point.planVersion)
     throw new Error("Recovery checkpoint plan version differs from its committed specialist.");
   const intent = await readIntent(job, point.commitSha);
   if (intent.parentSha !== point.parentSha || intent.workItem !== point.workItem ||

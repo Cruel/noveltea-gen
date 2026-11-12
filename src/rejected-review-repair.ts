@@ -532,6 +532,90 @@ export async function consumeRejectedRepairChoice(job: JobStartResult, sha: stri
   return state;
 }
 
+/** Foundation-only bootstrap: an initial standalone Foundation is trusted
+ * from its committed writer receipt before there is any revision ledger.
+ * Attest that exact sealed checkpoint and create the ledger BEFORE publishing
+ * a correction, so a missing ledger can never strand an already-made commit. */
+async function ensureRepairLedger(job: JobStartResult, state: RepairReceipt) {
+  const file = join(job.stateDir, "revisions", "verified-head.json");
+  if (!existsSync(file)) {
+    const source = (await inspectRecoveryCheckpoints(job)).find(point =>
+      point.eligible && point.commitSha === state.sourceCommitSha &&
+      point.workItem === "foundation" && point.semanticReview === "failed");
+    if (state.origin.workItem !== "foundation" ||
+        state.baselineHead !== state.sourceCommitSha || !source ||
+        await trustedHead(job) !== state.sourceCommitSha)
+      throw Error("Repair requires an existing trusted verified-head ledger.");
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    await writeFile(file, JSON.stringify({ version: 1, jobId: job.jobId,
+      headSha: state.sourceCommitSha, workItemId: "foundation" }, null, 2) + "\n",
+      { flag: "wx", mode: 0o600 });
+  }
+  const prior = JSON.parse(await readFile(file, "utf8")) as {
+    version: number; jobId: string; headSha: string };
+  if (prior.version !== 1 || prior.jobId !== job.jobId ||
+      prior.headSha !== state.baselineHead)
+    throw Error("The verified-head ledger moved before repair publication.");
+  return file;
+}
+
+/** Recover the narrow crash boundary where Git and its immutable native
+ * proof were committed but the verified-head ledger was not yet published.
+ * Reconstruct only from the exact Foundation source and fully bound proof;
+ * never infer success from a draft, writer assertion or arbitrary moving HEAD.
+ * This must happen before ordinary checkpoint inspection, which correctly
+ * refuses an unpublished commit. No Pi call is replayed. */
+async function recoverInterruptedFoundationRepair(job: JobStartResult, sha: string) {
+  const ledger = join(job.stateDir, "revisions", "verified-head.json");
+  const proofPath = join(job.stateDir, "review-repairs", "proofs", sha + ".json");
+  if (existsSync(ledger) || !existsSync(proofPath)) return;
+  const statePath = pathFor(job, sha);
+  const stat = await lstat(statePath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128_000)
+    throw Error("Unsafe interrupted Foundation repair state.");
+  const state = JSON.parse(await readFile(statePath, "utf8")) as RepairReceipt;
+  const proof = await readRepairCommitProof(job, "repair-" + sha);
+  const foundation = JSON.parse(await readFile(join(job.stateDir, "foundation.json"), "utf8")) as {
+    jobId?: string; stage?: string; workerMode?: string; commitSha?: string; validation?: string;
+  };
+  const commitPaths = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", proof.commitSha)
+    .split("\n").filter(Boolean).sort();
+  const expectedPaths = proof.paths.map(path => repoPath(job, path)).sort();
+  const requiredDigest = hash({
+    workItemId: "repair-" + sha, sourceCommitSha: sha,
+    rootFailureSha: state.rootFailureSha, sourceReviewDigest: state.sourceReviewDigest,
+    assignmentId: state.assignment?.id, assignmentRevision: state.revision?.digest ?? null,
+    nativeProof: state.validationProof, draft: state.draftDigest,
+    paths: state.paths, repairPlanDigest: state.planAmendment?.digest,
+  });
+  if (state.jobId !== job.jobId || state.threadId !== job.threadId ||
+      state.phase !== "awaiting-checkpoint" || state.sourceCommitSha !== sha ||
+      state.rootFailureSha !== sha || state.origin?.workItem !== "foundation" ||
+      state.baselineHead !== sha || foundation.jobId !== job.jobId ||
+      foundation.stage !== "committed" || foundation.workerMode !== "pi" ||
+      foundation.commitSha !== sha || foundation.validation !== "passed" ||
+      proof.beforeHead !== sha || proof.sourceCommitSha !== sha ||
+      proof.repairPlanDigest !== state.planAmendment?.digest ||
+      proof.sourceReviewDigest !== state.sourceReviewDigest ||
+      proof.validation.proofDigest !== state.validationProof ||
+      proof.digest !== requiredDigest ||
+      proof.sessionFile !== state.origin.sessionFile ||
+      proof.sessionId !== state.origin.sessionId ||
+      proof.sessionSha256 !== hash(await readFile(proof.sessionFile)) ||
+      git(job, "rev-parse", "HEAD") !== proof.commitSha ||
+      git(job, "rev-parse", "HEAD^") !== sha ||
+      git(job, "symbolic-ref", "--short", "HEAD") !== job.branch ||
+      git(job, "status", "--porcelain=v1", "--untracked-files=all") ||
+      JSON.stringify(commitPaths) !== JSON.stringify(expectedPaths) ||
+      !git(job, "log", "-1", "--format=%B", proof.commitSha)
+        .split("\n").includes("NovelTea-Review-Repair: " + proof.digest))
+    throw Error("Interrupted repair proof cannot authorize restoration of a verified HEAD.");
+  await mkdir(dirname(ledger), { recursive: true, mode: 0o700 });
+  await writeFile(ledger, JSON.stringify({ version: 1, jobId: job.jobId,
+    headSha: proof.commitSha, workItemId: "repair-" + sha }, null, 2) + "\n",
+    { flag: "wx", mode: 0o600 });
+}
+
 /** Commit only the controller's exact validated draft, with an immutable
  * repair proof and native recovery checkpoint. Caller owns the writer lease.
  * Never reset or clean an interrupted draft or an unrecognized commit. */
@@ -563,6 +647,7 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
   // Foundation checkpoints predate Architecture's own plan. They are still
   // source-bound to the immutable Turn work-plan version saved in the overlay.
   const planVersion = original.planVersion ?? state.planAmendment.basePlanVersion;
+  const headFile = await ensureRepairLedger(job, state);
   const proofDigest = hash({
     workItemId, sourceCommitSha: sha, rootFailureSha: state.rootFailureSha,
     sourceReviewDigest: state.sourceReviewDigest, assignmentId: state.assignment.id,
@@ -607,8 +692,6 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
   await mkdir(dirname(existingProof), { recursive: true, mode: 0o700 });
   await writeFile(existingProof, JSON.stringify(proof, null, 2) + "\n",
     { flag: "wx", mode: 0o600 });
-  const headFile = join(job.stateDir, "revisions", "verified-head.json");
-  if (!existsSync(headFile)) throw Error("Repair cannot publish without a trusted verified-head ledger.");
   const prior = JSON.parse(await readFile(headFile, "utf8")) as {
     version: number; jobId: string; headSha: string };
   if (prior.version !== 1 || prior.jobId !== job.jobId ||
@@ -759,6 +842,8 @@ async function reviewerFor(job: JobStartResult, sha: string, options: RejectedRe
 export async function advanceRejectedRepair(job: JobStartResult, sourceSha: string,
   options: RejectedRepairOptions = {}) {
   if (!SHA.test(sourceSha)) throw Error("Repair requires one exact reviewed commit.");
+  await withStoryJobLock(job, "reconcile-published-repair", () =>
+    recoverInterruptedFoundationRepair(job, sourceSha));
   const point = (await inspectRecoveryCheckpoints(job)).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
