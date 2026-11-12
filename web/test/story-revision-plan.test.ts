@@ -129,6 +129,29 @@ test('focused support creation cannot authorize unrelated records or unsafe prot
   assert.throws(() => resolveFocusedScope(catalog, tampered), /Invalid canonical focused creation grant/)
 })
 
+test('independent scope resolver fails closed on forged dependency graphs', () => {
+  const planned = inferStoryObjective('Write a conversation between Nia and Orin about rebuilding trust',
+    catalog, sha, previous).contract
+  const change = (update: (creates: NonNullable<typeof planned.scope.creates>) => void) => {
+    const forged = structuredClone(planned)
+    const creates = forged.scope.creates!
+    update(creates)
+    return forged
+  }
+  assert.throws(() => resolveFocusedScope(catalog, change(items => {
+    items[1]!.dependsOn.push('event.unknown')
+  })), /Unknown focused creation dependency/)
+  assert.throws(() => resolveFocusedScope(catalog, change(items => {
+    items[0]!.dependsOn = [items[1]!.id]
+  })), /Cyclic focused creation dependencies/)
+  assert.throws(() => resolveFocusedScope(catalog, change(items => {
+    items[2]!.dependsOn = []
+  })), /prerequisite dependency/)
+  assert.throws(() => resolveFocusedScope(catalog, change(items => {
+    items.push(structuredClone(items[0]!))
+  })), /Invalid focused creation inventory/)
+})
+
 test('Collaborative mode asks about open creative alternatives while Autonomous mode can proceed', () => {
   const preview = inferStoryRevision('Make character.nia either less trusting or more guarded',
     catalog, sha, previous)

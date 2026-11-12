@@ -303,7 +303,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         }
       }
       if (process.env.NT_FOCUS_FIXTURE_CASE === "unauthorized-edit") {
-        const outside = selection.context.find(r => !paths.includes(r.path));
+        const outside = selection.context.find(r => r.metadata.status !== "planned" &&
+          !paths.includes(r.path));
         if (!outside) throw new Error("Unauthorized-edit fixture requires an upstream context record.");
         const path = join(job.worktreeStoryRoot, outside.path);
         await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");

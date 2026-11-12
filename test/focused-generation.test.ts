@@ -126,6 +126,37 @@ test("bounded conversation creation commits only canonical new support with pres
     }
     assert.equal(git(f.repo, "rev-parse", "HEAD"), canonical);
     assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+    // An interrupted creation retains its uncommitted file and cannot silently
+    // replay, discard or adopt a changed canonical context on reconnect.
+    f.cli("interrupted", ["start"]);
+    const crashed = await startStoryJob({ story: f.story, job: "interrupted" }, false);
+    const interruptedTask = "Write a conversation between Ada and Neri about rebuilding trust after the storm";
+    const interrupted = inferStoryObjective(interruptedTask, catalog, canonical, prior);
+    const interruptedPlan = planObjective({ kind: "revision", request: interruptedTask,
+      contract: interrupted.contract, base: canonical, sourceJobId: "seed", catalog,
+      targetIds: interrupted.targets, allowedPaths: interrupted.writePaths });
+    await saveJobTurnPlan(crashed, interruptedPlan);
+    await runArchitectureJob({ story: f.story, job: "interrupted", action: "run",
+      fixture: true, contract: interrupted.contract, skillsSource: source });
+    const interruptedFirst = interrupted.contract.scope.creates![0]!;
+    const previousCase = process.env.NT_FOCUS_FIXTURE_CASE;
+    process.env.NT_FOCUS_FIXTURE_CASE = "unauthorized-edit";
+    try {
+      await assert.rejects(runFocusedWorkItem({ story: f.story, job: "interrupted",
+        target: interruptedFirst.id, task: interruptedTask, contract: interrupted.contract,
+        fixture: true, turnPlanDigest: interruptedPlan.digest, skillsSource: source }),
+      /outside its explicit authority/);
+    } finally {
+      if (previousCase === undefined) delete process.env.NT_FOCUS_FIXTURE_CASE;
+      else process.env.NT_FOCUS_FIXTURE_CASE = previousCase;
+    }
+    assert.equal(existsSync(join(crashed.worktreeStoryRoot, interruptedFirst.path)), true,
+      "partial output remains inspectable after a rejected creation");
+    assert.equal(git(crashed.worktreeRoot, "rev-parse", "HEAD"), canonical);
+    await assert.rejects(runFocusedWorkItem({ story: f.story, job: "interrupted",
+      target: interruptedFirst.id, task: interruptedTask, contract: interrupted.contract,
+      fixture: true, turnPlanDigest: interruptedPlan.digest, skillsSource: source }),
+    /changes requiring explicit reconciliation/);
   } finally {
     if (oldState === undefined) delete process.env.NT_STATE_DIR;
     else process.env.NT_STATE_DIR = oldState;

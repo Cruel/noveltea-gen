@@ -26,7 +26,26 @@ const references = (value: unknown, known: Set<string>): string[] => {
 export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: CompletionContract) {
   const active = records.filter(r => r.metadata.status !== "superseded");
   const byId = new Map(active.map(r => [r.metadata.id, r]));
-  const creates = new Map((contract.scope.creates ?? []).map(item => [item.id, item]));
+  const requested = contract.scope.creates ?? [];
+  if (!Array.isArray(requested) || requested.length > 12 ||
+      requested.some(item => !item || typeof item.id !== "string") ||
+      new Set(requested.map(item => item.id)).size !== requested.length)
+    throw new Error("Invalid focused creation inventory.");
+  const creates = new Map(requested.map(item => [item.id, item]));
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const validateDependencies = (id: string): void => {
+    if (visiting.has(id)) throw new Error("Cyclic focused creation dependencies.");
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const dependency of creates.get(id)!.dependsOn) {
+      if (typeof dependency !== "string" || !creates.has(dependency))
+        throw new Error("Unknown focused creation dependency: " + dependency);
+      validateDependencies(dependency);
+    }
+    visiting.delete(id);
+    visited.add(id);
+  };
   // The contract is parsed at entry, but this seam is also called from
   // independent verification paths: do not trust arbitrary caller data.
   for (const item of creates.values()) {
@@ -35,12 +54,19 @@ export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: C
         item.path !== ({ character: "characters", relationship: "relationships",
           event: "events", "authored-content": "authored-content" } as Record<string, string>)[item.id.split(".")[0] ?? ""] +
           "/" + item.id.split(".")[1] + ".md" ||
-        !Array.isArray(item.references) || !Array.isArray(item.dependsOn))
+        !Array.isArray(item.references) || !Array.isArray(item.dependsOn) ||
+        item.references.length > 16 || item.dependsOn.length > 12 ||
+        new Set(item.references).size !== item.references.length ||
+        new Set(item.dependsOn).size !== item.dependsOn.length ||
+        item.references.some(ref => typeof ref !== "string" ||
+          !/^(arc|character|relationship|event)\.[a-z][a-z0-9-]*$/.test(ref)))
       throw new Error("Invalid canonical focused creation grant.");
     for (const ref of item.references) {
       const known = byId.get(ref);
       if (!known && !creates.has(ref))
         throw new Error("Unverified focused creation prerequisite: " + ref);
+      if (creates.has(ref) && !item.dependsOn.includes(ref))
+        throw new Error("Focused creation reference lacks a prerequisite dependency: " + ref);
       if (known && known.metadata.type !== ref.split(".")[0])
         throw new Error("Focused creation references a mismatched typed record: " + ref);
     }
@@ -58,6 +84,7 @@ export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: C
       } });
     }
   }
+  for (const id of creates.keys()) validateDependencies(id);
   const selectedIds = [...new Set([...contract.scope.targets, ...(contract.scope.supportingTargets ?? [])])];
   const selected = selectedIds.map(id => {
     const record = byId.get(id);
