@@ -270,6 +270,44 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await inspectSpecialistChoice(job, binary.id)).answer?.kind, 'option')
     assert.equal((await api('POST', { action: 'choice', id: binary.id,
       proposalSha256: binary.proposalSha256, kind: 'option', optionId: 'no' })).status, 409)
+
+    // An existing Story's focused conversation uses exactly this authenticated
+    // endpoint, not a parallel collaboration scheduler or an untrusted grant.
+    writeFileSync(join(job.stateDir, 'event-items', 'revelation.json'), JSON.stringify({
+      jobId, workItemId: 'event-revelation', phase: 'committed',
+    }))
+    const target = 'authored-content.conversation'
+    const workItem = 'focus-' + createHash('sha256').update(target).digest('hex').slice(0, 24)
+    const focusedDir = join(job.stateDir, 'focused-sessions', target)
+    mkdirSync(focusedDir, { recursive: true })
+    const focusedSession = randomUUID(), focusedFile = join(focusedDir, 'original.jsonl')
+    writeFileSync(focusedFile, JSON.stringify({
+      type: 'session', id: focusedSession, cwd: job.worktreeStoryRoot,
+    }) + '\n')
+    const focusedItems = join(job.stateDir, 'focused-items')
+    mkdirSync(focusedItems, { recursive: true })
+    const stateFile = join(focusedItems, target + '.json')
+    const state = { jobId, threadId: job.threadId, workItemId: 'focus:' + target,
+      choiceWorkItem: workItem, piSessionFile: focusedFile,
+      piSessionId: focusedSession, phase: 'writing' }
+    writeFileSync(stateFile, JSON.stringify(state))
+    const conversation = await recordSpecialistChoice(job, workItem, question, focusedSession, focusedFile)
+    writeFileSync(stateFile, JSON.stringify({ ...state, phase: 'awaiting-author',
+      authorChoiceId: conversation.id }))
+    const focusedListed = await api('GET')
+    assert.equal(focusedListed.data.choice?.id, conversation.id)
+    const delegated = { action: 'choice', id: conversation.id,
+      proposalSha256: conversation.proposalSha256, kind: 'custom',
+      text: 'Use the established characterization. Delegate the exact playable dialogue to the writer.' }
+    assert.equal((await api('POST', delegated, owners[1]!.cookie)).status, 404)
+    assert.equal((await api('POST', { ...delegated, proposalSha256: 'f'.repeat(64) })).status, 409)
+    const focusedAnswer = await api('POST', delegated)
+    assert.equal(focusedAnswer.status, 200, focusedAnswer.data.error)
+    assert.equal(focusedAnswer.data.choice?.phase, 'answered')
+    assert.equal((await inspectSpecialistChoice(job, conversation.id)).answer?.kind, 'custom')
+    assert.equal((await api('POST', delegated)).status, 409)
+    assert.equal(git(job.worktreeRoot, 'status', '--porcelain'), '',
+      'Author choice may not create or authorize a Story write')
   } finally {
     store.close()
     if (previous.state === undefined) delete process.env.NT_STATE_DIR

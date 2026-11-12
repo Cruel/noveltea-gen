@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -68,6 +68,67 @@ test("shared Author Choices accept text, binary/Other and meaningful multi-alter
     context: [{ path: "../private.json", line: 1, description: "Unsafe context" }] }), /canonical/);
   assert.throws(() => parseSpecialistChoice({ kind: "alternatives", ...candidate,
     options: [candidate.options[0], candidate.options[0]] }), /unique/);
+});
+
+test("focused conversation choice binds one exact original session and supports Other/delegation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nt-focused-choice-"));
+  const old = { state: process.env.NT_STATE_DIR, cache: process.env.NT_GIT_CACHE_DIR };
+  process.env.NT_STATE_DIR = join(root, "state");
+  process.env.NT_GIT_CACHE_DIR = join(root, "cache");
+  try {
+    const repo = join(root, "repo"), story = join(repo, "story");
+    mkdirSync(join(story, "creative-direction"), { recursive: true });
+    writeFileSync(join(story, "creative-direction", "foundation.md"), "# Existing foundation\n");
+    git(repo, "init", "-q");
+    git(repo, "config", "user.name", "Test");
+    git(repo, "config", "user.email", "test@example.invalid");
+    git(repo, "add", ".");
+    git(repo, "commit", "-qm", "Source");
+    const job = await startStoryJob({ story, job: randomUUID() });
+    const target = "authored-content.dialogue";
+    const workItem = "focus-" + createHash("sha256").update(target).digest("hex").slice(0, 24);
+    const sessionDir = join(job.stateDir, "focused-sessions", target);
+    mkdirSync(sessionDir, { recursive: true });
+    const sessionId = randomUUID(), sessionFile = join(sessionDir, "original.jsonl");
+    writeFileSync(sessionFile, JSON.stringify({ type: "session", id: sessionId,
+      cwd: job.worktreeStoryRoot }) + "\n");
+    const itemDir = join(job.stateDir, "focused-items");
+    mkdirSync(itemDir, { recursive: true });
+    const stateFile = join(itemDir, target + ".json");
+    const originalState = { jobId: job.jobId, workItemId: "focus:" + target,
+      target, choiceWorkItem: workItem, phase: "writing", piSessionFile: sessionFile, piSessionId: sessionId };
+    writeFileSync(stateFile, JSON.stringify(originalState));
+    const question = parseSpecialistChoice(candidate);
+    await assert.rejects(recordSpecialistChoice(job, "focus-" + "f".repeat(24), question,
+      sessionId, sessionFile), /matching assigned/);
+    const receipt = await recordSpecialistChoice(job, workItem, question, sessionId, sessionFile);
+    writeFileSync(stateFile, JSON.stringify({ ...originalState, phase: "awaiting-author",
+      authorChoiceId: receipt.id }));
+    assert.equal((await activeSpecialistChoice(job))?.id, receipt.id);
+    await assert.rejects(answerSpecialistChoice(job, receipt.id, "f".repeat(64),
+      { kind: "option", optionId: "systemic", note: "" }, "user:owner"), /stale/);
+    const reply = await answerSpecialistChoice(job, receipt.id, receipt.proposalSha256,
+      { kind: "custom", text: "Use the systemic clues. Delegate the dialogue phrasing and pacing.",
+        note: "Preserve the protected foundation." }, "user:owner");
+    assert.equal(reply.phase, "answered");
+    assert.equal(reply.answer?.kind, "custom");
+    assert.equal((await activeSpecialistChoice(job))?.id, reply.id);
+    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "",
+      "Answering a question must never write Story files or grant scope");
+    const resumed = await claimSpecialistChoice(job, receipt.id);
+    assert.equal(resumed.sessionFile, sessionFile);
+    await assert.rejects(claimSpecialistChoice(job, receipt.id), /required author boundary/);
+    await completeSpecialistChoice(job, receipt.id);
+    assert.equal((await inspectSpecialistChoice(job, receipt.id)).phase, "consumed");
+    writeFileSync(stateFile, JSON.stringify({ ...originalState, phase: "committed" }));
+    assert.equal(await activeSpecialistChoice(job), null);
+  } finally {
+    if (old.state === undefined) delete process.env.NT_STATE_DIR;
+    else process.env.NT_STATE_DIR = old.state;
+    if (old.cache === undefined) delete process.env.NT_GIT_CACHE_DIR;
+    else process.env.NT_GIT_CACHE_DIR = old.cache;
+    removeTestTree(root);
+  }
 });
 
 test("author answer survives restart; only the original session, HEAD and draft bytes can resume", {

@@ -30,6 +30,12 @@ const REQUIRED = [
   "nt-catalog/references/progression.md",
   "nt-catalog/references/authority-and-validation.md",
 ] as const;
+const COLLABORATIVE = [
+  "nt-story-collaborate/SKILL.md",
+  "nt-story-collaborate/references/interaction.md",
+] as const;
+const requiredFor = (plan: TurnEvidence): readonly string[] =>
+  plan.creativePolicy?.mode === "collaborative" ? [...REQUIRED, ...COLLABORATIVE] : REQUIRED;
 const SCHEMA = "noveltea-objective-planning/v1" as const;
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const pathFor = (job: JobStartResult) => join(job.stateDir, "objective-planning.json");
@@ -132,7 +138,7 @@ function verifyReceipt(
     throw new Error("Pinned orchestration planning receipt is corrupt, stale or belongs to another writer.");
   if (receipt.phase === "planned") {
     verifyOrchestratorProposal(receipt.proposal, plan);
-    const required = REQUIRED.map((p) => join(selection.receipt.skillSnapshot.path, "skills", p));
+    const required = requiredFor(plan).map((p) => join(selection.receipt.skillSnapshot.path, "skills", p));
     if (!Array.isArray(receipt.skillReads) || required.some((p) => !receipt.skillReads!.includes(p)))
       throw new Error("Orchestration planning lacks verified pinned method reads.");
   }
@@ -226,7 +232,8 @@ export async function runPinnedObjectivePlanner(
       discovery: "explicit-only",
       novelteaSkills: snapshot.path,
       skillDirs: [],
-      requiredSkills: ["nt-story-orchestrate", "nt-catalog", "nt-story-discovery"],
+      requiredSkills: ["nt-story-orchestrate", "nt-catalog", "nt-story-discovery",
+        ...(plan.creativePolicy?.mode === "collaborative" ? ["nt-story-collaborate"] : [])],
     },
     [],
     "orchestrator",
@@ -235,7 +242,8 @@ export async function runPinnedObjectivePlanner(
   const { skills, diagnostics } = loader.getSkills();
   if (
     diagnostics.some((d) => d.type === "error") ||
-    ["nt-story-orchestrate", "nt-catalog"].some(
+    ["nt-story-orchestrate", "nt-catalog",
+      ...(plan.creativePolicy?.mode === "collaborative" ? ["nt-story-collaborate"] : [])].some(
       (name) =>
         !skills.some((s) => s.name === name && s.filePath.startsWith(join(snapshot.path, "skills") + sep)),
     )
@@ -256,7 +264,11 @@ export async function runPinnedObjectivePlanner(
     },
     runtime,
   );
-  const tools = await selectSandboxPiTools(job, snapshot, skills, undefined, "read-only", "orchestrator");
+  // The optional method is visible only when the controller pinned Collaborative
+  // for this Turn. A model cannot opt into it through nested skill invocation.
+  const visible = plan.creativePolicy?.mode === "collaborative"
+    ? skills : skills.filter(skill => skill.name !== "nt-story-collaborate");
+  const tools = await selectSandboxPiTools(job, snapshot, visible, undefined, "read-only", "orchestrator");
   const { session } = await createAgentSession({
     cwd: project.root,
     modelRuntime: runtime,
@@ -297,11 +309,20 @@ export async function runPinnedObjectivePlanner(
       context.contextNote +
       "You are the read-only NovelTea objective orchestrator, not a Story writer. " +
       "Read these exact pinned methods and references using read before planning:\n" +
-      REQUIRED.map((p) => "skill://" + p).join("\n") +
+      requiredFor(plan).map((p) => "skill://" + p).join("\n") +
       "\nInspect relevant existing canonical Story through read/find/grep without touching " +
       "the private .story-inbox or another Thread. You have NO file write, shell, reviewer, " +
       "or approval authority. Follow the pinned methodology to identify which of the " +
       "controller-authorized assignments are currently relevant and their causal order. " +
+      (plan.creativePolicy?.mode === "collaborative"
+        ? "Apply nt-story-collaborate ONLY to how consequential author choices should be presented. " +
+          "Reuse established foundation, protected decisions and delegated details. " +
+          "A routine edit, validator fix or already delegated detail needs no question. " +
+          "The assigned specialist and authenticated controller handle any actual " +
+          "choice/pause/resume; do not start another scheduler, issue a permission, or " +
+          "replace the bounded plan with an interview. "
+        : "Autonomous mode: do not invoke nt-story-collaborate or proactively ask " +
+          "for ordinary authoring choices. ") +
       "You may explain a missing prerequisite in a reason; you may NOT add, remove, " +
       "rename, modify or invent an assignment. The controller will revalidate and " +
       "enforce all dependencies and the complete delivery obligation.\n" +
@@ -331,7 +352,7 @@ export async function runPinnedObjectivePlanner(
           typeof c.arguments?.path === "string") : [])
         .map((c) => canonicalPinnedReadPath(c.arguments.path as string, project.root, snapshot.path));
     };
-    const required = REQUIRED.map((p) => join(snapshot.path, "skills", p));
+    const required = requiredFor(plan).map((p) => join(snapshot.path, "skills", p));
     const missingReads = () => required.filter(p => !completedReads().includes(p));
     if (missingReads().length) {
       await withStoryJobLock(job, "orchestrator:objective-reads", () => promptStorySpecialist(session,

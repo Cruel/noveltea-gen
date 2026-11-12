@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { JobStartResult } from "../src/job.js";
 import type { StoryOrchestratorSelection } from "../src/orchestrator-selection.js";
 import { planWholeStory, planRevision } from "../web/src/lib/turn-plan.js";
+import { creativePolicy } from "../src/creative-policy.js";
 import {
   verifyOrchestratorProposal,
   readPinnedObjectivePlanning,
@@ -176,6 +177,48 @@ test("signed planning receipt survives reconnect and rejects tampering, source a
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("Collaborative Turn requires its own pinned method reads; Autonomous Turn never inherits them", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nt-collaborative-method-"));
+  try {
+    const job = { stateDir: dir, jobId: "job", threadId: "thread", baseSha: a } as JobStartResult;
+    const selection = { receipt: { skillEntrypointSha256: "c".repeat(64),
+      skillSnapshot: { id: "b".repeat(64), path: join(dir, "snapshot") } } } as StoryOrchestratorSelection;
+    const full = planWholeStory("Make me a mystery", contract, a, null, creativePolicy("collaborative"));
+    const auto = planWholeStory("Make me a mystery", contract, a, null, creativePolicy("autonomous"));
+    const reads = ["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+      "nt-catalog/SKILL.md", "nt-catalog/references/records.md",
+      "nt-catalog/references/progression.md", "nt-catalog/references/authority-and-validation.md"]
+      .map(path => join(selection.receipt.skillSnapshot.path, "skills", path));
+    const overlay = ["nt-story-collaborate/SKILL.md", "nt-story-collaborate/references/interaction.md"]
+      .map(path => join(selection.receipt.skillSnapshot.path, "skills", path));
+    const save = (p: typeof full, skillReads: string[]) => {
+      const body = { schema: "noveltea-objective-planning/v1" as const, jobId: job.jobId,
+        threadId: job.threadId, sourceSha: a, turnDigest: p.digest,
+        methodSha256: selection.receipt.skillEntrypointSha256,
+        snapshotId: selection.receipt.skillSnapshot.id, provider: "openai", model: "gpt-6-luna",
+        phase: "planned" as const, sessionFile: join(dir, "transcript.jsonl"), skillReads,
+        proposal: { sourceSha: a, turnDigest: p.digest, assignments: p.assignments.map(x =>
+          ({ id: x.id, reason: "Pinned goal" })) } };
+      writeFileSync(join(dir, "objective-planning.json"), JSON.stringify({ ...body,
+        digest: createHash("sha256").update(JSON.stringify(body)).digest("hex") }));
+    };
+    save(full, reads);
+    await assert.rejects(readPinnedObjectivePlanning(job, selection, full, "openai", "gpt-6-luna"),
+      /method reads/);
+    save(full, [...reads, ...overlay.slice(0, 1)]);
+    await assert.rejects(readPinnedObjectivePlanning(job, selection, full, "openai", "gpt-6-luna"),
+      /method reads/);
+    save(full, [...reads, ...overlay]);
+    const receipt = await readPinnedObjectivePlanning(job, selection, full, "openai", "gpt-6-luna");
+    assert.deepEqual(receipt.skillReads?.slice(-2), overlay);
+    await assert.rejects(readPinnedObjectivePlanning(job, selection, auto, "openai", "gpt-6-luna"),
+      /corrupt|stale/);
+    save(auto, reads);
+    assert.deepEqual((await readPinnedObjectivePlanning(job, selection, auto, "openai", "gpt-6-luna"))
+      .skillReads, reads);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("independent focused assignments can be reordered without changing their writer grants", () => {

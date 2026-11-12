@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { JobStartResult } from "./job.js";
 import { verifyJobPiSession } from "./job-session.js";
@@ -57,6 +57,8 @@ export class SpecialistChoiceRequiredError extends Error {
   }
 }
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+/** Deterministic, safe work-item identity for focused record IDs containing a dot. */
+export const focusedChoiceWorkItem = (target: string) => "focus-" + sha(target).slice(0, 24);
 const ID = /^[a-z][a-z0-9]*(?:[a-z0-9-]*[a-z0-9])?$/;
 const file = (job: JobStartResult, id: string) => join(job.stateDir, "specialist-choices", id + ".json");
 function git(job: JobStartResult, ...args: string[]) {
@@ -190,6 +192,23 @@ async function verifyChoiceSession(job: JobStartResult, workItem: string,
       sessionFile, sessionId);
   if (/^event-[a-z][a-z0-9-]*$/.test(workItem))
     return verifyJobPiSession(job, "event", sessionFile, sessionId, workItem);
+  if (/^focus-[a-f0-9]{24}$/.test(workItem)) {
+    for (const { target, state } of await focusedChoiceStates(job)) {
+      if (state.choiceWorkItem !== workItem) continue;
+      if (!["writing", "awaiting-author"].includes(state.phase ?? "") ||
+          state.piSessionFile !== sessionFile || state.piSessionId !== sessionId ||
+          !sessionFile.startsWith(join(job.stateDir, "focused-sessions", target) + sep) ||
+          await realpath(sessionFile) !== sessionFile ||
+          !(await lstat(sessionFile)).isFile())
+        throw Error("Focused author choice is not bound to its original specialist session.");
+      const header = JSON.parse((await readFile(sessionFile, "utf8")).split("\n")[0]!) as {
+        type?: string; id?: string };
+      if (header.type !== "session" || header.id !== sessionId)
+        throw Error("Original focused Pi session identity changed.");
+      return;
+    }
+    throw Error("Focused author choice has no matching assigned specialist.");
+  }
   const repair = workItem.match(/^repair-([a-f0-9]{40})$/);
   if (repair) {
     const path = join(job.stateDir, "review-repairs", repair[1] + ".json");
@@ -219,12 +238,30 @@ async function readSpecialistState(job: JobStartResult, path: string) {
     throw Error("Unsafe specialist work-item state.");
   const state = JSON.parse(await readFile(path, "utf8")) as {
     jobId?: string; threadId?: string; workItemId?: string;
-    phase?: string; authorChoiceId?: string;
+    phase?: string; authorChoiceId?: string; choiceWorkItem?: string;
+    piSessionFile?: string; piSessionId?: string;
     units?: Array<{ id?: string; phase?: string; authorChoiceId?: string }>;
   };
   if (state.jobId !== job.jobId || state.threadId && state.threadId !== job.threadId)
     throw Error("Specialist state belongs to another job.");
   return state;
+}
+/** Both choice issuance and owner-facing lookup use this exact trusted inventory. */
+async function focusedChoiceStates(job: JobStartResult) {
+  const dir = join(job.stateDir, "focused-items");
+  if (!existsSync(dir)) return [];
+  const names = (await readdir(dir)).filter(name =>
+    /^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.json$/.test(name));
+  if (names.length > 256) throw Error("Focused choice inventory exceeds bounded limit.");
+  return Promise.all(names.map(async name => {
+    const target = name.slice(0, -5);
+    const state = await readSpecialistState(job, join(dir, name));
+    if (state.workItemId !== "focus:" + target ||
+        (state.choiceWorkItem !== undefined &&
+          state.choiceWorkItem !== focusedChoiceWorkItem(target)))
+      throw Error("Focused choice inventory differs from its bound record target.");
+    return { target, state };
+  }));
 }
 async function safeRead(job: JobStartResult, id: string) {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("Invalid specialist-choice ID.");
@@ -295,7 +332,6 @@ export async function activeSpecialistChoice(job: JobStartResult) {
   }
   const events = join(job.stateDir, "event-items");
   if (existsSync(events)) {
-    const { readdir } = await import("node:fs/promises");
     const names = (await readdir(events)).filter(n => /^[a-z0-9-]+\.json$/.test(n));
     if (names.length > 256) throw Error("Specialist author-choice inventory exceeds bounded limit.");
     for (const name of names) {
@@ -306,7 +342,6 @@ export async function activeSpecialistChoice(job: JobStartResult) {
   }
   const repairs = join(job.stateDir, "review-repairs");
   if (existsSync(repairs)) {
-    const { readdir } = await import("node:fs/promises");
     const names = (await readdir(repairs)).filter(n => /^[a-f0-9]{40}\.json$/.test(n));
     if (names.length > 256) throw Error("Rejected-review choice inventory exceeds bounded limit.");
     for (const name of names) {
@@ -318,6 +353,10 @@ export async function activeSpecialistChoice(job: JobStartResult) {
         waiting.push({ id: "repair-" + name.slice(0, 40),
           phase: state.phase, authorChoiceId: state.choiceId });
     }
+  }
+  for (const { state } of await focusedChoiceStates(job)) {
+    if (state.phase === "awaiting-author") waiting.push({
+      id: state.choiceWorkItem, phase: state.phase, authorChoiceId: state.authorChoiceId });
   }
   if (!waiting.length) return null;
   if (waiting.length !== 1 || !waiting[0]?.authorChoiceId || !waiting[0]?.id)

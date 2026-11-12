@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract, PlannedFocusCreate } from "./architecture.js";
 import { withStoryJobLock } from "./job-lock.js";
@@ -29,13 +29,18 @@ import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { resolveFocusedScope, type CanonicalScopeRecord } from "./focused-scope.js";
 import { readTurnEvidence, assertFocusedTurnAssignment } from "./turn-plan-evidence.js";
 import { creativePolicyInstruction, DEFAULT_CREATIVE_POLICY, type CreativePolicy } from "./creative-policy.js";
+import { focusedChoiceWorkItem, recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
+  completeSpecialistChoice, SpecialistChoiceRequiredError, authorChoiceDirection,
+  extractSpecialistChoice, parseSpecialistChoice, type SpecialistChoiceQuestion,
+  type SpecialistChoiceReceipt } from "./specialist-choice.js";
 
 interface Receipt {
   version: 1; jobId: string; workItemId: string; planVersion: number; contractDigest: string;
-  expectedHead: string; phase: "pending" | "writing" | "authored" | "committed" | "waiting-dependency";
+  expectedHead: string; phase: "pending" | "writing" | "authored" | "committed" | "waiting-dependency" | "awaiting-author";
   dependencyReport?: DependencyReport; resolvedDependency?: string;
   target: string; paths: string[]; context: string[]; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot; piSessionFile?: string;
+  piSessionId?: string; choiceWorkItem?: string; authorChoiceId?: string;
   sha256?: string; commitSha?: string; assignmentDigest?: string; steeringDigest?: string;
   validation?: { status: "passed"; validatorVersion: string; baseSha: string };
 }
@@ -156,7 +161,10 @@ function creationReferenceInstructions(create: PlannedFocusCreate): string {
 
 async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
-  create?: PlannedFocusCreate, obligations: string[] = [], steering = "") {
+  create?: PlannedFocusCreate, obligations: string[] = [], steering = "",
+  resume?: SpecialistChoiceReceipt): Promise<DependencyReport | {
+    authorQuestion: SpecialistChoiceQuestion; sessionFile: string; sessionId: string;
+  } | undefined> {
   let dependencyReport: DependencyReport | undefined;
   const dependencyTool = receipt.assignmentDigest && obligations.length > 0 &&
     !receipt.workItemId.startsWith("dependency:")
@@ -190,7 +198,9 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool, createPiStatusTool(),
+    sessionManager: resume
+      ? SessionManager.open(resume.sessionFile, dirname(resume.sessionFile), project.root)
+      : context.manager, customTools: [...(sandboxTools ?? []), context.contextTool, createPiStatusTool(),
       ...(dependencyTool ? [dependencyTool] : [])],
     noTools: "all", tools: [...(create ? ["write"] : []),
       "read", "edit", "grep", "find", "ls", "story_context", "report_status",
@@ -200,8 +210,13 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
     if (context.thinking && session.thinkingLevel !== context.thinking)
       throw new Error("Focused specialist did not honor the pinned reasoning profile.");
     const file = session.sessionManager.getSessionFile();
-    if (file) { receipt.piSessionFile = file; await save(receiptPath(job, receipt), receipt); }
-    await context.beforeTurn(file ?? undefined);
+    if (!file) throw Error("Focused specialist requires a persistent Pi transcript.");
+    if (resume && (file !== resume.sessionFile || session.sessionId !== resume.sessionId))
+      throw Error("Focused author response must resume the original exact Pi session.");
+    receipt.piSessionFile = file;
+    receipt.piSessionId = session.sessionId;
+    await save(receiptPath(job, receipt), receipt);
+    await context.beforeTurn(file);
     const required = [join(receipt.snapshot!.path, "skills", skill, "SKILL.md"),
       join(receipt.snapshot!.path, "skills", "nt-catalog", "SKILL.md"),
       join(receipt.snapshot!.path, "skills", "nt-catalog", "references", "records.md"),
@@ -261,6 +276,20 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       (receipt.resolvedDependency ? "A controller-authorized prerequisite has now been completed and reviewed. Re-read current canonical context before resuming your original assignment.\n" : "") +
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
       creativePolicyInstruction(policy) +
+      (resume?.answer ? "\nAUTHENTICATED AUTHOR ANSWER (exact waiting assignment): " +
+        authorChoiceDirection(resume.question, resume.answer) +
+        "\nContinue this original Pi session; keep the controller's existing write scope. " : "") +
+      "\nIf the currently authorized edit requires an unresolved CONSEQUENTIALLY different " +
+      "artistic direction not specified or delegated by the author, ask before editing. " +
+      "Return JSON {authorDecisionRequest:{kind:'alternatives',question,options:[2–3 " +
+      "{id,title,approach,benefits,tradeoffs}],recommendedId,recommendationReason},modifiedRecords:[]}. " +
+      "You may instead use kind:'free-text' or kind:'yes-no'; Other/free text and " +
+      "delegation are always allowed. Give meaningful alternatives, an explicit reasoned " +
+      "recommendation and concrete consequences. Never ask for routine phrasing, minor " +
+      "staging, validator errors or already delegated details; do not request protected " +
+      "canon approval via this mechanism. If asking, leave the Story and Git entirely " +
+      "unchanged so the exact original assignment can resume after authenticated answer. " +
+      "Otherwise implement the assigned edit normally; questions do not grant scope.\n" +
       "Original Turn goal: " + task + "\nSpecialist assignment outcome: " +
       (outcome ?? "Revise only the authorized record against the user request.") +
       (steering ? "\nSAFE-BOUNDARY AUTHOR PLAN AMENDMENT (additional, not replacement authority):\n" + steering : ""));
@@ -277,13 +306,25 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       await promptStorySpecialist(session, "You did not successfully read all required pinned skill " +
         "references. Read EACH exact path below using the read tool, then stop. " +
         "Do not edit any Story file, redo work, or repeat a previously recorded dependency report. " +
-        "After reading, finish with a brief status, not a new change.\nMISSING READS:\n" +
+        "If your last response was an author question, repeat the COMPLETE authorDecisionRequest " +
+        "and empty modifiedRecords JSON after reading, without editing. Otherwise finish with a brief status.\nMISSING READS:\n" +
         missingReads().join("\n"));
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
       throw new Error("Focused Pi specialist failed or was interrupted.");
     if (missingReads().length)
       throw new Error("Focused Pi specialist failed to read pinned skill guidance.");
+    const requested = extractSpecialistChoice(session.getLastAssistantText() ?? "");
+    if (requested) {
+      const question = parseSpecialistChoice(requested.authorDecisionRequest);
+      if (!Array.isArray(requested.modifiedRecords) || requested.modifiedRecords.length ||
+          changes(job).length || git(job, "rev-parse", "HEAD").trim() !== receipt.expectedHead ||
+          dependencyReport)
+        throw Error("Focused author question requires a clean unchanged, authorized work item.");
+      await context.completed(file, session.sessionId);
+      return { authorQuestion: question, sessionFile: file, sessionId: session.sessionId };
+    }
+    await context.completed(file, session.sessionId);
     return dependencyReport;
   } finally { session.dispose(); }
 }
@@ -364,6 +405,10 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           throw Error("Originating assignment lost its verified dependency authorization history.");
       }
       if (receipt.phase === "committed") {
+        if (receipt.authorChoiceId) {
+          const choice = await inspectSpecialistChoice(job, receipt.authorChoiceId);
+          if (choice.phase === "resuming") await completeSpecialistChoice(job, receipt.authorChoiceId);
+        }
         if (!receipt.commitSha || !receipt.sha256) throw new Error("Missing focused commit verification evidence.");
         git(job, "merge-base", "--is-ancestor", receipt.commitSha, current);
         const message = git(job, "log", "-1", "--format=%B", receipt.commitSha).toString();
@@ -383,6 +428,16 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       }
       if (receipt.phase === "writing" || receipt.phase === "authored")
         throw new Error("Interrupted focused writer: inspect preserved session and Git worktree; do not automatically replay.");
+      if (receipt.phase === "awaiting-author") {
+        if (!receipt.authorChoiceId || receipt.choiceWorkItem !== focusedChoiceWorkItem(receipt.target))
+          throw Error("Focused author-choice receipt lacks its original specialist identity.");
+        const choice = await inspectSpecialistChoice(job, receipt.authorChoiceId);
+        if (choice.phase === "awaiting-author") throw new SpecialistChoiceRequiredError();
+        if (choice.phase !== "answered") throw Error("Focused answer was already consumed.");
+        await verifySpecialistChoice(job, receipt.authorChoiceId, "answered");
+        if (choice.workItem !== receipt.choiceWorkItem || choice.headSha !== current)
+          throw Error("Focused author choice differs from the original verified source.");
+      }
     } else {
       if (dependency && current !== dependency.amendment!.sourceSha)
         throw Error("Dependency writer requires the exact authorized Story HEAD.");
@@ -420,6 +475,9 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       throw new Error("Focused skill snapshot changed.");
     await preflightPiAssignment(job, receipt.workItemId + ":" + plan.version,
       input.fixture ? undefined : { provider: receipt.provider, model: receipt.model });
+    const resuming = receipt.phase === "awaiting-author" && !!receipt.authorChoiceId;
+    const answered = resuming ? await verifySpecialistChoice(job, receipt.authorChoiceId!, "answered") : undefined;
+    if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
     receipt.phase = "writing"; await save(file, receipt);
     let missing: DependencyReport | undefined;
     const fixtureReport = input.fixture && !dependency && !receipt.resolvedDependency &&
@@ -446,9 +504,25 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         const path = join(job.worktreeStoryRoot, outside.path);
         await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");
       }
-    } else if (!input.fixture) missing = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
-      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
-      input.steering);
+    } else if (!input.fixture) {
+      const output = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
+        turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
+        input.steering, answered);
+      if (output && "authorQuestion" in output) {
+        if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
+        receipt.piSessionFile = output.sessionFile;
+        receipt.piSessionId = output.sessionId;
+        receipt.choiceWorkItem = focusedChoiceWorkItem(receipt.target);
+        await save(file, receipt);
+        const pending = await recordSpecialistChoice(job, receipt.choiceWorkItem, output.authorQuestion,
+          output.sessionId, output.sessionFile);
+        receipt.authorChoiceId = pending.id;
+        receipt.phase = "awaiting-author";
+        await save(file, receipt);
+        throw new SpecialistChoiceRequiredError();
+      }
+      missing = output;
+    }
     if (missing) {
       if (changes(job).length || git(job, "rev-parse", "HEAD").trim() !== current ||
           missing.sourceSha !== current || missing.turnDigest !== turnAssignmentDigest ||
@@ -456,6 +530,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         throw Error("Dependency report is stale or writer left edits; preserve for manual reconciliation.");
       receipt.dependencyReport = missing; receipt.phase = "waiting-dependency";
       await save(file, receipt);
+      if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
       return { status: "dependency-required" };
     }
     const edited = changes(job);
@@ -493,6 +568,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     if (changes(job).length) throw new Error("Focused commit left unexpected dirty worktree.");
     receipt.commitSha = git(job, "rev-parse", "HEAD").toString().trim();
     receipt.phase = "committed"; await save(file, receipt);
+    if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
     const headFile = join(job.stateDir, "revisions", "verified-head.json");
     const previous = existsSync(headFile) ? JSON.parse(await readFile(headFile, "utf8")) as {
       jobId: string; headSha: string; version: number } : undefined;

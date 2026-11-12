@@ -152,6 +152,10 @@ test("role-aware catalog exposes adjacent crafts but keeps orchestrator and revi
     "nt-story-collaborate", "nt-story-generate", "nt-story-import", "setup-noveltea"]) {
     await skill(skillRoot, name);
   }
+  const collaboration = join(skillRoot, "nt-story-collaborate");
+  await mkdir(join(collaboration, "references"));
+  await writeFile(join(collaboration, "references", "interaction.md"),
+    "Ask consequential questions with meaningful alternatives and an Other answer.");
   const config = await x.configure();
   const build = async (role: "specialist" | "reviewer" | "orchestrator") => {
     const { loader } = createProjectResourceLoader(x.project, x.agentDir, true, config, [], role);
@@ -170,7 +174,8 @@ test("role-aware catalog exposes adjacent crafts but keeps orchestrator and revi
   assert.ok(!ordinary.names.includes("nt-story-generate"));
   assert.ok(!ordinary.names.includes("setup-noveltea"));
   assert.match(JSON.stringify(await ordinary.read(join(craft, "references", "facts.md"))), /Cross-domain craft details/);
-  for (const forbidden of ["nt-story-orchestrate", "nt-narrative-review", "nt-story-import"]) {
+  for (const forbidden of ["nt-story-orchestrate", "nt-story-collaborate",
+    "nt-narrative-review", "nt-story-import"]) {
     await assert.rejects(ordinary.read(join(skillRoot, forbidden, "SKILL.md")), /Skill read denied/);
   }
   const review = await build("reviewer");
@@ -184,6 +189,10 @@ test("role-aware catalog exposes adjacent crafts but keeps orchestrator and revi
   assert.ok(coordinate.names.includes("nt-worldbuilding"));
   assert.ok(!coordinate.names.includes("nt-narrative-review"));
   assert.ok(!coordinate.names.includes("setup-noveltea"));
+  await assert.match(JSON.stringify(await coordinate.read("skill://nt-story-collaborate/SKILL.md")),
+    /nt-story-collaborate/);
+  await assert.match(JSON.stringify(await coordinate.read(
+    "skill://nt-story-collaborate/references/interaction.md")), /meaningful alternatives/);
   await assert.rejects(coordinate.read(join(skillRoot, "nt-narrative-review", "SKILL.md")), /Skill read denied/);
 });
 
