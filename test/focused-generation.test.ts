@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { parseGenerationContract } from "../src/generation.js";
+import { createGenerationGraph, parseGenerationContract } from "../src/generation.js";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { inspectDependencyPlan, sourceDigest, recordDependency, saveDependencyPlan } from "../src/dependency-state.js";
+import { advanceFocusedDependency } from "../src/dependency-work.js";
+import { withStoryJobLock } from "../src/job-lock.js";
 import { startStoryJob } from "../src/job.js";
 import { validateStoryJob } from "../src/validator.js";
 import { runArchitectureJob, type CompletionContract } from "../src/architecture.js";
@@ -300,6 +304,118 @@ test("focused revisions reject missing existing target IDs and unauthorized file
     "neither the selected nor the unauthorized record may be committed");
   assert.match(git(job.worktreeRoot, "status", "--porcelain"), /M /);
   assert.equal(git(f.repo, "rev-parse", "HEAD"), baseline);
+});
+
+test("discovered prerequisite amends a focused plan and survives process restart without duplicate writers", {
+  skip: !available, timeout: 300_000,
+}, async () => {
+  const f = fixture("dependency-amendment");
+  f.cli("seed", ["start"]);
+  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
+  const seed = f.cli("seed", ["generate", "start", "--task", "Seed a mystery",
+    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
+  git(f.repo, "merge", "--ff-only", seed.report.identity.branch);
+  const old = { state: process.env.NT_STATE_DIR, cache: process.env.NT_SKILL_CACHE_DIR,
+    report: process.env.NT_FOCUS_FIXTURE_DEPENDENCY };
+  process.env.NT_STATE_DIR = f.env.NT_STATE_DIR;
+  process.env.NT_SKILL_CACHE_DIR = f.env.NT_SKILL_CACHE_DIR;
+  try {
+    const job = await startStoryJob({ story: f.story, job: "dependency" });
+    const native = await validateStoryJob(job, source, { ...job, baseSha: job.baseSha });
+    assert.equal(native.status, "passed");
+    const catalog = (native.report as { records: CanonicalScopeRecord[] }).records;
+    const target = "authored-content.disclosure-scene";
+    const contract: CompletionContract = { scope: { kind: "partial", depth: "composition",
+      targets: [target], branches: [] }, constraints: [],
+      envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+    const task = "Clarify the witness disclosure conversation";
+    const turn = planObjective({ kind: "revision", request: task, contract, base: job.baseSha,
+      sourceJobId: "seed", catalog, targetIds: [target], allowedPaths: ["authored-content/disclosure-scene.md"] });
+    await saveJobTurnPlan(job, turn);
+    const eventPath = "events/disclose-ledger.md";
+    const bytes = readFileSync(join(job.worktreeStoryRoot, eventPath), "utf8");
+    const report = { sourceSha: job.baseSha, turnDigest: turn.digest, assignmentId: "focus:" + target,
+      obligation: turn.objective!.obligations[0], missing: "Clarify the causal prerequisite for the witness disclosure",
+      affectedIds: [target, "event.disclose-ledger"],
+      sources: [{ path: eventPath, sha256: sourceDigest(bytes), quote: "id: event.disclose-ledger" }],
+      likelySpecialist: "nt-event-design", authorDecisionRequired: false };
+    process.env.NT_FOCUS_FIXTURE_DEPENDENCY = JSON.stringify(report);
+    const saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
+    try {
+      const graph = createGenerationGraph(saver, "cli");
+      const result = await graph.invoke({ request: { story: f.story, job: "dependency", task,
+        contract, fixture: true, skillsSource: source, turnPlanDigest: turn.digest,
+        orchestrationPolicy: "fixture-legacy" }, pauseAfter: "focus" },
+        { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 });
+      assert.equal(result.status, "paused", result.reason ?? JSON.stringify(result));
+    } finally { saver.db.close(); }
+    const amended = await inspectDependencyPlan(job);
+    assert.equal(amended?.version, 2);
+    assert.equal(amended?.entries[0]?.phase, "verified");
+    assert.equal(amended?.entries[0]?.amendment?.assignment.specialist, "nt-event-design");
+    assert.deepEqual(amended?.entries[0]?.amendment?.objective, turn.objective);
+    assert.equal(git(job.worktreeRoot, "rev-list", "--count", job.baseSha + "..HEAD"), "2");
+    assert.deepEqual(git(job.worktreeRoot, "diff", "--name-only", job.baseSha, "HEAD").split("\n"),
+      ["story/authored-content/disclosure-scene.md", "story/events/disclose-ledger.md"]);
+    const head = git(job.worktreeRoot, "rev-parse", "HEAD");
+    const resumed = f.cli("dependency", ["generate", "resume"]);
+    assert.equal(resumed.status, "blocked");
+    assert.match(resumed.reason, /editorial-unverified|review/);
+    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
+    assert.deepEqual(await inspectDependencyPlan(job), amended);
+    const ledgerPath = join(job.stateDir, "dependency-plan.json");
+    renameSync(ledgerPath, ledgerPath + ".missing");
+    try {
+      const missingHistory = f.cli("dependency", ["generate", "resume"]);
+      assert.equal(missingHistory.status, "blocked");
+      assert.match(missingHistory.reason, /dependency authorization history is missing/);
+      assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
+    } finally { renameSync(ledgerPath + ".missing", ledgerPath); }
+    const final = await validateStoryJob(job, source, { ...job, baseSha: job.baseSha });
+    assert.equal(final.status, "passed");
+    await assert.rejects(inspectDependencyPlan({ ...job, threadId: "another-thread" }), /identity/);
+    await assert.rejects(inspectDependencyPlan({ ...job, jobId: "another-job" }), /identity/);
+
+    // A crash after the planner started must not turn into another model call
+    // or writer on restart, even though the original specialist left no edits.
+    const interrupted = await startStoryJob({ story: f.story, job: "dependency-interrupted" });
+    await saveJobTurnPlan(interrupted, turn);
+    await runArchitectureJob({ story: f.story, job: interrupted.jobId, action: "run",
+      fixture: true, contract, skillsSource: source });
+    const options = { story: f.story, job: interrupted.jobId, target, task, contract,
+      fixture: true, turnPlanDigest: turn.digest, skillsSource: source };
+    assert.equal((await runFocusedWorkItem(options)).status, "dependency-required");
+    await withStoryJobLock(interrupted, "test-crash-boundary", async () => {
+      const saved = await recordDependency(interrupted, report, true);
+      saved.entry.phase = "planning";
+      await saveDependencyPlan(interrupted, saved.plan);
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(advanceFocusedDependency(options), /Interrupted.*no replay/);
+      assert.equal(git(interrupted.worktreeRoot, "rev-parse", "HEAD"), interrupted.baseSha);
+      assert.equal(git(interrupted.worktreeRoot, "status", "--porcelain"), "");
+    }
+    assert.equal((await inspectDependencyPlan(interrupted))?.entries[0]?.phase, "planning");
+
+    const rejected = await startStoryJob({ story: f.story, job: "dependency-rejected" });
+    await saveJobTurnPlan(rejected, turn);
+    await runArchitectureJob({ story: f.story, job: rejected.jobId, action: "run",
+      fixture: true, contract, skillsSource: source });
+    const stale = { ...report, sources: [{ ...report.sources[0]!, sha256: "f".repeat(64) }] };
+    process.env.NT_FOCUS_FIXTURE_DEPENDENCY = JSON.stringify(stale);
+    const rejectedOptions = { ...options, job: rejected.jobId };
+    assert.equal((await runFocusedWorkItem(rejectedOptions)).status, "dependency-required");
+    await assert.rejects(advanceFocusedDependency(rejectedOptions), /stale evidence/);
+    assert.equal((await inspectDependencyPlan(rejected))?.entries[0]?.phase, "rejected");
+    assert.equal((await inspectDependencyPlan(rejected))?.version, 1);
+    await assert.rejects(advanceFocusedDependency(rejectedOptions), /rejected.*no replay/);
+    assert.equal(git(rejected.worktreeRoot, "rev-parse", "HEAD"), rejected.baseSha);
+  } finally {
+    for (const [key, value] of [["NT_STATE_DIR", old.state], ["NT_SKILL_CACHE_DIR", old.cache],
+      ["NT_FOCUS_FIXTURE_DEPENDENCY", old.report]]) {
+      if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+    }
+  }
 });
 
 test("missing target and missing upstream context block without creating or editing unrelated Story", {

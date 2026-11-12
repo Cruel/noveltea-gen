@@ -18,6 +18,9 @@ import { runInteractiveWorkItem } from "./interactive-work.js";
 import { runCompositionWorkItem } from "./composition-work.js";
 import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
+import { advanceFocusedDependency } from "./dependency-work.js";
+import { inspectDependencyPlan, dependencyDigest, verifyDependencyHistory,
+  type DependencyHistoryPin } from "./dependency-state.js";
 import { isFocusedScope } from "./focused-scope.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
@@ -178,6 +181,7 @@ const Channels = Annotation.Root({
   orchestratorOrder: Annotation<string[] | null>(),
   /** Exact model proposal, rationale and transcript identity across replay. */
   orchestratorPlanningDigest: Annotation<string | null>(),
+  dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
 });
 type State = typeof Channels.State;
 const openJob = async (s: State) => {
@@ -484,6 +488,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         const request = { ...input.data, fixture: input.data.fixture ?? false, contract };
         const job = await openJob({ ...s, request } as State);
         await verifyReadyRecoveryFork(job);
+        await verifyDependencyHistory(job, s.dependencyHistory ?? []);
         const fork = readRecoveryFork(job);
         if (fork && JSON.stringify(request.contract) !== JSON.stringify(fork.contract))
           throw new Error("Fork continuation must retain its approved completion contract; use an explicit plan revision after starting.");
@@ -686,6 +691,20 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         });
       }
     })
+    .addNode("dependency_amendment", async s => {
+      try {
+        if (s.active?.stage !== "focus" || !s.active.milestone)
+          throw Error("Dependency amendment is not bound to a focused assignment.");
+        const job = await openJob(s);
+        const stopped = await withStoryJobLock(job, "dependency-author-boundary", () => authorBoundary(job));
+        if (stopped) return stopped;
+        const resolved = await advanceFocusedDependency({ ...s.request, target: s.active.milestone });
+        const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === resolved.reportDigest);
+        if (!entry || entry.phase !== "verified") throw Error("Dependency amendment lost its completion evidence.");
+        return { result: null, dependencyHistory: [...(s.dependencyHistory ?? []).filter(p =>
+          p.reportDigest !== entry.reportDigest), { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }] };
+      } catch (error) { return blocked(error); }
+    })
     .addNode("independent_assignment_review", independentAssignmentBoundary)
     .addNode("verify_committed_work", async s => {
       const job = await openJob(s);
@@ -768,7 +787,10 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
       s.ideaTask ? "idea_integration" : s.active ? "specialist_dispatch" : "completion_decision")
     .addConditionalEdges("idea_integration", s => s.status !== "running" ? END : "verify_idea_integration")
     .addConditionalEdges("verify_idea_integration", s => s.status !== "running" ? END : "author_update_intake")
-    .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END : s.active ? "independent_assignment_review" : "author_update_intake")
+    .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END :
+      s.result?.status === "dependency-required" ? "dependency_amendment" :
+      s.active ? "independent_assignment_review" : "author_update_intake")
+    .addConditionalEdges("dependency_amendment", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("independent_assignment_review", s => s.status !== "running" ? END :
       s.result ? "verify_committed_work" : "specialist_dispatch")
     .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END : "author_update_intake")
@@ -800,7 +822,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         state = { request, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
-          orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null };
+          orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null, dependencyHistory: [] };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)
@@ -873,6 +895,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           await withStoryJobLock(job, "generation-inspect", async () => {
             try {
               clean(job);
+              await verifyDependencyHistory(job, state.dependencyHistory ?? []);
               await checkPlan(job, state.request, state.planVersion);
               if (state.cursor > 0) await trustedHead(job);
               if (state.status === "completed" && report.generation.status !== "completed")
@@ -894,6 +917,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
         recoveryCheckpoints: await inspectRecoveryCheckpoints(await startStoryJob({ story: job.storyRoot, job: job.jobId }, false)),
         orchestrationSelection, orchestrationPlanning,
+        dependencyPlan: await inspectDependencyPlan(job),
         escalation: visible.escalation ?? (state.status === "completed" ? null : reviewEscalation(report, visible.inventory ?? null)),
         pendingNodes: (await graph.getState(config)).next, request: visible.request, report };
     } finally { saver.db.close(); }

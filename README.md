@@ -113,8 +113,68 @@ and skill reads. `job generate inspect` verifies this receipt against the
 checkpointed order and reports `orchestrationPlanning` when present; a missing,
 interrupted or altered receipt blocks resumption instead of replaying the Pi
 planner. Historical and fixture-only runs do not retroactively gain a new
-model planner. Later tickets (#150–#153) add verified creation and amendment of
-assignments and safe-boundary replanning; #149 does not grant these implicitly.
+model planner. Focused creation (#150) and evidence-backed dependencies (#151)
+have separate controller gates below; broader safe-boundary replanning remains
+separate work. The initial objective planner does not grant these implicitly.
+
+## Evidence-backed specialist dependencies (#151)
+
+A source-bound **focused** specialist can call `report_dependency` when an
+unforeseen cross-domain prerequisite prevents its assigned outcome. It must
+stop **without Story edits**. The host stamps the exact HEAD, original Turn and
+assignment, and hashes the quoted canonical sources. Reports include the exact
+original delivery obligation, missing work, affected existing IDs, likely owning
+specialist, and whether an author/protected decision is required. A report is
+not permission to write, nor proof that the prerequisite is necessary.
+
+The production graph's `dependency_amendment` boundary retains the original
+Turn goal/contract and suspends that assignment. A separate read-only, pinned
+`nt-story-orchestrate` session proposes one necessary supporting assignment.
+The controller verifies native canonical/protection results, exact current HEAD,
+source hashes and quotations, original obligation, actual typed links, and the
+proper cross-domain owner. Model-proposed authority fields, speculative IDs,
+already assigned targets, unrelated records, unsafe paths and records with
+existing decisions are rejected. Protected decisions/objective changes require
+the existing explicit approval workflow, never a model assertion of consent.
+
+This initial amendment policy authorizes **one directly connected existing
+record** per report, with at most eight amendments per Turn. It does not add
+arbitrary new-record grants, recursively expand supporting writers, or replace
+the full-Story stage planners. Initial focused creation remains the separate
+#150 path. Each authorized dependency uses the existing sandboxed focused writer,
+exact diff checks, native validation, and a separate read-only assignment-aware
+editorial review before the originating specialist can resume. Fixtures exercise
+these controller boundaries but never certify semantic or literary quality.
+
+Job-private `dependency-plan.json` preserves the report, exact reason/proposal,
+before/after plan versions, unchanged objective, controller source-bound approval,
+pinned planner skill reads/session, work commit and independent review result.
+`dependency-items/` holds native-validated supporting work receipts;
+`dependency-sessions/` holds planning transcripts. Writer transcripts retain the
+existing focused-session storage. `job generate inspect` exposes `dependencyPlan`.
+These approvals attest bounded controller authority, **not author consent**.
+The parent independently checkpoints completed dependency evidence, so missing
+or changed history blocks resume. Git/source/native proof is rechecked on reads.
+
+Interrupted planners, writers and reviewers are never automatically replayed;
+dirty drafts and transcripts remain available for manual reconciliation. A
+rejected report/review remains blocked with its evidence. Supporting commits are
+not independently advertised as forkable generation checkpoints; the originating
+assignment retains its normal checkpoint after it resumes. There is no second
+scheduler, concurrent origin writer, automatic protected retcon, or cloud upload.
+
+Verification:
+
+```sh
+pnpm exec tsx --test test/dependency-amendments.test.ts test/focused-generation.test.ts
+pnpm exec tsx --test web/test/story-revision-admission.test.ts
+```
+
+The focused integration test uses the installed native CLI and a disposable
+canonical Story, checks two exact commits, and resumes in a fresh process. The
+Studio test exercises authenticated admission, another-owner/Thread rejection,
+and graph reconnect with a **validator stub**. Neither test claims real-Pi
+prerequisite discovery or narrative fulfillment; those require live evaluation.
 
 ## Checkpointed scope-driven Story generation (#32, #33)
 
@@ -218,8 +278,10 @@ individual-record targets in one contract is rejected; use separate explicitly
 authorized scopes to keep the requested write set unambiguous. Branch requirements are independently checked against
 reachable Choice/branch witnesses, and no preset inserts a fixed number of
 Arcs, Events, scenes or acts. A focused task that needs edits to unlisted
-records must be replanned with explicit author authorization rather than
-silently widening the write set.
+records must pass a separate authorization boundary rather than silently widen
+the write set. The #151 dependency policy below permits a narrowly sourced,
+causally necessary existing-record assignment; broader or protected changes
+still require explicit author authorization.
 
 `start` pins the objective, contract, fixture/Pi selection and explicit model/source
 options. `resume` accepts no replacement inputs; it uses that same request. Existing

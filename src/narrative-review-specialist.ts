@@ -49,6 +49,8 @@ export interface ReviewAssignment {
     authority: { recordTypes: string[]; existingPaths: string[]; mayCreate: boolean } }>;
   integration?: { base: string; targetHead: string; generationHead: string;
     risks: Array<{ path: string; ids: string[]; summary: string; evidence: string[] }> };
+  dependency?: { sourceSha: string; commitSha: string; obligation: string; reason: string;
+    sources: Array<{ path: string; quote: string }>; diff: string };
 }
 const guidance = ["nt-narrative-review/SKILL.md", "nt-catalog/SKILL.md",
   "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
@@ -181,6 +183,12 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "Examine actual saved prose, not a writer's summary. Analyze continuity, pacing, " +
       "Character voice/motivation, Puzzle fairness and accessible clues, player agency, " +
       "dramatic payoff, conditional Revelations and branch-exclusive player/Character knowledge. " +
+      (assignment.dependency ?
+        "This is a NECESSARY DEPENDENCY review of one supporting specialist commit, not a branch merge. " +
+        "Compare the exact provided source-to-commit Git diff with the original obligation, " +
+        "the cited canonical sources, and the changed record read from disk. " +
+        "Reject unrelated enhancements, unsupported causal claims, incomplete prerequisites, " +
+        "protected decision retcons, and unauthorized changes; a native-valid diff is not semantic approval. " : "") +
       (assignment.integration ?
         "This is an INTEGRATION PREVIEW of two independently edited Story branches. " +
         "Independently test merged Character motivations, Revelation prerequisites and validity, " +

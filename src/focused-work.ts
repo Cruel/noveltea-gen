@@ -1,3 +1,6 @@
+import { createDependencyTool } from "./dependency-tool.js";
+import { authorizedDependency, dependencyDigest, inspectDependencyPlan } from "./dependency-state.js";
+import { parseDependencyReport, type DependencyReport } from "./dependency-amendments.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -27,11 +30,16 @@ import { creativePolicyInstruction, DEFAULT_CREATIVE_POLICY, type CreativePolicy
 
 interface Receipt {
   version: 1; jobId: string; workItemId: string; planVersion: number; contractDigest: string;
-  expectedHead: string; phase: "pending" | "writing" | "authored" | "committed";
+  expectedHead: string; phase: "pending" | "writing" | "authored" | "committed" | "waiting-dependency";
+  dependencyReport?: DependencyReport; resolvedDependency?: string;
   target: string; paths: string[]; context: string[]; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot; piSessionFile?: string;
   sha256?: string; commitSha?: string; assignmentDigest?: string;
+  validation?: { status: "passed"; validatorVersion: string; baseSha: string };
 }
+const receiptPath = (job: JobStartResult, receipt: Pick<Receipt, "workItemId" | "target">) =>
+  join(job.stateDir, receipt.workItemId.startsWith("dependency:") ? "dependency-items" : "focused-items",
+    (receipt.workItemId.startsWith("dependency:") ? receipt.workItemId : receipt.target) + ".json");
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const repoPath = (job: JobStartResult, p: string) => job.storyRelativePath ? job.storyRelativePath + "/" + p : p;
 function git(job: JobStartResult, ...args: string[]) {
@@ -155,7 +163,14 @@ function creationReferenceInstructions(create: PlannedFocusCreate): string {
 
 async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
-  create?: PlannedFocusCreate) {
+  create?: PlannedFocusCreate, obligations: string[] = []) {
+  let dependencyReport: DependencyReport | undefined;
+  const dependencyTool = receipt.assignmentDigest && !receipt.workItemId.startsWith("dependency:")
+    ? createDependencyTool(job, { head: receipt.expectedHead, turnDigest: receipt.assignmentDigest,
+        assignmentId: receipt.workItemId }, report => {
+          if (dependencyReport) throw Error("Only one dependency report per bounded assignment is permitted.");
+          dependencyReport = report;
+        }) : null;
   const skill = skillFor(receipt.target);
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config = { discovery: "explicit-only" as const, novelteaSkills: receipt.snapshot!.path,
@@ -169,7 +184,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
     group: piNarrativeGroup("focused", receipt.context, receipt.target),
-    step: receipt.workItemId + ":" + receipt.planVersion,
+    step: receipt.workItemId + ":" + receipt.planVersion + (receipt.resolvedDependency ? ":" + receipt.resolvedDependency : ""),
     paths: receipt.context, snapshot: receipt.snapshot!.id, provider: receipt.provider,
     model: receipt.model, directory: join(job.stateDir, "focused-sessions", receipt.target),
     task: { kind: receipt.target.startsWith("event.") ? "event" :
@@ -181,16 +196,17 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool, createPiStatusTool()],
+    sessionManager: context.manager, customTools: [...(sandboxTools ?? []), context.contextTool, createPiStatusTool(),
+      ...(dependencyTool ? [dependencyTool] : [])],
     noTools: "all", tools: [...(create ? ["write"] : []),
-      "read", "edit", "grep", "find", "ls", "story_context", "report_status"],
+      "read", "edit", "grep", "find", "ls", "story_context", "report_status",
+      ...(dependencyTool ? ["report_dependency"] : [])],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking)
       throw new Error("Focused specialist did not honor the pinned reasoning profile.");
     const file = session.sessionManager.getSessionFile();
-    if (file) { receipt.piSessionFile = file; await save(join(job.stateDir,
-      "focused-items", receipt.target + ".json"), receipt); }
+    if (file) { receipt.piSessionFile = file; await save(receiptPath(job, receipt), receipt); }
     await context.beforeTurn(file ?? undefined);
     const required = [join(receipt.snapshot!.path, "skills", skill, "SKILL.md"),
       join(receipt.snapshot!.path, "skills", "nt-catalog", "SKILL.md"),
@@ -213,7 +229,10 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       "\nAll other files are READ-ONLY context (including upstream prerequisites, milestones, Arcs, and all sibling records). " +
       "Do not create any other files, use git commands, invoke untrusted shell commands, or change protected author decisions. " +
       "Preserve typed references and branch behavior. If a requested change requires additional records or upstream decisions, " +
-      "report that obstacle and stop without touching unauthorized files. Do not claim incomplete/delegated work is finished. " +
+      "use report_dependency for a sourced cross-domain prerequisite and stop WITHOUT ANY Story edits. " +
+      "If you have already edited, stop for manual reconciliation instead. Do not claim incomplete/delegated work is finished. " +
+      "Exact original delivery obligations: " + JSON.stringify(obligations) + "\n" +
+      (receipt.resolvedDependency ? "A controller-authorized prerequisite has now been completed and reviewed. Re-read current canonical context before resuming your original assignment.\n" : "") +
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
       creativePolicyInstruction(policy) +
       "Original Turn goal: " + task + "\nSpecialist assignment outcome: " +
@@ -229,12 +248,15 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       .map(c => canonicalPinnedReadPath(String(c.arguments.path ?? ""), project.root, receipt.snapshot!.path));
     if (required.some(path => !reads.includes(path)))
       throw new Error("Focused Pi specialist failed to read pinned skill guidance.");
+    return dependencyReport;
   } finally { session.dispose(); }
 }
 export interface FocusedWorkOptions {
   story: string; job: string; target: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string; provider?: string; model?: string;
   turnPlanDigest?: string;
+  /** Internal controller lookup only; caller-supplied IDs never grant authority. */
+  dependencyAssignmentId?: string;
 }
 export async function runFocusedWorkItem(input: FocusedWorkOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
@@ -247,27 +269,35 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         JSON.stringify(arch.plan.contract) !== JSON.stringify(input.contract))
       throw new Error("Focused work is not authorized by the pinned versioned completion contract.");
     const plan = arch.plan;
-    if (!input.contract.scope.targets.includes(input.target))
+    const dependency = input.dependencyAssignmentId
+      ? await authorizedDependency(job, input.dependencyAssignmentId, input.fixture) : null;
+    if (dependency && (dependency.amendment!.assignment.targets[0] !== input.target ||
+        dependency.report.turnDigest !== input.turnPlanDigest))
+      throw Error("Dependency assignment differs from the trusted Turn/target.");
+    if (!dependency && !input.contract.scope.targets.includes(input.target))
       throw new Error("Focused target is outside the explicit completion contract.");
-    const file = join(job.stateDir, "focused-items", input.target + ".json");
+    const workItemId = input.dependencyAssignmentId ?? "focus:" + input.target;
+    const file = receiptPath(job, { workItemId, target: input.target });
     const current = await trustedHead(job);
     const actual = git(job, "rev-parse", "HEAD").toString().trim();
     if (changes(job).length || actual !== current) throw new Error("Focused worktree has changes requiring explicit reconciliation.");
     const validation = await validateStoryJob(job, input.validatorSource ?? input.skillsSource, { ...job, baseSha: current });
-    const selection = resolveFocusedScope(reportOf(validation, current), input.contract);
-    const create = input.contract.scope.creates?.find(item => item.id === input.target);
+    const effectiveContract = dependency ? { ...input.contract, scope: { ...input.contract.scope,
+      targets: [input.target], supportingTargets: [], creates: [] } } : input.contract;
+    const selection = resolveFocusedScope(reportOf(validation, current), effectiveContract);
+    const create = effectiveContract.scope.creates?.find(item => item.id === input.target);
     const own = selection.selected.find(r => r.metadata.id === input.target);
     if (!own) throw new Error("Unknown focused target: " + input.target);
     // Shared supporting targets are authorized exactly once, with the first target.
-    const paths = [own.path, ...(input.target === input.contract.scope.targets[0] ? selection.selected
+    const paths = [own.path, ...(!dependency && input.target === input.contract.scope.targets[0] ? selection.selected
       .filter(r => input.contract.scope.supportingTargets?.includes(r.metadata.id)).map(r => r.path) : [])].sort();
     const types = [...new Set(paths.map(path => selection.selected.find(r => r.path === path)?.metadata.type))];
     if (types.some(type => !type)) throw new Error("A specialist path has no canonical record type.");
     const turnPlan = await readTurnEvidence(job, input.contract, input.task, input.turnPlanDigest);
     if (create && (!turnPlan || !input.turnPlanDigest))
       throw new Error("Focused creation requires the original source-bound authenticated Turn assignment.");
-    const turnAssignment = turnPlan ? assertFocusedTurnAssignment(turnPlan, input.target, paths,
-      types as string[]) : null;
+    const turnAssignment = dependency?.amendment?.assignment ?? (turnPlan ? assertFocusedTurnAssignment(turnPlan, input.target, paths,
+      types as string[]) : null);
     const turnAssignmentDigest = turnPlan?.digest;
     // Refuse symlinked / substituted records BEFORE Pi receives editing tools.
     for (const path of paths) {
@@ -285,6 +315,13 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           receipt.worker !== (input.fixture ? "fixture" : "pi") ||
           receipt.assignmentDigest !== turnAssignmentDigest)
         throw new Error("Focused work-item provenance differs from the original authorization.");
+      if (receipt.resolvedDependency) {
+        const history = await inspectDependencyPlan(job);
+        const resolved = history?.entries.find(e => e.reportDigest === receipt!.resolvedDependency);
+        if (resolved?.phase !== "verified" || resolved.commitSha !== receipt.expectedHead ||
+            resolved.fixture !== input.fixture)
+          throw Error("Originating assignment lost its verified dependency authorization history.");
+      }
       if (receipt.phase === "committed") {
         if (!receipt.commitSha || !receipt.sha256) throw new Error("Missing focused commit verification evidence.");
         git(job, "merge-base", "--is-ancestor", receipt.commitSha, current);
@@ -293,10 +330,22 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           throw new Error("Committed focused work has invalid provenance.");
         return { status: "focused-committed", headSha: receipt.commitSha, paths };
       }
+      if (receipt.phase === "waiting-dependency") {
+        const amendments = await inspectDependencyPlan(job);
+        const resolved = amendments?.entries.find(e => e.reportDigest === dependencyDigest(receipt!.dependencyReport));
+        if (!resolved || resolved.phase !== "verified") return { status: "dependency-required" };
+        if (resolved.commitSha !== current || resolved.fixture !== input.fixture)
+          throw Error("Resolved dependency is stale or belongs to a different worker mode.");
+        receipt.phase = "pending"; receipt.expectedHead = current;
+        receipt.resolvedDependency = resolved.reportDigest;
+        await save(file, receipt);
+      }
       if (receipt.phase === "writing" || receipt.phase === "authored")
         throw new Error("Interrupted focused writer: inspect preserved session and Git worktree; do not automatically replay.");
     } else {
-      receipt = { version: 1, jobId: job.jobId, workItemId: "focus:" + input.target,
+      if (dependency && current !== dependency.amendment!.sourceSha)
+        throw Error("Dependency writer requires the exact authorized Story HEAD.");
+      receipt = { version: 1, jobId: job.jobId, workItemId,
         planVersion: plan.version, contractDigest, expectedHead: current,
         phase: "pending", target: input.target, paths,
         context: selection.context.filter(r => r.metadata.status !== "planned")
@@ -330,7 +379,14 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     await preflightPiAssignment(job, receipt.workItemId + ":" + plan.version,
       input.fixture ? undefined : { provider: receipt.provider, model: receipt.model });
     receipt.phase = "writing"; await save(file, receipt);
-    if (input.fixture) {
+    let missing: DependencyReport | undefined;
+    const fixtureReport = input.fixture && !dependency && !receipt.resolvedDependency &&
+      process.env.NT_FOCUS_FIXTURE_DEPENDENCY;
+    if (fixtureReport) {
+      missing = parseDependencyReport(JSON.parse(fixtureReport));
+      if (missing.assignmentId !== receipt.workItemId) missing = undefined;
+    }
+    if (input.fixture && !missing) {
       for (const path of paths) {
         if (create && path === create.path) {
           await writeFile(join(job.worktreeStoryRoot, path),
@@ -347,8 +403,17 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         const path = join(job.worktreeStoryRoot, outside.path);
         await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");
       }
-    } else await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
-      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create);
+    } else if (!input.fixture) missing = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
+      turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations);
+    if (missing) {
+      if (changes(job).length || git(job, "rev-parse", "HEAD").trim() !== current ||
+          missing.sourceSha !== current || missing.turnDigest !== turnAssignmentDigest ||
+          missing.assignmentId !== workItemId)
+        throw Error("Dependency report is stale or writer left edits; preserve for manual reconciliation.");
+      receipt.dependencyReport = missing; receipt.phase = "waiting-dependency";
+      await save(file, receipt);
+      return { status: "dependency-required" };
+    }
     const edited = changes(job);
     const statusPath = (entry: string) => entry.slice(3).replace(
       job.storyRelativePath ? job.storyRelativePath + "/" : "", "");
@@ -371,7 +436,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         item.metadata.type === create.id.split(".")[0] && item.path === create.path &&
         item.metadata.status !== "superseded"))
       throw new Error("Native canonical validation did not recognize the exact new focused record.");
-    resolveFocusedScope(accepted, input.contract);
+    resolveFocusedScope(accepted, effectiveContract);
+    if (dependency) receipt.validation = { status: "passed", validatorVersion: job.validatorVersion, baseSha: current };
     receipt.sha256 = digest(JSON.stringify(await Promise.all(paths.map(async path =>
       [path, digest(await readFile(join(job.worktreeStoryRoot, path), "utf8"))]))));
     receipt.phase = "authored"; await save(file, receipt);
@@ -393,7 +459,9 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     await writeFile(headTemp, JSON.stringify({ version: 1, jobId: job.jobId, headSha: receipt.commitSha,
       workItemId: receipt.workItemId }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
     await rename(headTemp, headFile);
-    await finalizeRecoveryCheckpoint(job, receipt.workItemId, current, receipt.commitSha!);
+    // Supporting commits retain their own source-bound native/work/review receipts.
+    // They are not advertised as independently forkable generation checkpoints.
+    if (!dependency) await finalizeRecoveryCheckpoint(job, receipt.workItemId, current, receipt.commitSha!);
     return { status: "focused-committed", headSha: receipt.commitSha, paths };
   });
 }

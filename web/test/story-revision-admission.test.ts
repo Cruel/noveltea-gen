@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHmac, randomUUID } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { inspectDependencyPlan, sourceDigest } from '../../src/dependency-state'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
@@ -49,9 +50,10 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'create-conversation' | 'initial-focus' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
+async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'create-conversation' | 'initial-focus' | 'dependency' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
-  const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE']
+  const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE',
+    'NT_FOCUS_FIXTURE_DEPENDENCY', 'NT_SKILL_CACHE_DIR']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STATE_DIR = join(root, 'state')
@@ -132,7 +134,11 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       { status: 'completed' }, 'completion_decision')
     sourceGraph.saver.db.close()
 
-    if (kind === 'initial-focus') {
+    if (kind === 'initial-focus' || kind === 'dependency') {
+      if (kind === 'dependency') {
+        process.env.NT_STUDIO_SKILLS_SOURCE = resolve(import.meta.dirname, '../../../noveltea-skills')
+        process.env.NT_SKILL_CACHE_DIR = join(root, 'skills-cache')
+      }
       const firstJobId = randomUUID()
       const first = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
         ownerId: owner, repositoryId: 'github:124', remoteUrl: 'file://' + remote,
@@ -178,6 +184,50 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.deepEqual(admitted?.objective?.requestedTargets, ['authored-content.confession'])
       assert.equal(pinnedRequest(await selectedJob(store, owner, firstJobId), first)?.contract.scope.kind,
         'partial', 'first Chat Turn must not enqueue seven global stages')
+      if (kind === 'dependency') {
+        const row = await selectedJob(store, owner, firstJobId)
+        await assert.rejects(selectedJob(store, stranger, firstJobId), /not connected to this account/i)
+        const pinned = pinnedRequest(row, first)!
+        const event = readFileSync(join(first.worktreeStoryRoot, 'events/confession.md'), 'utf8')
+        process.env.NT_FOCUS_FIXTURE_DEPENDENCY = JSON.stringify({
+          sourceSha: first.baseSha, turnDigest: admitted!.digest,
+          assignmentId: 'focus:authored-content.confession',
+          obligation: admitted!.objective!.obligations[0],
+          missing: 'Clarify the necessary causal preparation for the confession',
+          affectedIds: ['authored-content.confession', 'event.confession'],
+          sources: [{ path: 'events/confession.md', sha256: sourceDigest(event), quote: '# Confession event' }],
+          likelySpecialist: 'nt-event-design', authorDecisionRequired: false,
+        })
+        const checkpoint = join(first.stateDir, 'web-generation.sqlite')
+        const graphConfig = { configurable: { thread_id: first.threadId + ':generation:web' }, recursionLimit: 100 }
+        const running = openWebGenerationGraph(checkpoint)
+        try {
+          const result = await running.graph.invoke({ request: pinned, pauseAfter: 'focus' }, graphConfig)
+          assert.equal(result.status, 'paused', result.reason ?? JSON.stringify(result))
+        } finally { running.saver.db.close() }
+        const amendments = await inspectDependencyPlan(first)
+        assert.equal(amendments?.version, 2)
+        assert.equal(amendments?.entries[0]?.phase, 'verified')
+        assert.equal(amendments?.entries[0]?.approval?.jobId, first.jobId)
+        assert.equal(amendments?.entries[0]?.approval?.threadId, first.threadId)
+        const head = git(first.worktreeRoot, 'rev-parse', 'HEAD')
+        assert.equal(git(first.worktreeRoot, 'rev-list', '--count', sha + '..HEAD'), '2')
+        assert.deepEqual(git(first.worktreeRoot, 'diff', '--name-only', sha, head).split('\n'),
+          ['story/authored-content/confession.md', 'story/events/confession.md'])
+        const restarted = openWebGenerationGraph(checkpoint)
+        try {
+          const state = await restarted.graph.getState(graphConfig)
+          await restarted.graph.invoke({ ...state.values, request: pinned, pauseAfter: null }, graphConfig)
+          assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), head)
+          const foreign = await restarted.graph.invoke({ request: pinned },
+            { configurable: { thread_id: 'another-owner-thread' } })
+          assert.equal(foreign.status, 'blocked')
+          assert.match(foreign.reason!, /another thread|pinned request|second writer/)
+          assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), head)
+        } finally { restarted.saver.db.close() }
+        assert.deepEqual(await inspectDependencyPlan(first), amendments)
+        assert.equal(git(remote, 'rev-parse', 'HEAD'), sha)
+      }
       assert.deepEqual((await store.testing.foreignKeyViolations()), [])
       return
     }
@@ -631,6 +681,9 @@ test('whole-story request in an existing Thread requires exact scope approval wi
   { timeout: 60_000 }, () => exerciseRevisionAdmission('whole'))
 test('first Chat Turn on verified canon admits a single conversation editor, not global creation',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('initial-focus'))
+test('authenticated Turn dispatches a discovered dependency and fences another owner across restart',
+  { timeout: 90_000, skip: !existsSync(resolve(import.meta.dirname, '../../../noveltea-skills/src/cli.ts')) },
+  () => exerciseRevisionAdmission('dependency'))
 test('conversation revision in the same authenticated Thread grants only authored-content',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('conversation'))
 test('authenticated focused conversation creates only pinned missing support after review and reconnect',

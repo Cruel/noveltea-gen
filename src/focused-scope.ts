@@ -24,28 +24,55 @@ const references = (value: unknown, known: Set<string>): string[] => {
   visit(value);
   return [...found];
 };
-/** Canonical links for an authorized creation must occupy schema-defined
- * reference fields. Descriptions, consequences, and other prose are never links. */
-function declaredCreationReferences(record: CanonicalScopeRecord): Set<string> {
+/** Only canonical schema-defined reference slots establish a typed link.
+ * Descriptions, consequences and arbitrary metadata strings never grant scope. */
+export function declaredCanonicalReferences(record: CanonicalScopeRecord): Set<string> {
   const data = record.metadata;
-  if (data.type === "relationship") return new Set(ids(data.characters));
-  if (data.type === "authored-content") return new Set(ids(data.events));
-  if (data.type === "event") {
-    const linked = [...ids(data.participants), ...ids(data.arcs)];
-    const objects = (value: unknown): Record<string, unknown>[] =>
-      Array.isArray(value) ? value.filter((x): x is Record<string, unknown> =>
-        x !== null && typeof x === "object" && !Array.isArray(x)) : [];
-    for (const step of objects(data.steps)) {
-      for (const branch of objects(step.branches)) {
-        for (const effect of objects(branch.effects)) {
-          if (effect.kind === "relationship" && typeof effect.relationship === "string")
-            linked.push(effect.relationship);
-        }
-      }
+  const linked = new Set<string>();
+  const add = (value: unknown) => { if (typeof value === "string") linked.add(value); };
+  const addList = (value: unknown) => ids(value).forEach(add);
+  const objects = (value: unknown): Record<string, unknown>[] =>
+    Array.isArray(value) ? value.filter((x): x is Record<string, unknown> =>
+      x !== null && typeof x === "object" && !Array.isArray(x)) : [];
+  const recordOf = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown> : {};
+  const predicates = (value: unknown) => {
+    for (const predicate of objects(value)) {
+      if (["truth", "knowledge"].includes(String(predicate.kind))) add(predicate.fact);
+      if (predicate.kind === "knowledge") add(predicate.character);
+      if (predicate.kind === "relationship") add(predicate.relationship);
+      if (predicate.kind === "revealed") add(predicate.revelation);
+      if (predicate.kind === "outcome") add(predicate.choice_point);
     }
-    return new Set(linked);
+  };
+  switch (data.type) {
+    case "character":
+      for (const entry of objects(data.initial_knowledge)) add(entry.fact);
+      break;
+    case "arc": addList(data.characters); break;
+    case "milestone":
+      addList(data.arcs);
+      for (const alternative of Array.isArray(recordOf(data.fulfillment).any_of)
+        ? recordOf(data.fulfillment).any_of as unknown[] : []) addList(alternative);
+      break;
+    case "event":
+      addList(data.participants); addList(data.arcs); addList(data.after);
+      for (const option of objects(recordOf(data.prerequisites).any_of)) {
+        addList(option.completed); addList(option.not_completed);
+        predicates(option.conditions);
+      }
+      for (const step of objects(data.steps)) for (const branch of objects(step.branches)) {
+        predicates(branch.conditions); predicates(branch.effects);
+      }
+      break;
+    case "relationship": addList(data.characters); break;
+    case "revelation": add(data.fact); break;
+    case "puzzle": addList(data.clues); addList(data.solutions); break;
+    case "authored-content": addList(data.events); addList(data.revelations); break;
+    case "narrative-position": add(data.event); break;
   }
-  return new Set();
+  return linked;
 }
 export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: CompletionContract) {
   const active = records.filter(r => r.metadata.status !== "superseded");
@@ -76,7 +103,7 @@ export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: C
     if (existing && (existing.path !== item.path || existing.metadata.type !== item.id.split(".")[0]))
       throw new Error("Focused creation ID collides with another canonical record.");
     if (existing) {
-      const found = declaredCreationReferences(existing);
+      const found = declaredCanonicalReferences(existing);
       const missing = item.references.filter(ref => !found.has(ref));
       if (missing.length)
         throw new Error("Created Story record omitted a pinned typed reference: " + item.id +
