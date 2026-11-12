@@ -54,7 +54,9 @@ export interface IndependentReviewResult {
     "assignmentId" | "assignmentDigest" | "diffDigest" | "validationProofDigest">;
   reviewer: string;
   status: "passed" | "failed";
-  findings: Array<{ path: string; message: string }>;
+  findings: Array<{ path: string; message: string;
+    kind?: "missing-requirement" | "unrequested-change" | "continuity" | "other";
+    line?: number; affectedPaths?: string[]; requiredCorrection?: string }>;
   evidence: string;
 }
 export type CheckpointReview = {
@@ -62,6 +64,22 @@ export type CheckpointReview = {
   status: SemanticReviewStatus;
   result: IndependentReviewResult | null;
 };
+
+/** Historical receipts may contain only message/path. Newly structured
+ * findings must be complete and bounded. Reviewers grant no permissions. */
+function validReviewFinding(f: IndependentReviewResult["findings"][number], paths: string[]) {
+  if (!f || !paths.includes(f.path) || typeof f.message !== "string" || !f.message.trim())
+    return false;
+  const structured = [f.kind, f.line, f.affectedPaths, f.requiredCorrection];
+  if (structured.every(v => v === undefined)) return true;
+  return ["missing-requirement", "unrequested-change", "continuity", "other"].includes(f.kind ?? "") &&
+    Number.isSafeInteger(f.line) && (f.line ?? 0) > 0 &&
+    typeof f.requiredCorrection === "string" && f.requiredCorrection.trim().length >= 16 &&
+    Array.isArray(f.affectedPaths) && f.affectedPaths.length > 0 &&
+    f.affectedPaths.length <= 12 && f.affectedPaths.includes(f.path) &&
+    new Set(f.affectedPaths).size === f.affectedPaths.length &&
+    f.affectedPaths.every(path => canonicalPath(path));
+}
 
 export function selectCheckpointReview(input: {
   workItem: string; paths: string[]; addedLines: number; removedLines: number;
@@ -186,6 +204,8 @@ export interface RepairCommitProof {
   sessionFile: string; sessionSha256: string; sessionId: string;
   provider: string; model: string; snapshot: { id: string; path: string };
   planVersion: number;
+  /** Digest of the controller-derived source-bound correction overlay. */
+  repairPlanDigest?: string;
 }
 /** Repair provenance is a separate immutable source, never the mutable
  * controller attempt state or a model's proposed new scope. */
@@ -211,7 +231,8 @@ export async function readRepairCommitProof(job: JobStartResult, workItem: strin
       proof.validation.validatorVersion !== job.validatorVersion ||
       !Array.isArray(proof.paths) || !proof.paths.length ||
       proof.paths.some(path => !canonicalPath(path)) ||
-      !Number.isSafeInteger(proof.planVersion) || proof.planVersion < 1)
+      !Number.isSafeInteger(proof.planVersion) || proof.planVersion < 1 ||
+      (proof.repairPlanDigest !== undefined && !/^[a-f0-9]{64}$/.test(proof.repairPlanDigest)))
     throw Error("Review-repair proof has invalid identity or validation binding.");
   const source = JSON.parse(await readFile(join(job.stateDir, "recovery-checkpoints",
     proof.sourceCommitSha + ".json"), "utf8")) as RecoveryCheckpoint;
@@ -413,7 +434,7 @@ export async function readIndependentReview(job: JobStartResult,
       !["passed", "failed"].includes(result.status) ||
       !result.reviewer?.trim() || !result.evidence?.trim() ||
       !Array.isArray(result.findings) ||
-      result.findings.some(f => !assurance.changedPaths.includes(f.path) || !f.message?.trim()) ||
+      result.findings.some(f => !validReviewFinding(f, assurance.changedPaths)) ||
       (result.status === "passed" && result.findings.length !== 0) ||
       (result.status === "failed" && result.findings.length === 0))
     throw new Error("Independent review is stale, unauthoritative, or malformed.");
@@ -443,7 +464,7 @@ export async function sealIndependentReview(job: JobStartResult, point: Recovery
   if (!["passed", "failed"].includes(result.status) ||
       !result.reviewer?.trim() || !result.evidence?.trim() ||
       !Array.isArray(result.findings) ||
-      result.findings.some(f => !assurance.changedPaths.includes(f.path) || !f.message?.trim()) ||
+      result.findings.some(f => !validReviewFinding(f, assurance.changedPaths)) ||
       (result.status === "passed" && result.findings.length !== 0) ||
       (result.status === "failed" && result.findings.length === 0))
     throw new Error("Independent review lacks source-linked actionable evidence.");

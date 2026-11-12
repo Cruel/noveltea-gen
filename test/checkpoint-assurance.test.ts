@@ -116,6 +116,19 @@ test("independent review receipts survive restart and reject stale, forged or co
     assert.equal((await readIndependentReview(job, assurance)).status, "failed");
     assert.equal((await readIndependentReview({ ...job }, assurance)).status, "failed",
       "process restart must not silently clear the failed review");
+    const structured = { ...outcome, findings: [{ ...outcome.findings[0],
+      kind: "continuity", line: 2,
+      requiredCorrection: "Restore the missing on-page cause for this Event revelation.",
+      affectedPaths: ["events/disclosure.md", "facts/promise.md"] }] };
+    write(structured);
+    assert.equal((await readIndependentReview(job, assurance)).result?.findings[0]?.kind,
+      "continuity", "structured repair instructions survive review receipt restart");
+    write({ ...structured, findings: [{ ...structured.findings[0],
+      affectedPaths: ["events/disclosure.md", "../outside.md"] }] });
+    await assert.rejects(readIndependentReview(job, assurance), /stale, unauthoritative/);
+    write({ ...structured, findings: [{ ...structured.findings[0],
+      requiredCorrection: undefined }] });
+    await assert.rejects(readIndependentReview(job, assurance), /stale, unauthoritative/);
     write({ ...outcome, source: { ...source, diffDigest: "0".repeat(64) } });
     await assert.rejects(readIndependentReview(job, assurance), /stale, unauthoritative/);
     write({ ...outcome, status: "passed" });

@@ -279,10 +279,17 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       "No write, shell, authorization, approval, or repair action is permitted. " +
       "If evidence is uncertain, return a source-linked failure rather than fabricate success. " +
       "Return exactly ONE JSON object with sourceDigest, verdict 'pass' or 'fail', findings " +
-      "[{commitSha,assignmentId,path,line,kind,message}] where kind is missing-requirement, " +
-      "unrequested-change, continuity or other, and evidence " +
-      "[{commitSha,assignmentId,path,line,explanation}]. Every passing checkpoint requires evidence. " +
-      "All file references must belong to the changed paths and actual lines in the supplied text.\n" +
+      "[{commitSha,assignmentId,path,line,kind,message,requiredCorrection,affectedPaths}] " +
+      "where kind is missing-requirement, unrequested-change, continuity or other. " +
+      "For each failure name the concrete causal/creative defect in message, the specific " +
+      "edit required in requiredCorrection (never just 'retry'), and affectedPaths as an " +
+      "array of real canonical record paths from this exact packet's canonicalContext, " +
+      "including the changed path. Cite the changed path and its real line in path/line. " +
+      "A related World/Event/Character source may explain the defect but does not grant " +
+      "the writer authority over it. The controller decides ownership and scope. " +
+      "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. " +
+      "Every passing checkpoint requires evidence. All changed-file references and lines " +
+      "must belong to the supplied immutable packet.\n" +
       "PINNED REFERENCES:\n" + pinned.join("\n") +
       "\nREVIEW PACKET:\n" + JSON.stringify(packet));
     const verdict = validateSemanticVerdict(packet, parseSpecialistJson(lastReply(session)));

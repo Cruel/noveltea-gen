@@ -10,7 +10,8 @@ import { parseSpecialistChoice, activeSpecialistChoice, answerSpecialistChoice,
   claimSpecialistChoice, completeSpecialistChoice, recordSpecialistChoice,
   inspectSpecialistChoice } from "../src/specialist-choice.js";
 import { changedRepairPaths, disagreementQuestion, repairFeedback,
-  type RepairReceipt } from "../src/rejected-review-repair.js";
+  readRejectedRepairOrigin, type RepairReceipt } from "../src/rejected-review-repair.js";
+import type { RecoveryCheckpoint } from "../src/recovery-checkpoints.js";
 import { removeTestTree } from "./helpers.js";
 
 const sha = "a".repeat(40);
@@ -83,6 +84,63 @@ test("a correction is a real owned Git diff, not an explanation or unrelated cre
   writeFileSync(join(story, "creative-direction", "canon.md"), "Protected.\n");
   git(root, "add", "story/characters/nia.md");
   assert.throws(() => changedRepairPaths(job, state), /staged|unsafe/);
+});
+
+test("rejected Foundation review restores its exact Pi writer, not discovery or Chat approval", async t => {
+  const root = mkdtempSync(join(tmpdir(), "nt-foundation-repair-origin-"));
+  t.after(() => removeTestTree(root));
+  const job = { jobId: "repair-foundation", stateDir: root } as JobStartResult;
+  const directory = join(root, "foundation-sessions");
+  mkdirSync(directory, { recursive: true });
+  const id = randomUUID(), file = join(directory, "original.jsonl");
+  writeFileSync(file, JSON.stringify({ type: "session", id }) + "\n");
+  const point = { workItem: "foundation", commitSha: sha,
+    assurance: { changedPaths: ["creative-direction/foundation.md"] } } as RecoveryCheckpoint;
+  const receipt = { jobId: job.jobId, workerMode: "pi", stage: "committed",
+    validation: "passed", target: "creative-direction/foundation.md",
+    commitSha: sha, piSessionId: id, piSessionFile: file,
+    discoverySessionFile: join(root, "foundation-discovery-sessions", "discovery.jsonl"),
+    snapshot: { id: "snapshot", path: "/snapshot" }, provider: "openai", model: "gpt-test" };
+  const store = (value: object) => writeFileSync(join(root, "foundation.json"), JSON.stringify(value));
+  store(receipt);
+  const origin = await readRejectedRepairOrigin(job, point);
+  assert.equal(origin.sessionFile, file);
+  assert.equal(origin.workItem, "foundation");
+  assert.equal(origin.provider, "openai");
+  await assert.rejects(readRejectedRepairOrigin(job, { ...point, assurance: {
+    changedPaths: ["creative-direction/other.md"] } } as RecoveryCheckpoint), /original committed Pi writer/);
+  for (const change of [{ workerMode: "fixture" }, { chatApprovalDigest: "approved" },
+    { stage: "writing" }, { commitSha: "b".repeat(40) },
+    { piSessionFile: receipt.discoverySessionFile }, { piSessionId: randomUUID() }]) {
+    store({ ...receipt, ...change });
+    await assert.rejects(readRejectedRepairOrigin(job, point),
+      /original committed Pi writer|transcript|header|session/);
+  }
+  store(receipt);
+  writeFileSync(file, "corrupted\n");
+  await assert.rejects(readRejectedRepairOrigin(job, point), /JSON|session|header/);
+});
+
+test("Foundation can correct only its previously committed Creative Direction, never another protected record", t => {
+  const root = mkdtempSync(join(tmpdir(), "nt-foundation-review-scope-"));
+  t.after(() => removeTestTree(root));
+  const directory = join(root, "story", "creative-direction");
+  mkdirSync(directory, { recursive: true });
+  const target = join(directory, "foundation.md"), other = join(directory, "other.md");
+  writeFileSync(target, "Original Foundation.\n");
+  writeFileSync(other, "Other protected decision.\n");
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "Test");
+  git(root, "config", "user.email", "test@example.test");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "Baseline");
+  const job = { worktreeRoot: root, storyRelativePath: "story" } as JobStartResult;
+  const state = { ...rejected(), allowedPaths: ["creative-direction/foundation.md"],
+    origin: { ...rejected().origin, workItem: "foundation" } };
+  writeFileSync(target, "Foundation with a newly established causal premise.\n");
+  assert.deepEqual(changedRepairPaths(job, state), ["creative-direction/foundation.md"]);
+  writeFileSync(other, "Changed protected decision.\n");
+  assert.throws(() => changedRepairPaths(job, state), /protected|unrelated|authorize/);
 });
 
 test("rejected-work disagreement uses normal authenticated Author Choice, persists across restart", {

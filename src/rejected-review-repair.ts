@@ -7,7 +7,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints, finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
-import { inspectCheckpointReview, repairReviewAssignment,
+import { inspectCheckpointReview, readRepairCommitProof, repairReviewAssignment,
   type IndependentReviewResult, type RepairCommitProof } from "./checkpoint-assurance.js";
 import { readTurnEvidence, type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 import { inspectSpecialistChoice, recordSpecialistChoice, claimSpecialistChoice,
@@ -29,6 +29,7 @@ import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
+import { deriveReviewRepairAmendment, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -88,6 +89,7 @@ export interface RepairReceipt {
   originalSource: IndependentReviewResult["source"];
   source: IndependentReviewResult["source"];
   findings: IndependentReviewResult["findings"];
+  planAmendment: ReviewRepairPlanAmendment;
   assignment: TurnAssignmentEvidence;
   allowedPaths: string[];
   origin: RepairOrigin;
@@ -108,6 +110,7 @@ export interface RepairReceipt {
   failure?: string;
 }
 function specialistSource(job: JobStartResult, workItem: string) {
+  if (workItem === "foundation") return join(job.stateDir, "foundation.json");
   if (workItem.startsWith("event-"))
     return join(job.stateDir, "event-items", workItem.slice(6) + ".json");
   if (workItem.startsWith("composition-"))
@@ -122,7 +125,7 @@ function specialistSource(job: JobStartResult, workItem: string) {
 }
 /** Establish origin from the *committed writer receipt*, not model-supplied
  * instructions. A missing or unsafe session is a recoverable blocker. */
-async function readOrigin(job: JobStartResult, point: RecoveryCheckpoint): Promise<RepairOrigin> {
+export async function readRejectedRepairOrigin(job: JobStartResult, point: RecoveryCheckpoint): Promise<RepairOrigin> {
   if (point.workItem.startsWith("repair-")) {
     const previous = await inspectRejectedRepair(job, point.workItem.slice(7));
     if (previous.repairedCommitSha !== point.commitSha ||
@@ -136,15 +139,23 @@ async function readOrigin(job: JobStartResult, point: RecoveryCheckpoint): Promi
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512_000)
     throw Error("Unsafe original specialist receipt.");
   const raw = JSON.parse(await readFile(source, "utf8")) as Record<string, any>;
+  const foundation = point.workItem === "foundation";
   const unit = raw.units ? raw.units.find((u: { id: string }) => u.id === point.workItem) : raw;
-  if (raw.jobId !== job.jobId || raw.worker !== "pi" || !unit ||
-      unit.phase !== "committed" || unit.commitSha !== point.commitSha ||
+  if (raw.jobId !== job.jobId || (foundation ? raw.workerMode !== "pi" ||
+      !!raw.chatApprovalDigest || raw.stage !== "committed" ||
+      raw.validation !== "passed" ||
+      JSON.stringify([raw.target]) !== JSON.stringify(point.assurance?.changedPaths) :
+      raw.worker !== "pi") || !unit ||
+      (foundation ? unit.stage : unit.phase) !== "committed" ||
+      unit.commitSha !== point.commitSha ||
       !raw.snapshot || !raw.provider || !raw.model)
     throw Error("Failed review cannot be repaired without the original committed Pi writer identity.");
   const sessionFile: string | undefined = unit.piSessionFile ?? unit.sessionFile;
   let sessionId: string | undefined = unit.piSessionId ?? unit.sessionId;
-  const sessionDir = point.workItem.startsWith("event-")
-    ? join(job.stateDir, "event-sessions", point.workItem) + sep
+  const sessionDir = foundation
+    ? join(job.stateDir, "foundation-sessions") + sep
+    : point.workItem.startsWith("event-")
+      ? join(job.stateDir, "event-sessions", point.workItem) + sep
     : point.workItem.startsWith("composition-")
       ? join(job.stateDir, "composition-sessions", point.workItem, "write") + sep
       : point.workItem.startsWith("interactive-")
@@ -163,7 +174,9 @@ async function readOrigin(job: JobStartResult, point: RecoveryCheckpoint): Promi
   sessionId ??= header.id;
   if (!sessionId || header.type !== "session" || header.id !== sessionId)
     throw Error("Original Pi session header is inconsistent with the writer receipt.");
-  if (point.workItem.startsWith("event-"))
+  if (foundation)
+    await verifyJobPiSession(job, "foundation", sessionFile, sessionId);
+  else if (point.workItem.startsWith("event-"))
     await verifyJobPiSession(job, "event", sessionFile, sessionId, point.workItem);
   else if (point.workItem.endsWith("-foundations"))
     await verifyJobPiSession(job, point.workItem === "world-foundations" ? "world" : "character",
@@ -199,11 +212,14 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   if (!isAncestor(job, point.commitSha, head) ||
       git(job, "status", "--porcelain=v1", "--untracked-files=all"))
     throw Error("Repair needs a clean verified descendant of the failed checkpoint.");
-  const origin = await readOrigin(job, point);
+  const origin = await readRejectedRepairOrigin(job, point);
   const previous = point.workItem.startsWith("repair-")
     ? await inspectRejectedRepair(job, point.workItem.slice(7)) : null;
   if (previous && previous.attempts >= MAX_ATTEMPTS)
     throw Error("Bounded repair attempts exhausted; author intervention is required.");
+  const planAmendment = deriveReviewRepairAmendment({ assurance: point.assurance!,
+    review: failure, original: assignment, planVersion: point.planVersion ?? plan!.version,
+    originWorkItem: origin.workItem });
   const root = previous?.rootFailureSha ?? point.commitSha;
   const rootReview = previous?.originalReviewDigest ?? sourceOf(failure);
   const rootSource = previous?.originalSource ?? failure.source;
@@ -212,7 +228,7 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
     sourceCommitSha: point.commitSha, rootFailureSha: root,
     sourceReviewDigest: sourceOf(failure), originalReviewDigest: rootReview,
     originalSource: rootSource, source: failure.source,
-    findings: structuredClone(failure.findings), assignment,
+    findings: structuredClone(failure.findings), planAmendment, assignment,
     allowedPaths: [...point.assurance!.changedPaths], origin,
     sessionSha256: hash(await readFile(origin.sessionFile)),
     phase: "ready", attempts: previous?.attempts ?? 0, baselineHead: head,
@@ -233,7 +249,10 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
       !HASH.test(state.sourceReviewDigest) || !HASH.test(state.originalReviewDigest) ||
       !HASH.test(state.sessionSha256) ||
       !Array.isArray(state.allowedPaths) || !state.allowedPaths.length ||
-      state.allowedPaths.some(path => !originalSafePath(path)) ||
+      state.allowedPaths.some(path => !originalSafePath(path) ||
+        (path.startsWith("creative-direction/") && state.origin?.workItem !== "foundation")) ||
+      (state.origin?.workItem === "foundation" &&
+        (state.allowedPaths.length !== 1 || !state.allowedPaths[0]?.startsWith("creative-direction/"))) ||
       !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > MAX_ATTEMPTS ||
       !["ready", "repairing", "awaiting-author", "validating",
         "awaiting-checkpoint", "reviewing", "passed", "failed", "blocked"].includes(state.phase))
@@ -254,7 +273,25 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
     throw Error("Repair no longer matches the original, immutable failure.");
   if (state.phase === "passed" && !state.repairedCommitSha)
     throw Error("Repair cannot pass without a reviewed successor checkpoint.");
+  const sealed = await verifiedFailure(job, current);
+  const planHint = JSON.parse(await readFile(join(job.stateDir, "turn-plan.json"), "utf8")) as {
+    contract: import("./architecture.js").CompletionContract };
+  const turn = await readTurnEvidence(job, planHint.contract);
+  if (!turn) throw Error("Repair lost its pinned original Turn plan.");
+  const origin = await readRejectedRepairOrigin(job, current);
+  const expectedAmendment = deriveReviewRepairAmendment({ assurance: current.assurance!,
+    review: sealed, original: state.assignment,
+    planVersion: current.planVersion ?? turn.version,
+    originWorkItem: origin.workItem });
+  if (JSON.stringify(state.origin) !== JSON.stringify(origin) ||
+      JSON.stringify(state.planAmendment) !== JSON.stringify(expectedAmendment) ||
+      JSON.stringify([...state.allowedPaths].sort()) !==
+      JSON.stringify([...current.assurance!.changedPaths].sort()))
+    throw Error("Review repair plan amendment is stale, widened or differs from sealed findings.");
   if (state.repairedCommitSha) {
+    const proof = await readRepairCommitProof(job, "repair-" + sha);
+    if (proof.repairPlanDigest && proof.repairPlanDigest !== expectedAmendment.digest)
+      throw Error("Repair commit proof differs from the source-bound correction plan.");
     const next = checkpoints.find(p => p.eligible && p.commitSha === state.repairedCommitSha);
     if (!next || next.workItem !== "repair-" + sha ||
         next.assurance?.assignmentId !== state.assignment.id)
@@ -283,7 +320,8 @@ export function repairFeedback(state: RepairReceipt) {
   return {
     source: state.source, reviewDigest: state.sourceReviewDigest,
     assignment: state.revision?.assignment ?? state.assignment,
-    findings: state.findings, allowedPaths: state.allowedPaths,
+    findings: state.findings, amendment: state.planAmendment,
+    allowedPaths: state.allowedPaths,
     attempt: state.attempts + 1, maxAttempts: MAX_ATTEMPTS,
   };
 }
@@ -313,7 +351,8 @@ export function changedRepairPaths(job: JobStartResult, state: RepairReceipt) {
   }).sort();
   const allowed = state.allowedPaths;
   if (paths.some(path => !allowed.includes(path) ||
-      path.startsWith("creative-direction/") || path.startsWith("arcs/") ||
+      (path.startsWith("creative-direction/") && state.origin.workItem !== "foundation") ||
+      path.startsWith("arcs/") ||
       path.startsWith("milestones/") || path.startsWith("narrative-positions/")))
     throw Error("Review feedback never authorizes unrelated or protected Story changes.");
   return paths;
@@ -518,13 +557,18 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
     throw Error("Draft changed after native validation; do not commit stale work.");
   const original = (await inspectRecoveryCheckpoints(job)).find(p =>
     p.eligible && p.commitSha === sha);
-  if (!original?.assurance || original.planVersion === null)
+  if (!original?.assurance || (original.planVersion !== null &&
+      original.planVersion !== state.planAmendment.basePlanVersion))
     throw Error("Repair lost its original validated, versioned checkpoint.");
+  // Foundation checkpoints predate Architecture's own plan. They are still
+  // source-bound to the immutable Turn work-plan version saved in the overlay.
+  const planVersion = original.planVersion ?? state.planAmendment.basePlanVersion;
   const proofDigest = hash({
     workItemId, sourceCommitSha: sha, rootFailureSha: state.rootFailureSha,
     sourceReviewDigest: state.sourceReviewDigest, assignmentId: state.assignment.id,
     assignmentRevision: state.revision?.digest ?? null,
     nativeProof: state.validationProof, draft: state.draftDigest, paths: state.paths,
+    repairPlanDigest: state.planAmendment.digest,
   });
   git(job, "add", "--", ...state.paths.map(path => repoPath(job, path)));
   git(job, "-c", "user.name=NovelTea Generator",
@@ -532,7 +576,7 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
     "Correct rejected specialist assignment [" + job.jobId + "]\n\n" +
     "NovelTea-Job: " + job.jobId + "\n" +
     "NovelTea-Work-Item: " + workItemId + "\n" +
-    "NovelTea-Plan-Version: " + original.planVersion + "\n" +
+    "NovelTea-Plan-Version: " + planVersion + "\n" +
     "NovelTea-Review-Repair: " + proofDigest);
   const commitSha = git(job, "rev-parse", "HEAD");
   if (git(job, "rev-parse", "HEAD^") !== state.baselineHead ||
@@ -557,7 +601,8 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
     sessionFile: state.origin.sessionFile, sessionId: state.origin.sessionId,
     sessionSha256: hash(await readFile(state.origin.sessionFile)),
     provider: state.origin.provider, model: state.origin.model,
-    snapshot: state.origin.snapshot, planVersion: original.planVersion,
+    snapshot: state.origin.snapshot, planVersion,
+    repairPlanDigest: state.planAmendment.digest,
   };
   await mkdir(dirname(existingProof), { recursive: true, mode: 0o700 });
   await writeFile(existingProof, JSON.stringify(proof, null, 2) + "\n",
@@ -588,8 +633,9 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     throw Error("No safe original-session repair attempt is ready.");
   const focus = state.origin.workItem.startsWith("focus:")
     ? state.origin.workItem.slice(6).split(".")[0] : null;
-  const skill = state.origin.workItem.startsWith("event-") || focus === "event"
-    ? "nt-event-design" :
+  const skill = state.origin.workItem === "foundation" ? "nt-story-discovery" :
+    state.origin.workItem.startsWith("event-") || focus === "event"
+      ? "nt-event-design" :
     state.origin.workItem.startsWith("composition-") || focus === "authored-content"
       ? "nt-narrative-composition" :
     state.origin.workItem.startsWith("interactive-choice-") || focus === "choice-point"

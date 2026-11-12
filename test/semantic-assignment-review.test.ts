@@ -25,7 +25,10 @@ const evidence = (id: string, path: string, commitSha = "b".repeat(40)) =>
   ({ commitSha, assignmentId: id, path, line: 2, explanation: "Source text supports the assigned change." });
 const finding = (id: string, path: string, kind: "missing-requirement" |
   "unrequested-change" = "missing-requirement", commitSha = "b".repeat(40)) =>
-  ({ commitSha, assignmentId: id, path, line: 2, kind, message: "Required motive is missing." });
+  ({ commitSha, assignmentId: id, path, line: 2, kind,
+    message: "Required motive is missing.",
+    requiredCorrection: "Write Nia's established promise as the motive for waiting.",
+    affectedPaths: [path] });
 
 test("faithful single assignment passes with exact source-linked evidence", () => {
   const packet = makePacket();
@@ -71,6 +74,30 @@ test("repeated assignment IDs remain distinct across group checkpoint commits", 
     evidence: [evidence("focus:character.nia", "characters/nia.md")] }).findings[0]!.commitSha,
     "c".repeat(40));
 });
+test("cross-domain causal defect names real linked context but cannot invent a writable record", () => {
+  const packet = makePacket();
+  packet.items[0]!.canonicalContext.push({ path: "facts/promise.md",
+    content: "# Fact\nNia knows the witness made a promise." });
+  const actual = { ...finding("focus:character.nia", "characters/nia.md"),
+    kind: "continuity" as const, affectedPaths: ["characters/nia.md", "facts/promise.md"],
+    message: "Nia behaves as if she never learned the Fact referenced by her dialogue.",
+    requiredCorrection: "Correct Nia's dialogue so it acknowledges the learned Fact without rewriting it." };
+  assert.equal(validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,
+    verdict: "fail", findings: [actual], evidence: [] }).findings[0]!.affectedPaths[1],
+    "facts/promise.md");
+  for (const invalid of [
+    { ...actual, affectedPaths: ["characters/nia.md", "facts/invented.md"] },
+    { ...actual, affectedPaths: ["facts/promise.md"] },
+    { ...actual, requiredCorrection: "retry" },
+    { ...actual, requiredCorrection: "" },
+    { ...actual, affectedPaths: ["characters/nia.md", "characters/nia.md"] },
+  ]) {
+    assert.throws(() => validateSemanticVerdict(packet, {
+      sourceDigest: packet.sourceDigest, verdict: "fail", findings: [invalid], evidence: [],
+    }), /source-linked/);
+  }
+});
+
 test("stale source and unauthorized reviewer actions cannot become approvals", () => {
   const packet = makePacket();
   const valid = { sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],

@@ -32,7 +32,12 @@ export interface SemanticFinding {
   path: string;
   line: number;
   kind: "missing-requirement" | "unrequested-change" | "continuity" | "other";
+  /** Narrative or causal failure observed at the pinned source line. */
   message: string;
+  /** Specific edit required to satisfy the assignment, not a generic retry. */
+  requiredCorrection: string;
+  /** Source records implicated by the defect. Only the changed path is writable. */
+  affectedPaths: string[];
 }
 export interface SemanticVerdict {
   sourceDigest: string;
@@ -138,7 +143,15 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
         line <= c.content.split("\n").length));
   if (verdict.findings.some(f => !f || !belongs(f.commitSha, f.assignmentId, f.path, f.line) ||
         !["missing-requirement", "unrequested-change", "continuity", "other"].includes(f.kind) ||
-        typeof f.message !== "string" || !f.message.trim()) ||
+        typeof f.message !== "string" || !f.message.trim() || f.message.length > 2000 ||
+        typeof f.requiredCorrection !== "string" ||
+        f.requiredCorrection.trim().length < 16 || f.requiredCorrection.length > 2000 ||
+        /^(?:retry|try again|fix it|redo|improve it)[.!\s]*$/i.test(f.requiredCorrection) ||
+        !Array.isArray(f.affectedPaths) || !f.affectedPaths.length || f.affectedPaths.length > 12 ||
+        !f.affectedPaths.includes(f.path) || new Set(f.affectedPaths).size !== f.affectedPaths.length ||
+        f.affectedPaths.some(path => !packet.items.find(item =>
+          item.assurance.commitSha === f.commitSha && item.assignment.id === f.assignmentId)?.canonicalContext
+          .some(record => record.path === path))) ||
       verdict.evidence.some(e => !e || !belongs(e.commitSha, e.assignmentId, e.path, e.line) ||
         typeof e.explanation !== "string" || !e.explanation.trim()) ||
       (verdict.verdict === "pass" && verdict.findings.length > 0) ||
@@ -171,7 +184,9 @@ export async function reviewBoundedAssignments(job: JobStartResult,
           assignmentDigest: item.assurance.assignmentDigest, diffDigest: item.assurance.diffDigest,
           validationProofDigest: item.assurance.validationProofDigest },
         reviewer, status: findings.length ? "failed" : "passed",
-        findings: findings.map(f => ({ path: f.path, message: f.path + ":" + f.line + " " + f.message })),
+        findings: findings.map(f => ({ path: f.path, message: f.path + ":" + f.line + " " + f.message,
+          kind: f.kind, line: f.line, affectedPaths: f.affectedPaths,
+          requiredCorrection: f.requiredCorrection })),
         evidence: JSON.stringify({ policy: packet.policy, sourceDigest: packet.sourceDigest,
           evidence: verdict.evidence.filter(e => e.commitSha === item.assurance.commitSha &&
             e.assignmentId === item.assignment.id) }),
