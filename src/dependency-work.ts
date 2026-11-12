@@ -89,11 +89,16 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions) {
     entry.commitSha = head; entry.phase = "reviewing";
     await saveDependencyPlan(job, saved);
     const turn = await dependencyTurn(job);
-    const review: ReviewAssignment = { contract: turn.contract,
+    const dependencyContract = { ...turn.contract, scope: { ...turn.contract.scope,
+      targets: assignment.targets, supportingTargets: [], creates: [] } };
+    const review: ReviewAssignment = { contract: dependencyContract,
       planVersion: entry.amendment!.afterVersion, scopeIds: entry.report.affectedIds,
       paths: [...new Set([...assignment.authority.existingPaths, ...report.sources.map(s => s.path)])],
       routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
-      turnGoal: turn.goal, specialistAssignments: [assignment],
+      turnGoal: "ONLY review the necessary supporting prerequisite for this original author goal: " + turn.goal +
+        ". The originating author dialogue is suspended and will be written only AFTER this review passes; " +
+        "its current incompleteness is not a failure of the supporting assignment.",
+      specialistAssignments: [assignment],
       dependency: { sourceSha: report.sourceSha, commitSha: head,
         obligation: report.obligation, reason: entry.amendment!.reason,
         sources: report.sources.map(s => ({ path: s.path, quote: s.quote })),

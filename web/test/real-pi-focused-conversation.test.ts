@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer as createNetServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import type { JobStartResult } from '../../src/job'
@@ -13,6 +14,7 @@ import { SandboxClient } from '../../src/sandbox-client'
 import { validateStoryJob } from '../../src/validator'
 import { renderFoundation } from '../../src/foundation-record'
 import { inspectRecoveryCheckpoints } from '../../src/recovery-checkpoints'
+import { inspectDependencyPlan } from '../../src/dependency-state'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
@@ -30,20 +32,34 @@ import { openStudioDatabase, migrateStudio } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
 
-const enabled = process.env.NT_TEST_WEB_PI_FOCUSED === '1'
+const dependencyTest = process.env.NT_TEST_WEB_PI_DEPENDENCY === '1'
+const enabled = process.env.NT_TEST_WEB_PI_FOCUSED === '1' || dependencyTest
 const subscription = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
+const isolatedLocalOAuth = process.env.NT_TEST_WEB_PI_LOCAL_OAUTH === '1'
+/** Opt-in local certification only: borrow an unexpired access token in memory.
+ * Never copy or refresh the user's durable Pi refresh token. */
+function localOAuth(provider: string) {
+  const credentials = JSON.parse(readFileSync(join(homedir(), '.pi/agent/auth.json'), 'utf8')) as
+    Record<string, { type: string; access?: string; expires?: number; refresh?: string }>
+  const selected = credentials[provider]
+  if (selected?.type !== 'oauth' || !selected.access || !selected.expires ||
+      selected.expires - Date.now() < 5 * 60_000)
+    throw Error('An unexpired local Pi OAuth access token is required; do not refresh it in this certification.')
+  return { ...selected, refresh: 'certification-refresh-disabled-' + randomBytes(24).toString('hex') }
+}
 const config = { baseURL: 'http://localhost:3000',
   secret: 'live-focused-credential-isolation-test-secret-abcdefg',
   github: { clientId: 'test', clientSecret: 'test' },
   gitlab: { clientId: 'test', clientSecret: 'test' } }
 
-test('opt-in live Pi: authenticated Thread creates only missing Event and dialogue in rootless sandbox', {
-  skip: !enabled ? 'Set NT_TEST_WEB_PI_FOCUSED=1 with isolated user Pi, native CLI, skills and rootless Docker.' : false,
-  timeout: 450_000,
+test('opt-in live Pi: authenticated Thread creates focused support or resolves an unforeseen dependency in rootless sandbox', {
+  skip: !enabled ? 'Set NT_TEST_WEB_PI_FOCUSED=1 or NT_TEST_WEB_PI_DEPENDENCY=1 with isolated Pi, native CLI, skills and rootless Docker.' : false,
+  timeout: 650_000,
 }, async () => {
   for (const variable of ['NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE',
     'NT_TEST_WEB_PI_PROVIDER', 'NT_TEST_WEB_PI_MODEL',
-    ...(subscription ? ['NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY'] : ['NT_TEST_WEB_PI_API_KEY'])])
+    ...(subscription && !isolatedLocalOAuth ? ['NT_TEST_WEB_PI_SOURCE_DB', 'NT_PI_CREDENTIAL_KEY'] :
+      subscription ? [] : ['NT_TEST_WEB_PI_API_KEY'])])
     assert.ok(process.env[variable], variable + ' required')
   const skills = resolve(process.env.NT_STUDIO_SKILLS_SOURCE!)
   const security = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .SecurityOptions}}'], {
@@ -55,9 +71,9 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
   }).trim(), '2/systemd')
   // Reuse the certified read-only token copy. Its real refresh token is never
   // copied, logged, changed, or used by the disposable test Studio instance.
-  const oauth = subscription ? await readIsolatedStudioOAuth(
-    process.env.NT_TEST_WEB_PI_SOURCE_DB!, process.env.NT_PI_CREDENTIAL_KEY!,
-    process.env.NT_TEST_WEB_PI_SOURCE_USER_ID, process.env.NT_TEST_WEB_PI_PROVIDER!) : null
+  const oauth = subscription ? isolatedLocalOAuth ? localOAuth(process.env.NT_TEST_WEB_PI_PROVIDER!) :
+    await readIsolatedStudioOAuth(process.env.NT_TEST_WEB_PI_SOURCE_DB!, process.env.NT_PI_CREDENTIAL_KEY!,
+      process.env.NT_TEST_WEB_PI_SOURCE_USER_ID, process.env.NT_TEST_WEB_PI_PROVIDER!) : null
 
   const root = mkdtempSync(join(tmpdir(), 'nt-web-focused-pi-'))
   const old = Object.fromEntries(['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_PI_CREDENTIAL_KEY',
@@ -91,6 +107,7 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
   let store = openStudioDatabase(join(app, 'studio.sqlite'))
   let agent: ChildProcess | undefined
   let child: JobStartResult | undefined
+  let certified = false
   try {
     await migrateStudio(store, config)
     const auth = createStudioAuth(store, config)
@@ -155,6 +172,15 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
     }
     writeFileSync(join(story, 'relationships', 'ada-neri.md'),
       `---\nschema: '0.1'\ntype: relationship\nid: relationship.ada-neri\ntitle: Ada and Neri\nstatus: draft\ndecisions: []\ncharacters: [character.ada, character.neri]\ninitial: estranged\n---\nAda and Neri disagree over whether the ledger should be revealed.\n`)
+    if (dependencyTest) {
+      for (const dir of ['facts', 'events', 'authored-content']) mkdirSync(join(story, dir), { recursive: true })
+      writeFileSync(join(story, 'facts', 'ledger-forged.md'),
+        `---\nschema: '0.1'\ntype: fact\nid: fact.ledger-forged\ntitle: The Ledger Was Forged\nstatus: draft\ndecisions: []\ninitial: true\n---\nThe ledger that accused Neri was forged, though Ada has not yet learned this fact.\n`)
+      writeFileSync(join(story, 'events', 'ledger-disclosure.md'),
+        `---\nschema: '0.1'\ntype: event\nid: event.ledger-disclosure\ntitle: Ledger Disclosure\nstatus: draft\ndecisions: []\nparticipants: [character.ada, character.neri]\narcs: [arc.truth]\nconsequences: [Ada confronts Neri with the disputed ledger accusation.]\nafter: []\nprerequisites:\n  any_of:\n    - completed: []\n      not_completed: []\nsteps:\n  - id: discovery\n    branches:\n      - id: inspection\n        conditions: []\n        effects: []\n---\nAda brings the sealed ledger to Neri and starts inspecting signatures. The documented existing Fact is fact.ledger-forged; the inspection branch is where Ada can discover the signature mismatch that proves it. The Event does not yet record that knowledge effect.\n`)
+      writeFileSync(join(story, 'authored-content', 'disclosure-scene.md'),
+        `---\nschema: '0.1'\ntype: authored-content\nid: authored-content.disclosure-scene\ntitle: The Disclosure Scene\nstatus: draft\ndecisions: []\nevents: [event.ledger-disclosure]\nrevelations: []\n---\n# The Disclosure\nAda: The ledger says you stole the funds, Neri.\nNeri: And do you believe it?\nAda: I have not verified the claim.\n`)
+    }
     git(repo, 'add', '.')
     git(repo, 'commit', '-qm', 'Establish existing canonical speakers and relationship')
     const base = git(repo, 'rev-parse', 'HEAD')
@@ -203,18 +229,27 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
       protection: (baselineVerification.report as { protection?: { status?: string; base?: string; warnings?: unknown[]; changes?: unknown[] } })?.protection,
     }))
     assert.equal(baselineVerification.status, 'passed')
-    const request = 'Write a conversation between Ada and Neri about rebuilding trust after the sealed ledger'
+    const request = dependencyTest
+      ? 'Revise authored-content.disclosure-scene only: make Ada and Neri\'s conversation state truthfully that Ada learned the ledger accusation was forged. Respect canonical knowledge continuity. Do not invent off-page knowledge; report any missing causal prerequisite outside your bounded dialogue assignment before making edits.'
+      : 'Write a conversation between Ada and Neri about rebuilding trust after the sealed ledger'
     await assert.rejects(previewThreadRevision(store, other.id, threadId, request), /not found|owner|no source generation/i)
     const proposal = await previewThreadRevision(store, owner.id, threadId, request)
     assert.equal(proposal.clarification, null)
-    assert.equal(proposal.reviewRequired, true)
-    assert.deepEqual(proposal.contract.scope.creates?.map(item => item.id.split('.')[0]),
-      ['event', 'authored-content'], 'preexisting Character/Relationship must be reused')
+    if (dependencyTest) {
+      assert.deepEqual(proposal.contract.scope.targets,
+        ['authored-content.disclosure-scene'], 'the unexpected Event repair must not be initially authorized')
+      assert.deepEqual(proposal.contract.scope.creates ?? [], [])
+    } else {
+      assert.equal(proposal.reviewRequired, true)
+      assert.deepEqual(proposal.contract.scope.creates?.map(item => item.id.split('.')[0]),
+        ['event', 'authored-content'], 'preexisting Character/Relationship must be reused')
+    }
     const turnId = randomUUID()
-    assert.equal((await submitThreadRevision(store, owner.id, threadId,
-      turnId, request)).hasRevisionScope, 0, 'new support requires author review')
-    assert.equal((await submitThreadRevision(store, owner.id, threadId,
-      turnId, request, undefined, proposal.digest)).hasRevisionScope, 1)
+    const firstSubmission = await submitThreadRevision(store, owner.id, threadId, turnId, request)
+    if (firstSubmission.hasRevisionScope === 0)
+      assert.equal((await submitThreadRevision(store, owner.id, threadId,
+        turnId, request, undefined, proposal.digest)).hasRevisionScope, 1)
+    else assert.equal(firstSubmission.hasRevisionScope, 1)
     await advanceThread(store, owner.id, threadId)
     const admission = await readThreadChat(store, owner.id, threadId)
     assert.equal(admission.messages.find(item => item.id === turnId)?.phase, 'running')
@@ -241,12 +276,16 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
     const rpcToken = randomBytes(48).toString('hex')
     process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:' + port
     process.env.NT_AGENT_RPC_TOKEN = rpcToken
-    agent = spawn(process.execPath, ['--import', 'tsx', resolve('src/agent-worker.ts')], {
-      cwd: resolve('.'), stdio: 'ignore',
+    agent = spawn(process.execPath, ['--import', 'tsx',
+      fileURLToPath(new URL('../src/agent-worker.ts', import.meta.url))], {
+      cwd: resolve('.'), stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, NT_STUDIO_DB_PATH: join(app, 'studio.sqlite'),
         NT_AGENT_RPC_TOKEN: rpcToken, NT_AGENT_PORT: String(port),
         NT_REQUIRE_SANDBOX_TOOLS: '1' },
     })
+    const agentLog = join(root, 'agent.log')
+    agent.stdout?.on('data', bytes => appendFileSync(agentLog, bytes))
+    agent.stderr?.on('data', bytes => appendFileSync(agentLog, bytes))
     let ready = false
     for (let attempt = 0; attempt < 120; attempt++) {
       if (agent.exitCode !== null) break
@@ -258,8 +297,8 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
       } catch { /* agent starting */ }
       await new Promise(done => setTimeout(done, 100))
     }
-    assert.equal(ready, true)
-    const deadline = Date.now() + 340_000
+    assert.equal(ready, true, 'agent process failed startup; inspect isolated agent.log')
+    const deadline = Date.now() + (dependencyTest ? 580_000 : 340_000)
     while (Date.now() < deadline) {
       const events = await listGenerationEvents(store, owner.id, turnId, 0)
       if (events.some(event => event.kind === 'finished' || event.kind === 'interrupted')) break
@@ -293,10 +332,29 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
       phase: finalQueue?.phase, events: events.map(item =>
         ({ kind: item.kind, stage: item.stage, status: item.status })),
     }))
+    if (dependencyTest) {
+      const dependency = await inspectDependencyPlan(child)
+      console.log('Live dependency progress:', JSON.stringify({
+        queuePhase: finalQueue?.phase, checkpointStatus: checkpoint.status,
+        reason: checkpoint.reason?.slice(0, 1200), version: dependency?.version,
+        phases: dependency?.entries.map(e => e.phase),
+        changed: git(child.worktreeRoot, 'diff', '--name-only', base, 'HEAD').split('\n').filter(Boolean),
+      }))
+    }
     assert.equal(finalQueue?.phase, 'finished')
-    assert.equal(events.find(item => item.kind === 'finished')?.status, 'completed',
-      'real focused Turn must finish with independent review, not an unverified draft')
-    assert.equal(checkpoint.status, 'completed')
+    const terminalStatus = events.find(item => item.kind === 'finished')?.status
+    if (dependencyTest) {
+      // #151 certifies the two specialist assignments and their reviews. The
+      // separate whole-Turn editorial gate can fail closed without invalidating
+      // native-validated, independently reviewed dependency evidence.
+      assert.ok(terminalStatus === 'completed' || terminalStatus === 'blocked')
+      assert.equal(checkpoint.inventory?.items?.find(item =>
+        item.id === 'focus:authored-content.disclosure-scene')?.status, 'verified')
+    } else {
+      assert.equal(terminalStatus, 'completed',
+        'real focused Turn must finish with independent review, not an unverified draft')
+      assert.equal(checkpoint.status, 'completed')
+    }
     const after = await validateStoryJob(child, skills, { ...child, baseSha: base })
     if (after.status !== 'passed') {
       console.error('Live focused native diagnostics:', JSON.stringify({
@@ -309,30 +367,68 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
     const finalHead = git(child.worktreeRoot, 'rev-parse', 'HEAD')
     const changed = git(child.worktreeRoot, 'diff', '--name-only', base, finalHead)
       .split('\n').filter(Boolean)
-    assert.deepEqual(changed, proposal.writePaths.map(path => 'story/' + path).sort())
+    assert.deepEqual(changed, dependencyTest
+      ? ['story/authored-content/disclosure-scene.md', 'story/events/ledger-disclosure.md']
+      : proposal.writePaths.map(path => 'story/' + path).sort())
     for (const [path, content] of priorBytes) {
-      assert.equal(readFileSync(join(child.worktreeRoot, path), 'utf8'), content,
-        'preexisting canon must remain byte-for-byte untouched: ' + path)
+      if (!dependencyTest || !changed.includes(path))
+        assert.equal(readFileSync(join(child.worktreeRoot, path), 'utf8'), content,
+          'preexisting canon must remain byte-for-byte untouched: ' + path)
     }
-    for (const item of proposal.contract.scope.creates!) {
+    for (const item of proposal.contract.scope.creates ?? []) {
       const created = readFileSync(join(child.worktreeStoryRoot, item.path), 'utf8')
       assert.match(created, /schema: ['"]?0\.1/)
       assert.ok(created.length > 220, 'Pi must author substantive canonical content')
     }
     const dialogue = readFileSync(join(child.worktreeStoryRoot,
-      proposal.contract.scope.creates!.find(item => item.id.startsWith('authored-content.'))!.path),
+      dependencyTest ? 'authored-content/disclosure-scene.md' :
+        proposal.contract.scope.creates!.find(item => item.id.startsWith('authored-content.'))!.path),
     'utf8')
     assert.match(dialogue, /Ada/i)
     assert.match(dialogue, /Neri/i)
-    assert.match(dialogue, /[“"'].{5,}[”"']/)
+    if (dependencyTest) assert.match(dialogue, /Ada:\s*.+/)
+    else assert.match(dialogue, /[“"'].{5,}[”"']/)
     const checkpoints = (await inspectRecoveryCheckpoints(child))
       .filter(point => point.workItem.startsWith('focus:'))
     assert.equal(checkpoints.filter(point => point.eligible).length,
-      proposal.contract.scope.creates!.length)
-    const reviewedEvent = checkpoints.find(point => point.workItem.startsWith('focus:event.'))
-    assert.equal(reviewedEvent?.semanticReview, 'passed',
-      'the new Event must have its own independent semantic review')
-    for (const item of proposal.contract.scope.creates!) {
+      dependencyTest ? 1 : proposal.contract.scope.creates!.length)
+    if (dependencyTest) {
+      const dependency = await inspectDependencyPlan(child)
+      assert.equal(dependency?.version, 2)
+      assert.equal(dependency?.entries.length, 1)
+      const entry = dependency.entries[0]!
+      assert.equal(entry.fixture, false)
+      assert.equal(entry.phase, 'verified')
+      assert.equal(entry.report.assignmentId, 'focus:authored-content.disclosure-scene')
+      assert.equal(entry.report.likelySpecialist, 'nt-event-design')
+      assert.equal(entry.report.authorDecisionRequired, false)
+      assert.equal(entry.amendment?.assignment.specialist, 'nt-event-design')
+      assert.deepEqual(entry.amendment?.assignment.targets, ['event.ledger-disclosure'])
+      assert.equal(entry.amendment?.beforeVersion, 1)
+      assert.equal(entry.amendment?.afterVersion, 2)
+      assert.deepEqual(entry.amendment?.objective, assignment.objective)
+      assert.equal(entry.review?.verdict, 'pass')
+      assert.ok(entry.planner?.sessionFile && existsSync(entry.planner.sessionFile))
+      assert.ok(entry.reviewerSession && existsSync(entry.reviewerSession))
+      assert.equal(entry.approval?.jobId, child.jobId)
+      assert.equal(entry.approval?.threadId, child.threadId)
+      assert.equal(git(child.worktreeRoot, 'rev-list', '--count', base + '..HEAD'), '2')
+      assert.match(readFileSync(join(child.worktreeStoryRoot, 'events/ledger-disclosure.md'), 'utf8'),
+        /kind: knowledge[\s\S]*character: character\.ada[\s\S]*fact: fact\.ledger-forged[\s\S]*value: knows/)
+      assert.match(dialogue, /forg(?:e|ed)/i)
+      const original = JSON.parse(readFileSync(join(child.stateDir,
+        'focused-items/authored-content.disclosure-scene.json'), 'utf8')) as
+        { phase: string; resolvedDependency?: string; worker: string; piSessionFile?: string }
+      assert.equal(original.phase, 'committed')
+      assert.equal(original.worker, 'pi')
+      assert.equal(original.resolvedDependency, entry.reportDigest)
+      assert.ok(original.piSessionFile && existsSync(original.piSessionFile))
+    } else {
+      const reviewedEvent = checkpoints.find(point => point.workItem.startsWith('focus:event.'))
+      assert.equal(reviewedEvent?.semanticReview, 'passed',
+        'the new Event must have its own independent semantic review')
+    }
+    for (const item of proposal.contract.scope.creates ?? []) {
       const receipt = JSON.parse(readFileSync(join(child.stateDir,
         'focused-items', item.id + '.json'), 'utf8')) as {
           phase?: string; worker?: string; piSessionFile?: string; commitSha?: string
@@ -347,8 +443,11 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
         worker?: string; phase?: string; editorial?: { verdict?: string }
       }
     assert.equal(review.worker, 'pi', 'literary verdict must come from the independent Pi reviewer')
-    assert.equal(review.phase, 'completed')
-    assert.equal(review.editorial?.verdict, 'pass')
+    if (!dependencyTest || checkpoint.status === 'completed') {
+      assert.equal(review.phase, 'completed')
+      assert.equal(review.editorial?.verdict, 'pass')
+    } else assert.equal(review.phase, 'blocked',
+      'a blocked final Turn review must not be advertised as completed')
     assert.equal(git(repo, 'rev-parse', 'HEAD'), base)
     assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
     await settleThreadRun(store, owner.id, turnId)
@@ -371,11 +470,13 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
       .map(point => [point.workItem, point.commitSha, point.semanticReview]),
     checkpoints.map(point => [point.workItem, point.commitSha, point.semanticReview]))
     assert.equal(git(restored.worktreeRoot, 'status', '--porcelain'), '')
-    console.log('Live #150 focused conversation verified:', JSON.stringify({
-      source: base, result: finalHead, changed,
+    console.log(dependencyTest ? 'Live #151 discovered dependency verified:' :
+      'Live #150 focused conversation verified:', JSON.stringify({
+      source: base, result: finalHead, changed, finalTurnStatus: checkpoint.status,
       checkpointCount: checkpoints.length, review: checkpoints.map(point =>
         ({ item: point.workItem, semanticReview: point.semanticReview })),
     }))
+    certified = true
   } finally {
     if (agent && agent.exitCode === null && agent.signalCode === null) {
       agent.kill('SIGTERM')
@@ -392,6 +493,8 @@ test('opt-in live Pi: authenticated Thread creates only missing Event and dialog
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-    removeTestTree(root)
+    if (!certified && process.env.NT_KEEP_FAILED_LIVE === '1')
+      console.error('Preserved isolated live evidence:', root)
+    else removeTestTree(root)
   }
 })

@@ -56,28 +56,60 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       "\nInspect the cited canonical Story sources. No private inbox access. Determine whether the reported " +
       "prerequisite is causally NECESSARY for the exact original obligation, not optional enrichment. " +
       "Reject protected retcons, material objective changes, invented IDs and unrelated enhancements. " +
+      "A source-bound addition to a canonical Event's existing inspection step may establish actual " +
+      "knowledge through a typed knowledge effect; do not conflate that bounded on-screen " +
+      "causal correction with inventing an off-page occurrence or granting new-record authority. " +
       "You cannot grant authority. Only one directly connected EXISTING record, owned by the proper different " +
       "specialist, can be proposed. New records or changes to protected decisions require separate approval. " +
       "If necessary, return ONLY JSON {sourceSha,reportDigest,target,specialist,outcome,reason}. " +
-      "Use the exact missing text as outcome and cite the causal source in reason. If unnecessary or unsafe return " +
+      "Target MUST be an existing typed canonical ID from the report's affectedIds " +
+      "(for example event.ledger-disclosure), NEVER a filesystem path like events/ledger-disclosure.md. " +
+      "COPY the exact report.missing string as outcome, verbatim, not a paraphrase or a new directive; " +
+      "explain the independently verified causal repair ONLY in reason. " +
+      "Use the exact sourceSha and reportDigest provided. If unnecessary or unsafe return " +
       "{rejected: true, reason: ...}; the controller will block, never manufacture a grant.\n" +
       "Original objective and delivery criteria: " + JSON.stringify({ goal: turn.goal, objective: turn.objective }) +
       "\nOriginal assignments: " + JSON.stringify(turn.assignments) +
       "\nDependency evidence: " + JSON.stringify(entry.report) + "\nReport digest: " + entry.reportDigest);
+    const completedReads = () => {
+      const completed = new Set(session.messages.filter(m => m.role === "toolResult" && !m.isError)
+        .map(m => m.role === "toolResult" ? m.toolCallId : ""));
+      return session.messages.flatMap(m => m.role === "assistant" ? m.content.flatMap(c =>
+        c.type === "toolCall" && c.name === "read" && completed.has(c.id)
+          ? [canonicalPinnedReadPath(String(c.arguments.path ?? ""), project.root, snapshot.path)] : []) : []);
+    };
+    const missingReads = () => guidance.map(p => join(snapshot.path, "skills", p))
+      .filter(p => !completedReads().includes(p));
+    if (missingReads().length) {
+      await promptStorySpecialist(session, "You omitted required pinned orchestrator methodology reads. " +
+        "Read EVERY exact file below with the read tool, then independently reconsider the " +
+        "causal necessity and return a fresh JSON proposal or rejection. " +
+        "Do not modify files or assume the previous answer was correct.\nMISSING READS:\n" +
+        missingReads().join("\n"));
+    }
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
       throw Error("Dependency planner was interrupted.");
-    const completed = new Set(session.messages.filter(m => m.role === "toolResult" && !m.isError)
-      .map(m => m.role === "toolResult" ? m.toolCallId : ""));
-    const reads = session.messages.flatMap(m => m.role === "assistant" ? m.content.flatMap(c =>
-      c.type === "toolCall" && c.name === "read" && completed.has(c.id)
-        ? [canonicalPinnedReadPath(String(c.arguments.path ?? ""), project.root, snapshot.path)] : []) : []);
-    if (guidance.some(p => !reads.includes(join(snapshot.path, "skills", p))))
+    const reads = completedReads();
+    if (missingReads().length)
       throw Error("Dependency planner did not read pinned methodology.");
     entry.planner.skillReads = reads;
     await saveDependencyPlan(job, plan);
-    const raw = (session.getLastAssistantText() ?? "").trim().replace(/^```(?:json)?\s*\n/i, "").replace(/\n```$/, "");
-    const proposal = JSON.parse(raw) as DependencyProposal;
+    const lastJson = () => JSON.parse((session.getLastAssistantText() ?? "").trim()
+      .replace(/^```(?:json)?\s*\n/i, "").replace(/\n```$/, "")) as DependencyProposal;
+    let proposal = lastJson();
+    if (proposal && (proposal.outcome !== undefined && proposal.outcome !== entry.report.missing ||
+        typeof proposal.target === "string" && !entry.report.affectedIds.includes(proposal.target))) {
+      await promptStorySpecialist(session, "Your proposal used an altered missing-work outcome or " +
+        "a target that is not an exact typed canonical ID from the evidence. " +
+        "Reassess the report and return one fresh JSON proposal only if necessary. " +
+        "Copy missing EXACTLY as outcome, choose target as an existing typed record ID " +
+        "(NEVER a .md path), and put your causal reasoning in reason. " +
+        "Return a rejection if this cannot be safely done. " +
+        "Exact missing work: " + JSON.stringify(entry.report.missing) +
+        "; allowed affected IDs: " + JSON.stringify(entry.report.affectedIds));
+      proposal = lastJson();
+    }
     await context.completed(sessionFile, session.sessionId);
     return proposal;
   } finally { session.dispose(); }

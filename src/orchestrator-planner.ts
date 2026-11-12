@@ -321,29 +321,29 @@ export async function runPinnedObjectivePlanner(
       "Plan digest: " +
       plan.digest;
     await withStoryJobLock(job, "orchestrator:objective", () => promptStorySpecialist(session, prompt));
+    const completedReads = () => {
+      const completed = new Set(session.messages
+        .filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
+          m.role === "toolResult" && !m.isError).map((m) => m.toolCallId));
+      return session.messages.flatMap((m) => m.role === "assistant"
+        ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
+          c.type === "toolCall" && c.name === "read" && completed.has(c.id) &&
+          typeof c.arguments?.path === "string") : [])
+        .map((c) => canonicalPinnedReadPath(c.arguments.path as string, project.root, snapshot.path));
+    };
+    const required = REQUIRED.map((p) => join(snapshot.path, "skills", p));
+    const missingReads = () => required.filter(p => !completedReads().includes(p));
+    if (missingReads().length) {
+      await withStoryJobLock(job, "orchestrator:objective-reads", () => promptStorySpecialist(session,
+        "Before your proposal can be accepted, read EVERY exact missing pinned skill reference " +
+        "with the read tool and return a fresh bounded proposal. This is still read-only and " +
+        "cannot authorize new work.\nMISSING READS:\n" + missingReads().join("\n")));
+    }
     const last = [...session.messages].reverse().find((m) => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
       throw new Error("Pinned orchestrator planning turn did not complete successfully.");
-    const completed = new Set(
-      session.messages
-        .filter((m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult" && !m.isError)
-        .map((m) => m.toolCallId),
-    );
-    const reads = session.messages
-      .flatMap((m) =>
-        m.role === "assistant"
-          ? m.content.filter(
-              (c): c is Extract<typeof c, { type: "toolCall" }> =>
-                c.type === "toolCall" &&
-                c.name === "read" &&
-                completed.has(c.id) &&
-                typeof c.arguments?.path === "string",
-            )
-          : [],
-      )
-      .map((c) => canonicalPinnedReadPath(c.arguments.path as string, project.root, snapshot.path));
-    const required = REQUIRED.map((p) => join(snapshot.path, "skills", p));
-    if (required.some((p) => !reads.includes(p)))
+    const reads = completedReads();
+    if (missingReads().length)
       throw new Error("Orchestrator did not actually read the selected pinned method and catalog.");
     const proposal = verifyOrchestratorProposal(parseText(session.getLastAssistantText() ?? ""), plan);
     await context.completed(file, session.sessionId);

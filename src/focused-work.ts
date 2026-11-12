@@ -165,9 +165,10 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
   create?: PlannedFocusCreate, obligations: string[] = []) {
   let dependencyReport: DependencyReport | undefined;
-  const dependencyTool = receipt.assignmentDigest && !receipt.workItemId.startsWith("dependency:")
+  const dependencyTool = receipt.assignmentDigest && obligations.length > 0 &&
+    !receipt.workItemId.startsWith("dependency:")
     ? createDependencyTool(job, { head: receipt.expectedHead, turnDigest: receipt.assignmentDigest,
-        assignmentId: receipt.workItemId }, report => {
+        assignmentId: receipt.workItemId, obligations }, report => {
           if (dependencyReport) throw Error("Only one dependency report per bounded assignment is permitted.");
           dependencyReport = report;
         }) : null;
@@ -210,7 +211,9 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
     await context.beforeTurn(file ?? undefined);
     const required = [join(receipt.snapshot!.path, "skills", skill, "SKILL.md"),
       join(receipt.snapshot!.path, "skills", "nt-catalog", "SKILL.md"),
-      join(receipt.snapshot!.path, "skills", "nt-catalog", "references", "records.md")];
+      join(receipt.snapshot!.path, "skills", "nt-catalog", "references", "records.md"),
+      ...(receipt.target.startsWith("event.") ?
+        [join(receipt.snapshot!.path, "skills", "nt-catalog", "references", "progression.md")] : [])];
     await promptStorySpecialist(session, context.contextNote +
       "You are a narrowly scoped NovelTea " + skill + " revision specialist. FIRST read all pinned guidance using read:\n" +
       required.join("\n") + "\nBegin with these relevant Story sources:\n" +
@@ -230,23 +233,62 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       "Do not create any other files, use git commands, invoke untrusted shell commands, or change protected author decisions. " +
       "Preserve typed references and branch behavior. If a requested change requires additional records or upstream decisions, " +
       "use report_dependency for a sourced cross-domain prerequisite and stop WITHOUT ANY Story edits. " +
-      "If you have already edited, stop for manual reconciliation instead. Do not claim incomplete/delegated work is finished. " +
-      "Exact original delivery obligations: " + JSON.stringify(obligations) + "\n" +
+      "If you have already edited, stop for manual reconciliation instead. " +
+      "Flag authorDecisionRequired ONLY for actual protected author decisions or material objective changes; " +
+      "a missing knowledge effect on an unprotected Event is a routine causal prerequisite, not automatically an author decision. " +
+      "Do not claim incomplete/delegated work is finished. " +
+      "Original delivery obligations for report_dependency (0-based obligationIndex): " +
+      JSON.stringify(obligations.map((obligation, index) => ({ index, obligation }))) +
+      ". Pass the NUMBER obligationIndex, not any copied obligation text or path. " +
+      "Include both the originating record ID and missing prerequisite record ID in affectedIds.\n" +
+      (receipt.workItemId.startsWith("dependency:") ?
+        "THIS IS A SEPARATELY AUTHORIZED SUPPORTING ASSIGNMENT, NOT THE ORIGINATING DIALOGUE WRITER. " +
+        "The original Turn objective below is context, not your current write grant. " +
+        "The controller has ALREADY checked the evidence and explicitly authorized YOU, " +
+        "the proper specialist for the listed preexisting files, to implement this necessary prerequisite. " +
+        "You are responsible for editing the allowed path(s) to fulfill your assigned outcome. " +
+        "For any causal state effect you add, update its in-scene prose to substantiate " +
+        "the actual observation or action that changes state, and remove any contradictory " +
+        "claims that the effect has not happened. A mere metadata effect without a supported " +
+        "canonical narrative occurrence is not enough for independent review. " +
+        "Make the SMALLEST causal edit: preserve existing status, completeness, " +
+        "prerequisites, consequences and unrelated steps unless independently justified. " +
+        "Every referenced ID must be verified by reading an existing canonical record; " +
+        "never invent an ID. " +
+        "Do NOT stop and ask the original dialogue specialist or another Event specialist " +
+        "to make these changes: YOU ARE the assigned specialist. Do not introduce unrelated edits.\n" : "") +
+      (receipt.workItemId.startsWith("dependency:") && receipt.target.startsWith("event.") ?
+        "EVENT SCHEMA PRECISION: Read the pinned nt-catalog progression reference before editing. " +
+        "For a knowledge effect use EXACT flattened shape " +
+        "`- {kind: knowledge, character: character.EXISTING, fact: fact.EXISTING, value: knows}`; " +
+        "not nested knowledge:, not value: known. Locate the real Fact ID in the Story's " +
+        "facts/ records using find/read before authoring. An inspection branch itself can " +
+        "establish knowledge in its effects; it does NOT require a prior knowledge condition. " +
+        "Do not promote a partial Event to complete to add this effect.\n" : "") +
       (receipt.resolvedDependency ? "A controller-authorized prerequisite has now been completed and reviewed. Re-read current canonical context before resuming your original assignment.\n" : "") +
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
       creativePolicyInstruction(policy) +
       "Original Turn goal: " + task + "\nSpecialist assignment outcome: " +
       (outcome ?? "Revise only the authorized record against the user request."));
+    const completedReads = () => {
+      const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
+        m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
+      return session.messages.flatMap(m => m.role === "assistant" ?
+        m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
+          c.type === "toolCall" && c.name === "read" && completed.has(c.id)) : [])
+        .map(c => canonicalPinnedReadPath(String(c.arguments.path ?? ""), project.root, receipt.snapshot!.path));
+    };
+    const missingReads = () => required.filter(path => !completedReads().includes(path));
+    if (missingReads().length)
+      await promptStorySpecialist(session, "You did not successfully read all required pinned skill " +
+        "references. Read EACH exact path below using the read tool, then stop. " +
+        "Do not edit any Story file, redo work, or repeat a previously recorded dependency report. " +
+        "After reading, finish with a brief status, not a new change.\nMISSING READS:\n" +
+        missingReads().join("\n"));
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
       throw new Error("Focused Pi specialist failed or was interrupted.");
-    const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-      m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-    const reads = session.messages.flatMap(m => m.role === "assistant" ?
-      m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
-        c.type === "toolCall" && c.name === "read" && completed.has(c.id)) : [])
-      .map(c => canonicalPinnedReadPath(String(c.arguments.path ?? ""), project.root, receipt.snapshot!.path));
-    if (required.some(path => !reads.includes(path)))
+    if (missingReads().length)
       throw new Error("Focused Pi specialist failed to read pinned skill guidance.");
     return dependencyReport;
   } finally { session.dispose(); }

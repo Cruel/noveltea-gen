@@ -187,6 +187,12 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
         "This is a NECESSARY DEPENDENCY review of one supporting specialist commit, not a branch merge. " +
         "Compare the exact provided source-to-commit Git diff with the original obligation, " +
         "the cited canonical sources, and the changed record read from disk. " +
+        "The original specialist is SUSPENDED and its untouched authored prose is expected " +
+        "to remain incomplete; judge ONLY the newly authorized supporting assignment. " +
+        "An Event branch can establish a new Fact knowledge effect through its own " +
+        "in-scene evidence; empty branch conditions mean the inspection is unconditional, " +
+        "not that knowledge must already exist beforehand. Require actual on-page causal prose " +
+        "supporting new effects, not a bare effect or retroactive assertion. " +
         "Reject unrelated enhancements, unsupported causal claims, incomplete prerequisites, " +
         "protected decision retcons, and unauthorized changes; a native-valid diff is not semantic approval. " : "") +
       (assignment.integration ?

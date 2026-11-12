@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { authorizeDependency } from "../src/dependency-amendments.js";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createDependencyTool } from "../src/dependency-tool.js";
+import type { JobStartResult } from "../src/job.js";
+import { authorizeDependency, type DependencyReport } from "../src/dependency-amendments.js";
 import type { TurnEvidence } from "../src/turn-plan-evidence.js";
 
 const head = "a".repeat(40);
@@ -27,6 +32,33 @@ const report = { sourceSha: head, turnDigest: plan.digest, assignmentId: plan.as
   sources: [source], likelySpecialist: "nt-event-design", authorDecisionRequired: false };
 const proposal = { sourceSha: head, reportDigest: "d".repeat(64), target: "event.disclosure",
   specialist: "nt-event-design", outcome: report.missing, reason: "Disclosure requires the speaker to know the truth." };
+
+test("specialist reports a pinned obligation by index; host stamps its exact text", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nt-dependency-tool-"));
+  try {
+    mkdirSync(join(root, "events"));
+    writeFileSync(join(root, "events/disclosure.md"), "# Ada sees the signature mismatch\n");
+    let observed: DependencyReport | undefined;
+    const tool = createDependencyTool({ worktreeStoryRoot: root } as JobStartResult, {
+      head, turnDigest: plan.digest, assignmentId: "focus:authored-content.disclosure",
+      obligations: plan.objective.obligations,
+    }, report => { observed = report; });
+    const required = (tool.parameters as { required: string[] }).required;
+    assert.ok(required.includes("obligationIndex"));
+    assert.ok(!required.includes("obligation"));
+    const input = { obligationIndex: 0, missing: report.missing,
+      affectedIds: ["authored-content.disclosure", "event.disclosure"],
+      sources: [{ path: "events/disclosure.md", quote: "Ada sees the signature mismatch" }],
+      likelySpecialist: "nt-event-design", authorDecisionRequired: false };
+    await tool.execute("report", input, {} as never);
+    assert.equal(observed?.obligation, plan.objective.obligations[0]);
+    assert.equal(observed?.sourceSha, head);
+    assert.equal(observed?.assignmentId, "focus:authored-content.disclosure");
+    await assert.rejects(tool.execute("report", { ...input, obligationIndex: 99 }, {} as never), /index|Validation/i);
+    await assert.rejects(tool.execute("report", { ...input,
+      affectedIds: ["event.disclosure"] }, {} as never), /originating assignment/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("controller adds only the connected owning specialist while retaining the author objective", () => {
   const result = authorizeDependency({ plan, head, report, reportDigest: proposal.reportDigest,

@@ -173,8 +173,31 @@ pnpm exec tsx --test web/test/story-revision-admission.test.ts
 The focused integration test uses the installed native CLI and a disposable
 canonical Story, checks two exact commits, and resumes in a fresh process. The
 Studio test exercises authenticated admission, another-owner/Thread rejection,
-and graph reconnect with a **validator stub**. Neither test claims real-Pi
-prerequisite discovery or narrative fulfillment; those require live evaluation.
+and graph reconnect with a **validator stub**. Neither fixture test claims
+real-Pi prerequisite discovery or literary fulfillment.
+
+An opt-in live authenticated Studio test exercises actual source-bound Pi discovery,
+read-only amendment planning, native-validated Event repair, independent dependency
+review, and resumed authored dialogue using rootless sandbox tools:
+
+```sh
+# Load local deployment paths (keep the encryption key private).
+set -a; . web/.env; set +a
+NT_TEST_WEB_PI_DEPENDENCY=1 NT_TEST_WEB_PI_AUTH=device-code \
+  NT_TEST_WEB_PI_LOCAL_OAUTH=1 NT_TEST_WEB_PI_PROVIDER=openai \
+  NT_TEST_WEB_PI_MODEL=gpt-6-luna \
+  pnpm exec tsx --test web/test/real-pi-focused-conversation.test.ts
+```
+
+The local-OAuth test mode copies only an unexpired access token into an isolated,
+encrypted temporary Studio vault; it never copies or refreshes the durable local
+Pi refresh token. Alternatively configure the existing read-only Studio credential
+source (`NT_TEST_WEB_PI_SOURCE_DB`) instead of `NT_TEST_WEB_PI_LOCAL_OAUTH`.
+The test checks the actual dependency grant, writer/reviewer transcripts, commit
+ancestry, native Story validation and authenticated reconnect. A **blocked final
+Story-wide editorial gate is not a completed Turn**, even when the #151
+specialist dependency and originating assignment checkpoints are verified.
+Fixture and live evidence must be reported separately.
 
 ## Checkpointed scope-driven Story generation (#32, #33)
 
