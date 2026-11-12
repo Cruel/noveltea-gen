@@ -14,12 +14,63 @@ export interface ExecutionItem extends WorkItem {
   milestone?: string;
   /** Architecture items refined by this executable unit. Never mutate the author-approved plan. */
   plannedItems: string[];
+  /** Fulfilled by a reviewed, source-bound omission rather than a new writer. */
+  omission?: { reason: string; evidence: string; reviewerSession: string };
 }
 export interface GenerationInventory {
   version: number; planVersion: number | null; headSha: string;
   items: ExecutionItem[]; audit?: ScopeAudit;
   rationale: string;
 }
+/** Existing work is never re-authored just because a newly discovered edge
+ * invalidates its prior dependency attestation. Mark only affected verified
+ * checkpoints (and their descendants via normal dependency propagation) as
+ * needing an explicit reconciliation; independent checkpoints remain intact. */
+export function invalidateChangedVerifiedPrerequisites(
+  items: ExecutionItem[], previous?: GenerationInventory | null,
+): void {
+  for (const item of items) {
+    const prior = previous?.items.find(other => other.id === item.id);
+    const affected = prior?.blockingReason?.startsWith("Verified checkpoint has a new causal prerequisite:") ||
+      (prior?.status === "verified" && item.status === "verified" &&
+        item.dependencies.some(dependency => !prior.dependencies.includes(dependency)));
+    if (affected && item.status === "verified") {
+      item.status = "blocked";
+      item.blockingReason = prior?.blockingReason?.startsWith("Verified checkpoint has a new causal prerequisite:")
+        ? prior.blockingReason
+        : "Verified checkpoint has a new causal prerequisite: " +
+          item.dependencies.filter(dependency => !prior!.dependencies.includes(dependency)).join(", ") +
+          "; inspect the preserved commit and obtain bounded reconciliation.";
+      delete item.verifiedSha;
+    }
+  }
+  // A downstream review or specialist cannot remain certified against an
+  // invalidated upstream checkpoint, even if its own direct edge list did not
+  // change. Do not invalidate independent branches or delete their Git commits.
+  for (let pass = 0; pass < items.length; pass++) {
+    for (const item of items) {
+      if (item.status !== "verified") continue;
+      const prior = previous?.items.find(other => other.id === item.id);
+      const sticky = prior?.blockingReason?.startsWith("Downstream checkpoint depends on a changed prerequisite:") ||
+        prior?.blockingReason?.startsWith("Downstream checkpoint depends on invalidated omission:");
+      const affected = item.dependencies.find(id => {
+        const parent = items.find(other => other.id === id);
+        return parent?.status === "blocked" &&
+          (parent.blockingReason?.startsWith("Verified checkpoint has a new causal prerequisite:") ||
+           parent.blockingReason?.startsWith("Downstream checkpoint depends on a changed prerequisite:") ||
+           parent.blockingReason?.startsWith("Downstream checkpoint depends on invalidated omission:"));
+      });
+      if (sticky || affected) {
+        item.status = "blocked";
+        item.blockingReason = sticky ? prior!.blockingReason :
+          "Downstream checkpoint depends on a changed prerequisite: " + affected +
+          "; review the preserved source and reconcile its assurance.";
+        delete item.verifiedSha;
+      }
+    }
+  }
+}
+
 export function reconcileInventory(plan: Plan | undefined, validation: ValidationResult | undefined,
   headSha: string, completed: GenerationEvidence[], failures: Record<string, string>,
   previous?: GenerationInventory | null): GenerationInventory {
@@ -154,6 +205,7 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
         (plan.contract.scope.depth !== "composition" || i.stage === "composition")).map(i => i.id));
     } else add("review", ["architecture"]);
   }
+  invalidateChangedVerifiedPrerequisites(items, previous);
   // Dependencies are live: a local block prevents its descendants, not independent clusters.
   for (let pass = 0; pass < items.length; pass++) for (const item of items) {
     if (item.status !== "pending") continue;
@@ -174,8 +226,10 @@ export function nextExecutionItem(inventory: GenerationInventory, order?: readon
   const ready = inventory.items.filter(item => item.status === "pending" && item.dependencies.every(id =>
     inventory.items.some(parent => parent.id === id && parent.status === "verified")));
   if (!order?.length) return ready[0];
-  const priority = (item: ExecutionItem) => order.indexOf(item.stage === "focus"
-    ? "focus:" + item.milestone : item.stage);
+  const priority = (item: ExecutionItem) => {
+    const exact = order.indexOf(item.id);
+    return exact >= 0 ? exact : order.indexOf(item.stage);
+  };
   return ready.sort((a, b) => {
     const left = priority(a), right = priority(b);
     return (left < 0 ? order.length : left) - (right < 0 ? order.length : right);

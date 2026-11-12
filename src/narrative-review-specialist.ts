@@ -51,6 +51,7 @@ export interface ReviewAssignment {
     risks: Array<{ path: string; ids: string[]; summary: string; evidence: string[] }> };
   dependency?: { sourceSha: string; commitSha: string; obligation: string; reason: string;
     sources: Array<{ path: string; quote: string }>; diff: string };
+  omission?: { assignmentId: string; headSha: string };
 }
 const guidance = ["nt-narrative-review/SKILL.md", "nt-catalog/SKILL.md",
   "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
@@ -183,6 +184,15 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "Examine actual saved prose, not a writer's summary. Analyze continuity, pacing, " +
       "Character voice/motivation, Puzzle fairness and accessible clues, player agency, " +
       "dramatic payoff, conditional Revelations and branch-exclusive player/Character knowledge. " +
+      (assignment.omission ?
+        "This is a PRE-WRITE OMISSION REVIEW: independently decide whether the listed " +
+        "pending specialist's precise outcome is already fulfilled by the current " +
+        "canonical Story at the supplied source HEAD. There is no new writer diff. " +
+        "PASS only when existing source-linked facts and causal prerequisites fully " +
+        "satisfy that assignment and original author's goal without edits. Native " +
+        "validity or metadata status alone cannot prove semantic fulfillment. " +
+        "If any part is still needed, BLOCK with the necessary changes and owner. " +
+        "Do not recommend erasing the author objective or altering protected canon. " : "") +
       (assignment.dependency ?
         "This is a NECESSARY DEPENDENCY review of one supporting specialist commit, not a branch merge. " +
         "Compare the exact provided source-to-commit Git diff with the original obligation, " +

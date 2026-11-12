@@ -19,6 +19,8 @@ import { runCompositionWorkItem } from "./composition-work.js";
 import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
+import { reconcilePendingWork } from "./pending-work.js";
+import { readPendingState, verifyPinnedPendingWork } from "./pending-work-state.js";
 import { inspectDependencyPlan, dependencyDigest, verifyDependencyHistory,
   type DependencyHistoryPin } from "./dependency-state.js";
 import { isFocusedScope } from "./focused-scope.js";
@@ -181,6 +183,9 @@ const Channels = Annotation.Root({
   orchestratorOrder: Annotation<string[] | null>(),
   /** Exact model proposal, rationale and transcript identity across replay. */
   orchestratorPlanningDigest: Annotation<string | null>(),
+  /** Source-bound changes to remaining, never already-authored, assignments. */
+  pendingOrder: Annotation<string[] | null>(),
+  pendingVersion: Annotation<number | null>(),
   dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
 });
 type State = typeof Channels.State;
@@ -304,7 +309,8 @@ async function reviewGatedInventory(job: JobStartResult, inventory: GenerationIn
       blockingReason: "Required independent specialist review is pending or failed for a dependency.",
     } : item) };
 }
-async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>> {
+async function reconcile(s: State, job: JobStartResult, allowAmend = true): Promise<Partial<State>> {
+  await verifyPinnedPendingWork(job, s.request.turnPlanDigest, s.pendingVersion);
   const receipt = await checkPlan(job, s.request, s.planVersion);
   const plan = receipt?.plan;
   const request = plan ? { ...s.request, contract: plan.contract } : s.request;
@@ -356,14 +362,17 @@ async function reconcile(s: State, job: JobStartResult): Promise<Partial<State>>
     const inventory = await reviewGatedInventory(job, reconcileInventory(plan, undefined, head,
       completedStages, failures, s.inventory));
     return { request, planVersion: plan.version, completedStages, failures, inventory,
-      active: nextExecutionItem(inventory, s.orchestratorOrder ?? undefined) ?? null };
+      active: nextExecutionItem(inventory, s.pendingOrder ?? s.orchestratorOrder ?? undefined) ?? null };
   }
   const validation = plan && completedStages.some(e => e.stage === "architecture")
     ? await validateStoryJob(job, request.validatorSource ?? request.skillsSource, { ...job, baseSha: head }) : undefined;
   const inventory = await reviewGatedInventory(job,
     reconcileInventory(plan, validation, head, completedStages, failures, s.inventory));
-  return { request, planVersion: plan?.version ?? null, completedStages, failures, inventory,
-    active: nextExecutionItem(inventory, s.orchestratorOrder ?? undefined) ?? null };
+  const pending = await reconcilePendingWork(job, request, inventory, s.inventory, validation, allowAmend);
+  const pendingOrder = pending.order ?? s.pendingOrder ?? null;
+  return { request, planVersion: plan?.version ?? null, completedStages, failures,
+    inventory: pending.inventory, pendingOrder, pendingVersion: pending.stateVersion,
+    active: nextExecutionItem(pending.inventory, pendingOrder ?? s.orchestratorOrder ?? undefined) ?? null };
 }
 async function dispatch(s: State) {
   const input = s.request;
@@ -489,6 +498,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
         const job = await openJob({ ...s, request } as State);
         await verifyReadyRecoveryFork(job);
         await verifyDependencyHistory(job, s.dependencyHistory ?? []);
+        await verifyPinnedPendingWork(job, request.turnPlanDigest, s.pendingVersion);
         const fork = readRecoveryFork(job);
         if (fork && JSON.stringify(request.contract) !== JSON.stringify(fork.contract))
           throw new Error("Fork continuation must retain its approved completion contract; use an explicit plan revision after starting.");
@@ -822,7 +832,8 @@ export async function runStoryGeneration(options: GenerationOptions) {
         state = { request, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
-          orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null, dependencyHistory: [] };
+          orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
+          pendingOrder: null, pendingVersion: null, dependencyHistory: [] };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)
@@ -900,7 +911,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
               if (state.cursor > 0) await trustedHead(job);
               if (state.status === "completed" && report.generation.status !== "completed")
                 throw new Error("Saved completion is no longer current; inspect the source-linked job report.");
-              return await reconcile(state, job);
+              return await reconcile(state, job, false);
             } catch (error) { return blocked(error); }
           });
       } else if (selectionFailure) {
@@ -912,12 +923,14 @@ export async function runStoryGeneration(options: GenerationOptions) {
         jobId: job.jobId, threadId: config.configurable.thread_id, checkpointPath: path,
         nextStage: visible.ideaTask ? "idea-integration" : visible.active?.stage ??
           (visible.inventory ? nextExecutionItem(visible.inventory,
-            visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
+            visible.pendingOrder ?? visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
         recoveryCheckpoints: await inspectRecoveryCheckpoints(await startStoryJob({ story: job.storyRoot, job: job.jobId }, false)),
         orchestrationSelection, orchestrationPlanning,
         dependencyPlan: await inspectDependencyPlan(job),
+        pendingPlan: state.request.turnPlanDigest
+          ? await readPendingState(job, state.request.turnPlanDigest) : null,
         escalation: visible.escalation ?? (state.status === "completed" ? null : reviewEscalation(report, visible.inventory ?? null)),
         pendingNodes: (await graph.getState(config)).next, request: visible.request, report };
     } finally { saver.db.close(); }

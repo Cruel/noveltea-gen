@@ -6,6 +6,11 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { createGenerationGraph, parseGenerationContract } from "../src/generation.js";
+import { reconcileInventory, nextExecutionItem } from "../src/generation-plan.js";
+import { authorizePendingAmendment } from "../src/pending-work-amendments.js";
+import { reconcilePendingWork } from "../src/pending-work.js";
+import { emptyPendingState, savePendingState, verifyPinnedPendingWork,
+  omissionContext } from "../src/pending-work-state.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { inspectDependencyPlan, sourceDigest, recordDependency, saveDependencyPlan } from "../src/dependency-state.js";
 import { advanceFocusedDependency } from "../src/dependency-work.js";
@@ -161,6 +166,141 @@ test("bounded conversation creation commits only canonical new support with pres
       target: interruptedFirst.id, task: interruptedTask, contract: interrupted.contract,
       fixture: true, turnPlanDigest: interruptedPlan.digest, skillsSource: source }),
     /changes requiring explicit reconciliation/);
+  } finally {
+    if (oldState === undefined) delete process.env.NT_STATE_DIR;
+    else process.env.NT_STATE_DIR = oldState;
+    if (oldCache === undefined) delete process.env.NT_SKILL_CACHE_DIR;
+    else process.env.NT_SKILL_CACHE_DIR = oldCache;
+  }
+});
+
+test("native-verified focused Turn restores a source-bound pending omission after restart", {
+  skip: !available, timeout: 300_000,
+}, async () => {
+  const f = fixture("pending-native-restart");
+  f.cli("seed", ["start"]);
+  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
+  const seeded = f.cli("seed", ["generate", "start", "--task", "Seed witness mystery",
+    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
+  git(f.repo, "merge", "--ff-only", seeded.report.identity.branch);
+  const characterPath = join(f.story, "characters/ada.md");
+  const character = readFileSync(characterPath, "utf8");
+  assert.match(character, /^status: draft$/m);
+  writeFileSync(characterPath, character.replace(/^status: draft$/m, "status: approved"));
+  git(f.repo, "add", "story/characters/ada.md");
+  git(f.repo, "commit", "-m", "Verify Ada's existing canonical characterization");
+  const base = git(f.repo, "rev-parse", "HEAD");
+  f.cli("pending", ["start"]);
+  const oldState = process.env.NT_STATE_DIR, oldCache = process.env.NT_SKILL_CACHE_DIR;
+  process.env.NT_STATE_DIR = f.env.NT_STATE_DIR;
+  process.env.NT_SKILL_CACHE_DIR = f.env.NT_SKILL_CACHE_DIR;
+  try {
+    const job = await startStoryJob({ story: f.story, job: "pending" }, false);
+    const validation = await validateStoryJob(job, source, { ...job, baseSha: base });
+    assert.equal(validation.status, "passed", JSON.stringify({
+      diagnostics: (validation.report as { diagnostics?: unknown[] })?.diagnostics?.slice(0, 10),
+      protection: (validation.report as { protection?: unknown })?.protection,
+    }));
+    const catalog = (validation.report as { records: CanonicalScopeRecord[] }).records;
+    const record = catalog.find(item => item.metadata.id === "character.ada")!;
+    assert.ok(record);
+    assert.equal(record.metadata.status, "approved");
+    const contract: CompletionContract = {
+      scope: { kind: "partial", depth: "architecture", targets: ["character.ada"], branches: [] },
+      constraints: [], envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] },
+    };
+    const task = "Ensure Ada's existing motives are coherent";
+    const turn = planObjective({ kind: "revision", request: task, contract, base,
+      sourceJobId: "seed", catalog, targetIds: ["character.ada"],
+      allowedPaths: [record.path] });
+    await saveJobTurnPlan(job, turn);
+    const architecture = await runArchitectureJob({ story: f.story, job: "pending",
+      action: "run", fixture: true, contract, skillsSource: source });
+    assert.equal(architecture.status, "complete-in-scope");
+    const head = git(job.worktreeRoot, "rev-parse", "HEAD");
+    const native = await validateStoryJob(job, source, { ...job, baseSha: head });
+    assert.equal(native.status, "passed");
+    const initial = reconcileInventory(architecture.plan, native, head, [
+      { stage: "foundation", headSha: head, status: "committed" },
+      { stage: "architecture", headSha: head, status: "complete-in-scope", planVersion: 1 },
+    ], {});
+    const id = "focus:character.ada";
+    assert.equal(initial.items.find(item => item.id === id)?.status, "pending");
+    const hash = sourceDigest(readFileSync(join(job.worktreeStoryRoot, record.path), "utf8"));
+    const contextRecords = omissionContext(
+      (native.report as { records: CanonicalScopeRecord[] }).records, record.path);
+    assert.ok(contextRecords, "approved canon has no protected adjacent record");
+    const context = contextRecords.map(item => ({ path: item.path,
+      sha256: sourceDigest(readFileSync(join(job.worktreeStoryRoot, item.path), "utf8")) }));
+    const hashes = Object.fromEntries([[record.path, hash],
+      ...context.map(item => [item.path, item.sha256])]);
+    // A fixture-injected proof exercises native source/restart verification,
+    // NOT literary certification. Production creates its own proof only after
+    // the separate read-only pinned Pi omission review has passed.
+    const fixtureProof = { assignmentId: id, sourceSha: head, path: record.path,
+      sourceHash: hash, context, evidence: record.path + ":1 fixture witness",
+      reviewerSession: "/fixture/omission.jsonl", reviewerSnapshot: "f".repeat(64),
+      verdict: "pass" as const };
+    const amendment = authorizePendingAmendment({
+      proposal: { sourceSha: head, turnDigest: turn.digest, beforeVersion: 1,
+        order: ["review"], prune: [id], prerequisites: [],
+        reason: "Fixture tests source-bound restoration of an external verdict." },
+      inventory: initial, turnDigest: turn.digest, version: 1,
+      omissionProofs: [fixtureProof], sourceHashes: hashes,
+      authorizedPaths: { [id]: [record.path] },
+      protectedPaths: catalog.filter(r => Array.isArray(r.metadata.decisions) &&
+        r.metadata.decisions.length > 0).map(r => r.path),
+      canonicalEdges: [], reviewed: [
+        { id: "foundation", sha: head }, { id: "architecture", sha: head },
+      ],
+    });
+    const state = emptyPendingState(job, turn.digest);
+    state.entries.push(amendment); state.version++;
+    await savePendingState(job, state);
+    await verifyPinnedPendingWork(job, turn.digest, 2);
+    const request = { story: job.storyRoot, job: job.jobId, task, contract,
+      fixture: true, turnPlanDigest: turn.digest, skillsSource: source };
+    const reloaded = await reconcilePendingWork(job, request, initial, null, native, false);
+    assert.equal(reloaded.stateVersion, 2);
+    assert.equal(reloaded.inventory.items.find(item => item.id === id)?.status, "verified");
+    assert.equal(reloaded.inventory.items.find(item => item.id === id)?.omission?.evidence,
+      fixtureProof.evidence);
+    assert.equal(nextExecutionItem(reloaded.inventory, reloaded.order ?? undefined)?.id, "review");
+    assert.deepEqual(git(job.worktreeRoot, "log", "--oneline", base + "..HEAD"), "");
+    const second = await reconcilePendingWork(job, request, initial, null, native, false);
+    assert.deepEqual(second.inventory, reloaded.inventory);
+    // Exercise the real production graph and persisted SQLite checkpoint,
+    // not only the pure amendment applier: it must skip the omitted writer.
+    const saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
+    try {
+      const graph = createGenerationGraph(saver, "cli");
+      const graphRequest = { ...request, orchestrationPolicy: "fixture-legacy" as const };
+      const result = await graph.invoke({ request: graphRequest, pauseAfter: "review" },
+        { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 });
+      assert.equal(result.status, "paused", result.reason ?? JSON.stringify(result));
+      assert.equal(result.inventory.items.find(item => item.id === id)?.status, "verified");
+      assert.equal(result.inventory.items.find(item => item.id === id)?.omission?.reviewerSession,
+        fixtureProof.reviewerSession);
+      assert.equal(result.completedStages.some(stage => stage.stage === "focus"), false);
+      assert.equal(result.completedStages.some(stage => stage.stage === "review"), true);
+    } finally { saver.db.close(); }
+    const resumed = f.cli("pending", ["generate", "resume"]);
+    assert.equal(resumed.status, "blocked");
+    assert.equal(resumed.inventory.items.find((item: { id: string; omission?: unknown }) =>
+      item.id === id)?.omission !== undefined, true);
+    const ledger = join(job.stateDir, "pending-work.json");
+    renameSync(ledger, ledger + ".missing");
+    try {
+      const missing = f.cli("pending", ["generate", "resume"]);
+      assert.equal(missing.status, "blocked");
+      assert.match(missing.reason, /pending-plan amendment history is missing/);
+      assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), base);
+    } finally { renameSync(ledger + ".missing", ledger); }
+    const restored = f.cli("pending", ["generate", "resume"]);
+    assert.equal(restored.status, "blocked");
+    assert.equal(restored.pendingPlan?.version, 2);
+    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+    assert.equal(git(f.repo, "rev-parse", "HEAD"), base);
   } finally {
     if (oldState === undefined) delete process.env.NT_STATE_DIR;
     else process.env.NT_STATE_DIR = oldState;

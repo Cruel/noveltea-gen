@@ -197,6 +197,45 @@ The test checks the actual dependency grant, writer/reviewer transcripts, commit
 ancestry, native Story validation and authenticated reconnect. A **blocked final
 Story-wide editorial gate is not a completed Turn**, even when the #151
 specialist dependency and originating assignment checkpoints are verified.
+
+## Safe-boundary pending-work amendments (#152)
+
+The production LangGraph controller may now reconsider **only remaining work**
+after native-verified Story evidence changes. The original Turn goal, immutable
+writer grants and approved architecture plan never change implicitly. Newly
+discovered typed causal dependencies order pending work before dependent prose;
+verified work with a new prerequisite is blocked for bounded reconciliation,
+not automatically re-authored. Independent completed checkpoints with unchanged
+prerequisites are retained.
+
+A previously unstarted, existing-record focused assignment can be omitted only
+when the native catalog marks its exact record approved **and** a separate,
+pinned, read-only Pi reviewer confirms the actual requested outcome with valid
+canonical file:line evidence. The original focused assignment must not have
+started, and protected decisions, ambiguous/multiple writer paths or invented
+scope never qualify. That omission is represented as reviewed fulfillment in
+the generation inventory, not as an unfulfilled pending item. The final
+independent whole-Turn reviewer still evaluates the original author objective
+and every assignment's outcome. No fixture-only review may certify an omission.
+
+The job-private `pending-work.json` binds the source, Turn, exact original
+inventory, amendments, explicit verified carry-forward and bounded attempts.
+A later canonical revision rechecks the unchanged source and typed context
+before carrying an omission forward; changed context restores the affected
+pending assignment, not unrelated completed commits. The graph independently
+checkpoints the amendment version and queue order. A missing, altered or
+interrupted ledger or review fences resumption rather than silently repeating
+a paid reviewer or previously verified writer. There are at most four accepted
+amendments and 24 attempts per Turn, with no second scheduler or unapproved
+record-creation authority. CLI generation inspection exposes `pendingPlan`
+and annotated inventory items for diagnosis.
+
+Deterministic controller, restart and rejection tests (not real-Pi literary
+certification):
+
+```sh
+pnpm exec tsx --test test/pending-work-amendments.test.ts test/orchestrator-planner.test.ts test/dependency-amendments.test.ts
+```
 Fixture and live evidence must be reported separately.
 
 ## Checkpointed scope-driven Story generation (#32, #33)
