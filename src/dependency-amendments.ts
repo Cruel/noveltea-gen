@@ -1,4 +1,5 @@
 import { declaredCanonicalReferences, type CanonicalScopeRecord } from "./focused-scope.js";
+import { focusedSpecialist } from "./focused-specialist.js";
 import type { TurnAssignmentEvidence, TurnEvidence } from "./turn-plan-evidence.js";
 
 export interface DependencySource { path: string; sha256: string; quote: string }
@@ -16,17 +17,6 @@ export interface DependencyAmendment {
   reportDigest: string; reason: string; objective: TurnEvidence["objective"];
   resumes: string; assignment: TurnAssignmentEvidence;
 }
-export function dependencySpecialist(target: string): string {
-  const owner: Record<string, string> = { character: "nt-character-development",
-    relationship: "nt-character-development", event: "nt-event-design",
-    fact: "nt-worldbuilding", revelation: "nt-worldbuilding", "world-entity": "nt-worldbuilding",
-    "authored-content": "nt-narrative-composition", "choice-point": "nt-interactive-narrative",
-    puzzle: "nt-interactive-narrative" };
-  const specialist = owner[target.split(".")[0]!];
-  if (!specialist) throw Error("Dependency has no bounded specialist owner.");
-  return specialist;
-}
-
 const text = (v: unknown, max = 2000): v is string => typeof v === "string" && !!v.trim() && v.length <= max;
 const keys = (v: unknown, expected: string) => !!v && typeof v === "object" && !Array.isArray(v) &&
   Object.keys(v).sort().join(",") === expected.split(",").sort().join(",");
@@ -60,6 +50,8 @@ export function authorizeDependency(input: {
   plan: TurnEvidence; head: string; report: DependencyReport; reportDigest: string;
   proposal: DependencyProposal; records: CanonicalScopeRecord[];
   sources: DependencySource[]; version: number;
+  /** Controller-verified grants from earlier amendments in the same Turn. */
+  priorAmendments?: TurnAssignmentEvidence[];
 }): DependencyAmendment {
   const { plan, head, proposal, records } = input;
   const report = parseDependencyReport(input.report);
@@ -75,9 +67,15 @@ export function authorizeDependency(input: {
     throw Error("Dependency amendment has stale evidence, changed obligations or requires author approval.");
   const origin = plan.assignments.find(a => a.id === report.assignmentId);
   const record = records.find(r => r.metadata.id === proposal.target);
+  // Write authority is path-based: supportingTargets may be in existingPaths
+  // without appearing in targets. Check every existing writer, including
+  // earlier dependency amendments, before approving a second writer.
+  const priorOwners = [...plan.assignments, ...(input.priorAmendments ?? [])];
   if (!origin || !record || record.metadata.status === "superseded" ||
       record.metadata.type !== proposal.target.split(".")[0] || !path.test(record.path) ||
-      origin.targets.includes(proposal.target) || plan.assignments.some(a => a.targets.includes(proposal.target)) ||
+      origin.targets.includes(proposal.target) || priorOwners.some(a =>
+        a.targets.includes(proposal.target) || a.authority.existingPaths.includes(record.path) ||
+        a.authority.newPaths?.includes(record.path)) ||
       report.affectedIds.some(id => !records.some(r => r.metadata.id === id && r.metadata.status !== "superseded")) ||
       !report.affectedIds.includes(proposal.target) || !origin.targets.some(id => report.affectedIds.includes(id)) ||
       !report.sources.some(s => s.path === record.path) ||
@@ -85,7 +83,7 @@ export function authorizeDependency(input: {
       !origin.targets.some(id => records.some(r => r.metadata.id === id &&
         (links(r, proposal.target) || links(record, id)))))
     throw Error("Unknown, speculative, already assigned or unrelated dependency record.");
-  if (proposal.specialist !== dependencySpecialist(proposal.target) ||
+  if (proposal.specialist !== focusedSpecialist(proposal.target) ||
       report.likelySpecialist !== proposal.specialist || proposal.specialist === origin.specialist)
     throw Error("Dependency amendment must use the proper cross-domain specialist.");
   if (records.some(r => report.affectedIds.includes(r.metadata.id) &&
@@ -96,7 +94,7 @@ export function authorizeDependency(input: {
     sourceSha: head, turnDigest: plan.digest, reportDigest: input.reportDigest,
     reason: proposal.reason, objective: structuredClone(plan.objective), resumes: origin.id,
     assignment: { id: "dependency:" + input.version + ":" + proposal.target,
-      specialist: dependencySpecialist(proposal.target), outcome: proposal.outcome,
+      specialist: focusedSpecialist(proposal.target), outcome: proposal.outcome,
       targets: [proposal.target], dependsOn: [], discovery: "canonical-story-read-only",
       authority: { recordTypes: [record.metadata.type], existingPaths: [record.path], mayCreate: false } } };
 }

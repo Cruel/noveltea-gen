@@ -7,6 +7,8 @@ import { createDependencyTool } from "../src/dependency-tool.js";
 import type { JobStartResult } from "../src/job.js";
 import { authorizeDependency, type DependencyReport } from "../src/dependency-amendments.js";
 import type { TurnEvidence } from "../src/turn-plan-evidence.js";
+import { planRevision } from "../web/src/lib/turn-plan.js";
+import { focusedSpecialist, isFocusedRecordType } from "../src/focused-specialist.js";
 
 const head = "a".repeat(40);
 const plan = {
@@ -32,6 +34,26 @@ const report = { sourceSha: head, turnDigest: plan.digest, assignmentId: plan.as
   sources: [source], likelySpecialist: "nt-event-design", authorDecisionRequired: false };
 const proposal = { sourceSha: head, reportDigest: "d".repeat(64), target: "event.disclosure",
   specialist: "nt-event-design", outcome: report.missing, reason: "Disclosure requires the speaker to know the truth." };
+
+test("focused planning, authorization and dispatch share one record-type specialist resolver", () => {
+  const cases = [
+    ["character", "nt-character-development"], ["relationship", "nt-character-development"],
+    ["world-entity", "nt-worldbuilding"], ["fact", "nt-worldbuilding"],
+    ["revelation", "nt-worldbuilding"], ["event", "nt-event-design"],
+    ["authored-content", "nt-narrative-composition"],
+    ["choice-point", "nt-interactive-narrative"], ["puzzle", "nt-interactive-narrative"],
+  ] as const;
+  for (const [type, specialist] of cases) {
+    assert.equal(isFocusedRecordType(type), true);
+    assert.equal(focusedSpecialist(type + ".sample"), specialist);
+  }
+  assert.equal(isFocusedRecordType("milestone"), false);
+  assert.throws(() => focusedSpecialist("milestone.demo"), /No bounded focused specialist/);
+  const fromAdmission = planRevision(plan.goal, plan.contract, head, "source", records,
+    ["authored-content.disclosure"], ["authored-content/disclosure.md"]);
+  assert.equal(fromAdmission.assignments[0]?.specialist,
+    focusedSpecialist("authored-content.disclosure"));
+});
 
 test("specialist reports a pinned obligation by index; host stamps its exact text", async () => {
   const root = mkdtempSync(join(tmpdir(), "nt-dependency-tool-"));
@@ -91,6 +113,47 @@ test("controller rejects stale evidence, invented authority, wrong owners and pr
       metadata: { ...r.metadata, events: [] } } : r) },
   ];
   for (const candidate of cases) assert.throws(() => authorizeDependency(candidate), /dependency|Dependency|amendment/i);
+});
+
+test("controller rejects a dependency path already owned as supportingTargets by the original writer", () => {
+  const contract = { ...plan.contract, scope: { ...plan.contract.scope,
+    supportingTargets: ["event.disclosure"] } };
+  const supported = planRevision(plan.goal, contract, head, "source", records,
+    ["authored-content.disclosure"], ["authored-content/disclosure.md", "events/disclosure.md"]);
+  const owner = supported.assignments.find(a => a.id === "focus:authored-content.disclosure");
+  assert.deepEqual(owner?.targets, ["authored-content.disclosure"]);
+  assert.deepEqual(owner?.authority.existingPaths,
+    ["authored-content/disclosure.md", "events/disclosure.md"]);
+  const evidence = { ...report, turnDigest: supported.digest,
+    obligation: supported.objective!.obligations[0]! };
+  const input = { plan: supported, head, report: evidence,
+    reportDigest: proposal.reportDigest, proposal, records, sources: [source], version: 1 };
+  assert.throws(() => authorizeDependency(input), /already assigned|already owned|overlap/i);
+
+  // A distinct writer's non-target authority can overlap too. New-file grants
+  // must not create a second owner for an existing canonical path either.
+  const otherWriter = { ...plan.assignments[0], id: "focus:character.ada",
+    targets: ["character.ada"], authority: {
+      ...plan.assignments[0].authority, existingPaths: ["events/disclosure.md"] } };
+  assert.throws(() => authorizeDependency({ ...input, plan: { ...plan,
+    assignments: [plan.assignments[0], otherWriter] }, report }), /already assigned|already owned|overlap/i);
+  assert.throws(() => authorizeDependency({ ...input, plan: { ...plan,
+    assignments: [plan.assignments[0], { ...otherWriter, authority: {
+      ...otherWriter.authority, existingPaths: [], newPaths: ["events/disclosure.md"] } }] },
+    report }), /already assigned|already owned|overlap/i);
+  assert.throws(() => authorizeDependency({ ...input, plan,
+    priorAmendments: [{ ...otherWriter, authority: {
+      ...otherWriter.authority, existingPaths: ["events/disclosure.md"] } }],
+    report }), /already assigned|already owned|overlap/i);
+  assert.throws(() => authorizeDependency({ ...input, plan,
+    priorAmendments: [{ ...otherWriter, authority: {
+      ...otherWriter.authority, existingPaths: [], newPaths: ["events/disclosure.md"] } }],
+    report }), /already assigned|already owned|overlap/i);
+  // A different already-authorized record does not block a valid amendment.
+  assert.equal(authorizeDependency({ ...input, plan, report,
+    priorAmendments: [{ ...otherWriter, authority: {
+      ...otherWriter.authority, existingPaths: ["characters/ada.md"] } }] }).assignment.targets[0],
+  "event.disclosure");
 });
 
 test("controller recognizes the schema-typed Event relationship effect without broad metadata scanning", () => {

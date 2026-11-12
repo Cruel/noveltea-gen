@@ -1,6 +1,7 @@
 import { createDependencyTool } from "./dependency-tool.js";
 import { authorizedDependency, dependencyDigest, inspectDependencyPlan } from "./dependency-state.js";
 import { parseDependencyReport, type DependencyReport } from "./dependency-amendments.js";
+import { focusedSpecialist } from "./focused-specialist.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -68,15 +69,6 @@ function reportOf(result: ValidationResult, head: string) {
     throw new Error("Focused scope requires complete canonical structure/protected-decision verification: " +
       JSON.stringify(result).slice(0, 3500));
   return report.records;
-}
-function skillFor(target: string) {
-  const type = target.split(".")[0];
-  if (type === "character" || type === "relationship") return "nt-character-development";
-  if (type === "world-entity" || type === "fact" || type === "revelation") return "nt-worldbuilding";
-  if (type === "event") return "nt-event-design";
-  if (type === "authored-content") return "nt-narrative-composition";
-  if (type === "choice-point" || type === "puzzle") return "nt-interactive-narrative";
-  throw new Error("A direct focus specialist is not available for " + target + "; select an Arc or Milestone scope.");
 }
 /** Deterministic fixture output exercises the same canonical/native/Git gates.
  * It is never evidence of model-authored literary quality. */
@@ -172,7 +164,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
           if (dependencyReport) throw Error("Only one dependency report per bounded assignment is permitted.");
           dependencyReport = report;
         }) : null;
-  const skill = skillFor(receipt.target);
+  const skill = focusedSpecialist(receipt.target);
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config = { discovery: "explicit-only" as const, novelteaSkills: receipt.snapshot!.path,
     skillDirs: [], requiredSkills: [skill, "nt-catalog"] };
@@ -411,7 +403,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
       : await loadSkillConfig(undefined, false);
     if (!receipt.snapshot) {
-      const requiredSkills = [skillFor(input.target), "nt-catalog"];
+      const requiredSkills = [focusedSpecialist(input.target), "nt-catalog"];
       const snapshot = await createSkillSnapshot({ ...config, requiredSkills });
       if (!snapshot) throw new Error("Focused work requires pinned canonical skills.");
       receipt.snapshot = snapshot; await save(file, receipt);

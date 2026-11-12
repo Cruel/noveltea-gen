@@ -3,13 +3,12 @@ import type { CompletionContract } from '../../../src/architecture'
 import type { CanonicalScopeRecord } from '../../../src/focused-scope'
 import { validTurnObjective, type TurnAssignmentEvidence, type TurnEvidence } from '../../../src/turn-plan-evidence'
 import { DEFAULT_CREATIVE_POLICY, parseCreativePolicy, type CreativePolicy } from '../../../src/creative-policy'
+import { focusedSpecialist, isFocusedRecordType } from '../../../src/focused-specialist'
 
 export type TurnSpecialistAssignment = TurnAssignmentEvidence
 export type TurnPlan = TurnEvidence
 
 const sha = /^[a-f0-9]{40}$/
-const writable = new Set(['character', 'relationship', 'world-entity', 'fact', 'revelation',
-  'event', 'authored-content', 'choice-point', 'puzzle'])
 const categories: Record<string, string[]> = {
   foundation: ['creative-direction'],
   architecture: ['arc', 'milestone'],
@@ -27,14 +26,6 @@ const specialist: Record<string, string> = {
   interactive: 'nt-interactive-narrative',
   composition: 'nt-narrative-composition',
   review: 'nt-narrative-review',
-  character: 'nt-character-development',
-  relationship: 'nt-character-development',
-  'world-entity': 'nt-worldbuilding',
-  fact: 'nt-worldbuilding',
-  revelation: 'nt-worldbuilding',
-  'authored-content': 'nt-narrative-composition',
-  'choice-point': 'nt-interactive-narrative',
-  puzzle: 'nt-interactive-narrative',
 }
 
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -105,7 +96,7 @@ export function planRevision(request: string, contract: CompletionContract, base
     for (const target of targetIds) {
       const record = active.get(target), type = target.split('.')[0]!
       const create = creates.get(target)
-      if (!writable.has(type) || !!record === !!create ||
+      if (!isFocusedRecordType(type) || !!record === !!create ||
           (record && (record.metadata.type !== type || !permitted.has(record.path))) ||
           (create && !permitted.has(create.path)))
         throw new Error('Unverified specialist assignment target: ' + target)
@@ -115,7 +106,7 @@ export function planRevision(request: string, contract: CompletionContract, base
       const supportOwned = target === targetIds[0] ? support.filter(
         (item): item is NonNullable<typeof item> => !!item) : []
       const ownedPaths = [...(record ? [record.path] : []), ...supportOwned.map(item => item.path)].sort()
-      assignments.push({ id: 'focus:' + target, specialist: specialist[type] ?? 'nt-event-design',
+      assignments.push({ id: 'focus:' + target, specialist: focusedSpecialist(target),
         outcome: (create ? 'Create connected canonical ' + target + ' (' + create.title +
           '), preserving the exact approved typed references and all existing canon' :
           'Deliver the author-requested change to ' + target +

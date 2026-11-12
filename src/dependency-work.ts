@@ -6,7 +6,8 @@ import { runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   recordDependency, approveDependency, inspectDependencyPlan, saveDependencyPlan } from "./dependency-state.js";
 import { proposeDependency } from "./dependency-planner.js";
-import { dependencySpecialist, type DependencyReport, type DependencyProposal } from "./dependency-amendments.js";
+import { type DependencyReport, type DependencyProposal } from "./dependency-amendments.js";
+import { focusedSpecialist } from "./focused-specialist.js";
 import { inspectPiPolicy } from "./job-pi-policy.js";
 import { openSkillSnapshot } from "./snapshot.js";
 import { reviewNarrative, type ReviewAssignment } from "./narrative-review-specialist.js";
@@ -44,7 +45,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions) {
       let proposal: DependencyProposal;
       if (input.fixture) {
         const target = report.affectedIds.find(id => !origin.workItemId.endsWith(id) &&
-          dependencySpecialist(id) === report.likelySpecialist);
+          focusedSpecialist(id) === report.likelySpecialist);
         if (!target) throw Error("Fixture dependency has no owning target.");
         proposal = { sourceSha: report.sourceSha, reportDigest, target,
           specialist: report.likelySpecialist, outcome: report.missing,

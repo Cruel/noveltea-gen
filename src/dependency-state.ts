@@ -171,9 +171,9 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
     sources.push({ ...source, sha256: sourceDigest(bytes) });
   }
   const amendment = authorizeDependency({ plan: turn, head, report: entry.report,
-    reportDigest: entry.reportDigest, proposal, records: report.records, sources, version: plan.version });
-  if (plan.entries.some(e => e !== entry && e.amendment?.assignment.targets.includes(proposal.target)))
-    throw Error("Dependency target already has a writer; repeated amendments require author reconciliation.");
+    reportDigest: entry.reportDigest, proposal, records: report.records, sources, version: plan.version,
+    priorAmendments: plan.entries.filter(e => e !== entry && e.amendment)
+      .map(e => e.amendment!.assignment) });
   entry.proposal = proposal; entry.amendment = amendment;
   entry.approval = { authority: "necessary-dependency/v1", jobId: job.jobId,
     threadId: job.threadId, sourceSha: head, amendmentDigest: dependencyDigest(amendment) };
