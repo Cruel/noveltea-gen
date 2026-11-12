@@ -17,6 +17,7 @@ import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
+import { validateFocusedCreationGrants } from "./creation-grants.js";
 
 /** Exact additions to a focused Turn, never a general record-type write grant. */
 export interface PlannedFocusCreate {
@@ -132,51 +133,7 @@ export function parseContract(value: unknown): CompletionContract {
       c.scope.supportingTargets?.some(id => c.scope.targets.includes(id))) {
     throw new Error("Invalid completion contract: specify typed targets, depth/preset, branches, constraints, and a production envelope.");
   }
-  const creates = c.scope.creates ?? [];
-  const createDirectory: Record<string, string> = {
-    character: "characters", relationship: "relationships", event: "events",
-    "authored-content": "authored-content",
-  };
-  if (!Array.isArray(creates) || creates.length > 12 ||
-      (creates.length > 0 && c.scope.kind !== "partial") ||
-      creates.some(item => !item || typeof item !== "object" ||
-        typeof item.id !== "string" ||
-        !Object.hasOwn(createDirectory, item.id.split(".")[0] ?? "") ||
-        !c.scope.targets.includes(item.id) ||
-        typeof item.title !== "string" || !item.title.trim() || item.title.length > 160 ||
-        /[\x00-\x1f\x7f]/.test(item.title) ||
-        item.path !== createDirectory[item.id.split(".")[0]!] + "/" + item.id.split(".")[1] + ".md" ||
-        !strings(item.references) || !Array.isArray(item.dependsOn) ||
-        !item.dependsOn.every((id: unknown) => typeof id === "string" && !!id) ||
-        item.references.length > 16 || item.dependsOn.length > 12 ||
-        new Set(item.references).size !== item.references.length ||
-        new Set(item.dependsOn).size !== item.dependsOn.length) ||
-      new Set(creates.map(item => item.id)).size !== creates.length ||
-      creates.some(item =>
-        item.dependsOn.some(id => id === item.id || !creates.some(other => other.id === id)) ||
-        item.references.some(id => !/^(arc|character|relationship|event)\.[a-z][a-z0-9-]*$/.test(id) ||
-          (creates.some(other => other.id === id) && !item.dependsOn.includes(id)))) ||
-      creates.some(item =>
-        (item.id.startsWith("relationship.") &&
-          (item.references.length !== 2 || item.references.some(id => !id.startsWith("character.")))) ||
-        (item.id.startsWith("event.") && !item.references.some(id => id.startsWith("arc."))) ||
-        (item.id.startsWith("authored-content.") &&
-          (item.references.length !== 1 || !item.references[0]?.startsWith("event."))) ||
-        (item.id.startsWith("character.") && item.references.length !== 0))) {
-    throw new Error("Invalid focused creation scope: require exact, typed and bounded records.");
-  }
-  const visited = new Set<string>();
-  const visiting = new Set<string>();
-  const byCreate = new Map(creates.map(item => [item.id, item]));
-  const visit = (id: string): boolean => {
-    if (visiting.has(id)) return false;
-    if (visited.has(id)) return true;
-    visiting.add(id);
-    if (!byCreate.get(id)!.dependsOn.every(visit)) return false;
-    visiting.delete(id); visited.add(id);
-    return true;
-  };
-  if (!creates.every(item => visit(item.id))) throw new Error("Cyclic focused creation dependencies.");
+  validateFocusedCreationGrants(c.scope.creates ?? [], c.scope.targets, c.scope.kind);
   if (c.scope.kind === "partial" && c.scope.targets.some(id => /^(arc|milestone)\./.test(id)) &&
       c.scope.targets.some(id => !/^(arc|milestone)\./.test(id))) {
     throw new Error("Mixed Arc/Milestone cluster and individual record targets require separately authorized contracts; no automatic scope expansion.");

@@ -110,6 +110,102 @@ test('focused conversation reuses a typed existing Event but never silently edit
   assert.deepEqual(mismatch.writePaths, [])
 })
 
+test('conversation instructions conflicting with protected canon require exact author review first', () => {
+  const source = catalog.map(item => item.metadata.id === 'creative-direction.foundation'
+    ? { ...item, metadata: { ...item.metadata, decisions: [{
+      id: 'investigation', statement: 'The investigation should invite repair rather than revenge',
+      origin: 'user', authority: 'user-protected',
+    }] } } : item)
+  const request = 'Write a conversation between Nia and Sol that makes the investigation invite revenge rather than repair'
+  const revision = inferStoryRevision(request, source, sha, previous)
+  const creation = inferStoryObjective(request, source, sha, previous)
+  assert.deepEqual(creation.protectedChange, revision.protectedChange)
+  assert.deepEqual(creation.protectedConflict, revision.protectedConflict)
+  assert.ok(creation.protectedChange || creation.protectedConflict)
+  assert.deepEqual(creation.contract.scope.creates, undefined)
+  assert.ok(!creation.writePaths.some(path => path.startsWith('events/') ||
+    path.startsWith('authored-content/')))
+  assert.throws(() => inferStoryObjective(request, source, sha, previous, ['event.arbitrary']),
+    /Protected canon conflicts cannot inherit focused creation target selections/)
+  const plain = inferStoryObjective('Write a conversation between Nia and Sol about helping the investigation invite repair rather than revenge',
+    source, sha, previous)
+  assert.equal(plain.protectedChange, null)
+  assert.equal(plain.protectedConflict, null)
+  assert.deepEqual(plain.contract.scope.creates?.map(item => item.id.split('.')[0]),
+    ['event', 'authored-content'])
+})
+
+test('explicit existing Event provides its verified Arc even when multiple Arcs share speakers', () => {
+  const source = catalog.filter(item => item.metadata.id !== 'authored-content.confession')
+    .map(item => item.metadata.id === 'event.confession'
+      ? { ...item, metadata: { ...item.metadata,
+        participants: ['character.nia', 'character.sol'] } } : item)
+  source.push(record('arc', 'rival', { characters: ['character.nia', 'character.sol'] }))
+  const anchored = inferStoryObjective('Write a conversation between Nia and Sol for event.confession',
+    source, sha, previous)
+  assert.equal(anchored.clarification, null)
+  assert.deepEqual(anchored.contract.scope.creates?.map(item => item.id), ['authored-content.confession'])
+  assert.ok(anchored.readOnlyIds.includes('arc.trust'))
+  const wrong = inferStoryObjective('Write a conversation between Nia and Sol for event.confession in arc.rival',
+    source, sha, previous)
+  assert.match(wrong.clarification ?? '', /Event.*Arc|Arc.*Event/)
+  assert.deepEqual(wrong.writePaths, [])
+  const multiArc = source.map(item => item.metadata.id === 'event.confession'
+    ? { ...item, metadata: { ...item.metadata, arcs: ['arc.trust', 'arc.rival'] } } : item)
+  const ambiguous = inferStoryObjective('Write a conversation between Nia and Sol for event.confession',
+    multiArc, sha, previous)
+  assert.match(ambiguous.clarification ?? '', /one verified Arc of the existing Event/)
+  assert.deepEqual(ambiguous.writePaths, [])
+  const chosen = inferStoryObjective('Write a conversation between Nia and Sol for event.confession in arc.rival',
+    multiArc, sha, previous)
+  assert.equal(chosen.clarification, null)
+  assert.ok(chosen.contextIds.includes('arc.rival'))
+  const dangling = source.map(item => item.metadata.id === 'event.confession'
+    ? { ...item, metadata: { ...item.metadata, arcs: ['arc.missing'] } } : item)
+  const invalid = inferStoryObjective('Write a conversation between Nia and Sol for event.confession',
+    dangling, sha, previous)
+  assert.match(invalid.clarification ?? '', /lacks verified Arc references/)
+  assert.deepEqual(invalid.writePaths, [])
+})
+
+test('created Event must contain actual typed Relationship effects, not free-text mentions', () => {
+  const relationship = record('relationship', 'nia-sol',
+    { characters: ['character.nia', 'character.sol'] })
+  const event = record('event', 'new-conversation', {
+    arcs: ['arc.trust'], participants: ['character.nia', 'character.sol'],
+    consequences: ['A promise about relationship.nia-sol is mentioned only in prose'],
+    steps: [{ id: 'opening', branches: [{ id: 'admit', effects: [] }] }],
+  })
+  const contract = {
+    ...previous, scope: { kind: 'partial' as const, depth: 'composition' as const,
+      targets: ['event.new-conversation'], branches: [],
+      creates: [{ id: 'event.new-conversation', path: 'events/new-conversation.md',
+        title: 'Conversation', references: ['arc.trust', 'character.nia', 'character.sol', 'relationship.nia-sol'],
+        dependsOn: [] }],
+    },
+  }
+  assert.throws(() => resolveFocusedScope([...catalog, relationship, event], contract),
+    /Created Story record omitted a pinned typed reference/)
+  const withEffect = { ...event, metadata: { ...event.metadata, steps: [
+    { id: 'opening', branches: [{ id: 'admit', effects: [{
+      kind: 'relationship', relationship: 'relationship.nia-sol', value: 'trusting',
+    }] }] },
+  ] } }
+  assert.doesNotThrow(() => resolveFocusedScope([...catalog, relationship, withEffect], contract))
+  const noTypedEvent = { ...event, metadata: { ...event.metadata,
+    participants: [], arcs: ['arc.trust'], consequences: ['character.nia', 'character.sol'] } }
+  assert.throws(() => resolveFocusedScope([...catalog, relationship, noTypedEvent], contract),
+    /Created Story record omitted a pinned typed reference/)
+  // A direct resolver caller cannot bypass the parser's per-type grant rules.
+  const wrongShape = { ...contract, scope: { ...contract.scope,
+    targets: ['relationship.invalid-link'],
+    creates: [{ id: 'relationship.invalid-link', path: 'relationships/invalid-link.md',
+      title: 'Wrong relationship', references: ['arc.trust', 'character.nia'],
+      dependsOn: [] }] } }
+  assert.throws(() => resolveFocusedScope([...catalog, relationship], wrongShape),
+    /Invalid focused creation scope/)
+})
+
 test('focused support creation cannot authorize unrelated records or unsafe protected changes', () => {
   const protectedRequest = inferStoryObjective('Create a conversation between Nia and Orin that overrides canon',
     catalog, sha, previous)

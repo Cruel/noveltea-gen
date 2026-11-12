@@ -1,4 +1,5 @@
 import type { CompletionContract } from "./architecture.js";
+import { validateFocusedCreationGrants } from "./creation-grants.js";
 
 export interface CanonicalScopeRecord {
   path: string;
@@ -23,44 +24,45 @@ const references = (value: unknown, known: Set<string>): string[] => {
   visit(value);
   return [...found];
 };
+/** Canonical links for an authorized creation must occupy schema-defined
+ * reference fields. Descriptions, consequences, and other prose are never links. */
+function declaredCreationReferences(record: CanonicalScopeRecord): Set<string> {
+  const data = record.metadata;
+  if (data.type === "relationship") return new Set(ids(data.characters));
+  if (data.type === "authored-content") return new Set(ids(data.events));
+  if (data.type === "event") {
+    const linked = [...ids(data.participants), ...ids(data.arcs)];
+    const objects = (value: unknown): Record<string, unknown>[] =>
+      Array.isArray(value) ? value.filter((x): x is Record<string, unknown> =>
+        x !== null && typeof x === "object" && !Array.isArray(x)) : [];
+    for (const step of objects(data.steps)) {
+      for (const branch of objects(step.branches)) {
+        for (const effect of objects(branch.effects)) {
+          if (effect.kind === "relationship" && typeof effect.relationship === "string")
+            linked.push(effect.relationship);
+        }
+      }
+    }
+    return new Set(linked);
+  }
+  return new Set();
+}
 export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: CompletionContract) {
   const active = records.filter(r => r.metadata.status !== "superseded");
   const byId = new Map(active.map(r => [r.metadata.id, r]));
-  const requested = contract.scope.creates ?? [];
-  if (!Array.isArray(requested) || requested.length > 12 ||
-      requested.some(item => !item || typeof item.id !== "string") ||
-      new Set(requested.map(item => item.id)).size !== requested.length)
-    throw new Error("Invalid focused creation inventory.");
+  // Independent callers may bypass contract parsing, so validate the entire
+  // creation inventory again with the shared pure validator.
+  let requested;
+  try {
+    requested = validateFocusedCreationGrants(contract.scope.creates ?? [],
+      contract.scope.targets, contract.scope.kind);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Invalid focused creation scope"))
+      throw new Error("Invalid canonical focused creation grant: " + error.message);
+    throw error;
+  }
   const creates = new Map(requested.map(item => [item.id, item]));
-  const visited = new Set<string>();
-  const visiting = new Set<string>();
-  const validateDependencies = (id: string): void => {
-    if (visiting.has(id)) throw new Error("Cyclic focused creation dependencies.");
-    if (visited.has(id)) return;
-    visiting.add(id);
-    for (const dependency of creates.get(id)!.dependsOn) {
-      if (typeof dependency !== "string" || !creates.has(dependency))
-        throw new Error("Unknown focused creation dependency: " + dependency);
-      validateDependencies(dependency);
-    }
-    visiting.delete(id);
-    visited.add(id);
-  };
-  // The contract is parsed at entry, but this seam is also called from
-  // independent verification paths: do not trust arbitrary caller data.
   for (const item of creates.values()) {
-    if (!contract.scope.targets.includes(item.id) ||
-        !/^(character|relationship|event|authored-content)\.[a-z][a-z0-9-]*$/.test(item.id) ||
-        item.path !== ({ character: "characters", relationship: "relationships",
-          event: "events", "authored-content": "authored-content" } as Record<string, string>)[item.id.split(".")[0] ?? ""] +
-          "/" + item.id.split(".")[1] + ".md" ||
-        !Array.isArray(item.references) || !Array.isArray(item.dependsOn) ||
-        item.references.length > 16 || item.dependsOn.length > 12 ||
-        new Set(item.references).size !== item.references.length ||
-        new Set(item.dependsOn).size !== item.dependsOn.length ||
-        item.references.some(ref => typeof ref !== "string" ||
-          !/^(arc|character|relationship|event)\.[a-z][a-z0-9-]*$/.test(ref)))
-      throw new Error("Invalid canonical focused creation grant.");
     for (const ref of item.references) {
       const known = byId.get(ref);
       if (!known && !creates.has(ref))
@@ -74,8 +76,7 @@ export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: C
     if (existing && (existing.path !== item.path || existing.metadata.type !== item.id.split(".")[0]))
       throw new Error("Focused creation ID collides with another canonical record.");
     if (existing) {
-      const found = new Set(references(existing.metadata,
-        new Set([...byId.keys(), ...creates.keys()])));
+      const found = declaredCreationReferences(existing);
       const missing = item.references.filter(ref => !found.has(ref));
       if (missing.length)
         throw new Error("Created Story record omitted a pinned typed reference: " + item.id +
@@ -86,7 +87,6 @@ export function resolveFocusedScope(records: CanonicalScopeRecord[], contract: C
       } });
     }
   }
-  for (const id of creates.keys()) validateDependencies(id);
   const selectedIds = [...new Set([...contract.scope.targets, ...(contract.scope.supportingTargets ?? [])])];
   const selected = selectedIds.map(id => {
     const record = byId.get(id);

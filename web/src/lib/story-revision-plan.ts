@@ -377,13 +377,33 @@ function inferFocusedConversation(prompt: string, catalog: CanonicalScopeRecord[
         references: [], dependsOn: [] })
     }
   }
+  // Resolve the author's explicit Event before deriving its Arc. A verified
+  // Event→Arc link is authoritative even if both speakers occur in other Arcs.
+  const existingEvents = explicitIds.filter(id => id.startsWith('event.'))
+  if (existingEvents.length > 1) return blocked('A focused conversation may be anchored to only one explicit Event.')
+  let eventId = existingEvents[0]
+  const anchoredEvent = eventId ? byId.get(eventId)! : null
+  if (anchoredEvent && !characterIds.every(id =>
+      ids(anchoredEvent.metadata.participants).includes(id)))
+    return blocked('The existing Event does not include both speakers; separately review an Event revision before authoring dialogue.')
+  const eventArcs = anchoredEvent ? ids(anchoredEvent.metadata.arcs) : []
+  if (anchoredEvent && (!eventArcs.length || eventArcs.some(id =>
+      byId.get(id)?.metadata.type !== 'arc')))
+    return blocked('The existing Event lacks verified Arc references; review that Event before adding dialogue.')
   const arcIds = explicitIds.filter(id => id.startsWith('arc.'))
   if (arcIds.length > 1) return blocked('A new conversation requires one specific existing Arc, not multiple unrelated Arcs.')
+  if (anchoredEvent && arcIds.length && !eventArcs.includes(arcIds[0]!))
+    return blocked('The selected Arc is not a verified Arc of the existing Event; request a separate Event revision.')
   const arcs = active.filter(r => r.metadata.type === 'arc')
   const shared = arcs.filter(r => characterIds.every(id => ids(r.metadata.characters).includes(id)))
-  const arc = arcIds[0] ?? (shared.length === 1 ? shared[0]!.metadata.id : arcs.length === 1 ? arcs[0]!.metadata.id : null)
-  if (!arc || !byId.has(arc))
-    return blocked('Select the existing arc.<id> this conversation belongs to; unrelated subplot creation is not authorized.')
+  const arc = arcIds[0] ?? (anchoredEvent ? (eventArcs.length === 1 ? eventArcs[0] : null) :
+    shared.length === 1 ? shared[0]!.metadata.id : arcs.length === 1 ? arcs[0]!.metadata.id : null)
+  if (!arc)
+    return blocked(anchoredEvent && eventArcs.length > 1
+      ? 'Select one verified Arc of the existing Event: ' + eventArcs.join(', ')
+      : 'Select the existing arc.<id> this conversation belongs to; unrelated subplot creation is not authorized.')
+  if (byId.get(arc)?.metadata.type !== 'arc')
+    return blocked('The selected Arc is not a verified canonical Arc.')
   const linkedRelationship = active.filter(r => r.metadata.type === 'relationship' &&
     characterIds.every(id => ids(r.metadata.characters).includes(id)) &&
     ids(r.metadata.characters).length === 2)
@@ -400,15 +420,7 @@ function inferFocusedConversation(prompt: string, catalog: CanonicalScopeRecord[
       title: speakers.join(' and '), references: [...characterIds],
       dependsOn: creates.filter(c => c.id.startsWith('character.')).map(c => c.id) })
   }
-  const existingEvents = explicitIds.filter(id => id.startsWith('event.'))
-  if (existingEvents.length > 1) return blocked('A focused conversation may be anchored to only one explicit Event.')
-  let eventId = existingEvents[0]
-  if (eventId) {
-    const event = byId.get(eventId)!
-    const participants = ids(event.metadata.participants)
-    if (!characterIds.every(id => participants.includes(id)))
-      return blocked('The existing Event does not include both speakers; separately review an Event revision before authoring dialogue.')
-  } else {
+  if (!eventId) {
     const topic = /\babout\s+(.+?)(?:[.!?]|$)/i.exec(request)?.[1] ?? ''
     const stem = slug('conversation-' + speakers.join('-') + (topic ? '-' + topic : ''))
     eventId = 'event.' + stem
@@ -463,9 +475,22 @@ function inferFocusedConversation(prompt: string, catalog: CanonicalScopeRecord[
  * an authorization to overwrite any protected Creative Direction. */
 export function inferStoryObjective(prompt: string, catalog: CanonicalScopeRecord[],
   headSha: string, previous: CompletionContract, selectedTargets?: string[]): RevisionPreview {
-  if (!isWholeStoryCreationRequest(prompt))
+  if (!isWholeStoryCreationRequest(prompt)) {
+    // A new conversation is not a bypass around the existing protected-canon
+    // conflict detector. Run that same verified revision analysis first for
+    // reversal/override language; its exact protected amendment or conflict
+    // takes precedence over any generic creation approval.
+    if (contrast.test(prompt) || protectedIntent.test(prompt)) {
+      const protection = inferStoryRevision(prompt, catalog, headSha, previous)
+      if (protection.protectedChange || protection.protectedConflict) {
+        if (selectedTargets !== undefined)
+          throw new Error('Protected canon conflicts cannot inherit focused creation target selections.')
+        return protection
+      }
+    }
     return inferFocusedConversation(prompt, catalog, headSha, previous, selectedTargets) ??
       inferStoryRevision(prompt, catalog, headSha, previous, selectedTargets)
+  }
   if (selectedTargets !== undefined)
     throw new Error('A whole-Story objective cannot silently inherit focused record selections.')
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 4000 ||
