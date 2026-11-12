@@ -532,8 +532,6 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
             const provider = request.provider ?? policy.profile.provider;
             const model = request.model ?? policy.profile.model;
             if (s.orchestratorPlanningDigest && !s.orchestratorOrder)
-              throw new Error("Checkpointed objective planning digest lacks its assignment order.");
-            if (s.orchestratorPlanningDigest && !s.orchestratorOrder)
               throw new Error("Checkpointed orchestrator receipt digest has no assignment order; model replay refused.");
             const receipt = s.orchestratorOrder
               ? await restoreCheckpointedObjectivePlanning(job, selection, plan, provider, model,
