@@ -45,7 +45,8 @@ function localOAuth(provider: string) {
   if (selected?.type !== 'oauth' || !selected.access || !selected.expires ||
       selected.expires - Date.now() < 5 * 60_000)
     throw Error('An unexpired local Pi OAuth access token is required; do not refresh it in this certification.')
-  return { ...selected, refresh: 'certification-refresh-disabled-' + randomBytes(24).toString('hex') }
+  return { type: 'oauth' as const, access: selected.access, expires: selected.expires,
+    refresh: 'certification-refresh-disabled-' + randomBytes(24).toString('hex') }
 }
 const config = { baseURL: 'http://localhost:3000',
   secret: 'live-focused-credential-isolation-test-secret-abcdefg',
