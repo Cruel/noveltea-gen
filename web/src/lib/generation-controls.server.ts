@@ -11,7 +11,7 @@ import { withStoryJobLock } from '../../../src/job-lock'
 import { sameGenerationRequest } from '../../../src/generation-owner'
 import type { GenerationRequest } from '../../../src/generation'
 import { trustedHead } from '../../../src/revision'
-import { activeSpecialistChoice, verifySpecialistChoice } from '../../../src/specialist-choice'
+import { activeSpecialistChoice, focusedChoiceWorkItem, verifySpecialistChoice } from '../../../src/specialist-choice'
 import { validateStoryJob } from '../../../src/validator'
 import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
@@ -39,6 +39,23 @@ const reply = (value: unknown, status = 200) => Response.json(value, {
   status, headers: { 'Cache-Control': 'private, no-store' },
 })
 type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget'
+
+/** Match an authenticated, already-verified answer to its exact checkpointed
+ * assignment. A different pending writer cannot inherit the author decision. */
+export function authorChoiceMatchesActiveAssignment(workItem: string, value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const active = value as { stage?: unknown; milestone?: unknown }
+  if (active.stage === 'foundations')
+    return workItem === 'world-foundations' || workItem === 'character-foundations'
+  if (active.stage === 'event')
+    return typeof active.milestone === 'string' &&
+      active.milestone.startsWith('milestone.') &&
+      workItem === 'event-' + active.milestone.slice('milestone.'.length)
+  if (active.stage === 'focus')
+    return typeof active.milestone === 'string' &&
+      workItem === focusedChoiceWorkItem(active.milestone)
+  return false
+}
 
 /** Read-only, evidence-checked admission. Exported for crash/restart regression tests. */
 export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
@@ -73,10 +90,7 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
         ['Foundation requires an explicit author decision before generation can proceed.',
           'Pi did not author the canonical Markdown through a standard write/edit tool.'].includes(saved.reason ?? '')
       const choiceBoundary = !!choiceAnswer &&
-        (choiceAnswer.workItem.endsWith('-foundations') || choiceAnswer.workItem.startsWith('event-')) &&
-        saved.active !== null && typeof saved.active === 'object' &&
-        (saved.active as { stage?: string }).stage ===
-          (choiceAnswer?.workItem.startsWith('event-') ? 'event' : 'foundations') &&
+        authorChoiceMatchesActiveAssignment(choiceAnswer.workItem, saved.active) &&
         saved.status === 'paused' && !saved.result &&
         saved.reason?.startsWith('Specialist paused for an author choice.') === true
       const budgetBoundary = !!policy.budget.pause && !!saved.active && !saved.result &&

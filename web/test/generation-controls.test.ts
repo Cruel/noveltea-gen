@@ -11,13 +11,33 @@ import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
 import { acquireCachedStory } from '../src/lib/git-cache.server'
-import { generationControlRequest } from '../src/lib/generation-controls.server'
+import { generationControlRequest, authorChoiceMatchesActiveAssignment } from '../src/lib/generation-controls.server'
 import { generationJobRequest } from '../src/lib/fixture-jobs.server'
 import { pumpAgentQueue, waitForAgentJob } from '../src/agent-service'
 import { queueGeneration, queueRecord } from '../src/lib/generation-queue.server'
 import { parseGenerationContract } from '../../src/generation'
 import { readJobControl } from '../../src/job-control'
 import { configurePiPolicy, inspectPiPolicy } from '../../src/job-pi-policy'
+import { focusedChoiceWorkItem } from '../../src/specialist-choice'
+
+test('only a source-bound answered choice can resume its original specialist assignment', () => {
+  const conversation = { stage: 'focus', milestone: 'authored-content.dialogue' }
+  const focused = focusedChoiceWorkItem('authored-content.dialogue')
+  assert.equal(authorChoiceMatchesActiveAssignment(focused, conversation), true)
+  assert.equal(authorChoiceMatchesActiveAssignment(focused, { ...conversation,
+    milestone: 'authored-content.another' }), false)
+  assert.equal(authorChoiceMatchesActiveAssignment(focused, { stage: 'event',
+    milestone: 'milestone.dialogue' }), false)
+  assert.equal(authorChoiceMatchesActiveAssignment('event-bridge', { stage: 'event',
+    milestone: 'milestone.bridge' }), true)
+  assert.equal(authorChoiceMatchesActiveAssignment('event-bridge', { stage: 'event',
+    milestone: 'milestone.other' }), false)
+  assert.equal(authorChoiceMatchesActiveAssignment('world-foundations', {
+    stage: 'foundations' }), true)
+  assert.equal(authorChoiceMatchesActiveAssignment('world-foundations', {
+    stage: 'foundation' }), false)
+  assert.equal(authorChoiceMatchesActiveAssignment(focused, null), false)
+})
 
 const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../../noveltea-skills')
 const config = { baseURL: 'http://localhost:3000',

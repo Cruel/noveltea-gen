@@ -24,16 +24,24 @@ import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.
 import { listGenerationEvents } from '../src/lib/generation-progress.server'
 import { queueRecord } from '../src/lib/generation-queue.server'
 import { userPiCredentials, availableUserPiModels, assertUserPiSelection } from '../src/lib/pi-credentials.server'
-import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
+import { previewThreadRevision, submitThreadRevision, revisionFromSource, assertPinnedRevision } from '../src/lib/story-revision.server'
+import { creativePolicy } from '../../src/creative-policy'
 import { advanceThread, readThreadChat, settleThreadRun } from '../src/lib/thread-chat.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
 import { readJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
+import { setThreadCreativeMode } from '../src/lib/threads.server'
+import { authorInteractionRequest } from '../src/lib/author-interactions.server'
+import { generationControlRequest } from '../src/lib/generation-controls.server'
+import { readPinnedObjectivePlanning } from '../../src/orchestrator-planner'
+import { loadSelectedStoryOrchestrator } from '../../src/orchestrator-selection'
+import { inspectSpecialistChoice } from '../../src/specialist-choice'
 import { openStudioDatabase, migrateStudio } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
 
 const dependencyTest = process.env.NT_TEST_WEB_PI_DEPENDENCY === '1'
-const enabled = process.env.NT_TEST_WEB_PI_FOCUSED === '1' || dependencyTest
+const collaborativeTest = process.env.NT_TEST_WEB_PI_COLLABORATIVE === '1'
+const enabled = process.env.NT_TEST_WEB_PI_FOCUSED === '1' || dependencyTest || collaborativeTest
 const subscription = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
 const isolatedLocalOAuth = process.env.NT_TEST_WEB_PI_LOCAL_OAUTH === '1'
 /** Opt-in local certification only: borrow an unexpired access token in memory.
@@ -53,8 +61,8 @@ const config = { baseURL: 'http://localhost:3000',
   github: { clientId: 'test', clientSecret: 'test' },
   gitlab: { clientId: 'test', clientSecret: 'test' } }
 
-test('opt-in live Pi: authenticated Thread creates focused support or resolves an unforeseen dependency in rootless sandbox', {
-  skip: !enabled ? 'Set NT_TEST_WEB_PI_FOCUSED=1 or NT_TEST_WEB_PI_DEPENDENCY=1 with isolated Pi, native CLI, skills and rootless Docker.' : false,
+test('opt-in live Pi: authenticated focused creation, dependency repair, or collaborative author-choice resume in rootless sandbox', {
+  skip: !enabled ? 'Set NT_TEST_WEB_PI_FOCUSED=1, NT_TEST_WEB_PI_DEPENDENCY=1 or NT_TEST_WEB_PI_COLLABORATIVE=1 with isolated Pi, native CLI, skills and rootless Docker.' : false,
   timeout: 650_000,
 }, async () => {
   for (const variable of ['NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE',
@@ -173,7 +181,7 @@ test('opt-in live Pi: authenticated Thread creates focused support or resolves a
     }
     writeFileSync(join(story, 'relationships', 'ada-neri.md'),
       `---\nschema: '0.1'\ntype: relationship\nid: relationship.ada-neri\ntitle: Ada and Neri\nstatus: draft\ndecisions: []\ncharacters: [character.ada, character.neri]\ninitial: estranged\n---\nAda and Neri disagree over whether the ledger should be revealed.\n`)
-    if (dependencyTest) {
+    if (dependencyTest || collaborativeTest) {
       for (const dir of ['facts', 'events', 'authored-content']) mkdirSync(join(story, dir), { recursive: true })
       writeFileSync(join(story, 'facts', 'ledger-forged.md'),
         `---\nschema: '0.1'\ntype: fact\nid: fact.ledger-forged\ntitle: The Ledger Was Forged\nstatus: draft\ndecisions: []\ninitial: true\n---\nThe ledger that accused Neri was forged, though Ada has not yet learned this fact.\n`)
@@ -224,19 +232,22 @@ test('opt-in live Pi: authenticated Thread creates focused support or resolves a
     graph.saver.db.close()
     await ensureRootThreads(store, owner.id, storyId)
     const threadId = 'root:' + parentId
+    if (collaborativeTest) await setThreadCreativeMode(store, owner.id, threadId, 'collaborative')
     const baselineVerification = await validateStoryJob(parent, skills, { ...parent, baseSha: base })
     if (baselineVerification.status !== 'passed') console.error('Focused test source validation:', JSON.stringify({
       status: baselineVerification.status, diagnostics: (baselineVerification.report as { diagnostics?: unknown[] })?.diagnostics,
       protection: (baselineVerification.report as { protection?: { status?: string; base?: string; warnings?: unknown[]; changes?: unknown[] } })?.protection,
     }))
     assert.equal(baselineVerification.status, 'passed')
-    const request = dependencyTest
+    const request = collaborativeTest
+      ? 'Revise the conversation in authored-content.disclosure-scene only. Preserve established facts: Ada does not yet know that the ledger was forged. The dramatic direction is unresolved: how much personal vulnerability Ada reveals in her exchange with Neri. Before any edits, consult the author with 2–3 meaningfully different dramatic alternatives and a reasoned recommendation; let the author settle this consequential relationship choice. Then implement the selected direction, delegating routine phrasing to the specialist. Do not change any other Story record.'
+      : dependencyTest
       ? 'Revise authored-content.disclosure-scene only: make Ada and Neri\'s conversation state truthfully that Ada learned the ledger accusation was forged. Respect canonical knowledge continuity. Do not invent off-page knowledge; report any missing causal prerequisite outside your bounded dialogue assignment before making edits.'
       : 'Write a conversation between Ada and Neri about rebuilding trust after the sealed ledger'
     await assert.rejects(previewThreadRevision(store, other.id, threadId, request), /not found|owner|no source generation/i)
     const proposal = await previewThreadRevision(store, owner.id, threadId, request)
     assert.equal(proposal.clarification, null)
-    if (dependencyTest) {
+    if (dependencyTest || collaborativeTest) {
       assert.deepEqual(proposal.contract.scope.targets,
         ['authored-content.disclosure-scene'], 'the unexpected Event repair must not be initially authorized')
       assert.deepEqual(proposal.contract.scope.creates ?? [], [])
@@ -251,21 +262,16 @@ test('opt-in live Pi: authenticated Thread creates focused support or resolves a
       assert.equal((await submitThreadRevision(store, owner.id, threadId,
         turnId, request, undefined, proposal.digest)).hasRevisionScope, 1)
     else assert.equal(firstSubmission.hasRevisionScope, 1)
-    await advanceThread(store, owner.id, threadId)
-    const admission = await readThreadChat(store, owner.id, threadId)
-    assert.equal(admission.messages.find(item => item.id === turnId)?.phase, 'running')
-    child = await restoreJob(await selectedJob(store, owner.id, turnId), owner.id)
-    assert.equal(child.baseSha, base)
-    const assignment = (await readJobTurnPlan(child))!
-    assert.equal(assignment.digest, proposal.turnPlan?.digest)
-    const pinned = pinnedRequest(await selectedJob(store, owner.id, turnId), child)!
-    assert.equal(pinned.fixture, false)
-    assert.equal(pinned.provider, provider)
-    assert.equal(pinned.model, model.id)
-    assert.deepEqual(assignment.contract.scope.creates, proposal.contract.scope.creates)
-    const initialValidation = await validateStoryJob(parent, skills, { ...parent, baseSha: base })
-    assert.equal(initialValidation.status, 'passed')
-
+    if (collaborativeTest) {
+      const approval = await store.persistence.revisions.scope(owner.id, threadId, turnId)
+      assert.ok(approval)
+      const scoped = JSON.parse(approval) as Parameters<typeof assertPinnedRevision>[0]
+      const refreshed = await revisionFromSource(store, owner.id, parentId, request,
+        scoped.selectedTargets, creativePolicy('collaborative'))
+      assert.equal(scoped.digest, refreshed.digest,
+        JSON.stringify({ saved: scoped, refreshed }).slice(0, 5000))
+      assertPinnedRevision(scoped, refreshed, parentId, base)
+    }
     server.listen(socket)
     await once(server, 'listening')
     const probe = createNetServer()
@@ -299,7 +305,29 @@ test('opt-in live Pi: authenticated Thread creates focused support or resolves a
       await new Promise(done => setTimeout(done, 100))
     }
     assert.equal(ready, true, 'agent process failed startup; inspect isolated agent.log')
-    const deadline = Date.now() + (dependencyTest ? 580_000 : 340_000)
+    await advanceThread(store, owner.id, threadId)
+    let admission = await readThreadChat(store, owner.id, threadId)
+    for (let attempt = 0; attempt < 100 &&
+        admission.messages.find(item => item.id === turnId)?.phase === 'preparing'; attempt++) {
+      await new Promise(done => setTimeout(done, 200))
+      admission = await readThreadChat(store, owner.id, threadId)
+    }
+    assert.equal(admission.messages.find(item => item.id === turnId)?.phase, 'running',
+      JSON.stringify({ messages: admission.messages, runs: admission.runs }).slice(0, 7000))
+    child = await restoreJob(await selectedJob(store, owner.id, turnId), owner.id)
+    assert.equal(child.baseSha, base)
+    const assignment = (await readJobTurnPlan(child))!
+    assert.equal(assignment.digest, proposal.turnPlan?.digest)
+    if (collaborativeTest) assert.equal(assignment.creativePolicy?.mode, 'collaborative')
+    const pinned = pinnedRequest(await selectedJob(store, owner.id, turnId), child)!
+    assert.equal(pinned.fixture, false)
+    assert.equal(pinned.provider, provider)
+    assert.equal(pinned.model, model.id)
+    assert.deepEqual(assignment.contract.scope.creates, proposal.contract.scope.creates)
+    const initialValidation = await validateStoryJob(parent, skills, { ...parent, baseSha: base })
+    assert.equal(initialValidation.status, 'passed')
+
+    const deadline = Date.now() + (collaborativeTest ? 130_000 : dependencyTest ? 580_000 : 340_000)
     while (Date.now() < deadline) {
       const events = await listGenerationEvents(store, owner.id, turnId, 0)
       if (events.some(event => event.kind === 'finished' || event.kind === 'interrupted')) break
@@ -308,6 +336,127 @@ test('opt-in live Pi: authenticated Thread creates focused support or resolves a
     const events = await listGenerationEvents(store, owner.id, turnId, 0)
     assert.ok(events.some(event => event.kind === 'finished' || event.kind === 'interrupted'),
       'focused real Pi run must have a terminal event')
+    if (collaborativeTest) {
+      // #155: actual authenticated Studio Turn, real pinned planner reads,
+      // real specialist question, authenticated Other/delegation, same-session
+      // continuation, and a mode change that cannot rewrite the Turn receipt.
+      const selection = await loadSelectedStoryOrchestrator(child,
+        child.threadId + ':generation:web', {
+          task: request, kind: pinned.contract.scope.kind, turnPlanDigest: pinned.turnPlanDigest,
+        })
+      const planning = await readPinnedObjectivePlanning(child, selection, assignment, provider, model.id)
+      assert.equal(planning.phase, 'planned')
+      for (const method of ['nt-story-orchestrate/SKILL.md',
+        'nt-story-collaborate/SKILL.md', 'nt-story-collaborate/references/interaction.md'])
+        assert.ok(planning.skillReads?.some(path => path.endsWith('/skills/' + method)),
+          'real orchestration transcript must have a successful pinned read: ' + method)
+      assert.equal((await queueRecord(store, turnId))?.phase, 'finished')
+      assert.equal(events.find(event => event.kind === 'finished')?.status, 'paused',
+        'an unresolved consequential author decision must pause without writing')
+      assert.equal(git(child.worktreeRoot, 'rev-parse', 'HEAD'), base)
+      assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
+      const original = JSON.parse(readFileSync(join(child.stateDir,
+        'focused-items/authored-content.disclosure-scene.json'), 'utf8')) as {
+        phase: string; piSessionFile: string; piSessionId: string; authorChoiceId: string
+      }
+      assert.equal(original.phase, 'awaiting-author')
+      assert.ok(original.piSessionFile && existsSync(original.piSessionFile))
+      const choice = await inspectSpecialistChoice(child, original.authorChoiceId)
+      assert.equal(choice.phase, 'awaiting-author')
+      assert.equal(choice.sessionId, original.piSessionId)
+      assert.equal(choice.sessionFile, original.piSessionFile)
+      assert.ok(choice.question.question.length > 30)
+      assert.equal(choice.question.kind, 'alternatives')
+      assert.ok((choice.question.options?.length ?? 0) >= 2)
+      assert.ok(choice.question.recommendedId)
+      assert.ok(choice.question.recommendationReason)
+      const api = async (method: 'GET' | 'POST', body?: unknown, cookie = signedCookie) =>
+        authorInteractionRequest(auth, store, new Request(config.baseURL + '/api/jobs/' +
+          turnId + '/author', { method, headers: { cookie, origin: config.baseURL,
+            'content-type': 'application/json' },
+          ...(body ? { body: JSON.stringify(body) } : {}) }), turnId, config.baseURL)
+      assert.equal((await api('GET', undefined, '')).status, 401)
+      const foreignSession = await ctx.internalAdapter.createSession(other.id)
+      const otherCookie = 'better-auth.session_token=' + foreignSession.token + '.' +
+        createHmac('sha256', config.secret).update(foreignSession.token).digest('base64')
+      assert.equal((await api('GET', undefined, otherCookie)).status, 404)
+      const published = await api('GET')
+      const publishedData = await published.json() as { choice?: { id?: string } }
+      assert.equal(published.status, 200)
+      assert.equal(publishedData.choice?.id, choice.id)
+      // Change the Thread default only. The already-pinned Collaborative Turn,
+      // Foundation and the pending choice must remain untouched.
+      await setThreadCreativeMode(store, owner.id, threadId, 'autonomous')
+      assert.equal((await readThreadChat(store, owner.id, threadId)).creativePolicy.mode, 'autonomous')
+      assert.equal((await readJobTurnPlan(child))?.creativePolicy?.mode, 'collaborative')
+      const answer = { action: 'choice', id: choice.id, proposalSha256: choice.proposalSha256,
+        kind: 'custom', text: "Choose the candid admission of uncertainty. Delegate the exact dialogue and staging to the writer. Preserve Ada's lack of knowledge of the forgery." }
+      assert.equal((await api('POST', { ...answer, proposalSha256: 'f'.repeat(64) })).status, 409)
+      assert.equal((await api('POST', answer, otherCookie)).status, 404)
+      const submitted = await api('POST', answer)
+      assert.equal(submitted.status, 200, await submitted.text())
+      assert.equal((await inspectSpecialistChoice(child, choice.id)).phase, 'answered')
+      assert.equal((await api('POST', answer)).status, 409)
+      assert.equal(git(child.worktreeRoot, 'rev-parse', 'HEAD'), base)
+      const restart = await generationControlRequest(auth, store,
+        new Request(config.baseURL + '/api/jobs/' + turnId + '/control', {
+          method: 'POST', headers: { cookie: signedCookie, origin: config.baseURL,
+            'content-type': 'application/json' }, body: JSON.stringify({ action: 'resume' }),
+        }), turnId, config.baseURL)
+      assert.equal(restart.status, 202, await restart.text())
+      const expectedFinished = events.filter(event => event.kind === 'finished').length + 1
+      const resumeDeadline = Date.now() + 120_000
+      let resumed = await listGenerationEvents(store, owner.id, turnId, 0)
+      while (Date.now() < resumeDeadline &&
+          resumed.filter(event => event.kind === 'finished').length < expectedFinished) {
+        await new Promise(done => setTimeout(done, 1000))
+        resumed = await listGenerationEvents(store, owner.id, turnId, 0)
+      }
+      assert.ok(resumed.filter(event => event.kind === 'finished').length >= expectedFinished,
+        'the same Pi assignment must reach a terminal result after authenticated resume')
+      const finalState = openWebGenerationGraph(join(child.stateDir, 'web-generation.sqlite'))
+      let finalStatus: string | undefined
+      let finalReason: string | null | undefined
+      let focusStatus: string | undefined
+      try {
+        const state = (await finalState.graph.getState({
+          configurable: { thread_id: child.threadId + ':generation:web' },
+        })).values as { status?: string; reason?: string | null;
+          inventory?: { items?: Array<{ id: string; status: string }> } }
+        finalStatus = state.status
+        finalReason = state.reason
+        focusStatus = state.inventory?.items?.find(item =>
+          item.id === 'focus:authored-content.disclosure-scene')?.status
+      } finally { finalState.saver.db.close() }
+      console.log('Live #155 resume:', JSON.stringify({
+        finalStatus, finalReason, focusStatus,
+        events: resumed.filter(event => event.kind === 'finished').map(event => event.status),
+      }))
+      assert.equal(focusStatus, 'verified', 'resumed original specialist must produce reviewed Story work')
+      assert.equal((await inspectSpecialistChoice(child, choice.id)).phase, 'consumed')
+      const completed = JSON.parse(readFileSync(join(child.stateDir,
+        'focused-items/authored-content.disclosure-scene.json'), 'utf8')) as {
+        phase: string; piSessionFile: string; piSessionId: string; authorChoiceId: string
+      }
+      assert.equal(completed.phase, 'committed')
+      assert.equal(completed.piSessionId, original.piSessionId)
+      assert.equal(completed.piSessionFile, original.piSessionFile)
+      assert.equal(completed.authorChoiceId, original.authorChoiceId)
+      const finalHead = git(child.worktreeRoot, 'rev-parse', 'HEAD')
+      assert.notEqual(finalHead, base)
+      assert.deepEqual(git(child.worktreeRoot, 'diff', '--name-only', base, finalHead).split('\n'),
+        ['story/authored-content/disclosure-scene.md'])
+      assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
+      assert.equal((await validateStoryJob(child, skills, { ...child, baseSha: base })).status, 'passed')
+      assert.equal(git(repo, 'rev-parse', 'HEAD'), base)
+      console.log('Live #155 focused author-choice certification PASS (whole-Turn review is separate):', JSON.stringify({
+        turn: assignment.digest, source: base, result: finalHead, choice: choice.id,
+        recommended: choice.question.recommendedId, options: choice.question.options?.length,
+        pinnedReads: planning.skillReads?.length, sameSession: true,
+      }))
+      certified = true
+      return
+    }
     const finalQueue = await queueRecord(store, turnId)
     const checkpointFile = join(child.stateDir, 'web-generation.sqlite')
     let checkpoint: { status?: string; reason?: string; active?: unknown;
