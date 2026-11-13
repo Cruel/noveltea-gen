@@ -548,6 +548,30 @@ test("cyclic typed dependencies block their work without dispatch", { skip: !ava
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
+test("clean Event no-write prerequisite is blocked for typed plan approval without replay or new grants", { skip: !available }, () => {
+  const f = setup("event-prerequisite-report");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-prerequisite" });
+  const first = f.cli(f.start);
+  assert.equal(first.status, "blocked");
+  const item = first.inventory.items.find((i: any) => i.id === "event:milestone.disclosure");
+  assert.equal(item.status, "blocked");
+  assert.match(item.blockingReason, /Clean no-write Event prerequisite report/);
+  assert.match(item.blockingReason, /controller-approved bounded architecture\/work-plan revision/);
+  assert.equal(first.inventory.items.find((i: any) => i.id === "interactive:milestone.disclosure").status,
+    "blocked", "A Choice unit must not bypass its original Event prerequisite");
+  const receiptPath = join(f.job.stateDir, "event-items/disclosure.json");
+  const receipt = readFileSync(receiptPath, "utf8");
+  assert.equal(JSON.parse(receipt).phase, "prerequisite-reported");
+  const before = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const resumed = f.cli(["generate", "resume"]);
+  assert.equal(resumed.status, "blocked");
+  assert.equal(readFileSync(receiptPath, "utf8"), receipt,
+    "The same completed no-write specialist must not be invoked twice");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(resumed.inventory.version, first.inventory.version);
+});
+
 test("a clean local cluster block does not stop independent work or spin on resume", { skip: !available }, () => {
   const f = setup("local-block", story => plannedCluster(story, "z-optional", "aaa-optional"));
   Object.assign(f.env, { NT_FOUNDATIONS_FIXTURE_CASE: "one-arc-only" });

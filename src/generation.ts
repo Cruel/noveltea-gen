@@ -781,8 +781,28 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
       // verification checkpoint. Otherwise the stage API reconciles its receipt,
       // including a commit published before its receipt; never invent a new writer.
       if (s.result) return {};
-      try { return { result: await dispatch(s) }; }
-      catch (error) {
+      try {
+        const result = await dispatch(s);
+        if (result.status === "event-prerequisite-reported") {
+          const evidence = result as typeof result & {
+            prerequisite?: { reportDigest: string; expectedHead: string };
+            conflicts?: string[]; obligations?: string[];
+          };
+          if (!evidence.prerequisite || !/^[a-f0-9]{64}$/.test(evidence.prerequisite.reportDigest))
+            throw Error("A no-write Event dependency report lacks a sealed source receipt.");
+          // A model's unsupported dependency claim is evidence to the typed
+          // plan/approval boundary, never an executable write grant. The
+          // interactive unit depends on this Event, so automatically reversing
+          // that edge would introduce a cycle rather than resolve the request.
+          const failure = "Clean no-write Event prerequisite report " +
+            evidence.prerequisite.reportDigest + " at " + evidence.prerequisite.expectedHead +
+            ": " + [...evidence.conflicts ?? [], ...evidence.obligations ?? []].join("; ") +
+            ". No authorized executable reordering was verified; obtain a controller-approved " +
+            "bounded architecture/work-plan revision. Original Pi writer is not replayable.";
+          return { failures: { ...s.failures, [s.active!.id]: failure }, active: null, result: null };
+        }
+        return { result };
+      } catch (error) {
         const stop = blocked(error);
         if (stop.status === "paused" || stop.status === "cancelled") return stop;
         const job = await openJob(s);

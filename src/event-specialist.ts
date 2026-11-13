@@ -62,15 +62,17 @@ export interface EventEvidence {
   skillReads: string[];
 }
 
-function parseManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[]; laterObligations: string[] } {
+export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[]; laterObligations: string[] } {
   const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
   let parsed: unknown;
   try { parsed = JSON.parse(match ?? "null"); } catch { /* reject below */ }
   const obj = parsed as Record<string, unknown> | null;
   const strings = (value: unknown): value is string[] =>
     Array.isArray(value) && value.every(x => typeof x === "string" && x.trim().length > 0);
-  if (!obj || !strings(obj.modifiedRecords) || !obj.modifiedRecords.length ||
-      !strings(obj.architecturalConflicts) || !strings(obj.laterObligations)) {
+  if (!obj || !strings(obj.modifiedRecords) ||
+      !strings(obj.architecturalConflicts) || !strings(obj.laterObligations) ||
+      (!obj.modifiedRecords.length && !obj.architecturalConflicts.length &&
+        !obj.laterObligations.length)) {
     throw new Error("Event specialist must return a JSON manifest with modifiedRecords, architecturalConflicts and laterObligations.");
   }
   return { modifiedRecords: obj.modifiedRecords, architecturalConflicts: obj.architecturalConflicts,
@@ -131,6 +133,13 @@ export async function authorEventCluster(
       "Actual enabling conditions belong in prerequisites.any_of, with nonempty alternatives containing completed and not_completed lists. " +
       "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
       "Before writing, read the selected authored Milestone and Arc prose, linked Characters/current Facts and relevant earlier Events. " +
+      "This Event stage precedes the specialized Choice/Puzzle and final prose stages. " +
+      "Author the causal Event route and its meaningful alternative step outcomes NOW; " +
+      "the later interactive specialist will bind playable Choice Points to these committed Events. " +
+      "Do not refuse to author an Event merely because a Choice Point or ending scene is not yet written. " +
+      "If a genuinely impossible prerequisite requires another scoped specialist or a protected revision, " +
+      "make NO edits, and return modifiedRecords:[] with specific architecturalConflicts and laterObligations; " +
+      "the controller will preserve this as a blocked plan report, NOT an authorization or completed Event. " +
       "Trace each promised inference to its delivered evidence, source/uncertainty, route gate and consequence; " +
       "check that chain before reporting fulfillment. Source paths are read-only context unless separately authorized below. " +
       EVENT_CAUSAL_GROUNDING +
@@ -188,12 +197,24 @@ export async function authorEventCluster(
       const calls = session.messages.flatMap(m => m.role === "assistant"
         ? m.content.filter(c => c.type === "toolCall") : []);
 
+      const summary = parseEventManifest(finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
+      if (!summary.modifiedRecords.length) {
+        // Only a genuinely no-write, settled model turn may report missing
+        // prerequisites. A modified/reverted or interrupted writer has no
+        // authority to claim a clean plan-reconciliation boundary.
+        if (resume || calls.some(c => ["write", "edit"].includes(c.name)))
+          throw new Error("Event no-write prerequisite report follows a writer tool or author-choice resume.");
+        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
+        return { claimedPaths: [], conflicts: summary.architecturalConflicts,
+          obligations: summary.laterObligations,
+          skillReads, sessionFile: session.sessionManager.getSessionFile() ?? undefined,
+          piSessionId: session.sessionId };
+      }
       if (!calls.some(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
           typeof c.arguments?.path === "string" &&
           relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/").startsWith("events/"))) {
         throw new Error("Event specialist did not author canonical Event Markdown with an editing tool.");
       }
-      const summary = parseManifest(finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
       const structural: string[] = [];
       for (const path of summary.modifiedRecords) {
         if (!/^(?:events|facts|revelations|relationships|arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(path))

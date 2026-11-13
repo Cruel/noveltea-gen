@@ -5,8 +5,32 @@ import { hostname as requireHostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { changedPaths } from "../src/event-work.js";
-import { canonicalFrontmatterStructureError } from "../src/event-specialist.js";
+import { changedPaths, eventPrerequisiteReportDigest } from "../src/event-work.js";
+import { canonicalFrontmatterStructureError, parseEventManifest } from "../src/event-specialist.js";
+
+test("no-write Event reports are explicit, bounded and never confused with a successful author manifest", () => {
+  const input = '{"modifiedRecords":[],"architecturalConflicts":["Needs a Choice specialist"],"laterObligations":["Interactive route outcomes"]}';
+  assert.deepEqual(parseEventManifest(input), { modifiedRecords: [],
+    architecturalConflicts: ["Needs a Choice specialist"],
+    laterObligations: ["Interactive route outcomes"] });
+  assert.throws(() => parseEventManifest('{"modifiedRecords":[],"architecturalConflicts":[],"laterObligations":[]}'),
+    /manifest/);
+  assert.throws(() => parseEventManifest('{"modifiedRecords":[],"architecturalConflicts":"needs work","laterObligations":[]}'),
+    /manifest/);
+  const claim = { jobId: "job", workItemId: "event-disclosure", expectedHead: "a".repeat(40),
+    planDigest: "b".repeat(64), sessionSha256: "c".repeat(64), sessionId: "session",
+    assignmentDigest: "d".repeat(64), snapshotId: "e".repeat(64),
+    sessionFile: "/state/original-session.jsonl", worker: "pi" as const,
+    conflicts: ["Requires a Choice"], obligations: ["Build distinct endings"] };
+  const digest = eventPrerequisiteReportDigest(claim);
+  assert.match(digest, /^[a-f0-9]{64}$/);
+  assert.notEqual(digest, eventPrerequisiteReportDigest({ ...claim, conflicts: ["Requires another owner"] }));
+  for (const invalid of [{ ...claim, conflicts: [], obligations: [] },
+    { ...claim, sessionSha256: "bad" },
+    { ...claim, obligations: ["x".repeat(1501)] },
+    { ...claim, workItemId: "../untrusted" }])
+    assert.throws(() => eventPrerequisiteReportDigest(invalid), /no-write prerequisite report/);
+});
 
 test("early Event draft preflight identifies truncated YAML instead of mistaking it for a validator defect", () => {
   assert.equal(canonicalFrontmatterStructureError("---\nschema: '0.1'\ntype: event\nid: event.clue\n"),
@@ -111,6 +135,50 @@ test("revising an existing Event does not require rewriting an already fulfilled
     /modifiedRecords differ.*authorized Git diff/);
   assert.equal(readFileSync(milestone, "utf8"), original,
     "The Milestone must not be touched just to pass a path audit.");
+});
+
+test("clean no-write prerequisite report stays source-bound without a replay or fabricated Event commit", { skip: !available }, () => {
+  const f = setup("no-write-prerequisite");
+  const head = f.prepare();
+  const first = f.event("no-write-prerequisite");
+  assert.equal(first.status, 0, first.stderr);
+  const result = JSON.parse(first.stdout);
+  assert.equal(result.status, "event-prerequisite-reported");
+  assert.equal(result.headSha, head);
+  assert.deepEqual(result.paths, undefined);
+  assert.match(result.conflicts.join(";"), /Choice/);
+  assert.match(result.prerequisite.reportDigest, /^[a-f0-9]{64}$/);
+  const receiptFile = join(f.job.stateDir, "event-items/disclosure.json");
+  const receipt = readFileSync(receiptFile, "utf8");
+  const repeat = f.event("no-write-prerequisite");
+  assert.equal(repeat.status, 0, repeat.stderr);
+  assert.equal(JSON.parse(repeat.stdout).prerequisite.reportDigest, result.prerequisite.reportDigest);
+  assert.equal(readFileSync(receiptFile, "utf8"), receipt, "No fresh specialist turn or grant on repeated run");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  const changed = JSON.parse(receipt);
+  changed.conflicts = ["Report tampered after original turn"];
+  writeFileSync(receiptFile, JSON.stringify(changed));
+  const tampered = f.event("no-write-prerequisite");
+  assert.notEqual(tampered.status, 0);
+  assert.match(tampered.stderr, /report changed/);
+});
+
+test("dirty and empty no-write claims cannot become plan receipts", { skip: !available }, () => {
+  for (const variant of ["no-write-dirty", "no-write-empty"]) {
+    const f = setup(variant);
+    const head = f.prepare();
+    const attempted = f.event(variant);
+    assert.notEqual(attempted.status, 0, variant);
+    assert.match(attempted.stderr, /prerequisite report is not at a clean|must change at least one Event/);
+    const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+    assert.equal(receipt.phase, "writing", "A doubtful report cannot be promoted to a finished writer");
+    assert.equal(receipt.prerequisite, undefined);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+    if (variant === "no-write-dirty")
+      assert.match(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"),
+        /events\/uncertain-draft.md/);
+  }
 });
 
 test("public CLI commits a reachable causal Event cluster with validated Milestone fulfillment", { skip: !available }, () => {

@@ -10,6 +10,7 @@ import { authorEventCluster, type EventAssignment, type EventEvidence } from "./
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
+import { verifyJobPiSession } from "./job-session.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
@@ -21,7 +22,7 @@ import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { recordSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
   completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
 
-type Phase = "ready" | "writing" | "awaiting-author" | "authored" | "committed";
+type Phase = "ready" | "writing" | "awaiting-author" | "authored" | "committed" | "prerequisite-reported";
 interface EventReceipt {
   version: 1; jobId: string; baseSha: string; workItemId: string;
   milestoneId: string; planVersion: number; planDigest: string;
@@ -31,7 +32,12 @@ interface EventReceipt {
   assignment?: EventAssignment;
   skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
-  conflicts?: string[]; obligations?: string[]; validation?: {
+  conflicts?: string[]; obligations?: string[];
+  /** A completed, clean no-write original session; never executable authority. */
+  prerequisite?: { expectedHead: string; sessionSha256: string; sessionId: string;
+    assignmentDigest: string; snapshotId: string; sessionFile: string; worker: "pi" | "fixture";
+    reportDigest: string };
+  validation?: {
     status: "passed"; validatorVersion: string; protectionBase: string;
     eventIds: string[]; routes: Route[]; eventProgress: Progress[];
     branchProgress: Array<{ event: string; step: string; branch: string; status: Progress["status"] }>;
@@ -63,6 +69,29 @@ export interface EventOptions {
 }
 const idPattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+export function eventPrerequisiteReportDigest(value: {
+  jobId: string; workItemId: string; expectedHead: string; planDigest: string;
+  sessionSha256: string; sessionId: string; assignmentDigest: string;
+  snapshotId: string; sessionFile: string; worker: "pi" | "fixture";
+  conflicts: string[]; obligations: string[];
+}) {
+  if (!/^[a-f0-9]{40}$/.test(value.expectedHead) ||
+      !/^[a-f0-9]{64}$/.test(value.sessionSha256) ||
+      !/^[a-f0-9]{64}$/.test(value.planDigest) ||
+      !/^[a-f0-9]{64}$/.test(value.assignmentDigest) ||
+      !/^[a-f0-9]{64}$/.test(value.snapshotId) ||
+      !["pi", "fixture"].includes(value.worker) ||
+      !value.sessionFile.trim() ||
+      !value.jobId.trim() || !/^event-[a-z][a-z0-9-]*$/.test(value.workItemId) ||
+      !value.sessionId.trim() || !Array.isArray(value.conflicts) ||
+      !Array.isArray(value.obligations) ||
+      !value.conflicts.length && !value.obligations.length ||
+      value.conflicts.length > 8 || value.obligations.length > 8 ||
+      [...value.conflicts, ...value.obligations].some(s => typeof s !== "string" ||
+        !s.trim() || s.length > 1500))
+    throw Error("Unverified or unbounded Event no-write prerequisite report.");
+  return hash(JSON.stringify(value));
+}
 const gitEnv = () => {
   const env = { ...process.env };
   for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[k];
@@ -302,14 +331,15 @@ function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string
   }
 }
 function output(job: JobStartResult, state: EventReceipt) {
-  return { status: state.phase === "committed" ? "event-cluster-committed" : state.phase,
+  return { status: state.phase === "committed" ? "event-cluster-committed" :
+    state.phase === "prerequisite-reported" ? "event-prerequisite-reported" : state.phase,
     jobId: job.jobId, milestoneId: state.milestoneId, workItemId: state.workItemId,
     worktreeStoryRoot: job.worktreeStoryRoot, headSha: state.commitSha ?? state.expectedHead,
     expectedHead: state.expectedHead, planVersion: state.planVersion, phase: state.phase,
     specialist: "nt-event-design", paths: state.paths, validation: state.validation,
     obligations: state.obligations, conflicts: state.conflicts,
     outstanding: state.validation?.remaining ?? [],
-    failure: state.failure, sessionFile: state.sessionFile, skillReads: state.skillReads,
+    failure: state.failure, prerequisite: state.prerequisite, sessionFile: state.sessionFile, skillReads: state.skillReads,
     skillSnapshot: state.snapshot?.id,
     completionEvidence: { eventReachability: state.phase === "committed",
       editorial: "unverified", unrelatedComposition: "not-required", fullStory: false } };
@@ -326,6 +356,17 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): 
       `---\nschema: '0.1'\ntype: event\nid: event.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${prose}\n`, { flag: "wx" });
     files.push(local);
   };
+  if (["no-write-prerequisite", "no-write-dirty", "no-write-empty"].includes(variant)) {
+    if (variant === "no-write-dirty") {
+      await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
+      await writeFile(join(job.worktreeStoryRoot, "events/uncertain-draft.md"), "Unapproved draft.\n");
+    }
+    return { claimedPaths: [], skillReads: [],
+      conflicts: variant === "no-write-empty" ? [] :
+        ["A distinct Choice and authored ending are needed beyond this Event writer's scope."],
+      obligations: variant === "no-write-empty" ? [] :
+        ["Arrange controller-approved interactive work before concluding the resolution."] };
+  }
   if (["optional", "alternative-routes", "contradiction", "failed-repair", "repair"].includes(variant)) {
     await add("inspect-ledger",
       `participants: [character.ada]\narcs: [${assignment.arcIds[0]}]\nconsequences: ["Ada recognizes the handwriting"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: []\n      not_completed: []\nsteps: []`,
@@ -455,6 +496,38 @@ export async function runEventWorkItem(input: EventOptions) {
     const validate = async (head: string) => validateStoryJob(
       await startStoryJob({ story: input.story, job: input.job }, false),
       input.validatorSource ?? input.skillsSource ?? config.novelteaSkills, { ...job, baseSha: head });
+    if (receipt.phase === "prerequisite-reported") {
+      if (!receipt.prerequisite || !receipt.assignment ||
+          (receipt.worker === "pi" && !receipt.sessionFile) ||
+          receipt.claimedPaths?.length || !receipt.conflicts || !receipt.obligations || dirty(job).length)
+        throw Error("A reported Event prerequisite is missing its clean original source.");
+      if (receipt.worker === "pi") {
+        await verifyJobPiSession(job, "event", receipt.sessionFile,
+          receipt.prerequisite.sessionId, receipt.workItemId);
+        if (hash(await readFile(receipt.sessionFile!)) !== receipt.prerequisite.sessionSha256)
+          throw Error("Event prerequisite report's settled Pi transcript changed.");
+      } else if (receipt.prerequisite.sessionSha256 !== "f".repeat(64)) {
+        throw Error("Fixture prerequisite report has unexpected source identity.");
+      }
+      if (receipt.prerequisite.expectedHead !== receipt.expectedHead ||
+          receipt.prerequisite.assignmentDigest !== hash(JSON.stringify(receipt.assignment)) ||
+          receipt.prerequisite.snapshotId !== receipt.snapshot?.id ||
+          receipt.prerequisite.sessionFile !== (receipt.sessionFile ?? "fixture") ||
+          receipt.prerequisite.worker !== receipt.worker ||
+          receipt.prerequisite.reportDigest !== eventPrerequisiteReportDigest({
+            jobId: job.jobId, workItemId: receipt.workItemId, expectedHead: receipt.expectedHead,
+            planDigest: receipt.planDigest,
+            sessionSha256: receipt.prerequisite.sessionSha256,
+            sessionId: receipt.prerequisite.sessionId,
+            assignmentDigest: receipt.prerequisite.assignmentDigest,
+            snapshotId: receipt.prerequisite.snapshotId,
+            sessionFile: receipt.prerequisite.sessionFile, worker: receipt.prerequisite.worker,
+            conflicts: receipt.conflicts, obligations: receipt.obligations }))
+        throw Error("Event prerequisite report changed after its original Pi decision.");
+      try { rawGit(job, "merge-base", "--is-ancestor", receipt.expectedHead, await trustedHead(job)); }
+      catch { throw Error("Event prerequisite report no longer descends from its pinned Story source."); }
+      return output(job, receipt);
+    }
     if (receipt.phase === "committed") {
       if (!receipt.commitSha) throw new Error("Committed Event work item lacks a commit.");
       verifyCommit(job, receipt, receipt.commitSha);
@@ -567,6 +640,39 @@ export async function runEventWorkItem(input: EventOptions) {
             await persist(receiptFile, receipt);
             throw new SpecialistChoiceRequiredError();
           }
+          if (!evidence.claimedPaths.length &&
+              (evidence.conflicts.length || evidence.obligations.length)) {
+            // A completed original turn may raise a prerequisite; it does not
+            // authorize a dependency edge, Choice writer or fabricated Event.
+            if (resuming || dirty(job).length || await trustedHead(job) !== receipt.expectedHead)
+              throw Error("Event prerequisite report is not at a clean unchanged source boundary.");
+            if (receipt.worker === "pi") {
+              await verifyJobPiSession(job, "event", evidence.sessionFile,
+                evidence.piSessionId, receipt.workItemId);
+            }
+            const sessionSha256 = receipt.worker === "fixture" ? "f".repeat(64) :
+              hash(await readFile(evidence.sessionFile!));
+            const sessionId = receipt.worker === "fixture" ? "fixture" : evidence.piSessionId!;
+            receipt.claimedPaths = [];
+            receipt.conflicts = evidence.conflicts;
+            receipt.obligations = evidence.obligations;
+            receipt.skillReads = evidence.skillReads;
+            receipt.sessionFile = evidence.sessionFile;
+            const payload = { jobId: job.jobId, workItemId: receipt.workItemId,
+              expectedHead: receipt.expectedHead, planDigest: receipt.planDigest,
+              sessionSha256, sessionId, assignmentDigest: hash(JSON.stringify(receipt.assignment)),
+              snapshotId: receipt.snapshot!.id, sessionFile: evidence.sessionFile ?? "fixture",
+              worker: receipt.worker, conflicts: evidence.conflicts,
+              obligations: evidence.obligations };
+            receipt.prerequisite = { expectedHead: receipt.expectedHead, sessionSha256,
+              sessionId, assignmentDigest: payload.assignmentDigest,
+              snapshotId: payload.snapshotId, sessionFile: payload.sessionFile,
+              worker: receipt.worker, reportDigest: eventPrerequisiteReportDigest(payload) };
+            receipt.phase = "prerequisite-reported";
+            delete receipt.failure;
+            await persist(receiptFile, receipt);
+            return { receipt }; // No commit, checkpoint, grant or automatic replay.
+          }
           if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
           receipt.claimedPaths = evidence.claimedPaths;
           receipt.conflicts = evidence.conflicts;
@@ -588,6 +694,7 @@ export async function runEventWorkItem(input: EventOptions) {
       .addNode("validate_and_commit_event", async ({ receipt }) => {
         try {
         const prior = receipt.expectedHead;
+        if (receipt.phase === "prerequisite-reported") return { receipt };
         const recovering = git(job, "rev-parse", "HEAD") !== prior;
         if (recovering && (!receipt.contentDigest || !receipt.paths || dirty(job).length ||
             git(job, "rev-parse", "HEAD^") !== prior ||
