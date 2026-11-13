@@ -165,6 +165,11 @@ export function selectAssignment(plan: Plan, report: Report, milestoneId: string
 }
 /** A tracked, unstaged change to an assignment's read-only source may be
  * repaired by the same Pi session. It is never authorized for publication. */
+export class RepairableInteractiveGateError extends Error {
+  constructor(readonly paths: string[]) {
+    super("Original Event prerequisite route gate was changed or bypassed: " + paths.join(", "));
+  }
+}
 export class RepairableInteractiveScopeError extends Error {
   constructor(readonly paths: string[]) {
     super("Unauthorized interactive specialist file(s): " + paths.join(", "));
@@ -185,6 +190,7 @@ export async function auditInteractivePaths(job: JobStartResult, assign: Interac
   domain: InteractiveDomain, claimed: string[]) {
   const paths: string[] = [];
   const readOnlyEdits: string[] = [];
+  const gateEdits: string[] = [];
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   const changes = dirty(job);
   // Check EVERY change before offering any soft repair: staged/deleted/renamed
@@ -229,13 +235,14 @@ export async function auditInteractivePaths(job: JobStartResult, assign: Interac
         const oldText = git(job, "show", "HEAD:" + repoPath(job, local));
         const newText = await readFile(join(job.worktreeStoryRoot, local), "utf8");
         if (prerequisitesText(oldText) !== prerequisitesText(newText)) {
-          throw new Error("Original Event prerequisite route gate was changed or bypassed: " + local);
+          gateEdits.push(local); // Complete the scan before offering repair.
         }
       }
     }
     paths.push(local);
   }
   if (readOnlyEdits.length) throw new RepairableInteractiveScopeError(readOnlyEdits.sort());
+  if (gateEdits.length) throw new RepairableInteractiveGateError(gateEdits.sort());
   paths.sort();
   if (!paths.length || claimed.length !== paths.length ||
       JSON.stringify([...new Set(claimed)].sort()) !== JSON.stringify(paths)) {
@@ -268,8 +275,19 @@ async function assertSafeInteractiveRepair(job: JobStartResult, before: string,
  * reverted or authorized by the graph on the agent's behalf. */
 export async function scopeRepairFeedback(job: JobStartResult, before: string, error: unknown,
   validate: (head: string) => Promise<ValidationResult>): Promise<string[] | undefined> {
-  if (!(error instanceof RepairableInteractiveScopeError)) return undefined;
+  if (!(error instanceof RepairableInteractiveScopeError ||
+        error instanceof RepairableInteractiveGateError)) return undefined;
   await assertSafeInteractiveRepair(job, before, validate);
+  if (error instanceof RepairableInteractiveGateError) return [error.message +
+    ". Existing Event prerequisites are immutable, including every completed/not_completed alternative. " +
+    "Read the original Event files at the exact pinned HEAD and restore ONLY the " +
+    "prerequisites YAML blocks on these paths byte-for-byte using authorized read/edit tools; " +
+    "do not use git checkout, restore, reset, add or commit. Do not change your writer's " +
+    "scope or invent a new prerequisite to make the route appear reachable. " +
+    "Retain your other legitimate Choice/Outcome edits where allowed. Remove any newly " +
+    "invented reference to a Choice Point until that record exists, or create the actual " +
+    "authorized Choice Point first. Inspect the full changed-file inventory and rerun " +
+    "native validation; this correction is NOT a grant to rewrite the entry gate."];
   return [error.message + ". These are READ-ONLY context records, not editable targets. " +
     "Restore ONLY these files to their exact, pre-work-item Git HEAD contents using read/edit/write; " +
     "do not use git checkout, restore, reset, add or commit. Compare each with git diff -- <path> " +

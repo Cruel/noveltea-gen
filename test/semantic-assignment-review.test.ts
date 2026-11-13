@@ -209,7 +209,9 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(event, /fixed number of witnesses/);
   assert.match(event, /BEFORE relying on it/);
   assert.match(event, /Event design occurs BEFORE/);
-  assert.match(event, /Conditions: \[\] on separate Event step branches/);
+  assert.match(event, /Conditions: \[\] on parallel branches/);
+  assert.match(event, /ACTS and that action has distinct consequences/);
+  assert.match(event, /A merely framed question/);
   assert.match(event, /final Turn review MUST still check/);
   assert.doesNotMatch(event, /train|berth|passenger list|assigned seat/);
   const correctedEvent = semanticUnitOutcome("repair-" + "a".repeat(40), "nt-event-design");

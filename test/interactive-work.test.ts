@@ -6,7 +6,8 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { auditInteractivePaths, checkOutput, selectAssignment,
-  RepairableInteractiveScopeError, scopeRepairFeedback } from "../src/interactive-work.js";
+  RepairableInteractiveGateError, RepairableInteractiveScopeError,
+  scopeRepairFeedback } from "../src/interactive-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-interactive-work-"));
 after(() => removeTestTree(root));
@@ -273,6 +274,37 @@ test("a new choice cannot bypass a previously committed Event prerequisite route
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(inspect(x).specialistUnits[0].phase, "writing");
   assert.notEqual(git(x.job.worktreeRoot, "status", "--porcelain"), "");
+});
+
+test("a touched Event prerequisite gate receives only source-preserving original-session correction feedback", { skip: !available }, async () => {
+  const x = setup("gate-correction-feedback");
+  const prior = x.prepare();
+  const path = "events/disclose-ledger.md";
+  const file = join(x.job.worktreeStoryRoot, path);
+  const original = readFileSync(file, "utf8");
+  writeFileSync(file, original.replace("prerequisites:\n",
+    "prerequisites:\n  # no unauthorized gate adjustment may be published\n"));
+  const assign = { sourcePaths: [path] } as any;
+  let error: unknown;
+  try { await auditInteractivePaths(x.job, assign, "choice", [path]); }
+  catch (cause) { error = cause; }
+  assert.ok(error instanceof RepairableInteractiveGateError);
+  assert.deepEqual(error.paths, [path]);
+  const protection = (changes: unknown[] = []) => ({
+    status: "passed", jobId: x.job.jobId, worktreeStoryRoot: x.job.worktreeStoryRoot,
+    baseSha: prior, report: { protection: { status: "checked", base: prior,
+      changes, warnings: [] } },
+  }) as any;
+  const feedback = await scopeRepairFeedback(x.job, prior, error, async () => protection());
+  assert.match(feedback!.join(" "), /restore ONLY the prerequisites YAML blocks/);
+  assert.match(feedback!.join(" "), /byte-for-byte/);
+  assert.match(feedback!.join(" "), /NOT a grant to rewrite/);
+  assert.notEqual(readFileSync(file, "utf8"), original,
+    "The controller must not silently revert a writer's illegal edit");
+  await assert.rejects(scopeRepairFeedback(x.job, prior, error,
+    async () => protection([{ kind: "retcon" }])), /protected Story changes/);
+  writeFileSync(file, original);
+  assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
 test("Puzzle with no independently accessible pre-solution clue is rejected", { skip: !available }, () => {

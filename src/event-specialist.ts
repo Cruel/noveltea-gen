@@ -134,9 +134,17 @@ export async function authorEventCluster(
       "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
       "Before writing, read the selected authored Milestone and Arc prose, linked Characters/current Facts and relevant earlier Events. " +
       "This Event stage precedes the specialized Choice/Puzzle and final prose stages. " +
-      "Author the causal Event route and a coherent current Event-level setup NOW; " +
-      "the later interactive specialist owns selectable Choice Points, mutually distinguishable outcome effects, and branching payoff content. " +
-      "Do not fabricate a completed Choice implementation: if a player decision remains unbound, explicitly defer its selection and distinct outcome effects as laterObligations. " +
+      "Author the causal Event route and its selected Milestone's actual immediate consequences NOW. " +
+      "If this Milestone promises the player ENACTS a meaningful decision, write one Event step " +
+      "with two selectable conditions: [] branches: each must have a distinct valid typed immediate " +
+      "effect (for example different existing Relationship states or Knowledge consequences), " +
+      "and the Event prose must show what the player DOES in each alternative. " +
+      "This is a valid initial decision Event even before a formal Choice Point exists. " +
+      "Do NOT mention a not-yet-created choice-point ID or write kind: outcome effects; " +
+      "the later interactive specialist binds actual Choice Points and distinct outcome tokens to these " +
+      "committed branches without altering Event entry prerequisites. Report only that formal binding " +
+      "and downstream conditional payoff as laterObligations. A mere question with effects: [] does not " +
+      "satisfy a Milestone that promises enacted action, and must NOT be treated as fulfillment. " +
       "Do not refuse to author an Event merely because a Choice Point or ending scene is not yet written. " +
       "If a genuinely impossible prerequisite requires another scoped specialist or a protected revision, " +
       "make NO edits, and return modifiedRecords:[] with specific architecturalConflicts and laterObligations; " +
