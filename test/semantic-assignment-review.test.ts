@@ -198,9 +198,16 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(characters, /Reject any Arc body, decision, plot, or other-field edit/);
   assert.match(choice, /separate later interactive-puzzle/);
   assert.match(puzzle, /Assess real solvability/);
-  assert.match(event, /do NOT demand a pre-existing canonical Fact/);
-  assert.match(event, /assigned seat or passenger list alone does not prove/);
-  assert.match(event, /last-known-presence evidence or corroborated testimony/);
+  assert.match(event, /selected authored Milestone/);
+  assert.match(event, /No pre-existing canonical Fact is required/);
+  assert.match(event, /expected presence or unconfirmed report alone does not establish actual last-known presence/);
+  assert.match(event, /fixed number of witnesses/);
+  assert.match(event, /BEFORE relying on it/);
+  assert.doesNotMatch(event, /train|berth|passenger list|assigned seat/);
+  const correctedEvent = semanticUnitOutcome("repair-" + "a".repeat(40), "nt-event-design");
+  assert.match(correctedEvent, /BEFORE relying on it/);
+  assert.match(correctedEvent, /no new paths/i);
+  assert.doesNotMatch(correctedEvent, /may author Events and necessary connected new Facts/);
   const packet = makePacket();
   assert.equal(packet.items[0]!.reviewedWorkItem, "focus:character.nia");
   assert.match(packet.items[0]!.unitOutcome, /exact committed work item/);
@@ -320,6 +327,74 @@ test("repeated assignment IDs remain distinct across group checkpoint commits", 
     evidence: [evidence("focus:character.nia", "characters/nia.md")] }).findings[0]!.commitSha,
     "c".repeat(40));
 });
+function makeEventPacket(text: string): SemanticReviewPacket {
+  const packet = makePacket();
+  const item = packet.items[0]!;
+  item.assignment = { id: "event", specialist: "nt-event-design", outcome: "Establish a credible absence without settling its cause",
+    targets: ["milestone.absence"], dependsOn: [], discovery: "canonical-story-read-only",
+    authority: { recordTypes: ["event"], existingPaths: ["events/absence.md"], mayCreate: false } };
+  item.assurance = { ...item.assurance, assignmentId: "event",
+    assignmentDigest: createHash("sha256").update(JSON.stringify(item.assignment)).digest("hex"),
+    changedPaths: ["events/absence.md"], changedRecordTypes: ["event"] };
+  item.reviewedWorkItem = "event-absence";
+  item.unitOutcome = semanticUnitOutcome(item.reviewedWorkItem);
+  item.repairTargets = ["events/absence.md"];
+  item.canonicalContext = [{ path: "events/absence.md", content: "# Absence\n" + text,
+    commitSha: item.assurance.commitSha, blobSha: "a".repeat(40) }];
+  return packet;
+}
+
+// Human-labelled minimal semantic cases, not a natural-language validator or
+// claims of live model convergence. Exercise the existing reviewer/repair seam:
+// each negative assessment must survive intact as a bounded correction.
+for (const [name, text, defect, correction] of [
+  ["expected presence", "The assigned room is empty, proving a disappearance.",
+    "An assignment proves expectation, not presence.", "Present a sourced last-known-presence witness account before inferring absence."],
+  ["unshown clue", "Compare the available traces to resolve the accounts.",
+    "The player never encounters the traces.", "Show the concrete observations within this Event before comparison."],
+  ["unreachable clue", "The optional search revealed the clue; every route now knows it.",
+    "The shared route can bypass the evidence Event.", "Gate this inference on the evidence route or deliver the evidence here first."],
+  ["unconfirmed testimony", "A witness guesses the visitor left; therefore departure is objective truth.",
+    "An uncertain claim becomes canonical truth without support.", "Attribute the claim and preserve uncertainty instead of asserting a truth effect."],
+  ["missing prerequisite", "The player uses the key without any route to acquire it.",
+    "A required enabling condition is absent.", "Deliver the authorized enabling action here before relying on it or report the missing prerequisite."],
+  ["invented timestamp", "The earlier inspection recorded presence at exactly midnight.",
+    "No source establishes the past inspection or timestamp.", "Remove the invented record and deliver a named witness report with explicit limits in this Event."],
+  ["premature state", "Trust and knowledge change before the witness speaks.",
+    "Typed knowledge and relationship consequences precede their causal trigger.", "Move those effects after the player-visible disclosure on the appropriate branch."],
+  ["contradiction", "Nobody saw the visitor. The visitor's witnessed exit proves departure.",
+    "The inference contradicts the Event's own stated observations.", "Reconcile the observation and inference without inventing protected history."],
+]) {
+  test(`Event causal finding remains actionable and source-bound: ${name}`, () => {
+    const packet = makeEventPacket(text);
+    const item = packet.items[0]!;
+    const result = validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest, verdict: "fail",
+      findings: [{ commitSha: item.assurance.commitSha, assignmentId: "event", path: "events/absence.md",
+        line: 2, kind: "continuity", message: defect, requiredCorrection: correction,
+        affectedPaths: ["events/absence.md"] }], evidence: [] });
+    const { jobId, commitSha, turnDigest, assignmentId, assignmentDigest, diffDigest, validationProofDigest } = item.assurance;
+    const amendment = deriveReviewRepairAmendment({ assurance: item.assurance, original: item.assignment,
+      planVersion: 1, originWorkItem: "event-absence", review: { version: 1, status: "failed",
+        reviewer: "recorded-semantic-assessment", source: { jobId, commitSha, turnDigest, assignmentId,
+          assignmentDigest, diffDigest, validationProofDigest }, evidence: "Human-labelled minimal case",
+        findings: result.findings } });
+    assert.equal(amendment.obligations[0]!.defect, defect);
+    assert.equal(amendment.obligations[0]!.requiredCorrection, correction);
+    assert.deepEqual(amendment.assignment.authority.existingPaths, ["events/absence.md"]);
+    assert.equal(amendment.assignment.authority.mayCreate, false);
+    assert.equal(amendment.assignment.specialist, "nt-event-design");
+  });
+}
+
+test("ambiguous player-visible witness evidence can pass without proving harm or culprit", () => {
+  const packet = makeEventPacket("The caretaker tells the player: I spoke to the visitor here before supper; I did not see where they went.\nThe player checks the now-empty room, then treats absence as credible, not evidence of harm or a culprit.");
+  const item = packet.items[0]!;
+  const result = validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,
+    verdict: "pass", findings: [], evidence: [{ ...evidence(item.assignment.id, "events/absence.md"),
+      explanation: "The sourced testimony and current observation precede the provisional inference; uncertainty remains." }] });
+  assert.equal(result.verdict, "pass");
+});
+
 test("cross-domain causal defect names real linked context but cannot invent a writable record", () => {
   const packet = makePacket();
   packet.items[0]!.canonicalContext.push({ path: "facts/promise.md",

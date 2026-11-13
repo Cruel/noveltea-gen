@@ -1,3 +1,4 @@
+import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { parseSpecialistChoice, extractSpecialistChoice, authorChoiceDirection,
@@ -129,29 +130,10 @@ export async function authorEventCluster(
       "Event 'after' is optional chronology IF both Events occur; it does not require the earlier Event. " +
       "Actual enabling conditions belong in prerequisites.any_of, with nonempty alternatives containing completed and not_completed lists. " +
       "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
-      "FAIR-PLAY CAUSALITY: if a selected Milestone promises an evidence comparison, " +
-      "testimony contradiction, clue deduction or a defensible account, the actual " +
-      "player route MUST present identifiable concrete observations and claims " +
-      "BEFORE asking the player to compare or deduce from them. Name their source " +
-      "and use real typed prerequisites linking earlier evidence Events, OR author " +
-      "an explicit discovery/observation step in THIS Event before the comparison. " +
-      "An unrestricted Event with empty prerequisites that merely says 'compare " +
-      "available traces' or 'the player knows the evidence' is NOT sufficient " +
-      "unless it itself exposes those exact concrete traces and testimony. " +
-      "For a disappearance or absence, an assigned seat, passenger-list entry or " +
-      "empty room proves expectation, NOT that someone was actually aboard or " +
-      "that they disappeared while the train was stopped. To claim a credible " +
-      "disappearance, introduce at least one independently perceivable positive " +
-      "last-known-presence observation or converging witness accounts IN THE " +
-      "PLAYER-VISIBLE Event BEFORE the missing-person inference. If the source " +
-      "has none, you may author a new witnessed observation in this Event under " +
-      "delegated creative authority; explicitly distinguish testimony from " +
-      "objective truth and give the player its source. The scene itself can " +
-      "introduce observations; not every new observation needs an earlier Fact " +
-      "record, but it must be actually delivered and causally consistent. " +
-      "Only claim Milestone fulfillment when a reachable route delivers the " +
-      "actual clues and resulting inference; don't invent previous off-screen " +
-      "discoveries, false certainty or a final culprit for a provisional account. " +
+      "Before writing, read the selected authored Milestone and Arc prose, linked Characters/current Facts and relevant earlier Events. " +
+      "Trace each promised inference to its delivered evidence, source/uncertainty, route gate and consequence; " +
+      "check that chain before reporting fulfillment. Source paths are read-only context unless separately authorized below. " +
+      EVENT_CAUSAL_GROUNDING +
       "If a new Revelation is required, create a correctly typed canonical revelation with an existing Fact; do not invent a Choice Point, Puzzle, engine Room or game state snapshot. " +
       "Ensure the selected Milestone has reachable Event fulfillment. If its existing fulfillment is already correct, " +
       "leave the Milestone byte-for-byte unchanged; otherwise change ONLY its fulfillment and completeness fields. " +

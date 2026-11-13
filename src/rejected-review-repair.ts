@@ -1,3 +1,5 @@
+import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
+import { rejectedRepairContext } from "./review-repair-context.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
@@ -89,6 +91,8 @@ export interface RepairReceipt {
   originalSource: IndependentReviewResult["source"];
   source: IndependentReviewResult["source"];
   findings: IndependentReviewResult["findings"];
+  /** New verdict on repairedCommitSha; never replaces the rejected source findings. */
+  successorFindings?: IndependentReviewResult["findings"];
   planAmendment: ReviewRepairPlanAmendment;
   assignment: TurnAssignmentEvidence;
   allowedPaths: string[];
@@ -299,7 +303,9 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
       throw Error("Repaired commit is not a verified successor of this rejected source.");
     if (["passed", "failed", "blocked"].includes(state.phase)) {
       const sealed = await inspectCheckpointReview(job, next);
-      if (sealed?.status !== (state.phase === "passed" ? "passed" : "failed"))
+      if (sealed?.status !== (state.phase === "passed" ? "passed" : "failed") ||
+          (state.successorFindings !== undefined &&
+            JSON.stringify(state.successorFindings) !== JSON.stringify(sealed.result?.findings)))
         throw Error("Repair terminal state conflicts with the immutable successor verdict.");
     }
   }
@@ -324,6 +330,31 @@ export function repairFeedback(state: RepairReceipt) {
     findings: state.findings, amendment: state.planAmendment,
     allowedPaths: state.planAmendment?.assignment.authority.existingPaths ?? state.allowedPaths,
     attempt: state.attempts + 1, maxAttempts: MAX_ATTEMPTS,
+  };
+}
+type EventRepairSources = Pick<import("./event-specialist.js").EventAssignment, "sourcePaths">;
+/** Build actionable feedback before claiming a paid turn or touching the writer
+ * transcript. The failed source and adjacent records remain immutable. */
+export async function prepareRejectedRepairFeedback(job: JobStartResult, state: RepairReceipt) {
+  const event = state.origin.workItem.startsWith("event-");
+  let sourcePaths: string[] = [];
+  if (event) {
+    // The original committed Event receipt was verified by inspectRejectedRepair.
+    // Its selected Milestone/Arc/Character/Fact/earlier-Event sources matter even
+    // when a finding only names the offending Event. Read their rejected-SHA
+    // blobs, not their potentially newer worktree versions.
+    const file = specialistSource(job, state.origin.workItem)!;
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 512_000)
+      throw Error("Unsafe original Event source receipt.");
+    const receipt = JSON.parse(await readFile(file, "utf8")) as { assignment?: EventRepairSources };
+    const paths = receipt.assignment?.sourcePaths;
+    if (!Array.isArray(paths) || paths.some(p => typeof p !== "string"))
+      throw Error("Original Event assignment has no pinned causal sources.");
+    sourcePaths = paths;
+  }
+  return { ...repairFeedback(state), ...rejectedRepairContext(job, state, sourcePaths),
+    ...(event ? { causalGrounding: EVENT_CAUSAL_GROUNDING } : {}),
   };
 }
 export async function claimRejectedRepair(job: JobStartResult, sha: string) {
@@ -452,6 +483,22 @@ export async function acceptRejectedRepairCheckpoint(job: JobStartResult,
   await save(job, state);
   return state;
 }
+/** Pure terminal transition after the controller has verified the independent
+ * successor receipt. Keeping both verdicts separate makes restart validation
+ * against the original source possible after a second negative finding. */
+export function repairReviewOutcome(state: RepairReceipt, review: IndependentReviewResult): RepairReceipt {
+  if (state.phase !== "reviewing" || !state.repairedCommitSha ||
+      review.source.commitSha !== state.repairedCommitSha)
+    throw Error("Repair verdict must refer to its reviewed successor.");
+  const failed = review.status === "failed";
+  const phase = !failed ? "passed" : state.attempts >= MAX_ATTEMPTS ? "blocked" : "failed";
+  return { ...state, phase, successorFindings: structuredClone(review.findings),
+    ...(failed ? { baselineHead: state.repairedCommitSha,
+      failure: phase === "blocked"
+        ? "Two real corrections failed independent rereview; inspect saved sessions, drafts and immutable findings."
+        : undefined } : {}),
+  };
+}
 export async function finishRejectedRepairReview(job: JobStartResult, sha: string) {
   const state = await inspectRejectedRepair(job, sha);
   if (state.phase !== "reviewing" || !state.repairedCommitSha)
@@ -462,19 +509,11 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   const review = await inspectCheckpointReview(job, point);
   if (!review || !["passed", "failed"].includes(review.status) || !review.result)
     throw Error("A new independent semantic verdict is mandatory after repaired file changes.");
-  if (review.status === "passed") {
-    state.phase = "passed";
-  } else {
-    state.findings = review.result.findings;
-    state.phase = state.attempts >= MAX_ATTEMPTS ? "blocked" : "failed";
-    state.baselineHead = point.commitSha;
-    state.sessionSha256 = hash(await readFile(state.origin.sessionFile));
-    state.failure = state.phase === "blocked"
-      ? "Two real corrections failed independent rereview; inspect saved sessions, drafts and immutable findings."
-      : undefined;
-  }
-  await save(job, state);
-  return state;
+  const finished = repairReviewOutcome(state, review.result);
+  if (review.status === "failed")
+    finished.sessionSha256 = hash(await readFile(state.origin.sessionFile));
+  await save(job, finished);
+  return finished;
 }
 /** The authenticated Author Choice is kept separate from protected approval.
  * An author revision may narrow/rephrase the outcome but never grant new paths,
@@ -762,6 +801,7 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
         return tool.execute(...args);
       },
     });
+  const feedback = await prepareRejectedRepairFeedback(job, state);
   const claimed = await claimRejectedRepair(job, sha);
   if (claimed.attempts !== state.attempts + 1)
     throw Error("Repair attempt counter changed while preparing the original Pi session.");
@@ -777,7 +817,6 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     if (resolved.resolution.thinking &&
         session.thinkingLevel !== resolved.resolution.thinking)
       throw Error("Original specialist thinking effort changed.");
-    const feedback = repairFeedback(state);
     await promptStorySpecialist(session,
       "Continue your ORIGINAL specialist Pi session to correct a rejected draft. " +
       "This is not an argument with the independent reviewer. The prior verdict " +

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,8 +10,9 @@ import { parseSpecialistChoice, activeSpecialistChoice, answerSpecialistChoice,
   claimSpecialistChoice, completeSpecialistChoice, recordSpecialistChoice,
   inspectSpecialistChoice } from "../src/specialist-choice.js";
 import { changedRepairPaths, disagreementQuestion, repairFeedback,
-  readRejectedRepairOrigin, type RepairReceipt } from "../src/rejected-review-repair.js";
+  readRejectedRepairOrigin, prepareRejectedRepairFeedback, repairReviewOutcome, type RepairReceipt } from "../src/rejected-review-repair.js";
 import type { RecoveryCheckpoint } from "../src/recovery-checkpoints.js";
+import { readIndependentReview } from "../src/checkpoint-assurance.js";
 import { removeTestTree } from "./helpers.js";
 
 const sha = "a".repeat(40);
@@ -39,6 +40,63 @@ function rejected(): RepairReceipt {
   };
 }
 
+test("saved Autonomous Event findings replay as immutable source-bound repair feedback", {
+  skip: !process.env.NT_TEST_EVENT_REPAIR_STATE && "set NT_TEST_EVENT_REPAIR_STATE to private #162 Autonomous state",
+}, async t => {
+  const directory = process.env.NT_TEST_EVENT_REPAIR_STATE!;
+  const job = JSON.parse(readFileSync(join(directory, "job.json"), "utf8")) as JobStartResult;
+  // Read-only replay: no receipt, Story, session or checkpoint is rewritten.
+  for (const source of ["12ab1bd53395e5c1ccd6e1ad82e0645f207ec11b",
+    "26ba3fe4a49b2bbfff17e54e43ef10a1316b7502",
+    "2707cb7b658557f759b35fa31d13fbb27b508bf6",
+    "d37f6753e4bb9e97b249ad7d973a2428d1c21c3b"]) {
+    const state = JSON.parse(readFileSync(join(directory, "review-repairs", source + ".json"), "utf8")) as RepairReceipt;
+    const point = JSON.parse(readFileSync(join(directory, "recovery-checkpoints", source + ".json"), "utf8")) as RecoveryCheckpoint;
+    const original = (await readIndependentReview(job, point.assurance!)).result!;
+    const successorPoint = JSON.parse(readFileSync(join(directory, "recovery-checkpoints",
+      state.repairedCommitSha + ".json"), "utf8")) as RecoveryCheckpoint;
+    const successor = (await readIndependentReview(job, successorPoint.assurance!)).result!;
+    const draft = { ...state, phase: "reviewing" as const, findings: original.findings };
+    const feedback = await prepareRejectedRepairFeedback(job, draft);
+    assert.deepEqual(feedback.findings, original.findings);
+    assert.ok(feedback.offendingSources.every(s => s.commitSha === source && s.text.length > 0));
+    assert.ok(feedback.context.every(c => c.writable === feedback.allowedPaths.includes(c.path)));
+    const completed = repairReviewOutcome(draft, successor);
+    assert.deepEqual(completed.findings, original.findings);
+    assert.deepEqual(completed.successorFindings, successor.findings);
+    assert.deepEqual(completed.origin, state.origin);
+    assert.equal(completed.phase, successor.status === "passed" ? "passed" : state.attempts === 2 ? "blocked" : "failed");
+    t.diagnostic(`source=${source} successor=${state.repairedCommitSha} phase=${completed.phase}`);
+  }
+});
+
+test("negative Event rereview preserves source findings while reporting exact successor blockers", () => {
+  const state = rejected();
+  state.phase = "reviewing";
+  state.repairedCommitSha = "d".repeat(40);
+  const before = structuredClone(state);
+  const review = { version: 1 as const, status: "failed" as const, reviewer: "independent",
+    source: { ...state.source, commitSha: state.repairedCommitSha },
+    findings: [{ path: "events/absence.md", line: 24,
+      message: "The newly asserted past observation has no identified witness.",
+      requiredCorrection: "Deliver the witness account before the disappearance inference." }],
+    evidence: "Pinned successor source" };
+  const failed = repairReviewOutcome(state, review);
+  assert.equal(failed.phase, "failed");
+  assert.deepEqual(failed.findings, before.findings);
+  assert.deepEqual(failed.successorFindings, review.findings);
+  assert.deepEqual(state, before);
+  const blocked = repairReviewOutcome({ ...state, attempts: 2 }, review);
+  assert.equal(blocked.phase, "blocked");
+  assert.match(blocked.failure!, /Two real corrections/);
+  assert.deepEqual(blocked.successorFindings, review.findings);
+  assert.throws(() => repairReviewOutcome(state, { ...review,
+    source: { ...review.source, commitSha: sha } }), /successor/);
+  const passed = repairReviewOutcome(state, { ...review, status: "passed", findings: [] });
+  assert.equal(passed.phase, "passed");
+  assert.deepEqual(passed.findings, before.findings);
+});
+
 test("source-linked repair feedback remains scoped and cannot silently expand protected authority", () => {
   const state = rejected();
   const feedback = repairFeedback(state);
@@ -52,6 +110,85 @@ test("source-linked repair feedback remains scoped and cannot silently expand pr
   assert.equal(question.recommendedId, "correct");
   assert.match(question.options![1]!.tradeoffs, /source-bound/);
   assert.equal(state.phase, "ready", "A choice prompt never changes an immutable failed verdict");
+});
+
+test("Event repair receives the exact committed offending line and read-only causal sources", async t => {
+  const root = mkdtempSync(join(tmpdir(), "nt-event-repair-source-"));
+  t.after(() => removeTestTree(root));
+  mkdirSync(join(root, "story/events"), { recursive: true });
+  mkdirSync(join(root, "story/milestones"));
+  writeFileSync(join(root, "story/events/absence.md"), "# Absence\nThe empty assigned room proves a disappearance.\n");
+  writeFileSync(join(root, "story/milestones/absence.md"), "Establish a credible absence, not its cause.\n");
+  git(root, "init", "-q"); git(root, "config", "user.name", "Test");
+  git(root, "config", "user.email", "test@example.test");
+  git(root, "add", "."); git(root, "commit", "-qm", "Rejected source");
+  const sourceCommitSha = git(root, "rev-parse", "HEAD");
+  const state = rejected();
+  state.sourceCommitSha = sourceCommitSha;
+  state.source = { ...state.source, commitSha: sourceCommitSha };
+  state.allowedPaths = ["events/absence.md"];
+  state.origin.workItem = "event-absence";
+  state.findings = [{ path: "events/absence.md", line: 2, kind: "continuity",
+    message: "Expectation is not last-known presence.",
+    requiredCorrection: "Present a sourced witness account before the inference, preserving uncertainty.",
+    affectedPaths: ["events/absence.md"] }];
+  mkdirSync(join(root, ".git/event-items"));
+  writeFileSync(join(root, ".git/event-items/absence.json"), JSON.stringify({ assignment: {
+    sourcePaths: ["events/absence.md", "milestones/absence.md"],
+  } }));
+  const before = structuredClone(state);
+  const job = { worktreeRoot: root, storyRelativePath: "story", stateDir: join(root, ".git") } as JobStartResult;
+  // Later/dirty bytes must never be substituted for the failed review's source.
+  writeFileSync(join(root, "story/events/absence.md"), "Unreviewed replacement.\n");
+  const feedback = await prepareRejectedRepairFeedback(job, state);
+  assert.equal(feedback.offendingSources[0]!.text, "The empty assigned room proves a disappearance.");
+  assert.equal(feedback.offendingSources[0]!.line, 2);
+  assert.equal(feedback.offendingSources[0]!.commitSha, sourceCommitSha);
+  assert.match(feedback.causalGrounding!, /witness claim/);
+  assert.match(feedback.causalGrounding!, /within this Event/);
+  assert.deepEqual(feedback.context.map(c => [c.path, c.writable]), [
+    ["events/absence.md", true], ["milestones/absence.md", false],
+  ]);
+  assert.match(feedback.context[1]!.content, /not its cause/);
+  assert.deepEqual(state, before, "Preparing feedback must not mutate the failed verdict or authority");
+  const corrected = "# Absence\nThe caretaker tells the player: I spoke with the visitor here before supper; I did not see where they went.\nThe player inspects the now-empty room.\nOnly then does the player infer a credible unexplained absence, not harm or a culprit.\n";
+  writeFileSync(join(root, "story/events/absence.md"), corrected);
+  assert.deepEqual(changedRepairPaths(job, state), ["events/absence.md"]);
+  git(root, "add", "story/events/absence.md");
+  git(root, "commit", "-qm", "Deliver sourced evidence before inference");
+  assert.notEqual(git(root, "rev-parse", "HEAD"), sourceCommitSha);
+  assert.equal((await prepareRejectedRepairFeedback(job, state)).offendingSources[0]!.text,
+    "The empty assigned room proves a disappearance.", "A corrected commit never rewrites the failed source");
+  assert.equal(readFileSync(join(root, "story/milestones/absence.md"), "utf8"),
+    "Establish a credible absence, not its cause.\n");
+  state.findings[0]!.line = 99;
+  await assert.rejects(prepareRejectedRepairFeedback(job, state), /source line/);
+  state.findings[0]!.line = 2;
+  state.findings[0]!.affectedPaths!.push(".story-inbox/ideas/private.md");
+  await assert.rejects(prepareRejectedRepairFeedback(job, state), /canonical|unsafe/i);
+});
+
+test("repair context refuses inbox paths, symlink blobs, missing sources and oversized packets", async t => {
+  const root = mkdtempSync(join(tmpdir(), "nt-repair-context-boundary-"));
+  t.after(() => removeTestTree(root));
+  mkdirSync(join(root, "story/characters"), { recursive: true });
+  writeFileSync(join(root, "story/characters/nia.md"), "Nia waits.\n");
+  symlinkSync("nia.md", join(root, "story/characters/link.md"));
+  writeFileSync(join(root, "story/characters/large.md"), "x".repeat(128 * 1024 + 1));
+  git(root, "init", "-q"); git(root, "config", "user.name", "Test");
+  git(root, "config", "user.email", "test@example.test");
+  git(root, "add", "."); git(root, "commit", "-qm", "Pinned boundary cases");
+  const state = rejected();
+  state.sourceCommitSha = git(root, "rev-parse", "HEAD");
+  state.origin.workItem = "focus:character.nia";
+  const job = { worktreeRoot: root, storyRelativePath: "story" } as JobStartResult;
+  for (const path of [".story-inbox/ideas/secret.md", "characters/../../secret.md",
+    "characters/missing.md", "characters/link.md", "characters/large.md"]) {
+    state.findings = [{ path, line: 1, message: "Do not read unsafe sources." }];
+    await assert.rejects(prepareRejectedRepairFeedback(job, state));
+  }
+  state.findings = Array.from({ length: 33 }, (_, i) => ({ path: `characters/person-${i}.md`, message: "Too many sources." }));
+  await assert.rejects(prepareRejectedRepairFeedback(job, state), /unbounded/);
 });
 
 test("repair feedback cannot present protected changed context as a writable target", () => {

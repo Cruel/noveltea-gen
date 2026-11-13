@@ -1,3 +1,4 @@
+import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
 import { createHash } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { readFile } from "node:fs/promises";
@@ -73,10 +74,14 @@ function packetDigest(items: SemanticReviewItem[]) {
 
 /** Review only the work actually authorized at this durable checkpoint.
  * Parent Turn goals still belong to the following units and final Turn review. */
-export function semanticUnitOutcome(workItem: string): string {
+export function semanticUnitOutcome(workItem: string, specialist?: string): string {
+  if (workItem.startsWith("repair-") && specialist === "nt-event-design")
+    return "Correction of the original Event assignment only: no new paths, owner changes or protected writes. " +
+      "Assess the corrected committed evidence against the original Milestone promise and source-linked findings.\n" +
+      EVENT_CAUSAL_GROUNDING;
   if (workItem === "world-foundations") return "World Foundations only: world entities, setting and relevant objective Facts. Character and relationship records are the NEXT separately committed character-foundations unit. Do not fail World Foundations solely for not writing Characters or relationships; do fail missing or contradictory World Foundations.";
   if (workItem === "character-foundations") return "Character Foundations: concrete Character and Relationship records required by the approved story architecture and existing World Foundations. The stage-specific Character specialist is ALSO authorized to extend ONLY the existing, planned Arc's characters array to link newly written Characters, preserving every other Arc field and all prose. The independent Character/World controller already checks this exact before/after Arc restriction and rejects unrelated Arc edits. Treat a verified link-only Arc update as a legitimate supporting change even though the high-level Turn assignment recordTypes lists character/relationship ownership; that simplified list is not a stricter replacement for the stage-specific writer contract. Reject any Arc body, decision, plot, or other-field edit. Review Character and Relationship obligations now; missing central Characters are a failure.";
-  if (workItem.startsWith("event-")) return "One Event-design Milestone cluster only. The stage-specific verified Event writer may author Events and necessary connected new Facts or Revelations, and may update only the selected Milestone's completeness/fulfillment fields to bind actual Event routes. The current Event may introduce new firsthand observations, witnessed claims and uncertain testimony as player-visible narrative evidence; do NOT demand a pre-existing canonical Fact for every newly authored observation, since this specialist is creating the initial playable Event. However an assigned seat or passenger list alone does not prove someone boarded; require positive last-known-presence evidence or corroborated testimony on-screen before a disappearance is declared credible. Clearly separate testimony, inference and objective truth. The high-level Turn assignment.recordTypes=[event] describes the specialist owner, not an exclusive whitelist that supersedes the independently validated Event work contract. Do not fail narrow supporting records solely for type mismatch; reject unrelated Milestones, unconnected records, protected retcons or unsupported invented Event effects.";
+  if (workItem.startsWith("event-")) return "One Event-design Milestone cluster only. The stage-specific verified Event writer may author Events and necessary connected new Facts or Revelations, and may update only the selected Milestone's completeness/fulfillment fields to bind actual Event routes. The high-level Turn assignment.recordTypes=[event] describes the specialist owner, not an exclusive whitelist that supersedes the independently validated Event work contract. Do not fail narrow supporting records solely for type mismatch; reject unrelated Milestones, unconnected records, protected retcons or unsupported invented Event effects.\n" + EVENT_CAUSAL_GROUNDING;
   if (workItem.startsWith("interactive-choice-")) return "Choice-point unit only. The stage-specific verified Choice author may write a Choice Point, the causal outcome effects/branches in connected existing Events (without changing their prerequisites), and player-facing Authored Content for the choice. The high-level Turn recordTypes=[choice-point,puzzle] is specialist ownership, not the exclusive file whitelist; reject unrelated or protected changes. Puzzle authoring, if planned, is a separate later interactive-puzzle unit, not a missing requirement in this checkpoint. Inspect actual branch consequences and later consumers.";
   if (workItem.startsWith("interactive-puzzle-")) return "Puzzle unit only. The stage-specific verified Puzzle author may add a connected Puzzle, accessible pre-solution clue Authored Content, and bounded new solution Events; existing Choice outcomes and original Event prerequisites remain immutable. The high-level Turn recordTypes is not an exclusive file whitelist. Assess real solvability, prerequisite accessibility, distinct consequences and fair-play clues; reject unrelated/unauthorized files or retcons. The preceding Choice unit was reviewed separately.";
   return "Review the exact committed work item against the author-approved assignment and its dependencies; defer only work explicitly assigned to later units.";
@@ -128,7 +133,7 @@ export async function prepareSemanticReview(job: JobStartResult,
     const repairTargets = reviewRepairTargets(assurance.changedPaths, point.workItem);
     const readOnlyPaths = canonicalContext.map(c => c.path).filter(p => !repairTargets.includes(p));
     items.push({ assignment, reviewedWorkItem: point.workItem,
-      unitOutcome: semanticUnitOutcome(point.workItem), assurance, diff, canonicalContext,
+      unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist), assurance, diff, canonicalContext,
       readOnlyPaths, repairTargets });
   }
   // Group only commits on a single ancestry chain. Unrelated branches and
