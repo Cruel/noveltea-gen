@@ -1,7 +1,8 @@
 import { createPiStatusTool } from "./pi-work-status.js";
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { join, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
@@ -15,6 +16,36 @@ import type { Plan } from "./architecture.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
+
+/** A new agent-authored Arc/Milestone decision cannot silently grant itself
+ * author protection. Previously pinned author-protected decisions are retained
+ * byte-for-byte; only newly claimed protection is rejected here. */
+export function unapprovedArchitectureDecisionIds(after: string, before = ""): string[] {
+  type Decision = { id?: string; origin?: string; authority?: string; statement?: string };
+  const decisions = (text: string): Decision[] => {
+    const lines = text.split(/\r?\n/);
+    if (lines[0] !== "---") return [];
+    const end = lines.indexOf("---", 1);
+    if (end < 0) return [];
+    let inside = false;
+    let current: Decision | null = null;
+    const records: Decision[] = [];
+    for (const line of lines.slice(1, end)) {
+      if (/^decisions:\s*$/.test(line)) { inside = true; continue; }
+      if (/^[a-z][a-z0-9_-]*:/.test(line)) { inside = false; current = null; }
+      if (!inside) continue;
+      const item = line.match(/^  - id:\s*(.+?)\s*$/);
+      if (item) { current = { id: item[1]!.replace(/^['"]|['"]$/g, "") }; records.push(current); continue; }
+      if (!current) continue;
+      const field = line.match(/^    (origin|authority|statement):\s*(.+?)\s*$/);
+      if (field) (current as Record<string, string>)[field[1]!] = field[2]!.replace(/^['"]|['"]$/g, "");
+    }
+    return records;
+  };
+  const prior = new Set(decisions(before).map(d => JSON.stringify(d)));
+  return decisions(after).filter(d => d.authority === "user-protected" &&
+    (d.origin === "agent" || !prior.has(JSON.stringify(d)))).map(d => d.id ?? "unnamed");
+}
 
 const REQUIRED = [
   "nt-story-architecture/SKILL.md",
@@ -103,6 +134,10 @@ export async function authorArchitecture(
       "turning points in timeless terms that remain true when typed links are " +
       "later populated. Avoid contradictory interim assertions. " +
       "Never invent Events, fixed act/ending/Puzzle counts, approvals, or completion claims. " +
+      "All NEW Arc/Milestone decisions written by the agent MUST use origin: agent and authority: delegated. " +
+      "Never set authority: user-protected for an agent suggestion, even when it restates the author's fair-play goals. " +
+      "Only previously pinned, exactly unchanged author-protected decisions retain that authority; " +
+      "the Architecture writer cannot create or authorize new protected decisions. " +
       "Preserve existing user-protected decisions; never change an existing record unless safely authorized. " +
       "Honor branch/depth/target selection and do not shrink or redefine the contract yourself. " +
       (sandboxTools ? "The shell operates only inside /story, without Git, host credentials or network. Read pinned skills through the read tool; use story_validate for native validation. " :
@@ -138,6 +173,50 @@ export async function authorArchitecture(
         resolve(project.root, c.arguments.path as string).slice(project.root.length + 1).split(sep).join("/"),
       ));
     if (!authored) throw new Error("Architecture specialist did not author canonical Arc/Milestone Markdown.");
+    const authoredPaths = [...new Set(calls.filter(c => completed.has(c.id) &&
+      ["write", "edit"].includes(c.name) && typeof c.arguments?.path === "string")
+      .map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"))
+      .filter(p => /^(?:arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(p)))];
+    const authorityErrors = async () => {
+      const result: string[] = [];
+      for (const path of authoredPaths) {
+        let before = "";
+        try {
+          const env = { ...process.env };
+          for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"])
+            delete env[key];
+          before = execFileSync("git", ["show", "HEAD:" +
+            (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path], {
+            cwd: job.worktreeRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        } catch { /* Newly created file: no existing author authority. */ }
+        const full = join(project.root, path);
+        const stat = await lstat(full);
+        if (!stat.isFile() || stat.isSymbolicLink() || await realpath(full) !== full)
+          throw new Error("Architecture preflight rejects unsafe record path: " + path);
+        const after = await readFile(full, "utf8");
+        for (const id of unapprovedArchitectureDecisionIds(after, before))
+          result.push(path + " decision " + id);
+      }
+      return result;
+    };
+    const errors = await authorityErrors();
+    if (errors.length) {
+      // One completed-turn correction in the SAME Pi session, not a replay of
+      // an uncertain writer or a grant of previously absent user protection.
+      await promptStorySpecialist(session,
+        "The controller found NEW author-protected decisions that were not " +
+        "approved by the author. This is a provenance error, not a schema " +
+        "validation exception. In your existing Arc/Milestone files, correct " +
+        "each newly authored decision to origin: agent and authority: delegated; " +
+        "preserve all truly preexisting author-protected decisions unchanged. " +
+        "Do not modify any other records or ask the author for blanket approval. " +
+        "Run story_validate and finish normally. Exact new invalid claims:\n" + errors.join("\n"));
+      const corrected = [...session.messages].reverse().find(m => m.role === "assistant");
+      if (!corrected || corrected.role !== "assistant" || ["error", "aborted"].includes(corrected.stopReason))
+        throw new Error("Architecture authority correction turn did not complete safely.");
+      const stillInvalid = await authorityErrors();
+      if (stillInvalid.length) throw new Error("Architecture invented user protection: " + stillInvalid.join("; "));
+    }
     await context.completed(sessionFile, session.sessionId);
     return { piSessionId: session.sessionId, piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
       skillReads: reads.filter(p => required.includes(p)) };

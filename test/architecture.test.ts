@@ -8,6 +8,22 @@ import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { unapprovedArchitectureDecisionIds } from "../src/architecture-specialist.js";
+
+test("Architecture cannot invent author-protected decisions during initial authoring or a correction", () => {
+  const record = (origin: string, authority: string, statement = "Fair clues are mandatory") =>
+    `---\nschema: '0.1'\ntype: milestone\nid: milestone.evidence\ndecisions:\n  - id: fair-play\n    statement: "${statement}"\n    origin: ${origin}\n    authority: ${authority}\nchange: "The evidence is disclosed"\n---\n\nThe mystery has fair clues.\n`;
+  assert.deepEqual(unapprovedArchitectureDecisionIds(record("agent", "user-protected")), ["fair-play"]);
+  assert.deepEqual(unapprovedArchitectureDecisionIds(record("user", "user-protected")), ["fair-play"]);
+  assert.deepEqual(unapprovedArchitectureDecisionIds(record("agent", "delegated")), []);
+  assert.deepEqual(unapprovedArchitectureDecisionIds(record("user", "user-protected"),
+    record("user", "user-protected")), [], "Existing exact author protection remains intact");
+  assert.deepEqual(unapprovedArchitectureDecisionIds(record("user", "user-protected", "Changed"),
+    record("user", "user-protected")), ["fair-play"],
+    "A changed protected statement is not grandfathered in");
+  const body = "---\ndecisions: []\n---\n\nA character says origin: agent and authority: user-protected.\n";
+  assert.deepEqual(unapprovedArchitectureDecisionIds(body), [], "Narrative text is not a decision grant");
+});
 
 const root = mkdtempSync(join(tmpdir(), "nt-architecture-"));
 after(() => removeTestTree(root));
