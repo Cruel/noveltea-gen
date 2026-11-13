@@ -48,22 +48,33 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(packet.items[0]!.unitOutcome, /exact committed work item/);
 });
 
-test("review provenance correction cannot erase an independent finding", () => {
+test("source correction preserves the original negative finding despite model paraphrasing", () => {
   const original = { verdict: "fail", findings: [{
-    kind: "continuity", message: "Arc claims there are no Characters after links exist.",
-    requiredCorrection: "Remove the contradiction from the Arc body.",
-    commitSha: "wrong", line: 20,
+    kind: "continuity", message: "The Event makes the wary Characters trusting too early.",
+    requiredCorrection: "Remove the unsupported trusting relationship effect.",
+    commitSha: "wrong", assignmentId: "event", path: "story/events/clue.md",
+    affectedPaths: ["events/clue.md", "relationships/wary.md"], line: 20,
   }] };
-  assert.doesNotThrow(() => assertSemanticCorrectionPreserved(original, {
-    verdict: "fail", findings: [{ ...original.findings[0], commitSha: "a".repeat(40), line: 21 }],
-  }));
+  const corrected = { verdict: "fail", findings: [{ ...original.findings[0],
+    commitSha: "a".repeat(40), path: "events/clue.md", line: 21,
+    message: "The people gain trust too quickly.", requiredCorrection: "Revise their bond." }],
+    evidence: [{ commitSha: "a".repeat(40), assignmentId: "event", path: "events/clue.md",
+      line: 21, explanation: "The Event applies the trusting state." }] };
+  const preserved = assertSemanticCorrectionPreserved(original, corrected) as typeof corrected;
+  assert.equal(preserved.verdict, "fail");
+  assert.equal(preserved.findings[0]!.path, "events/clue.md");
+  assert.equal(preserved.findings[0]!.commitSha, "a".repeat(40));
+  assert.equal(preserved.findings[0]!.message, original.findings[0]!.message);
+  assert.equal(preserved.findings[0]!.requiredCorrection, original.findings[0]!.requiredCorrection);
+  assert.deepEqual(preserved.findings[0]!.affectedPaths, original.findings[0]!.affectedPaths);
   assert.throws(() => assertSemanticCorrectionPreserved(original, { verdict: "pass", findings: [] }),
     /cannot erase/);
   assert.throws(() => assertSemanticCorrectionPreserved(original, { verdict: "fail", findings: [] }),
     /cannot erase/);
-  assert.throws(() => assertSemanticCorrectionPreserved(original, {
-    verdict: "fail", findings: [{ ...original.findings[0], message: "No problem found" }],
-  }), /changed the independently reported defects/);
+  assert.throws(() => assertSemanticCorrectionPreserved(original, { ...corrected,
+    findings: [{ ...corrected.findings[0]!, kind: "other" }] }), /cannot change/);
+  assert.throws(() => assertSemanticCorrectionPreserved(original, { ...corrected,
+    findings: [{ ...corrected.findings[0]!, path: "events/another.md" }] }), /cannot change/);
 });
 
 test("faithful single assignment passes with exact source-linked evidence", () => {

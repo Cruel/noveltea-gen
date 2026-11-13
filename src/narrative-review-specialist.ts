@@ -253,18 +253,28 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
  * The independent defect and required correction are immutable across the
  * retry; only source location and evidence formatting may be corrected. */
 export function assertSemanticCorrectionPreserved(before: Record<string, unknown>,
-  after: Record<string, unknown>): void {
-  if (before.verdict !== "fail") return;
+  after: Record<string, unknown>): Record<string, unknown> {
+  if (before.verdict !== "fail") return after;
   if (after.verdict !== "fail" ||
       !Array.isArray(before.findings) || !Array.isArray(after.findings) ||
       before.findings.length === 0 || before.findings.length !== after.findings.length)
     throw new Error("Provenance correction cannot erase an independent negative review.");
-  const summary = (findings: unknown[]) => findings.map(item => {
-    const f = item as Record<string, unknown> | null;
-    return f ? [f.kind, f.message, f.requiredCorrection] : null;
+  const correctedFindings = after.findings as unknown[];
+  const findings = before.findings.map((item, index) => {
+    const prior = item as Record<string, unknown> | null;
+    const correction = correctedFindings[index] as Record<string, unknown> | null;
+    if (!prior || !correction || prior.kind !== correction.kind ||
+        prior.assignmentId !== correction.assignmentId ||
+        typeof prior.path !== "string" || typeof correction.path !== "string" ||
+        prior.path.replace(/^story\//, "") !== correction.path)
+      throw new Error("Provenance correction cannot change the original defect location or kind.");
+    // Correct only source identities. A reviewer may paraphrase during the
+    // repair turn, but that must never replace or weaken its original finding.
+    // Native source-link verification still checks every corrected location.
+    return { ...correction, kind: prior.kind, message: prior.message,
+      requiredCorrection: prior.requiredCorrection, affectedPaths: prior.affectedPaths };
   });
-  if (JSON.stringify(summary(before.findings)) !== JSON.stringify(summary(after.findings)))
-    throw new Error("Provenance correction changed the independently reported defects.");
+  return { ...after, findings };
 }
 
 /** Assignment-fidelity reviewer: no writer tools, no approval tools and no
@@ -350,8 +360,8 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
         JSON.stringify(exact) + "\nUse a real changed source line for each finding. " +
         "No prose outside JSON, no invented path or revision, no write tools.");
       const corrected = parseSpecialistJson(lastReply(session));
-      if (initial) assertSemanticCorrectionPreserved(initial, corrected);
-      verdict = validateSemanticVerdict(packet, corrected);
+      const preserved = initial ? assertSemanticCorrectionPreserved(initial, corrected) : corrected;
+      verdict = validateSemanticVerdict(packet, preserved);
     }
     await context!.completed(file!, session.sessionId);
     return verdict;

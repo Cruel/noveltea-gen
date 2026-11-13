@@ -81,6 +81,13 @@ export async function beginLiveNewStoryChat(args: ChatCase) {
   assert.ok(discovery.digest)
   assert.equal(discovery.chat?.sourceSha, sourceSha)
   assert.equal(discovery.chat?.originalObjective, prompt)
+  // A browser disconnect/reconnect reloads this exact proposed author Turn.
+  // GET must not trigger a second Pi interview, revision or foundation digest.
+  const reconnected = await request('GET')
+  assert.equal(reconnected.phase, discovery.phase)
+  assert.equal(reconnected.revision, discovery.revision)
+  assert.equal(reconnected.digest, discovery.digest)
+  assert.deepEqual(reconnected.chat, discovery.chat)
   return discovery
 }
 
