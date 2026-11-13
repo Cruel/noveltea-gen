@@ -6,11 +6,12 @@ existing LangGraph/controller is the only production scheduler and the only
 source of Story write authority. Do not call the removed skills-repository
 `pnpm collaborate` runner or resurrect its staged host.
 
-## Current cross-repository source evidence (2026-11-12)
+## Current cross-repository source evidence (2026-11-12/13)
 
-The local `~/dev/noveltea-skills` checkout was clean at:
+The local `~/dev/noveltea-skills` checkout was clean at the final #35 revision:
 
-- Git commit: `b51f01269c03c892623de93216b028a72a408fcf`
+- Git commit: `3d798d5aada9f38e48a694f3f39ee73a86a02e25` (#35 closed)
+  (the original Gen-side certification used `b51f012`; no `skills/` bytes changed between these revisions)
 - Studio whole-`skills/`-tree snapshot SHA-256:
   `f0aa51fa1b1e0a74c1e6cc5f8647691f8f3f18c631061b51754cb1981660e872`
   (`createSkillSnapshot`, `dirty: false`)
@@ -120,7 +121,8 @@ pnpm eval:global joint-skills evals/.runs/issue35-control --installed --jobs 2 -
 pnpm eval:certify joint-skills evals/.runs/issue35-with evals/.runs/issue35-control
 ```
 
-See upstream `evals/joint-skills/README.md` and `review.md`. Its #35
+See upstream `evals/joint-skills/README.md` and `review.md`. With #35
+closed, its skills-side evaluation prerequisite is satisfied. The upstream
 guided/live results at the recorded revision include partial new-Story outputs;
 neither a fully playable completed Story nor independent editorial acceptance
 has been demonstrated. These runs **must not** be reported as a Gen live-Pi
