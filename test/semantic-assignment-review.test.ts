@@ -104,6 +104,16 @@ test("saved #158 reviewer SHA-omission can be corrected without generating evide
     assert.throws(() => validateSemanticVerdict(packet,
       normalizeOmittedSemanticEvidenceSha(packet, invalid)), /source-linked|stale/);
   }
+  const longOmission = "85d8c8f273e6df67ac0c8eff54d609cab";
+  const fullSha = "85d8c8f273e6df67ac0df71ac0c8eff54d609cab";
+  packet.items[0]!.assurance.commitSha = fullSha;
+  const copied = { ...input, evidence: [evidence("focus:character.nia", "characters/nia.md", longOmission)] };
+  assert.equal(validateSemanticVerdict(packet,
+    normalizeOmittedSemanticEvidenceSha(packet, copied)).verdict, "pass",
+  "Seven omitted hex characters in the real live review are unambiguously bound to the verified commit");
+  const tooShort = { ...input, evidence: [evidence("focus:character.nia", "characters/nia.md", longOmission.slice(0, 31))] };
+  assert.throws(() => validateSemanticVerdict(packet,
+    normalizeOmittedSemanticEvidenceSha(packet, tooShort)), /source-linked/);
   const negative = { ...input, verdict: "fail", findings: [
     finding("focus:character.nia", "characters/nia.md", "missing-requirement", trusted)] };
   assert.strictEqual(normalizeOmittedSemanticEvidenceSha(packet, negative), negative,

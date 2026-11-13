@@ -143,8 +143,10 @@ export async function prepareSemanticReview(job: JobStartResult,
   return { policy: "assignment-fidelity/v1", sourceDigest: packetDigest(items), items };
 }
 
-/** Correct only an unambiguous 1–2-character omission in a PASS review's
- * evidence SHA after the read-only Pi correction turn. The reviewer must have
+/** Correct only an unambiguous near-complete (32–39 hex chars) omission in a
+ * PASS review's evidence SHA after the read-only Pi correction turn. A model
+ * can omit a run of repeated hex characters while copying a 40-char SHA.
+ * The reviewer must have
  * supplied the assignment, actual changed path, valid line and explanation.
  * Never replace a full-length (possibly stale/foreign) SHA, infer a missing
  * citation, repair a negative finding, or bypass validateSemanticVerdict. */
@@ -157,7 +159,7 @@ export function normalizeOmittedSemanticEvidenceSha(packet: SemanticReviewPacket
   let fixed = false;
   const evidence = value.evidence.map(entry => {
     if (!entry || typeof entry.commitSha !== "string" ||
-        !/^[a-f0-9]{38,39}$/.test(entry.commitSha) ||
+        !/^[a-f0-9]{32,39}$/.test(entry.commitSha) ||
         typeof entry.assignmentId !== "string" || typeof entry.path !== "string" ||
         !Number.isSafeInteger(entry.line) || entry.line < 1) return entry;
     const candidates = packet.items.filter(item => {
