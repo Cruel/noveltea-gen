@@ -6,6 +6,18 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { changedPaths } from "../src/event-work.js";
+import { canonicalFrontmatterStructureError } from "../src/event-specialist.js";
+
+test("early Event draft preflight identifies truncated YAML instead of mistaking it for a validator defect", () => {
+  assert.equal(canonicalFrontmatterStructureError("---\nschema: '0.1'\ntype: event\nid: event.clue\n"),
+    "The file is missing its closing --- delimiter after YAML frontmatter.");
+  assert.equal(canonicalFrontmatterStructureError("---\nschema: '0.1'\n---\n"),
+    "The file has no narrative Markdown body after the closing --- delimiter.");
+  assert.equal(canonicalFrontmatterStructureError("schema: '0.1'\n---\nStory\n"),
+    "The first line must be exactly --- (YAML frontmatter opening).");
+  assert.equal(canonicalFrontmatterStructureError("---\nschema: '0.1'\n---\nA clue is discovered.\n"), null);
+  assert.equal(canonicalFrontmatterStructureError("---\r\nschema: '0.1'\r\n---\r\nText\r\n"), null);
+});
 
 const root = mkdtempSync(join(tmpdir(), "nt-event-work-"));
 after(() => removeTestTree(root));

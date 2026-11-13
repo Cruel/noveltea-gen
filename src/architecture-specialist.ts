@@ -85,9 +85,23 @@ export async function authorArchitecture(
       "Follow nt-story-architecture and nt-catalog. Do not invent an alternative narrative schema. " +
       "AUTHOR actual Arc and Milestone Markdown inside the Story root using ordinary write/edit tools. " +
       "Only write arcs/*.md and milestones/*.md; do not edit Creative Direction, Events, other records, or project files. " +
+      "Record filenames use ONLY the untyped slug, not the typed ID: for example " +
+      "arc.missing-passenger MUST be saved as arcs/missing-passenger.md, NEVER " +
+      "arcs/arc.missing-passenger.md; milestone.disclosure-choice MUST be saved " +
+      "as milestones/disclosure-choice.md. A period in a filename stem is invalid. " +
       "Use schema '0.1', valid typed IDs/references and honest status draft. " +
       "Planning-stage Milestones without real Events MUST have completeness: partial and fulfillment: {any_of: []}. " +
       "Describe plausible future routes and their required causal prerequisites in prose, not as speculative typed Event IDs. " +
+      "World and Character Foundations are authored in subsequent separate stages. " +
+      "Write Arc/Milestone body prose as ENDURING in-world dramatic direction, " +
+      "not a progress report about the record graph or authoring process. Never " +
+      "claim 'no Characters exist', 'Characters are not yet established', " +
+      "'Character links will be populated', 'Characters will be added later', " +
+      "or other temporary implementation status. Those statements become " +
+      "false as soon as the next specialist legitimately completes the records. " +
+      "Instead describe conflict, investigative stakes, uncertainty and causal " +
+      "turning points in timeless terms that remain true when typed links are " +
+      "later populated. Avoid contradictory interim assertions. " +
       "Never invent Events, fixed act/ending/Puzzle counts, approvals, or completion claims. " +
       "Preserve existing user-protected decisions; never change an existing record unless safely authorized. " +
       "Honor branch/depth/target selection and do not shrink or redefine the contract yourself. " +

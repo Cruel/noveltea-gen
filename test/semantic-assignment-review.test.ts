@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateSemanticVerdict, type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
+import { validateSemanticVerdict, semanticUnitOutcome,
+  type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
+import { assertSemanticCorrectionPreserved } from "../src/narrative-review-specialist.js";
 
 const makePacket = (group = false): SemanticReviewPacket => {
   const item = (id: string, path: string, sha: string) => ({
+    reviewedWorkItem: id, unitOutcome: semanticUnitOutcome(id),
     assignment: { id, specialist: "nt-character-development", outcome: "Give Nia a reason to wait",
       targets: ["character.nia"], dependsOn: [], discovery: "canonical-story-read-only" as const,
       authority: { recordTypes: ["character"], existingPaths: [path], mayCreate: false } },
@@ -29,6 +32,39 @@ const finding = (id: string, path: string, kind: "missing-requirement" |
     message: "Required motive is missing.",
     requiredCorrection: "Write Nia's established promise as the motive for waiting.",
     affectedPaths: [path] });
+
+test("multi-unit review requires only the exact current specialist unit, not its successor", () => {
+  const world = semanticUnitOutcome("world-foundations");
+  const characters = semanticUnitOutcome("character-foundations");
+  const choice = semanticUnitOutcome("interactive-choice-disclosure");
+  const puzzle = semanticUnitOutcome("interactive-puzzle-disclosure");
+  assert.match(world, /NEXT separately committed character-foundations/);
+  assert.match(world, /Do not fail World Foundations solely for not writing Characters/);
+  assert.match(characters, /missing central Characters are a failure/);
+  assert.match(choice, /separate later interactive-puzzle/);
+  assert.match(puzzle, /Assess real solvability/);
+  const packet = makePacket();
+  assert.equal(packet.items[0]!.reviewedWorkItem, "focus:character.nia");
+  assert.match(packet.items[0]!.unitOutcome, /exact committed work item/);
+});
+
+test("review provenance correction cannot erase an independent finding", () => {
+  const original = { verdict: "fail", findings: [{
+    kind: "continuity", message: "Arc claims there are no Characters after links exist.",
+    requiredCorrection: "Remove the contradiction from the Arc body.",
+    commitSha: "wrong", line: 20,
+  }] };
+  assert.doesNotThrow(() => assertSemanticCorrectionPreserved(original, {
+    verdict: "fail", findings: [{ ...original.findings[0], commitSha: "a".repeat(40), line: 21 }],
+  }));
+  assert.throws(() => assertSemanticCorrectionPreserved(original, { verdict: "pass", findings: [] }),
+    /cannot erase/);
+  assert.throws(() => assertSemanticCorrectionPreserved(original, { verdict: "fail", findings: [] }),
+    /cannot erase/);
+  assert.throws(() => assertSemanticCorrectionPreserved(original, {
+    verdict: "fail", findings: [{ ...original.findings[0], message: "No problem found" }],
+  }), /changed the independently reported defects/);
+});
 
 test("faithful single assignment passes with exact source-linked evidence", () => {
   const packet = makePacket();

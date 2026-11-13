@@ -12,7 +12,7 @@ import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
-import type { SkillSnapshot } from "./snapshot.js";
+import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
@@ -110,7 +110,9 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     if (sessionFile) await onSession(sessionFile);
     const pinned = required.map(name => join(snapshot.path, "skills", name));
     let prompt = `You are the real pinned NovelTea ${selected.name} specialist authoring ONE bounded ${domain} work item.\n` +
-      "Read each of these skill references using the read tool BEFORE authoring:\n" + pinned.join("\n") +
+      "Read each of these exact stable skill:// references using the read tool BEFORE authoring; " +
+      "never copy or invent long absolute snapshot hash paths:\n" +
+      pinnedSkillReferences(snapshot, pinned) +
       "\nRead the relevant Story sources in the assignment. Follow only necessary typed references. " +
       "Use canonical schema '0.1' Story Markdown only, with nonempty narrative body and exact permitted fields. " +
       "No engine Dialogue/Room/Scene records, no speculative typed IDs, and no author-protected retcons. " +

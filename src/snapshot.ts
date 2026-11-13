@@ -15,6 +15,19 @@ export interface SkillSnapshot {
   detached: boolean;
   dirty: boolean;
 }
+/** Translate only pinned snapshot paths into the stable Pi read-tool address.
+ * This is presentation only: snapshot file hashes and completed tool reads
+ * remain authoritative, regardless of what the model writes in its response. */
+export function pinnedSkillReferences(snapshot: SkillSnapshot, paths: readonly string[]): string {
+  const prefix = join(snapshot.path, "skills") + sep;
+  return paths.map(path => {
+    if (!path.startsWith(prefix)) throw new Error("Required skill is not in the pinned snapshot.");
+    const relative = path.slice(prefix.length).split(sep).join("/");
+    if (relative.split("/").some(part => !part || part === "." || part === ".."))
+      throw new Error("Invalid pinned skill reference.");
+    return "skill://" + relative;
+  }).join("\n");
+}
 interface FileEntry { path: string; digest: string; data: Buffer }
 interface Capture { digest: string; files: FileEntry[]; directories: string[] }
 /** Allowlist for the restricted reader, bound to an already verified digest. */

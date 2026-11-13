@@ -13,7 +13,7 @@ import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import { completedContextReads } from "./story-context.js";
 import type { SkillConfig } from "./skills.js";
-import type { SkillSnapshot } from "./snapshot.js";
+import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export interface CompositionAssignment {
@@ -157,7 +157,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
     let prompt = "You are a pinned nt-narrative-composition author for one bounded composition milestone. " +
       "FIRST read ALL pinned guidance files below using read, then read sourcePaths including Event steps, " +
       "Character voices, Relationship, Facts, Revelations, any optional clue discovery, and existing content.\n" +
-      pinned.join("\n") + "\n" +
+      pinnedSkillReferences(snapshot, pinned) + "\n" +
       "Write real player-facing dialogue/narration in canonical authored-content/*.md only. " +
       "No engine records, no invented schema keys, no branch retcons. Edit ONLY allowedExistingContent " +
       "or add new Authored Content; do NOT alter other Story records, including Events, Choice Points, Milestones, " +
@@ -172,14 +172,20 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "In the Choice Event file use literal headings '## Shared entry', '## Choice wording', and " +
       "'## <Outcome> selected' for EACH declared outcome. Menu contains selectable labels only; " +
       "the entry and menu never reveal branch-only truths or presume physical props. " +
-      "The Story may begin at the Choice Event with no clues discovered: write the shared entry and " +
-      "choice labels for this least-informed route. Only the challenge branch's revealed effect " +
-      "licenses revelation.ledger-secret, if present in the source; protecting does not. " +
-      "Every later outcome-conditioned Event, including an aftermath, needs distinct playable " +
-      "'## <Outcome> selected' sections for every reachable condition branch, not a generic summary. " +
-      "For each Puzzle solution Event, ensure standalone playable dialogue/narration under " +
-      "'## Solution consequence' using only clues required on that route. Never place the watermark " +
-      "in the seal/testimony route without an additional prerequisite, nor vice versa. " +
+      "A Choice Event can be reachable before optional clues: write its shared entry " +
+      "and labels for the least-informed reachable route according to the ACTUAL " +
+      "source prerequisites. A Revelation may be disclosed only on branches whose " +
+      "explicit Event effects and prerequisites license that knowledge. Never copy " +
+      "a branch-specific secret or clue into another outcome without a verified " +
+      "shared prerequisite. Every later outcome-conditioned Event, including an " +
+      "aftermath, needs distinct playable '## <Outcome> selected' sections for " +
+      "every reachable condition branch, not a generic summary. For each ACTUAL " +
+      "Puzzle solution Event in assignment.puzzleSolutions, ensure standalone " +
+      "playable dialogue/narration under '## Solution consequence', using only " +
+      "clues accessible on that route. If no Puzzle is assigned, do not invent " +
+      "one. Never copy a clue exclusive to another route without an additional " +
+      "verified prerequisite. Follow assignment.branchWitnesses and the actual " +
+      "typed records; no fixture-specific characters, props, or secrets. " +
       "Do not write editorial directions as playable prose. " +
       "If a source lacks a needed route, report a conflict; NEVER manufacture new Event effects or bypass gates. " +
       (sandboxed ?
@@ -247,8 +253,9 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
     if (sessionFile) await onSession(sessionFile);
     await context.beforeTurn(sessionFile);
     await promptStorySpecialist(session, context.contextNote + "You are an INDEPENDENT read-only editorial reviewer. Read the pinned composition " +
-      "skill and catalog, the ACTUAL saved authored-content paths, linked Events, all choice outcomes, " +
-      "both Puzzle solution events, character voices, initial knowledge, facts, revelations, and optional " +
+      "skill and catalog, the ACTUAL saved authored-content paths, linked Events, " +
+      "every actually assigned choice outcome and Puzzle solution route (if any), " +
+      "character voices, initial knowledge, facts, revelations, and optional " +
       "discovery routes. Do not trust the writer's explanation or Event narrative body as proof of state. " +
       "Compare each line against the least-informed reachable route and the exact source step/branch. " +
       "Block actual authored prose defects: leaked branch-only truth in shared/menu text, " +
@@ -261,11 +268,14 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
       "outside this ticket or because the schema lacks typed step-level content links. " +
       "Use headings for branch ownership. Report only actionable contradictions in authored prose. " +
       "Do not edit or invoke shell. Read these pinned references FIRST:\n" +
-      pinned.join("\n") + "\n Read these Story paths:\n" +
+      pinnedSkillReferences(snapshot, pinned) + "\n Read these Story paths:\n" +
       [...new Set([...assignment.sourcePaths, ...paths])].join("\n") +
       "\nReturn unfenced JSON ONLY: " +
       '{"verdict":"pass"|"block","sourceEvidence":["event.X#step/branch licenses ..."],"concerns":[]}. ' +
-      "A pass requires explicit source-linked evidence for EVERY choice outcome and BOTH puzzle endings. " +
+      "A pass requires explicit source-linked evidence for EVERY outcome in " +
+      "assignment.choicePoints and EVERY actual puzzle solution route in " +
+      "assignment.puzzleSolutions. If none are assigned, never fabricate two endings " +
+      "or a fixed Puzzle count. Verify the real branchWitnesses instead. " +
       "If uncertain, block.\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
     const missingReads = () => {
       const calls = toolPaths(session, project.root, snapshot.path);

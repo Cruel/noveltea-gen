@@ -15,7 +15,7 @@ import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
-import type { SkillSnapshot } from "./snapshot.js";
+import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { creativePolicyInstruction, DEFAULT_CREATIVE_POLICY, type CreativePolicy } from "./creative-policy.js";
 
@@ -113,8 +113,10 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     await onSession(session.sessionId, sessionFile);
     let prompt =
       `You are the NovelTea ${selected.name} specialist assigned ONE bounded canonical Story work item.\n` +
-      "Read ALL the pinned guidance below using the read tool before writing:\n" +
-      required.map(path => join(snapshot.path, "skills", path)).join("\n") +
+      "Read ALL the pinned guidance below using the read tool before writing. " +
+      "These are exact stable skill:// references served by the verified immutable " +
+      "snapshot; NEVER construct, copy or type long absolute snapshot hash paths:\n" +
+      pinnedSkillReferences(snapshot, required.map(path => join(snapshot.path, "skills", path))) +
       "\nRead only the relevant existing Story sources named in the assignment (follow necessary typed references). " +
       "Never read/search .story-inbox/ideas, even with git grep/show, rg --hidden, find or broad scans; " +
       "it holds noncanonical, dormant author material reserved for a later placement specialist. " +
@@ -180,7 +182,24 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       }
       const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
         typeof c.arguments?.path === "string").map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
-      if (!edits.length) throw new Error("Foundation specialist did not edit canonical Markdown.");
+      if (!edits.length) {
+        // A completed model turn may fail to author because it misunderstood
+        // stable skill:// reads or assumed absent World/Character directories
+        // were a blocker. One in-session correction remains under the original
+        // write boundary; it never replays a failed, interrupted model turn.
+        if (attempt === 2) throw new Error("Foundation specialist did not edit canonical Markdown.");
+        prompt = "No canonical files were authored in the previous completed turn. " +
+          "Read missing pinned references using their EXACT skill:// addresses (never " +
+          "an absolute snapshot path). Absent world-entities/, facts/, characters/ " +
+          "or relationships/ directories can be CREATED by the normal write tool " +
+          "inside the authorized Story; they are not blockers. Your assigned " +
+          "new-Story foundation requires substantive canonical authored records, " +
+          "not an outline or empty modifiedRecords list. Preserve protected canon, " +
+          "run story_validate and return the complete JSON manifest. " +
+          "If a genuine consequential creative ambiguity remains, use a bounded " +
+          "authorDecisionRequest instead of fabricating an unapproved detail.";
+        continue;
+      }
       const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
       let declared: unknown;
       try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }

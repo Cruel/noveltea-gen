@@ -1,5 +1,5 @@
 import { createPiStatusTool } from "./pi-work-status.js";
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { parseSpecialistChoice, extractSpecialistChoice, authorChoiceDirection,
   type SpecialistChoiceQuestion, type SpecialistChoiceReceipt } from "./specialist-choice.js";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -16,7 +16,7 @@ import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
-import type { SkillSnapshot } from "./snapshot.js";
+import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 
 const REQUIRED = [
   "nt-event-design/SKILL.md",
@@ -26,6 +26,19 @@ const REQUIRED = [
   "nt-catalog/references/authority-and-validation.md",
   "nt-catalog/references/glossary.md",
 ] as const;
+
+/** Cheap, read-only early diagnosis for half-written model records. Native
+ * validation remains authoritative for YAML schema, references and reachability.
+ * This never repairs bytes or certifies a record as valid. */
+export function canonicalFrontmatterStructureError(content: string): string | null {
+  const lines = content.split(/\r?\n/);
+  if (lines[0] !== "---") return "The first line must be exactly --- (YAML frontmatter opening).";
+  const close = lines.findIndex((line, i) => i > 0 && line === "---");
+  if (close < 2) return "The file is missing its closing --- delimiter after YAML frontmatter.";
+  if (!lines.slice(close + 1).join("\n").trim())
+    return "The file has no narrative Markdown body after the closing --- delimiter.";
+  return null;
+}
 
 export interface EventAssignment {
   milestoneId: string;
@@ -107,19 +120,37 @@ export async function authorEventCluster(
     if (file) await onSession(file);
     const required = REQUIRED.map(name => join(snapshot.path, "skills", name));
     let prompt = "You are the pinned NovelTea nt-event-design specialist. Read ALL the following real skill instructions " +
-      "and references with the read tool BEFORE editing:\n" + required.join("\n") +
+      "and references with the read tool BEFORE editing. Use exact stable skill:// references, " +
+      "never copy or invent absolute snapshot paths containing long hash directories:\n" +
+      pinnedSkillReferences(snapshot, required) +
       "\nRead the specified source files and follow their typed links only where necessary. " +
       "Work in this isolated canonical Story root. Implement exactly ONE bounded Milestone Event-design cluster, " +
       "with meaningful dramatic stakes, actions, actual causes, and typed consequences. " +
       "Event 'after' is optional chronology IF both Events occur; it does not require the earlier Event. " +
       "Actual enabling conditions belong in prerequisites.any_of, with nonempty alternatives containing completed and not_completed lists. " +
       "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
+      "FAIR-PLAY CAUSALITY: if a selected Milestone promises an evidence comparison, " +
+      "testimony contradiction, clue deduction or a defensible account, the actual " +
+      "player route MUST present identifiable concrete observations and claims " +
+      "BEFORE asking the player to compare or deduce from them. Name their source " +
+      "and use real typed prerequisites linking earlier evidence Events, OR author " +
+      "an explicit discovery/observation step in THIS Event before the comparison. " +
+      "An unrestricted Event with empty prerequisites that merely says 'compare " +
+      "available traces' or 'the player knows the evidence' is NOT sufficient " +
+      "unless it itself exposes those exact concrete traces and testimony. " +
+      "Only claim Milestone fulfillment when a reachable route delivers the " +
+      "actual clues and resulting inference; don't invent previous off-screen " +
+      "discoveries, false certainty or a final culprit for a provisional account. " +
       "If a new Revelation is required, create a correctly typed canonical revelation with an existing Fact; do not invent a Choice Point, Puzzle, engine Room or game state snapshot. " +
       "Ensure the selected Milestone has reachable Event fulfillment. If its existing fulfillment is already correct, " +
       "leave the Milestone byte-for-byte unchanged; otherwise change ONLY its fulfillment and completeness fields. " +
       "Do NOT edit any other Milestone, Creative Direction, unrelated Arc, or any Character baseline. " +
       "You may write events/*.md and strictly connected, authorized arcs/*.md, facts/*.md, revelations/*.md and relationships/*.md. " +
       "All records must contain valid schema '0.1' frontmatter with ONLY allowed fields and nonempty Markdown body prose. " +
+      "Every Markdown file MUST begin with a standalone --- opening line, end the YAML " +
+      "header with a SECOND standalone --- closing line, and include substantive " +
+      "plain Markdown prose after that closing delimiter. Never stop inside YAML, " +
+      "even when the Event steps/effects are complete. " +
       "Do not invent references; preserve user-protected author choices. New work remains draft, not author-approved. " +
       (sandboxTools ?
         "Shell and file searches run only in networkless /story; Git, host paths and credentials are unavailable. Use story_validate for native checks. " :
@@ -170,6 +201,37 @@ export async function authorEventCluster(
         throw new Error("Event specialist did not author canonical Event Markdown with an editing tool.");
       }
       const summary = parseManifest(finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
+      const structural: string[] = [];
+      for (const path of summary.modifiedRecords) {
+        if (!/^(?:events|facts|revelations|relationships|arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(path))
+          continue; // The controller's exact scope/diff validator owns invalid paths.
+        const full = join(job.worktreeStoryRoot, path);
+        try {
+          const info = await lstat(full);
+          if (!info.isFile() || info.isSymbolicLink() || await realpath(full) !== full)
+            throw new Error("Unsafe or redirected record path");
+          const issue = canonicalFrontmatterStructureError(await readFile(full, "utf8"));
+          if (issue) structural.push(path + ": " + issue);
+        } catch {
+          structural.push(path + ": Missing or unsafe canonical record file.");
+        }
+      }
+      if (structural.length) {
+        if (attempt === 2)
+          throw new Error("Event specialist left structurally incomplete Markdown after bounded repairs: " +
+            structural.join("; "));
+        prompt = "The files you just wrote have an OBJECTIVE source formatting error, " +
+          "NOT an architectural conflict or native-validator bug. You may edit " +
+          "only your already authorized paths, in this SAME session. Read the " +
+          "complete files and repair each one: every canonical .md record must " +
+          "start with a standalone --- line, close the YAML with a SECOND " +
+          "standalone --- line, and contain substantive narrative Markdown " +
+          "AFTER that closing line. A single opening --- is insufficient. " +
+          "Then run story_validate and return the complete cumulative JSON " +
+          "manifest; remove any false architectural-conflict claim caused only " +
+          "by these truncated files. EXACT ERRORS:\n" + structural.join("\n");
+        continue;
+      }
       const evidence: EventEvidence = { claimedPaths: summary.modifiedRecords,
         conflicts: summary.architecturalConflicts, obligations: summary.laterObligations,
         sessionFile: session.sessionManager.getSessionFile() ?? undefined,

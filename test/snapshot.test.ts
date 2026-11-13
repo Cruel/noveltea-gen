@@ -6,9 +6,20 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import type { Skill } from "@earendil-works/pi-coding-agent";
-import { createSkillSnapshot, openSkillSnapshot, verifiedSkillFiles } from "../src/snapshot.js";
+import { createSkillSnapshot, openSkillSnapshot, pinnedSkillReferences, verifiedSkillFiles } from "../src/snapshot.js";
 import { createSkillReadTool, loadSkillConfig } from "../src/skills.js";
 import { createProjectResourceLoader } from "../src/pi.js";
+
+test("pinned Pi skill URLs are normalized from the verified snapshot, never arbitrary host paths", () => {
+  const snapshot = { path: "/cache/immutable", id: "a".repeat(64) } as Parameters<typeof pinnedSkillReferences>[0];
+  assert.equal(pinnedSkillReferences(snapshot, [
+    "/cache/immutable/skills/nt-catalog/SKILL.md",
+    "/cache/immutable/skills/nt-catalog/references/records.md",
+  ]), "skill://nt-catalog/SKILL.md\nskill://nt-catalog/references/records.md");
+  assert.throws(() => pinnedSkillReferences(snapshot, ["/host/secrets/key"]), /not in the pinned snapshot/);
+  assert.throws(() => pinnedSkillReferences(snapshot, ["/cache/immutable/skills/../secret"]),
+    /Invalid pinned skill reference/);
+});
 
 function git(root: string, ...args: string[]) {
   return execFileSync("git", ["-C", root, ...args], {
