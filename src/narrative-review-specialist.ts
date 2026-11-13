@@ -326,7 +326,17 @@ export async function reviewTurnCompleteness(job: JobStartResult, snapshot: Skil
       "checks and a native-validated and editorially reviewed canonical Story HEAD. " +
       "Successful specialists DO NOT imply the whole Turn is fulfilled. " +
       "Independently compare the original author request, every enumerated goal, constraint, " +
-      "plan outcome and the combined FINAL Story. Detect omitted whole-Story obligations, " +
+      "plan outcome and the combined FINAL Story. The packet contains versioned delivery " +
+      "criteria pinned to the ORIGINAL author promise and a separately approved execution " +
+      "contract. Do not silently lower breadth, targets, branch obligations or delivery depth. " +
+      "For an Arc/Milestone outline, check connected causal architecture without requiring " +
+      "unrequested prose. For interactive structure, check actual reachable prerequisites, " +
+      "consequential choices and coherent branch outcomes, not just typed references. " +
+      "For full composition, check player-facing authored scenes; a complete Story additionally " +
+      "requires meaningful branch endings, central mystery payoffs and coherent resolution. " +
+      "Record counts, empty YAML fields, validator success and isolated attractive prose " +
+      "are never proof of narrative fulfillment. Explicitly fail missing content and " +
+      "unsupported semantic claims. Detect missing commitments, " +
       "stale commitments and unsupported completion claims. Do not silently change protected canon. " +
       "Use the exact objective IDs. For EACH objective return a fulfilled boolean with positive " +
       "canonical path/line evidence if fulfilled. Absence is an unfulfilled check, not invented evidence. " +

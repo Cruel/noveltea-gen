@@ -8,6 +8,7 @@ import type { JobReport } from "./job-report.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
+import { assertTurnDeliveryHistory, deliveryCriteria, type NarrativeDeliveryCriteria } from "./turn-delivery.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const safePath = /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/;
@@ -42,7 +43,11 @@ export interface TurnFulfillmentPacket {
       review: string; assignmentDigest: string }> };
   goal: string;
   originalRequest: string;
+  /** The original author promise, unaffected by later approved work amendments. */
   contract: TurnEvidence["contract"];
+  /** The current controller-approved execution scope; its history is verified. */
+  approvedContract: TurnEvidence["contract"];
+  criteria: NarrativeDeliveryCriteria;
   objectives: TurnObjective[];
   plannedWork: Array<{ id: string; kind: string; targets: string[]; status: string }>;
   canonical: Array<{ path: string; content: string }>;
@@ -105,6 +110,7 @@ export async function prepareTurnFulfillment(job: JobStartResult,
   if (!arch.plan || arch.plan.version !== input.planVersion ||
       JSON.stringify(arch.plan.contract) !== JSON.stringify(input.contract))
     throw new Error("Approved generation plan differs from the final Story scope.");
+  assertTurnDeliveryHistory(turn.contract, arch.plan.contract, arch.history);
   const scopeReview = await readFile(join(job.stateDir, "narrative-review.json"), "utf8");
   const inspected = await inspectRecoveryCheckpoints(job);
   if (inspected.some(p => !p.eligible || !p.assurance))
@@ -129,8 +135,10 @@ export async function prepareTurnFulfillment(job: JobStartResult,
   });
   if (Buffer.byteLength(JSON.stringify(canonical)) > MAX_CONTEXT)
     throw new Error("Plan-level Story context exceeds the bounded reviewer budget; require a scoped plan.");
+  const criteria = deliveryCriteria(turn.kind, turn.contract);
   const objectives: TurnObjective[] = [
     { id: "goal", text: turn.goal },
+    ...criteria.objectives,
     ...turn.contract.constraints.map((text, i) => ({ id: "constraint:" + i, text })),
     ...turn.contract.envelope.hardLimits.map((text, i) => ({ id: "hard-limit:" + i, text })),
     { id: "presentation", text: turn.contract.envelope.presentation },
@@ -151,7 +159,8 @@ export async function prepareTurnFulfillment(job: JobStartResult,
     turnDigest: turn.digest, planVersion: arch.plan.version, planDigest: hash(arch.plan),
     scopeReviewDigest: hash(scopeReview), checkpoints };
   const body = { policy: "turn-completeness/v1" as const, source, goal: turn.goal,
-    originalRequest: turn.originalRequest, contract: turn.contract, objectives,
+    originalRequest: turn.originalRequest, contract: turn.contract,
+    approvedContract: arch.plan.contract, criteria, objectives,
     plannedWork: arch.plan.items.map(i => ({ id: i.id, kind: i.kind,
       targets: i.targetIds, status: i.status })), canonical };
   return { ...body, digest: hash(body) };
@@ -166,16 +175,37 @@ export function validateTurnFulfillment(packet: TurnFulfillmentPacket,
   const assignmentIds = new Set(packet.objectives.filter(o => o.id.startsWith("assignment:"))
     .map(o => o.id.slice("assignment:".length)));
   const allowedTargets = new Set(packet.plannedWork.flatMap(p => p.targets));
-  const pathLines = new Map(packet.canonical.map(c => [c.path, c.content.split("\n").length]));
-  if (!v || v.digest !== packet.digest || !["complete", "incomplete"].includes(v.verdict) ||
+  const pathLines = new Map(packet.canonical.map(c => [c.path, c.content.split("\n")]));
+  const expectedCriteria = deliveryCriteria(packet.criteria.breadth === "whole-story" ? "full-story" : "revision",
+    packet.contract);
+  const witnessRoot: Record<string, string[]> = {
+    "delivery:architecture": ["arcs/", "milestones/"],
+    "delivery:interactive": ["events/", "choice-points/", "puzzles/"],
+    "delivery:composition": ["authored-content/"],
+    "delivery:complete-story": ["authored-content/"],
+    "delivery:payoff": ["authored-content/"],
+  };
+  const expectedIds = expectedCriteria.objectives.map(o => o.id);
+  const packetObjectives = new Map(packet.objectives.map(o => [o.id, o.text]));
+  if (JSON.stringify(packet.criteria) !== JSON.stringify(expectedCriteria) ||
+      expectedIds.some(id => packetObjectives.get(id) !== expectedCriteria.objectives.find(o => o.id === id)?.text) ||
+      packetObjectives.size !== packet.objectives.length ||
+      !v || v.digest !== packet.digest || !["complete", "incomplete"].includes(v.verdict) ||
       !Array.isArray(v.checks) || !Array.isArray(v.findings) ||
       v.checks.length !== objectives.size ||
       new Set(v.checks.map(c => c.objectiveId)).size !== objectives.size ||
       v.checks.some(c => !objectives.has(c.objectiveId) || typeof c.fulfilled !== "boolean" ||
         !Array.isArray(c.evidence) || c.evidence.some(e =>
           !pathLines.has(e.path) || !Number.isSafeInteger(e.line) || e.line < 1 ||
-          e.line > pathLines.get(e.path)! || !e.explanation?.trim()) ||
-        (c.fulfilled && !c.evidence.length)) ||
+          e.line > pathLines.get(e.path)!.length || !pathLines.get(e.path)![e.line - 1]?.trim() ||
+          !e.explanation?.trim()) ||
+        (c.fulfilled && (!c.evidence.length ||
+          (c.objectiveId.startsWith("delivery:branch:") &&
+            !c.evidence.some(e => (packet.criteria.depth === "architecture"
+              ? ["arcs/", "milestones/"] : ["events/", "choice-points/", "puzzles/"])
+              .some(p => e.path.startsWith(p)))) ||
+          (witnessRoot[c.objectiveId] &&
+            !c.evidence.some(e => witnessRoot[c.objectiveId]!.some(p => e.path.startsWith(p))))))) ||
       v.findings.some(f => !objectives.has(f.objectiveId) || !f.message?.trim() ||
         (f.followUp !== null && (!f.followUp ||
           !assignmentIds.has(f.followUp.assignmentId) || !f.followUp.outcome?.trim() ||

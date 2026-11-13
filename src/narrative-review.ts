@@ -13,7 +13,8 @@ import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./sn
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
-import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
+import { assertTurnDeliveryHistory } from "./turn-delivery.js";
 import { steeringForAssignment } from "./steering-amendments.js";
 import type { PlanHistoryStep } from "./plan-continuity.js";
 import { deferredCompletionObligations } from "./ideas.js";
@@ -412,7 +413,12 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
       throw new Error("Narrative review requires a committed, versioned scope plan.");
     verifyPlanHistory(job, arch);
     const plan = arch.plan;
-    const turnEvidence = await readTurnEvidence(job, plan.contract, undefined, input.turnPlanDigest);
+    const savedTurnPath = join(job.stateDir, "turn-plan.json");
+    const savedTurn = existsSync(savedTurnPath)
+      ? JSON.parse(await readFile(savedTurnPath, "utf8")) as TurnEvidence : null;
+    const turnEvidence = await readTurnEvidence(job, savedTurn?.contract ?? plan.contract,
+      undefined, input.turnPlanDigest);
+    if (turnEvidence) assertTurnDeliveryHistory(turnEvidence.contract, plan.contract, arch.history);
     const withTurnAssignments = async (audit: ScopeAudit, headSha: string): Promise<ScopeAudit> => {
       if (turnEvidence) {
         audit.assignment.turnGoal = turnEvidence.goal;

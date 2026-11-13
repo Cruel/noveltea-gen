@@ -4,10 +4,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JobStartResult } from "../src/job.js";
+import { deliveryCriteria } from "../src/turn-delivery.js";
 import { readTurnFulfillment, validateTurnFulfillment, type TurnFulfillmentPacket,
   type TurnFulfillmentVerdict } from "../src/turn-fulfillment.js";
 
 const a = "a".repeat(40), b = "b".repeat(40), h = "c".repeat(64);
+const contract = { scope: { kind: "partial" as const, depth: "composition" as const,
+  targets: ["milestone.reveal", "milestone.choice"], branches: ["confess", "hide"] },
+  constraints: ["The witness chooses whether to confess"],
+  envelope: { presentation: "Dialogue-led mystery", hardLimits: [], preferences: [] } };
+const criteria = deliveryCriteria("revision", contract);
 const makePacket = (): TurnFulfillmentPacket => ({
   policy: "turn-completeness/v1",
   source: { jobId: "child", baseSha: a, headSha: b, turnDigest: h,
@@ -16,11 +22,9 @@ const makePacket = (): TurnFulfillmentPacket => ({
       review: "passed", assignmentDigest: "0".repeat(64) }] },
   originalRequest: "A mystery with a witness reveal AND a meaningful branch choice",
   goal: "A mystery with a witness reveal AND a meaningful branch choice",
-  contract: { scope: { kind: "partial", depth: "composition",
-    targets: ["milestone.reveal", "milestone.choice"], branches: ["confess", "hide"] },
-    constraints: ["The witness chooses whether to confess"],
-    envelope: { presentation: "Dialogue-led mystery", hardLimits: [], preferences: [] } },
+  contract, approvedContract: contract, criteria,
   objectives: [
+    ...criteria.objectives,
     { id: "goal", text: "A mystery with a witness reveal AND a meaningful branch choice" },
     { id: "constraint:0", text: "The witness chooses whether to confess" },
     { id: "presentation", text: "Dialogue-led mystery" },
@@ -31,13 +35,23 @@ const makePacket = (): TurnFulfillmentPacket => ({
     { id: "event:milestone.reveal", kind: "realization", targets: ["milestone.reveal"], status: "verified" },
     { id: "interactive:milestone.choice", kind: "realization", targets: ["milestone.choice"], status: "verified" },
   ],
-  canonical: [{ path: "events/reveal.md", content: "Reveal\nThe witness confesses." }],
+  canonical: [
+    { path: "arcs/archive.md", content: "Arc\nThe witness controls the archive." },
+    { path: "milestones/reveal.md", content: "Milestone\nThe truth is uncovered." },
+    { path: "events/reveal.md", content: "Reveal\nThe witness confesses." },
+    { path: "authored-content/reveal.md", content: "Scene\nThe witness faces the player." },
+  ],
   digest: h,
 });
 const evidence = () => [{ path: "events/reveal.md", line: 2, explanation: "Witness confession in canon." }];
 const complete = (packet: TurnFulfillmentPacket): TurnFulfillmentVerdict => ({
   digest: packet.digest, verdict: "complete",
-  checks: packet.objectives.map(o => ({ objectiveId: o.id, fulfilled: true, evidence: evidence() })),
+  checks: packet.objectives.map(o => ({ objectiveId: o.id, fulfilled: true,
+    evidence: o.id === "delivery:architecture"
+      ? [{ path: "milestones/reveal.md", line: 2, explanation: "Connected narrative Milestone." }]
+      : ["delivery:composition", "delivery:complete-story", "delivery:payoff"].includes(o.id)
+        ? [{ path: "authored-content/reveal.md", line: 2, explanation: "Player-facing scene." }]
+        : evidence() })),
   findings: [],
 });
 const missed = (packet: TurnFulfillmentPacket): TurnFulfillmentVerdict => ({
@@ -90,6 +104,51 @@ test("unapproved follow-up scope, forged file witnesses and stale input are reje
     ...complete(packet), checks: complete(packet).checks.map(c => ({
       ...c, evidence: [{ path: "events/reveal.md", line: 900, explanation: "Nonexistent line" }] })),
   }), /unsupported|stale/);
+});
+
+test("a complete verdict cannot substitute unrelated metadata or empty lines for delivery evidence", () => {
+  const packet = makePacket();
+  const completeVerdict = complete(packet);
+  const replace = (id: string, path: string, line: number) => ({
+    ...completeVerdict,
+    checks: completeVerdict.checks.map(c => c.objectiveId === id ? {
+      ...c, evidence: [{ path, line, explanation: "This is the delivery proof." }],
+    } : c),
+  });
+  assert.throws(() => validateTurnFulfillment(packet,
+    replace("delivery:architecture", "authored-content/reveal.md", 2)), /unsupported|stale/);
+  assert.throws(() => validateTurnFulfillment(packet,
+    replace("delivery:interactive", "arcs/archive.md", 2)), /unsupported|stale/);
+  assert.throws(() => validateTurnFulfillment(packet,
+    replace("delivery:composition", "milestones/reveal.md", 2)), /unsupported|stale/);
+  assert.throws(() => validateTurnFulfillment(packet,
+    replace("delivery:branch:0", "authored-content/reveal.md", 2)), /unsupported|stale/);
+  assert.throws(() => validateTurnFulfillment(packet,
+    replace("delivery:composition", "authored-content/reveal.md", 9)), /unsupported|stale/);
+  const blankProse = { ...packet, canonical: packet.canonical.map(c =>
+    c.path === "authored-content/reveal.md" ? { ...c, content: "Scene\\n\\nThe witness faces the player." } : c) };
+  assert.throws(() => validateTurnFulfillment(blankProse, completeVerdict), /unsupported|stale/);
+  assert.throws(() => validateTurnFulfillment(packet, {
+    ...completeVerdict,
+    checks: completeVerdict.checks.filter(c => c.objectiveId !== "delivery:interactive"),
+  }), /unsupported|stale/);
+  assert.throws(() => validateTurnFulfillment({
+    ...packet, criteria: { ...packet.criteria, depth: "architecture" },
+  }, completeVerdict), /unsupported|stale/);
+});
+
+test("an outlined branch has Arc/Milestone evidence without requiring an Event witness", () => {
+  const packet = makePacket();
+  const outlineContract = { ...contract, scope: { ...contract.scope, depth: "architecture" as const } };
+  const outlineCriteria = deliveryCriteria("revision", outlineContract);
+  const outline = { ...packet, contract: outlineContract, approvedContract: outlineContract,
+    criteria: outlineCriteria, objectives: [...outlineCriteria.objectives,
+      ...packet.objectives.filter(o => !o.id.startsWith("delivery:"))] };
+  const verdict = complete(outline);
+  verdict.checks = verdict.checks.map(c => c.objectiveId.startsWith("delivery:branch:")
+    ? { ...c, evidence: [{ path: "milestones/reveal.md", line: 2, explanation: "Branch payoff is outlined." }] }
+    : c);
+  assert.equal(validateTurnFulfillment(outline, verdict).verdict, "complete");
 });
 
 test("final plan-level receipt survives restart; altered source, policy or reviewer status fail closed", async () => {
