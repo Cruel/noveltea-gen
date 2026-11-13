@@ -10,7 +10,7 @@ import { createUserPiRuntime, assertUserPiSelection, validPiSelection, type PiSe
 import { createSkillSnapshot, openSkillSnapshot } from '../../../src/snapshot'
 import { candidate, validateNewStory } from './story-foundation.server'
 import { parseGenerationContract } from '../../../src/generation'
-import { continueApprovedStoryChat, type ContinuationStatus } from './story-approved-continuation.server'
+import { continueApprovedStoryChat, type ContinuationStatus, type ProviderJobGateways } from './story-approved-continuation.server'
 
 type Turn = { role: 'user' | 'assistant'; text: string }
 type Foundation = {
@@ -205,7 +205,7 @@ async function input(request: Request): Promise<Record<string, unknown>> {
 }
 export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabase,
   request: Request, baseURL: string, infer?: DiscoveryInference,
-  chat?: ChatDiscoveryBinding): Promise<Response> {
+  chat?: ChatDiscoveryBinding, gateways: ProviderJobGateways = {}): Promise<Response> {
   if (!['GET', 'POST'].includes(request.method)) return reply({ error: 'Method not allowed' }, 405)
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
     return reply({ error: 'Cross-origin write refused' }, 403)
@@ -288,7 +288,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         request.headers, baseURL, {
           chat, digest: approved.digest!, skillId: approved.skillId,
           model: approved.model, foundation: approved.proposal!.foundation,
-        }) : undefined
+        }, gateways) : undefined
       return reply({ session: scope(approved), continuation: handoff })
     }
     if (action === 'continue') {
@@ -298,7 +298,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const handoff = await continueApprovedStoryChat(auth, store, request.headers, baseURL, {
         chat, digest: saved.digest!, skillId: saved.skillId,
         model: saved.model, foundation: saved.proposal!.foundation,
-      })
+      }, gateways)
       return reply({ session: scope(saved), continuation: handoff })
     }
     if (!['start', 'answer', 'revise', 'retry'].includes(String(action))) throw new DiscoveryError(400, 'Invalid discovery action')

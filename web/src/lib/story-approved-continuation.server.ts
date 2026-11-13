@@ -33,7 +33,7 @@ export type ApprovedChatContinuation = {
 
 export type ContinuationStatus = { state: 'queued' | 'pending' | 'blocked' | 'completed'
   message?: string }
-type ProviderJobGateways = {
+export type ProviderJobGateways = {
   github?: typeof githubJobRequest
   gitlab?: typeof gitlabJobRequest
 }

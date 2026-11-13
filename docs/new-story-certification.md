@@ -117,6 +117,40 @@ a paused Job, failed/uncertain literary quality, unsupported paths/lines,
 missing real model method reads, insufficient player-facing work, or an
 unverified recovery. The command exits nonzero when blocked.
 
+## Unified opt-in Studio E2E runner
+
+The two opt-in tests share **one** Studio live runner:
+`web/test/real-pi-studio-scenario.ts`. This owns the disposable Studio database,
+authenticated user, source Git repository, independent trusted agent, rootless
+Docker sandbox, native CLI, worker cleanup and Pi credential isolation. The
+full-Story mode adds only Story Chat discovery, approval, continuation and
+completion assertions in `web/test/support/full-story-case.ts`. It does not
+start or require another Docker Compose stack. The existing Foundation smoke
+mode is unchanged and does **not** implicitly run the long full-Story test.
+
+To run one mode explicitly, with a previously authorized Pi login:
+
+```sh
+NT_TEST_WEB_PI_NEW_STORY=1 NT_TEST_WEB_PI_STORY_MODE=autonomous \
+  NT_TEST_WEB_PI_AUTH=device-code NT_TEST_WEB_PI_LOCAL_OAUTH=1 \
+  NT_TEST_WEB_PI_PROVIDER=openai NT_TEST_WEB_PI_MODEL=gpt-6-luna \
+  NT_NATIVE_CLI="$HOME/dev/nt/build/cli/linux/noveltea" \
+  NT_STUDIO_SKILLS_SOURCE="$HOME/dev/noveltea-skills" \
+  pnpm --filter @noveltea/studio exec tsx --test test/real-pi-new-story-certification.test.ts
+```
+
+Repeat with `NT_TEST_WEB_PI_STORY_MODE=collaborative` against a separate
+fresh Job. `NT_TEST_WEB_PI_PRESERVE=1` saves private evidence in a disposable
+`/tmp/nt158-*` location, rather than exposing transcripts in Git. The
+isolated local-OAuth helper copies an unexpired **access token only** from the
+existing Pi login; it never copies the usable refresh token into Studio.
+Alternatively the existing live runner accepts the read-only Studio OAuth
+source database or an explicit provider API key. No real provider calls run
+without an opt-in flag. The provider acquisition check uses an existing local
+verified Git worktree instead of a remote GitHub API, which must be certified
+separately. A passing E2E run does **not** replace the separate external
+quality and recovery audit below.
+
 ## Automation and current evidence
 
 Controller and safety checks (no real provider requests):

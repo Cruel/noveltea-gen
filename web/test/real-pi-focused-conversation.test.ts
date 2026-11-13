@@ -4,7 +4,7 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer as createNetServer } from 'node:net'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
@@ -38,24 +38,13 @@ import { inspectSpecialistChoice } from '../../src/specialist-choice'
 import { openStudioDatabase, migrateStudio } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
+import { localPiOAuth } from './support/local-pi-oauth'
 
 const dependencyTest = process.env.NT_TEST_WEB_PI_DEPENDENCY === '1'
 const collaborativeTest = process.env.NT_TEST_WEB_PI_COLLABORATIVE === '1'
 const enabled = process.env.NT_TEST_WEB_PI_FOCUSED === '1' || dependencyTest || collaborativeTest
 const subscription = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
 const isolatedLocalOAuth = process.env.NT_TEST_WEB_PI_LOCAL_OAUTH === '1'
-/** Opt-in local certification only: borrow an unexpired access token in memory.
- * Never copy or refresh the user's durable Pi refresh token. */
-function localOAuth(provider: string) {
-  const credentials = JSON.parse(readFileSync(join(homedir(), '.pi/agent/auth.json'), 'utf8')) as
-    Record<string, { type: string; access?: string; expires?: number; refresh?: string }>
-  const selected = credentials[provider]
-  if (selected?.type !== 'oauth' || !selected.access || !selected.expires ||
-      selected.expires - Date.now() < 5 * 60_000)
-    throw Error('An unexpired local Pi OAuth access token is required; do not refresh it in this certification.')
-  return { type: 'oauth' as const, access: selected.access, expires: selected.expires,
-    refresh: 'certification-refresh-disabled-' + randomBytes(24).toString('hex') }
-}
 const config = { baseURL: 'http://localhost:3000',
   secret: 'live-focused-credential-isolation-test-secret-abcdefg',
   github: { clientId: 'test', clientSecret: 'test' },
@@ -80,7 +69,7 @@ test('opt-in live Pi: authenticated focused creation, dependency repair, or coll
   }).trim(), '2/systemd')
   // Reuse the certified read-only token copy. Its real refresh token is never
   // copied, logged, changed, or used by the disposable test Studio instance.
-  const oauth = subscription ? isolatedLocalOAuth ? localOAuth(process.env.NT_TEST_WEB_PI_PROVIDER!) :
+  const oauth = subscription ? isolatedLocalOAuth ? localPiOAuth(process.env.NT_TEST_WEB_PI_PROVIDER!) :
     await readIsolatedStudioOAuth(process.env.NT_TEST_WEB_PI_SOURCE_DB!, process.env.NT_PI_CREDENTIAL_KEY!,
       process.env.NT_TEST_WEB_PI_SOURCE_USER_ID, process.env.NT_TEST_WEB_PI_PROVIDER!) : null
 
