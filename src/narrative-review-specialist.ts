@@ -15,7 +15,7 @@ import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import type { SkillConfig } from "./skills.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignment-review.js";
-import { validateSemanticVerdict } from "./semantic-assignment-review.js";
+import { normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict } from "./semantic-assignment-review.js";
 import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfillment.js";
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
 
@@ -361,7 +361,8 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
         "No prose outside JSON, no invented path or revision, no write tools.");
       const corrected = parseSpecialistJson(lastReply(session));
       const preserved = initial ? assertSemanticCorrectionPreserved(initial, corrected) : corrected;
-      verdict = validateSemanticVerdict(packet, preserved);
+      verdict = validateSemanticVerdict(packet,
+        normalizeOmittedSemanticEvidenceSha(packet, preserved));
     }
     await context!.completed(file!, session.sessionId);
     return verdict;

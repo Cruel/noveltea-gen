@@ -143,6 +143,41 @@ export async function prepareSemanticReview(job: JobStartResult,
   return { policy: "assignment-fidelity/v1", sourceDigest: packetDigest(items), items };
 }
 
+/** Correct only an unambiguous 1–2-character omission in a PASS review's
+ * evidence SHA after the read-only Pi correction turn. The reviewer must have
+ * supplied the assignment, actual changed path, valid line and explanation.
+ * Never replace a full-length (possibly stale/foreign) SHA, infer a missing
+ * citation, repair a negative finding, or bypass validateSemanticVerdict. */
+export function normalizeOmittedSemanticEvidenceSha(packet: SemanticReviewPacket,
+  raw: unknown): unknown {
+  const value = raw as Partial<SemanticVerdict> | null;
+  if (!value || value.sourceDigest !== packet.sourceDigest || value.verdict !== "pass" ||
+      !Array.isArray(value.findings) || value.findings.length !== 0 ||
+      !Array.isArray(value.evidence)) return raw;
+  let fixed = false;
+  const evidence = value.evidence.map(entry => {
+    if (!entry || typeof entry.commitSha !== "string" ||
+        !/^[a-f0-9]{38,39}$/.test(entry.commitSha) ||
+        typeof entry.assignmentId !== "string" || typeof entry.path !== "string" ||
+        !Number.isSafeInteger(entry.line) || entry.line < 1) return entry;
+    const candidates = packet.items.filter(item => {
+      if (item.assignment.id !== entry.assignmentId ||
+          !item.assurance.changedPaths.includes(entry.path) ||
+          !item.canonicalContext.some(c => c.path === entry.path &&
+            entry.line <= c.content.split("\n").length)) return false;
+      const expected = item.assurance.commitSha;
+      if (!/^[a-f0-9]{40}$/.test(expected)) return false;
+      let index = 0;
+      for (const char of expected) if (entry.commitSha[index] === char) index++;
+      return index === entry.commitSha.length;
+    });
+    if (candidates.length !== 1) return entry;
+    fixed = true;
+    return { ...entry, commitSha: candidates[0]!.assurance.commitSha };
+  });
+  return fixed ? { ...value, evidence } : raw;
+}
+
 export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unknown): SemanticVerdict {
   const verdict = raw as SemanticVerdict;
   if (!verdict || verdict.sourceDigest !== packet.sourceDigest ||

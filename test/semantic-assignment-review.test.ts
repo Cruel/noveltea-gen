@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateSemanticVerdict, semanticUnitOutcome,
+import { normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict, semanticUnitOutcome,
   type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 import { assertSemanticCorrectionPreserved } from "../src/narrative-review-specialist.js";
 
@@ -75,6 +75,37 @@ test("source correction preserves the original negative finding despite model pa
     findings: [{ ...corrected.findings[0]!, kind: "other" }] }), /cannot change/);
   assert.throws(() => assertSemanticCorrectionPreserved(original, { ...corrected,
     findings: [{ ...corrected.findings[0]!, path: "events/another.md" }] }), /cannot change/);
+});
+
+test("saved #158 reviewer SHA-omission can be corrected without generating evidence", () => {
+  const packet = makePacket();
+  // The live Character review's fourth citation omitted two hex characters.
+  const trusted = "a52b9edf58b61e677bd51c829e310121f3f3b661";
+  const omitted = "a52b9edf58b61e677bd51c829e310121f3b661";
+  packet.items[0]!.assurance.commitSha = trusted;
+  const input = { sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+    evidence: [evidence("focus:character.nia", "characters/nia.md", omitted)] };
+  assert.throws(() => validateSemanticVerdict(packet, input), /source-linked/);
+  const repaired = normalizeOmittedSemanticEvidenceSha(packet, input) as typeof input;
+  assert.equal(repaired.evidence[0]!.commitSha, trusted);
+  assert.equal(repaired.evidence[0]!.explanation, input.evidence[0]!.explanation);
+  assert.equal(validateSemanticVerdict(packet, repaired).verdict, "pass");
+  for (const invalid of [
+    { ...input, evidence: [] },
+    { ...input, sourceDigest: "stale" },
+    { ...input, evidence: [evidence("focus:character.nia", "characters/nia.md", "f".repeat(40))] },
+    { ...input, evidence: [evidence("focus:character.nia", "characters/nia.md", "f".repeat(38))] },
+    { ...input, evidence: [evidence("foreign-assignment", "characters/nia.md", omitted)] },
+    { ...input, evidence: [evidence("focus:character.nia", "characters/foreign.md", omitted)] },
+    { ...input, evidence: [{ ...input.evidence[0]!, line: 900 }] },
+  ]) {
+    assert.throws(() => validateSemanticVerdict(packet,
+      normalizeOmittedSemanticEvidenceSha(packet, invalid)), /source-linked|stale/);
+  }
+  const negative = { ...input, verdict: "fail", findings: [
+    finding("focus:character.nia", "characters/nia.md", "missing-requirement", trusted)] };
+  assert.strictEqual(normalizeOmittedSemanticEvidenceSha(packet, negative), negative,
+    "Negative reviews and their source links must never be rewritten");
 });
 
 test("faithful single assignment passes with exact source-linked evidence", () => {
