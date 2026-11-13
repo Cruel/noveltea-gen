@@ -1910,6 +1910,10 @@ native validation, while independent narrative review receives each specialist
 outcome in addition to the top-level author goal. Legacy direct CLI generation
 without a per-Turn receipt retains its independent explicit-contract checks.
 
+For exact-commit causal review context, the distinction between reviewed changes
+and writable repair targets, and the saved Collaborative failure replay, see
+[Source-bound assignment review (#161)](docs/semantic-review-source.md).
+
 ### Unified Author Choices (#114)
 
 Character, World, and Event specialists share one bounded, durable author-choice

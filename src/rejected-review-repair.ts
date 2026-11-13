@@ -229,7 +229,7 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
     sourceReviewDigest: sourceOf(failure), originalReviewDigest: rootReview,
     originalSource: rootSource, source: failure.source,
     findings: structuredClone(failure.findings), planAmendment, assignment,
-    allowedPaths: [...point.assurance!.changedPaths], origin,
+    allowedPaths: [...planAmendment.assignment.authority.existingPaths], origin,
     sessionSha256: hash(await readFile(origin.sessionFile)),
     phase: "ready", attempts: previous?.attempts ?? 0, baselineHead: head,
     ...(previous?.revision ? { revision: previous.revision } : {}),
@@ -284,9 +284,10 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
     planVersion: current.planVersion ?? turn.version,
     originWorkItem: origin.workItem });
   if (JSON.stringify(state.origin) !== JSON.stringify(origin) ||
+      JSON.stringify(state.findings) !== JSON.stringify(sealed.findings) ||
       JSON.stringify(state.planAmendment) !== JSON.stringify(expectedAmendment) ||
       JSON.stringify([...state.allowedPaths].sort()) !==
-      JSON.stringify([...current.assurance!.changedPaths].sort()))
+      JSON.stringify([...expectedAmendment.assignment.authority.existingPaths].sort()))
     throw Error("Review repair plan amendment is stale, widened or differs from sealed findings.");
   if (state.repairedCommitSha) {
     const proof = await readRepairCommitProof(job, "repair-" + sha);
@@ -321,7 +322,7 @@ export function repairFeedback(state: RepairReceipt) {
     source: state.source, reviewDigest: state.sourceReviewDigest,
     assignment: state.revision?.assignment ?? state.assignment,
     findings: state.findings, amendment: state.planAmendment,
-    allowedPaths: state.allowedPaths,
+    allowedPaths: state.planAmendment?.assignment.authority.existingPaths ?? state.allowedPaths,
     attempt: state.attempts + 1, maxAttempts: MAX_ATTEMPTS,
   };
 }

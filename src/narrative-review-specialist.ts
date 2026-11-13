@@ -324,8 +324,13 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       "edit required in requiredCorrection (never just 'retry'), and affectedPaths as an " +
       "array of real canonical record paths from this exact packet's canonicalContext, " +
       "including the changed path. Cite the changed path and its real line in path/line. " +
-      "A related World/Event/Character source may explain the defect but does not grant " +
-      "the writer authority over it. The controller decides ownership and scope. " +
+      "Each canonicalContext record is pinned by commitSha and blobSha. Use only that " +
+      "sealed content for citations, never a newer worktree read. assurance.changedPaths " +
+      "are the reviewed changes; readOnlyPaths are supporting context (including any " +
+      "protected changed metadata); repairTargets are only a ceiling for later controller " +
+      "authorization, not a grant. A related World/Event/Character source may explain " +
+      "the defect but never grants its writer authority. If correction requires a " +
+      "protected or other-owner edit, retain the finding for escalation. " +
       "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. " +
       "Your JSON sourceDigest MUST be copied EXACTLY as " + packet.sourceDigest +
       " (do not recalculate it, shorten it, or copy a similar nearby hash). " +

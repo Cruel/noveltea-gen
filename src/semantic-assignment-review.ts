@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { loadSealedReviewContext, type SealedReviewRecord } from "./sealed-review-context.js";
+import { reviewRepairTargets } from "./review-repair-amendment.js";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
@@ -13,7 +15,6 @@ const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const MAX_ITEMS = 8;
 const MAX_DIFF_BYTES = 128 * 1024;
 const MAX_CONTEXT_BYTES = 128 * 1024;
-const MAX_PATHS = 32;
 
 export interface SemanticReviewItem {
   assignment: TurnAssignmentEvidence;
@@ -22,7 +23,12 @@ export interface SemanticReviewItem {
   unitOutcome: string;
   assurance: CheckpointAssurance;
   diff: string;
-  canonicalContext: Array<{ path: string; content: string }>;
+  /** Changed records are assurance.changedPaths; context membership NEVER grants writes. */
+  canonicalContext: SealedReviewRecord[];
+  /** Read-only sources include protected changed records which repair cannot edit. */
+  readOnlyPaths: string[];
+  /** Ceiling only: the repair controller must still authorize an amendment. */
+  repairTargets: string[];
 }
 export interface SemanticReviewPacket {
   policy: "assignment-fidelity/v1";
@@ -108,27 +114,22 @@ export async function prepareSemanticReview(job: JobStartResult,
         hash(git(job, "diff", "--binary", "--no-ext-diff", point.parentSha, point.commitSha)) !== assurance.diffDigest)
       throw new Error("Reviewer Git diff differs from the validated source.");
     const dependencies = plan.assignments.filter(a => assignment.dependsOn.includes(a.id));
-    const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths,
-      ...dependencies.flatMap(a => a.authority.existingPaths)])];
-    if (paths.length > MAX_PATHS) throw new Error("Reviewer context exceeds bounded path count.");
-    const canonicalContext = paths.map(path => {
-      if (!/^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/.test(path))
-        throw new Error("Reviewer context contains an unsafe Story path.");
-      let content: string;
-      try { content = git(job, "show", point.commitSha + ":" + prefix + path); }
-      catch {
-        // A missing record is valid for an authorized creation. A missing
-        // previously owned record is not permission to silently omit context.
-        if (assurance.changedPaths.includes(path) && assignment.authority.mayCreate)
-          content = "[Record absent at this checkpoint]";
-        else throw new Error("Pinned canonical review context is missing: " + path);
-      }
-      return { path, content };
+    // Creation-stage dependency assignments have no existingPaths. Their
+    // verified committed outputs are causal context too, never new grants.
+    const dependencyPaths = saved.filter(p => p.assurance?.turnDigest === plan.digest &&
+      dependencies.some(a => a.id === p.assurance?.assignmentId)).flatMap(p => {
+      try { git(job, "merge-base", "--is-ancestor", p.commitSha, point.commitSha); }
+      catch { return []; }
+      return p.assurance!.changedPaths;
     });
-    if (Buffer.byteLength(JSON.stringify(canonicalContext)) > MAX_CONTEXT_BYTES)
-      throw new Error("Reviewer canonical context exceeds bounded size.");
+    const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths,
+      ...dependencies.flatMap(a => a.authority.existingPaths), ...dependencyPaths])];
+    const canonicalContext = await loadSealedReviewContext(job, point.commitSha, paths);
+    const repairTargets = reviewRepairTargets(assurance.changedPaths, point.workItem);
+    const readOnlyPaths = canonicalContext.map(c => c.path).filter(p => !repairTargets.includes(p));
     items.push({ assignment, reviewedWorkItem: point.workItem,
-      unitOutcome: semanticUnitOutcome(point.workItem), assurance, diff, canonicalContext });
+      unitOutcome: semanticUnitOutcome(point.workItem), assurance, diff, canonicalContext,
+      readOnlyPaths, repairTargets });
   }
   // Group only commits on a single ancestry chain. Unrelated branches and
   // unrelated assignment batches are never silently combined.

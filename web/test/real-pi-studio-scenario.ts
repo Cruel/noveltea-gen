@@ -166,7 +166,7 @@ test(fullStory
         new Date().toISOString())
     }
     const headers = new Headers({ cookie, origin: config.baseURL })
-    const creativeMode = process.env.NT_TEST_WEB_PI_STORY_MODE === 'collaborative'
+    const creativeMode: 'autonomous' | 'collaborative' = process.env.NT_TEST_WEB_PI_STORY_MODE === 'collaborative'
       ? 'collaborative' : 'autonomous'
     const chatCase = { auth, store, headers, baseURL: config.baseURL,
       ownerId: user.id, storyId, jobId, repositoryId, sourceSha: commit, mode: creativeMode }

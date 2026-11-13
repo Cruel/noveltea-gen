@@ -36,6 +36,17 @@ export interface ReviewRepairPlanAmendment {
   digest: string;
 }
 
+/** A review may name every changed file, but protected supporting metadata
+ * is not an automatic repair target. An empty ceiling requires escalation. */
+export function reviewRepairTargets(changedPaths: string[], originWorkItem: string): string[] {
+  const paths = changedPaths.filter(path =>
+    !(originWorkItem.startsWith("event-") && path.startsWith("milestones/"))).sort();
+  if (paths.some(path => !canonicalPath.test(path) ||
+      (path.startsWith("creative-direction/") && originWorkItem !== "foundation") ||
+      /^(?:arcs|milestones|narrative-positions)\//.test(path))) return [];
+  return paths;
+}
+
 export function deriveReviewRepairAmendment(input: {
   assurance: CheckpointAssurance;
   review: IndependentReviewResult;
@@ -52,8 +63,7 @@ export function deriveReviewRepairAmendment(input: {
   // metadata in its *already validated* commit. That is read-only context for
   // any correction, never new repair authority. A finding ON that Milestone
   // still escalates rather than creating a protected-path repair grant.
-  const paths = assurance.changedPaths.filter(path =>
-    !(originWorkItem.startsWith("event-") && path.startsWith("milestones/"))).sort();
+  const paths = reviewRepairTargets(assurance.changedPaths, originWorkItem);
   const owned = new Set([...original.authority.existingPaths, ...original.authority.newPaths ?? []]);
   if (review.status !== "failed" || !review.findings.length ||
       JSON.stringify(source) !== JSON.stringify(review.source) ||

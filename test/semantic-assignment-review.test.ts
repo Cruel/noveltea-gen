@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict, semanticUnitOutcome,
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, unlinkSync,
+  readFileSync, readdirSync, cpSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { removeTestTree } from "./helpers.js";
+import { loadSealedReviewContext } from "../src/sealed-review-context.js";
+import type { JobStartResult } from "../src/job.js";
+import { createHash } from "node:crypto";
+import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { readIndependentReview } from "../src/checkpoint-assurance.js";
+import { deriveReviewRepairAmendment } from "../src/review-repair-amendment.js";
+import { prepareSemanticReview, reviewBoundedAssignments,
+  normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict, semanticUnitOutcome,
   type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 import { assertSemanticCorrectionPreserved } from "../src/narrative-review-specialist.js";
 
@@ -18,7 +31,8 @@ const makePacket = (group = false): SemanticReviewPacket => {
       addedLines: 1, removedLines: 0, diffDigest: "f".repeat(64),
       reviewSelection: { status: "required-pending" as const, reasons: ["large-diff"] } },
     diff: "diff --git a/" + path + " b/" + path,
-    canonicalContext: [{ path, content: "# Nia\nNia waits." }],
+    canonicalContext: [{ path, content: "# Nia\nNia waits.", commitSha: sha, blobSha: "a".repeat(40) }],
+    readOnlyPaths: [], repairTargets: [path],
   });
   return { policy: "assignment-fidelity/v1", sourceDigest: "source",
     items: [item("focus:character.nia", "characters/nia.md", "b".repeat(40)),
@@ -32,6 +46,144 @@ const finding = (id: string, path: string, kind: "missing-requirement" |
     message: "Required motive is missing.",
     requiredCorrection: "Write Nia's established promise as the motive for waiting.",
     affectedPaths: [path] });
+
+test("review context loads native-linked records only from the sealed Git source", async t => {
+  const root = mkdtempSync(join(tmpdir(), "nt-sealed-review-"));
+  t.after(() => removeTestTree(root));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  mkdirSync(join(root, "story/events"), { recursive: true });
+  mkdirSync(join(root, "story/characters"));
+  writeFileSync(join(root, "story/events/clue.md"), "Sealed Event.\n");
+  writeFileSync(join(root, "story/characters/witness.md"), "Sealed witness.\n");
+  mkdirSync(join(root, "story/.story-inbox/ideas"), { recursive: true });
+  writeFileSync(join(root, "story/.story-inbox/ideas/secret.md"), "Private idea.\n".repeat(12_000));
+  git("init", "-q"); git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.test"); git("add", "."); git("commit", "-qm", "source");
+  const sha = git("rev-parse", "HEAD");
+  // Fixture native boundary; the private saved-response replay separately uses the real CLI.
+  const cli = join(root, "native.cjs");
+  writeFileSync(cli, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes('--version')) { console.log('1.0.0'); process.exit(0); }
+const paths = ['events/clue.md', 'characters/witness.md'];
+console.log(JSON.stringify(args.includes('validate') ? {
+  success: true, catalog: { records: paths.map((path, i) => ({path, metadata: {id: i ? 'character.witness' : 'event.clue'}})) }
+} : {success: true, manifest: {contractRevision: 'test', files: paths.map(path => ({path, id: path,
+ sourceRevision: 'sealed', status: 'draft', priority: 'primary', inclusions: [{code: 'linked', sourceId: 'event.clue', targetId: 'character.witness'}]})),
+ unresolved: [], bounded: {truncated: false}, coverageStatus: 'complete'}}));
+`, { mode: 0o700 });
+  const prior = process.env.NT_NATIVE_CLI;
+  process.env.NT_NATIVE_CLI = cli;
+  t.after(() => { if (prior === undefined) delete process.env.NT_NATIVE_CLI; else process.env.NT_NATIVE_CLI = prior; });
+  const job = { worktreeRoot: root, storyRelativePath: "story", validatorVersion: "1.0.0" } as JobStartResult;
+  writeFileSync(join(root, "story/characters/witness.md"), "Uncommitted unrelated replacement.\n");
+  const context = await loadSealedReviewContext(job, sha, ["events/clue.md"]);
+  assert.deepEqual(context.map(c => [c.path, c.content]), [
+    ["characters/witness.md", "Sealed witness.\n"], ["events/clue.md", "Sealed Event.\n"],
+  ]);
+  assert.ok(context.every(c => c.commitSha === sha && /^[a-f0-9]{40}$/.test(c.blobSha)));
+  assert.deepEqual(await loadSealedReviewContext(job, sha, ["events/clue.md"]), context);
+  for (const path of ["../outside.md", "events/../../outside.md", ".story-inbox/ideas/secret.md",
+    "events/.hidden.md", "unknown/clue.md", "events/missing.md"]) {
+    await assert.rejects(loadSealedReviewContext(job, sha, [path]), /Unsafe|missing/);
+  }
+  await assert.rejects(loadSealedReviewContext(job, "HEAD", ["events/clue.md"]), /Unsafe/);
+  await assert.rejects(loadSealedReviewContext(job, "f".repeat(40), ["events/clue.md"]));
+  // Git stores symlinks as blobs too; a blob object alone is not safe provenance.
+  symlinkSync("../characters/witness.md", join(root, "story/events/link.md"));
+  git("add", "story"); git("commit", "-qm", "unsafe link");
+  await assert.rejects(loadSealedReviewContext(job, git("rev-parse", "HEAD"), ["events/clue.md"]), /Unsafe/);
+  unlinkSync(join(root, "story/events/link.md"));
+  writeFileSync(join(root, "story/events/huge.md"), "x".repeat(128 * 1024 + 1));
+  git("add", "story"); git("commit", "-qm", "oversized record");
+  await assert.rejects(loadSealedReviewContext(job, git("rev-parse", "HEAD"), ["events/clue.md"]), /bounded/);
+  unlinkSync(join(root, "story/events/huge.md"));
+  writeFileSync(join(root, "story/events/clue.md"), "e".repeat(70 * 1024));
+  writeFileSync(join(root, "story/characters/witness.md"), "c".repeat(70 * 1024));
+  git("add", "story"); git("commit", "-qm", "oversized combined context");
+  await assert.rejects(loadSealedReviewContext(job, git("rev-parse", "HEAD"), ["events/clue.md"]), /bounded/);
+  writeFileSync(join(root, "story/events/clue.md"), "Event.\n");
+  writeFileSync(join(root, "story/characters/witness.md"), "Witness.\n");
+  const manyPaths = Array.from({ length: 33 }, (_, i) => `events/event-${i}.md`);
+  for (const path of manyPaths) writeFileSync(join(root, "story", path), "Event.\n");
+  git("add", "story"); git("commit", "-qm", "many related records");
+  const nativeSource = readFileSync(cli, "utf8");
+  writeFileSync(cli, nativeSource.replace("['events/clue.md', 'characters/witness.md']",
+    JSON.stringify(manyPaths)));
+  await assert.rejects(loadSealedReviewContext(job, git("rev-parse", "HEAD"), [manyPaths[0]!]), /bounded/);
+  writeFileSync(cli, nativeSource.replace("truncated: false", "truncated: true"));
+  await assert.rejects(loadSealedReviewContext(job, sha, ["events/clue.md"]), /truncated/);
+  for (const invented of ["events/missing.md", "../outside.md", ".story-inbox/ideas/secret.md"]) {
+    writeFileSync(cli, nativeSource.replace("['events/clue.md', 'characters/witness.md']",
+      JSON.stringify(["events/clue.md", invented])));
+    await assert.rejects(loadSealedReviewContext(job, sha, ["events/clue.md"]));
+  }
+  writeFileSync(cli, nativeSource);
+  assert.deepEqual(await loadSealedReviewContext(job, sha, ["events/clue.md"]), context,
+    "later commits and dirty files never change an earlier packet");
+});
+
+test("saved Collaborative responses seal failed receipts with bounded repair authority", {
+  skip: !process.env.NT_TEST_SEMANTIC_REPLAY_STATE && "set NT_TEST_SEMANTIC_REPLAY_STATE to the private #161 job state directory",
+}, async t => {
+  const directory = process.env.NT_TEST_SEMANTIC_REPLAY_STATE!;
+  const job = JSON.parse(readFileSync(join(directory, "job.json"), "utf8")) as JobStartResult;
+  const sourceSha = "191e9c2a0ad1b60745f57582d625600b912e5626";
+  const sessionDir = join(directory, "review-sessions/review");
+  const messages = readdirSync(sessionDir).flatMap(file => readFileSync(join(sessionDir, file), "utf8")
+    .trim().split("\n").map(line => JSON.parse(line).message).filter(Boolean));
+  const texts = (message: { content: Array<{ type: string; text?: string }> }) =>
+    Array.isArray(message.content) ? message.content.filter(c => c.type === "text").map(c => c.text!) : [];
+  const prompt = messages.flatMap(texts).find(text => text.includes("\nREVIEW PACKET:\n") &&
+    text.includes(sourceSha))!;
+  const legacy = JSON.parse(prompt.split("\nREVIEW PACKET:\n")[1]!);
+  assert.equal(createHash("sha256").update(JSON.stringify({ policy: legacy.policy,
+    items: legacy.items })).digest("hex"), legacy.sourceDigest);
+  const responses = messages.filter(m => m.role === "assistant").flatMap(texts)
+    .filter(text => text.startsWith('{"sourceDigest"') && text.includes(sourceSha)).map(text => JSON.parse(text));
+  assert.equal(responses.length, 2);
+  for (const response of responses) {
+    assert.equal(response.sourceDigest, legacy.sourceDigest);
+    assert.throws(() => validateSemanticVerdict(legacy, response), /source-linked/);
+    const root = mkdtempSync(join(tmpdir(), "nt-review-replay-"));
+    t.after(() => removeTestTree(root));
+    const stateDir = join(root, "state");
+    cpSync(directory, stateDir, { recursive: true });
+    const replayJob = { ...job, stateDir };
+    const point = (await inspectRecoveryCheckpoints(replayJob)).find(p => p.commitSha === sourceSha)!;
+    assert.ok(point.eligible);
+    const packet = await prepareSemanticReview(replayJob, [point]);
+    assert.throws(() => validateSemanticVerdict(packet, response), /stale/);
+    // A new input packet necessarily has a new digest. Re-envelope only for
+    // this recorded-model replay; production never migrates a stale response.
+    const replay = { ...response, sourceDigest: packet.sourceDigest };
+    for (let restart = 0; restart < 2; restart++) {
+      const result = await reviewBoundedAssignments({ ...replayJob }, [point],
+        async () => replay, "recorded-independent-pi-replay", true);
+      assert.equal(result.verdict.verdict, "fail");
+      assert.deepEqual(result.verdict.findings, response.findings);
+    }
+    const receipt = await readIndependentReview({ ...replayJob }, point.assurance!);
+    assert.equal(receipt.status, "failed");
+    assert.deepEqual(JSON.parse(receipt.result!.evidence).evidence, response.evidence);
+    const amendment = deriveReviewRepairAmendment({ assurance: point.assurance!,
+      review: receipt.result!, original: packet.items[0]!.assignment,
+      planVersion: point.planVersion ?? 1, originWorkItem: point.workItem });
+    assert.deepEqual(amendment.assignment.authority.existingPaths, ["events/disappearance-explained.md"]);
+    assert.equal(amendment.assignment.specialist, "nt-event-design");
+    assert.equal(amendment.assignment.authority.mayCreate, false);
+    assert.deepEqual(amendment.obligations[0]!.affectedPaths, response.findings[0].affectedPaths);
+    assert.equal(amendment.obligations[0]!.requiredCorrection, response.findings[0].requiredCorrection);
+    assert.ok(amendment.readOnlyDependencies.includes("world-entities/stranded-overnight-train.md"));
+    assert.ok(amendment.readOnlyDependencies.includes("milestones/disappearance-explained.md"));
+    assert.deepEqual(packet.items[0]!.repairTargets, amendment.assignment.authority.existingPaths);
+    for (const change of [{ jobId: "other-job" }, { assignmentId: "other-assignment" },
+      { turnDigest: "0".repeat(64) }]) {
+      await assert.rejects(readIndependentReview(replayJob, { ...point.assurance!, ...change }), /stale/);
+    }
+    t.diagnostic(`source=${sourceSha} packet=${packet.sourceDigest} status=${receipt.status}`);
+  }
+});
 
 test("multi-unit review requires only the exact current specialist unit, not its successor", () => {
   const world = semanticUnitOutcome("world-foundations");
@@ -171,7 +323,7 @@ test("repeated assignment IDs remain distinct across group checkpoint commits", 
 test("cross-domain causal defect names real linked context but cannot invent a writable record", () => {
   const packet = makePacket();
   packet.items[0]!.canonicalContext.push({ path: "facts/promise.md",
-    content: "# Fact\nNia knows the witness made a promise." });
+    content: "# Fact\nNia knows the witness made a promise.", commitSha: "b".repeat(40), blobSha: "a".repeat(40) });
   const actual = { ...finding("focus:character.nia", "characters/nia.md"),
     kind: "continuity" as const, affectedPaths: ["characters/nia.md", "facts/promise.md"],
     message: "Nia behaves as if she never learned the Fact referenced by her dialogue.",

@@ -54,6 +54,13 @@ test("source-linked repair feedback remains scoped and cannot silently expand pr
   assert.equal(state.phase, "ready", "A choice prompt never changes an immutable failed verdict");
 });
 
+test("repair feedback cannot present protected changed context as a writable target", () => {
+  const state = rejected();
+  state.allowedPaths = ["events/clue.md", "milestones/clue.md"];
+  state.planAmendment = { assignment: { authority: { existingPaths: ["events/clue.md"] } } } as RepairReceipt["planAmendment"];
+  assert.deepEqual(repairFeedback(state).allowedPaths, ["events/clue.md"]);
+});
+
 test("a correction is a real owned Git diff, not an explanation or unrelated creative change", t => {
   const root = mkdtempSync(join(tmpdir(), "nt-rejected-repair-diff-"));
   t.after(() => removeTestTree(root));
