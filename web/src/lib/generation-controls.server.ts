@@ -74,9 +74,23 @@ export function matchesReviewRepairResumeBoundary(
 ): boolean {
   const sha = choice.workItem.match(/^repair-([a-f0-9]{40})$/)?.[1]
   const result = saved.result as { status?: string; headSha?: string } | null | undefined
+  // Review may pause either between a two-specialist handoff or after an
+  // already committed stage. Both retain the same sealed source SHA and
+  // original dispatch result; neither may replay the prior writer.
+  const stage = saved.active && typeof saved.active === 'object'
+    ? (saved.active as { stage?: string }).stage : undefined
+  const committedStageResult: Record<string, string> = {
+    foundation: 'committed', architecture: 'architecture-committed',
+    foundations: 'foundations-committed', event: 'event-cluster-committed',
+    interactive: 'interactive-slice-committed',
+    composition: 'composition-committed', focus: 'focused-committed',
+  }
+  const preservedResult = result?.headSha === sha &&
+    (result.status === 'review-handoff' ||
+      !!stage && result.status === committedStageResult[stage])
   return !!sha && saved.status === 'paused' &&
     saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.' &&
-    result?.status === 'review-handoff' && result.headSha === sha &&
+    preservedResult &&
     !saved.ideaTask && !saved.ideaResult &&
     point.eligible && point.commitSha === sha && point.semanticReview === 'failed' &&
     repair.phase === 'awaiting-author' && repair.choiceId === choice.id &&
@@ -130,7 +144,7 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
       const sourceSha = choiceAnswer?.workItem.match(/^repair-([a-f0-9]{40})$/)?.[1]
       if (sourceSha && saved.status === 'paused' &&
           saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.' &&
-          (saved.result as { status?: string; headSha?: string } | null)?.status === 'review-handoff') {
+          (saved.result as { status?: string; headSha?: string } | null)?.headSha === sourceSha) {
         const repair = await inspectRejectedRepair(job, sourceSha)
         const checkpoint = (await inspectRecoveryCheckpoints(job)).find(p =>
           p.eligible && p.commitSha === sourceSha && p.semanticReview === 'failed')

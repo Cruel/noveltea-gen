@@ -34,6 +34,21 @@ test('verified author answer re-enters the original reviewer checkpoint without 
   assert.equal(matchesReviewRepairResumeBoundary(saved, choice, repair, point), true)
 })
 
+test('a committed Event review can resume its exact rejected author-choice checkpoint', () => {
+  const { saved, choice, repair, point } = valid()
+  saved.active = { stage: 'event', id: 'event:milestone.disclosure', milestone: 'milestone.disclosure' }
+  saved.result = { status: 'event-cluster-committed', headSha: sha }
+  repair.origin = { workItem: 'event-disclosure' }
+  point.workItem = 'event-disclosure'
+  assert.equal(matchesReviewRepairResumeBoundary(saved, choice, repair, point), true)
+  assert.equal(matchesReviewRepairResumeBoundary({ ...saved,
+    result: { status: 'interactive-slice-committed', headSha: sha } }, choice, repair, point), false)
+  assert.equal(matchesReviewRepairResumeBoundary({ ...saved,
+    result: { status: 'event-cluster-committed', headSha: 'b'.repeat(40) } }, choice, repair, point), false)
+  assert.equal(matchesReviewRepairResumeBoundary({ ...saved,
+    active: { stage: 'foundations', id: 'foundations' } }, choice, repair, point), false)
+})
+
 test('foreign, unverified, outdated or unrelated review choices cannot resume a writer', () => {
   const { saved, choice, repair, point } = valid()
   assert.equal(matchesReviewRepairResumeBoundary(saved, { ...choice, id: 'other' }, repair, point), false)
