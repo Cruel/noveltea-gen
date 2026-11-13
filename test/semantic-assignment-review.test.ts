@@ -186,11 +186,16 @@ test("saved Collaborative responses seal failed receipts with bounded repair aut
 });
 
 test("multi-unit review requires only the exact current specialist unit, not its successor", () => {
+  const architecture = semanticUnitOutcome("global-architecture");
   const world = semanticUnitOutcome("world-foundations");
   const characters = semanticUnitOutcome("character-foundations");
   const choice = semanticUnitOutcome("interactive-choice-disclosure");
   const puzzle = semanticUnitOutcome("interactive-puzzle-disclosure");
   const event = semanticUnitOutcome("event-milestone.disappearance-established");
+  assert.match(architecture, /causally coherent chain/);
+  assert.match(architecture, /generic promises that Events will discover/);
+  assert.match(architecture, /fulfillment.any_of: \[\]/);
+  assert.match(architecture, /do NOT demand speculative Event IDs/);
   assert.match(world, /NEXT separately committed character-foundations/);
   assert.match(world, /Do not fail World Foundations solely for not writing Characters/);
   assert.match(characters, /missing central Characters are a failure/);

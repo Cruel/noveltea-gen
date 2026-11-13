@@ -123,6 +123,17 @@ export async function authorArchitecture(
       "Use schema '0.1', valid typed IDs/references and honest status draft. " +
       "Planning-stage Milestones without real Events MUST have completeness: partial and fulfillment: {any_of: []}. " +
       "Describe plausible future routes and their required causal prerequisites in prose, not as speculative typed Event IDs. " +
+      "CAUSAL ARCHITECTURE: every selected Milestone is a dramatic turning point in an ordered chain, " +
+      "not a disconnected outline entry. Its enduring body prose must name the meaningful prior " +
+      "condition or observation that makes this change possible, what changes for the player/world, " +
+      "and which later turning point that change enables (or that it is a terminal outcome). " +
+      "For investigations, distinguish the triggering discovery, evidence gathering, inference, " +
+      "confrontation and consequential player decision in the selected Arc order; make the transition " +
+      "between each causally explicit and give plausible evidence ACCESS without inventing specific " +
+      "events, scenes, timelines, Characters or objective proof beyond the pinned source. " +
+      "A generic sentence that 'Event design will determine prerequisites' is insufficient if it " +
+      "leaves WHY one selected Milestone leads to the next unspecified. " +
+      "Keep the actual Event prerequisites and fulfillment bindings delegated to Event design. " +
       "World and Character Foundations are authored in subsequent separate stages. " +
       "Write Arc/Milestone body prose as ENDURING in-world dramatic direction, " +
       "not a progress report about the record graph or authoring process. Never " +
