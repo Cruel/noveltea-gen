@@ -18,6 +18,7 @@
     "test:offline": "tsx --test test/cli.test.ts test/demo.test.ts test/graph.test.ts test/langsmith-config.test.ts test/local-trace.test.ts test/pi-delegation.test.ts test/pinned-skill-reads.test.ts test/project.test.ts test/recovery-compatibility.test.ts test/resources.test.ts test/sandbox-pi-tools.test.ts test/skills.test.ts test/snapshot.test.ts test/specialist-author-instruction.test.ts test/tracing.test.ts",
     "certify": "tsx --test test/certification.test.ts",
     "certify:story": "node scripts/certify-story.mjs",
+    "certify:new-story": "tsx scripts/certify-new-story.ts",
     "certify:self-hosted": "node scripts/certify-self-hosted.mjs",
     "certify:compose": "tsx scripts/certify-compose.ts",
     "certify:postgres-compose": "tsx scripts/certify-postgres-compose.ts",
