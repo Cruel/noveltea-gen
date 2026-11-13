@@ -54,6 +54,15 @@ test("gitignored machine-local config resolves checkout and rejects invalid path
   await assert.rejects(() => x.configure({ skillDirs: ["./not-found"] }), /Invalid skillDirs/);
   await assert.rejects(() => x.configure({ skillDiscovery: "off" }), /Invalid skill configuration/);
   await assert.rejects(() => x.configure({ requiredSkills: [42] }), /Invalid skill configuration/);
+  const legacy = await x.configure({ requiredSkills: ["nt-story-generate"] });
+  assert.deepEqual(legacy.requiredSkills, ["nt-catalog", "nt-story-generate"]);
+  await assert.rejects(createProjectResourceLoader(x.project, x.agentDir, true, legacy).loader.reload(),
+    /legacy.*nt-story-generate.*nt-story-orchestrate.*pinned/i);
+  await skill(join(x.checkout, "skills"), "nt-story-generate");
+  const legacyLoader = createProjectResourceLoader(x.project, x.agentDir, true, legacy,
+    [], "orchestrator").loader;
+  await legacyLoader.reload();
+  assert.ok(!legacyLoader.getSkills().skills.some(s => s.name === "nt-story-generate"));
   await writeFile(x.configPath, "not-json");
   await assert.rejects(() => loadSkillConfig(x.configPath), /expected JSON/);
 });
@@ -157,8 +166,10 @@ test("role-aware catalog exposes adjacent crafts but keeps orchestrator and revi
   await writeFile(join(collaboration, "references", "interaction.md"),
     "Ask consequential questions with meaningful alternatives and an Other answer.");
   const config = await x.configure();
-  const build = async (role: "specialist" | "reviewer" | "orchestrator") => {
-    const { loader } = createProjectResourceLoader(x.project, x.agentDir, true, config, [], role);
+  const build = async (role: "specialist" | "reviewer" | "orchestrator",
+    collaborative = true) => {
+    const { loader } = createProjectResourceLoader(x.project, x.agentDir, true, config, [], role,
+      collaborative);
     await loader.reload();
     const skills = loader.getSkills().skills;
     const reader = createSkillReadTool(skills);
@@ -183,7 +194,15 @@ test("role-aware catalog exposes adjacent crafts but keeps orchestrator and revi
   assert.ok(review.names.includes("nt-worldbuilding"));
   assert.ok(!review.names.includes("nt-story-orchestrate"));
   await assert.rejects(review.read(join(skillRoot, "nt-story-orchestrate", "SKILL.md")), /Skill read denied/);
-  const coordinate = await build("orchestrator");
+  const autonomous = await build("orchestrator", false);
+  assert.ok(autonomous.names.includes("nt-story-orchestrate"));
+  assert.ok(!autonomous.names.includes("nt-story-collaborate"));
+  await assert.rejects(autonomous.read("skill://nt-story-collaborate/SKILL.md"), /Skill read denied/);
+  const defaultOrchestrator = createProjectResourceLoader(x.project, x.agentDir, true,
+    config, [], "orchestrator").loader;
+  await defaultOrchestrator.reload();
+  assert.ok(!defaultOrchestrator.getSkills().skills.some(s => s.name === "nt-story-collaborate"));
+  const coordinate = await build("orchestrator", true);
   assert.ok(coordinate.names.includes("nt-story-orchestrate"));
   assert.ok(coordinate.names.includes("nt-story-collaborate"));
   assert.ok(coordinate.names.includes("nt-worldbuilding"));

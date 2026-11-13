@@ -1,9 +1,8 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { parseContract, type Plan } from "./architecture.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { loadSkillConfig } from "./skills.js";
+import { assertPinnedSkillResources, assertPortableOrchestrationSkills } from "./story-skill-policy.js";
 import type { JobStartResult } from "./job.js";
 import { verifyForkValidator, type NativeValidatorPin } from "./validator.js";
 
@@ -145,17 +144,18 @@ export async function selectCurrentRecoveryToolchain(parent: JobStartResult,
     skills = await createSkillSnapshot({ discovery: "explicit-only",
       novelteaSkills: configured, skillDirs: [], requiredSkills: [] });
     if (!skills || await openSkillSnapshot(skills.id) !== skills.path) throw new Error("invalid snapshot");
-    const required = ["nt-catalog", "nt-story-discovery", "nt-story-architecture",
+    await assertPortableOrchestrationSkills(skills.path);
+    const required = ["nt-story-architecture",
       "nt-worldbuilding", "nt-character-development", "nt-event-design",
       "nt-interactive-narrative", "nt-puzzle-design", "nt-narrative-composition",
       "nt-narrative-review"];
-    for (const name of required) {
-      const file = join(skills.path, "skills", name, "SKILL.md");
-      if (!(await readFile(file, "utf8")).trim()) throw new Error("empty required skill");
-    }
-  } catch {
+    await assertPinnedSkillResources(skills.path, required.map(name => name + "/SKILL.md"));
+  } catch (error) {
+    const reason = error instanceof Error &&
+      error.message.startsWith("Missing or empty pinned NovelTea skill resource")
+      ? " " + error.message : "";
     throw new RecoveryCompatibilityError("missing-tooling",
-      "Current NovelTea skills or their pinned snapshot are missing or incomplete.");
+      "Current NovelTea skills or their pinned snapshot are missing or incomplete." + reason);
   }
   return { graphSchema: "noveltea-generation/v1",
     runtime: { nodeVersion: process.version, continuationSchema: "noveltea-fork/v2" },

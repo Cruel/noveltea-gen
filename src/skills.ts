@@ -20,7 +20,8 @@ const CROSS_DOMAIN_GUIDANCE = new Set([
 ]);
 
 /** Skill visibility is knowledge, never a grant to invoke a role or write Story records. */
-export function roleVisibleSkills(skills: readonly Skill[], role: SkillReadRole): Skill[] {
+export function roleVisibleSkills(skills: readonly Skill[], role: SkillReadRole,
+  allowCollaborativeMethod = true): Skill[] {
   return skills.filter(skill =>
     // The controller binds a portable role to its package location, never
     // only to forgeable SKILL.md frontmatter or invocation metadata.
@@ -29,7 +30,8 @@ export function roleVisibleSkills(skills: readonly Skill[], role: SkillReadRole)
     (CROSS_DOMAIN_GUIDANCE.has(skill.name) ||
       (role === "reviewer" && skill.name === "nt-narrative-review") ||
       (role === "orchestrator" &&
-        (skill.name === "nt-story-orchestrate" || skill.name === "nt-story-collaborate"))));
+        (skill.name === "nt-story-orchestrate" ||
+          (allowCollaborativeMethod && skill.name === "nt-story-collaborate")))));
 }
 
 export interface SkillConfig {
@@ -190,6 +192,12 @@ export function resolveConfiguredSkills(
     const selected = chosen.get(name);
     if (!selected || !config.novelteaSkills ||
         !contained(join(config.novelteaSkills, "skills"), realpathSync(selected.filePath))) {
+      if (name === "nt-story-generate") {
+        throw new Error("Missing legacy configured skill nt-story-generate. New Studio Turns " +
+          "select nt-story-orchestrate; remove the retired requiredSkills entry for " +
+          "new workflows, or restore the original pinned skills for historical sessions. " +
+          "Never alias or repin the old skill implicitly.");
+      }
       throw new Error(`Missing required NovelTea skill "${name}" in ${config.novelteaSkills ?? "unconfigured checkout"}.`);
     }
   }

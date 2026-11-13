@@ -18,24 +18,13 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { preparePiContext } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
+import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { trustedHead } from "./revision.js";
 
-const REQUIRED = [
-  "nt-story-orchestrate/SKILL.md",
-  "nt-story-orchestrate/references/planning.md",
-  "nt-catalog/SKILL.md",
-  "nt-catalog/references/records.md",
-  "nt-catalog/references/progression.md",
-  "nt-catalog/references/authority-and-validation.md",
-] as const;
-const COLLABORATIVE = [
-  "nt-story-collaborate/SKILL.md",
-  "nt-story-collaborate/references/interaction.md",
-] as const;
 const requiredFor = (plan: TurnEvidence): readonly string[] =>
-  plan.creativePolicy?.mode === "collaborative" ? [...REQUIRED, ...COLLABORATIVE] : REQUIRED;
+  requiredOrchestratorSkillReads(plan.creativePolicy?.mode ?? "autonomous");
 const SCHEMA = "noveltea-objective-planning/v1" as const;
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const pathFor = (job: JobStartResult) => join(job.stateDir, "objective-planning.json");
@@ -237,6 +226,7 @@ export async function runPinnedObjectivePlanner(
     },
     [],
     "orchestrator",
+    plan.creativePolicy?.mode === "collaborative",
   );
   await loader.reload();
   const { skills, diagnostics } = loader.getSkills();
@@ -264,10 +254,9 @@ export async function runPinnedObjectivePlanner(
     },
     runtime,
   );
-  // The optional method is visible only when the controller pinned Collaborative
-  // for this Turn. A model cannot opt into it through nested skill invocation.
-  const visible = plan.creativePolicy?.mode === "collaborative"
-    ? skills : skills.filter(skill => skill.name !== "nt-story-collaborate");
+  // Resource discovery and sandbox reads enforce the same Turn-scoped role policy.
+  // A model cannot opt into the optional method through skill discovery.
+  const visible = skills;
   const tools = await selectSandboxPiTools(job, snapshot, visible, undefined, "read-only", "orchestrator");
   const { session } = await createAgentSession({
     cwd: project.root,

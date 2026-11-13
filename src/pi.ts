@@ -38,6 +38,8 @@ export function createProjectResourceLoader(
   config: SkillConfig = { discovery: "explicit-only", skillDirs: [], requiredSkills: [] },
   traceExtensions: InlineExtension[] = [],
   role: SkillReadRole = "specialist",
+  // Opt in only for a controller-authenticated Collaborative Turn.
+  allowCollaborativeMethod = false,
 ) {
   const settingsManager = SettingsManager.inMemory();
   return {
@@ -55,7 +57,7 @@ export function createProjectResourceLoader(
         if (!config.novelteaSkills) return found;
         const pinnedRoot = join(config.novelteaSkills, "skills") + sep;
         const pinned = found.skills.filter(skill => skill.filePath.startsWith(pinnedRoot));
-        const visible = new Set(roleVisibleSkills(pinned, role));
+        const visible = new Set(roleVisibleSkills(pinned, role, allowCollaborativeMethod));
         return { ...found, skills: found.skills.filter(skill =>
           visible.has(skill) || (!skill.filePath.startsWith(pinnedRoot) && !skill.name.startsWith("nt-"))) };
       },

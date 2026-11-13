@@ -90,6 +90,12 @@ uses the explicit `fixture-legacy` policy, which cannot authorize a real writer.
 New live requests require the compatible skill checkout configured via
 `--skills-source`, `NT_STUDIO_SKILLS_SOURCE`, or trusted local config.
 
+For the four-scenario new/existing × Autonomous/Collaborative skill-read
+matrix, cross-repository revision/digest handoff, legacy-name migration and
+verification commands, see [Studio ↔ portable skills integration](docs/story-skill-integration.md).
+These controller/fixture checks do not replace completed real-Pi Story
+certification (#158–#160).
+
 ## Source-bound objective planning (#149)
 
 Both new Story creation and subsequent Thread requests enter the same trusted
