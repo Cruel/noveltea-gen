@@ -180,6 +180,101 @@ an independent literary pass was obtained. Re-authenticate the intended Pi
 provider **outside** the certification process, then restart a fresh
 source-bound test; do not reuse a stale or partially delivered model turn.
 
+## November 13 current-source certification: blocked in both modes
+
+After #161 and #162 closed, two fresh independent runs used Gen source
+`6c4a5b03954bf5161760d47d6061fe831acb9acc`, clean skills source
+`3d798d5aada9f38e48a694f3f39ee73a86a02e25`, pinned snapshot
+`f0aa51fa1b1e0a74c1e6cc5f8647691f8f3f18c631061b51754cb1981660e872`,
+Pi 1.5.0, `openai/gpt-6-luna` and native CLI 1.0.0. The existing isolated
+local-OAuth path authenticated successfully; the November 12 authentication
+failure above is historical, not the blocker for these runs. Rootless Docker
+reported cgroup v2/systemd. No second runner or Compose stack was introduced.
+
+Both used the command above with `NT_TEST_WEB_PI_PRESERVE=1`, once per mode.
+Both live tests **failed** their `terminal === completed` assertion; this is
+negative real-Pi evidence, not creative certification:
+
+| Evidence | Autonomous | Collaborative |
+| --- | --- | --- |
+| Private root | `/tmp/nt158-lwsPW0` | `/tmp/nt158-a6l8gI` |
+| Job / first Turn | `665ad56f-d03c-415e-875b-d4fcba3923a1` | `e1fad179-af5b-4330-ba01-e9ddb3e71242` |
+| Initial Story SHA | `e1456b709496b988df00ae3a4a806a44d4669914` | `503ae727664673438274ed989d4c50a02392d1df` |
+| Final committed SHA | `a7f623b66a656151da27110e89c3eb607a187c49` | `4624500f1f3faa120c45534431b7a663414c673d` |
+| Terminal / native validation | blocked / passed | blocked / passed |
+| Post-baseline author choices | 0 | 0 |
+
+Discovery questions included recommendations; the runner supplied a partial
+answer and delegation, reloaded the exact proposed digest/revision, and
+approved that exact foundation. Approval automatically queued the original
+Turn. Both reached real pinned Architecture, World/Character and Event work.
+Both worktrees were clean after the tests. Neither reached Authored Content,
+Choice/Puzzle completion or final goal-level acceptance.
+
+### Autonomous: bounded causal-evidence correction exhausted
+
+The first Event's failed review at `c2f7b402de54438d89f03044d17a3ab9dd60b05b`
+identified missing evidence for the selected Milestone and an unearned
+relationship transition. Event-only corrections were committed at
+`0bc34b0e93eb7f667344e632a1204acdb993421f` and
+`a7f623b66a656151da27110e89c3eb607a187c49`. Independent rereview still
+found inadequate support, finally an unsupported earlier witness recollection.
+The repair receipt preserved the original findings and separate successor
+findings, recorded two attempts, and stopped blocked. The causal-grounding
+changes in #162 therefore do **not** establish real-model convergence.
+No retry budget, review threshold or writer authority was changed.
+
+### Collaborative: two passing repairs, unresolved prerequisite report
+
+Two real negative Event reviews led to bounded original-session correction
+and independent passing rereview:
+
+- `45bf7e5bc2977dbfa53915a43c2c34cc9f201d97` →
+  `7a7397731e2cafa5d7e6e002c061f7cf09f6a561`.
+- `3ececd2ff31b6cd2823aad52a0ae1d966d2a9caa` →
+  `4624500f1f3faa120c45534431b7a663414c673d`.
+
+However, an earlier resolution-Milestone specialist made no edits and reported
+that an enacted choice and distinct endings required interactive prerequisites
+outside its Event-only assignment. Its receipt remained `writing` with
+`Event specialist did not author canonical Event Markdown with an editing tool.`
+The job ended blocked despite subsequent progress on the other two Events.
+Focused follow-up [#163](https://github.com/Cruel/noveltea-gen/issues/163) owns
+reproduction and routing of clean no-write prerequisite reports through the
+existing work-plan machinery. The saved writer was not blindly resumed, and
+its authority was not widened. This observation alone does not establish the
+root cause or that replay is safe.
+
+### Evidence retained and limits
+
+Each private root retains its Studio database, isolated agent log, Job receipts,
+source Git repository/worktree, skill snapshot, and Pi sessions. Each
+`certification-observation.json` records native validation status and changed
+paths; Event receipts contain native progression witnesses. A private manifest
+at `.local/certification/issue-158/attempt-6c4a5b0.json` records source/model
+identity, evidence locations and session SHA-256 hashes. Console logs and the
+full check log are beside it. These private artifacts are not committed.
+
+Verification on the tested source:
+
+- `pnpm check`: passed; root **433 passed / 24 skipped / 0 failed**;
+  Studio **408 passed / 53 skipped / 0 failed**, including typechecks and builds.
+- With `NT_NATIVE_CLI` and `NT_SKILLS_CHECKOUT` set, `pnpm exec tsx --test
+  test/event-work.test.ts test/review-repair-amendment.test.ts
+  test/rejected-review-repair.test.ts test/rejected-repair-controller.test.ts
+  test/semantic-assignment-review.test.ts`: **50 passed / 2 skipped / 0 failed**.
+  The two private historical replay tests were not enabled in this invocation.
+- Real-Pi new-Story tests: **0 passed / 2 failed / 0 skipped** across the two
+  separate mode invocations. No additional full-generation retries were run.
+
+The proposed-discovery reload is reconnect evidence only. Worker-process
+interruption/resume, duplicate-grant/commit protection and cross-Thread
+isolation were **not certified by these live runs**. Meaningful post-baseline
+Collaborative participation, complete player-visible routes/clues/endings,
+final readiness and whole-Turn review, and independent external literary
+assessment remain unverified. No external quality attestation or `eligible`
+acceptance result was fabricated for these incomplete Stories.
+
 **#158 must remain open** until both real Story modes, negative/recovery
 checks and external quality assessment are completed and recorded. A
 deterministic check, intact source snapshot or successfully implemented
