@@ -8,7 +8,23 @@ import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
-import { unapprovedArchitectureDecisionIds } from "../src/architecture-specialist.js";
+import { architectureMilestoneOrder, unapprovedArchitectureDecisionIds } from "../src/architecture-specialist.js";
+import { verifiedArchitectureMilestoneOrder } from "../src/architecture.js";
+
+test("Architecture's sealed causal order names exactly its canonical Milestones", () => {
+  const ids = ["milestone.discovery", "milestone.evidence", "milestone.resolution"];
+  assert.deepEqual(architectureMilestoneOrder(
+    "The route follows the evidence.\nCAUSAL_MILESTONE_ORDER: " + ids.join(',') + "\n"), ids);
+  assert.deepEqual(verifiedArchitectureMilestoneOrder(ids,
+    ["milestone.resolution", "milestone.discovery", "milestone.evidence"]), ids);
+  assert.equal(architectureMilestoneOrder("I cannot choose a causal order."), null);
+  assert.equal(architectureMilestoneOrder("CAUSAL_MILESTONE_ORDER: milestone.discovery,milestone.discovery"), null);
+  assert.equal(architectureMilestoneOrder("CAUSAL_MILESTONE_ORDER: milestone.discovery\n" +
+    "CAUSAL_MILESTONE_ORDER: milestone.evidence"), null);
+  assert.throws(() => verifiedArchitectureMilestoneOrder(ids.slice(0, 2), ids), /canonical scope/);
+  assert.throws(() => verifiedArchitectureMilestoneOrder([...ids.slice(0, 2), "milestone.unknown"], ids),
+    /canonical scope/);
+});
 
 test("Architecture cannot invent author-protected decisions during initial authoring or a correction", () => {
   const record = (origin: string, authority: string, statement = "Fair clues are mandatory") =>

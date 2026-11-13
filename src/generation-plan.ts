@@ -220,6 +220,23 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
       ? "Accepted architecture plan changed; reconcile authorized scope and retained work."
       : "Reconciled current canonical coverage, dependencies and verified specialist results." };
 }
+/** A pinned Architecture author can prefer the causal sequence of Milestone
+ * Event units without altering the canonical inventory or introducing typed
+ * dependency edges. Original controller authority and every readiness gate
+ * remain authoritative. Already explicitly ordered Event IDs take precedence. */
+export function withCausalEventPriority(plan: Plan, preferred?: readonly string[]): string[] {
+  const events = [...new Set(plan.items.filter(item => item.kind === "realization")
+    .flatMap(item => item.targetIds.filter(id => id.startsWith("milestone.")).map(id => "event:" + id)))];
+  const order = preferred?.length ? [...preferred] :
+    ["foundation", "architecture", "foundations", "event", "interactive", "composition", "review"];
+  if (!events.length || order.some(key => key.startsWith("event:milestone."))) return order;
+  const eventSlot = order.indexOf("event");
+  const nextStage = order.findIndex(key => ["interactive", "composition", "review"].includes(key));
+  order.splice(eventSlot >= 0 ? eventSlot : nextStage >= 0 ? nextStage : order.length,
+    eventSlot >= 0 ? 1 : 0, ...events, "event");
+  return order;
+}
+
 /** Controller checks readiness first; the read-only orchestrator may only
  * prioritize already-runnable, controller-authorized assignments. */
 export function nextExecutionItem(inventory: GenerationInventory, order?: readonly string[]) {

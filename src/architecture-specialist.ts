@@ -47,6 +47,19 @@ export function unapprovedArchitectureDecisionIds(after: string, before = ""): s
     (d.origin === "agent" || !prior.has(JSON.stringify(d)))).map(d => d.id ?? "unnamed");
 }
 
+/** The same pinned writer supplies a source-bound execution order after its
+ * canonical Milestones exist. This changes scheduling only, never record grants
+ * or the story's native causal prerequisites. */
+export function architectureMilestoneOrder(text: string): string[] | null {
+  const lines = text.split(/\r?\n/).filter(line => /^CAUSAL_MILESTONE_ORDER:\s*/.test(line));
+  if (lines.length !== 1) return null;
+  const raw = lines[0]!.slice('CAUSAL_MILESTONE_ORDER:'.length).trim();
+  const ids = raw.split(',').map(s => s.trim());
+  if (!ids.length || ids.some(id => !/^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)) ||
+      new Set(ids).size !== ids.length) return null;
+  return ids;
+}
+
 const REQUIRED = [
   "nt-story-architecture/SKILL.md",
   "nt-catalog/SKILL.md",
@@ -65,7 +78,7 @@ export async function authorArchitecture(
   modelId: string,
   onSession: (sessionId: string, path: string) => Promise<void>,
   authorTask?: string,
-): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[] }> {
+): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[]; milestoneOrder: string[] }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = {
     discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -157,6 +170,7 @@ export async function authorArchitecture(
       "Production economy is an explicit constraint, not a universal fixed budget. " +
       "Frontmatter free-text YAML scalars must be quoted; avoid invalid colon-containing unquoted values. " +
       "Before finishing, call story_validate with no arguments, inspect diagnostics and coverage, repair problems and rerun validation; the graph independently decides acceptance. Explain downstream obligations.\n" +
+      "End your final answer with exactly one line: CAUSAL_MILESTONE_ORDER: milestone.earliest,milestone.next,milestone.last (substitute EVERY actual selected canonical Milestone ID, in narrative cause-to-consequence order, from triggering discovery through evidence/inference to meaningful payoff). This is only the trusted work-EXECUTION order: do not invent Event IDs, file paths, completion claims or write permissions.\n" +
       "AUTHORIZED PLAN AND SCOPE:\n" + JSON.stringify(plan, null, 2) +
       specialistAuthorInstruction(authorTask) +
       "\nOnly implement the global architecture work item now, not the downstream realization or composition items.",
@@ -228,9 +242,26 @@ export async function authorArchitecture(
       const stillInvalid = await authorityErrors();
       if (stillInvalid.length) throw new Error("Architecture invented user protection: " + stillInvalid.join("; "));
     }
+    let milestoneOrder = architectureMilestoneOrder(assistant.content.filter(c =>
+      c.type === 'text').map(c => c.text).join('\n'));
+    if (!milestoneOrder) {
+      // Never guess alphabetical order or relaunch the original writer. Request
+      // one no-write metadata correction in this same pinned Pi session.
+      await promptStorySpecialist(session,
+        'The final answer omitted the exact CAUSAL_MILESTONE_ORDER line. Read the Milestones you just authored if necessary. ' +
+        'Do not edit any files, create new records or modify the proposed scope. ' +
+        'Reply with exactly CAUSAL_MILESTONE_ORDER: followed by all selected milestone IDs ' +
+        'in actual dramatic cause-to-consequence order, comma-separated.');
+      const latest = [...session.messages].reverse().find(m => m.role === 'assistant');
+      if (latest?.role !== 'assistant' || ['error', 'aborted'].includes(latest.stopReason))
+        throw new Error('Architecture milestone-order correction did not finish safely.');
+      milestoneOrder = architectureMilestoneOrder(latest.content.filter(c =>
+        c.type === 'text').map(c => c.text).join('\n'));
+      if (!milestoneOrder) throw new Error('Architecture did not declare a valid source-bound causal Milestone order.');
+    }
     await context.completed(sessionFile, session.sessionId);
     return { piSessionId: session.sessionId, piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
-      skillReads: reads.filter(p => required.includes(p)) };
+      skillReads: reads.filter(p => required.includes(p)), milestoneOrder };
   } finally {
     session.dispose();
   }

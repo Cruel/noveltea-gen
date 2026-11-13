@@ -82,6 +82,8 @@ interface Receipt {
   piSessionFile?: string;
   piSessionId?: string;
   skillReads?: string[];
+  /** Source-bound authoring metadata, not a permission or a gameplay prerequisite. */
+  milestoneOrder?: string[];
   outstanding?: Obligation[];
 }
 interface Obligation { id: string; path: string; field: string; requiredBy: string; code: string; message: string }
@@ -399,6 +401,19 @@ function checkOriginalProtection(job: JobStartResult, result: ValidationResult, 
   throw new Error("Original baseline cannot certify architecture authorization.");
 }
 
+/** A source-bound milestone scheduling preference must cover the exact
+ * controller-validated canonical set. Never infer order from filename sorting,
+ * let the writer add unknown targets, or treat preference as a new grant. */
+export function verifiedArchitectureMilestoneOrder(
+  ordered: readonly string[] | undefined, canonical: readonly string[],
+): string[] {
+  if (!ordered || ordered.length !== canonical.length ||
+      new Set(ordered).size !== ordered.length ||
+      ordered.some(id => !canonical.includes(id)))
+    throw new Error('Architecture milestone execution order differs from the verified canonical scope.');
+  return [...ordered];
+}
+
 function finishPlan(state: Receipt, report: CatalogReport, commit: string) {
   const plan = state.plan!;
   const selected = checkArchitecture(report, plan.contract);
@@ -428,7 +443,17 @@ function finishPlan(state: Receipt, report: CatalogReport, commit: string) {
     state.expectedHead = commit;
     return;
   }
-  const clusters = [...new Set(obligations.map(o => o.id))].map(id => workItem("realize-" + id.replace(".", "-"), "realization", [id], ["global-architecture"], plan.version));
+  const clusterIds = [...new Set(obligations.map(o => o.id))];
+  // Fixture plans retain the historical obligation order; already certified
+  // carry-forward hashes must not drift due to test scaffolding. Real Pi plans
+  // use the verified causal order supplied by the source-bound author.
+  const ordered = state.worker === 'pi'
+    ? verifiedArchitectureMilestoneOrder(state.milestoneOrder,
+        selected.filter(r => r.metadata.type === 'milestone').map(r => r.metadata.id))
+    : clusterIds;
+  const clusters = [...ordered.filter(id => clusterIds.includes(id)),
+    ...clusterIds.filter(id => !ordered.includes(id))].map(id =>
+    workItem("realize-" + id.replace(".", "-"), "realization", [id], ["global-architecture"], plan.version));
   for (const item of clusters) { item.status = "blocked"; item.blockingReason = "Tracked downstream obligation; execute with the Event/interactive specialist in a later work unit."; }
   plan.items = [plan.items[0], ...clusters];
   if (plan.contract.scope.depth !== "architecture") {
@@ -665,6 +690,11 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         const original = await validate(source);
         checkOriginalProtection(job, original, workingHead);
         const selected = checkArchitecture(report, receipt.plan!.contract);
+        if (receipt.worker === 'pi' && !isFocusedScope(receipt.plan!.contract)) {
+          // Reject a stale or invented order BEFORE committing any Story bytes.
+          verifiedArchitectureMilestoneOrder(receipt.milestoneOrder,
+            selected.filter(record => record.metadata.type === 'milestone').map(record => record.metadata.id));
+        }
         if (receipt.paths) {
           if (await contentDigest(job, receipt.paths) !== receipt.contentDigest) throw new Error("Authored architecture bytes changed; do not reuse acceptance.");
           if (receipt.paths.some(path => !selected.some(r => r.path === path))) throw new Error("Architecture wrote records outside the accepted scope.");

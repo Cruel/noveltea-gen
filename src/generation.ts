@@ -49,7 +49,8 @@ import { runPinnedObjectivePlanner, restoreCheckpointedObjectivePlanning,
   type OrchestratorPlanningReceipt } from "./orchestrator-planner.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
-import { generationStages, reconcileInventory, nextExecutionItem, type GenerationStage as Stage,
+import { generationStages, reconcileInventory, nextExecutionItem, withCausalEventPriority,
+  type GenerationStage as Stage,
   type GenerationEvidence, type GenerationInventory, type ExecutionItem } from "./generation-plan.js";
 export { generationStages, type GenerationEvidence } from "./generation-plan.js";
 
@@ -234,6 +235,23 @@ async function checkPlan(job: JobStartResult, request: GenerationRequest, versio
   }
   return receipt;
 }
+/** The original source-bound Architecture order affects only ready-item
+ * selection, never the canonical inventory, Git ancestry or carry-forward
+ * checkpoint identity. Later amended plans retain their own controller order. */
+function causalDispatchPriority(receipt: {
+  worker?: string; milestoneOrder?: string[];
+  plan?: import('./architecture.js').Plan;
+} | null, preferred?: readonly string[]): readonly string[] | undefined {
+  if (receipt?.worker !== 'pi' || !receipt.plan || !Array.isArray(receipt.milestoneOrder))
+    return preferred;
+  const actual = receipt.plan.items.filter(item => item.kind === 'realization')
+    .flatMap(item => item.targetIds.filter(id => id.startsWith('milestone.')));
+  if (actual.length !== receipt.milestoneOrder.length ||
+      new Set(actual).size !== actual.length ||
+      actual.some((id, index) => id !== receipt.milestoneOrder![index]))
+    return preferred; // Later controller-approved scopes cannot inherit a stale order.
+  return withCausalEventPriority(receipt.plan, preferred);
+}
 /**
  * The parent graph can checkpoint a failure after a child has committed and
  * published its trusted receipt. Clear only that failure when the *current*
@@ -366,7 +384,8 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     const inventory = await reviewGatedInventory(job, reconcileInventory(plan, undefined, head,
       completedStages, failures, s.inventory));
     return { request, planVersion: plan.version, completedStages, failures, inventory,
-      active: nextExecutionItem(inventory, s.pendingOrder ?? s.orchestratorOrder ?? undefined) ?? null };
+      active: nextExecutionItem(inventory,
+        causalDispatchPriority(receipt, s.pendingOrder ?? s.orchestratorOrder ?? undefined)) ?? null };
   }
   const validation = plan && completedStages.some(e => e.stage === "architecture")
     ? await validateStoryJob(job, request.validatorSource ?? request.skillsSource, { ...job, baseSha: head }) : undefined;
@@ -376,7 +395,8 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const pendingOrder = pending.order ?? s.pendingOrder ?? null;
   return { request, planVersion: plan?.version ?? null, completedStages, failures,
     inventory: pending.inventory, pendingOrder, pendingVersion: pending.stateVersion,
-    active: nextExecutionItem(pending.inventory, pendingOrder ?? s.orchestratorOrder ?? undefined) ?? null };
+    active: nextExecutionItem(pending.inventory,
+      causalDispatchPriority(receipt, pendingOrder ?? s.orchestratorOrder ?? undefined)) ?? null };
 }
 /** The DB receipt and the private graph amendment must never diverge. A
  * missing file after an applied receipt cannot silently restore the old plan;

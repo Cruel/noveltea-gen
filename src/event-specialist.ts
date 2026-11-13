@@ -134,8 +134,9 @@ export async function authorEventCluster(
       "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
       "Before writing, read the selected authored Milestone and Arc prose, linked Characters/current Facts and relevant earlier Events. " +
       "This Event stage precedes the specialized Choice/Puzzle and final prose stages. " +
-      "Author the causal Event route and its meaningful alternative step outcomes NOW; " +
-      "the later interactive specialist will bind playable Choice Points to these committed Events. " +
+      "Author the causal Event route and a coherent current Event-level setup NOW; " +
+      "the later interactive specialist owns selectable Choice Points, mutually distinguishable outcome effects, and branching payoff content. " +
+      "Do not fabricate a completed Choice implementation: if a player decision remains unbound, explicitly defer its selection and distinct outcome effects as laterObligations. " +
       "Do not refuse to author an Event merely because a Choice Point or ending scene is not yet written. " +
       "If a genuinely impossible prerequisite requires another scoped specialist or a protected revision, " +
       "make NO edits, and return modifiedRecords:[] with specific architecturalConflicts and laterObligations; " +

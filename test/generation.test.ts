@@ -8,7 +8,7 @@ import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { createGenerationGraph } from "../src/generation.js";
-import { reconcileInventory, nextExecutionItem } from "../src/generation-plan.js";
+import { reconcileInventory, nextExecutionItem, withCausalEventPriority } from "../src/generation-plan.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
@@ -491,6 +491,27 @@ function plannedDependencyInventory(f: ReturnType<typeof setup>, edit: (items: a
     { stage: "foundations", headSha: head, status: "foundations-committed", planVersion: 1 },
   ], {});
 }
+
+test("source-bound Architecture order schedules the earliest causal Event before alphabetical resolution", { skip: !available }, () => {
+  const f = setup("causal-event-order");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope.targets = ["arc.truth", "milestone.disclosure", "milestone.reckoning"];
+  writeFileSync(f.contract, JSON.stringify(contract));
+  f.cli([...f.start, "--pause-after", "architecture"]);
+  const inventory = plannedDependencyInventory(f, () => {});
+  assert.deepEqual(inventory.items.filter(i => i.stage === "event").map(i => i.id),
+    ["event:milestone.disclosure", "event:milestone.reckoning"],
+    "The canonical inventory and carry-forward identity remain unchanged");
+  const causal = withCausalEventPriority({ items: [
+    { kind: "realization", targetIds: ["milestone.reckoning"] },
+    { kind: "realization", targetIds: ["milestone.disclosure"] },
+  ] } as any, ["foundation", "architecture", "foundations", "event", "interactive", "composition"]);
+  assert.deepEqual(causal.slice(3, 6),
+    ["event:milestone.reckoning", "event:milestone.disclosure", "event"]);
+  assert.equal(nextExecutionItem(inventory, causal)?.id, "event:milestone.reckoning");
+  assert.equal(nextExecutionItem(inventory)?.id, "event:milestone.disclosure");
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+});
 
 test("a new typed cross-Milestone dependency changes the next runnable work item", { skip: !available }, () => {
   const f = setup("dependency");
