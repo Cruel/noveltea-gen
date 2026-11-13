@@ -29,7 +29,7 @@ import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.s
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
-import { localPiOAuth } from './support/local-pi-oauth'
+import { localPiOAuth, syncLocalPiOAuth } from './support/local-pi-oauth'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
 import { beginLiveNewStoryChat, approveLiveNewStoryChat, verifyLiveNewStory } from './support/full-story-case'
 
@@ -112,6 +112,9 @@ test(fullStory
   const server = createControllerServer(new SandboxController(sandbox))
   let agent: ChildProcess | undefined
   let acquiredJob: JobStartResult | undefined
+  let oauthRelay: ReturnType<typeof setInterval> | undefined
+  let oauthSync: Promise<void> | undefined
+  let oauthFailure: Error | undefined
   try {
     await migrateStudio(store, config)
     const auth = createStudioAuth(store, config)
@@ -159,6 +162,23 @@ test(fullStory
     const selected = { provider, id: selectedModel.id }
     console.log('Live Pi certification model:', selected.provider + '/' + selected.id)
     await assertUserPiSelection(store, user.id, selected)
+    if (fullStory && isolatedLocalOAuth && oauth) {
+      // Pi refreshes only its own local login. This process periodically
+      // copies a fresh ACCESS token to its disposable owner-bound Studio DB;
+      // neither Studio nor the test sandbox ever receives the real refresh
+      // grant. The worker reads the same vault across separate processes.
+      let previous = oauth
+      oauthRelay = setInterval(() => {
+        if (oauthSync || oauthFailure) return
+        oauthSync = syncLocalPiOAuth(provider, selected.id, previous, async next => {
+          await userPiCredentials(store, user.id).modify(provider, async () => next)
+        }).then(next => { previous = next })
+          .catch(() => {
+            oauthFailure = new Error('Local Pi OAuth renewal failed during live certification; reconnect local Pi before retrying.')
+          }).finally(() => { oauthSync = undefined })
+      }, 30_000)
+      oauthRelay.unref()
+    }
     if (fullStory) {
       // Normal Story Chat reads the saved per-user default, not the smoke
       // test's explicit generation configuration. Both use the same real Pi.
@@ -246,6 +266,7 @@ test(fullStory
       assert.ok(discovery)
       await approveLiveNewStoryChat(chatCase, discovery, job)
       await verifyLiveNewStory({ ...chatCase, job, root, skills, model: selected.id })
+      if (oauthFailure) throw oauthFailure
       assert.equal(git(repo, 'rev-parse', 'HEAD'), commit,
         'certification must not change the original source repository')
       return
@@ -446,6 +467,8 @@ test(fullStory
     assert.equal(await store.testing.records.count('story_turn_executions', { turnId: requestTurn.id }), 1)
     assert.deepEqual(await store.testing.foreignKeyViolations(), [])
   } finally {
+    if (oauthRelay) clearInterval(oauthRelay)
+    if (oauthSync) await oauthSync
     if (agent && agent.exitCode === null && agent.signalCode === null) {
       agent.kill('SIGTERM')
       await Promise.race([once(agent, 'exit'), new Promise(done => setTimeout(done, 5_000))])

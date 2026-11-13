@@ -143,7 +143,13 @@ Repeat with `NT_TEST_WEB_PI_STORY_MODE=collaborative` against a separate
 fresh Job. `NT_TEST_WEB_PI_PRESERVE=1` saves private evidence in a disposable
 `/tmp/nt158-*` location, rather than exposing transcripts in Git. The
 isolated local-OAuth helper copies an unexpired **access token only** from the
-existing Pi login; it never copies the usable refresh token into Studio.
+existing Pi login; it never copies the usable refresh token into Studio. For
+long full-Story runs it checks the access-token lifetime and uses Pi's supported
+`auth print-bearer-token --min-expiry 40m` command to renew the **local Pi**
+login before expiry, then synchronizes only the new access token to the
+throwaway owner-bound Studio vault. Pi alone stores and rotates the usable
+refresh grant. Renewal failure stops certification rather than falling back
+to ambient or another user's credentials; the local Pi CLI must be on `PATH`.
 Alternatively the existing live runner accepts the read-only Studio OAuth
 source database or an explicit provider API key. No real provider calls run
 without an opt-in flag. The provider acquisition check uses an existing local

@@ -85,7 +85,7 @@ export function matchesReviewRepairResumeBoundary(
     interactive: 'interactive-slice-committed',
     composition: 'composition-committed', focus: 'focused-committed',
   }
-  const preservedResult = result?.headSha === sha &&
+  const preservedResult = !!result && result.headSha === sha &&
     (result.status === 'review-handoff' ||
       !!stage && result.status === committedStageResult[stage])
   return !!sha && saved.status === 'paused' &&
