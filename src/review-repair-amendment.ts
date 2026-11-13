@@ -36,15 +36,16 @@ export interface ReviewRepairPlanAmendment {
   digest: string;
 }
 
-/** A review may name every changed file, but protected supporting metadata
- * is not an automatic repair target. An empty ceiling requires escalation. */
+/** A validated checkpoint may include protected supporting records (e.g. an
+ * Arc's Character links or a Milestone's fulfillment metadata). Keep these
+ * read-only without discarding the original writer's other repairable files.
+ * The finding itself must still target one of the resulting writable paths.
+ * Invalid paths or unauthorized Creative Direction changes fail closed. */
 export function reviewRepairTargets(changedPaths: string[], originWorkItem: string): string[] {
-  const paths = changedPaths.filter(path =>
-    !(originWorkItem.startsWith("event-") && path.startsWith("milestones/"))).sort();
-  if (paths.some(path => !canonicalPath.test(path) ||
-      (path.startsWith("creative-direction/") && originWorkItem !== "foundation") ||
-      /^(?:arcs|milestones|narrative-positions)\//.test(path))) return [];
-  return paths;
+  if (changedPaths.some(path => !canonicalPath.test(path) ||
+      (path.startsWith("creative-direction/") && originWorkItem !== "foundation"))) return [];
+  return changedPaths.filter(path =>
+    !/^(?:arcs|milestones|narrative-positions)\//.test(path)).sort();
 }
 
 export function deriveReviewRepairAmendment(input: {

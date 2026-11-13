@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { deriveReviewRepairAmendment } from "../src/review-repair-amendment.js";
+import { deriveReviewRepairAmendment, reviewRepairTargets } from "../src/review-repair-amendment.js";
 import type { CheckpointAssurance, IndependentReviewResult } from "../src/checkpoint-assurance.js";
 import type { TurnAssignmentEvidence } from "../src/turn-plan-evidence.js";
 
@@ -70,6 +70,47 @@ test("reviewer cannot grant an unrelated path, changed owner, or stale source", 
     planVersion: 0 }), /new writer|path|protected/);
 });
 
+test("Character checkpoint's verified Arc links remain read-only while owned Characters can be repaired", () => {
+  const character: TurnAssignmentEvidence = {
+    id: "foundations", specialist: "nt-character-development", outcome: "Introduce the witnesses",
+    targets: ["character.witness"], dependsOn: [], discovery: "canonical-story-read-only",
+    authority: { recordTypes: ["character", "relationship"], existingPaths: [], mayCreate: true },
+  };
+  const changedPaths = ["arcs/train-disappearance.md", "characters/guarded-passenger.md",
+    "characters/player-witness.md", "relationships/player-and-guarded-passenger.md"];
+  assert.deepEqual(reviewRepairTargets(changedPaths, "character-foundations"), [
+    "characters/guarded-passenger.md", "characters/player-witness.md",
+    "relationships/player-and-guarded-passenger.md",
+  ]);
+  const check = { ...assurance, workItem: "character-foundations",
+    assignmentId: character.id, assignmentDigest: hash(character), changedPaths };
+  const review: IndependentReviewResult = { ...result,
+    source: { ...result.source, assignmentId: character.id,
+      assignmentDigest: hash(character) },
+    findings: [{ path: "characters/guarded-passenger.md", kind: "continuity", line: 12,
+      message: "The witness forgets what the player knows about the train.",
+      requiredCorrection: "Revise this Character's established knowledge without touching the Arc.",
+      affectedPaths: ["characters/guarded-passenger.md", "arcs/train-disappearance.md"] }] };
+  const args = { assurance: check, review, original: character,
+    planVersion: 1, originWorkItem: "character-foundations" };
+  const amendment = deriveReviewRepairAmendment(args);
+  assert.deepEqual(amendment.assignment.authority.existingPaths, [
+    "characters/guarded-passenger.md", "characters/player-witness.md",
+    "relationships/player-and-guarded-passenger.md",
+  ]);
+  assert.deepEqual(amendment.readOnlyDependencies, ["arcs/train-disappearance.md"]);
+  assert.equal(amendment.assignment.specialist, character.specialist);
+  assert.equal(amendment.assignment.authority.mayCreate, false);
+  assert.deepEqual(deriveReviewRepairAmendment(args), amendment,
+    "Restart must derive identical bounded authority");
+  assert.throws(() => deriveReviewRepairAmendment({ ...args,
+    review: { ...review, findings: [{ ...review.findings[0]!,
+      path: "arcs/train-disappearance.md" }] } }), /unverified source/);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args,
+    assurance: { ...check, changedPaths: ["arcs/train-disappearance.md"] } }),
+    /new writer|path|protected/);
+});
+
 test("Event correction edits its reviewed Event, never the validated Milestone metadata", () => {
   const event: TurnAssignmentEvidence = {
     id: "event", specialist: "nt-event-design", outcome: "Present fair-play observations",
@@ -95,9 +136,21 @@ test("Event correction edits its reviewed Event, never the validated Milestone m
   assert.throws(() => deriveReviewRepairAmendment({ ...args,
     review: { ...review, findings: [{ ...review.findings[0]!,
       path: "milestones/evidence.md" }] } }), /unverified source/);
-  assert.throws(() => deriveReviewRepairAmendment({ ...args,
-    assurance: { ...changed, changedPaths: [...changed.changedPaths, "arcs/unrelated.md"] } }),
-  /new writer|path|protected/);
+  const linkedArc = { ...args,
+    assurance: { ...changed, changedPaths: [...changed.changedPaths, "arcs/connected.md"] },
+    review: { ...review, findings: [{ ...review.findings[0]!,
+      affectedPaths: [...review.findings[0]!.affectedPaths, "arcs/connected.md"] }] } };
+  const linkedRepair = deriveReviewRepairAmendment(linkedArc);
+  assert.deepEqual(linkedRepair.assignment.authority.existingPaths, ["events/compare.md"]);
+  assert.deepEqual(linkedRepair.readOnlyDependencies,
+    ["arcs/connected.md", "milestones/evidence.md"]);
+  assert.throws(() => deriveReviewRepairAmendment({ ...linkedArc,
+    review: { ...linkedArc.review, findings: [{ ...linkedArc.review.findings[0]!,
+      path: "arcs/connected.md" }] } }), /unverified source/);
+  assert.deepEqual(reviewRepairTargets(["arcs/linked.md", "milestones/linked.md"],
+    "event-evidence"), [], "A wholly protected checkpoint offers no writable repair target");
+  assert.deepEqual(reviewRepairTargets(["events/compare.md", "arcs/../unsafe.md"],
+    "event-evidence"), [], "Invalid canonical paths still fail closed");
 });
 
 test("Foundation-only exception retains exact Creative Direction path without author-approval grants", () => {
