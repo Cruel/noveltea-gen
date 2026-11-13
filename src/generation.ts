@@ -830,7 +830,11 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           const completedStages = [...s.completedStages, { stage, milestone: s.active?.milestone,
             headSha: s.result.headSha ?? headSha, status: s.result.status, planVersion: planVersion ?? undefined }];
           const next = await reconcile({ ...s, completedStages, active: null, result: null, planVersion }, job);
-          return { ...next, cursor: s.cursor + 1, result: null,
+          // A newly verified specialist has just reached a safe boundary. The
+          // next assignment must not become in-flight until author steering and
+          // other boundary updates have been reconciled by author_update_intake.
+          // Preserve the in-flight guard there for genuinely interrupted writers.
+          return { ...next, active: null, cursor: s.cursor + 1, result: null,
             ...(s.pauseAfter === stage ? { status: "paused" as const, reason: "Requested safe-boundary pause" } : {}) };
         } catch (error) { return blocked(error); }
       });

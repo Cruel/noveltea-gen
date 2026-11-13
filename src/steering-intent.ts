@@ -14,7 +14,11 @@ export function steeringGroundedTargets(text: string, catalog: ReadonlyArray<{
   metadata: { id: string; type: string; [key: string]: unknown };
 }>): string[] {
   const explicit = steeringCanonicalTargets(text);
-  const normalized = text.toLocaleLowerCase('en-US');
+  // A canonical ID's slug is not a second mention of another record's title.
+  // For example, "authored-content.confession" must not implicitly target a
+  // Milestone titled "Confession". Preserve separate natural-language names
+  // outside the explicit IDs so additional intended targets still need review.
+  const normalized = text.replace(canonicalIds, ' ').toLocaleLowerCase('en-US');
   const matches = catalog.filter(record => {
     const meta = record.metadata;
     const title = typeof meta.title === 'string' ? meta.title.trim() : '';

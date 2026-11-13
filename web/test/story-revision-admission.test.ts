@@ -242,7 +242,12 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
             return
           }
           const plan = await readSteeringPlan(first, admitted!.digest)
-          assert.equal(plan?.entries.length, 1)
+          assert.equal(plan?.entries.length, 1, JSON.stringify({
+            status: result.status, reason: result.reason, active: result.active?.id,
+            inventory: result.inventory?.items.map(item => ({ id: item.id, status: item.status })),
+            pending: await store.persistence.steering.pendingBoundary(owner, firstJobId, ownerThreadId),
+            activity: await store.persistence.steering.activity(owner, ownerThreadId),
+          }, null, 2))
           assert.equal(plan?.entries[0]?.messageId, steerId)
           assert.equal(plan?.entries[0]?.sourceSha, sha)
           assert.equal(plan?.entries[0]?.originalObjective, request)

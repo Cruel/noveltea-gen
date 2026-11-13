@@ -100,6 +100,27 @@ test("a second distinct steer is a versioned append, not an overwrite of origina
     /false lead/);
 });
 
+test("an explicit canonical ID does not silently target a second record with a matching title", t => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const catalog = f.records.map(record => record.metadata.id === "event.alibi"
+    ? { ...record, metadata: { ...record.metadata, title: "Mara" } }
+    : record) as CanonicalScopeRecord[];
+  const exact = f.make(f.steering, f.inventory, catalog);
+  assert.equal(exact.decision.kind, "applied");
+  assert.deepEqual(exact.amendment?.affectedAssignments, ["focus:character.mara"]);
+  const multiple = f.make({ ...f.steering, content:
+    "Make character.mara the murderer and give the Mara event a false lead" }, f.inventory, catalog);
+  assert.equal(multiple.decision.kind, "applied");
+  assert.deepEqual(multiple.amendment?.affectedAssignments,
+    ["focus:character.mara", "focus:event.alibi"]);
+  const forbidden = f.make({ ...f.steering, content:
+    "Make character.mara the murderer and revise event.alibi" },
+    { ...f.inventory, items: f.inventory.items.filter(item => item.id !== "focus:event.alibi") }, catalog);
+  assert.equal(forbidden.decision.kind, "review-required",
+    "A genuinely additional out-of-scope target remains blocked");
+});
+
 test("source drift, unrelated targets, protected canon and unbound instructions fail closed", async t => {
   const f = fixture();
   t.after(f.cleanup);
