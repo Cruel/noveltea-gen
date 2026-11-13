@@ -48,7 +48,12 @@ export function deriveReviewRepairAmendment(input: {
     turnDigest: assurance.turnDigest, assignmentId: assurance.assignmentId,
     assignmentDigest: assurance.assignmentDigest, diffDigest: assurance.diffDigest,
     validationProofDigest: assurance.validationProofDigest };
-  const paths = [...assurance.changedPaths].sort();
+  // An Event work item may have advanced the selected Milestone's fulfillment
+  // metadata in its *already validated* commit. That is read-only context for
+  // any correction, never new repair authority. A finding ON that Milestone
+  // still escalates rather than creating a protected-path repair grant.
+  const paths = assurance.changedPaths.filter(path =>
+    !(originWorkItem.startsWith("event-") && path.startsWith("milestones/"))).sort();
   const owned = new Set([...original.authority.existingPaths, ...original.authority.newPaths ?? []]);
   if (review.status !== "failed" || !review.findings.length ||
       JSON.stringify(source) !== JSON.stringify(review.source) ||

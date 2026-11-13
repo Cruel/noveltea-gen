@@ -70,6 +70,36 @@ test("reviewer cannot grant an unrelated path, changed owner, or stale source", 
     planVersion: 0 }), /new writer|path|protected/);
 });
 
+test("Event correction edits its reviewed Event, never the validated Milestone metadata", () => {
+  const event: TurnAssignmentEvidence = {
+    id: "event", specialist: "nt-event-design", outcome: "Present fair-play observations",
+    targets: ["milestone.evidence"], dependsOn: [], discovery: "canonical-story-read-only",
+    authority: { recordTypes: ["event"], existingPaths: [], mayCreate: true },
+  };
+  const changed = { ...assurance, workItem: "event-evidence", assignmentId: event.id,
+    assignmentDigest: hash(event), changedPaths: ["events/compare.md", "milestones/evidence.md"],
+    changedRecordTypes: ["event", "milestone"] };
+  const review: IndependentReviewResult = { ...result,
+    source: { ...result.source, assignmentId: event.id,
+      assignmentDigest: hash(event) },
+    findings: [{ path: "events/compare.md", kind: "missing-requirement", line: 22,
+      message: "Comparison skips the evidence observations needed for fair play.",
+      requiredCorrection: "Show both observations in a playable scene before the comparison.",
+      affectedPaths: ["events/compare.md", "milestones/evidence.md"] }] };
+  const args = { assurance: changed, review, original: event,
+    planVersion: 1, originWorkItem: "event-evidence" };
+  const amendment = deriveReviewRepairAmendment(args);
+  assert.deepEqual(amendment.assignment.authority.existingPaths, ["events/compare.md"]);
+  assert.deepEqual(amendment.readOnlyDependencies, ["milestones/evidence.md"]);
+  assert.equal(amendment.assignment.authority.mayCreate, false);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args,
+    review: { ...review, findings: [{ ...review.findings[0]!,
+      path: "milestones/evidence.md" }] } }), /unverified source/);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args,
+    assurance: { ...changed, changedPaths: [...changed.changedPaths, "arcs/unrelated.md"] } }),
+  /new writer|path|protected/);
+});
+
 test("Foundation-only exception retains exact Creative Direction path without author-approval grants", () => {
   const foundation: TurnAssignmentEvidence = { id: "foundation", specialist: "nt-story-discovery",
     outcome: "Establish a source-linked Creative Direction", targets: [], dependsOn: [],

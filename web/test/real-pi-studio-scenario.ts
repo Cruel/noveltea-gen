@@ -159,6 +159,12 @@ test(fullStory
     const selected = { provider, id: selectedModel.id }
     console.log('Live Pi certification model:', selected.provider + '/' + selected.id)
     await assertUserPiSelection(store, user.id, selected)
+    if (fullStory) {
+      // Normal Story Chat reads the saved per-user default, not the smoke
+      // test's explicit generation configuration. Both use the same real Pi.
+      await store.persistence.settings.putDefaultModel(user.id, selected,
+        new Date().toISOString())
+    }
     const headers = new Headers({ cookie, origin: config.baseURL })
     const creativeMode = process.env.NT_TEST_WEB_PI_STORY_MODE === 'collaborative'
       ? 'collaborative' : 'autonomous'

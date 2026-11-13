@@ -12,9 +12,13 @@ import { request } from 'node:http'
 import { afterEach, test } from 'node:test'
 import { createControllerFixtureDatabase } from './support/sqlite-controller-fixture'
 import { SandboxClient } from '../../src/sandbox-client'
+import { pinChatApprovedFoundation } from '../../src/chat-approved-foundation'
+import { renderFoundation } from '../../src/foundation-record'
+import type { JobStartResult } from '../../src/job'
 import {
   createControllerServer, loadControllerConfig, resolveTrustedJob,
-  SandboxController, SandboxError, type CommandRunner, type ControllerConfig,
+  SandboxController, SandboxError, verifyPinnedGenerationRevision,
+  type CommandRunner, type ControllerConfig,
 } from '../src/sandbox-controller'
 
 const roots: string[] = []
@@ -131,6 +135,85 @@ test('registered Story job derives one trusted worktree and never mounts git or 
   await controller.acquire(ID)
   assert.deepEqual(await controller.inspect(ID), { jobId: ID, status: 'running' })
   assert.deepEqual((await controller.dispose(ID)), { jobId: ID, status: 'disposed' })
+})
+
+test('historical generation pin must be the exact approved Foundation, not a forged ancestor', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'nt-generation-pin-'))
+  roots.push(root)
+  const repo = join(root, 'repo'), story = join(repo, 'story'), stateDir = join(root, 'state')
+  mkdirSync(story, { recursive: true })
+  mkdirSync(stateDir)
+  const git = (...args: string[]) => execFileSync('git', args, {
+    cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim()
+  git('init', '-q')
+  git('config', 'user.name', 'Test Author')
+  git('config', 'user.email', 'author@test.invalid')
+  git('checkout', '-qb', 'noveltea-gen/verified-job')
+  writeFileSync(join(story, 'README.txt'), 'Empty Story\n')
+  git('add', '.'); git('commit', '-qm', 'Source baseline')
+  const baseSha = git('rev-parse', 'HEAD')
+  const job = {
+    jobId: ID, baseSha, worktreeRoot: repo, worktreeStoryRoot: story,
+    storyRelativePath: 'story', storyRoot: story, gitRoot: repo,
+    stateDir, branch: 'noveltea-gen/verified-job', threadId: ID,
+    validatorVersion: '1.0.0', status: 'ready', headSha: baseSha,
+    cacheRoot: root,
+  } as JobStartResult
+  const draft = {
+    id: 'foundation', title: 'A Mystery', premise: 'A train stops',
+    central_conflict: 'The passenger disappears', genre: 'Mystery', tone: 'Eerie',
+    player_experience: 'Investigate', scope: 'Overnight train',
+    decisions: [{ id: 'train', statement: 'On an overnight train',
+      origin: 'user' as const, authority: 'user-protected' as const }],
+    body: 'The train must arrive before sunrise.',
+  }
+  await pinChatApprovedFoundation(job, {
+    jobId: ID, sourceSha: baseSha, firstTurnId: ID, scope: 'whole-story',
+    originalObjective: 'Make me a mystery game', proposalDigest: 'd'.repeat(64),
+    skillId: 'b'.repeat(64), foundation: draft,
+    creativeMode: 'autonomous', provider: 'openai', model: 'gpt-6-luna',
+  })
+  mkdirSync(join(story, 'creative-direction'))
+  writeFileSync(join(story, 'creative-direction', 'foundation.md'), renderFoundation(draft))
+  git('add', '.'); git('commit', '-qm', 'Approved foundation\n\nNovelTea-Job: ' + ID +
+    '\nNovelTea-Work-Item: foundation')
+  const foundationSha = git('rev-parse', 'HEAD')
+  const foundationReceipt = {
+    stage: 'committed', commitSha: foundationSha,
+    authoredSha256: sha(renderFoundation(draft)),
+  }
+  writeFileSync(join(stateDir, 'foundation.json'), JSON.stringify(foundationReceipt))
+  mkdirSync(join(story, 'arcs'))
+  writeFileSync(join(story, 'arcs', 'opening.md'), 'A train mystery begins.\n')
+  git('add', '.'); git('commit', '-qm', 'Architecture\n\nNovelTea-Job: ' + ID +
+    '\nNovelTea-Work-Item: global-architecture')
+  const verified = git('rev-parse', 'HEAD')
+  const headReceipt = join(stateDir, 'revisions', 'verified-head.json')
+  mkdirSync(join(stateDir, 'revisions'))
+  writeFileSync(headReceipt, JSON.stringify({ version: 1, jobId: ID, headSha: verified,
+    workItemId: 'global-architecture' }))
+  assert.equal(await verifyPinnedGenerationRevision(job, baseSha, baseSha), true)
+  assert.equal(await verifyPinnedGenerationRevision(job, foundationSha, baseSha), true)
+  assert.equal(await verifyPinnedGenerationRevision(job, verified, baseSha), true)
+  assert.equal(await verifyPinnedGenerationRevision(job, '0'.repeat(40), baseSha), false)
+  assert.equal(await verifyPinnedGenerationRevision(job, foundationSha, 'f'.repeat(40)), false)
+  writeFileSync(join(stateDir, 'foundation.json'), JSON.stringify({ ...foundationReceipt,
+    authoredSha256: 'f'.repeat(64) }))
+  assert.equal(await verifyPinnedGenerationRevision(job, foundationSha, baseSha), false)
+  writeFileSync(join(stateDir, 'foundation.json'), JSON.stringify(foundationReceipt))
+  const approvalPath = join(stateDir, 'chat-approved-foundation.json')
+  const approval = readFileSync(approvalPath, 'utf8')
+  writeFileSync(approvalPath, JSON.stringify({ ...JSON.parse(approval), firstTurnId: 'foreign' }))
+  assert.equal(await verifyPinnedGenerationRevision(job, foundationSha, baseSha), false)
+  writeFileSync(approvalPath, approval)
+  git('checkout', '-qb', 'noveltea-gen/foreign-branch')
+  assert.equal(await verifyPinnedGenerationRevision(job, foundationSha, baseSha), false)
+  git('checkout', 'noveltea-gen/verified-job')
+  writeFileSync(headReceipt, JSON.stringify({ version: 1, jobId: ID,
+    headSha: 'e'.repeat(40), workItemId: 'global-architecture' }))
+  await assert.rejects(() => verifyPinnedGenerationRevision(job, foundationSha, baseSha),
+    /differs from the latest verified revision/)
 })
 
 const pinnedDraft = (limits: unknown, headSha = 'a'.repeat(40)) =>

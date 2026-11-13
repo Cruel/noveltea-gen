@@ -7,6 +7,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { trustedHead } from "./revision.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
+import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 import { checkpointAssurance, inspectCheckpointReview, readRepairCommitProof,
   type CheckpointAssurance, type SemanticReviewStatus } from "./checkpoint-assurance.js";
 
@@ -336,11 +337,30 @@ async function readFinal(job: JobStartResult, sha: string): Promise<RecoveryChec
 }
 async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
   inspectionHead?: string) {
+  const parentGraphThread = await graphThread(job);
+  // The exact-approved Chat Foundation is committed before the parent's first
+  // generation queue admission. Its checkpoint was sealed with the original
+  // pre-admission graph identity. A later :generation:web owner cannot rewrite
+  // that historical receipt; allow only this source-bound whole-Story handoff.
+  const preGraphFoundation = point.workItem === "foundation" &&
+    point.graphThread === job.threadId + ":generation" &&
+    parentGraphThread === job.threadId + ":generation:web";
+  const approvedFoundation = preGraphFoundation ? await readChatApprovedFoundation(job) : null;
+  const foundationReceipt = preGraphFoundation && existsSync(join(job.stateDir, "foundation.json"))
+    ? JSON.parse(await readFile(join(job.stateDir, "foundation.json"), "utf8")) as {
+      commitSha?: string; authoredSha256?: string; stage?: string
+    } : null;
+  const earlyChatFoundation = preGraphFoundation &&
+    approvedFoundation?.scope === "whole-story" &&
+    approvedFoundation.firstTurnId === job.jobId &&
+    approvedFoundation.authoredSha256 === foundationReceipt?.authoredSha256 &&
+    foundationReceipt.stage === "committed" &&
+    foundationReceipt.commitSha === point.commitSha;
   if (point.version !== 1 || point.status !== "finalized" ||
       point.jobId !== job.jobId || point.repository !== job.gitRoot ||
       point.story !== job.storyRoot || point.storyRelativePath !== job.storyRelativePath ||
       point.branch !== job.branch || point.baseSha !== job.baseSha ||
-      point.graphThread !== await graphThread(job) ||
+      (point.graphThread !== parentGraphThread && !earlyChatFoundation) ||
       point.compatibility?.logicalSchema !== "noveltea-recovery/v1" ||
       point.compatibility.graphSchema !== "noveltea-generation/v1" ||
       point.validation?.validatorVersion !== job.validatorVersion ||
@@ -426,7 +446,13 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
       throw new Error("Historical Architecture proof differs from the authorized plan commit.");
   }
   const review = await inspectCheckpointReview(job, point);
-  if (!review && await checkpointAssurance(job, point))
+  // An exact author-approved Foundation was finalized *before* Story Chat
+  // created its Turn plan. Its immutable checkpoint correctly has no Turn
+  // review-selection receipt. A later plan must not retroactively manufacture
+  // an assurance or make that same historical commit unusable. Only the
+  // independently verified original Chat handoff above permits this absence;
+  // later specialist checkpoints still require their own original reviews.
+  if (!review && !earlyChatFoundation && await checkpointAssurance(job, point))
     throw new Error("Turn checkpoint lacks its required original review-selection receipt.");
   if (point.planVersion !== (source.planVersion ?? (point.plan as { version?: number } | null)?.version ?? null) ||
       point.validation.status !== (source.proof.validation === "unverified-empty-baseline"

@@ -14,6 +14,9 @@ import { StringDecoder } from 'node:string_decoder'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { readTrustedControllerJob, type TrustedCatalogOptions, type TrustedControllerJobRow } from './db/trusted-catalog'
 import { parseJobLimits } from '../../src/job-limits'
+import { trustedHead } from '../../src/revision'
+import { readChatApprovedFoundation } from '../../src/chat-approved-foundation'
+import type { JobStartResult } from '../../src/job'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SHA = /^[0-9a-f]{40}$/i
@@ -122,13 +125,20 @@ const defaultMaximums: Resources = { cpu: 4, memoryMiB: 2048, pids: 512 }
 
 /** Only a user-owned, pinned Studio draft supplies preferences. Enforce the
  * host operator's upper bound independently, including on reconnection. */
-function trustedResources(row: JobRow, config: ControllerConfig): Resources {
+async function trustedResources(row: JobRow, config: ControllerConfig,
+  revisionEvidence: boolean, verifyPinnedRevision: (pin: string) => Promise<boolean>): Promise<Resources> {
   let requested: ReturnType<typeof parseJobLimits> = {}
   if (row.configJson !== null) {
     try {
       const draft = JSON.parse(row.configJson) as Record<string, unknown>
-      if (!draft || draft.version !== 1 || draft.headSha !== row.pin)
-        throw new Error('Invalid pinned generation config')
+      if (!draft || draft.version !== 1 || typeof draft.headSha !== 'string' ||
+          !SHA.test(draft.headSha)) throw new Error('Invalid pinned generation config')
+      // A pinned generation configuration records the *initial* authorized
+      // checkpoint, not the moving HEAD after every specialist commit. Verify
+      // both the original checkpoint and its descendant's Git/receipt chain.
+      if ((draft.headSha !== row.pin || revisionEvidence) &&
+          !await verifyPinnedRevision(draft.headSha))
+        throw new Error('Generation configuration is not pinned to a verified Story revision')
       requested = parseJobLimits(draft.limits)
     } catch { throw new SandboxError(409, 'Trusted job resource configuration is invalid or unpinned.') }
   }
@@ -139,11 +149,61 @@ function trustedResources(row: JobRow, config: ControllerConfig): Resources {
     pids: Math.min(requested.pids ?? defaults.pids, maxima.pids),
   }
 }
+/** The draft's immutable starting revision is either its original source,
+ * its currently verified HEAD, or the single author-approved Foundation commit.
+ * No arbitrary ancestor, forged metadata or moving unverified HEAD is authority. */
+export async function verifyPinnedGenerationRevision(job: JobStartResult, pin: string,
+  sourcePin: string): Promise<boolean> {
+  if (!SHA.test(pin) || sourcePin !== job.baseSha) return false
+  const head = await trustedHead(job)
+  const actualBranch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+    cwd: job.worktreeRoot, encoding: 'utf8', timeout: 5000,
+    stdio: ['ignore', 'pipe', 'pipe'], env: cleanGitEnv(),
+  }).trim()
+  if (actualBranch !== job.branch) return false
+  if (pin !== sourcePin && pin !== head) {
+    const approval = await readChatApprovedFoundation(job)
+    if (approval?.scope !== 'whole-story' || approval.firstTurnId !== job.jobId) return false
+    const path = join(job.stateDir, 'foundation.json')
+    if (!existsSync(path)) return false
+    const foundation = JSON.parse(readFileSync(path, 'utf8')) as {
+      stage?: string; commitSha?: string; authoredSha256?: string
+    }
+    if (foundation.stage !== 'committed' || foundation.commitSha !== pin ||
+        foundation.authoredSha256 !== approval.authoredSha256) return false
+    const message = execFileSync('git', ['log', '-1', '--format=%B', pin], {
+      cwd: job.worktreeRoot, encoding: 'utf8', timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'], env: cleanGitEnv(),
+    })
+    if (!message.split(/\r?\n/).includes('NovelTea-Job: ' + job.jobId) ||
+        !message.split(/\r?\n/).includes('NovelTea-Work-Item: foundation')) return false
+    const parent = execFileSync('git', ['rev-parse', pin + '^'], {
+      cwd: job.worktreeRoot, encoding: 'utf8', timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'], env: cleanGitEnv(),
+    }).trim()
+    if (parent !== sourcePin) return false
+  }
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', pin, head], {
+      cwd: job.worktreeRoot, env: cleanGitEnv(),
+      stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000,
+    })
+    return true
+  } catch { return false }
+}
+function cleanGitEnv() {
+  const env = { ...process.env }
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX'])
+    delete env[key]
+  return env
+}
+
 type JobRow = TrustedControllerJobRow
 type Manifest = {
   version: number; jobId: string; gitRoot: string; gitCommonDir: string;
   storyRoot: string; storyRelativePath: string; baseSha: string; branch: string;
   stateDir: string; cacheRoot: string; worktreeRoot: string; worktreeStoryRoot: string;
+  threadId?: string; validatorVersion?: string;
 }
 
 /**
@@ -217,7 +277,25 @@ export async function resolveTrustedJob(config: ControllerConfig, jobId: string,
     if (error instanceof SandboxError) throw error
     throw new SandboxError(409, 'Saved job worktree is missing or has an unsafe filesystem identity.')
   }
-  const resources = trustedResources(row, config)
+  const hostState = join(config.stateVolume, 'jobs', stateHash)
+  const revisionEvidence = existsSync(join(hostState, 'foundation.json')) ||
+    existsSync(join(hostState, 'revisions', 'verified-head.json'))
+  const resources = await trustedResources(row, config, revisionEvidence, async (pin) => {
+    if (!saved.threadId || !saved.validatorVersion)
+      throw new SandboxError(409, 'Trusted job manifest has incomplete revision identity.')
+    // Read-only reconstruction from the checked manifest, owner catalog, linked
+    // Git registry, and host paths. Revision receipts must match actual Git HEAD.
+    const identity: JobStartResult = {
+      jobId, gitRoot: join(config.cacheVolume, scoped, 'base'),
+      storyRoot: join(config.cacheVolume, scoped, 'base', row.directory),
+      storyRelativePath: row.directory, baseSha: saved.baseSha, branch: saved.branch,
+      stateDir: hostState, cacheRoot: join(config.cacheVolume, scoped),
+      worktreeRoot: hostRoot, worktreeStoryRoot: hostStory,
+      threadId: saved.threadId, validatorVersion: saved.validatorVersion,
+      status: 'ready', headSha: '',
+    }
+    return verifyPinnedGenerationRevision(identity, pin, row.pin)
+  })
   return { id: jobId, storyRoot: hostStory,
     volumeSubpath: hostStory.slice(config.cacheVolume.length + 1).split(sep).join('/'),
     identity: stateHash, imageId, resources, resourceHash: hash(JSON.stringify(resources)) }

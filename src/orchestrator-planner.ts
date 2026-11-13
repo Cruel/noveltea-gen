@@ -22,6 +22,7 @@ import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { trustedHead } from "./revision.js";
+import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 
 const requiredFor = (plan: TurnEvidence): readonly string[] =>
   requiredOrchestratorSkillReads(plan.creativePolicy?.mode ?? "autonomous");
@@ -294,6 +295,10 @@ export async function runPinnedObjectivePlanner(
     });
     await context.beforeTurn(file);
     const currentHead = await trustedHead(job);
+    const approvedFoundation = await readChatApprovedFoundation(job);
+    const foundationCommitted = approvedFoundation?.scope === "whole-story" &&
+      approvedFoundation.firstTurnId === job.jobId && currentHead !== job.baseSha;
+    const requiredIds = plan.assignments.map((assignment) => assignment.id);
     const prompt =
       context.contextNote +
       "You are the read-only NovelTea objective orchestrator, not a Story writer. " +
@@ -302,7 +307,9 @@ export async function runPinnedObjectivePlanner(
       "\nInspect relevant existing canonical Story through read/find/grep without touching " +
       "the private .story-inbox or another Thread. You have NO file write, shell, reviewer, " +
       "or approval authority. Follow the pinned methodology to identify which of the " +
-      "controller-authorized assignments are currently relevant and their causal order. " +
+      "ALL controller-authorized assignments in a causal order, including already " +
+      "completed assignments. This is a COMPLETE ordering and rationale annotation, " +
+      "NOT a filtered list of only the remaining unblocked work. " +
       (plan.creativePolicy?.mode === "collaborative"
         ? "Apply nt-story-collaborate ONLY to how consequential author choices should be presented. " +
           "Reuse established foundation, protected decisions and delegated details. " +
@@ -319,12 +326,23 @@ export async function runPinnedObjectivePlanner(
       job.baseSha +
       "\nCurrent verified HEAD: " +
       currentHead +
+      (foundationCommitted
+        ? "\nThe authenticated Chat controller has already recorded exact author approval " +
+          "for this whole-Story objective, and the Foundation is independently " +
+          "native-validated and committed. Do not ask for a second approval or " +
+          "treat that completed assignment as an unmet prerequisite. "
+        : "\nNo pre-graph whole-Story Foundation handoff is recorded; the graph " +
+          "will handle its authorized Foundation assignment. ") +
       "\nAuthor objective: " +
       plan.goal +
       "\nDelivery requirements: " +
       JSON.stringify(plan.objective) +
       "\nAuthorized bounded plan: " +
       JSON.stringify(plan.assignments) +
+      "\nREQUIRED exact assignment IDs (" + requiredIds.length + " total): " +
+      JSON.stringify(requiredIds) +
+      "\nYou MUST return every one of these IDs exactly once, even if a stage has " +
+      "already been verified or a downstream task has a dependency. No omissions. " +
       "\nReturn ONLY JSON with fields sourceSha (the source base SHA), turnDigest " +
       "(the exact plan digest), assignments (every authorized assignment, in causal order, " +
       "each as an object with id and a concise source-grounded reason). No other keys.\n" +
@@ -355,7 +373,31 @@ export async function runPinnedObjectivePlanner(
     const reads = completedReads();
     if (missingReads().length)
       throw new Error("Orchestrator did not actually read the selected pinned method and catalog.");
-    const proposal = verifyOrchestratorProposal(parseText(session.getLastAssistantText() ?? ""), plan);
+    const checkProposal = () => verifyOrchestratorProposal(
+      parseText(session.getLastAssistantText() ?? ""), plan);
+    let proposal: OrchestratorProposal;
+    try { proposal = checkProposal(); }
+    catch (cause) {
+      // A completed model turn may legitimately misunderstand full assignment
+      // coverage. One bounded correction in the SAME preserved Pi session is
+      // safe: the controller still validates every ID and dependency. Never
+      // replay an errored/aborted turn or auto-authorize a missing assignment.
+      if (!(cause instanceof Error) || !cause.message.startsWith("Orchestrator ")) throw cause;
+      await withStoryJobLock(job, "orchestrator:objective-correction", () => promptStorySpecialist(session,
+        "Your proposal did not preserve the exact controller-authorized assignment set. " +
+        "Return a COMPLETE reordering annotation with EXACTLY these IDs, each once, " +
+        "including already committed stages. Do not create, remove, rename or defer " +
+        "any assignment. All dependencies must appear before their dependents. " +
+        "The author-approved Foundation, when present, is already committed. " +
+        "Return ONLY JSON with sourceSha, turnDigest and assignments. " +
+        "sourceSha=" + job.baseSha + " turnDigest=" + plan.digest +
+        " required IDs=" + JSON.stringify(requiredIds)));
+      const corrected = [...session.messages].reverse().find((m) => m.role === "assistant");
+      if (!corrected || corrected.role !== "assistant" ||
+          ["error", "aborted"].includes(corrected.stopReason))
+        throw new Error("Orchestrator correction turn did not complete safely.");
+      proposal = checkProposal();
+    }
     await context.completed(file, session.sessionId);
     const finished = seal({ ...original, phase: "planned", proposal, skillReads: reads });
     await writeFile(pathFor(job), JSON.stringify(finished, null, 2) + "\n", { mode: 0o600 });

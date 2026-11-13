@@ -15,6 +15,8 @@ import { activeSpecialistChoice, focusedChoiceWorkItem, verifySpecialistChoice }
 import { validateStoryJob } from '../../../src/validator'
 import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
+import { inspectRejectedRepair, type RepairReceipt } from '../../../src/rejected-review-repair'
+import { inspectRecoveryCheckpoints, type RecoveryInspection } from '../../../src/recovery-checkpoints'
 import { inspectPiPolicy, configurePiPolicy, type PiPolicy } from '../../../src/job-pi-policy'
 import { parseJobLimits } from '../../../src/job-limits'
 
@@ -57,6 +59,32 @@ export function authorChoiceMatchesActiveAssignment(workItem: string, value: unk
   return false
 }
 
+type PendingReviewChoiceState = {
+  status?: string; reason?: string | null; active?: unknown; result?: unknown;
+  ideaTask?: unknown; ideaResult?: unknown;
+}
+
+/** Only an exact already-sealed rejected checkpoint and its answered
+ * authenticated choice may re-enter review. No specialist writer is replayed. */
+export function matchesReviewRepairResumeBoundary(
+  saved: PendingReviewChoiceState,
+  choice: { id: string; workItem: string },
+  repair: Pick<RepairReceipt, 'phase' | 'choiceId' | 'baselineHead' | 'sourceCommitSha' | 'origin'>,
+  point: Pick<RecoveryInspection, 'eligible' | 'commitSha' | 'workItem' | 'semanticReview'>,
+): boolean {
+  const sha = choice.workItem.match(/^repair-([a-f0-9]{40})$/)?.[1]
+  const result = saved.result as { status?: string; headSha?: string } | null | undefined
+  return !!sha && saved.status === 'paused' &&
+    saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.' &&
+    result?.status === 'review-handoff' && result.headSha === sha &&
+    !saved.ideaTask && !saved.ideaResult &&
+    point.eligible && point.commitSha === sha && point.semanticReview === 'failed' &&
+    repair.phase === 'awaiting-author' && repair.choiceId === choice.id &&
+    repair.baselineHead === sha && repair.sourceCommitSha === sha &&
+    repair.origin.workItem === point.workItem &&
+    authorChoiceMatchesActiveAssignment(point.workItem, saved.active)
+}
+
 /** Read-only, evidence-checked admission. Exported for crash/restart regression tests. */
 export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
   threadId: string, pinned: string, retry: boolean): Promise<'start' | 'resume'> {
@@ -79,8 +107,7 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
     const { saver, graph } = openWebGenerationGraph(checkpoint)
     try {
       const state = await graph.getState({ configurable: { thread_id: threadId } })
-      const saved = state.values as { request?: unknown; status?: string; reason?: string | null;
-        active?: unknown; result?: unknown; ideaTask?: unknown; ideaResult?: unknown }
+      const saved = state.values as PendingReviewChoiceState & { request?: unknown }
       const policy = await inspectPiPolicy(job)
       const conflict = await authorizedFoundationException(job)
       const authorBoundary = !!conflict && !conflict.retryUsed &&
@@ -95,6 +122,21 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
         saved.reason?.startsWith('Specialist paused for an author choice.') === true
       const budgetBoundary = !!policy.budget.pause && !!saved.active && !saved.result &&
         saved.reason?.startsWith('Pi budget exhausted at safe boundary:') === true
+      // The original specialist already committed before its independent
+      // review and a reviewer dispute interrupted this graph. Preserve the
+      // in-flight dispatch/result; only the exact authenticated answered
+      // review-repair choice can re-enter its read-only review boundary.
+      let reviewRepairBoundary = false
+      const sourceSha = choiceAnswer?.workItem.match(/^repair-([a-f0-9]{40})$/)?.[1]
+      if (sourceSha && saved.status === 'paused' &&
+          saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.' &&
+          (saved.result as { status?: string; headSha?: string } | null)?.status === 'review-handoff') {
+        const repair = await inspectRejectedRepair(job, sourceSha)
+        const checkpoint = (await inspectRecoveryCheckpoints(job)).find(p =>
+          p.eligible && p.commitSha === sourceSha && p.semanticReview === 'failed')
+        reviewRepairBoundary = !!checkpoint &&
+          matchesReviewRepairResumeBoundary(saved, choiceAnswer!, repair, checkpoint)
+      }
       if (authorBoundary) {
         // Check the exact pinned native executable before consuming the
         // single no-write retry; a rotated bind mount must not let Pi edit
@@ -103,9 +145,9 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
         if (validation.status !== 'passed')
           throw new Error('Pinned native validator did not pass the unchanged Story. Restore the exact original validator before resuming.')
       }
-      if ((!authorBoundary && !choiceBoundary && saved.status !== 'paused') ||
-          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary) ||
-          saved.result || saved.ideaTask || saved.ideaResult ||
+      if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && saved.status !== 'paused') ||
+          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary) ||
+          (saved.result && !reviewRepairBoundary) || saved.ideaTask || saved.ideaResult ||
           (!saved.request || !sameGenerationRequest(saved.request as GenerationRequest,
             JSON.parse(pinned) as GenerationRequest)) || state.next.length !== 0)
         throw new Error('Checkpoint is not at a verified, idle safe boundary. Inspect the original specialist receipts.')

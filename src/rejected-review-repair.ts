@@ -15,7 +15,7 @@ import { inspectSpecialistChoice, recordSpecialistChoice, claimSpecialistChoice,
 import { verifyJobPiSession } from "./job-session.js";
 import { validateStoryJob } from "./validator.js";
 import { trustedHead } from "./revision.js";
-import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
+import { openSkillSnapshot, pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
@@ -784,13 +784,19 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       "validation and separate semantic rereview. First read the relevant pinned " +
       "skill and exact Story files. Edit ONLY the already authorized paths below. " +
       "Do not modify protected canon, broaden the task, run shell, approve changes " +
-      "or touch the author's deferred ideas. If a genuine disagreement prevents " +
+      "or touch the author's deferred ideas. If a finding cites records outside " +
+      "the allowed files, those are READ-ONLY context, not write grants. Fix " +
+      "the causal gap within your original authorized file where possible: " +
+      "for example, present concrete playable observations before asking the " +
+      "player to compare them in that Event instead of inventing new file paths. " +
+      "If a genuine disagreement prevents " +
       "correction, explain it in your response without editing; the controller " +
       "will ask the author. Your explanation cannot change the reviewer verdict. " +
       "Finish with a concise description of the actual edits and run story_validate. " +
       "SOURCE-LINKED REVIEW FEEDBACK: " + JSON.stringify(feedback) +
       "\nPINNED SPECIALIST GUIDANCE: " +
-      join(state.origin.snapshot.path, "skills", skill, "SKILL.md") +
+      pinnedSkillReferences(state.origin.snapshot, [
+        join(state.origin.snapshot.path, "skills", skill, "SKILL.md")]) +
       "\nAUTHORIZED FILES: " + state.allowedPaths.join(", "));
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!last || last.role !== "assistant" ||
