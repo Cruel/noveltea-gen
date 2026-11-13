@@ -41,6 +41,8 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(world, /NEXT separately committed character-foundations/);
   assert.match(world, /Do not fail World Foundations solely for not writing Characters/);
   assert.match(characters, /missing central Characters are a failure/);
+  assert.match(characters, /extend ONLY the existing, planned Arc's characters array/);
+  assert.match(characters, /Reject any Arc body, decision, plot, or other-field edit/);
   assert.match(choice, /separate later interactive-puzzle/);
   assert.match(puzzle, /Assess real solvability/);
   const packet = makePacket();
