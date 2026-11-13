@@ -38,6 +38,7 @@ test("multi-unit review requires only the exact current specialist unit, not its
   const characters = semanticUnitOutcome("character-foundations");
   const choice = semanticUnitOutcome("interactive-choice-disclosure");
   const puzzle = semanticUnitOutcome("interactive-puzzle-disclosure");
+  const event = semanticUnitOutcome("event-milestone.disappearance-established");
   assert.match(world, /NEXT separately committed character-foundations/);
   assert.match(world, /Do not fail World Foundations solely for not writing Characters/);
   assert.match(characters, /missing central Characters are a failure/);
@@ -45,6 +46,9 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(characters, /Reject any Arc body, decision, plot, or other-field edit/);
   assert.match(choice, /separate later interactive-puzzle/);
   assert.match(puzzle, /Assess real solvability/);
+  assert.match(event, /do NOT demand a pre-existing canonical Fact/);
+  assert.match(event, /assigned seat or passenger list alone does not prove/);
+  assert.match(event, /last-known-presence evidence or corroborated testimony/);
   const packet = makePacket();
   assert.equal(packet.items[0]!.reviewedWorkItem, "focus:character.nia");
   assert.match(packet.items[0]!.unitOutcome, /exact committed work item/);
