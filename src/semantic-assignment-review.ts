@@ -228,13 +228,11 @@ export async function prepareSemanticReview(job: JobStartResult,
   return { policy: "assignment-fidelity/v1", sourceDigest: packetDigest(items), items };
 }
 
-/** Correct only an unambiguous near-complete (32–39 hex chars) omission in a
- * PASS review's evidence SHA after the read-only Pi correction turn. A model
- * can omit a run of repeated hex characters while copying a 40-char SHA.
- * The reviewer must have
- * supplied the assignment, actual changed path, valid line and explanation.
- * Never replace a full-length (possibly stale/foreign) SHA, infer a missing
- * citation, repair a negative finding, or bypass validateSemanticVerdict. */
+/** Correct only unambiguous transcription errors in a PASS review's evidence
+ * SHA after the read-only Pi correction turn: omitted hex chars (32–39) or a
+ * contiguous duplicated span (41–80). Never replace a full-length possibly
+ * stale/foreign SHA, invent a citation, change a negative verdict, or bypass
+ * validateSemanticVerdict. Exact assignment, changed path and line are required. */
 export function normalizeOmittedSemanticEvidenceSha(packet: SemanticReviewPacket,
   raw: unknown): unknown {
   const value = raw as Partial<SemanticVerdict> | null;
@@ -244,9 +242,10 @@ export function normalizeOmittedSemanticEvidenceSha(packet: SemanticReviewPacket
   let fixed = false;
   const evidence = value.evidence.map(entry => {
     if (!entry || typeof entry.commitSha !== "string" ||
-        !/^[a-f0-9]{32,39}$/.test(entry.commitSha) ||
+        !/^[a-f0-9]{32,39}$|^[a-f0-9]{41,80}$/.test(entry.commitSha) ||
         typeof entry.assignmentId !== "string" || typeof entry.path !== "string" ||
-        !Number.isSafeInteger(entry.line) || entry.line < 1) return entry;
+        !Number.isSafeInteger(entry.line) || entry.line < 1 ||
+        typeof entry.explanation !== "string" || !entry.explanation.trim()) return entry;
     const candidates = packet.items.filter(item => {
       if (item.assignment.id !== entry.assignmentId ||
           !item.assurance.changedPaths.includes(entry.path) ||
@@ -254,9 +253,20 @@ export function normalizeOmittedSemanticEvidenceSha(packet: SemanticReviewPacket
             entry.line <= c.content.split("\n").length)) return false;
       const expected = item.assurance.commitSha;
       if (!/^[a-f0-9]{40}$/.test(expected)) return false;
-      let index = 0;
-      for (const char of expected) if (entry.commitSha[index] === char) index++;
-      return index === entry.commitSha.length;
+      if (entry.commitSha.length < 40) {
+        let index = 0;
+        for (const char of expected) if (entry.commitSha[index] === char) index++;
+        return index === entry.commitSha.length;
+      }
+      // Only an EXACT adjacent repetition of a contiguous part of the
+      // canonical SHA can be collapsed. This is not fuzzy SHA matching.
+      for (let start = 0; start < expected.length; start++)
+        for (let end = start + 1; end <= expected.length; end++) {
+          const span = expected.slice(start, end);
+          if (entry.commitSha === expected.slice(0, start) + span + span + expected.slice(end))
+            return true;
+        }
+      return false;
     });
     if (candidates.length !== 1) return entry;
     fixed = true;

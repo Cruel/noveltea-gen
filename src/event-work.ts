@@ -247,7 +247,22 @@ export async function changedPaths(job: JobStartResult, assignment: EventAssignm
   if (!allowEmpty && !paths.some(p => p.startsWith("events/"))) {
     throw new Error("Event specialist must change at least one Event in its assigned cluster.");
   }
-  if (JSON.stringify(paths) !== JSON.stringify([...new Set(manifest)].sort())) {
+  const declared = [...new Set(manifest)].sort();
+  if (JSON.stringify(paths) !== JSON.stringify(declared)) {
+    // #158: A bounded Event writer can accidentally list the SELECTED
+    // planning Milestone even after leaving it untouched and partial. The
+    // exact Git diff is the authority. Only discard this one redundant,
+    // original-source-identical path; never infer missing edits, ignore other
+    // overclaims, or accept an unauthorized/protected mutation.
+    const extra = assignment.milestonePath;
+    if (manifest.length === declared.length && declared.includes(extra) &&
+        !paths.includes(extra) &&
+        JSON.stringify(paths) === JSON.stringify(declared.filter(p => p !== extra))) {
+      const full = join(job.worktreeStoryRoot, extra);
+      if (await realpath(full) === full && (await lstat(full)).isFile() &&
+          await readFile(full, "utf8") === rawGit(job, "show", "HEAD:" + repoPath(job, extra)))
+        return paths;
+    }
     throw new Error("Event specialist modifiedRecords differ from the actual authorized Git diff: " +
       JSON.stringify({ expected: paths, declared: manifest }));
   }
@@ -426,7 +441,8 @@ function output(job: JobStartResult, state: EventReceipt) {
 async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
   rerouted = false): Promise<EventEvidence> {
   const configured = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
-  const variant = configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" : configured;
+  const variant = configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" :
+    configured === "phantom-milestone" ? "decision-pending" : configured;
   const cluster = fixtureCluster(assignment.milestoneId);
   const files: string[] = [];
   const add = async (slug: string, metadata: string, prose: string) => {
@@ -508,6 +524,7 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
       "\nThis is an unauthorized addition.\n");
   }
   if (variant === "mismatch") files.push("events/never-written.md");
+  if (configured === "phantom-milestone") files.push(assignment.milestonePath);
   return { claimedPaths: files, conflicts: [], obligations:
     ["decision-pending", "false-decision-complete", "fake-unrelated-effects"].includes(variant)
       ? ["Formal Choice Point binding and outcome-specific later consumers remain with the Choice specialist."]

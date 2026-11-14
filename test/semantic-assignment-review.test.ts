@@ -336,6 +336,36 @@ test("saved #158 reviewer SHA-omission can be corrected without generating evide
     "Negative reviews and their source links must never be rewritten");
 });
 
+test("live #158 repeated SHA span is recoverable only with exact verified source witnesses", () => {
+  const packet = makePacket();
+  const expected = "2b5ef5e7bedb12d2d1601af506181a6d2eeda54f";
+  const repeated = "2b5ef5e7bedb12d2d1601af506181a6d2d1601af506181a6d2eeda54f";
+  packet.items[0]!.assurance.commitSha = expected;
+  const entry = evidence("focus:character.nia", "characters/nia.md", repeated);
+  const original = { sourceDigest: packet.sourceDigest, verdict: "pass",
+    findings: [], evidence: [entry] };
+  assert.throws(() => validateSemanticVerdict(packet, original), /source-linked/);
+  const recovered = normalizeOmittedSemanticEvidenceSha(packet, original) as typeof original;
+  assert.equal(recovered.evidence[0]!.commitSha, expected);
+  assert.equal(recovered.evidence[0]!.explanation, entry.explanation);
+  assert.equal(validateSemanticVerdict(packet, recovered).verdict, "pass");
+  for (const changed of [
+    { commitSha: expected + expected.slice(0, 12) },
+    { commitSha: "f".repeat(40) },
+    { assignmentId: "other-assignment" },
+    { path: "characters/not-authored.md" },
+    { line: 900 },
+    { explanation: "" },
+  ]) {
+    const invalid = { ...original, evidence: [{ ...entry, ...changed }] };
+    assert.throws(() => validateSemanticVerdict(packet,
+      normalizeOmittedSemanticEvidenceSha(packet, invalid)), /source-linked/);
+  }
+  const failed = { ...original, verdict: "fail",
+    findings: [finding("focus:character.nia", "characters/nia.md", "missing-requirement", expected)] };
+  assert.strictEqual(normalizeOmittedSemanticEvidenceSha(packet, failed), failed);
+});
+
 test("faithful single assignment passes with exact source-linked evidence", () => {
   const packet = makePacket();
   assert.equal(validateSemanticVerdict(packet, { sourceDigest: packet.sourceDigest,

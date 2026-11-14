@@ -153,6 +153,30 @@ test("revising an existing Event does not require rewriting an already fulfilled
     "The Milestone must not be touched just to pass a path audit.");
 });
 
+test("an overreported but unchanged selected Milestone cannot exhaust the Event writer", { skip: !available }, () => {
+  const f = setup("phantom-milestone");
+  const head = f.prepare();
+  const milestone = join(f.job.worktreeStoryRoot, "milestones/disclosure.md");
+  const original = readFileSync(milestone, "utf8");
+  const run = f.event("phantom-milestone");
+  assert.equal(run.status, 0, run.stderr);
+  const result = JSON.parse(run.stdout);
+  assert.equal(result.status, "event-cluster-committed");
+  assert.deepEqual(result.paths, ["events/disclose-ledger.md"]);
+  assert.equal(readFileSync(milestone, "utf8"), original);
+  assert.notEqual(result.headSha, head);
+  const receiptFile = join(f.job.stateDir, "event-items/disclosure.json");
+  const receipt = JSON.parse(readFileSync(receiptFile, "utf8"));
+  assert.deepEqual(receipt.claimedPaths, [
+    "events/disclose-ledger.md", "milestones/disclosure.md",
+  ], "Retain the original model inventory for source-bound recovery");
+  assert.deepEqual(receipt.paths, ["events/disclose-ledger.md"],
+    "Only the actual Git diff may become a committed file");
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(f.event("phantom-milestone").status, 0);
+  assert.equal(readFileSync(receiptFile, "utf8"), JSON.stringify(receipt, null, 2) + "\n");
+});
+
 test("clean no-write prerequisite report stays source-bound without a replay or fabricated Event commit", { skip: !available }, () => {
   const f = setup("no-write-prerequisite");
   const head = f.prepare();
