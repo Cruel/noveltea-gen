@@ -95,6 +95,9 @@ test("two indistinguishable pending outcomes remain a Choice-owner obligation, n
     event: "event.testimony", step: "account", branches: ["protect", "confront"],
     reason: "identical-typed-effects-await-choice-binding",
   }]);
+  const formalOnly = proof(source, ["The formal choice remains deferred to a later owner."]);
+  assert.deepEqual(formalOnly.unresolvedChoiceOutcomes, map.unresolvedChoiceOutcomes,
+    "A formal-choice obligation must not silently become an Event-stage typed-effect demand");
   const unrelated = proof(source, ["Later composition will supply dialogue polish."]);
   assert.deepEqual(unrelated.unresolvedChoiceOutcomes, []);
 });

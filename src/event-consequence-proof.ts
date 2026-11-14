@@ -96,7 +96,7 @@ export function buildEventConsequenceProof(
   const diagnostics: EventProofDiagnostic[] = [];
   const unresolvedChoiceOutcomes: EventConsequenceProof["unresolvedChoiceOutcomes"] = [];
   const deferredChoice = laterObligations.some(text =>
-    /choice[ -]?(?:point|binding|specialist|writer|owner)|\\bformal choice\\b/i.test(text));
+    /choice[ -]?(?:point|binding|specialist|writer|owner)|\bformal choice\b/i.test(text));
   const records = events.map(event => {
     const outcomes: EventConsequenceProof["events"][number]["outcomes"] = [];
     const steps = asArray(event.metadata.steps);
