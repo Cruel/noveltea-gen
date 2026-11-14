@@ -1,0 +1,62 @@
+/** #167: One objective-to-solution semantic contract across the bounded
+ * Puzzle author, independent reviewer and original-assignment correction.
+ * This guidance never substitutes for native reachability or a sealed verdict. */
+export const PUZZLE_GOAL_AUTHOR = [
+  "Before writing a Puzzle, state the exact evidence or action that would",
+  "SATISFY its objective, not merely advance an investigation.",
+  "For EVERY solution Event, trace its available pre-solution clue, enacted",
+  "observation, inference, branch effects and player-visible consequence.",
+  "Each listed solution must independently answer that SAME objective.",
+  "Do not silently strengthen or narrow the authored objective: proving",
+  "deliberate removal is different from identifying the exact transfer;",
+  "an explicit, credible admission of removal may meet the former even if",
+  "the admission does not enumerate the transfer date or index number.",
+  "Different methods may legitimately have different side effects or",
+  "narrative costs, but neither may establish a weaker or unrelated fact.",
+  "For example, decoding a ledger can establish a specific concealed",
+  "transfer; confirming a seal or chain of custody alone does NOT establish",
+  "the transfer and is not an equivalent solution to that same Puzzle.",
+  "Add source-backed in-scene confirmation within authorized Event paths,",
+  "or treat the weaker finding as preparatory clue/progress, NOT a completed",
+  "solution. Do not invent testimony, knowledge, a Fact, a state transition,",
+  "or a protected change just to make the alternatives appear equivalent.",
+  "Do not narrow the author-approved objective to excuse a weak solution;",
+  "report an exact other-owner dependency if the necessary proof is outside",
+  "the current authority. Recheck every declared solution, not only the best.",
+].join(" ");
+
+export const PUZZLE_GOAL_REVIEW = [
+  "A reachable, clue-accessible solution is structurally viable, NOT proof",
+  "that it resolves the Puzzle objective. Read the exact Puzzle objective,",
+  "EVERY listed solution Event and relevant accessible clue prose from the",
+  "immutable committed source; compare all solutions to the SAME claim.",
+  "Require each alternative to enact an observable, source-grounded",
+  "resolution of that objective. Different side effects are allowed.",
+  "Do NOT impose a stronger unstated objective: if the question is whether",
+  "an entry was deliberately removed, a source-grounded admission of removal",
+  "may answer it without specifying the exact transfer identity. By contrast,",
+  "authenticating a custodian's seal or custody interval does not by itself",
+  "prove deliberate removal or identify a particular missing transfer.",
+  "If one Event proves a weaker or different fact, fail that Puzzle unit",
+  "with the exact changed Puzzle/solution path and line, objective clause,",
+  "the missing witnessed proof, and a bounded corrective action.",
+  "Never substitute metadata reachability, an invented Fact/effect, cosmetic",
+  "prose or a speculative testimony for the actual causal evidence.",
+  "An unrelated future Composition or Milestone closeout is not a Puzzle",
+  "checkpoint defect; preserve other-owner and protected source boundaries.",
+].join(" ");
+
+export const PUZZLE_GOAL_REPAIR = [
+  "Compare the failed Puzzle objective with EACH originally declared",
+  "solution and the exact source-linked negative finding. Correct only",
+  "the original authorized Puzzle, clue and solution Event paths.",
+  "If custody authentication is weaker than proof of a specific transfer,",
+  "write a playable, causally supported confirmation in the permitted",
+  "solution route, or remove/demote the inadequate route only when within",
+  "the original grant and without breaking required alternatives.",
+  "Keep the author-approved objective, protected canon and original Event",
+  "prerequisites unchanged. Check both typed effects and player-visible",
+  "resolution; do not merely assert that two routes are equivalent.",
+  "If correction needs another owner or unavailable evidence, report the",
+  "dependency and remain incomplete rather than fabricating the proof.",
+].join(" ");

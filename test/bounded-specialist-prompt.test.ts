@@ -224,6 +224,22 @@ test("Choice writer and independent review trace source-linked typed payoff cont
   assert.match(reviewer, /NONE\. This is a read-only reviewer/);
 });
 
+test("Puzzle writer and reviewer require equivalent objective evidence for every listed solution", () => {
+  assert.match(rendered.Puzzle, /Each listed solution must independently answer that SAME objective/);
+  assert.match(rendered.Puzzle, /confirming a seal or chain of custody alone does NOT establish/);
+  assert.match(rendered.Puzzle, /without breaking|required alternatives|author-approved objective/);
+  assert.doesNotMatch(rendered.Choice, /confirming a seal or chain of custody alone/);
+  const puzzlePacket = {
+    ...packet, items: [{ ...packet.items[0]!, reviewedWorkItem: "interactive-puzzle-disclosure",
+      unitOutcome: semanticUnitOutcome("interactive-puzzle-disclosure") }],
+  };
+  const reviewer = assignmentFidelityPrompt(snapshot, puzzlePacket);
+  assert.match(reviewer, /EVERY listed solution Event/);
+  assert.match(reviewer, /weaker or different fact/);
+  assert.match(reviewer, /NONE\. This is a read-only reviewer/);
+  assert.doesNotMatch(rendered["Assignment reviewer"], /weaker or different fact/);
+});
+
 test("each actual pinned-read list retains portable method, representation and authority", () => {
   for (const method of [
     "nt-story-architecture",

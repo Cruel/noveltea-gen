@@ -1,5 +1,6 @@
 import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
 import { CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
+import { PUZZLE_GOAL_REPAIR } from "./puzzle-goal-fidelity.js";
 import { eventConsequenceProofDigest,
   type EventConsequenceProof } from "./event-consequence-proof.js";
 import { rejectedRepairContext } from "./review-repair-context.js";
@@ -859,7 +860,8 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       "a prose-only rewrite cannot resolve a remaining typed mismatch. " +
       "If truthful state cannot fit the original slots, report the later Choice " +
       "dependency or required source rather than inventing a Fact or Relationship transition. " +
-      (state.origin.workItem.startsWith("interactive-choice-") ? CHOICE_PAYOFF_REPAIR + " " : "") +
+      (state.origin.workItem.startsWith("interactive-choice-") ? CHOICE_PAYOFF_REPAIR + " " :
+        state.origin.workItem.startsWith("interactive-puzzle-") ? PUZZLE_GOAL_REPAIR + " " : "") +
       "If a genuine disagreement prevents " +
       "correction, explain it in your response without editing; the controller " +
       "will ask the author. Your explanation cannot change the reviewer verdict. " +

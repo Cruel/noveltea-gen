@@ -129,10 +129,38 @@ test("reference adventure authors two independently certified Choice/Puzzle comm
   for (const id of ["authored-content.watermark-clue", "authored-content.seal-clue"]) {
     assert.ok(stories.some((r: any) => r.metadata.id === id));
   }
+  const objective = readFileSync(join(x.job.worktreeStoryRoot, "puzzles/ledger-proof.md"), "utf8");
+  assert.match(objective, /concealed entry through documentary decoding or corroborated testimony/);
+  for (const path of ["events/decode-ledger.md", "events/request-testimony.md"]) {
+    const content = readFileSync(join(x.job.worktreeStoryRoot, path), "utf8");
+    assert.match(content, /revealed/);
+    assert.match(content, /revelation\.puzzle-evidence/);
+  }
   assert.equal(inspect(x).headSha, data.headSha);
   const replay = x.interactive();
   assert.equal(replay.status, 0, replay.stderr);
   assert.equal(JSON.parse(replay.stdout).headSha, data.headSha);
+});
+
+test("native Puzzle structure cannot certify a weaker alternate solution as semantically equivalent", { skip: !available }, () => {
+  const x = setup("puzzle-weak-custody");
+  x.prepare();
+  const result = x.interactive("puzzle-weak-custody");
+  assert.equal(result.status, 0, result.stderr);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.status, "interactive-slice-committed");
+  assert.equal(data.specialistUnits[1].validation.puzzles[0].solutions.length, 2);
+  assert.ok(data.specialistUnits[1].validation.puzzles[0].solutions.every((s: any) =>
+    s.status === "reachable" && s.clueAccess === "reachable"),
+    "Structural reachability does not establish editorial equivalence");
+  const objective = readFileSync(join(x.job.worktreeStoryRoot, "puzzles/ledger-proof.md"), "utf8");
+  const weaker = readFileSync(join(x.job.worktreeStoryRoot, "events/request-testimony.md"), "utf8");
+  assert.match(objective, /concealed entry/);
+  assert.match(weaker, /cannot confirm that any ledger entry was concealed/);
+  assert.doesNotMatch(weaker, /kind: revealed/);
+  assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
+  // A separate, sealed independent semantic review must FAIL this mismatch.
+  // The native validator's PASSED result is not a literary approval.
 });
 
 test("staged Event→Choice preserves partial Milestone and original immutable prerequisite gate", { skip: !available }, () => {

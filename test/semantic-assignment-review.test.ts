@@ -203,6 +203,8 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(characters, /Reject any Arc body, decision, plot, or other-field edit/);
   assert.match(choice, /separate later interactive-puzzle/);
   assert.match(puzzle, /Assess real solvability/);
+  assert.match(puzzle, /weaker or different fact/);
+  assert.match(puzzle, /every listed solution|EVERY listed solution/);
   assert.match(event, /source-bound Event-design Milestone cluster/);
   assert.match(event, /selected Milestone's completeness\/fulfillment fields/);
   assert.match(event, /witnessed inference|unwitnessed inference/);

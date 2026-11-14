@@ -17,6 +17,7 @@ import type { SkillConfig } from "./skills.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignment-review.js";
 import { CHOICE_PAYOFF_REVIEW } from "./choice-payoff-guidance.js";
+import { PUZZLE_GOAL_REVIEW } from "./puzzle-goal-fidelity.js";
 import { normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict } from "./semantic-assignment-review.js";
 import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfillment.js";
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
@@ -237,6 +238,7 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "A true contradiction in a Choice relationship/knowledge effect or source prose " +
       "IS still blocking, regardless of native reachability. " +
       "If the assignment is for Event-only work, likewise defer later Choice binding. " +
+      (assignment.puzzleRoutes.length ? "POST-PUZZLE checkpoint: " + PUZZLE_GOAL_REVIEW + " " : "") +
       "Assess scope constraints, production envelope, and binding obligations. " +
       "When Turn assignments are supplied, independently compare EACH specialist\'s changes " +
       "with its specific outcome and authorization, not merely the top-level author brief; " +
@@ -386,7 +388,9 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "or final playable Story obligations remain. Still reject false enactment, " +
       "unsupported cause/effect and unauthorized changes." +
       (packet.items.some(item => item.reviewedWorkItem.startsWith("interactive-choice-"))
-        ? " " + CHOICE_PAYOFF_REVIEW : ""),
+        ? " " + CHOICE_PAYOFF_REVIEW : "") +
+      (packet.items.some(item => item.reviewedWorkItem.startsWith("interactive-puzzle-"))
+        ? " " + PUZZLE_GOAL_REVIEW : ""),
     laterObligations:
       "The controller and later specialists own deferred units and " +
       "final literary review. If a defect needs protected or other-owner edits, " +

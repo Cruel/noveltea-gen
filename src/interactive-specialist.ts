@@ -17,6 +17,7 @@ import type { SkillSnapshot } from "./snapshot.js";
 import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { CHOICE_PAYOFF_AUTHOR, CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
+import { PUZZLE_GOAL_AUTHOR, PUZZLE_GOAL_REPAIR } from "./puzzle-goal-fidelity.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
 export interface InteractiveAssignment {
@@ -97,7 +98,8 @@ export function interactiveSpecialistPrompt(
         : "At least two separately reachable solving Events and pre-solution Authored Content " +
           "clues attached to distinct reachable discovery Events, with genuine gated " +
           "consequences and readable player-facing clue prose. Reuse existing valid records " +
-          "instead of creating cosmetic duplicates. Do not modify original Choice outcomes.") +
+          "instead of creating cosmetic duplicates. Do not modify original Choice outcomes. " +
+          PUZZLE_GOAL_AUTHOR) +
       " Author schema 0.1 Markdown and run story_validate, repair and revalidate. " +
       "The controller checks actual final-state coverage, not output-file count.",
     laterObligations: choice
@@ -202,7 +204,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
         "not edit permissions. Compare changed files against the originally read sources and provide " +
         "the FULL cumulative modifiedRecords manifest EXCLUDING restored files. " +
         "Do not claim a conditional or unverified path is proven. " +
-        (domain === "choice" ? CHOICE_PAYOFF_REPAIR + " " : "") +
+        (domain === "choice" ? CHOICE_PAYOFF_REPAIR : PUZZLE_GOAL_REPAIR) + " " +
         "Diagnostics:\n" + diagnostics.join("\n");
     }
     throw new Error("Unexpected interactive repair loop termination.");

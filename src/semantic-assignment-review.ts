@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadSealedReviewContext, type SealedReviewRecord } from "./sealed-review-context.js";
 import { reviewRepairTargets } from "./review-repair-amendment.js";
 import { CHOICE_PAYOFF_REVIEW } from "./choice-payoff-guidance.js";
+import { PUZZLE_GOAL_REVIEW } from "./puzzle-goal-fidelity.js";
 import { eventConsequenceProofDigest,
   type EventConsequenceProof } from "./event-consequence-proof.js";
 import type { JobStartResult } from "./job.js";
@@ -103,7 +104,7 @@ export function semanticUnitOutcome(workItem: string, specialist?: string): stri
       "neither Choice binding nor final Composition belongs to this checkpoint."
     );
   if (workItem.startsWith("interactive-choice-")) return "Choice-point unit only. The stage-specific verified Choice author may write a Choice Point, the causal outcome effects/branches in connected existing Events (without changing their prerequisites), and player-facing Authored Content for the choice. The high-level Turn recordTypes=[choice-point,puzzle] is specialist ownership, not the exclusive file whitelist; reject unrelated or protected changes. Puzzle authoring, if planned, is a separate later interactive-puzzle unit, not a missing requirement in this checkpoint. Inspect actual branch consequences and later consumers. " + CHOICE_PAYOFF_REVIEW;
-  if (workItem.startsWith("interactive-puzzle-")) return "Puzzle unit only. The stage-specific verified Puzzle author may add a connected Puzzle, accessible pre-solution clue Authored Content, and bounded new solution Events; existing Choice outcomes and original Event prerequisites remain immutable. The high-level Turn recordTypes is not an exclusive file whitelist. Assess real solvability, prerequisite accessibility, distinct consequences and fair-play clues; reject unrelated/unauthorized files or retcons. The preceding Choice unit was reviewed separately.";
+  if (workItem.startsWith("interactive-puzzle-")) return "Puzzle unit only. The stage-specific verified Puzzle author may add a connected Puzzle, accessible pre-solution clue Authored Content, and bounded new solution Events; existing Choice outcomes and original Event prerequisites remain immutable. The high-level Turn recordTypes is not an exclusive file whitelist. Assess real solvability, prerequisite accessibility, distinct consequences and fair-play clues; reject unrelated/unauthorized files or retcons. The preceding Choice unit was reviewed separately. " + PUZZLE_GOAL_REVIEW;
   return "Review the exact committed work item against the author-approved assignment and its dependencies; defer only work explicitly assigned to later units.";
 }
 

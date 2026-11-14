@@ -759,8 +759,18 @@ revelations: [revelation.ledger-secret]`,
       `${common}\n  - "Ada confronts the custodian with the seal and obtains witness testimony"\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.discover-seal]\n      not_completed: [event.decode-ledger]\nsteps:\n  - id: verify\n    branches:\n      - id: testimony\n        conditions: []\n        effects:\n          - kind: revealed\n            revelation: revelation.puzzle-evidence\n            value: true\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: wary`,
       "The seal gives Ada leverage to question the custodian. The verbal confirmation exposes the concealment but leaves the relationship tense.");
     await add("puzzles", "ledger-proof", "puzzle",
-      'objective: "Prove who concealed the ledger record"\nclues: [authored-content.watermark-clue, authored-content.seal-clue]\nsolutions: [event.decode-ledger, event.request-testimony]',
+      'objective: "Verify that the ledger hides a concealed entry through documentary decoding or corroborated testimony"\nclues: [authored-content.watermark-clue, authored-content.seal-clue]\nsolutions: [event.decode-ledger, event.request-testimony]',
       "Players can notice a watermark or seal, infer either the cipher key or its custodian, and then choose a method. A mistaken guess yields a comparison prompt, with hints escalating from noticing the mark to matching its source and finally trying the cipher or testimony route.");
+    if (variant === "puzzle-weak-custody") {
+      // #167 negative: all native reachability/clue gates pass, but one
+      // "solution" establishes only custody, not the Puzzle objective.
+      await rewrite("events/request-testimony.md", s => s
+        .replace("Ada confronts the custodian with the seal and obtains witness testimony",
+          "Ada verifies the ledger seal but cannot identify a concealed entry")
+        .replace("The seal gives Ada leverage to question the custodian. The verbal confirmation exposes the concealment but leaves the relationship tense.",
+          "The custodian authenticates the seal and handling interval, but cannot confirm that any ledger entry was concealed. The relationship remains tense.")
+        .replace(/          - kind: revealed\n            revelation: revelation\.puzzle-evidence\n            value: true\n/, ""));
+    }
     if (variant === "unreachable-clue") {
       await rewrite("authored-content/watermark-clue.md", s =>
         s.replace("events: [event.discover-mark]", "events: [event.decode-ledger]"));

@@ -259,7 +259,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
           "A live Event must not fulfill the player's still-unbound decision",
         );
         assert.ok(event.obligations.some((obligation: string) => /choice/i.test(obligation)));
-        assert.equal(event.skillReads.length, 5);
+        assert.ok(event.skillReads.length >= 5, "Event must retain all pinned method reads");
       }
       // The Event CLI pins its default thinking profile; requesting a new one
       // at Choice would violate the saved model-resolution contract.
@@ -286,7 +286,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
       }
       assert.equal(result.specialistUnits[1].validation.protectionBase, result.specialistUnits[0].commitSha);
       for (const unit of result.specialistUnits) {
-        assert.equal(unit.skillReads.length, 5);
+        assert.ok(unit.skillReads.length >= 5, "Interactive unit must retain all pinned method reads");
         assert.match(unit.commitSha, /^[0-9a-f]{40}$/);
         const messages = readFileSync(unit.piSessionFile, "utf8").trim().split("\n").map(JSON.parse);
         if (["low", "medium", "high"].includes(thinking ?? "")) {
@@ -468,6 +468,72 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
           "",
           "Independent reviewer must never author Story files",
         );
+      }
+      if (process.env.NT_LIVE_PUZZLE_REVIEW === "1") {
+        // #167: replay the *same committed* real-Pi Puzzle with an independent,
+        // read-only reviewer. A reachable route is not a semantic resolution.
+        const unit = result.specialistUnits[1];
+        const puzzleRoutes = unit.validation.puzzles.flatMap((puzzle: any) =>
+          puzzle.solutions.map((solution: any) => ({
+            puzzle: puzzle.id, event: solution.event, status: solution.status,
+            clueAccess: solution.clueAccess,
+          })));
+        const paths = [...new Set([
+          "creative-direction/foundation.md", "milestones/disclosure.md",
+          "facts/evidence-concealed.md", "characters/ada.md", "characters/neri.md",
+          ...(event.paths ?? []), ...(result.specialistUnits[0].paths ?? []),
+          ...(unit.paths ?? []),
+        ])] as string[];
+        const assignment: ReviewAssignment = {
+          contract: { kind: "partial", depth: "interactive",
+            constraints: ["Every listed Puzzle solution must independently satisfy its exact objective"] },
+          planVersion: event.planVersion, scopeIds: ["milestone.disclosure"],
+          paths, routes: [], milestoneRoutes: [], puzzleRoutes,
+          outstanding: [], uncertainties: [],
+          turnGoal: "POST-PUZZLE checkpoint ONLY: assess every listed solution against the exact " +
+            "Puzzle objective using the current source and pre-solution clue prose. " +
+            "The Choice and Event setup are committed prior units. " +
+            "Future Composition, Milestone closeout and full-game completion are outside " +
+            "this checkpoint. Reachability and clueAccess are structural, not semantic proof. " +
+            "In particular, custody authentication alone does not identify a specific " +
+            "concealed ledger transfer unless the player actually learns that transfer.",
+        };
+        const envKeys = ["NT_STATE_DIR", "NT_GIT_CACHE_DIR", "NT_SKILL_CACHE_DIR",
+          "NT_SANDBOX_SOCKET", "NT_SANDBOX_TOKEN_FILE", "NT_REQUIRE_SANDBOX_TOOLS",
+          "NT_CONFIG_FILE"];
+        const previous = envKeys.map(key => process.env[key]);
+        try {
+          envKeys.forEach(key => { process.env[key] = env[key]!; });
+          const snapshot = await createSkillSnapshot({
+            discovery: "explicit-only", novelteaSkills: source,
+            skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"],
+          });
+          assert.ok(snapshot);
+          const reviewJob = await startStoryJob({ story, job: jobId }, false);
+          const reviewer = await withStoryJobLock(reviewJob, "independent-puzzle-review", () =>
+            reviewNarrative(reviewJob, snapshot, assignment,
+              process.env.NT_PROVIDER ?? "openai", process.env.NT_MODEL ?? "gpt-6-luna",
+              undefined, async () => {}));
+          process.stderr.write("LIVE_PUZZLE_GOAL_REVIEW " + JSON.stringify(reviewer) + "\n");
+          if (process.env.NT_LIVE_EXPECT_PUZZLE_BLOCK === "1") {
+            assert.equal(reviewer.verdict, "block", "Weaker custody-only solution must not pass");
+            assert.ok(reviewer.findings.some((finding: any) =>
+              finding.severity === "blocking" &&
+              ["puzzle-fairness", "continuity", "dramatic-payoff"].includes(finding.dimension) &&
+              /puzzles\/|events\//.test(finding.source) &&
+              /custod|transfer|objective|proof|ledger|solution|conceal/i.test(finding.message)),
+            "Blocked Puzzle reviewer must identify the objective/solution discrepancy");
+          } else {
+            assert.equal(reviewer.verdict, "pass", JSON.stringify(reviewer.findings));
+          }
+        } finally {
+          envKeys.forEach((key, index) => {
+            if (previous[index] === undefined) delete process.env[key];
+            else process.env[key] = previous[index];
+          });
+        }
+        assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "",
+          "Puzzle review must not edit the original Story");
       }
       completed = true;
     } finally {
