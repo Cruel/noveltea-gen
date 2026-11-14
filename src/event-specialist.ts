@@ -84,7 +84,10 @@ export function eventSpecialistPrompt(
     sources: REQUIRED,
     sourceUse:
       "Read the selected Milestone/Arc, connected Characters/Facts and reachable earlier " +
-      "Events. Follow only relevant typed links. 'after' orders Events if both occur; actual " +
+      "Events, IF any already exist. An empty events/ directory is a normal first " +
+      "Milestone, not a missing dependency or a reason to ask permission: " +
+      "YOU own authoring its discovery scene within this exact Event grant. " +
+      "Follow only relevant typed links. 'after' orders Events if both occur; actual " +
       "enabling conditions use prerequisites.any_of.",
     writableScope:
       "Only events/*.md and causally connected authorized arcs/*.md, new facts/*.md, " +
@@ -96,7 +99,11 @@ export function eventSpecialistPrompt(
         : "Do not stage, commit, reset or checkout; Git diff/status inspection is permitted."),
     doneWhen:
       "The canonical schema 0.1 Event files have complete YAML frontmatter and " +
-      "substantive Markdown. A new in-scene observation or explicitly sourced testimony " +
+      "substantive Markdown. If this is the first Event or a discovery Milestone, " +
+      "author the discovery and Character access NOW with justified in-scene " +
+      "knowledge effects, rather than asking who should author the discovery. " +
+      "The Story does not require a pre-existing discovery Event to start. " +
+      "A new in-scene observation or explicitly sourced testimony " +
       "may establish evidence without a pre-existing Fact or earlier Event; do not invent " +
       "off-screen history or promote uncertain claims to truth. Show evidence before " +
       "justified inferences/effects. " +
@@ -119,14 +126,38 @@ export function eventSpecialistPrompt(
       "Return one unfenced JSON object with cumulative Story-relative " +
       "modifiedRecords, architecturalConflicts and laterObligations arrays. Include all " +
       "changed records. An optional authorDecisionRequest for consequential ambiguity " +
-      "may be free-text (question), yes-no (question/recommendation), or alternatives " +
+      "MUST use field kind, never type, with value free-text, yes-no or " +
+      "alternatives. Free-text needs only question; yes-no needs question; " +
+      "alternatives require " +
       "(question, 2–4 options and recommendation); structured choices include Other. " +
-      "No choice authorizes protected changes. No-write prerequisite reports have modifiedRecords:[] " +
+      "Do not request author permission for a discovery Event already in this " +
+      "authorized work item. No choice authorizes protected changes. " +
+      "No-write prerequisite reports have modifiedRecords:[] " +
       "and must precede any edit. The graph verifies source, manifests, authority and validation.",
     assignmentLabel: "AUTHORIZED ASSIGNMENT",
     assignment,
     authorInstruction: specialistAuthorInstruction(assignment.authorTask),
   });
+}
+
+/** A malformed author question is never permission to replay the writer or
+ * ask the author to approve work already owned by this Event assignment. */
+export function eventQuestionCorrectionFeedback(error: unknown): string {
+  return "CONTROLLER-REJECTED AUTHOR QUESTION: " + String(error) + ". " +
+    "An empty events/ directory is normal. If this Milestone requires " +
+    "the discovery, YOU are the Event writer authorized to create its " +
+    "reachable, source-grounded discovery scene under the SAME Event " +
+    "record grant. Do not ask for another Event writer or a separate " +
+    "approval to author the discovery. Show who discovers what and when, " +
+    "with only justified in-scene Character knowledge effects. " +
+    "Keep protected and other-owner records unchanged. If a genuine " +
+    "consequential question remains outside your grant, use EXACT " +
+    "authorDecisionRequest field kind (never type), with value " +
+    "free-text, yes-no, or alternatives and the supported option fields. " +
+    "Otherwise author the Event, run story_validate, and return the " +
+    "complete cumulative modifiedRecords, architecturalConflicts and " +
+    "laterObligations JSON arrays. This is one bounded correction in " +
+    "the SAME Pi session, not a writer replay or new authority.";
 }
 
 export async function authorEventCluster(
@@ -193,7 +224,17 @@ export async function authorEventCluster(
       const text = finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
       const proposed = extractSpecialistChoice(text);
       if (proposed) {
-        const question = parseSpecialistChoice(proposed.authorDecisionRequest);
+        let question: SpecialistChoiceQuestion;
+        try {
+          question = parseSpecialistChoice(proposed.authorDecisionRequest);
+        } catch (error) {
+          if (attempt === 2) throw error;
+          // #158: A new Story can have no existing Event. A malformed model
+          // question never creates a new grant or a synthetic author answer.
+          // Correct it in the original bounded specialist session.
+          prompt = eventQuestionCorrectionFeedback(error);
+          continue;
+        }
         if (!Array.isArray(proposed.modifiedRecords) ||
             !proposed.modifiedRecords.every(p => typeof p === "string"))
           throw Error("Event author question lacks an exact modifiedRecords manifest.");

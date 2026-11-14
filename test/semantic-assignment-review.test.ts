@@ -13,7 +13,8 @@ import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { readIndependentReview } from "../src/checkpoint-assurance.js";
 import { deriveReviewRepairAmendment } from "../src/review-repair-amendment.js";
 import { prepareSemanticReview, reviewBoundedAssignments,
-  normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict, semanticUnitOutcome,
+  normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKinds,
+  validateSemanticVerdict, semanticUnitOutcome,
   type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 import { assertSemanticCorrectionPreserved } from "../src/narrative-review-specialist.js";
 
@@ -183,6 +184,48 @@ test("saved Collaborative responses seal failed receipts with bounded repair aut
     }
     t.diagnostic(`source=${sourceSha} packet=${packet.sourceDigest} status=${receipt.status}`);
   }
+});
+
+test("live Luna descriptive negative finding kinds stay failed and source-bound", () => {
+  const packet = makePacket();
+  const original = { sourceDigest: packet.sourceDigest, verdict: "fail",
+    findings: [{ ...finding("focus:character.nia", "characters/nia.md"),
+      kind: "unsupported-causal-prerequisite" }],
+    evidence: [evidence("focus:character.nia", "characters/nia.md")] };
+  assert.throws(() => validateSemanticVerdict(packet, original), /source-linked/);
+  const normalized = normalizeFailedSemanticFindingKinds(original) as typeof original;
+  assert.equal(normalized.verdict, "fail");
+  assert.equal(normalized.findings[0]!.kind, "other");
+  assert.equal(normalized.findings.length, 1);
+  assert.equal(normalized.findings[0]!.message, original.findings[0]!.message);
+  assert.equal(normalized.findings[0]!.requiredCorrection, original.findings[0]!.requiredCorrection);
+  assert.deepEqual(normalized.evidence, original.evidence);
+  assert.equal(validateSemanticVerdict(packet, normalized).verdict, "fail");
+  const after = { ...original, findings: [{ ...original.findings[0]!,
+    kind: "continuity", line: 1, message: "No underlying defect actually exists." }] };
+  const preserved = assertSemanticCorrectionPreserved(normalized as Record<string, unknown>,
+    normalizeFailedSemanticFindingKinds(after) as Record<string, unknown>);
+  assert.deepEqual((preserved.findings as any[])[0].message, original.findings[0]!.message);
+  assert.equal(validateSemanticVerdict(packet, preserved).verdict, "fail");
+  // The normalization is not a way to launder a PASS, invented source, forged
+  // commit SHA, an empty correction or an invalid/oversized finding kind.
+  const pass = { ...original, verdict: "pass" };
+  assert.strictEqual(normalizeFailedSemanticFindingKinds(pass), pass);
+  const otherSource = { ...original, findings: [{ ...original.findings[0]!,
+    path: "characters/other.md" }] };
+  assert.throws(() => validateSemanticVerdict(packet,
+    normalizeFailedSemanticFindingKinds(otherSource)), /source-linked/);
+  const forgedSha = { ...original, findings: [{ ...original.findings[0]!,
+    commitSha: "c".repeat(40) }] };
+  assert.throws(() => validateSemanticVerdict(packet,
+    normalizeFailedSemanticFindingKinds(forgedSha)), /source-linked/);
+  const noCorrection = { ...original, findings: [{ ...original.findings[0]!,
+    requiredCorrection: "" }] };
+  assert.throws(() => validateSemanticVerdict(packet,
+    normalizeFailedSemanticFindingKinds(noCorrection)), /source-linked/);
+  const oversized = { ...original, findings: [{ ...original.findings[0]!,
+    kind: "x".repeat(200) }] };
+  assert.strictEqual(normalizeFailedSemanticFindingKinds(oversized), oversized);
 });
 
 test("multi-unit review requires only the exact current specialist unit, not its successor", () => {

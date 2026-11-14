@@ -18,7 +18,8 @@ import { parseSpecialistJson } from "./composition-specialist.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignment-review.js";
 import { CHOICE_PAYOFF_REVIEW } from "./choice-payoff-guidance.js";
 import { PUZZLE_GOAL_REVIEW } from "./puzzle-goal-fidelity.js";
-import { normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict } from "./semantic-assignment-review.js";
+import { normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKinds,
+  validateSemanticVerdict } from "./semantic-assignment-review.js";
 import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfillment.js";
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
 
@@ -343,7 +344,9 @@ export function assertSemanticCorrectionPreserved(before: Record<string, unknown
   const findings = before.findings.map((item, index) => {
     const prior = item as Record<string, unknown> | null;
     const correction = correctedFindings[index] as Record<string, unknown> | null;
-    if (!prior || !correction || prior.kind !== correction.kind ||
+    if (!prior || !correction ||
+        (prior.kind !== correction.kind && !(prior.kind === "other" &&
+          ["missing-requirement", "unrequested-change", "continuity"].includes(String(correction.kind)))) ||
         prior.assignmentId !== correction.assignmentId ||
         typeof prior.path !== "string" || typeof correction.path !== "string" ||
         prior.path.replace(/^story\//, "") !== correction.path)
@@ -351,7 +354,7 @@ export function assertSemanticCorrectionPreserved(before: Record<string, unknown
     // Correct only source identities. A reviewer may paraphrase during the
     // repair turn, but that must never replace or weaken its original finding.
     // Native source-link verification still checks every corrected location.
-    return { ...correction, kind: prior.kind, message: prior.message,
+    return { ...correction, kind: correction.kind, message: prior.message,
       requiredCorrection: prior.requiredCorrection, affectedPaths: prior.affectedPaths };
   });
   return { ...after, findings };
@@ -400,7 +403,9 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       packet.sourceDigest +
       "), verdict pass|fail, findings " +
       "[{commitSha,assignmentId,path,line,kind,message,requiredCorrection,affectedPaths}] " +
-      "and evidence [{commitSha,assignmentId,path,line,explanation}]. Use one real " +
+      "Finding kind MUST be exactly one of missing-requirement, unrequested-change, " +
+      "continuity, other (do not invent specialized kind names). " +
+      "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. Use one real " +
       "changed record and 1-based canonicalContext line for every source-linked finding; " +
       "requiredCorrection must identify a concrete edit, not 'retry'. affectedPaths " +
       "must exist in the same packet and include that changed record. " +
@@ -480,7 +485,7 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     let initial: Record<string, unknown> | null = null;
     try {
       initial = parseSpecialistJson(lastReply(session));
-      verdict = validateSemanticVerdict(packet, initial);
+      verdict = validateSemanticVerdict(packet, normalizeFailedSemanticFindingKinds(initial));
     } catch (error) {
       if (!(error instanceof Error) || !/source-linked|malformed|stale/.test(error.message)) throw error;
       const exact = packet.items.map(item => ({ assignmentId: item.assignment.id,
@@ -495,11 +500,16 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
         " (copy this immutable packet checksum byte-for-byte, not your earlier " +
         "response's possibly mistyped value) and exact full commitSha " +
         "for EVERY finding and evidence entry. Evidence paths and 1-based line " +
-        "numbers must match these immutable checkpoint records:\n" +
+        "numbers must match these immutable checkpoint records. " +
+        "For a negative finding, kind must be one of missing-requirement, " +
+        "unrequested-change, continuity or other; preserve the exact causal defect, " +
+        "message, requiredCorrection and affectedPaths.\n" +
         JSON.stringify(exact) + "\nUse a real changed source line for each finding. " +
         "No prose outside JSON, no invented path or revision, no write tools.");
       const corrected = parseSpecialistJson(lastReply(session));
-      const preserved = initial ? assertSemanticCorrectionPreserved(initial, corrected) : corrected;
+      const normalized = normalizeFailedSemanticFindingKinds(corrected) as Record<string, unknown>;
+      const preserved = initial ? assertSemanticCorrectionPreserved(
+        normalizeFailedSemanticFindingKinds(initial) as Record<string, unknown>, normalized) : normalized;
       verdict = validateSemanticVerdict(packet,
         normalizeOmittedSemanticEvidenceSha(packet, preserved));
     }

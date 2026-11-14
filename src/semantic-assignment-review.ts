@@ -265,6 +265,27 @@ export function normalizeOmittedSemanticEvidenceSha(packet: SemanticReviewPacket
   return fixed ? { ...value, evidence } : raw;
 }
 
+/** #158/#166: A failed review cannot be erased because Luna emitted a
+ * descriptive rather than enum-conforming finding kind. Only normalize a
+ * bounded unknown taxonomy label to the broad 'other' category on a FAIL;
+ * retain exact SHA, path, line, message, required correction and finding count.
+ * The normal provenance validator still checks every source and attribution.
+ * No passing verdict or structurally invalid finding can be rehabilitated. */
+export function normalizeFailedSemanticFindingKinds(raw: unknown): unknown {
+  const value = raw as Partial<SemanticVerdict> | null;
+  if (!value || value.verdict !== "fail" || !Array.isArray(value.findings) ||
+      value.findings.length < 1 || value.findings.length > 100) return raw;
+  const allowed = new Set(["missing-requirement", "unrequested-change", "continuity", "other"]);
+  let changed = false;
+  const findings = value.findings.map(finding => {
+    if (!finding || typeof finding.kind !== "string" ||
+        !/^[a-z][a-z0-9-]{0,63}$/.test(finding.kind) || allowed.has(finding.kind)) return finding;
+    changed = true;
+    return { ...finding, kind: "other" as const };
+  });
+  return changed ? { ...value, findings } : raw;
+}
+
 export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unknown): SemanticVerdict {
   const verdict = raw as SemanticVerdict;
   if (!verdict || verdict.sourceDigest !== packet.sourceDigest ||

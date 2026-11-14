@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { architectureSpecialistPrompt } from "../src/architecture-specialist.js";
-import { eventSpecialistPrompt, type EventAssignment } from "../src/event-specialist.js";
+import { eventSpecialistPrompt, eventQuestionCorrectionFeedback,
+  type EventAssignment } from "../src/event-specialist.js";
+import { parseSpecialistChoice } from "../src/specialist-choice.js";
 import { interactiveSpecialistPrompt, type InteractiveAssignment } from "../src/interactive-specialist.js";
 import {
   assignmentFidelityPrompt,
@@ -190,6 +192,11 @@ test("same scoped fixture has no conflicting write grants or future-owner obliga
   assert.match(rendered.Event, /make NO edits/);
   assert.match(rendered.Event, /partial Milestone/);
   assert.match(rendered.Event, /may establish evidence without a pre-existing Fact or earlier Event/);
+  assert.match(rendered.Event, /An empty events\/ directory is a normal first/);
+  assert.match(rendered.Event, /YOU own authoring its discovery scene/);
+  assert.match(rendered.Event, /author the discovery and Character access NOW/);
+  assert.match(rendered.Event, /MUST use field kind, never type/);
+  assert.match(rendered.Event, /Do not request author permission for a discovery Event already/);
   assert.match(rendered.Event, /Missing Choice, Puzzle,.*$/m);
   assert.match(rendered.Event, /NOT blockers for this Event setup/);
   assert.match(rendered.Choice, /Never edit milestones\//);
@@ -205,6 +212,22 @@ test("same scoped fixture has no conflicting write grants or future-owner obliga
   assert.ok(rendered.Event.includes(paths[3]!));
   assert.ok(rendered.Choice.includes(interactive.eventSource!.headSha));
   assert.ok(rendered["Assignment reviewer"].includes(packet.sourceDigest));
+});
+
+test("malformed first-Event author request receives one non-granting correction in the same session", () => {
+  const recorded = { type: "free-text",
+    question: "Should another worker create the missing death-discovery Event first?" };
+  assert.throws(() => parseSpecialistChoice(recorded), /Invalid bounded author question/);
+  const corrected = eventQuestionCorrectionFeedback(new Error("Invalid bounded author question."));
+  assert.match(corrected, /An empty events\/ directory is normal/);
+  assert.match(corrected, /YOU are the Event writer authorized to create/);
+  assert.match(corrected, /Character knowledge effects/);
+  assert.match(corrected, /kind \(never type\)/);
+  assert.match(corrected, /SAME Pi session, not a writer replay or new authority/);
+  assert.doesNotMatch(corrected, /permission to edit protected records/);
+  assert.equal(parseSpecialistChoice({ kind: "free-text",
+    question: recorded.question }).kind, "free-text",
+  "A genuinely needed author question remains available after syntax correction");
 });
 
 test("Choice writer and independent review trace source-linked typed payoff continuity", () => {
