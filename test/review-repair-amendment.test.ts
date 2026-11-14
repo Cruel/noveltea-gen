@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { deriveReviewRepairAmendment, reviewRepairTargets } from "../src/review-repair-amendment.js";
+import { deriveReviewRepairAmendment, reviewRepairTargets, reviewNeedsDependency } from "../src/review-repair-amendment.js";
 import type { CheckpointAssurance, IndependentReviewResult } from "../src/checkpoint-assurance.js";
 import type { TurnAssignmentEvidence } from "../src/turn-plan-evidence.js";
 
@@ -153,6 +153,57 @@ test("Event correction edits its reviewed Event, never the validated Milestone m
     "event-evidence"), [], "A wholly protected checkpoint offers no writable repair target");
   assert.deepEqual(reviewRepairTargets(["events/compare.md", "arcs/../unsafe.md"],
     "event-evidence"), [], "Invalid canonical paths still fail closed");
+});
+
+test("sealed Event grant corrects only the selected native-typed Milestone fulfillment slots", () => {
+  const event: TurnAssignmentEvidence = {
+    id: "event", specialist: "nt-event-design", outcome: "Make the locked door materially matter",
+    targets: ["milestone.notice-absence"], dependsOn: [], discovery: "canonical-story-read-only",
+    authority: { recordTypes: ["event"], existingPaths: ["events/notice-absence.md"], mayCreate: false },
+  };
+  const grant = { id: "milestone.notice-absence", path: "milestones/selected-record.md" };
+  const changed = { ...assurance, workItem: "event-notice-absence", assignmentId: event.id,
+    assignmentDigest: hash(event), changedPaths: ["events/notice-absence.md",
+      grant.path, "milestones/other.md"] };
+  const review: IndependentReviewResult = { ...result,
+    source: { ...result.source, assignmentId: event.id, assignmentDigest: hash(event) },
+    findings: [{ path: grant.path, kind: "missing-requirement", line: 14,
+      message: "The locked compartment does not matter to the selected Milestone.",
+      requiredCorrection: "Keep Milestone partial until the lock is materially supported.",
+      affectedPaths: [grant.path, "events/notice-absence.md"] }] };
+  const args = { assurance: changed, review, original: event,
+    planVersion: 2, originWorkItem: "event-notice-absence", eventMilestone: grant };
+  assert.equal(reviewNeedsDependency(changed, review, args.originWorkItem), true);
+  assert.equal(reviewNeedsDependency(changed, review, args.originWorkItem, grant), false);
+  const amendment = deriveReviewRepairAmendment(args);
+  assert.deepEqual(amendment.eventMilestone, grant);
+  assert.deepEqual(amendment.assignment.authority.existingPaths,
+    ["events/notice-absence.md", grant.path]);
+  assert.deepEqual(amendment.assignment.authority.recordTypes, ["event", "milestone"]);
+  assert.equal(amendment.assignment.authority.mayCreate, false);
+  assert.deepEqual(amendment.readOnlyDependencies, []);
+  assert.deepEqual(deriveReviewRepairAmendment(args), amendment, "replay is deterministic");
+  assert.deepEqual(reviewRepairTargets(changed.changedPaths, args.originWorkItem, grant),
+    amendment.assignment.authority.existingPaths);
+
+  for (const eventMilestone of [
+    { ...grant, id: "milestone.other" },
+    { ...grant, path: "milestones/missing.md" },
+    { ...grant, path: "milestones/../unsafe.md" },
+  ])
+    assert.throws(() => deriveReviewRepairAmendment({ ...args, eventMilestone }), /grant/);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args, original: {
+    ...event, specialist: "nt-worldbuilding" } }), /grant/);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args, assurance: {
+    ...changed, changedPaths: ["events/notice-absence.md"] } }), /grant/);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args,
+    review: { ...review, source: { ...review.source, commitSha: "f".repeat(40) } } }),
+    /protected|grant|writer/);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args,
+    review: { ...review, findings: [{ ...review.findings[0]!,
+      path: "milestones/other.md" }] } }), /unverified source/);
+  assert.throws(() => deriveReviewRepairAmendment({ ...args,
+    planVersion: 0 }), /protected|writer/);
 });
 
 test("Foundation-only exception retains exact Creative Direction path without author-approval grants", () => {

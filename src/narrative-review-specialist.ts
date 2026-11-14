@@ -399,7 +399,10 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "NONE. This is a read-only reviewer with no writer, shell, repair, " +
       "approval or authorization tools. assurance.changedPaths are reviewed changes; " +
       "readOnlyPaths are context and repairTargets only a ceiling for a separately " +
-      "authorized repair. A finding cannot expand its original writer's grant.",
+      "authorized repair. An eventMilestoneFieldGrant, when present, permits ONLY " +
+      "that selected Milestone's completeness and fulfillment fields, never its " +
+      "other metadata, body or protected choices. A finding cannot expand " +
+      "its original writer's grant.",
     doneWhen:
       "Assess each current unit, not all remaining Turn obligations. Architecture " +
       "may remain partial without Event IDs; an Event setup may be complete while a " +

@@ -1,5 +1,6 @@
 import { execFileSync } from "./git-read-cache.js";
 import { commitOrigin } from "./recovery-fork-state.js";
+import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
@@ -190,25 +191,6 @@ function selectedAssignment(job: JobStartResult, plan: Plan, report: Report, mil
     authority: { existingProtectedChoices: "no-retcon",
       delegatedChoices: "draft", signingRequiredForProtectedChanges: true } };
 }
-function normalizeMilestone(text: string): string {
-  const lines = text.split("\n");
-  if (lines[0] !== "---") throw new Error("Milestone has no frontmatter.");
-  const end = lines.indexOf("---", 1);
-  if (end < 0) throw new Error("Milestone has unclosed frontmatter.");
-  const out: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (i > 0 && i < end && /^fulfillment:/.test(lines[i]!)) {
-      out.push("fulfillment: [audited]");
-      while (i + 1 < end && /^(?:[ \t]+|[ \t]*$)/.test(lines[i + 1]!)) i++;
-    } else if (i > 0 && i < end && /^completeness:/.test(lines[i]!)) {
-      // A planning-stage partial Milestone can become complete after binding
-      // its reachable Event routes. No other metadata or body may change.
-    } else {
-      out.push(lines[i]!);
-    }
-  }
-  return out.join("\n").trimEnd();
-}
 export async function changedPaths(job: JobStartResult, assignment: EventAssignment, manifest: string[],
   allowEmpty = false): Promise<string[]> {
   const paths: string[] = [];
@@ -230,9 +212,7 @@ export async function changedPaths(job: JobStartResult, assignment: EventAssignm
     }
     if (path === assignment.milestonePath) {
       const previous = git(job, "show", "HEAD:" + repoPath(job, path));
-      if (normalizeMilestone(previous) !== normalizeMilestone(await readFile(target, "utf8"))) {
-        throw new Error("Event specialist changed unrelated Milestone metadata/body: " + path);
-      }
+      assertMilestoneFulfillmentOnly(previous, await readFile(target, "utf8"), true);
     } else if (type !== "events" && entry.slice(0, 2) === " M" &&
                !assignment.sourcePaths.includes(path)) {
       throw new Error("Event specialist edited an unrelated canonical record: " + path);

@@ -17,6 +17,12 @@ export interface ReviewRepairObligation {
   /** These may include read-only adjacent canonical records. */
   affectedPaths: string[];
 }
+/** The single originally selected, native-typed Milestone. This is only
+ * supplied after the controller verifies the original signed Event evidence. */
+export interface EventMilestoneRepairGrant {
+  id: string;
+  path: string;
+}
 export interface ReviewRepairPlanAmendment {
   version: 1;
   kind: "review-correction";
@@ -30,6 +36,7 @@ export interface ReviewRepairPlanAmendment {
   originalAssignmentDigest: string;
   obligations: ReviewRepairObligation[];
   readOnlyDependencies: string[];
+  eventMilestone?: EventMilestoneRepairGrant;
   /** A new bounded corrective work item, owned by the original specialist. */
   assignment: TurnAssignmentEvidence;
   /** Exact immutable digest checked against the sealed review on every restart. */
@@ -72,8 +79,9 @@ export interface ReviewDependencyRequest {
  * a creation-capable retry merely because the cited line is writable. */
 export function reviewNeedsDependency(
   assurance: CheckpointAssurance, review: IndependentReviewResult, originWorkItem: string,
+  eventMilestone?: EventMilestoneRepairGrant,
 ): boolean {
-  const repairable = new Set(reviewRepairTargets(assurance.changedPaths, originWorkItem));
+  const repairable = new Set(reviewRepairTargets(assurance.changedPaths, originWorkItem, eventMilestone));
   return review.findings.some(f =>
     !repairable.has(f.path) ||
     (f.kind === "missing-requirement" &&
@@ -89,6 +97,7 @@ export function deriveReviewDependencyRequest(input: {
   turn: TurnEvidence;
   planVersion: number;
   originWorkItem: string;
+  eventMilestone?: EventMilestoneRepairGrant;
 }): ReviewDependencyRequest {
   const { assurance, review, original, turn } = input;
   const source = { jobId: assurance.jobId, commitSha: assurance.commitSha,
@@ -105,7 +114,7 @@ export function deriveReviewDependencyRequest(input: {
       !Number.isSafeInteger(input.planVersion) || input.planVersion < 1 ||
       !assurance.changedPaths.length ||
       assurance.changedPaths.some(path => !canonicalPath.test(path)) ||
-      !reviewNeedsDependency(assurance, review, input.originWorkItem))
+      !reviewNeedsDependency(assurance, review, input.originWorkItem, input.eventMilestone))
     throw Error("Review dependency request lacks sealed source, assignment, objective or out-of-lease evidence.");
 
   const findings = review.findings.map(f => {
@@ -133,7 +142,8 @@ export function deriveReviewDependencyRequest(input: {
   // A reviewer cannot authorize changing a protected or author-owned record.
   // Even a genuine Event/Milestone correction needs its own exact field grant.
   const protectedSource = findings.some(f =>
-    /^(?:milestones|narrative-positions|creative-direction)\//.test(f.path) ||
+    (/^(?:milestones|narrative-positions|creative-direction)\//.test(f.path) &&
+      f.path !== input.eventMilestone?.path) ||
     /\b(?:protected decision|author decision|retcon|author approval)\b/i.test(
       f.defect + " " + f.requiredCorrection));
   const otherOwner = findings.some(f =>
@@ -159,16 +169,17 @@ export function deriveReviewDependencyRequest(input: {
   return { ...body, digest: hash(body) };
 }
 
-/** A validated checkpoint may include protected supporting records (e.g. an
- * Arc's Character links or a Milestone's fulfillment metadata). Keep these
- * read-only without discarding the original writer's other repairable files.
- * The finding itself must still target one of the resulting writable paths.
- * Invalid paths or unauthorized Creative Direction changes fail closed. */
-export function reviewRepairTargets(changedPaths: string[], originWorkItem: string): string[] {
+/** Protected supporting records remain read-only. The only field-limited
+ * exception is the exact selected Milestone of a signed Event source, whose
+ * non-fulfillment bytes are separately checked against the committed baseline.
+ * Invalid paths and unauthorized Creative Direction changes fail closed. */
+export function reviewRepairTargets(changedPaths: string[], originWorkItem: string,
+  eventMilestone?: EventMilestoneRepairGrant): string[] {
   if (changedPaths.some(path => !canonicalPath.test(path) ||
       (path.startsWith("creative-direction/") && originWorkItem !== "foundation"))) return [];
   return changedPaths.filter(path =>
-    !/^(?:arcs|milestones|narrative-positions)\//.test(path)).sort();
+    !/^(?:arcs|milestones|narrative-positions)\//.test(path) ||
+    path === eventMilestone?.path && originWorkItem.startsWith("event-")).sort();
 }
 
 export function deriveReviewRepairAmendment(input: {
@@ -177,17 +188,26 @@ export function deriveReviewRepairAmendment(input: {
   original: TurnAssignmentEvidence;
   planVersion: number;
   originWorkItem: string;
+  eventMilestone?: EventMilestoneRepairGrant;
 }): ReviewRepairPlanAmendment {
   const { assurance, review, original, originWorkItem } = input;
   const source = { jobId: assurance.jobId, commitSha: assurance.commitSha,
     turnDigest: assurance.turnDigest, assignmentId: assurance.assignmentId,
     assignmentDigest: assurance.assignmentDigest, diffDigest: assurance.diffDigest,
     validationProofDigest: assurance.validationProofDigest };
-  // An Event work item may have advanced the selected Milestone's fulfillment
-  // metadata in its *already validated* commit. That is read-only context for
-  // any correction, never new repair authority. A finding ON that Milestone
-  // still escalates rather than creating a protected-path repair grant.
-  const paths = reviewRepairTargets(assurance.changedPaths, originWorkItem);
+  // The exact Event/Milestone grant must originate with the sealed Event
+  // receipt, never with a reviewer finding, a guessed filename or the model.
+  const eventMilestone = input.eventMilestone;
+  if (eventMilestone && (original.id !== "event" ||
+      original.specialist !== "nt-event-design" ||
+      !original.authority.recordTypes.includes("event") ||
+      originWorkItem !== "event-" + eventMilestone.id.replace(/^milestone\./, "") ||
+      !/^milestone\.[a-z][a-z0-9-]*$/.test(eventMilestone.id) ||
+      !/^milestones\/[a-z0-9][a-z0-9._-]*\.md$/.test(eventMilestone.path) ||
+      (original.targets.length > 0 && !original.targets.includes(eventMilestone.id)) ||
+      !assurance.changedPaths.includes(eventMilestone.path)))
+    throw Error("Event Milestone repair lacks its original selected field grant.");
+  const paths = reviewRepairTargets(assurance.changedPaths, originWorkItem, eventMilestone);
   const owned = new Set([...original.authority.existingPaths, ...original.authority.newPaths ?? []]);
   if (review.status !== "failed" || !review.findings.length ||
       JSON.stringify(source) !== JSON.stringify(review.source) ||
@@ -195,9 +215,10 @@ export function deriveReviewRepairAmendment(input: {
       !Number.isSafeInteger(input.planVersion) || input.planVersion < 1 ||
       !paths.length || paths.length > 32 ||
       paths.some(path => !canonicalPath.test(path) ||
-        (!owned.has(path) && !original.authority.mayCreate) ||
+        (!owned.has(path) && !original.authority.mayCreate && path !== eventMilestone?.path) ||
         (path.startsWith("creative-direction/") && originWorkItem !== "foundation") ||
-        /^(?:arcs|milestones|narrative-positions)\//.test(path)) ||
+        (/^(?:arcs|milestones|narrative-positions)\//.test(path) &&
+          path !== eventMilestone?.path)) ||
       (originWorkItem === "foundation" && (paths.length !== 1 ||
         !paths[0]!.startsWith("creative-direction/"))) ||
       !original.specialist.trim())
@@ -229,7 +250,8 @@ export function deriveReviewRepairAmendment(input: {
     outcome: obligations.map(o => o.path + ": " + o.requiredCorrection).join("\n"),
     targets: [...original.targets], dependsOn: [original.id],
     discovery: "canonical-story-read-only",
-    authority: { recordTypes: [...original.authority.recordTypes],
+    authority: { recordTypes: [...original.authority.recordTypes,
+        ...(eventMilestone ? ["milestone"] : [])],
       existingPaths: paths, mayCreate: false },
   };
   const body = { version: 1 as const, kind: "review-correction" as const,
@@ -237,6 +259,6 @@ export function deriveReviewRepairAmendment(input: {
     turnDigest: assurance.turnDigest, basePlanVersion: input.planVersion,
     amendmentVersion: 1 as const, originalAssignmentId: original.id,
     originalAssignmentDigest: hash(original), obligations,
-    readOnlyDependencies, assignment };
+    readOnlyDependencies, ...(eventMilestone ? { eventMilestone } : {}), assignment };
   return { ...body, digest: hash(body) };
 }

@@ -1,4 +1,6 @@
 import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
+import { readEventMilestoneRepairGrant } from "./event-milestone-repair.js";
+import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
 import { CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
 import { PUZZLE_GOAL_REPAIR } from "./puzzle-goal-fidelity.js";
 import { eventConsequenceProofDigest,
@@ -7,7 +9,7 @@ import { rejectedRepairContext } from "./review-repair-context.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { JobStartResult } from "./job.js";
@@ -241,27 +243,33 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   if (!isAncestor(job, point.commitSha, head) ||
       git(job, "status", "--porcelain=v1", "--untracked-files=all"))
     throw Error("Repair needs a clean verified descendant of the failed checkpoint.");
-  // This branch is intentionally BEFORE reopening the original Pi writer:
-  // its existing-path-only tool lease cannot create a missing Character or
-  // change a read-only Arc. Such a finding must never become a replay prompt.
-  if (reviewNeedsDependency(point.assurance!, failure, point.workItem)) {
+  const previous = point.workItem.startsWith("repair-")
+    ? await inspectRejectedRepair(job, point.workItem.slice(7)) : null;
+  if (previous && previous.attempts >= MAX_ATTEMPTS)
+    throw Error("Bounded repair attempts exhausted; author intervention is required.");
+  const originWorkItem = previous?.origin.workItem ?? point.workItem;
+  const eventMilestone = point.workItem.startsWith("event-") &&
+      point.assurance!.changedPaths.some(p => p.startsWith("milestones/"))
+    ? await readEventMilestoneRepairGrant(job, point, assignment)
+    : previous?.planAmendment.eventMilestone &&
+        point.assurance!.changedPaths.includes(previous.planAmendment.eventMilestone.path)
+      ? previous.planAmendment.eventMilestone : undefined;
+  // A reviewer cannot grant a new record, owner, Arc, or Milestone field.
+  // This exception is the already selected, signed Event grant, nothing more.
+  if (reviewNeedsDependency(point.assurance!, failure, originWorkItem, eventMilestone)) {
     const request = deriveReviewDependencyRequest({
       assurance: point.assurance!, review: failure, original: assignment,
       turn: plan!, planVersion: point.planVersion ?? plan!.version,
-      originWorkItem: point.workItem,
+      originWorkItem, eventMilestone,
     });
     await withStoryJobLock(job, "review-dependency-request", () =>
       recordReviewDependency(job, request));
     throw new ReviewDependencyRequiredError(request);
   }
   const origin = await readRejectedRepairOrigin(job, point);
-  const previous = point.workItem.startsWith("repair-")
-    ? await inspectRejectedRepair(job, point.workItem.slice(7)) : null;
-  if (previous && previous.attempts >= MAX_ATTEMPTS)
-    throw Error("Bounded repair attempts exhausted; author intervention is required.");
   const planAmendment = deriveReviewRepairAmendment({ assurance: point.assurance!,
     review: failure, original: assignment, planVersion: point.planVersion ?? plan!.version,
-    originWorkItem: origin.workItem });
+    originWorkItem: origin.workItem, eventMilestone });
   const root = previous?.rootFailureSha ?? point.commitSha;
   const rootReview = previous?.originalReviewDigest ?? sourceOf(failure);
   const rootSource = previous?.originalSource ?? failure.source;
@@ -321,10 +329,18 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
   const turn = await readTurnEvidence(job, planHint.contract);
   if (!turn) throw Error("Repair lost its pinned original Turn plan.");
   const origin = await readRejectedRepairOrigin(job, current);
+  const previous = current.workItem.startsWith("repair-")
+    ? await inspectRejectedRepair(job, current.workItem.slice(7)) : null;
+  const eventMilestone = current.workItem.startsWith("event-") &&
+      current.assurance!.changedPaths.some(p => p.startsWith("milestones/"))
+    ? await readEventMilestoneRepairGrant(job, current, state.assignment)
+    : previous?.planAmendment.eventMilestone &&
+        current.assurance!.changedPaths.includes(previous.planAmendment.eventMilestone.path)
+      ? previous.planAmendment.eventMilestone : undefined;
   const expectedAmendment = deriveReviewRepairAmendment({ assurance: current.assurance!,
     review: sealed, original: state.assignment,
     planVersion: current.planVersion ?? turn.version,
-    originWorkItem: origin.workItem });
+    originWorkItem: origin.workItem, eventMilestone });
   if (JSON.stringify(state.origin) !== JSON.stringify(origin) ||
       JSON.stringify(state.findings) !== JSON.stringify(sealed.findings) ||
       JSON.stringify(state.planAmendment) !== JSON.stringify(expectedAmendment) ||
@@ -443,11 +459,20 @@ export function changedRepairPaths(job: JobStartResult, state: RepairReceipt) {
     return path.slice(prefix.length);
   }).sort();
   const allowed = state.allowedPaths;
+  const milestonePath = state.planAmendment?.eventMilestone?.path;
   if (paths.some(path => !allowed.includes(path) ||
       (path.startsWith("creative-direction/") && state.origin.workItem !== "foundation") ||
-      path.startsWith("arcs/") ||
-      path.startsWith("milestones/") || path.startsWith("narrative-positions/")))
+      path.startsWith("arcs/") || path.startsWith("narrative-positions/") ||
+      path.startsWith("milestones/") && path !== milestonePath))
     throw Error("Review feedback never authorizes unrelated or protected Story changes.");
+  if (milestonePath && paths.includes(milestonePath)) {
+    const target = join(job.worktreeStoryRoot, milestonePath);
+    if (realpathSync(target) !== target || !lstatSync(target).isFile())
+      throw Error("Unsafe or symlinked Milestone repair path.");
+    assertMilestoneFulfillmentOnly(
+      gitRaw(job, "show", state.baselineHead + ":" + repoPath(job, milestonePath)),
+      readFileSync(target, "utf8"));
+  }
   return paths;
 }
 export function disagreementQuestion(state: RepairReceipt): SpecialistChoiceQuestion {
@@ -885,7 +910,10 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       "validation and separate semantic rereview. First read the relevant pinned " +
       "skill and exact Story files. Edit ONLY the already authorized paths below. " +
       "Do not modify protected canon, broaden the task, run shell, approve changes " +
-      "or touch the author's deferred ideas. If a finding cites records outside " +
+      "or touch the author's deferred ideas. The one exception, when explicitly " +
+      "listed in the signed feedback, is the selected Event Milestone's " +
+      "completeness and fulfillment frontmatter slots; never change its " +
+      "title, arcs, decisions, other metadata, or prose. If a finding cites records outside " +
       "the allowed files, those are READ-ONLY context, not write grants. Fix " +
       "the causal gap within your original authorized file where possible: " +
       "for example, present concrete playable observations before asking the " +

@@ -12,7 +12,7 @@ import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { readTurnEvidence, type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
-import { sealIndependentReview, repairReviewAssignment,
+import { sealIndependentReview, repairReviewAssignment, readRepairCommitProof,
   type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -33,6 +33,9 @@ export interface SemanticReviewItem {
   readOnlyPaths: string[];
   /** Ceiling only: the repair controller must still authorize an amendment. */
   repairTargets: string[];
+  /** Signed Event correction exception; no other Milestone fields may change. */
+  eventMilestoneFieldGrant?: { id: string; path: string;
+    fields: ["completeness", "fulfillment"] };
   /** Advisory inventory from the native-validated Event checkpoint, not a verdict. */
   eventConsequenceProof?: EventConsequenceProof;
   /** Historical failed promise, not an additional grant or inherited verdict. */
@@ -151,7 +154,26 @@ export async function prepareSemanticReview(job: JobStartResult,
     const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths,
       ...dependencies.flatMap(a => a.authority.existingPaths), ...dependencyPaths])];
     const canonicalContext = await loadSealedReviewContext(job, point.commitSha, paths);
-    const repairTargets = reviewRepairTargets(assurance.changedPaths, point.workItem);
+    let eventMilestone: import("./review-repair-amendment.js").EventMilestoneRepairGrant | undefined;
+    if (point.workItem.startsWith("repair-")) {
+      const source = point.workItem.slice(7);
+      if (!/^[a-f0-9]{40}$/.test(source)) throw Error("Unsafe reviewed repair source.");
+      const repair = JSON.parse(await readFile(join(job.stateDir, "review-repairs",
+        source + ".json"), "utf8")) as {
+        sourceCommitSha?: string;
+        planAmendment?: { digest?: string; eventMilestone?: typeof eventMilestone };
+      };
+      const proof = await readRepairCommitProof(job, point.workItem);
+      if (repair.sourceCommitSha !== source || !repair.planAmendment?.digest ||
+          (proof.repairPlanDigest !== undefined
+            ? repair.planAmendment.digest !== proof.repairPlanDigest
+            : repair.planAmendment.eventMilestone !== undefined))
+        throw Error("Reviewed Milestone repair has no signed source-bound field grant.");
+      eventMilestone = repair.planAmendment.eventMilestone;
+    }
+    const repairTargets = reviewRepairTargets(assurance.changedPaths,
+      eventMilestone ? "event-" + eventMilestone.id.slice("milestone.".length) : point.workItem,
+      eventMilestone);
     const readOnlyPaths = canonicalContext.map(c => c.path).filter(p => !repairTargets.includes(p));
     let eventConsequenceProof: EventConsequenceProof | undefined;
     if (point.workItem.startsWith("event-")) {
@@ -212,6 +234,8 @@ export async function prepareSemanticReview(job: JobStartResult,
     items.push({ assignment, reviewedWorkItem: point.workItem,
       unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist), assurance, diff, canonicalContext,
       readOnlyPaths, repairTargets,
+      ...(eventMilestone ? { eventMilestoneFieldGrant: { ...eventMilestone,
+        fields: ["completeness", "fulfillment"] as ["completeness", "fulfillment"] } } : {}),
       ...(eventConsequenceProof ? { eventConsequenceProof } : {}),
       ...(rejectedEventComparison ? { rejectedEventComparison } : {}) });
   }
