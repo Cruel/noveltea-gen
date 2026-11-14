@@ -260,8 +260,13 @@ export async function advanceReviewCharacterDependency(input: {
         ? "Review ONLY the separately authorized new Character's grounded role in the " +
           "original Event source; that Event is READ-ONLY and still has a failed review. " +
           "The Event specialist, NOT this Character specialist, must later append the " +
-          "Character to participants and correct its prose. Require coherent motivation " +
-          "and initial knowledge; do not demand the still-suspended Event repair here."
+          "Character to participants and correct its prose. The lack of enacted testimony " +
+          "or Event attendance is the PRECISE ORIGINAL FAILED OBLIGATION and is deferred " +
+          "to that Event owner: it is NOT a Character-stage blocker. Judge whether this " +
+          "new Character has a source-grounded reason to be asked to testify, a credible " +
+          "role and motivation, honest initial knowledge, and no invented prior acts. " +
+          "Do NOT demand this Character profile itself enact an encounter or solve the " +
+          "original Event's absent dialogue; that would create a dependency cycle."
         : "Review ONLY this new Character specialist's exact necessary support for the " +
           "original complete-Story Character Foundations requirement. No later Events, " +
           "Choices or authored dialogue need to be complete at this checkpoint. " +

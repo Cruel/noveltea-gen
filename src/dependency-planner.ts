@@ -14,6 +14,45 @@ import { dependencyBoundary, dependencyTurn, saveDependencyPlan,
   type DependencyEntry, type DependencyPlan } from "./dependency-state.js";
 import type { DependencyProposal } from "./dependency-amendments.js";
 
+/** A model may mistype a source digest without changing the proposed work.
+ * One explicit, fresh-proposal retry is allowed; it cannot modify the signed
+ * evidence or bypass the controller's independent authorization gate. */
+export function needsDependencyProposalCorrection(
+  proposal: DependencyProposal | { rejected: true; reason: string },
+  entry: Pick<DependencyEntry, "report" | "reportDigest">,
+  reviewCharacter: boolean,
+): boolean {
+  if ("rejected" in proposal) return false; // Never turn a deliberate scope rejection into a grant.
+  return (
+    (proposal.sourceSha !== undefined && proposal.sourceSha !== entry.report.sourceSha) ||
+    (proposal.reportDigest !== undefined && proposal.reportDigest !== entry.reportDigest) ||
+    (proposal.sourceSha === undefined) !== (proposal.reportDigest === undefined) ||
+    proposal.outcome !== entry.report.missing ||
+    (typeof proposal.target === "string" &&
+      (reviewCharacter
+        ? !/^character\.[a-z][a-z0-9-]*$/.test(proposal.target)
+        : !entry.report.affectedIds.includes(proposal.target)))
+  );
+}
+
+/** The model proposes semantic work, never an opaque source identity. Model
+ * output may omit both identity fields; the trusted controller binds the
+ * already verified report. Explicitly conflicting identity fields fail closed.
+ * An explicit model rejection is never converted into a grant. */
+export function bindDependencyProposalIdentity(
+  proposal: DependencyProposal | { rejected: true; reason: string },
+  entry: Pick<DependencyEntry, "report" | "reportDigest">,
+): DependencyProposal {
+  if ("rejected" in proposal) return proposal as unknown as DependencyProposal;
+  if (
+    (proposal.sourceSha !== undefined && proposal.sourceSha !== entry.report.sourceSha) ||
+    (proposal.reportDigest !== undefined && proposal.reportDigest !== entry.reportDigest) ||
+    (proposal.sourceSha === undefined) !== (proposal.reportDigest === undefined)
+  )
+    throw Error("Dependency model proposed an untrusted or incomplete source identity.");
+  return { ...proposal, sourceSha: entry.report.sourceSha, reportDigest: entry.reportDigest };
+}
+
 /** Invoked under the shared writer lock at a clean boundary. Model output is
  * only a proposal; approveDependency independently checks source and scope. */
 export async function proposeDependency(job: JobStartResult, plan: DependencyPlan,
@@ -56,7 +95,12 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
     const guidance = ["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
       "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"];
     await promptStorySpecialist(session, context.contextNote +
-      "You are the READ-ONLY dependency orchestrator. First read these pinned methods:\n" +
+      "You are the READ-ONLY dependency orchestrator. The complete original " +
+      "approved author request, NOT its first sentence or a generic summary, " +
+      "is the authoritative requirement to compare against the sealed review. " +
+      "Read it verbatim before deciding whether an omitted Character was " +
+      "actually requested. ORIGINAL USER REQUEST: " + JSON.stringify(turn.originalRequest) +
+      "\nFirst read these pinned methods:\n" +
       guidance.map(p => "skill://" + p).join("\n") +
       "\nInspect the cited canonical Story sources. No private inbox access. Determine whether the reported " +
       "prerequisite is causally NECESSARY for the exact original obligation, not optional enrichment. " +
@@ -66,11 +110,19 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       "causal correction with inventing an off-page occurrence or granting new-record authority. " +
       (reviewRequest
         ? "This is a SEALED negative review for a missing central Character under the existing approved " +
-          "whole-Story objective, not a request to widen scope. First inspect the cited " +
+          "whole-Story objective, not a request to widen scope. This is an OMISSION " +
+          "finding: the named Character may have NO record or mention in the " +
+          "existing Event precisely because the original owner omitted required " +
+          "work. Absence from existing Event prose is NOT evidence that the " +
+          "approved author Turn omitted that requirement. Compare the explicit " +
+          "original user objective supplied below to the sealed negative finding " +
+          "and existing Character inventory; reject if the author did not require " +
+          "the Character or if an existing record already fulfills the role. " +
+          "First inspect the cited " +
           (reviewRequest.originalWorkItem.startsWith("event-") ? "Event" : "Arc") +
           " and existing Characters. Reject a duplicate or irrelevant new Character, invented " +
           "history, protected retcon, or unearned knowledge. You cannot grant write authority. " +
-          "If necessary return ONLY JSON {sourceSha,reportDigest,target,specialist,title,outcome,reason}: " +
+          "If necessary return ONLY JSON {target,specialist,title,outcome,reason}: " +
           "target is ONE newly chosen unused typed character.slug ID (not a path), title is a concise " +
           "Character title, specialist is nt-character-development, and outcome must copy the " +
           "report's missing work. The controller separately verifies the exact new path/ID " +
@@ -80,18 +132,22 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
             : "and the one existing Arc's link-only field. ") :
           "You cannot grant authority. Only one directly connected EXISTING record, owned by the proper different " +
           "specialist, can be proposed. New records or changes to protected decisions require separate approval. " +
-          "If necessary, return ONLY JSON {sourceSha,reportDigest,target,specialist,outcome,reason}. " +
+          "If necessary, return ONLY JSON {target,specialist,outcome,reason}. " +
           "Target MUST be an existing typed canonical ID from the report's affectedIds " +
           "(for example event.ledger-disclosure), NEVER a filesystem path like events/ledger-disclosure.md. ") +
       "COPY the exact report.missing string as outcome, verbatim, not a paraphrase or a new directive; " +
       "explain the independently verified causal repair ONLY in reason. " +
-      "Use the exact sourceSha and reportDigest provided. If unnecessary or unsafe return " +
-      "{rejected: true, reason: ...}; the controller will block, never manufacture a grant.\n" +
+      "Do NOT include sourceSha or reportDigest in the JSON response. These opaque " +
+      "identifiers already belong to the controller; it binds them from the saved " +
+      "ledger after independently checking the proposal. You decide only whether " +
+      "the work is necessary and its bounded target, specialist and rationale. " +
+      "Do NOT reject only because a digest is absent from the model evidence. " +
+      "If causally unnecessary, protected or unsafe, return " +
+      "{rejected: true, reason: ...}; the controller never manufactures a grant.\n" +
       "Original objective and delivery criteria: " + JSON.stringify({ goal: turn.goal, objective: turn.objective }) +
       "\nOriginal assignments: " + JSON.stringify(turn.assignments) +
       "\nDependency evidence: " + JSON.stringify(entry.report) +
-      (reviewRequest ? "\nSealed reviewer request: " + JSON.stringify(reviewRequest) : "") +
-      "\nReport digest: " + entry.reportDigest);
+      (reviewRequest ? "\nSealed reviewer request: " + JSON.stringify(reviewRequest) : ""));
     const completedReads = () => {
       const completed = new Set(session.messages.filter(m => m.role === "toolResult" && !m.isError)
         .map(m => m.role === "toolResult" ? m.toolCallId : ""));
@@ -116,26 +172,37 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       throw Error("Dependency planner did not read pinned methodology.");
     entry.planner.skillReads = reads;
     await saveDependencyPlan(job, plan);
-    const lastJson = () => JSON.parse((session.getLastAssistantText() ?? "").trim()
-      .replace(/^```(?:json)?\s*\n/i, "").replace(/\n```$/, "")) as DependencyProposal;
+    const lastJson = () =>
+      JSON.parse(
+        (session.getLastAssistantText() ?? "")
+          .trim()
+          .replace(/^```(?:json)?\s*\n/i, "")
+          .replace(/\n```$/, ""),
+      ) as DependencyProposal;
     let proposal = lastJson();
-    if (proposal && (proposal.outcome !== undefined && proposal.outcome !== entry.report.missing ||
-        typeof proposal.target === "string" &&
-          (reviewRequest ? !/^character\.[a-z][a-z0-9-]*$/.test(proposal.target) :
-            !entry.report.affectedIds.includes(proposal.target)))) {
-      await promptStorySpecialist(session, "Your proposal used an altered missing-work outcome or " +
-        "a target that is not an exact typed canonical ID from the evidence. " +
-        "Reassess the report and return one fresh JSON proposal only if necessary. " +
-        "Copy missing EXACTLY as outcome, choose target as a " +
-        (reviewRequest ? "new typed character.slug ID with a title" :
-          "preexisting typed canonical ID from the affected IDs") +
-        " (NEVER a .md path), and put your causal reasoning in reason. " +
-        "Return a rejection if this cannot be safely done. " +
-        "Exact missing work: " + JSON.stringify(entry.report.missing) +
-        "; allowed affected IDs: " + JSON.stringify(entry.report.affectedIds));
+    if (proposal && needsDependencyProposalCorrection(proposal, entry, !!reviewRequest)) {
+      await promptStorySpecialist(
+        session,
+        "Your proposal included an incorrect " +
+          "source identity, altered missing-work outcome or invalid target ID. " +
+          "Reassess the report and return one fresh JSON proposal only if necessary. " +
+          "Copy missing EXACTLY as outcome, choose target as a " +
+          (reviewRequest
+            ? "new typed character.slug ID with a title"
+            : "preexisting typed canonical ID from the affected IDs") +
+          " (NEVER a .md path), and put your causal reasoning in reason. " +
+          "Return a rejection if this cannot be safely done. " +
+          "Do NOT copy or include sourceSha/reportDigest: the trusted controller " +
+          "binds these from the saved source after this proposal. " +
+          "Exact missing work: " +
+          JSON.stringify(entry.report.missing) +
+          "; allowed affected IDs: " +
+          JSON.stringify(entry.report.affectedIds) +
+          ". Do not invent new evidence or permissions.",
+      );
       proposal = lastJson();
     }
     await context.completed(sessionFile, session.sessionId);
-    return proposal;
+    return bindDependencyProposalIdentity(proposal, entry);
   } finally { session.dispose(); }
 }

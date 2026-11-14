@@ -153,6 +153,43 @@ test("hosted editorial reviewers receive only sandbox-backed read/search tools",
   assert.ok(runner.calls.every(argv => argv[0] === "sh"));
 });
 
+test("retrospective assignment reviewer can read pinned methods but cannot open mutable Story files", async () => {
+  const { snapshot, skills } = await fixture();
+  const runner = client();
+  const definitions = await createSandboxPiTools(
+    job,
+    snapshot,
+    skills,
+    runner,
+    "read-only",
+    "reviewer",
+    "pinned-skills-only",
+  );
+  const readTool = definitions.find((tool) => tool.name === "read")!;
+  assert.match(
+    JSON.stringify((await call(readTool, { path: "skill://nt-catalog/SKILL.md" })).content),
+    /Pinned rules/,
+  );
+  assert.match(
+    JSON.stringify((await call(readTool, { path: "skill://nt-narrative-review/SKILL.md" })).content),
+    /narrative-review guidance/,
+  );
+  for (const path of [
+    "milestones/disclosure.md",
+    "events/disclosure.md",
+    "/story/milestones/disclosure.md",
+    join(job.worktreeStoryRoot, "milestones/disclosure.md"),
+    ".story-inbox/ideas/private.md",
+  ]) {
+    await assert.rejects(
+      call(readTool, { path }),
+      /only immutable pinned skills/i,
+      "No current Story read can contaminate a sealed review: " + path,
+    );
+  }
+  assert.equal(runner.calls.length, 0, "Denied reads never touch the sandbox or host");
+});
+
 test("host paths, traversal, Git and deferred author ideas are never model-readable or writable", async () => {
   const { snapshot, skills } = await fixture();
   const runner = client();

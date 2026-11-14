@@ -151,6 +151,72 @@ test("independent PASS requires exact source-linked route identities, not a #ste
     assignment).verdict, "pass");
 });
 
+test("Character specialist review can source-link Character defects without inventing an Event owner", () => {
+  const assignment: ReviewAssignment = {
+    contract: {},
+    planVersion: 2,
+    scopeIds: ["character.mara"],
+    paths: ["characters/mara.md"],
+    routes: [],
+    milestoneRoutes: [],
+    puzzleRoutes: [],
+    outstanding: [],
+    uncertainties: [],
+  };
+  const verdict = checkEditorialVerdict(
+    {
+      verdict: "block",
+      findings: [
+        {
+          severity: "blocking",
+          dimension: "characterization",
+          source: "characters/mara.md:12",
+          repair: "character",
+          message: "New Character asserts an off-screen event as already completed.",
+        },
+      ],
+      evidence: ["characters/mara.md:12 unsupported prior claim"],
+    },
+    assignment,
+  );
+  assert.equal(verdict.findings[0]?.repair, "character");
+  const noRedundantEvidence = checkEditorialVerdict(
+    {
+      verdict: "block",
+      findings: verdict.findings,
+      evidence: [],
+    },
+    assignment,
+  );
+  assert.equal(
+    noRedundantEvidence.verdict,
+    "block",
+    "Preserve a source-linked Character blocker even without redundant evidence entries",
+  );
+  assert.throws(
+    () => checkEditorialVerdict({ verdict: "pass", findings: [], evidence: [] }, assignment),
+    /evidence linked/,
+    "A PASS still needs independently linked positive evidence",
+  );
+  assert.throws(
+    () =>
+      checkEditorialVerdict(
+        {
+          verdict: "block",
+          findings: [
+            {
+              ...verdict.findings[0],
+              repair: "arbitrary-specialist",
+            },
+          ],
+          evidence: verdict.evidence,
+        },
+        assignment,
+      ),
+    /invalid severity/,
+  );
+});
+
 test("weak choice and Revelation leak remain independent editorial blocks", () => {
   const assignment: ReviewAssignment = { contract: plan().contract, planVersion: 4,
     scopeIds: ["arc.truth"], paths: ["authored-content/confront.md"],

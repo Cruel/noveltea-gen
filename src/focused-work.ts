@@ -262,7 +262,17 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
         ? "EVENT REVIEW SUPPORT: Your ONLY deliverable is the new Character profile. " +
           "The sealed reviewer also requests an Event participant/prose correction, but " +
           "that belongs to the ORIGINAL Event specialist AFTER independent review of " +
-          "your Character. Do NOT edit the Event or claim to have finished its repair.\n"
+          "your Character. Do NOT edit the Event or claim to have finished its repair. " +
+          "The Event's witness encounter is currently pending and the sealed review " +
+          "is still negative. Ground WHY this Character is relevant to the specific " +
+          "archive record and why the existing protagonists would approach her, " +
+          "using actual cited Story context rather than inventing a prior encounter. " +
+          "Give her an explicit, credible source-bound role, motivation and bounded " +
+          "initial knowledge, but DO NOT narrate her testimony as already " +
+          "delivered, claim she has already identified the missing ledger entry, " +
+          "or assert a completed in-scene knowledge gain. Describe the capacity and " +
+          "intention to testify; the separate Event owner must stage and source " +
+          "the testimony before it becomes an enacted Story occurrence.\n"
         : "") +
       (create ? "Create ONLY this new canonical Markdown file with schema 0.1, exact type/id/title and typed references:\n" +
         JSON.stringify(create) + "\n" +

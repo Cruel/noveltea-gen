@@ -19,6 +19,7 @@ import type { JobStartResult } from "./job.js";
 export const SANDBOX_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
 export const SANDBOX_READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export type SandboxToolAccess = "writer" | "read-only";
+export type SandboxReadScope = "story-and-skills" | "pinned-skills-only";
 const MAX_WRITE = 128 * 1024;
 const MAX_READ_LINES = 500;
 const MAX_OUTPUT = 48 * 1024;
@@ -52,11 +53,12 @@ export function blockUnroutedHostedPi(stage: string): void {
 export async function selectSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[],
   client?: Runner, access: SandboxToolAccess = "writer", role: SkillReadRole = "specialist",
+  readScope: SandboxReadScope = "story-and-skills",
 ): Promise<ToolDefinition[] | undefined> {
   if (!process.env.NT_SANDBOX_SOCKET || !process.env.NT_SANDBOX_TOKEN_FILE) {
     throw new Error("Hosted Pi requires a configured private sandbox socket and token; no local tool fallback.");
   }
-  return createSandboxPiTools(job, snapshot, skills, client ?? new SandboxClient(), access, role);
+  return createSandboxPiTools(job, snapshot, skills, client ?? new SandboxClient(), access, role, readScope);
 }
 
 /** The same canonical path boundary applies to Pi's tools and model-requested context reads. */
@@ -124,6 +126,7 @@ export async function readSandboxContextFile(
 export async function createSandboxPiTools(
   job: JobStartResult, snapshot: SkillSnapshot, skills: Skill[], client: Runner,
   access: SandboxToolAccess = "writer", role: SkillReadRole = "specialist",
+  readScope: SandboxReadScope = "story-and-skills",
 ): Promise<ToolDefinition[]> {
   // The host controller checks the trusted Studio catalog, worktree manifest,
   // user identity and Docker rootlessness; no model-controlled mount options.
@@ -186,6 +189,11 @@ export async function createSandboxPiTools(
             (isAbsolute(path) && (path === verified.root || path.startsWith(verified.root + sep)))) {
           return pinnedRead.execute(_id, { path }, undefined as never, undefined as never, undefined as never);
         }
+        // A historical assignment reviewer receives the complete sealed Git
+        // packet inline. A current worktree read could change its verdict;
+        // reject that read at execution time, before accessing the sandbox.
+        if (readScope === "pinned-skills-only")
+          throw new Error("Assignment fidelity reads only immutable pinned skills; Story evidence is in the sealed review packet.");
         const offset = number(input.offset, 1, 1_000_000);
         const limit = number(input.limit, 300, MAX_READ_LINES);
         return text(await read(mapped(path), offset, limit));
