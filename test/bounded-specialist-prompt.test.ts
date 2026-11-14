@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { architectureSpecialistPrompt } from "../src/architecture-specialist.js";
+import { architectureSpecialistPrompt, emptyArchitectureCorrectionPrompt,
+  canCorrectEmptyArchitecture } from "../src/architecture-specialist.js";
 import { eventSpecialistPrompt, eventQuestionCorrectionFeedback,
   type EventAssignment } from "../src/event-specialist.js";
 import { parseSpecialistChoice } from "../src/specialist-choice.js";
@@ -186,6 +187,9 @@ test("actual production prompt builders give a single current work item before r
 
 test("same scoped fixture has no conflicting write grants or future-owner obligations", () => {
   assert.match(rendered.Architecture, /Only authorized arcs\/\*\.md and milestones\/\*\.md/);
+  assert.match(rendered.Architecture, /Arcs and Milestones do NOT yet exist/);
+  assert.match(rendered.Architecture, /CREATE the first Arc and Milestones/);
+  assert.match(rendered.Architecture, /story_validate TOOL is provided directly/);
   assert.match(rendered.Architecture, /fulfillment: \{any_of: \[\]\}/);
   assert.doesNotMatch(rendered.Architecture, /AUTHOR actual Event/);
   assert.match(rendered.Event, /selected milestones\/\*\.md may change ONLY/);
@@ -212,6 +216,20 @@ test("same scoped fixture has no conflicting write grants or future-owner obliga
   assert.ok(rendered.Event.includes(paths[3]!));
   assert.ok(rendered.Choice.includes(interactive.eventSource!.headSha));
   assert.ok(rendered["Assignment reviewer"].includes(packet.sourceDigest));
+});
+
+test("empty-Story Architecture correction never replays a writer with attempted edits or dirty sources", () => {
+  assert.equal(canCorrectEmptyArchitecture(false, false), true);
+  assert.equal(canCorrectEmptyArchitecture(true, false), false);
+  assert.equal(canCorrectEmptyArchitecture(false, true), false);
+  assert.equal(canCorrectEmptyArchitecture(true, true), false);
+  const correction = emptyArchitectureCorrectionPrompt();
+  assert.match(correction, /No Arcs or Milestones exist/);
+  assert.match(correction, /SAME original Pi session/);
+  assert.match(correction, /story_validate tool is directly available/);
+  assert.match(correction, /no new write grant/i);
+  assert.match(correction, /CAUSAL_MILESTONE_ORDER/);
+  assert.doesNotMatch(correction, /edit protected choices/);
 });
 
 test("malformed first-Event author request receives one non-granting correction in the same session", () => {

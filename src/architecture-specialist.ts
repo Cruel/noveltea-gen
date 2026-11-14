@@ -1,5 +1,6 @@
 import { createPiStatusTool } from "./pi-work-status.js";
 import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { join, relative, resolve, sep } from "node:path";
@@ -74,12 +75,17 @@ export function architectureSpecialistPrompt(
   return renderBoundedPrompt(snapshot, {
     goal:
       "Author the selected causal Arc/Milestone architecture from the actual " +
-      "Creative Direction. Establish an ordered chain of substantive turning points " +
+      "Creative Direction. On a NEW Story the Arcs and Milestones do NOT yet exist: " +
+      "YOU are authorized to CREATE the first Arc and Milestones now, without " +
+      "waiting for a separate writer, existing record, or author approval. " +
+      "Establish an ordered chain of substantive turning points " +
       "and their enabling conditions, meaningful changes and later payoffs in enduring " +
       "in-world prose, without inventing Event IDs or later-stage records.",
     sources: REQUIRED,
     sourceUse:
-      "Read Creative Direction and relevant existing canonical Story records. " +
+      "Read Creative Direction and relevant existing canonical Story records IF present. " +
+      "A new Story containing ONLY Creative Direction is the expected starting " +
+      "state, not an incomplete project or a reason to halt for missing Arcs. " +
       "Never search the noncanonical .story-inbox/ideas directory; only explicitly " +
       "supplied scoped author constraints may influence this unit.",
     writableScope:
@@ -88,10 +94,13 @@ export function architectureSpecialistPrompt(
       "protected decisions or create new user-protected decisions: new agent decisions " +
       "have origin: agent and authority: delegated. File stems are untyped slugs, not IDs. " +
       (sandboxed
-        ? "Use the networkless /story sandbox; no host Git, paths or credentials."
+        ? "Use the networkless /story sandbox; no host Git, paths or credentials. " +
+          "The story_validate TOOL is provided directly; do not search for or require " +
+          "a host-installed noveltea CLI executable."
         : "Do not stage, commit, checkout or reset; Git status/diff inspection is permitted."),
     doneWhen:
-      "Arc and Milestone schema 0.1 Markdown names plausible prior conditions, " +
+      "CREATE canonical Arc and Milestone schema 0.1 Markdown files yourself " +
+      "even when no other Arc/Milestone exists. They name plausible prior conditions, " +
       "turning point outcomes and their causal successor (or terminal payoff). " +
       "For investigations distinguish discovery, evidence, inference, confrontation " +
       "and consequential player decision without asserting unsupported facts. " +
@@ -113,6 +122,30 @@ export function architectureSpecialistPrompt(
     assignment: plan,
     authorInstruction: specialistAuthorInstruction(authorTask),
   });
+}
+
+/** Only a clean zero-write first-Story misunderstanding can receive one more
+ * turn in the original Pi session. Never retry a writer that attempted a write,
+ * left a draft, or may have crossed the record/scope boundary. */
+export function canCorrectEmptyArchitecture(attemptedWrite: boolean, gitDirty: boolean): boolean {
+  return !attemptedWrite && !gitDirty;
+}
+export function emptyArchitectureCorrectionPrompt(): string {
+  return "CONTROLLER-CORRECTED NEW STORY OWNERSHIP: No Arcs or Milestones exist " +
+    "because this is a NEW Story. This is NOT missing source, an architectural " +
+    "conflict, or a need to ask the author to restore records. You are the " +
+    "already-authorized nt-story-architecture writer. In the SAME original Pi " +
+    "session, read the current Creative Direction and CREATE the first bounded " +
+    "Arc and Milestone files now, keeping protected choices unchanged. The " +
+    "networkless sandbox intentionally lacks the host CLI; the story_validate " +
+    "tool is directly available and must be used without arguments. No new " +
+    "write grant, tool, scope expansion or protected authorization was issued. " +
+    "Establish a source-grounded causal order, leave fulfillment.any_of empty " +
+    "for deferred Event work, and finish with one exact " +
+    "CAUSAL_MILESTONE_ORDER: milestone.first,milestone.next line listing all " +
+    "actually authored Milestone IDs. If genuinely impossible under the " +
+    "existing authorized scope, make no edits and report the reason instead " +
+    "of inventing missing records.";
 }
 
 /** The specialist authors Markdown; it cannot approve, validate, or commit its own output. */
@@ -165,10 +198,29 @@ export async function authorArchitecture(
     await context.beforeTurn(sessionFile);
     await promptStorySpecialist(session, context.contextNote +
       architectureSpecialistPrompt(snapshot, plan, Boolean(sandboxTools), authorTask));
-    const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
+    let assistant = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!assistant || assistant.role !== "assistant" ||
         ["error", "aborted"].includes(assistant.stopReason)) {
       throw new Error("Architecture specialist did not complete a successful Pi turn.");
+    }
+    const attemptedWrite = session.messages.some(m => m.role === "assistant" &&
+      m.content.some(c => c.type === "toolCall" && ["write", "edit"].includes(c.name)));
+    const newStory = !existsSync(join(project.root, "arcs")) &&
+      !existsSync(join(project.root, "milestones"));
+    if (newStory && !attemptedWrite) {
+      const env = { ...process.env };
+      for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"])
+        delete env[key];
+      const dirty = !!execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+        cwd: job.worktreeRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      if (canCorrectEmptyArchitecture(attemptedWrite, dirty)) {
+        await promptStorySpecialist(session, emptyArchitectureCorrectionPrompt());
+        assistant = [...session.messages].reverse().find(m => m.role === "assistant");
+        if (!assistant || assistant.role !== "assistant" ||
+            ["error", "aborted"].includes(assistant.stopReason))
+          throw new Error("Same-session empty Architecture correction did not complete safely.");
+      }
     }
     const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
       m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
