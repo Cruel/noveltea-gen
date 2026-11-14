@@ -55,6 +55,19 @@ const CATALOG = [
   "nt-catalog/references/authority-and-validation.md",
   "nt-catalog/references/glossary.md",
 ];
+export const CRITICAL_CAST_GUIDANCE = [
+  "FIRST compare the selected Arc/Milestone and World Foundations against",
+  "the cast. A named or clearly individuated person central to the inciting",
+  "mystery (including an absent victim, missing witness, or inspector) may need",
+  "a canonical Character record even if currently off-scene. Author that",
+  "profile under this original creation grant when their identity/role matters",
+  "to later Events, without inventing a culprit, outcome, appearance, or",
+  "unearned initial knowledge. Do not create Characters for incidental",
+  "references or force absent Characters into scenes. If a central figure",
+  "must remain intentionally undefined, report its exact later-owner",
+  "obligation rather than imply that two other leads cover it.",
+].join(" ");
+
 const DOMAINS = {
   world: {
     name: "nt-worldbuilding",
@@ -64,7 +77,7 @@ const DOMAINS = {
   character: {
     name: "nt-character-development",
     owns: ["characters/*.md", "relationships/*.md", "arcs/*.md (characters array only)"],
-    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. FIRST inspect the listed existing Character records and typed IDs. If a Character ID already exists, REUSE and develop its exact existing file; never create a second filename for the same canonical ID. A draft status does not make an existing character disposable. Use character records (type-specific fields motivation and optional initial_knowledge) for people, relationship records (characters exactly two distinct IDs and initial) for the bond. Every record MUST have readable narrative prose after its closing --- frontmatter line. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
+    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. FIRST inspect the listed existing Character records and typed IDs. If a Character ID already exists, REUSE and develop its exact existing file; never create a second filename for the same canonical ID. A draft status does not make an existing character disposable. " + CRITICAL_CAST_GUIDANCE + " Use character records (type-specific fields motivation and optional initial_knowledge) for people, relationship records (characters exactly two distinct IDs and initial) for the bond. Every record MUST have readable narrative prose after its closing --- frontmatter line. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
   },
 } as const;
 

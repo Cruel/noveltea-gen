@@ -5,6 +5,7 @@ import { architectureSpecialistPrompt, emptyArchitectureCorrectionPrompt,
 import { eventSpecialistPrompt, eventQuestionCorrectionFeedback,
   type EventAssignment } from "../src/event-specialist.js";
 import { parseSpecialistChoice } from "../src/specialist-choice.js";
+import { CRITICAL_CAST_GUIDANCE } from "../src/character-world-specialist.js";
 import { interactiveSpecialistPrompt, type InteractiveAssignment } from "../src/interactive-specialist.js";
 import {
   assignmentFidelityPrompt,
@@ -200,6 +201,11 @@ test("same scoped fixture has no conflicting write grants or future-owner obliga
   assert.match(rendered.Event, /YOU own authoring its discovery scene/);
   assert.match(rendered.Event, /author the discovery and Character access NOW/);
   assert.match(rendered.Event, /MUST use field kind, never type/);
+  assert.match(rendered.Event, /compare EACH material clause/);
+  assert.match(rendered.Event, /completeness and empty fulfillment\.any_of/);
+  assert.match(CRITICAL_CAST_GUIDANCE, /absent victim, missing witness, or inspector/);
+  assert.match(CRITICAL_CAST_GUIDANCE, /without inventing a culprit/);
+  assert.match(CRITICAL_CAST_GUIDANCE, /two other leads cover it/);
   assert.match(rendered.Event, /Do not request author permission for a discovery Event already/);
   assert.match(rendered.Event, /Missing Choice, Puzzle,.*$/m);
   assert.match(rendered.Event, /NOT blockers for this Event setup/);

@@ -105,7 +105,8 @@ test("Character checkpoint's verified Arc links remain read-only while owned Cha
     "Restart must derive identical bounded authority");
   assert.throws(() => deriveReviewRepairAmendment({ ...args,
     review: { ...review, findings: [{ ...review.findings[0]!,
-      path: "arcs/train-disappearance.md" }] } }), /unverified source/);
+      path: "arcs/train-disappearance.md" }] } }),
+    /unverified source.*arcs\/train-disappearance\.md.*controller-approved/);
   assert.throws(() => deriveReviewRepairAmendment({ ...args,
     assurance: { ...check, changedPaths: ["arcs/train-disappearance.md"] } }),
     /new writer|path|protected/);
@@ -135,7 +136,8 @@ test("Event correction edits its reviewed Event, never the validated Milestone m
   assert.equal(amendment.assignment.authority.mayCreate, false);
   assert.throws(() => deriveReviewRepairAmendment({ ...args,
     review: { ...review, findings: [{ ...review.findings[0]!,
-      path: "milestones/evidence.md" }] } }), /unverified source/);
+      path: "milestones/evidence.md" }] } }),
+    /unverified source.*milestones\/evidence\.md.*field-limited/);
   const linkedArc = { ...args,
     assurance: { ...changed, changedPaths: [...changed.changedPaths, "arcs/connected.md"] },
     review: { ...review, findings: [{ ...review.findings[0]!,

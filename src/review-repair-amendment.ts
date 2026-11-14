@@ -80,9 +80,15 @@ export function deriveReviewRepairAmendment(input: {
       !original.specialist.trim())
     throw Error("Rejected review cannot grant a new writer, path, or protected change.");
   const obligations: ReviewRepairObligation[] = review.findings.map(f => {
+    if (!paths.includes(f.path))
+      throw Error("Review repair obligation has unverified source or correction: " +
+        f.path + " is not writable in the original specialist's bounded repair " +
+        "lease. Arc links, Milestone metadata and new record creation require " +
+        "a separate controller-approved, field-limited or dependency-plan " +
+        "amendment; do not replay the original writer with expanded authority.");
     const affectedPaths = f.affectedPaths ?? [f.path];
     const requiredCorrection = f.requiredCorrection ?? f.message;
-    if (!paths.includes(f.path) || !Array.isArray(affectedPaths) ||
+    if (!Array.isArray(affectedPaths) ||
         !affectedPaths.length || affectedPaths.length > 12 ||
         !affectedPaths.includes(f.path) ||
         new Set(affectedPaths).size !== affectedPaths.length ||

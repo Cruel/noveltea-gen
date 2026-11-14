@@ -111,6 +111,15 @@ export function eventSpecialistPrompt(
       "an enacted player decision, produce a reachable setup, preserve partial Milestone " +
       "completeness with empty fulfillment.any_of, and leave formal outcome binding for Choice. " +
       "A setup Event is complete unless its own text claims the decision enacted. " +
+      "Before setting a Milestone complete, compare EACH material clause of its " +
+      "selected change/outcome and narrative promise with the player's actually " +
+      "reachable observations, testimony and access in this Event. An observation " +
+      "of an empty or locked place NOW does not prove it was continuously locked " +
+      "or inaccessible EARLIER; neither a witness claim nor a possible discrepancy " +
+      "alone proves that all the Milestone's evidence has been established. " +
+      "When an essential clause is not yet established, retain partial " +
+      "completeness and empty fulfillment.any_of, and name the exact missing " +
+      "support as a later obligation; do NOT make a false completed route. " +
       "For a completed nondecision Milestone, bind only genuinely fulfilled routes. " +
       "Call story_validate without arguments, repair introduced errors and revalidate; " +
       "independent controller checks remain authoritative.",
