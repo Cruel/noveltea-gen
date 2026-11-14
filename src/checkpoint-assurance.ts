@@ -166,6 +166,34 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
     }
     for (const ancestor of ancestors) covered.set(ancestor, "not-required");
   }
+  // S14: only the shared dependency ledger's *verified* new-Character commit
+  // plus two independent passing reviews can cover the previously failed
+  // foundations checkpoint. The old independent verdict and checkpoint are
+  // never edited, deleted or retroactively marked passed. The dependency
+  // inspector authenticates the Turn/owner/grant, exact Git diff and native
+  // validation receipt before any coverage is derived from it.
+  const { inspectDependencyPlan } = await import("./dependency-state.js");
+  const dependencies = await inspectDependencyPlan(job);
+  for (const entry of dependencies?.entries ?? []) {
+    if (!entry.reviewSourceSha || entry.phase !== "verified" ||
+        entry.review?.verdict !== "pass" || entry.originalReview?.verdict !== "pass" ||
+        !entry.reviewerSession || !entry.originalReviewerSession || !entry.commitSha)
+      continue;
+    const source = byCommit.get(entry.reviewSourceSha);
+    const request = dependencies?.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
+    if (!source || source.semanticReview !== "failed" || !source.assurance ||
+        !request || request.classification !== "new-full-story-record" ||
+        source.assurance.assignmentId !== request.originalAssignmentId ||
+        request.originalWorkItem !== source.workItem ||
+        source.assurance.turnDigest !== request.turnDigest ||
+        entry.report.turnDigest !== request.turnDigest ||
+        entry.amendment?.resumes !== request.originalAssignmentId ||
+        entry.amendment?.assignment.authority.newPaths?.length !== 1 ||
+        entry.amendment?.assignment.authority.existingPaths.length !== 1 ||
+        entry.amendment.sourceSha !== source.commitSha)
+      throw Error("Passing Character dependency cannot supersede an unrelated, stale or unverified negative checkpoint.");
+    covered.set(source.commitSha, "not-required");
+  }
   return covered;
 }
 

@@ -35,13 +35,34 @@ import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
-import { deriveReviewRepairAmendment, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
+import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
+  type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
+import { recordReviewDependency } from "./dependency-state.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const hash = (value: unknown) => createHash("sha256").update(
   typeof value === "string" || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest("hex");
 const MAX_ATTEMPTS = 2;
+
+/** A sealed failure that needs a NEW typed assignment is not a retryable
+ * original-session repair. The shared dependency ledger records a pending,
+ * non-authorizing work-plan request; no author approval is implied by routine
+ * full-Story support, and the original review stays failed. */
+export class ReviewDependencyRequiredError extends Error {
+  readonly name = "ReviewDependencyRequiredError";
+  constructor(readonly request: ReviewDependencyRequest) {
+    const sources = request.findings.map(f =>
+      f.path + ":" + f.line + " — " + f.requiredCorrection).join("; ");
+    super("Independent review " + request.sourceSha + " requires a " +
+      (request.action === "author-approval-required"
+        ? "trusted author-approved scope/protected amendment"
+        : "controller-verified typed supporting-work amendment") +
+      " before another specialist can write. Original review and Pi transcript are preserved; " +
+      "no path, new Character ID, Arc edit, owner or approval has been granted. " +
+      "Source-bound findings: " + sources);
+  }
+}
 const pathFor = (job: JobStartResult, sha: string) => join(job.stateDir, "review-repairs", sha + ".json");
 const repoPath = (job: JobStartResult, path: string) =>
   job.storyRelativePath ? job.storyRelativePath + "/" + path : path;
@@ -220,6 +241,19 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   if (!isAncestor(job, point.commitSha, head) ||
       git(job, "status", "--porcelain=v1", "--untracked-files=all"))
     throw Error("Repair needs a clean verified descendant of the failed checkpoint.");
+  // This branch is intentionally BEFORE reopening the original Pi writer:
+  // its existing-path-only tool lease cannot create a missing Character or
+  // change a read-only Arc. Such a finding must never become a replay prompt.
+  if (reviewNeedsDependency(point.assurance!, failure, point.workItem)) {
+    const request = deriveReviewDependencyRequest({
+      assurance: point.assurance!, review: failure, original: assignment,
+      turn: plan!, planVersion: point.planVersion ?? plan!.version,
+      originWorkItem: point.workItem,
+    });
+    await withStoryJobLock(job, "review-dependency-request", () =>
+      recordReviewDependency(job, request));
+    throw new ReviewDependencyRequiredError(request);
+  }
   const origin = await readRejectedRepairOrigin(job, point);
   const previous = point.workItem.startsWith("repair-")
     ? await inspectRejectedRepair(job, point.workItem.slice(7)) : null;

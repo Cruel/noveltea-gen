@@ -50,12 +50,16 @@ export interface ReviewAssignment {
   uncertainties: string[];
   turnGoal?: string;
   specialistAssignments?: Array<{ id: string; specialist: string; outcome: string; targets: string[];
-    authority: { recordTypes: string[]; existingPaths: string[]; mayCreate: boolean } }>;
+    authority: { recordTypes: string[]; existingPaths: string[];
+      newPaths?: string[]; mayCreate: boolean } }>;
   integration?: { base: string; targetHead: string; generationHead: string;
     risks: Array<{ path: string; ids: string[]; summary: string; evidence: string[] }> };
   dependency?: { sourceSha: string; commitSha: string; obligation: string; reason: string;
     sources: Array<{ path: string; quote: string }>; diff: string };
   omission?: { assignmentId: string; headSha: string };
+  /** Independent successor judgment of an already-failed assignment; the
+   * earlier negative checkpoint is immutable and this is not a prewrite review. */
+  reassessment?: { assignmentId: string; failedSourceSha: string; correctedHeadSha: string };
 }
 const guidance = ["nt-narrative-review/SKILL.md", "nt-catalog/SKILL.md",
   "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
@@ -106,7 +110,7 @@ export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignme
     // A Turn plan is more specific than the overarching Story goal. Each
     // concrete specialist-owned path needs source-linked independent evidence.
     const owned = new Set((assignment.specialistAssignments ?? [])
-      .flatMap(item => item.authority.existingPaths));
+      .flatMap(item => [...item.authority.existingPaths, ...(item.authority.newPaths ?? [])]));
     if ([...owned].some(path => !v.evidence!.some(line => line.split(path + ":")
       .slice(1).some(rest => /^[1-9][0-9]*/.test(rest)))))
       throw new Error("Passing reviewer omitted source-linked evidence for a specialist assignment.");
@@ -199,6 +203,20 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "Examine actual saved prose, not a writer's summary. Analyze continuity, pacing, " +
       "Character voice/motivation, Puzzle fairness and accessible clues, player agency, " +
       "dramatic payoff, conditional Revelations and branch-exclusive player/Character knowledge. " +
+      (assignment.reassessment ?
+        "POST-DEPENDENCY REASSESSMENT: The original specialist already wrote its " +
+        "assignment, but an independent review at Git SHA " +
+        assignment.reassessment.failedSourceSha + " FAILED. A different, " +
+        "controller-authorized supporting writer subsequently committed at Git SHA " +
+        assignment.reassessment.correctedHeadSha + ". Both checkpoints and all prior " +
+        "negative findings remain immutable. Independently evaluate whether the " +
+        "original assignment is NOW fully satisfied by the actual canonical sources " +
+        "at the corrected HEAD, including the missing Character, its actual Arc " +
+        "link, source-grounded motivation and honest starting knowledge. Do NOT " +
+        "treat the prior failure as success merely because a supporting writer " +
+        "committed; judge each source and reject unresolved contradictions, " +
+        "duplicate Characters or unauthorized retcons. Future Event/Choice and " +
+        "Composition work remains outside this original foundations checkpoint. " : "") +
       (assignment.omission ?
         "This is a PRE-WRITE OMISSION REVIEW: independently decide whether the listed " +
         "pending specialist's precise outcome is already fulfilled by the current " +

@@ -13,6 +13,8 @@ import { dirname, join, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract, PlannedFocusCreate } from "./architecture.js";
+import { normalizeArcCharacterLinks } from "./character-world.js";
+import type { ReviewCharacterProposal } from "./dependency-amendments.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { startStoryJob } from "./job.js";
 import { trustedHead } from "./revision.js";
@@ -76,6 +78,32 @@ function reportOf(result: ValidationResult, head: string) {
       JSON.stringify(result).slice(0, 3500));
   return report.records;
 }
+/** Reuse the same Arc field normalizer as the Character Foundations writer. */
+export function appendArcLink(oldText: string, character: string): string {
+  const prior = normalizeArcCharacterLinks(oldText);
+  if (prior.ids.includes(character)) throw Error("Missing-Character link already exists.");
+  const inline = oldText.match(/^characters:[ \t]*\[([^\]\n]*)\][ \t]*$/m);
+  if (inline) return oldText.replace(inline[0],
+    "characters: [" + [...prior.ids, character].join(", ") + "]");
+  const lines = oldText.split("\n");
+  const start = lines.findIndex(line => /^characters:[ \t]*$/.test(line));
+  if (start < 0) throw Error("Unsupported Arc link field.");
+  let end = start + 1;
+  while (end < lines.length && /^[ \t]+- character\.[a-z][a-z0-9-]*[ \t]*$/.test(lines[end]!)) end++;
+  lines.splice(end, 0, "  - " + character);
+  return lines.join("\n");
+}
+export function auditArcLink(oldText: string, newText: string, character: string) {
+  const before = normalizeArcCharacterLinks(oldText);
+  const after = normalizeArcCharacterLinks(newText);
+  if (before.text !== after.text || after.ids.length !== before.ids.length + 1 ||
+      after.ids.at(-1) !== character || before.ids.includes(character) ||
+      before.ids.some((id, index) => after.ids[index] !== id) ||
+      after.ids.some(id => !/^character\.[a-z][a-z0-9-]*$/.test(id)) ||
+      new Set(after.ids).size !== after.ids.length)
+    throw Error("Review-dependency Arc changed more than the addition of one Character link.");
+}
+
 /** Deterministic fixture output exercises the same canonical/native/Git gates.
  * It is never evidence of model-authored literary quality. */
 function fixtureCreatedRecord(create: PlannedFocusCreate, contract: CompletionContract,
@@ -162,7 +190,8 @@ function creationReferenceInstructions(create: PlannedFocusCreate): string {
 async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
   create?: PlannedFocusCreate, obligations: string[] = [], steering = "",
-  resume?: SpecialistChoiceReceipt): Promise<DependencyReport | {
+  resume?: SpecialistChoiceReceipt,
+  arcLink?: { path: string; characterId: string }): Promise<DependencyReport | {
     authorQuestion: SpecialistChoiceQuestion; sessionFile: string; sessionId: string;
   } | undefined> {
   let dependencyReport: DependencyReport | undefined;
@@ -234,10 +263,17 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
         "NEVER add references: or dependsOn: to the new record's frontmatter. " +
         "Translate them only into the permitted typed schema fields below, following nt-catalog.\n" +
         creationReferenceInstructions(create) +
-        "Do not alter any preexisting files. Write substantive narrative content, " +
-        "not a placeholder, including actual in-scene character dialogue for Authored Content. " :
+        (arcLink
+          ? "Also edit ONLY the existing Arc at " + arcLink.path +
+            ": add " + arcLink.characterId + " to its characters array without changing any " +
+            "other Arc metadata, protected decisions, formatting outside that array or prose. " +
+            "Do not modify or create any other preexisting or new file. " :
+            "Do not alter any preexisting files. ") +
+        "Write substantive narrative content, not a placeholder, including actual in-scene " +
+        "character dialogue for Authored Content. " :
         "Only edit these PREEXISTING canonical Markdown files:\n" + receipt.paths.join("\n")) +
-      "\nAll other files are READ-ONLY context (including upstream prerequisites, milestones, Arcs, and all sibling records). " +
+      "\nAll other files are READ-ONLY context (including upstream prerequisites, milestones, " +
+      (arcLink ? "other Arcs" : "Arcs") + ", and all sibling records). " +
       "Do not create any other files, use git commands, invoke untrusted shell commands, or change protected author decisions. " +
       "Preserve typed references and branch behavior. If a requested change requires additional records or upstream decisions, " +
       "use report_dependency for a sourced cross-domain prerequisite and stop WITHOUT ANY Story edits. " +
@@ -253,7 +289,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
         "THIS IS A SEPARATELY AUTHORIZED SUPPORTING ASSIGNMENT, NOT THE ORIGINATING DIALOGUE WRITER. " +
         "The original Turn objective below is context, not your current write grant. " +
         "The controller has ALREADY checked the evidence and explicitly authorized YOU, " +
-        "the proper specialist for the listed preexisting files, to implement this necessary prerequisite. " +
+        "the proper specialist for the listed owned files, to implement this necessary prerequisite. " +
         "You are responsible for editing the allowed path(s) to fulfill your assigned outcome. " +
         "For any causal state effect you add, update its in-scene prose to substantiate " +
         "the actual observation or action that changes state, and remove any contradictory " +
@@ -265,6 +301,11 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
         "never invent an ID. " +
         "Do NOT stop and ask the original dialogue specialist or another Event specialist " +
         "to make these changes: YOU ARE the assigned specialist. Do not introduce unrelated edits.\n" : "") +
+      (arcLink ?
+        "CHARACTER CREATION PRECISION: The new Character ID is exactly " +
+        arcLink.characterId + "; no other new record is authorized. The single permitted Arc " +
+        "change is its characters list. Do not retcon any established knowledge or history, " +
+        "or change any existing Character/Fact/Relationship. " : "") +
       (receipt.workItemId.startsWith("dependency:") && receipt.target.startsWith("event.") ?
         "EVENT SCHEMA PRECISION: Read the pinned nt-catalog progression reference before editing. " +
         "For a knowledge effect use EXACT flattened shape " +
@@ -352,6 +393,24 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     if (dependency && (dependency.amendment!.assignment.targets[0] !== input.target ||
         dependency.report.turnDigest !== input.turnPlanDigest))
       throw Error("Dependency assignment differs from the trusted Turn/target.");
+    const reviewAuthority = dependency?.reviewSourceSha && dependency.amendment?.assignment;
+    let reviewCreate: PlannedFocusCreate | undefined;
+    let reviewArc: string | undefined;
+    if (reviewAuthority) {
+      const grant = reviewAuthority.authority;
+      const proposal = dependency!.proposal as ReviewCharacterProposal | undefined;
+      if (reviewAuthority.specialist !== "nt-character-development" ||
+          !/^character\.[a-z][a-z0-9-]*$/.test(input.target) ||
+          JSON.stringify(grant.recordTypes) !== JSON.stringify(["arc", "character"]) ||
+          grant.existingPaths.length !== 1 || grant.newPaths?.length !== 1 ||
+          grant.newPaths[0] !== "characters/" + input.target.slice(10) + ".md" ||
+          !grant.existingPaths[0]?.startsWith("arcs/") ||
+          !proposal?.title || proposal.target !== input.target)
+        throw Error("Review dependency lacks exactly one bounded Character creation and Arc link.");
+      reviewCreate = { id: input.target, path: grant.newPaths[0], title: proposal.title,
+        references: [], dependsOn: [] };
+      reviewArc = grant.existingPaths[0];
+    }
     if (!dependency && !input.contract.scope.targets.includes(input.target))
       throw new Error("Focused target is outside the explicit completion contract.");
     const workItemId = input.dependencyAssignmentId ?? "focus:" + input.target;
@@ -362,13 +421,32 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     const validation = await validateStoryJob(job, input.validatorSource ?? input.skillsSource, { ...job, baseSha: current });
     const effectiveContract = dependency ? { ...input.contract, scope: { ...input.contract.scope,
       targets: [input.target], supportingTargets: [], creates: [] } } : input.contract;
-    const selection = resolveFocusedScope(reportOf(validation, current), effectiveContract);
-    const create = effectiveContract.scope.creates?.find(item => item.id === input.target);
+    const catalog = reportOf(validation, current);
+    // Review amendments deliberately cannot extend the immutable full-Story
+    // contract. Their separate grant identifies one new Character plus the Arc
+    // already cited by the negative reviewer. No supporting scope is inferred.
+    const selection = reviewCreate && reviewArc ? (() => {
+      const arc = catalog.find(r => r.path === reviewArc && r.metadata.type === "arc" &&
+        r.metadata.status !== "superseded");
+      if (!arc || !Array.isArray(arc.metadata.characters))
+        throw Error("Controller-approved Arc is absent from the native canonical catalog.");
+      const arcCharacters = arc.metadata.characters as string[];
+      const existingCharacters = catalog.filter(r => r.metadata.type === "character" &&
+        arcCharacters.includes(r.metadata.id));
+      const selected: CanonicalScopeRecord[] = [arc, { path: reviewCreate.path,
+        metadata: { id: reviewCreate.id, type: "character", status: "planned" } }];
+      return { selected, context: [arc, ...existingCharacters,
+        ...catalog.filter(r => ["fact", "world-entity"].includes(r.metadata.type) &&
+          r.metadata.status !== "superseded").slice(0, 24)],
+        allowedPaths: [reviewArc, reviewCreate.path].sort() };
+    })() : resolveFocusedScope(catalog, effectiveContract);
+    const create = reviewCreate ?? effectiveContract.scope.creates?.find(item => item.id === input.target);
     const own = selection.selected.find(r => r.metadata.id === input.target);
     if (!own) throw new Error("Unknown focused target: " + input.target);
     // Shared supporting targets are authorized exactly once, with the first target.
-    const paths = [own.path, ...(!dependency && input.target === input.contract.scope.targets[0] ? selection.selected
-      .filter(r => input.contract.scope.supportingTargets?.includes(r.metadata.id)).map(r => r.path) : [])].sort();
+    const paths = [own.path, ...(reviewArc ? [reviewArc] :
+      !dependency && input.target === input.contract.scope.targets[0] ? selection.selected
+        .filter(r => input.contract.scope.supportingTargets?.includes(r.metadata.id)).map(r => r.path) : [])].sort();
     const types = [...new Set(paths.map(path => selection.selected.find(r => r.path === path)?.metadata.type))];
     if (types.some(type => !type)) throw new Error("A specialist path has no canonical record type.");
     const trustedSteering = await steeringForAssignment(job, input.turnPlanDigest, workItemId, current);
@@ -488,7 +566,10 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     }
     if (input.fixture && !missing) {
       for (const path of paths) {
-        if (create && path === create.path) {
+        if (reviewArc && path === reviewArc) {
+          const before = await readFile(join(job.worktreeStoryRoot, path), "utf8");
+          await writeFile(join(job.worktreeStoryRoot, path), appendArcLink(before, input.target));
+        } else if (create && path === create.path) {
           await writeFile(join(job.worktreeStoryRoot, path),
             fixtureCreatedRecord(create, input.contract, selection.context), { flag: "wx" });
         } else {
@@ -507,7 +588,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     } else if (!input.fixture) {
       const output = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
         turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
-        input.steering, answered);
+        input.steering, answered,
+        reviewArc ? { path: reviewArc, characterId: input.target } : undefined);
       if (output && "authorQuestion" in output) {
         if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
         receipt.piSessionFile = output.sessionFile;
@@ -555,7 +637,15 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         item.metadata.type === create.id.split(".")[0] && item.path === create.path &&
         item.metadata.status !== "superseded"))
       throw new Error("Native canonical validation did not recognize the exact new focused record.");
-    resolveFocusedScope(accepted, effectiveContract);
+    if (reviewCreate && reviewArc) {
+      const originalArc = git(job, "show", "HEAD:" + repoPath(job, reviewArc));
+      const revisedArc = await readFile(join(job.worktreeStoryRoot, reviewArc), "utf8");
+      auditArcLink(originalArc, revisedArc, input.target);
+      const canonicalArc = accepted.find(r => r.path === reviewArc && r.metadata.type === "arc");
+      if (!canonicalArc || !Array.isArray(canonicalArc.metadata.characters) ||
+          !canonicalArc.metadata.characters.includes(input.target))
+        throw Error("Native catalog does not verify the new Character's exact Arc link.");
+    } else resolveFocusedScope(accepted, effectiveContract);
     if (dependency) receipt.validation = { status: "passed", validatorVersion: job.validatorVersion, baseSha: current };
     receipt.sha256 = digest(JSON.stringify(await Promise.all(paths.map(async path =>
       [path, digest(await readFile(join(job.worktreeStoryRoot, path), "utf8"))]))));

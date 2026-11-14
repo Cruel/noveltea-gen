@@ -6,11 +6,15 @@ import { execFileSync } from "./git-read-cache.js";
 import type { JobStartResult } from "./job.js";
 import { persist } from "./ideas.js";
 import { trustedHead } from "./revision.js";
+import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { inspectCheckpointReview } from "./checkpoint-assurance.js";
+import { deriveReviewDependencyRequest, type ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
-import { authorizeDependency, parseDependencyReport, type DependencyReport,
-  type DependencyProposal, type DependencyAmendment } from "./dependency-amendments.js";
+import { authorizeDependency, authorizeReviewCharacterDependency, parseDependencyReport,
+  type DependencyReport, type DependencyProposal, type ReviewCharacterProposal,
+  type DependencyAmendment } from "./dependency-amendments.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { EditorialVerdict } from "./narrative-review-specialist.js";
 
@@ -25,11 +29,18 @@ export interface DependencyEntry {
   planner?: { snapshot: SkillSnapshot; sessionFile: string; skillReads?: string[] };
   commitSha?: string; review?: EditorialVerdict; reviewerSession?: string;
   fixture: boolean;
+  /** Exact sealed negative review which generated a supporting work report. */
+  reviewSourceSha?: string;
+  originalReview?: EditorialVerdict; originalReviewerSession?: string;
   rejection?: { reason: string; proposal: unknown };
 }
 export interface DependencyPlan {
   schema: "noveltea-dependency-plan/v1"; jobId: string; threadId: string;
-  turnDigest: string; version: number; entries: DependencyEntry[]; digest: string;
+  turnDigest: string; version: number; entries: DependencyEntry[];
+  /** Sealed findings awaiting a separate verified plan amendment. These are
+   * never writer authorization and do not consume an amendment version. */
+  reviewRequests?: ReviewDependencyRequest[];
+  digest: string;
 }
 const file = (job: JobStartResult) => join(job.stateDir, "dependency-plan.json");
 export function dependencyGit(job: JobStartResult, ...args: string[]): string {
@@ -58,8 +69,31 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
   if (saved.schema !== "noveltea-dependency-plan/v1" || saved.jobId !== job.jobId ||
       saved.threadId !== job.threadId || saved.turnDigest !== turn.digest ||
       digest !== dependencyDigest(body) || !Array.isArray(saved.entries) || saved.entries.length > 8 ||
+      (saved.reviewRequests !== undefined && (!Array.isArray(saved.reviewRequests) ||
+        saved.reviewRequests.length > 8 ||
+        new Set(saved.reviewRequests.map(r => r.sourceSha)).size !== saved.reviewRequests.length)) ||
       saved.version !== 1 + saved.entries.filter(e => e.amendment).length)
     throw Error("Dependency plan identity, version or source evidence is corrupt.");
+  // A pending review request belongs to the original sealed negative verdict,
+  // not to later model statements or a mutable Story catalog. Reconstruct its
+  // exact digest on every read and keep it outside the writer grant list.
+  if (saved.reviewRequests?.length) {
+    const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.assurance);
+    for (const request of saved.reviewRequests) {
+      const point = checkpoints.find(p => p.commitSha === request.sourceSha);
+      const original = turn.assignments.find(a => a.id === request.originalAssignmentId);
+      if (!point?.assurance || !original || request.turnDigest !== turn.digest ||
+          request.basePlanVersion !== point.planVersion)
+        throw Error("Review dependency lost its original checkpoint, plan version or Turn assignment.");
+      const sealed = await inspectCheckpointReview(job, point);
+      if (sealed?.status !== "failed" || !sealed.result ||
+          JSON.stringify(deriveReviewDependencyRequest({ assurance: point.assurance,
+            review: sealed.result, original, turn,
+            planVersion: request.basePlanVersion,
+            originWorkItem: point.workItem })) !== JSON.stringify(request))
+        throw Error("Review dependency differs from immutable source, ownership or scope.");
+    }
+  }
   let version = 1;
   const seen = new Set<string>();
   for (const entry of saved.entries) {
@@ -68,6 +102,19 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         entry.report.turnDigest !== turn.digest || typeof entry.fixture !== "boolean" ||
         !["reported", "planning", "authorized", "reviewing", "verified", "rejected"].includes(entry.phase))
       throw Error("Dependency report provenance is corrupt.");
+    if (entry.reviewSourceSha) {
+      const review = saved.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
+      if (!review || review.turnDigest !== entry.report.turnDigest ||
+          review.originalAssignmentId !== entry.report.assignmentId ||
+          review.sourceSha !== entry.report.sourceSha ||
+          review.classification !== "new-full-story-record" ||
+          review.action !== "controller-amendment-required" ||
+          entry.fixture)
+        throw Error("Supporting review-dependency report is not linked to the sealed source.");
+    }
+    if (entry.originalReview && (!entry.reviewSourceSha ||
+        entry.originalReview.verdict !== "pass" || !entry.originalReviewerSession))
+      throw Error("Suspended original goal lacks independent positive rereview.");
     seen.add(entry.reportDigest);
     if (entry.amendment) {
       const a = entry.amendment;
@@ -82,20 +129,23 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
     } else if (!["reported", "planning", "rejected"].includes(entry.phase))
       throw Error("Dependency work has no authorized plan amendment.");
     if (entry.phase === "verified" && (!entry.commitSha || !entry.review ||
-        entry.review.verdict !== "pass" || (!entry.fixture && !entry.reviewerSession)))
+        entry.review.verdict !== "pass" || (!entry.fixture && !entry.reviewerSession) ||
+        entry.reviewSourceSha && (!entry.originalReview || !entry.originalReviewerSession)))
       throw Error("Dependency completion lacks verified work and independent review receipts.");
     if (entry.phase === "verified") {
       const a = entry.amendment!;
       const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", a.assignment.id + ".json"), "utf8"));
+      const authorizedPaths = [...a.assignment.authority.existingPaths,
+        ...(a.assignment.authority.newPaths ?? [])].sort();
       if (proof.phase !== "committed" || proof.jobId !== job.jobId || proof.workItemId !== a.assignment.id ||
           proof.commitSha !== entry.commitSha || proof.expectedHead !== a.sourceSha ||
           proof.assignmentDigest !== turn.digest || proof.worker !== (entry.fixture ? "fixture" : "pi") ||
           proof.validation?.status !== "passed" || proof.validation.validatorVersion !== job.validatorVersion ||
           proof.validation.baseSha !== a.sourceSha ||
-          JSON.stringify(proof.paths) !== JSON.stringify(a.assignment.authority.existingPaths))
+          JSON.stringify(proof.paths) !== JSON.stringify(authorizedPaths))
         throw Error("Dependency work receipt is missing or no longer matches its native-validated assignment.");
       const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
-      const paths = a.assignment.authority.existingPaths;
+      const paths = authorizedPaths;
       if (dependencyGit(job, "rev-parse", entry.commitSha + "^") !== a.sourceSha ||
           dependencyGit(job, "diff", "--name-only", a.sourceSha, entry.commitSha!).split("\n").join("\n") !==
             paths.map(p => prefix + p).join("\n") ||
@@ -125,6 +175,125 @@ export async function saveDependencyPlan(job: JobStartResult, plan: DependencyPl
   plan.digest = dependencyDigest(body);
   await persist(file(job), plan);
 }
+/** Durable read-only plan request for an out-of-lease independent review.
+ * It does not authorize a path, change the Turn objective or retry a writer. */
+export async function recordReviewDependency(job: JobStartResult, request: ReviewDependencyRequest) {
+  const turn = await dependencyTurn(job);
+  const head = await dependencyBoundary(job);
+  if (request.turnDigest !== turn.digest)
+    throw Error("Review dependency lost its original sealed Turn.");
+  const plan = await inspectDependencyPlan(job) ?? {
+    schema: "noveltea-dependency-plan/v1" as const,
+    jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest,
+    version: 1, entries: [], reviewRequests: [], digest: "",
+  };
+  const previous = plan.reviewRequests?.find(r => r.sourceSha === request.sourceSha);
+  if (previous) {
+    if (JSON.stringify(previous) !== JSON.stringify(request))
+      throw Error("Review dependency request changed at the same source SHA.");
+    if (head !== request.sourceSha) {
+      const entry = plan.entries.find(e => e.reviewSourceSha === request.sourceSha);
+      const proofPath = entry?.amendment && join(job.stateDir, "dependency-items",
+        entry.amendment.assignment.id + ".json");
+      if (!entry || !entry.amendment || !proofPath || !existsSync(proofPath) ||
+          !["authorized", "reviewing", "verified"].includes(entry.phase))
+        throw Error("Review dependency HEAD advanced without an authenticated supporting-work receipt.");
+      const proof = JSON.parse(await readFile(proofPath, "utf8"));
+      if (proof.phase !== "committed" || proof.commitSha !== head ||
+          proof.expectedHead !== request.sourceSha ||
+          proof.workItemId !== entry.amendment.assignment.id ||
+          proof.assignmentDigest !== request.turnDigest)
+        throw Error("Review dependency successor differs from the exact authorized Git receipt.");
+    }
+    return request;
+  }
+  if (head !== request.sourceSha)
+    throw Error("New review dependency requires the exact reviewed Story HEAD.");
+  if ((plan.reviewRequests?.length ?? 0) >= 8 || plan.entries.some(e => e.phase !== "verified"))
+    throw Error("Unresolved amendment budget reached; retain review for controlled reconciliation.");
+  plan.reviewRequests ??= [];
+  plan.reviewRequests.push(request);
+  await saveDependencyPlan(job, plan);
+  // The next load independently verifies the full sealed review, rather than
+  // trusting even our own state-writer's representation.
+  await inspectDependencyPlan(job);
+  return request;
+}
+
+/** Adapt a sealed missing-Character review to the SAME dependency-plan
+ * report/entry/version mechanism used by focused work. Source facts come
+ * from native-validated canon and actual source line, not reviewer prose.
+ * Nothing here creates a file, approves an Arc edit or starts a writer. */
+export async function registerReviewDependency(
+  job: JobStartResult, request: ReviewDependencyRequest, validatorSource?: string,
+) {
+  if (request.classification !== "new-full-story-record" ||
+      request.action !== "controller-amendment-required" ||
+      request.findings.length !== 1 ||
+      !/^arcs\/[a-z][a-z0-9-]*\.md$/.test(request.findings[0]!.path))
+    throw Error("Review dependency cannot be safely reduced to one scoped Character/Arc assignment.");
+  const saved = await inspectDependencyPlan(job);
+  if (!saved?.reviewRequests?.some(r => JSON.stringify(r) === JSON.stringify(request)))
+    throw Error("Review dependency has not been sealed into the shared work plan.");
+  const head = await dependencyBoundary(job);
+  const prior = saved.entries.find(e => e.reviewSourceSha === request.sourceSha);
+  if (prior) {
+    if (head !== request.sourceSha) {
+      const path = prior.amendment && join(job.stateDir, "dependency-items",
+        prior.amendment.assignment.id + ".json");
+      if (!path || !existsSync(path) ||
+          !["authorized", "reviewing", "verified"].includes(prior.phase))
+        throw Error("Review dependency advanced without a completed owned writer.");
+      const proof = JSON.parse(await readFile(path, "utf8"));
+      if (proof.phase !== "committed" || proof.expectedHead !== request.sourceSha ||
+          proof.commitSha !== head)
+        throw Error("Review dependency cannot resume from a substituted supporting commit.");
+    }
+    return { plan: saved, entry: prior };
+  }
+  if (head !== request.sourceSha)
+    throw Error("New review dependency requires its original negative checkpoint HEAD.");
+  const original = await dependencyTurn(job);
+  if (!original.objective || original.kind !== "full-story" ||
+      original.digest !== request.turnDigest)
+    throw Error("Review dependency lost the whole-Story objective.");
+  const validation = await validateStoryJob(job, validatorSource, { ...job, baseSha: head });
+  const report = validation.report as { records?: CanonicalScopeRecord[]; diagnostics?: unknown[];
+    protection?: { status?: string; base?: string; changes?: unknown[]; warnings?: unknown[] } } | undefined;
+  if (validation.status !== "passed" || !report?.records ||
+      report.protection?.status !== "checked" || report.protection.base !== head ||
+      report.protection.changes?.length || report.protection.warnings?.length)
+    throw Error("Review dependency requires a clean native-verifiable canonical source.");
+  const finding = request.findings[0]!;
+  const arc = report.records.find(r => r.path === finding.path && r.metadata.type === "arc" &&
+    r.metadata.status !== "superseded");
+  if (!arc || !/^arc\.[a-z][a-z0-9-]*$/.test(arc.metadata.id))
+    throw Error("Review dependency's cited Arc lacks verified canonical type/ID.");
+  const file = join(job.worktreeStoryRoot, finding.path);
+  if (await realpath(file) !== file)
+    throw Error("Review dependency Arc is symlinked.");
+  const content = await readFile(file, "utf8");
+  const line = content.split(/\r?\n/)[finding.line - 1];
+  if (!line?.trim()) throw Error("Review dependency lost its exact cited Arc source line.");
+  const obligation = original.objective.obligations.find(x => /\bcharacters\b/i.test(x));
+  if (!obligation) throw Error("Original approved Turn has no Character delivery obligation.");
+  const reportValue: DependencyReport = {
+    sourceSha: head, turnDigest: request.turnDigest,
+    assignmentId: request.originalAssignmentId, obligation,
+    missing: finding.requiredCorrection, affectedIds: [arc.metadata.id],
+    sources: [{ path: finding.path, sha256: sourceDigest(content), quote: line.trim() }],
+    likelySpecialist: "nt-character-development", authorDecisionRequired: false,
+  };
+  const { plan, entry } = await recordDependency(job, reportValue, false);
+  if (entry.reviewSourceSha && entry.reviewSourceSha !== request.sourceSha)
+    throw Error("Dependency report has mismatched review identity.");
+  if (!entry.reviewSourceSha) {
+    entry.reviewSourceSha = request.sourceSha;
+    await saveDependencyPlan(job, plan);
+  }
+  return { plan, entry };
+}
+
 export async function recordDependency(job: JobStartResult, value: unknown, fixture: boolean) {
   const report = parseDependencyReport(value);
   const turn = await dependencyTurn(job);
@@ -170,10 +339,18 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
     if (!bytes.includes(source.quote)) throw Error("Dependency evidence quote is absent from Story source.");
     sources.push({ ...source, sha256: sourceDigest(bytes) });
   }
-  const amendment = authorizeDependency({ plan: turn, head, report: entry.report,
-    reportDigest: entry.reportDigest, proposal, records: report.records, sources, version: plan.version,
-    priorAmendments: plan.entries.filter(e => e !== entry && e.amendment)
-      .map(e => e.amendment!.assignment) });
+  const priorAmendments = plan.entries.filter(e => e !== entry && e.amendment)
+    .map(e => e.amendment!.assignment);
+  const request = entry.reviewSourceSha && plan.reviewRequests?.find(r =>
+    r.sourceSha === entry.reviewSourceSha);
+  const amendment = request
+    ? authorizeReviewCharacterDependency({ plan: turn, head, request,
+        proposal: proposal as ReviewCharacterProposal,
+        reportDigest: entry.reportDigest, records: report.records, version: plan.version,
+        priorAmendments })
+    : authorizeDependency({ plan: turn, head, report: entry.report,
+        reportDigest: entry.reportDigest, proposal, records: report.records, sources, version: plan.version,
+        priorAmendments });
   entry.proposal = proposal; entry.amendment = amendment;
   entry.approval = { authority: "necessary-dependency/v1", jobId: job.jobId,
     threadId: job.threadId, sourceSha: head, amendmentDigest: dependencyDigest(amendment) };

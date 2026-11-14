@@ -599,6 +599,71 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
     }
     return { result: { ...s.result, headSha: await trustedHead(job) } };
   } catch (error) {
+    if (error instanceof (await import("./rejected-review-repair.js")).ReviewDependencyRequiredError) {
+      const request = error.request;
+      if (request.action === "controller-amendment-required" &&
+          request.classification === "new-full-story-record") {
+        // A routine Character omission already falls under the approved
+        // whole-Story objective. This controller-authorized dependency path
+        // must not ask the author to reapprove that creative choice.
+        try {
+          const { advanceReviewCharacterDependency } = await import("./dependency-work.js");
+          const progress = await advanceReviewCharacterDependency({
+            story: s.request.story, job: s.request.job, task: s.request.task,
+            contract: s.request.contract, skillsSource: s.request.skillsSource,
+            validatorSource: s.request.validatorSource,
+            provider: s.request.provider, model: s.request.model,
+            turnPlanDigest: request.turnDigest, request,
+          });
+          if (progress.status !== "dependency-verified")
+            throw Error("New supporting Character has not passed both independent reviews.");
+          if (s.result?.status === "review-handoff") {
+            await assertNativeReviewDependencies(job, "character-foundations");
+            return { result: null, escalation: null };
+          }
+          return { result: s.result ? { ...s.result, headSha: await trustedHead(job) } : null,
+            escalation: null };
+        } catch (dependencyError) {
+          // A supporting specialist may legitimately ask a protected author
+          // question. Preserve its authenticated, paused choice instead of
+          // misreporting it as a terminal dependency failure.
+          if (dependencyError instanceof Error &&
+              dependencyError.name === "SpecialistChoiceRequiredError")
+            return { status: "paused",
+              reason: "Supporting Character work is awaiting its saved authenticated Author Choice; the original negative review remains sealed.",
+              escalation: null };
+          return { status: "blocked",
+            reason: "The original negative review remains sealed. Supporting Character amendment: " +
+              (dependencyError instanceof Error ? dependencyError.message : String(dependencyError)),
+            escalation: {
+              kind: "dependency-replan",
+              sources: request.findings.map(f => ({
+                source: f.path + ":" + f.line, message: f.defect, repair: f.requiredCorrection,
+              })),
+              requiresTrustedApproval: false,
+              action: "Inspect the exact source-bound dependency plan and specialist/review receipts. " +
+                "A failed or interrupted new Character/Arc-link assignment needs explicit bounded " +
+                "reconciliation; do not replay its author or broaden the original failed repair lease.",
+            },
+          };
+        }
+      }
+      const requiresTrustedApproval = request.action === "author-approval-required";
+      return {
+        status: requiresTrustedApproval ? "paused" : "blocked",
+        reason: error.message,
+        escalation: {
+          kind: requiresTrustedApproval ? "protected-approval" : "dependency-replan",
+          sources: request.findings.map(f => ({
+            source: f.path + ":" + f.line, message: f.defect, repair: f.requiredCorrection,
+          })),
+          requiresTrustedApproval,
+          action: requiresTrustedApproval
+            ? "Obtain a source-bound, explicit author-approved scope/protected decision amendment. No original specialist replay or new path is authorized."
+            : "A necessary supporting Character/other-owner assignment must be planned and controller-authorized from the sealed review and original whole-Story objective. Authenticate the proposed exact ID/path, owner, Arc-link fields, current HEAD and plan version; then independently review supporting work and the suspended goal. Reviewer prose alone cannot grant writes.",
+        },
+      };
+    }
     return { status: "blocked", reason: error instanceof Error ? error.message : String(error) };
   }
 }

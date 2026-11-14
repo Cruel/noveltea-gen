@@ -1,6 +1,8 @@
 import { declaredCanonicalReferences, type CanonicalScopeRecord } from "./focused-scope.js";
 import { focusedSpecialist } from "./focused-specialist.js";
 import type { TurnAssignmentEvidence, TurnEvidence } from "./turn-plan-evidence.js";
+import { createHash } from "node:crypto";
+import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
 
 export interface DependencySource { path: string; sha256: string; quote: string }
 export interface DependencyReport {
@@ -12,12 +14,18 @@ export interface DependencyProposal {
   sourceSha: string; reportDigest: string; target: string; specialist: string;
   outcome: string; reason: string;
 }
+/** A Character creation proposal is merely a name and rationale. It cannot
+ * supply a file path or edit authorization; the controller derives those. */
+export interface ReviewCharacterProposal extends DependencyProposal {
+  title: string;
+}
 export interface DependencyAmendment {
   beforeVersion: number; afterVersion: number; sourceSha: string; turnDigest: string;
   reportDigest: string; reason: string; objective: TurnEvidence["objective"];
   resumes: string; assignment: TurnAssignmentEvidence;
 }
 const text = (v: unknown, max = 2000): v is string => typeof v === "string" && !!v.trim() && v.length <= max;
+const sourceHash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const keys = (v: unknown, expected: string) => !!v && typeof v === "object" && !Array.isArray(v) &&
   Object.keys(v).sort().join(",") === expected.split(",").sort().join(",");
 const id = /^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/;
@@ -41,6 +49,82 @@ export function parseDependencyReport(value: unknown): DependencyReport {
 // mentioning an ID cannot turn an unrelated enhancement into a prerequisite.
 function links(record: CanonicalScopeRecord, target: string): boolean {
   return declaredCanonicalReferences(record).has(target);
+}
+
+/** A review-discovered gap in a whole Story can warrant one *new*
+ * Character and one field-limited Arc link. This reuses DependencyAmendment
+ * and the same typed owner/path grants as focused prerequisite work. Neither
+ * reviewer text nor a planner-proposed ID/path is trusted as authority.
+ *
+ * The caller must independently attest the saved request against its sealed
+ * review and reconstruct these catalog records using native validation at HEAD.
+ * This pure gate checks every original Turn/owner/scope and exact proposal;
+ * Git and field-level diff auditing remain mandatory at dispatch. */
+export function authorizeReviewCharacterDependency(input: {
+  plan: TurnEvidence; head: string; request: ReviewDependencyRequest;
+  proposal: ReviewCharacterProposal; reportDigest: string;
+  records: CanonicalScopeRecord[]; version: number;
+  priorAmendments?: TurnAssignmentEvidence[];
+}): DependencyAmendment {
+  const { plan, head, request, proposal, records } = input;
+  const owner = plan.assignments.find(a => a.id === request.originalAssignmentId);
+  const citedArcs = request.findings.filter(f => /^arcs\/[a-z][a-z0-9-]*\.md$/.test(f.path));
+  const [cited] = citedArcs;
+  const arc = records.find(r => r.path === cited?.path);
+  const proposedPath = typeof proposal?.target === "string" &&
+    /^character\.[a-z][a-z0-9-]*$/.test(proposal.target)
+    ? "characters/" + proposal.target.slice("character.".length) + ".md" : "";
+  const priorOwners = [...(input.priorAmendments ?? [])];
+  if (request.kind !== "review-dependency" ||
+      request.classification !== "new-full-story-record" ||
+      request.action !== "controller-amendment-required" ||
+      plan.kind !== "full-story" || plan.objective?.breadth !== "whole-story" ||
+      !owner || owner.specialist !== "nt-worldbuilding + nt-character-development" ||
+      !owner.authority.mayCreate || !owner.authority.recordTypes.includes("character") ||
+      request.originalWorkItem !== "character-foundations" ||
+      request.sourceSha !== head || plan.digest !== request.turnDigest ||
+      sourceHash(plan.objective) !== request.objectiveDigest ||
+      sourceHash(plan.contract.scope) !== request.scopeDigest ||
+      sourceHash(plan.assignments) !== request.ownersDigest ||
+      sourceHash(owner) !== request.originalAssignmentDigest ||
+      !text(proposal.title, 120) || /[\r\n]/.test(proposal.title) ||
+      !keys(proposal, "sourceSha,reportDigest,target,specialist,outcome,reason,title") ||
+      !text(proposal.reason) || !text(proposal.outcome) ||
+      proposal.sourceSha !== head || proposal.reportDigest !== input.reportDigest ||
+      !/^[a-f0-9]{64}$/.test(input.reportDigest) ||
+      proposal.specialist !== "nt-character-development" ||
+      !proposedPath || !cited || citedArcs.length !== 1 ||
+      proposal.outcome !== cited.requiredCorrection ||
+      !arc || arc.metadata.type !== "arc" ||
+      arc.metadata.status === "superseded" ||
+      !/^arc\.[a-z][a-z0-9-]*$/.test(arc.metadata.id) ||
+      !Array.isArray(arc.metadata.characters) ||
+      !arc.metadata.characters.every(id => typeof id === "string" && /^character\.[a-z][a-z0-9-]*$/.test(id)) ||
+      records.some(r => r.path === proposedPath || r.metadata.id === proposal.target) ||
+      priorOwners.some(a => a.authority.existingPaths.some(p =>
+        p === proposedPath || p === arc.path) ||
+        a.authority.newPaths?.some(p => p === proposedPath || p === arc.path) ||
+        a.targets.includes(proposal.target)) ||
+      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
+    throw Error("Review dependency lacks exact approved full-Story creation, Arc source, owner or plan authorization.");
+  // The Character may be off-screen; the reviewer-proposed name and title are
+  // not allowed to rewrite existing Character histories or Arc creative prose.
+  // Allow one new Character path, and one existing Arc's link-only field.
+  return {
+    beforeVersion: input.version, afterVersion: input.version + 1,
+    sourceSha: head, turnDigest: plan.digest, reportDigest: input.reportDigest,
+    reason: proposal.reason, objective: structuredClone(plan.objective),
+    resumes: owner.id,
+    assignment: {
+      id: "dependency:" + input.version + ":" + proposal.target,
+      specialist: "nt-character-development", outcome: proposal.outcome,
+      targets: [proposal.target], dependsOn: [], discovery: "canonical-story-read-only",
+      authority: {
+        recordTypes: ["arc", "character"], existingPaths: [arc.path],
+        newPaths: [proposedPath], mayCreate: true,
+      },
+    },
+  };
 }
 
 /** Pure authorization policy. Inputs named records/sources are controller-read

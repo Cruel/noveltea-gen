@@ -187,7 +187,7 @@ export function deriveFoundationAssignment(domain: FoundationDomain, plan: Plan,
 }
 /** Compare Arc records with their Character links removed, accepting both canonical
  * YAML array spellings without tolerating a change to any other field or prose. */
-function normalizeArcCharacterLinks(text: string): { text: string; ids: string[] } {
+export function normalizeArcCharacterLinks(text: string): { text: string; ids: string[] } {
   const lines = text.split("\n");
   if (lines[0] !== "---") throw new Error("Arc frontmatter is missing.");
   const end = lines.indexOf("---", 1);
