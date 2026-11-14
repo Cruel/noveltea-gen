@@ -209,10 +209,11 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(event, /fixed number of witnesses/);
   assert.match(event, /BEFORE relying on it/);
   assert.match(event, /Event design occurs BEFORE/);
-  assert.match(event, /Conditions: \[\] on parallel branches/);
-  assert.match(event, /ACTS and that action has distinct consequences/);
-  assert.match(event, /A merely framed question/);
-  assert.match(event, /final Turn review MUST still check/);
+  assert.match(event, /conditions: \[\] branches are selectable alternatives/);
+  assert.match(event, /Milestone remains completeness: partial/);
+  assert.match(event, /Do not invent Choice Point IDs/);
+  assert.match(event, /fake effects or an unbound route cannot certify/);
+  assert.match(event, /Final Turn review checks actual outcome-specific routes/);
   assert.doesNotMatch(event, /train|berth|passenger list|assigned seat/);
   const correctedEvent = semanticUnitOutcome("repair-" + "a".repeat(40), "nt-event-design");
   assert.match(correctedEvent, /BEFORE relying on it/);

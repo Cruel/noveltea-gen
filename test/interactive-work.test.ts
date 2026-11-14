@@ -50,10 +50,11 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "missing-config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
      };
-  function cli(args: string[], variant?: string) {
+  function cli(args: string[], variant?: string, eventVariant?: string) {
     return spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "job", ...args,
       "--story", story, "--job", "draft"], { encoding: "utf8", timeout: 120_000,
-        maxBuffer: 24 * 1024 * 1024, env: { ...env, NT_INTERACTIVE_FIXTURE_CASE: variant ?? "" } });
+        maxBuffer: 24 * 1024 * 1024, env: { ...env, NT_INTERACTIVE_FIXTURE_CASE: variant ?? "",
+          NT_EVENT_FIXTURE_CASE: eventVariant ?? "" } });
   }
   const started = cli(["start"]); assert.equal(started.status, 0, started.stderr);
   const job = JSON.parse(started.stdout);
@@ -65,12 +66,12 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     envelope: { presentation: "Visual novel", hardLimits: ["Reuse archive backdrop"],
       preferences: ["Two major Characters", "Clues visible without bespoke animation"] },
   }));
-  function prepare() {
+  function prepare(eventVariant?: string) {
     const arch = cli(["architecture", "run", "--fixture", "--contract", contract, "--skills-source", source]);
     assert.equal(arch.status, 0, arch.stderr);
     const foundations = cli(["foundations", "run", "--fixture", "--skills-source", source]);
     assert.equal(foundations.status, 0, foundations.stderr);
-    const event = cli(["event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source]);
+    const event = cli(["event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source], undefined, eventVariant);
     assert.equal(event.status, 0, event.stderr);
     return JSON.parse(event.stdout).headSha as string;
   }
@@ -132,6 +133,44 @@ test("reference adventure authors two independently certified Choice/Puzzle comm
   const replay = x.interactive();
   assert.equal(replay.status, 0, replay.stderr);
   assert.equal(JSON.parse(replay.stdout).headSha, data.headSha);
+});
+
+test("staged Event→Choice preserves partial Milestone and original immutable prerequisite gate", { skip: !available }, () => {
+  const x = setup("staged-event-choice");
+  const eventHead = x.prepare("decision-pending");
+  const original = readFileSync(join(x.job.worktreeStoryRoot, "events/disclose-ledger.md"), "utf8");
+  const milestone = readFileSync(join(x.job.worktreeStoryRoot, "milestones/disclosure.md"), "utf8");
+  const run = x.interactive();
+  assert.equal(run.status, 0, run.stderr);
+  const result = JSON.parse(run.stdout);
+  assert.equal(result.status, "interactive-slice-committed");
+  assert.equal(result.eventSource.headSha, eventHead);
+  assert.equal(result.eventSource.milestoneState, "partial-choice-pending");
+  assert.match(result.eventSource.missingObligations.join(";"), /Choice Point binding/);
+  assert.deepEqual(result.eventSource.eventIds, ["event.disclose-ledger"]);
+  const updated = readFileSync(join(x.job.worktreeStoryRoot, "events/disclose-ledger.md"), "utf8");
+  const gate = (text: string) => text.split("prerequisites:")[1]!.split("steps:")[0]!;
+  assert.equal(gate(updated), gate(original));
+  assert.equal(readFileSync(join(x.job.worktreeStoryRoot, "milestones/disclosure.md"), "utf8"), milestone,
+    "The Choice owner must not silently close a partial Milestone");
+  const choices = result.specialistUnits[0].validation.choices[0].outcomes;
+  assert.deepEqual(choices.map((o: any) => o.name), ["protect", "challenge"]);
+  assert.ok(choices.every((o: any) => o.downstream.includes("event.aftermath")));
+  assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
+});
+
+test("stale Event-source receipt cannot authorize Choice edits", { skip: !available }, () => {
+  const x = setup("stale-event-source");
+  const eventHead = x.prepare("decision-pending");
+  const file = join(x.job.stateDir, "event-items/disclosure.json");
+  const corrupted = JSON.parse(readFileSync(file, "utf8"));
+  corrupted.validation.eventIds = ["event.unrelated"];
+  writeFileSync(file, JSON.stringify(corrupted));
+  const denied = x.interactive();
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /Missing or unreachable verified|sealed Event work evidence|Event source/);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
+  assert.equal(existsSync(join(x.job.worktreeStoryRoot, "choice-points/loyalty.md")), false);
 });
 
 test("verified deferred capture between Event and Interactive remains independent", { skip: !available }, () => {

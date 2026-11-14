@@ -134,17 +134,14 @@ export async function authorEventCluster(
       "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
       "Before writing, read the selected authored Milestone and Arc prose, linked Characters/current Facts and relevant earlier Events. " +
       "This Event stage precedes the specialized Choice/Puzzle and final prose stages. " +
-      "Author the causal Event route and its selected Milestone's actual immediate consequences NOW. " +
-      "If this Milestone promises the player ENACTS a meaningful decision, write one Event step " +
-      "with two selectable conditions: [] branches: each must have a distinct valid typed immediate " +
-      "effect (for example different existing Relationship states or Knowledge consequences), " +
-      "and the Event prose must show what the player DOES in each alternative. " +
-      "This is a valid initial decision Event even before a formal Choice Point exists. " +
-      "Do NOT mention a not-yet-created choice-point ID or write kind: outcome effects; " +
-      "the later interactive specialist binds actual Choice Points and distinct outcome tokens to these " +
-      "committed branches without altering Event entry prerequisites. Report only that formal binding " +
-      "and downstream conditional payoff as laterObligations. A mere question with effects: [] does not " +
-      "satisfy a Milestone that promises enacted action, and must NOT be treated as fulfillment. " +
+      "Implement only what actually occurs in this Event. Do not add artificial typed effects. " +
+      "If the Milestone promises an enacted player decision needing formal Choice binding, " +
+      "author the reachable Event setup, leave the Milestone completeness: partial and " +
+      "fulfillment: {any_of: []}, and explicitly name the missing Choice binding, " +
+      "real outcome effects and later consumers in laterObligations. A complete setup Event is valid; " +
+      "if its own text claims the decision enacted before outcomes exist, mark the Event partial too. " +
+      "Never fabricate an unknown choice-point ID or unrelated Relationship/Knowledge changes. " +
+      "The later Choice writer owns outcome binding and must retain existing Event entry gates. " +
       "Do not refuse to author an Event merely because a Choice Point or ending scene is not yet written. " +
       "If a genuinely impossible prerequisite requires another scoped specialist or a protected revision, " +
       "make NO edits, and return modifiedRecords:[] with specific architecturalConflicts and laterObligations; " +
@@ -153,8 +150,9 @@ export async function authorEventCluster(
       "check that chain before reporting fulfillment. Source paths are read-only context unless separately authorized below. " +
       EVENT_CAUSAL_GROUNDING +
       "If a new Revelation is required, create a correctly typed canonical revelation with an existing Fact; do not invent a Choice Point, Puzzle, engine Room or game state snapshot. " +
-      "Ensure the selected Milestone has reachable Event fulfillment. If its existing fulfillment is already correct, " +
-      "leave the Milestone byte-for-byte unchanged; otherwise change ONLY its fulfillment and completeness fields. " +
+      "For a genuinely completed nondecision Milestone, bind only actually fulfilled reachable Event routes " +
+      "and complete the selected Milestone; otherwise leave its unbound partial state intact. " +
+      "When legitimately editing the selected Milestone, change ONLY its fulfillment and completeness fields. " +
       "Do NOT edit any other Milestone, Creative Direction, unrelated Arc, or any Character baseline. " +
       "You may write events/*.md and strictly connected, authorized arcs/*.md, facts/*.md, revelations/*.md and relationships/*.md. " +
       "All records must contain valid schema '0.1' frontmatter with ONLY allowed fields and nonempty Markdown body prose. " +

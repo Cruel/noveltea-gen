@@ -40,6 +40,7 @@ interface EventReceipt {
   validation?: {
     status: "passed"; validatorVersion: string; protectionBase: string;
     eventIds: string[]; routes: Route[]; eventProgress: Progress[];
+    milestoneState: "complete" | "partial-choice-pending";
     branchProgress: Array<{ event: string; step: string; branch: string; status: Progress["status"] }>;
     remaining: unknown[]; truncated: boolean;
   };
@@ -69,6 +70,19 @@ export interface EventOptions {
 }
 const idPattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+/** The source-committed evidence that decides whether Choice binding is still owed. */
+export function eventCompletionDigest(value: {
+  milestoneId: string; expectedHead: string; snapshotId: string; contentDigest: string;
+  eventIds: string[]; milestoneState: "complete" | "partial-choice-pending";
+  obligations: string[];
+}) {
+  if (!idPattern.test(value.milestoneId) || !/^[a-f0-9]{40}$/.test(value.expectedHead) ||
+      !/^[a-f0-9]{64}$/.test(value.snapshotId) ||
+      !/^[a-f0-9]{64}$/.test(value.contentDigest) || !value.eventIds.length ||
+      !["complete", "partial-choice-pending"].includes(value.milestoneState))
+    throw Error("Event completion evidence is not bound to a verified source.");
+  return hash(JSON.stringify(value));
+}
 export function eventPrerequisiteReportDigest(value: {
   jobId: string; workItemId: string; expectedHead: string; planDigest: string;
   sessionSha256: string; sessionId: string; assignmentDigest: string;
@@ -243,13 +257,13 @@ function metadataReferences(value: unknown, found = new Set<string>()): Set<stri
   }
   return found;
 }
-function acceptance(report: Report, assignment: EventAssignment, paths: string[]) {
+function acceptance(report: Report, assignment: EventAssignment, paths: string[], obligations: string[]) {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
   if (paths.some(path => !records.some(r => r.path === path))) {
     throw new Error("Canonical catalog did not recognize every authored Event record.");
   }
   const authored = records.filter(r => paths.includes(r.path) && r.metadata.type === "event");
-  if (!authored.length || authored.some(r => r.metadata.completeness === "partial" ||
+  if (!authored.length || authored.some(r =>
     !(r.metadata.arcs as string[] ?? []).some(id => assignment.arcIds.includes(id)) ||
     (r.metadata.arcs as string[] ?? []).some(id => !assignment.arcIds.includes(id)) ||
     !(r.metadata.participants as string[] ?? []).length ||
@@ -258,17 +272,30 @@ function acceptance(report: Report, assignment: EventAssignment, paths: string[]
     !(r.metadata.prerequisites?.any_of as unknown[] ?? []).length)) {
     throw new Error("Events must be complete, causal and belong only to the selected Arc cluster.");
   }
-  const routes = report.coverage.milestoneRoutes.find(m => m.id === assignment.milestoneId)?.routes;
+  const routes = report.coverage.milestoneRoutes.find(m => m.id === assignment.milestoneId)?.routes ?? [];
   const milestone = records.find(r => r.metadata.id === assignment.milestoneId && r.metadata.type === "milestone");
-  if (!milestone || !Array.isArray(milestone.metadata.fulfillment?.any_of) ||
-      !milestone.metadata.fulfillment.any_of.length || !routes ||
+  if (!milestone || !Array.isArray(milestone.metadata.fulfillment?.any_of)) {
+    throw new Error("Selected Milestone lacks a valid fulfillment declaration.");
+  }
+  const missingChoice = obligations.some(obligation =>
+    /choice[ -]?point|choice binding|formal choice|choice specialist/i.test(obligation));
+  const deferredChoice = milestone.metadata.completeness === "partial" &&
+    milestone.metadata.fulfillment.any_of.length === 0 && missingChoice;
+  if (missingChoice && !deferredChoice) {
+    throw new Error("Unbound Choice obligation cannot certify a completed Milestone or authored fulfillment IDs.");
+  }
+  if (!deferredChoice && (!milestone.metadata.fulfillment.any_of.length ||
+      milestone.metadata.completeness === "partial" ||
       routes.length !== milestone.metadata.fulfillment.any_of.length ||
-      !routes.some(r => r.status === "reachable") || routes.some(r => r.status === "impossible")) {
+      !routes.some(r => r.status === "reachable") || routes.some(r => r.status === "impossible"))) {
     throw new Error("Selected Milestone lacks a deterministically reachable Event fulfillment route.");
   }
-  if (milestone.metadata.fulfillment.any_of.every((route: string[]) =>
+  if (!deferredChoice && milestone.metadata.fulfillment.any_of.every((route: string[]) =>
     !route.some(id => authored.some(event => event.metadata.id === id)))) {
     throw new Error("Selected Milestone's fulfillment does not use the authored Event cluster.");
+  }
+  if (!deferredChoice && authored.some(event => event.metadata.completeness === "partial")) {
+    throw new Error("A partial Event cannot certify complete Milestone fulfillment.");
   }
   const refs = metadataReferences(authored.map(r => ({
     prerequisites: r.metadata.prerequisites, steps: r.metadata.steps,
@@ -293,7 +320,8 @@ function acceptance(report: Report, assignment: EventAssignment, paths: string[]
       branches.some(b => b.status === "impossible" || b.status === "incomplete")) {
     throw new Error("Authored Event prerequisites/branches are not proven structurally reachable.");
   }
-  return { eventIds, routes, eventProgress: progress, branchProgress: branches,
+  return { eventIds, routes, milestoneState: deferredChoice ? "partial-choice-pending" as const : "complete" as const,
+    eventProgress: progress, branchProgress: branches,
     remaining: report.outstanding.filter(o => records.some(r => r.path === o.path &&
       (paths.includes(r.path) || r.metadata.id === assignment.milestoneId))),
     truncated: report.coverage.search.truncated };
@@ -325,6 +353,14 @@ function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string
       !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Plan-Version: " + receipt.planVersion + "\n")) {
     throw new Error("Event commit provenance or previous verified HEAD changed.");
   }
+  if (receipt.validation?.milestoneState &&
+      !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Event-Completion: " +
+        eventCompletionDigest({ milestoneId: receipt.milestoneId,
+          expectedHead: receipt.expectedHead, snapshotId: receipt.snapshot!.id,
+          contentDigest: receipt.contentDigest, eventIds: receipt.validation.eventIds,
+          milestoneState: receipt.validation.milestoneState, obligations: receipt.obligations ?? [] }))) {
+    throw new Error("Committed Event completion/Choice handoff has changed since its sealed source.");
+  }
   const files = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", commit).split("\n").filter(Boolean).sort();
   if (JSON.stringify(files) !== JSON.stringify(receipt.paths.map(p => repoPath(job, p)).sort())) {
     throw new Error("Event commit contains unreviewed or missing files.");
@@ -342,6 +378,9 @@ function output(job: JobStartResult, state: EventReceipt) {
     failure: state.failure, prerequisite: state.prerequisite, sessionFile: state.sessionFile, skillReads: state.skillReads,
     skillSnapshot: state.snapshot?.id,
     completionEvidence: { eventReachability: state.phase === "committed",
+      milestoneState: state.validation?.milestoneState ?? "unverified",
+      deferredChoiceObligations: state.validation?.milestoneState === "partial-choice-pending"
+        ? state.obligations ?? [] : [],
       editorial: "unverified", unrelatedComposition: "not-required", fullStory: false } };
 }
 async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): Promise<EventEvidence> {
@@ -376,6 +415,20 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): 
   await add("disclose-ledger",
     `participants: [character.ada, character.neri]\narcs: [${assignment.arcIds[0]}]\nconsequences: ["Neri discloses the ledger, changing Ada's belief and their relationship"]\nafter: ${variant === "optional" ? "[event.inspect-ledger]" : "[]"}\nprerequisites:\n  any_of:\n    - completed: ${impossible ? "[event.inspect-ledger]" : "[]"}\n      not_completed: ${impossible ? "[event.inspect-ledger]" : "[]"}\n      conditions:\n        - kind: knowledge\n          character: character.neri\n          fact: fact.evidence-concealed\n          value: knows\nsteps:\n  - id: admit\n    branches:\n      - id: disclose\n        conditions: []\n        effects:\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting`,
     "Neri admits concealing the ledger and explains the reason. Ada learns that the concealment is real, while the confession begins repairing their trust. These are typed effects at the disclosure step.");
+  if (["decision-pending", "false-decision-complete", "fake-unrelated-effects", "descriptive"].includes(variant)) {
+    const path = join(job.worktreeStoryRoot, "events/disclose-ledger.md");
+    const original = await readFile(path, "utf8");
+    const newText = variant === "fake-unrelated-effects" ? original :
+      original.replace(/steps:\n[\s\S]*?(?=\n---)/, variant === "descriptive"
+        ? "steps: []"
+        : "steps:\n  - id: decision-offered\n    branches:\n      - id: release\n        conditions: []\n        effects: []\n      - id: withhold\n        conditions: []\n        effects: []");
+    await writeFile(path, newText.replace("Neri discloses the ledger, changing Ada's belief and their relationship",
+      variant === "descriptive" ? "Neri reports the location of the ledger without changing tracked state"
+        : "Neri presents a pending opportunity to release or withhold the ledger")
+      .replace("Neri admits concealing the ledger and explains the reason. Ada learns that the concealment is real, while the confession begins repairing their trust. These are typed effects at the disclosure step.",
+      variant === "descriptive" ? "Neri reveals where the ledger was found; the discovery records no new canonical state."
+        : "Neri shows Ada the ledger and offers to release it or withhold it. The player has not yet made that choice."));
+  }
   if (variant === "revelation") {
     const path = "revelations/ledger-shared.md";
     await mkdir(join(job.worktreeStoryRoot, "revelations"), { recursive: true });
@@ -396,11 +449,13 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): 
   const file = join(job.worktreeStoryRoot, assignment.milestonePath);
   const old = await readFile(file, "utf8");
   if (!old.includes("fulfillment: {any_of: []}")) throw new Error("Fixture requires an unbound planning Milestone.");
-  await writeFile(file, old.replace("completeness: partial\n", "")
-    .replace("fulfillment: {any_of: []}", cluster.text(variant === "alternative-routes"
-      ? "fulfillment: {any_of: [[event.inspect-ledger, event.disclose-ledger], [event.disclose-ledger]]}"
-      : "fulfillment: {any_of: [[event.disclose-ledger]]}")));
-  files.push(assignment.milestonePath);
+  if (variant !== "decision-pending") {
+    await writeFile(file, old.replace("completeness: partial\n", "")
+      .replace("fulfillment: {any_of: []}", cluster.text(variant === "alternative-routes"
+        ? "fulfillment: {any_of: [[event.inspect-ledger, event.disclose-ledger], [event.disclose-ledger]]}"
+        : "fulfillment: {any_of: [[event.disclose-ledger]]}")));
+    files.push(assignment.milestonePath);
+  }
   if (variant === "milestone-retcon") {
     await writeFile(file, (await readFile(file, "utf8")).replace("The investigator can no longer act alone", "The investigator must act entirely alone"));
   }
@@ -410,8 +465,11 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): 
       "\nThis is an unauthorized addition.\n");
   }
   if (variant === "mismatch") files.push("events/never-written.md");
-  return { claimedPaths: files, conflicts: [], obligations: [
-    "Player-facing prose and alternate branch details require composition and editorial review."], skillReads: [] };
+  return { claimedPaths: files, conflicts: [], obligations:
+    ["decision-pending", "false-decision-complete", "fake-unrelated-effects"].includes(variant)
+      ? ["Formal Choice Point binding and outcome-specific later consumers remain with the Choice specialist."]
+      : ["Player-facing prose and alternate branch details require composition and editorial review."],
+    skillReads: [] };
 }
 
 export async function runEventWorkItem(input: EventOptions) {
@@ -593,7 +651,7 @@ export async function runEventWorkItem(input: EventOptions) {
             if (repairablePathError) return [repairablePathError +
               " Edit an authorized Event if necessary, or correct modifiedRecords to list the exact Git changes. " +
               "Do not modify the Milestone merely to make it appear in the diff."];
-            try { acceptance(draft, assign, paths!); return []; }
+            try { acceptance(draft, assign, paths!, candidate.obligations); return []; }
             catch (error) { return [String(error)]; }
           };
           let evidence: EventEvidence;
@@ -708,7 +766,11 @@ export async function runEventWorkItem(input: EventOptions) {
             await contentDigest(job, receipt.paths) !== receipt.contentDigest) {
           throw new Error("Authored Event inventory changed or has architectural conflicts.");
         }
-        const proof = acceptance(report, assign, receipt.paths);
+        const proof = acceptance(report, assign, receipt.paths, receipt.obligations ?? []);
+        const completionDigest = eventCompletionDigest({ milestoneId: receipt.milestoneId,
+          expectedHead: receipt.expectedHead, snapshotId: receipt.snapshot!.id,
+          contentDigest: receipt.contentDigest, eventIds: proof.eventIds,
+          milestoneState: proof.milestoneState, obligations: receipt.obligations ?? [] });
         if (!recovering) {
           assertHead(job, prior);
           const paths = await changedPaths(job, assign, receipt.claimedPaths ?? []);
@@ -717,7 +779,7 @@ export async function runEventWorkItem(input: EventOptions) {
           }
           git(job, "add", "--", ...paths.map(p => repoPath(job, p)));
           git(job, "-c", "user.name=NovelTea Generator", "-c", "user.email=noveltea-gen@users.noreply.github.com",
-            "commit", "-m", `Realize ${receipt.milestoneId} [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Plan-Version: ${receipt.planVersion}\nNovelTea-Event-Design: ${receipt.contentDigest}`);
+            "commit", "-m", `Realize ${receipt.milestoneId} [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Plan-Version: ${receipt.planVersion}\nNovelTea-Event-Design: ${receipt.contentDigest}\nNovelTea-Event-Completion: ${completionDigest}`);
         }
         if (dirty(job).length) throw new Error("Event commit left unexpected modifications.");
         const commit = git(job, "rev-parse", "HEAD");

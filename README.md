@@ -1429,11 +1429,17 @@ reachability, Milestone route witnesses and incompleteness obligations. The
 same Pi session can make **up to two bounded repairs** before the work item
 fails closed. `after` is optional chronology (when both Events occur);
 `prerequisites.any_of` contains true enabling conditions. At least one
-authored Event and a deterministically reachable fulfillment route are
-required. Unrelated composition/readiness gaps are not Event acceptance
-requirements, and Editorial/branch-intent proof remains unverified. Any
-unresolved future alternative is explicitly reported as a downstream
-obligation, never filled with a fabricated Event ID.
+reachable authored Event is required. Nondecision Milestones require a real
+reachable fulfillment route; they need no invented typed state effects. A
+Milestone promising a decision that requires formal Choice binding may instead
+remain `completeness: partial` with `fulfillment: {any_of: []}` if the Event
+actually provides the accessible setup and its evidence explicitly records
+the outstanding Choice obligation. The original Event commit seals both the
+verification and this completion boundary. The Event status
+`partial-choice-pending` is **not** a fulfilled Milestone, a fabricated Choice
+Point ID, or an authorization to change protected canon. Unrelated
+composition/readiness gaps are not Event acceptance requirements, and
+editorial/branch-intent proof remains unverified.
 
 Independent Milestones can have their own serialized receipts and commits at
 **clean verified work-item boundaries**; failures never implicitly complete
@@ -1471,6 +1477,16 @@ pnpm dev job interactive inspect --story /path/to/story --job draft-1 \
   --milestone milestone.disclosure
 pnpm dev job validate --story /path/to/story --job draft-1
 ```
+
+The Interactive work item accepts either an already fulfilled Event-design
+Milestone or the exact committed `partial-choice-pending` Event source. The
+staged handoff pins the original Event SHA, skill snapshot, authored Event IDs
+and missing Choice obligations against the source commit's completion digest.
+Missing or changed evidence fails closed. Choice does **not** complete a
+partial Milestone, even when it has bound valid outcomes; a subsequent
+controller-approved, independently reviewed narrow Milestone closeout is
+required. Without that authority, final Turn review correctly reports the
+still-partial objective rather than marking it complete.
 
 The LangGraph workflow serializes two real pinned Pi specialists:
 `nt-interactive-narrative` develops a consequential **Choice Point**, typed

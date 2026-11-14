@@ -6,6 +6,7 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { authorInteractive, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
+import { eventCompletionDigest } from "./event-work.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
@@ -33,11 +34,15 @@ interface Unit {
 interface Receipt {
   version: 1; jobId: string; baseSha: string; workItemId: string; milestoneId: string;
   planVersion: number; planDigest: string; eventHead: string; worker: "fixture" | "pi";
-  provider: string; model: string; thinking?: "low" | "medium" | "high"; snapshot?: SkillSnapshot; units: [Unit, Unit];
+  provider: string; model: string; thinking?: "low" | "medium" | "high"; snapshot?: SkillSnapshot;
+  eventSource?: InteractiveAssignment["eventSource"]; units: [Unit, Unit];
 }
 interface SourceReceipt {
   jobId: string; phase: string; milestoneId: string; commitSha?: string;
-  planVersion: number; workItemId: string;
+  planVersion: number; workItemId: string; snapshot?: SkillSnapshot;
+  paths?: string[]; contentDigest?: string; obligations?: string[];
+  validation?: { status: "passed"; eventIds: string[];
+    milestoneState?: "complete" | "partial-choice-pending" };
 }
 interface ArchitectureReceipt { jobId: string; phase: string; expectedHead: string; plan?: Plan }
 type Status = "reachable" | "impossible" | "unverified" | "incomplete";
@@ -105,7 +110,8 @@ function reportOf(result: ValidationResult, head: string): Report {
   }
   return report;
 }
-export function selectAssignment(plan: Plan, report: Report, milestoneId: string): InteractiveAssignment {
+export function selectAssignment(plan: Plan, report: Report, milestoneId: string,
+  eventSource?: InteractiveAssignment["eventSource"]): InteractiveAssignment {
   if (plan.contract.scope.depth === "architecture") throw new Error("Completion contract does not authorize interactive work.");
   const architecture = plan.items.find(i => i.id === "global-architecture");
   if (architecture?.status !== "verified" || !architecture.targetIds.includes(milestoneId)) {
@@ -113,21 +119,31 @@ export function selectAssignment(plan: Plan, report: Report, milestoneId: string
   }
   const records = report.records.filter(r => r.metadata.status !== "superseded");
   const milestone = records.find(r => r.metadata.id === milestoneId && r.metadata.type === "milestone");
-  if (!milestone || !milestone.metadata.fulfillment?.any_of?.length ||
-      !report.coverage.milestoneRoutes.find(r => r.id === milestoneId)?.routes.some(r => r.status === "reachable")) {
-    throw new Error("Interactive design requires a fulfilled, reachable Event-design Milestone.");
+  const staged = eventSource?.milestoneState === "partial-choice-pending" &&
+    milestone?.metadata.completeness === "partial" &&
+    Array.isArray(milestone.metadata.fulfillment?.any_of) &&
+    milestone.metadata.fulfillment.any_of.length === 0 &&
+    eventSource.missingObligations.length > 0 && eventSource.eventIds.length > 0;
+  if (!milestone || !staged && (!milestone.metadata.fulfillment?.any_of?.length ||
+      !report.coverage.milestoneRoutes.find(r => r.id === milestoneId)?.routes.some(r => r.status === "reachable"))) {
+    throw new Error("Interactive design requires a verified reachable Event cluster or an explicitly staged Choice obligation.");
   }
+  if (eventSource?.milestoneState === "partial-choice-pending" && !staged)
+    throw new Error("Staged Event source no longer matches the original partial Milestone and Choice obligations.");
   const arcIds = milestone.metadata.arcs as string[];
   if (!arcIds.length || arcIds.some(id => !architecture.targetIds.includes(id))) {
     throw new Error("Milestone references an unauthorized Arc.");
   }
-  const eventIds = (milestone.metadata.fulfillment.any_of as string[][]).flat();
+  const eventIds = staged ? eventSource!.eventIds : (milestone.metadata.fulfillment.any_of as string[][]).flat();
   const adjacent = records.filter(r => r.metadata.type === "event" &&
     (r.metadata.arcs as string[]).some(id => arcIds.includes(id)));
   const characters = records.filter(r => r.metadata.type === "arc" && arcIds.includes(r.metadata.id))
     .flatMap(r => r.metadata.characters as string[]);
   const characterIds = [...new Set(characters)].sort();
-  if (characterIds.length < 2 || !eventIds.length) throw new Error("Missing Character/World/Event foundations.");
+  if (characterIds.length < 2 || !eventIds.length || eventIds.some(id =>
+    !adjacent.some(event => event.metadata.id === id &&
+      report.coverage.eventProgress.some(progress => progress.id === id && progress.status === "reachable"))))
+    throw new Error("Missing or unreachable verified Character/World/Event foundations.");
   const references = new Set<string>([...characterIds, ...eventIds, ...arcIds]);
   // Existing Puzzles may use these Events without being referenced back by
   // the Events. Include them and their clues in the editable/context inventory.
@@ -156,11 +172,13 @@ export function selectAssignment(plan: Plan, report: Report, milestoneId: string
     r.metadata.type === "relationship" && (r.metadata.characters as string[] ?? []).every(id => characterIds.includes(id)));
   return { workItemId: "interactive-" + milestoneId.slice(10), milestoneId, arcIds, characterIds,
     factIds: related.filter(r => r.metadata.type === "fact").map(r => r.metadata.id),
-    eventIds: [...new Set(adjacent.map(r => r.metadata.id))].sort(),
+    eventIds: [...new Set(staged ? eventIds : adjacent.map(r => r.metadata.id))].sort(),
+    ...(eventSource ? { eventSource } : {}),
     sourcePaths: [...new Set(related.map(r => r.path))].sort(),
     authorContract: plan.contract, protectedRouteGates: "immutable-existing-event-prerequisites",
     authorizedPaths: ["events/", "choice-points/", "puzzles/", "authored-content/", "revelations/", "facts/", "relationships/", "narrative-positions/"],
-    downstreamRequirements: ["Player-perceivable branch effects", "Later conditional payoff or explicit writing obligations",
+    downstreamRequirements: [...(staged ? eventSource!.missingObligations : []),
+      "Player-perceivable branch effects", "Later conditional payoff or explicit writing obligations",
       "Independent clue text/fairness and presentation review"] };
 }
 /** A tracked, unstaged change to an assignment's read-only source may be
@@ -310,12 +328,9 @@ function selectEffects(event: RecordItem) {
 function checkProgress(original: Report, candidate: Report, milestoneId: string, paths: string[] = []) {
   const oldMilestone = original.coverage.milestoneRoutes.find(m => m.id === milestoneId);
   const nowMilestone = candidate.coverage.milestoneRoutes.find(m => m.id === milestoneId);
-  if (!nowMilestone?.routes.some(r => r.status === "reachable")) {
+  if (oldMilestone?.routes.some(r => r.status === "reachable") &&
+      !nowMilestone?.routes.some(r => r.status === "reachable")) {
     throw new Error("The previously fulfilled Milestone lost all reachable routes.");
-  }
-  if (oldMilestone && oldMilestone.routes.some(r => r.status === "reachable") &&
-      !nowMilestone.routes.some(r => r.status === "reachable")) {
-    throw new Error("Interactive edits destroyed a verified Milestone path.");
   }
   for (const previous of original.coverage.eventProgress.filter(p => p.status === "reachable")) {
     const current = candidate.coverage.eventProgress.find(p => p.id === previous.id);
@@ -570,7 +585,13 @@ function output(job: JobStartResult, receipt: Receipt) {
     jobId: job.jobId, milestoneId: receipt.milestoneId,
     worktreeStoryRoot: job.worktreeStoryRoot, headSha: receipt.units[1].commitSha ??
       receipt.units[0].commitSha ?? receipt.eventHead,
-    eventHead: receipt.eventHead, workItemId: receipt.workItemId, planVersion: receipt.planVersion,
+    eventHead: receipt.eventHead, eventSource: receipt.eventSource,
+    milestoneState: receipt.eventSource?.milestoneState === "partial-choice-pending"
+      ? receipt.units[0].phase === "committed"
+        ? "choice-bound-milestone-awaiting-authorized-closeout"
+        : "choice-binding-pending-milestone-partial"
+      : "event-route-fulfilled",
+    workItemId: receipt.workItemId, planVersion: receipt.planVersion,
     thinking: receipt.thinking ?? "configured-default",
     specialistUnits: receipt.units.map(u => ({ ...u, specialist: u.domain === "choice"
       ? "nt-interactive-narrative" : "nt-puzzle-design" })),
@@ -738,10 +759,34 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       throw new Error("Interactive work item requires the same authorized, fully committed Event-design Milestone.");
     }
     assertPlanContinuity(job, architecture, "event:" + input.milestone, event.planVersion);
-    if (!git(job, "log", "-1", "--format=%B", event.commitSha)
-      .includes("NovelTea-Work-Item: " + event.workItemId + "\n")) {
-      throw new Error("Source Event-design commit does not match its verified work-item provenance.");
+    if (!event.snapshot?.id || !event.validation || event.validation.status !== "passed" ||
+        !event.validation.eventIds?.length || !event.paths?.length || !event.contentDigest ||
+        !git(job, "log", "-1", "--format=%B", event.commitSha)
+          .includes("NovelTea-Work-Item: " + event.workItemId + "\n") ||
+        !git(job, "log", "-1", "--format=%B", event.commitSha)
+          .includes("NovelTea-Event-Design: " + event.contentDigest) ||
+        JSON.stringify(git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", event.commitSha)
+          .split("\n").filter(Boolean).sort()) !==
+          JSON.stringify(event.paths.map(p => repoPath(job, p)).sort())) {
+      throw new Error("Source Event-design commit lacks original, sealed Event work evidence.");
     }
+    if (event.validation.milestoneState &&
+        !git(job, "log", "-1", "--format=%B", event.commitSha).includes(
+          "NovelTea-Event-Completion: " + eventCompletionDigest({
+            milestoneId: event.milestoneId, expectedHead: git(job, "rev-parse", event.commitSha + "^"),
+            snapshotId: event.snapshot.id, contentDigest: event.contentDigest,
+            eventIds: event.validation.eventIds,
+            milestoneState: event.validation.milestoneState, obligations: event.obligations ?? [],
+          }))) {
+      throw new Error("Event source and deferred obligations changed after their original sealed commit.");
+    }
+    const eventSource: NonNullable<InteractiveAssignment["eventSource"]> = {
+      headSha: event.commitSha, snapshotId: event.snapshot.id,
+      eventIds: event.validation.eventIds,
+      milestoneState: event.validation.milestoneState ?? "complete",
+      missingObligations: event.validation.milestoneState === "partial-choice-pending"
+        ? event.obligations ?? [] : [],
+    };
     try { git(job, "merge-base", "--is-ancestor", event.commitSha, "HEAD"); }
     catch { throw new Error("Story branch has diverged from the committed Event-design stage."); }
     const planDigest = digest(JSON.stringify(architecture.plan));
@@ -750,6 +795,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
       if (receipt.version !== 1 || receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
           receipt.milestoneId !== input.milestone || receipt.eventHead !== event.commitSha ||
+          receipt.eventSource && JSON.stringify(receipt.eventSource) !== JSON.stringify(eventSource) ||
           receipt.units?.length !== 2 || receipt.units[0]?.domain !== "choice" ||
           receipt.units[1]?.domain !== "puzzle") {
         throw new Error("Interactive receipt differs from the verified Story plan and Event foundation.");
@@ -760,10 +806,12 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       if (input.action !== "run") throw new Error("No saved interactive work item.");
       if (dirty(job).length) throw new Error("Interactive design requires a clean verified Story worktree.");
       await verifiedNarrativeSuccessor(job, event.commitSha);
+      if (await fileDigest(job, event.paths) !== event.contentDigest)
+        throw new Error("Original Event source bytes changed before Choice binding.");
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         workItemId: "interactive-" + input.milestone.slice(10),
         milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
-        eventHead: event.commitSha, worker: input.fixture ? "fixture" : "pi",
+        eventHead: event.commitSha, eventSource, worker: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna", thinking: input.thinking,
         units: [{ id: "interactive-choice-" + input.milestone.slice(10), domain: "choice", phase: "pending" },
           { id: "interactive-puzzle-" + input.milestone.slice(10), domain: "puzzle", phase: "pending" }] };
@@ -852,7 +900,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Interactive writer requires a clean Story boundary.");
       }
       const baseline = reportOf(await validate(before), before);
-      const assign = { ...selectAssignment(architecture.plan!, baseline, state.milestoneId),
+      const assign = { ...selectAssignment(architecture.plan!, baseline, state.milestoneId,
+        state.eventSource ?? eventSource),
         ...(input.task ? { authorTask: input.task } : {}) };
       if (unit.phase === "pending") {
         await preflightPiAssignment(job, "interactive:" + assign.workItemId + ":" + unit.domain,

@@ -76,9 +76,19 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
     assert.equal(cli("architecture", "run", "--fixture", "--skills-source", source,
       "--contract", contract).status, "architecture-committed");
     assert.equal(cli("foundations", "run", "--fixture", "--skills-source", source).status, "foundations-committed");
-    const event = cli("event", "run", "--fixture", "--milestone", "milestone.disclosure",
-      "--skills-source", source);
+    const realEvent = process.env.NT_LIVE_EVENT_CHOICE === "1";
+    const eventArgs = ["event", "run", ...(realEvent ? [] : ["--fixture"]),
+      "--milestone", "milestone.disclosure", "--skills-source", source];
+    if (realEvent && process.env.NT_PROVIDER) eventArgs.push("--provider", process.env.NT_PROVIDER);
+    if (realEvent && process.env.NT_MODEL) eventArgs.push("--model", process.env.NT_MODEL);
+    const event = cli(...eventArgs);
     assert.equal(event.status, "event-cluster-committed");
+    if (realEvent) {
+      assert.equal(event.validation.milestoneState, "partial-choice-pending",
+        "A live Event must not fulfill the player's still-unbound decision");
+      assert.ok(event.obligations.some((obligation: string) => /choice/i.test(obligation)));
+      assert.equal(event.skillReads.length, 6);
+    }
     const args = ["interactive", "run", "--milestone", "milestone.disclosure", "--skills-source", source];
     if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
     if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
@@ -88,6 +98,14 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
     assert.equal(result.status, "interactive-slice-committed");
     assert.deepEqual(result.specialistUnits.map((u: any) => u.phase), ["committed", "committed"]);
     assert.equal(result.specialistUnits[0].validation.protectionBase, event.headSha);
+    if (realEvent) {
+      assert.equal(result.eventSource.headSha, event.headSha);
+      assert.equal(result.eventSource.milestoneState, "partial-choice-pending");
+      assert.equal(result.milestoneState, "choice-bound-milestone-awaiting-authorized-closeout");
+      const milestone = readFileSync(join(job.worktreeStoryRoot, "milestones/disclosure.md"), "utf8");
+      assert.match(milestone, /completeness: partial/);
+      assert.match(milestone, /fulfillment: \{any_of: \[\]\}/);
+    }
     assert.equal(result.specialistUnits[1].validation.protectionBase, result.specialistUnits[0].commitSha);
     for (const unit of result.specialistUnits) {
       assert.equal(unit.skillReads.length, 6);

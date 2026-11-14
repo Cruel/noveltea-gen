@@ -24,6 +24,9 @@ export interface InteractiveAssignment {
   characterIds: string[];
   factIds: string[];
   eventIds: string[];
+  /** Original verified Event source, not a grant to edit its entry gates. */
+  eventSource?: { headSha: string; snapshotId: string; eventIds: string[];
+    milestoneState: "complete" | "partial-choice-pending"; missingObligations: string[] };
   sourcePaths: string[];
   authorContract: unknown;
   protectedRouteGates: "immutable-existing-event-prerequisites";
@@ -47,7 +50,7 @@ const CATALOG = [
 const SPECIALISTS = {
   choice: {
     name: "nt-interactive-narrative",
-    guidance: "Develop a real two-outcome Choice Point. Canonical choice-point.outcomes MUST be an array of plain outcome slug strings (for example [protect, confront]), not objects, labels or descriptions; put option explanations in the Markdown body. The Story model intentionally does not represent engine UI input binding: a step with multiple enabled conditions: [] branches, each setting a distinct kind: outcome effect, is the canonical representation of selectable narrative alternatives (exact user-facing UI controls are downstream work, not an architectural blocker). Place each exclusive outcome effect in a reachable Event step branch, with materially different immediate state and a later conditional consumer. Preserve original Event prerequisites verbatim. Never reveal branch-exclusive information in shared prose or the other branch. Complete the choice/branch work before proposing the Puzzle. Do not create Puzzle records in this unit.",
+    guidance: "Use the exact original Event source and missing obligations in ASSIGNMENT.eventSource. A partial decision Milestone is NOT complete until authorized post-Choice closeout; do not edit it. Develop a real two-outcome Choice Point. Canonical choice-point.outcomes MUST be an array of plain outcome slug strings (for example [protect, confront]), not objects, labels or descriptions; put option explanations in the Markdown body. The Story model intentionally does not represent engine UI input binding: a step with multiple enabled conditions: [] branches, each setting a distinct kind: outcome effect, is the canonical representation of selectable narrative alternatives (exact user-facing UI controls are downstream work, not an architectural blocker). Place each exclusive outcome effect in a reachable Event step branch, with materially different immediate state and a later conditional consumer. Preserve original Event prerequisites verbatim. Never reveal branch-exclusive information in shared prose or the other branch. Complete the choice/branch work before proposing the Puzzle. Do not create Puzzle records in this unit.",
   },
   puzzle: {
     name: "nt-puzzle-design",

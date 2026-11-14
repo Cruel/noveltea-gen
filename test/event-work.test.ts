@@ -218,6 +218,64 @@ test("public CLI commits a reachable causal Event cluster with validated Milesto
   assert.equal(JSON.parse(replay.stdout).headSha, data.headSha);
 });
 
+test("an unbound decision Event commits as a reviewed-ready partial Milestone without a synthetic Choice ID", { skip: !available }, () => {
+  const f = setup("staged-decision");
+  const prior = f.prepare();
+  const run = f.event("decision-pending");
+  assert.equal(run.status, 0, run.stderr);
+  const data = JSON.parse(run.stdout);
+  assert.equal(data.status, "event-cluster-committed");
+  assert.equal(data.validation.milestoneState, "partial-choice-pending");
+  assert.equal(data.completionEvidence.milestoneState, "partial-choice-pending");
+  assert.equal(data.validation.routes.length, 0);
+  assert.deepEqual(data.validation.eventIds, ["event.disclose-ledger"]);
+  assert.match(data.obligations[0], /Choice Point binding/);
+  const milestone = readFileSync(join(f.job.worktreeStoryRoot, "milestones/disclosure.md"), "utf8");
+  assert.match(milestone, /completeness: partial/);
+  assert.match(milestone, /fulfillment: \{any_of: \[\]\}/);
+  const eventSource = readFileSync(join(f.job.worktreeStoryRoot, "events/disclose-ledger.md"), "utf8");
+  assert.match(eventSource, /effects: \[\]/);
+  assert.doesNotMatch(eventSource.split("steps:")[1]!, /kind: outcome|kind: relationship|kind: knowledge/);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD^"), prior);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  const repeat = f.event("decision-pending");
+  assert.equal(repeat.status, 0, repeat.stderr);
+  assert.equal(JSON.parse(repeat.stdout).headSha, data.headSha);
+});
+
+test("unbound decision claims cannot falsely complete a Milestone or bind made-up fulfillment", { skip: !available }, () => {
+  const f = setup("false-decision-complete");
+  const prior = f.prepare();
+  const bad = f.event("false-decision-complete");
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /Unbound Choice obligation cannot certify a completed Milestone/);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), prior);
+  assert.equal(JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8")).phase, "authored");
+});
+
+test("unrelated typed effects cannot launder an unbound decision into a fulfilled Milestone", { skip: !available }, () => {
+  const f = setup("unrelated-fake-effects");
+  const prior = f.prepare();
+  const bad = f.event("fake-unrelated-effects");
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /Unbound Choice obligation cannot certify a completed Milestone/);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), prior);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all")
+    .includes("events/disclose-ledger.md"), true,
+    "An unaccepted fake claim is preserved for source-bound correction, not committed");
+});
+
+test("descriptive Events may complete without artificial state transitions", { skip: !available }, () => {
+  const f = setup("descriptive-event");
+  f.prepare();
+  const run = f.event("descriptive");
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(JSON.parse(run.stdout).validation.milestoneState, "complete");
+  const source = readFileSync(join(f.job.worktreeStoryRoot, "events/disclose-ledger.md"), "utf8");
+  assert.match(source, /steps: \[\]/);
+  assert.doesNotMatch(source.split("steps:")[1]!, /kind: knowledge|kind: relationship|kind: outcome/);
+});
+
 test("Event obeys shared job lock and execution pause before writing", { skip: !available }, () => {
   const x = setup("shared-lock-and-pause");
   x.prepare();
