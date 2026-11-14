@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
 import { authorEventCluster, type EventAssignment, type EventEvidence } from "./event-specialist.js";
+import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
@@ -48,6 +49,9 @@ interface EventReceipt {
     branchProgress: Array<{ event: string; step: string; branch: string; status: Progress["status"] }>;
     remaining: unknown[]; truncated: boolean;
   };
+  /** Exact original sealed no-write receipt that authorized one new Event setup task. */
+  reroutedFrom?: string;
+  reroutedTask?: string;
   failure?: string;
 }
 interface RecordItem { path: string; metadata: Record<string, any> & { id: string; type: string; status: string } }
@@ -71,6 +75,8 @@ export interface EventOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean;
   provider?: string; model?: string; task?: string;
+  /** Internal controller-only reassignment, never a model-provided grant. */
+  reroute?: { reportDigest: string; sourceSha: string; task: string };
 }
 const idPattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -407,7 +413,8 @@ function output(job: JobStartResult, state: EventReceipt) {
     specialist: "nt-event-design", paths: state.paths, validation: state.validation,
     obligations: state.obligations, conflicts: state.conflicts,
     outstanding: state.validation?.remaining ?? [],
-    failure: state.failure, prerequisite: state.prerequisite, sessionFile: state.sessionFile, skillReads: state.skillReads,
+    failure: state.failure, prerequisite: state.prerequisite, reroutedFrom: state.reroutedFrom,
+    sessionFile: state.sessionFile, skillReads: state.skillReads,
     consequenceProof: state.consequenceProof,
     skillSnapshot: state.snapshot?.id,
     completionEvidence: { eventReachability: state.phase === "committed",
@@ -416,8 +423,10 @@ function output(job: JobStartResult, state: EventReceipt) {
         ? state.obligations ?? [] : [],
       editorial: "unverified", unrelatedComposition: "not-required", fullStory: false } };
 }
-async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): Promise<EventEvidence> {
-  const variant = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
+async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
+  rerouted = false): Promise<EventEvidence> {
+  const configured = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
+  const variant = configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" : configured;
   const cluster = fixtureCluster(assignment.milestoneId);
   const files: string[] = [];
   const add = async (slug: string, metadata: string, prose: string) => {
@@ -428,13 +437,14 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment): 
       `---\nschema: '0.1'\ntype: event\nid: event.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${prose}\n`, { flag: "wx" });
     files.push(local);
   };
-  if (["no-write-prerequisite", "no-write-dirty", "no-write-empty"].includes(variant)) {
+  if (["no-write-prerequisite", "no-write-dirty", "no-write-empty", "no-write-protected"].includes(variant)) {
     if (variant === "no-write-dirty") {
       await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
       await writeFile(join(job.worktreeStoryRoot, "events/uncertain-draft.md"), "Unapproved draft.\n");
     }
     return { claimedPaths: [], skillReads: [],
-      conflicts: variant === "no-write-empty" ? [] :
+      conflicts: variant === "no-write-empty" ? [] : variant === "no-write-protected"
+        ? ["Protected author approval for an out-of-scope new Milestone is required."] :
         ["A distinct Choice and authored ending are needed beyond this Event writer's scope."],
       obligations: variant === "no-write-empty" ? [] :
         ["Arrange controller-approved interactive work before concluding the resolution."] };
@@ -584,9 +594,52 @@ export async function runEventWorkItem(input: EventOptions) {
     if (await openSkillSnapshot(receipt.snapshot.id) !== receipt.snapshot.path) {
       throw new Error("Event snapshot does not match the pinned identity.");
     }
+    if (receipt.reroutedFrom) {
+      // Even after a graph restart, bind the new task to the original,
+      // authenticated no-write decision; durable task text cannot grant scope.
+      const history = join(root, "event-prerequisite-history",
+        input.milestone.slice(10) + "-" + receipt.reroutedFrom + ".json");
+      const original = JSON.parse(await readFile(history, "utf8")) as EventReceipt;
+      if (original.phase !== "prerequisite-reported" || !original.prerequisite ||
+          original.jobId !== job.jobId || original.workItemId !== workItemId ||
+          original.planDigest !== planDigest || original.expectedHead !== receipt.expectedHead ||
+          original.worker !== receipt.worker || original.provider !== receipt.provider ||
+          original.model !== receipt.model || original.snapshot?.id !== receipt.snapshot.id ||
+          original.claimedPaths?.length || !original.assignment ||
+          !original.conflicts || !original.obligations || original.reroutedFrom ||
+          receipt.reroutedFrom !== original.prerequisite.reportDigest)
+        throw Error("Rerouted Event setup lacks a matching original no-write authority.");
+      const source = original.prerequisite;
+      if (eventPrerequisiteReportDigest({
+        jobId: job.jobId, workItemId, expectedHead: original.expectedHead,
+        planDigest: original.planDigest, sessionSha256: source.sessionSha256,
+        sessionId: source.sessionId, assignmentDigest: hash(JSON.stringify(original.assignment)),
+        snapshotId: original.snapshot!.id, sessionFile: source.sessionFile,
+        worker: original.worker, conflicts: original.conflicts, obligations: original.obligations,
+      }) !== receipt.reroutedFrom ||
+        source.assignmentDigest !== hash(JSON.stringify(original.assignment)) ||
+        source.worker !== original.worker || source.snapshotId !== original.snapshot?.id)
+        throw Error("Rerouted Event setup predecessor receipt is tampered.");
+      const route = routeEventPrerequisite({
+        milestone: input.milestone, activeStage: "event",
+        expectedHead: original.expectedHead, verifiedHead: original.expectedHead,
+        reportDigest: source.reportDigest, conflicts: original.conflicts,
+        obligations: original.obligations, alreadyRerouted: false,
+      });
+      if (route.kind !== "event-setup" || route.task !== receipt.reroutedTask)
+        throw Error("Rerouted Event setup task changed from controller-approved source.");
+      if (original.worker === "pi") {
+        await verifyJobPiSession(job, "event", source.sessionFile, source.sessionId, original.workItemId);
+        if (hash(await readFile(source.sessionFile)) !== source.sessionSha256)
+          throw Error("Rerouted Event predecessor's settled Pi session changed.");
+      }
+    }
     const validate = async (head: string) => validateStoryJob(
       await startStoryJob({ story: input.story, job: input.job }, false),
       input.validatorSource ?? input.skillsSource ?? config.novelteaSkills, { ...job, baseSha: head });
+    if (input.reroute && receipt.phase !== "prerequisite-reported" &&
+        receipt.reroutedFrom !== input.reroute.reportDigest)
+      throw Error("Event setup reassignment does not match the original no-write report.");
     if (receipt.phase === "prerequisite-reported") {
       if (!receipt.prerequisite || !receipt.assignment ||
           (receipt.worker === "pi" && !receipt.sessionFile) ||
@@ -617,7 +670,36 @@ export async function runEventWorkItem(input: EventOptions) {
         throw Error("Event prerequisite report changed after its original Pi decision.");
       try { rawGit(job, "merge-base", "--is-ancestor", receipt.expectedHead, await trustedHead(job)); }
       catch { throw Error("Event prerequisite report no longer descends from its pinned Story source."); }
-      return output(job, receipt);
+      if (input.reroute) {
+        const routed = routeEventPrerequisite({
+          milestone: input.milestone, activeStage: "event",
+          expectedHead: receipt.expectedHead, verifiedHead: receipt.expectedHead,
+          reportDigest: receipt.prerequisite.reportDigest,
+          conflicts: receipt.conflicts, obligations: receipt.obligations,
+          alreadyRerouted: false,
+        });
+        if (receipt.reroutedFrom || input.reroute.reportDigest !== receipt.prerequisite.reportDigest ||
+            input.reroute.sourceSha !== receipt.expectedHead ||
+            await trustedHead(job) !== receipt.expectedHead ||
+            routed.kind !== "event-setup" || input.reroute.task !== routed.task)
+          throw Error("Stale, unauthorized or repeated Event setup reassignment; controller approval is required.");
+        // Preserve the complete authenticated original, including the settled
+        // session digest and no-write decision, before any new writer can start.
+        const history = join(root, "event-prerequisite-history",
+          input.milestone.slice(10) + "-" + receipt.prerequisite.reportDigest + ".json");
+        await mkdir(join(root, "event-prerequisite-history"), { recursive: true });
+        if (existsSync(history)) {
+          if (await readFile(history, "utf8") !== JSON.stringify(receipt, null, 2) + "\n")
+            throw Error("Conflicting Event prerequisite archive; reconcile manually.");
+        } else await persist(history, receipt);
+        receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
+          workItemId, milestoneId: input.milestone, planVersion: arch.plan.version,
+          planDigest, expectedHead: receipt.expectedHead, phase: "ready",
+          worker: receipt.worker, provider: receipt.provider, model: receipt.model,
+          snapshot: receipt.snapshot, reroutedFrom: input.reroute.reportDigest,
+          reroutedTask: input.reroute.task };
+        await persist(receiptFile, receipt);
+      } else return output(job, receipt);
     }
     if (receipt.phase === "committed") {
       if (!receipt.commitSha) throw new Error("Committed Event work item lacks a commit.");
@@ -648,7 +730,8 @@ export async function runEventWorkItem(input: EventOptions) {
         const prior = resuming ? null : reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
         const assign = resuming ? receipt.assignment! : {
           ...selectedAssignment(job, arch.plan!, prior!, receipt.milestoneId, receipt.workItemId),
-          ...(input.task ? { authorTask: input.task } : {}),
+          ...(receipt.reroutedTask ? { authorTask: receipt.reroutedTask } :
+            input.task ? { authorTask: input.task } : {}),
         };
         await preflightPiAssignment(job, "event:" + receipt.workItemId,
           receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model } : undefined);
@@ -693,7 +776,7 @@ export async function runEventWorkItem(input: EventOptions) {
           };
           let evidence: EventEvidence;
           if (receipt.worker === "fixture") {
-            evidence = await fixtureAuthor(job, assign);
+            evidence = await fixtureAuthor(job, assign, !!receipt.reroutedFrom);
             if (["failed-repair", "repair"].includes(process.env.NT_EVENT_FIXTURE_CASE ?? "")) {
               // Exercise the same bounded, source-located feedback seam as Pi:
               // one fixture corrects the contradiction; another refuses.
@@ -713,7 +796,7 @@ export async function runEventWorkItem(input: EventOptions) {
           } else {
             evidence = await authorEventCluster(job, receipt.snapshot!, assign, receipt.provider, receipt.model,
               async file => { receipt.sessionFile = file; await persist(receiptFile, receipt); }, verifyDraft,
-              choice ?? undefined);
+              choice ?? undefined, receipt.reroutedFrom);
           }
           if (evidence.authorQuestion) {
             await changedPaths(job, assign, evidence.claimedPaths, true);

@@ -593,6 +593,82 @@ test("clean Event no-write prerequisite is blocked for typed plan approval witho
   assert.equal(resumed.inventory.version, first.inventory.version);
 });
 
+test("clean no-write Event report authorizes one new bounded Event setup without changing Choice grants", { skip: !available }, () => {
+  const f = setup("event-prerequisite-reassign");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-once" });
+  const result = f.cli(f.start);
+  const event = result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure");
+  assert.equal(event.status, "verified", JSON.stringify(event));
+  const receiptPath = join(f.job.stateDir, "event-items/disclosure.json");
+  const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+  assert.equal(receipt.phase, "committed");
+  assert.equal(receipt.reroutedFrom?.length, 64);
+  assert.equal(receipt.reroutedTask?.includes("Do not bind Choice outcomes"), true);
+  const archive = join(f.job.stateDir, "event-prerequisite-history",
+    "disclosure-" + receipt.reroutedFrom + ".json");
+  const original = JSON.parse(readFileSync(archive, "utf8"));
+  assert.equal(original.phase, "prerequisite-reported");
+  assert.equal(original.prerequisite.reportDigest, receipt.reroutedFrom);
+  assert.deepEqual(original.claimedPaths, []);
+  assert.equal(original.expectedHead, receipt.expectedHead);
+  assert.equal(result.inventory.items.find((i: any) => i.id === "interactive:milestone.disclosure")?.status,
+    "verified", "Authorized downstream Choice work resumes only after a real Event commit");
+  const before = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  f.cli(["generate", "resume"]);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
+  assert.equal(readFileSync(receiptPath, "utf8"), JSON.stringify(receipt, null, 2) + "\n",
+    "A restart cannot repeat the original no-write report or Event writer");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial,
+    "The source author's checkout stays unmodified");
+});
+
+test("rerouted Event task and original receipt remain immutable across recovery", { skip: !available }, () => {
+  const f = setup("event-prerequisite-immutable");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-once" });
+  const first = f.cli(f.start);
+  assert.equal(first.inventory.items.find((i: any) => i.id === "event:milestone.disclosure")?.status,
+    "verified");
+  const file = join(f.job.stateDir, "event-items/disclosure.json");
+  const saved = readFileSync(file, "utf8");
+  const current = JSON.parse(saved);
+  const eventArgs = ["event", "run", "--fixture", "--milestone", "milestone.disclosure",
+    "--skills-source", source];
+  writeFileSync(file, JSON.stringify({ ...current, reroutedTask: "Change all protected records." }));
+  assert.match(f.cli(eventArgs, false), /task changed/);
+  writeFileSync(file, saved);
+  const history = join(f.job.stateDir, "event-prerequisite-history",
+    "disclosure-" + current.reroutedFrom + ".json");
+  const original = readFileSync(history, "utf8");
+  const tampered = JSON.parse(original);
+  tampered.conflicts = ["Different report"];
+  writeFileSync(history, JSON.stringify(tampered));
+  assert.match(f.cli(eventArgs, false), /predecessor receipt is tampered/);
+  writeFileSync(history, original);
+  const recovered = f.cli(eventArgs);
+  assert.equal(recovered.status, "event-cluster-committed");
+});
+
+test("second no-write report and protected prerequisite remain honestly blocked", { skip: !available }, () => {
+  for (const variant of ["no-write-prerequisite", "no-write-protected"]) {
+    const f = setup("event-prerequisite-" + variant);
+    Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: variant });
+    const first = f.cli(f.start);
+    assert.equal(first.status, "blocked");
+    const receiptPath = join(f.job.stateDir, "event-items/disclosure.json");
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+    assert.equal(receipt.phase, "prerequisite-reported");
+    assert.equal(Boolean(receipt.reroutedFrom), variant === "no-write-prerequisite");
+    assert.equal(first.inventory.items.find((i: any) => i.id === "interactive:milestone.disclosure")?.status,
+      "blocked");
+    const before = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const resumed = f.cli(["generate", "resume"]);
+    assert.equal(resumed.status, "blocked");
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+    assert.equal(readFileSync(receiptPath, "utf8"), JSON.stringify(receipt, null, 2) + "\n");
+  }
+});
+
 test("a clean local cluster block does not stop independent work or spin on resume", { skip: !available }, () => {
   const f = setup("local-block", story => plannedCluster(story, "z-optional", "aaa-optional"));
   Object.assign(f.env, { NT_FOUNDATIONS_FIXTURE_CASE: "one-arc-only" });

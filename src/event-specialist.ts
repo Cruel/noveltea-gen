@@ -133,7 +133,7 @@ export async function authorEventCluster(
   job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
   provider: string, modelId: string, onSession: (file: string) => Promise<void>,
   verifyDraft: (evidence: EventEvidence) => Promise<string[]>,
-  resume?: SpecialistChoiceReceipt,
+  resume?: SpecialistChoiceReceipt, reroutedFrom?: string,
 ): Promise<EventEvidence> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -148,10 +148,13 @@ export async function authorEventCluster(
     }
   }
   const runtime = await createJobModelRuntime();
-  const sessionDir = join(job.stateDir, "event-sessions", assignment.workItemId);
+  const sessionDir = join(job.stateDir, "event-sessions", assignment.workItemId,
+    ...(reroutedFrom ? ["rerouted-" + reroutedFrom] : []));
   const context = await preparePiContext(job, project, {
-    group: piNarrativeGroup("event", assignment.sourcePaths, assignment.milestoneId),
-    step: "event:" + assignment.workItemId,
+    // A fresh bounded reassignment must not fork the no-write author's settled Pi session.
+    group: piNarrativeGroup("event", assignment.sourcePaths, assignment.milestoneId) +
+      (reroutedFrom ? ":rerouted-" + reroutedFrom : ""),
+    step: "event:" + assignment.workItemId + (reroutedFrom ? ":rerouted-" + reroutedFrom : ""),
     paths: assignment.sourcePaths, snapshot: snapshot.id,
     task: { kind: "event", ids: [assignment.milestoneId], scope: "related" },
     provider, model: modelId, directory: sessionDir,

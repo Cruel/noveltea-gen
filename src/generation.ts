@@ -14,6 +14,7 @@ import { runFoundationJob } from "./foundation.js";
 import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob } from "./character-world.js";
 import { runEventWorkItem } from "./event-work.js";
+import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { runInteractiveWorkItem } from "./interactive-work.js";
 import { runCompositionWorkItem } from "./composition-work.js";
 import { runNarrativeReview } from "./narrative-review.js";
@@ -802,23 +803,41 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
       // including a commit published before its receipt; never invent a new writer.
       if (s.result) return {};
       try {
-        const result = await dispatch(s);
+        let result = await dispatch(s);
         if (result.status === "event-prerequisite-reported") {
-          const evidence = result as typeof result & {
+          let evidence = result as typeof result & {
             prerequisite?: { reportDigest: string; expectedHead: string };
-            conflicts?: string[]; obligations?: string[];
+            conflicts?: string[]; obligations?: string[]; reroutedFrom?: string;
           };
           if (!evidence.prerequisite || !/^[a-f0-9]{64}$/.test(evidence.prerequisite.reportDigest))
             throw Error("A no-write Event dependency report lacks a sealed source receipt.");
-          // A model's unsupported dependency claim is evidence to the typed
-          // plan/approval boundary, never an executable write grant. The
-          // interactive unit depends on this Event, so automatically reversing
-          // that edge would introduce a cycle rather than resolve the request.
+          const job = await openJob(s);
+          const route = routeEventPrerequisite({
+            milestone: s.active!.milestone!, activeStage: s.active!.stage,
+            expectedHead: evidence.prerequisite.expectedHead,
+            verifiedHead: await trustedHead(job), reportDigest: evidence.prerequisite.reportDigest,
+            conflicts: evidence.conflicts ?? [], obligations: evidence.obligations ?? [],
+            alreadyRerouted: !!evidence.reroutedFrom,
+          });
+          if (route.kind === "event-setup") {
+            // Same authorized Event assignment, one new task and a fresh
+            // settled Pi session. The original source receipt is archived;
+            // no Choice/ending grant or dependency inversion is introduced.
+            result = await runEventWorkItem({ ...s.request, action: "run",
+              milestone: s.active!.milestone!, task: route.task,
+              reroute: { reportDigest: route.reportDigest,
+                sourceSha: evidence.prerequisite.expectedHead, task: route.task } });
+            if (result.status !== "event-prerequisite-reported") return { result };
+            evidence = result as typeof evidence;
+          }
           const failure = "Clean no-write Event prerequisite report " +
-            evidence.prerequisite.reportDigest + " at " + evidence.prerequisite.expectedHead +
+            evidence.prerequisite!.reportDigest + " at " + evidence.prerequisite!.expectedHead +
             ": " + [...evidence.conflicts ?? [], ...evidence.obligations ?? []].join("; ") +
-            ". No authorized executable reordering was verified; obtain a controller-approved " +
-            "bounded architecture/work-plan revision. Original Pi writer is not replayable.";
+            ". " + (route.kind === "event-setup"
+              ? "An independently bounded Event-setup reassignment also reported no edits; "
+              : route.reason + " ") +
+            "The original settled session is preserved; no unauthorized Choice or upstream work " +
+            "was dispatched. Obtain a controller-approved bounded architecture/work-plan revision.";
           return { failures: { ...s.failures, [s.active!.id]: failure }, active: null, result: null };
         }
         return { result };
