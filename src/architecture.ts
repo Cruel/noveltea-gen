@@ -18,6 +18,7 @@ import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { validateFocusedCreationGrants } from "./creation-grants.js";
+import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 
 /** Exact additions to a focused Turn, never a general record-type write grant. */
 export interface PlannedFocusCreate {
@@ -239,7 +240,7 @@ async function changedPaths(job: JobStartResult) {
     if (!["??", " M"].includes(entry.slice(0, 2))) throw new Error("Unexpected staged/deleted/renamed changes; architecture commit refused.");
     const path = entry.slice(3);
     const local = job.storyRelativePath ? path.slice(job.storyRelativePath.length + 1) : path;
-    if (repoPath(job, local) !== path || !/^(arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(local)) {
+    if (repoPath(job, local) !== path || !authorizedArchitectureRecordPath(local)) {
       throw new Error("Architecture changed an unauthorized path: " + path);
     }
     const full = join(job.worktreeStoryRoot, local);
@@ -284,7 +285,7 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
     }
     if (state.phase === "authored") {
       const paths = state.paths;
-      if (!paths?.length || paths.some(p => !/^(arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(p)) ||
+      if (!paths?.length || paths.some(p => !authorizedArchitectureRecordPath(p)) ||
           !state.contentDigest || !/^[a-f0-9]{64}$/.test(state.contentDigest)) {
         return blocked("Authored work-item inventory is missing or corrupt; inspect the Story before recovery.");
       }

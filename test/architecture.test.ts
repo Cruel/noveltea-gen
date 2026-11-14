@@ -10,6 +10,7 @@ import { authorApproval } from "./approval-controller.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { architectureMilestoneOrder, unapprovedArchitectureDecisionIds } from "../src/architecture-specialist.js";
 import { verifiedArchitectureMilestoneOrder } from "../src/architecture.js";
+import { authorizedArchitectureRecordPath } from "../src/architecture-record-path.js";
 
 test("Architecture's sealed causal order names exactly its canonical Milestones", () => {
   const ids = ["milestone.discovery", "milestone.evidence", "milestone.resolution"];
@@ -24,6 +25,22 @@ test("Architecture's sealed causal order names exactly its canonical Milestones"
   assert.throws(() => verifiedArchitectureMilestoneOrder(ids.slice(0, 2), ids), /canonical scope/);
   assert.throws(() => verifiedArchitectureMilestoneOrder([...ids.slice(0, 2), "milestone.unknown"], ids),
     /canonical scope/);
+});
+
+test("Architecture accepts native-valid dot-separated filenames without deriving typed IDs from filenames", () => {
+  for (const path of [
+    "arcs/last-passenger.md", "arcs/arc.last-passenger.md",
+    "milestones/disappearance-established.md",
+    "milestones/milestone.disappearance-established.md",
+    "milestones/safe.part.one.md",
+  ]) assert.equal(authorizedArchitectureRecordPath(path), true, path);
+  for (const path of [
+    "characters/character.ada.md", "creative-direction/foundation.md",
+    "arcs/.private.md", "arcs/arc..bad.md", "arcs/arc.foo/bar.md",
+    "arcs/../characters/ada.md", "milestones/../secrets.md",
+    "milestones/milestone..md", "milestones/x.json",
+    "milestones/Some Item.md", "/arcs/arc.safe.md",
+  ]) assert.equal(authorizedArchitectureRecordPath(path), false, path);
 });
 
 test("Architecture cannot invent author-protected decisions during initial authoring or a correction", () => {

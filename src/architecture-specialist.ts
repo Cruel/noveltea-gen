@@ -15,6 +15,7 @@ import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
+import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { boundedPinnedSources, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 
@@ -183,14 +184,14 @@ export async function authorArchitecture(
     }
     const authored = calls.some(c => completed.has(c.id) && ["write", "edit"].includes(c.name) &&
       typeof c.arguments?.path === "string" &&
-      /^(arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(
-        resolve(project.root, c.arguments.path as string).slice(project.root.length + 1).split(sep).join("/"),
+      authorizedArchitectureRecordPath(
+        relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"),
       ));
     if (!authored) throw new Error("Architecture specialist did not author canonical Arc/Milestone Markdown.");
     const authoredPaths = [...new Set(calls.filter(c => completed.has(c.id) &&
       ["write", "edit"].includes(c.name) && typeof c.arguments?.path === "string")
       .map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"))
-      .filter(p => /^(?:arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(p)))];
+      .filter(authorizedArchitectureRecordPath))];
     const authorityErrors = async () => {
       const result: string[] = [];
       for (const path of authoredPaths) {
