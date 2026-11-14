@@ -23,6 +23,14 @@ export interface EventMilestoneRepairGrant {
   id: string;
   path: string;
 }
+/** Separate Character writer has committed and passed review. The Event
+ * correction may append only this approved Character to this exact Event. */
+export interface EventCharacterRepairGrant {
+  id: string;
+  path: string;
+  supportingCommitSha: string;
+  failedSourceSha: string;
+}
 export interface ReviewRepairPlanAmendment {
   version: 1;
   kind: "review-correction";
@@ -37,6 +45,7 @@ export interface ReviewRepairPlanAmendment {
   obligations: ReviewRepairObligation[];
   readOnlyDependencies: string[];
   eventMilestone?: EventMilestoneRepairGrant;
+  eventCharacter?: EventCharacterRepairGrant;
   /** A new bounded corrective work item, owned by the original specialist. */
   assignment: TurnAssignmentEvidence;
   /** Exact immutable digest checked against the sealed review on every restart. */
@@ -87,7 +96,9 @@ export function reviewNeedsDependency(
     (f.kind === "missing-requirement" &&
       /\b(?:create|add|introduce|new)\b/i.test(f.requiredCorrection ?? "") &&
       /\bcharacter\b/i.test(f.requiredCorrection ?? "") &&
-      /\b(?:record|profile)\b/i.test(f.requiredCorrection ?? "")));
+      /\b(?:record|profile)\b/i.test(f.requiredCorrection ?? "") &&
+      !/\b(?:existing|already authored|already present)\b.{0,90}\bcharacter\b/i.test(
+        f.requiredCorrection ?? "")));
 }
 
 export function deriveReviewDependencyRequest(input: {
@@ -135,10 +146,16 @@ export function deriveReviewDependencyRequest(input: {
   const missingCharacter = findings.some(f => f.kind === "missing-requirement" &&
     /\bcharacter\b/i.test(f.defect + " " + f.requiredCorrection) &&
     /\b(?:missing|create|new|profile|record)\b/i.test(f.defect + " " + f.requiredCorrection));
+  const foundationsCharacter = input.originWorkItem === "character-foundations" &&
+    original.authority.mayCreate && original.authority.recordTypes.includes("character");
+  const eventCharacter = original.id === "event" && original.specialist === "nt-event-design" &&
+    original.authority.recordTypes.includes("event") &&
+    /^event-[a-z][a-z0-9-]*$/.test(input.originWorkItem) &&
+    findings.length === 1 && /^events\/[a-z][a-z0-9-]*\.md$/.test(findings[0]!.path) &&
+    findings[0]!.affectedPaths.every(p => p === findings[0]!.path);
   const newFullStoryRecord = turn.kind === "full-story" &&
-    turn.objective.breadth === "whole-story" && original.authority.mayCreate &&
-    original.authority.recordTypes.includes("character") &&
-    input.originWorkItem === "character-foundations" && missingCharacter;
+    turn.objective.breadth === "whole-story" && missingCharacter &&
+    (foundationsCharacter || eventCharacter);
   // A reviewer cannot authorize changing a protected or author-owned record.
   // Even a genuine Event/Milestone correction needs its own exact field grant.
   const protectedSource = findings.some(f =>
@@ -189,6 +206,7 @@ export function deriveReviewRepairAmendment(input: {
   planVersion: number;
   originWorkItem: string;
   eventMilestone?: EventMilestoneRepairGrant;
+  eventCharacter?: EventCharacterRepairGrant;
 }): ReviewRepairPlanAmendment {
   const { assurance, review, original, originWorkItem } = input;
   const source = { jobId: assurance.jobId, commitSha: assurance.commitSha,
@@ -207,7 +225,19 @@ export function deriveReviewRepairAmendment(input: {
       (original.targets.length > 0 && !original.targets.includes(eventMilestone.id)) ||
       !assurance.changedPaths.includes(eventMilestone.path)))
     throw Error("Event Milestone repair lacks its original selected field grant.");
-  const paths = reviewRepairTargets(assurance.changedPaths, originWorkItem, eventMilestone);
+  const eventCharacter = input.eventCharacter;
+  if (eventCharacter && (original.id !== "event" ||
+      original.specialist !== "nt-event-design" ||
+      !/^event-[a-z][a-z0-9-]*$/.test(originWorkItem) ||
+      !/^events\/[a-z][a-z0-9-]*\.md$/.test(eventCharacter.path) ||
+      !/^character\.[a-z][a-z0-9-]*$/.test(eventCharacter.id) ||
+      !/^[a-f0-9]{40}$/.test(eventCharacter.supportingCommitSha) ||
+      !/^[a-f0-9]{40}$/.test(eventCharacter.failedSourceSha) ||
+      !assurance.changedPaths.includes(eventCharacter.path) ||
+      review.findings.some(f => f.path !== eventCharacter.path)))
+    throw Error("Event Character correction is not limited to its original owned Event.");
+  const paths = eventCharacter ? [eventCharacter.path] :
+    reviewRepairTargets(assurance.changedPaths, originWorkItem, eventMilestone);
   const owned = new Set([...original.authority.existingPaths, ...original.authority.newPaths ?? []]);
   if (review.status !== "failed" || !review.findings.length ||
       JSON.stringify(source) !== JSON.stringify(review.source) ||
@@ -259,6 +289,7 @@ export function deriveReviewRepairAmendment(input: {
     turnDigest: assurance.turnDigest, basePlanVersion: input.planVersion,
     amendmentVersion: 1 as const, originalAssignmentId: original.id,
     originalAssignmentDigest: hash(original), obligations,
-    readOnlyDependencies, ...(eventMilestone ? { eventMilestone } : {}), assignment };
+    readOnlyDependencies, ...(eventMilestone ? { eventMilestone } : {}),
+    ...(eventCharacter ? { eventCharacter } : {}), assignment };
   return { ...body, digest: hash(body) };
 }

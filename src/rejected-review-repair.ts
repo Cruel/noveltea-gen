@@ -1,6 +1,7 @@
 import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
 import { readEventMilestoneRepairGrant } from "./event-milestone-repair.js";
 import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
+import { auditEventParticipantCorrection } from "./event-participant-correction.js";
 import { CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
 import { PUZZLE_GOAL_REPAIR } from "./puzzle-goal-fidelity.js";
 import { eventConsequenceProofDigest,
@@ -39,7 +40,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
-import { recordReviewDependency } from "./dependency-state.js";
+import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -254,9 +255,13 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
     : previous?.planAmendment.eventMilestone &&
         point.assurance!.changedPaths.includes(previous.planAmendment.eventMilestone.path)
       ? previous.planAmendment.eventMilestone : undefined;
-  // A reviewer cannot grant a new record, owner, Arc, or Milestone field.
-  // This exception is the already selected, signed Event grant, nothing more.
-  if (reviewNeedsDependency(point.assurance!, failure, originWorkItem, eventMilestone)) {
+  // The original Event owner can correct its Event only after a separate
+  // Character specialist has committed and passed independent source review.
+  const eventCharacter = originWorkItem.startsWith("event-")
+    ? await inspectReviewEventSupport(job, previous?.rootFailureSha ?? point.commitSha)
+    : null;
+  if (reviewNeedsDependency(point.assurance!, failure, originWorkItem, eventMilestone) &&
+      !eventCharacter) {
     const request = deriveReviewDependencyRequest({
       assurance: point.assurance!, review: failure, original: assignment,
       turn: plan!, planVersion: point.planVersion ?? plan!.version,
@@ -269,7 +274,8 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   const origin = await readRejectedRepairOrigin(job, point);
   const planAmendment = deriveReviewRepairAmendment({ assurance: point.assurance!,
     review: failure, original: assignment, planVersion: point.planVersion ?? plan!.version,
-    originWorkItem: origin.workItem, eventMilestone });
+    originWorkItem: origin.workItem,
+    ...(eventCharacter ? { eventCharacter } : { eventMilestone }) });
   const root = previous?.rootFailureSha ?? point.commitSha;
   const rootReview = previous?.originalReviewDigest ?? sourceOf(failure);
   const rootSource = previous?.originalSource ?? failure.source;
@@ -337,10 +343,14 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
     : previous?.planAmendment.eventMilestone &&
         current.assurance!.changedPaths.includes(previous.planAmendment.eventMilestone.path)
       ? previous.planAmendment.eventMilestone : undefined;
+  const eventCharacter = origin.workItem.startsWith("event-")
+    ? await inspectReviewEventSupport(job, previous?.rootFailureSha ?? sha)
+    : null;
   const expectedAmendment = deriveReviewRepairAmendment({ assurance: current.assurance!,
     review: sealed, original: state.assignment,
     planVersion: current.planVersion ?? turn.version,
-    originWorkItem: origin.workItem, eventMilestone });
+    originWorkItem: origin.workItem,
+    ...(eventCharacter ? { eventCharacter } : { eventMilestone }) });
   if (JSON.stringify(state.origin) !== JSON.stringify(origin) ||
       JSON.stringify(state.findings) !== JSON.stringify(sealed.findings) ||
       JSON.stringify(state.planAmendment) !== JSON.stringify(expectedAmendment) ||
@@ -465,6 +475,18 @@ export function changedRepairPaths(job: JobStartResult, state: RepairReceipt) {
       path.startsWith("arcs/") || path.startsWith("narrative-positions/") ||
       path.startsWith("milestones/") && path !== milestonePath))
     throw Error("Review feedback never authorizes unrelated or protected Story changes.");
+  const eventCharacter = state.planAmendment?.eventCharacter;
+  if (eventCharacter) {
+    if (paths.length !== 1 || paths[0] !== eventCharacter.path)
+      throw Error("Event Character correction may modify only the cited, owned Event.");
+    const target = join(job.worktreeStoryRoot, eventCharacter.path);
+    if (realpathSync(target) !== target || !lstatSync(target).isFile())
+      throw Error("Unsafe or symlinked Event correction path.");
+    auditEventParticipantCorrection(
+      gitRaw(job, "show", state.baselineHead + ":" + repoPath(job, eventCharacter.path)),
+      readFileSync(target, "utf8"), eventCharacter.id,
+      state.sourceCommitSha !== eventCharacter.failedSourceSha);
+  }
   if (milestonePath && paths.includes(milestonePath)) {
     const target = join(job.worktreeStoryRoot, milestonePath);
     if (realpathSync(target) !== target || !lstatSync(target).isFile())
@@ -918,6 +940,15 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       "the causal gap within your original authorized file where possible: " +
       "for example, present concrete playable observations before asking the " +
       "player to compare them in that Event instead of inventing new file paths. " +
+      (state.planAmendment.eventCharacter
+        ? "EVENT CHARACTER DEPENDENCY: A separate verified Character specialist has already " +
+          "created Character " + state.planAmendment.eventCharacter.id + ". " +
+          "The ONLY permitted Event YAML change is appending that exact ID to the " +
+          "participants array of " + state.planAmendment.eventCharacter.path +
+          "; preserve every other frontmatter byte, prerequisite, decision, route, step " +
+          "and effect. Correct the canonical Event prose to accurately introduce " +
+          "this named speaker without inventing off-page history. Do not edit the " +
+          "Character profile, Arc, Milestone or any other Event. " : "") +
       "For Event corrections, compare the cited effect slot and narrative claim: " +
       "a prose-only rewrite cannot resolve a remaining typed mismatch. " +
       "If truthful state cannot fit the original slots, report the later Choice " +

@@ -68,20 +68,28 @@ export function authorizeReviewCharacterDependency(input: {
 }): DependencyAmendment {
   const { plan, head, request, proposal, records } = input;
   const owner = plan.assignments.find(a => a.id === request.originalAssignmentId);
+  const foundation = request.originalWorkItem === "character-foundations";
+  const event = /^event-[a-z][a-z0-9-]*$/.test(request.originalWorkItem);
   const citedArcs = request.findings.filter(f => /^arcs\/[a-z][a-z0-9-]*\.md$/.test(f.path));
-  const [cited] = citedArcs;
-  const arc = records.find(r => r.path === cited?.path);
+  const [cited] = request.findings;
+  const supportingRecord = records.find(r => r.path === cited?.path);
+  const arc = foundation ? supportingRecord : undefined;
   const proposedPath = typeof proposal?.target === "string" &&
     /^character\.[a-z][a-z0-9-]*$/.test(proposal.target)
     ? "characters/" + proposal.target.slice("character.".length) + ".md" : "";
-  const priorOwners = [...(input.priorAmendments ?? [])];
+  const priorOwners = [...plan.assignments.filter(a => a.id !== owner?.id),
+    ...(input.priorAmendments ?? [])];
   if (request.kind !== "review-dependency" ||
       request.classification !== "new-full-story-record" ||
       request.action !== "controller-amendment-required" ||
       plan.kind !== "full-story" || plan.objective?.breadth !== "whole-story" ||
-      !owner || owner.specialist !== "nt-worldbuilding + nt-character-development" ||
-      !owner.authority.mayCreate || !owner.authority.recordTypes.includes("character") ||
-      request.originalWorkItem !== "character-foundations" ||
+      !owner || !(foundation
+        ? owner.specialist === "nt-worldbuilding + nt-character-development" &&
+          owner.authority.mayCreate && owner.authority.recordTypes.includes("character")
+        : event && owner.id === "event" && owner.specialist === "nt-event-design" &&
+          owner.authority.recordTypes.includes("event") &&
+          plan.assignments.some(a => a.specialist === "nt-worldbuilding + nt-character-development" &&
+            a.authority.recordTypes.includes("character") && a.authority.mayCreate)) ||
       request.sourceSha !== head || plan.digest !== request.turnDigest ||
       sourceHash(plan.objective) !== request.objectiveDigest ||
       sourceHash(plan.contract.scope) !== request.scopeDigest ||
@@ -93,23 +101,36 @@ export function authorizeReviewCharacterDependency(input: {
       proposal.sourceSha !== head || proposal.reportDigest !== input.reportDigest ||
       !/^[a-f0-9]{64}$/.test(input.reportDigest) ||
       proposal.specialist !== "nt-character-development" ||
-      !proposedPath || !cited || citedArcs.length !== 1 ||
+      !proposedPath || !cited || request.findings.length !== 1 ||
       proposal.outcome !== cited.requiredCorrection ||
-      !arc || arc.metadata.type !== "arc" ||
-      arc.metadata.status === "superseded" ||
-      !/^arc\.[a-z][a-z0-9-]*$/.test(arc.metadata.id) ||
-      !Array.isArray(arc.metadata.characters) ||
-      !arc.metadata.characters.every(id => typeof id === "string" && /^character\.[a-z][a-z0-9-]*$/.test(id)) ||
+      !supportingRecord || supportingRecord.metadata.status === "superseded" ||
+      !(foundation
+        ? citedArcs.length === 1 && arc?.metadata.type === "arc" &&
+          /^arc\.[a-z][a-z0-9-]*$/.test(arc.metadata.id) &&
+          Array.isArray(arc.metadata.characters) &&
+          arc.metadata.characters.every(id => typeof id === "string" &&
+            /^character\.[a-z][a-z0-9-]*$/.test(id))
+        : event && /^events\/[a-z][a-z0-9-]*\.md$/.test(cited.path) &&
+          supportingRecord.metadata.type === "event" &&
+          /^event\.[a-z][a-z0-9-]*$/.test(supportingRecord.metadata.id) &&
+          Array.isArray(supportingRecord.metadata.participants) &&
+          supportingRecord.metadata.participants.every(id => typeof id === "string" &&
+            /^character\.[a-z][a-z0-9-]*$/.test(id)) &&
+          new Set(supportingRecord.metadata.participants).size ===
+            supportingRecord.metadata.participants.length &&
+          cited.affectedPaths.length === 1 && cited.affectedPaths[0] === cited.path) ||
       records.some(r => r.path === proposedPath || r.metadata.id === proposal.target) ||
-      priorOwners.some(a => a.authority.existingPaths.some(p =>
-        p === proposedPath || p === arc.path) ||
-        a.authority.newPaths?.some(p => p === proposedPath || p === arc.path) ||
+      priorOwners.some(a => a.authority.existingPaths.includes(proposedPath) ||
+        a.authority.newPaths?.includes(proposedPath) ||
+        (foundation && a.authority.existingPaths.includes(arc!.path)) ||
         a.targets.includes(proposal.target)) ||
       !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
     throw Error("Review dependency lacks exact approved full-Story creation, Arc source, owner or plan authorization.");
-  // The Character may be off-screen; the reviewer-proposed name and title are
-  // not allowed to rewrite existing Character histories or Arc creative prose.
-  // Allow one new Character path, and one existing Arc's link-only field.
+  // A Character prerequisite discovered in an Event review needs two
+  // distinct writers: the Character specialist creates exactly one record;
+  // the original Event specialist subsequently corrects only the cited
+  // Event's participant list and canonical prose. No Event path is granted
+  // to the supporting Character writer. Foundations retain the Arc-link lease.
   return {
     beforeVersion: input.version, afterVersion: input.version + 1,
     sourceSha: head, turnDigest: plan.digest, reportDigest: input.reportDigest,
@@ -120,7 +141,8 @@ export function authorizeReviewCharacterDependency(input: {
       specialist: "nt-character-development", outcome: proposal.outcome,
       targets: [proposal.target], dependsOn: [], discovery: "canonical-story-read-only",
       authority: {
-        recordTypes: ["arc", "character"], existingPaths: [arc.path],
+        recordTypes: foundation ? ["arc", "character"] : ["character"],
+        existingPaths: foundation ? [arc!.path] : [],
         newPaths: [proposedPath], mayCreate: true,
       },
     },

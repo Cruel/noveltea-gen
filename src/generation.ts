@@ -579,6 +579,11 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
         const progress = await advanceRejectedRepair(job, point.commitSha, {
           skillsSource: s.request.skillsSource, provider: s.request.provider,
           model: s.request.model });
+        if (progress.next === "completed") {
+          const { finalizeReviewEventDependency } = await import("./dependency-state.js");
+          await withStoryJobLock(job, "event-dependency-review-completion", () =>
+            finalizeReviewEventDependency(job, point.commitSha));
+        }
         if (progress.next !== "completed") return {
           status: progress.next === "author-choice" ? "paused" : "blocked",
           reason: progress.next === "author-choice"
@@ -615,8 +620,37 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
             provider: s.request.provider, model: s.request.model,
             turnPlanDigest: request.turnDigest, request,
           });
-          if (progress.status !== "dependency-verified")
-            throw Error("New supporting Character has not passed both independent reviews.");
+          if (progress.status === "dependency-support-verified") {
+            // Event-owned participant/prose correction is a SECOND, bounded
+            // original-specialist operation. The Character assignment gives
+            // it no write authority; the sealed failure remains negative
+            // until the Event repair's new independent checkpoint passes.
+            const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
+            const repair = await advanceRejectedRepair(job, request.sourceSha, {
+              skillsSource: s.request.skillsSource, provider: s.request.provider,
+              model: s.request.model,
+            });
+            if (repair.next === "completed") {
+              const { finalizeReviewEventDependency } = await import("./dependency-state.js");
+              await withStoryJobLock(job, "event-dependency-review-completion", () =>
+                finalizeReviewEventDependency(job, request.sourceSha));
+            } else return {
+              status: repair.next === "author-choice" ? "paused" : "blocked",
+              reason: repair.next === "author-choice"
+                ? "The separate Event correction awaits an authenticated saved Author Choice."
+                : "The original Event failure remains sealed; its bounded Event-owner correction " +
+                  "requires manual reconciliation before Story generation can continue.",
+              escalation: repair.next === "author-choice" ? null : {
+                kind: "dependency-replan", requiresTrustedApproval: false,
+                sources: request.findings.map(f => ({
+                  source: f.path + ":" + f.line, message: f.defect, repair: f.requiredCorrection,
+                })),
+                action: "Inspect the separate Event repair receipt and original Pi session. " +
+                  "Do not replay an interrupted writer or expand its single-Event authority.",
+              },
+            };
+          } else if (progress.status !== "dependency-verified")
+            throw Error("New supporting Character has not completed its mandatory independent reviews.");
           if (s.result?.status === "review-handoff") {
             await assertNativeReviewDependencies(job, "character-foundations");
             return { result: null, escalation: null };
@@ -650,7 +684,10 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
       }
       const requiresTrustedApproval = request.action === "author-approval-required";
       return {
-        status: requiresTrustedApproval ? "paused" : "blocked",
+        // A protected/scope expansion has no authenticated Author Choice to
+        // resume yet. Expose an actionable blocked escalation, never a
+        // misleading paused Thread with no saved question or answer path.
+        status: "blocked",
         reason: error.message,
         escalation: {
           kind: requiresTrustedApproval ? "protected-approval" : "dependency-replan",

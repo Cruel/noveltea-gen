@@ -191,7 +191,8 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
   create?: PlannedFocusCreate, obligations: string[] = [], steering = "",
   resume?: SpecialistChoiceReceipt,
-  arcLink?: { path: string; characterId: string }): Promise<DependencyReport | {
+  arcLink?: { path: string; characterId: string },
+  eventReviewSupport = false): Promise<DependencyReport | {
     authorQuestion: SpecialistChoiceQuestion; sessionFile: string; sessionId: string;
   } | undefined> {
   let dependencyReport: DependencyReport | undefined;
@@ -257,6 +258,12 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       receipt.context.join("\n") + "\nYou may use read, grep, find, ls and story_context to inspect " +
       "additional canonical Story records and discover typed dependencies. Discovery is READ-ONLY, " +
       "never write authority; do not inspect private inboxes.\n" +
+      (eventReviewSupport
+        ? "EVENT REVIEW SUPPORT: Your ONLY deliverable is the new Character profile. " +
+          "The sealed reviewer also requests an Event participant/prose correction, but " +
+          "that belongs to the ORIGINAL Event specialist AFTER independent review of " +
+          "your Character. Do NOT edit the Event or claim to have finished its repair.\n"
+        : "") +
       (create ? "Create ONLY this new canonical Markdown file with schema 0.1, exact type/id/title and typed references:\n" +
         JSON.stringify(create) + "\n" +
         "IMPORTANT: references and dependsOn in this JSON are controller-only dependency grants, NOT canonical YAML keys. " +
@@ -399,17 +406,23 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     if (reviewAuthority) {
       const grant = reviewAuthority.authority;
       const proposal = dependency!.proposal as ReviewCharacterProposal | undefined;
+      const foundation = dependency!.reviewSourceSha &&
+        (await inspectDependencyPlan(job))?.reviewRequests?.some(r =>
+          r.sourceSha === dependency!.reviewSourceSha &&
+          r.originalWorkItem === "character-foundations");
+      const requiredTypes = foundation ? ["arc", "character"] : ["character"];
       if (reviewAuthority.specialist !== "nt-character-development" ||
           !/^character\.[a-z][a-z0-9-]*$/.test(input.target) ||
-          JSON.stringify(grant.recordTypes) !== JSON.stringify(["arc", "character"]) ||
-          grant.existingPaths.length !== 1 || grant.newPaths?.length !== 1 ||
+          JSON.stringify(grant.recordTypes) !== JSON.stringify(requiredTypes) ||
+          grant.existingPaths.length !== (foundation ? 1 : 0) ||
+          grant.newPaths?.length !== 1 ||
           grant.newPaths[0] !== "characters/" + input.target.slice(10) + ".md" ||
-          !grant.existingPaths[0]?.startsWith("arcs/") ||
+          (foundation && !grant.existingPaths[0]?.startsWith("arcs/")) ||
           !proposal?.title || proposal.target !== input.target)
-        throw Error("Review dependency lacks exactly one bounded Character creation and Arc link.");
+        throw Error("Review dependency lacks one authorized Character creation with exact source ownership.");
       reviewCreate = { id: input.target, path: grant.newPaths[0], title: proposal.title,
         references: [], dependsOn: [] };
-      reviewArc = grant.existingPaths[0];
+      reviewArc = foundation ? grant.existingPaths[0] : undefined;
     }
     if (!dependency && !input.contract.scope.targets.includes(input.target))
       throw new Error("Focused target is outside the explicit completion contract.");
@@ -425,20 +438,25 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     // Review amendments deliberately cannot extend the immutable full-Story
     // contract. Their separate grant identifies one new Character plus the Arc
     // already cited by the negative reviewer. No supporting scope is inferred.
-    const selection = reviewCreate && reviewArc ? (() => {
-      const arc = catalog.find(r => r.path === reviewArc && r.metadata.type === "arc" &&
+    const selection = reviewCreate ? (() => {
+      const cited = dependency!.report.sources[0]?.path;
+      const parent = catalog.find(r => r.path === cited &&
+        r.metadata.type === (reviewArc ? "arc" : "event") &&
         r.metadata.status !== "superseded");
-      if (!arc || !Array.isArray(arc.metadata.characters))
-        throw Error("Controller-approved Arc is absent from the native canonical catalog.");
-      const arcCharacters = arc.metadata.characters as string[];
+      if (!parent || reviewArc && (!Array.isArray(parent.metadata.characters) ||
+          parent.path !== reviewArc) ||
+          !reviewArc && !Array.isArray(parent.metadata.participants))
+        throw Error("Controller-approved Character prerequisite source is absent from native canon.");
+      const participants = (reviewArc ? parent.metadata.characters : parent.metadata.participants) as string[];
       const existingCharacters = catalog.filter(r => r.metadata.type === "character" &&
-        arcCharacters.includes(r.metadata.id));
-      const selected: CanonicalScopeRecord[] = [arc, { path: reviewCreate.path,
-        metadata: { id: reviewCreate.id, type: "character", status: "planned" } }];
-      return { selected, context: [arc, ...existingCharacters,
+        participants.includes(r.metadata.id));
+      const selected: CanonicalScopeRecord[] = [...(reviewArc ? [parent] : []),
+        { path: reviewCreate.path,
+          metadata: { id: reviewCreate.id, type: "character", status: "planned" } }];
+      return { selected, context: [parent, ...existingCharacters,
         ...catalog.filter(r => ["fact", "world-entity"].includes(r.metadata.type) &&
           r.metadata.status !== "superseded").slice(0, 24)],
-        allowedPaths: [reviewArc, reviewCreate.path].sort() };
+        allowedPaths: [...(reviewArc ? [reviewArc] : []), reviewCreate.path].sort() };
     })() : resolveFocusedScope(catalog, effectiveContract);
     const create = reviewCreate ?? effectiveContract.scope.creates?.find(item => item.id === input.target);
     const own = selection.selected.find(r => r.metadata.id === input.target);
@@ -589,7 +607,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       const output = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
         turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
         input.steering, answered,
-        reviewArc ? { path: reviewArc, characterId: input.target } : undefined);
+        reviewArc ? { path: reviewArc, characterId: input.target } : undefined,
+        !!reviewCreate && !reviewArc);
       if (output && "authorQuestion" in output) {
         if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
         receipt.piSessionFile = output.sessionFile;

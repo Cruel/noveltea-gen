@@ -7,8 +7,10 @@ import type { JobStartResult } from "./job.js";
 import { persist } from "./ideas.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
-import { inspectCheckpointReview } from "./checkpoint-assurance.js";
-import { deriveReviewDependencyRequest, type ReviewDependencyRequest } from "./review-repair-amendment.js";
+import { inspectCheckpointReview, readRepairCommitProof } from "./checkpoint-assurance.js";
+import { auditEventParticipantCorrection } from "./event-participant-correction.js";
+import { deriveReviewDependencyRequest, type EventCharacterRepairGrant,
+  type ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
@@ -22,6 +24,9 @@ export const dependencyDigest = (value: unknown) => createHash("sha256").update(
 export const sourceDigest = (value: string) => createHash("sha256").update(value).digest("hex");
 export interface DependencyEntry {
   report: DependencyReport; reportDigest: string;
+  /** The separate Event owner's reviewed correction; not part of the Character
+   * specialist's new-record write grant. */
+  eventRepair?: { sourceSha: string; commitSha: string; proofDigest: string };
   phase: "reported" | "planning" | "authorized" | "reviewing" | "verified" | "rejected";
   amendment?: DependencyAmendment; proposal?: DependencyProposal;
   approval?: { authority: "necessary-dependency/v1"; jobId: string; threadId: string;
@@ -130,8 +135,43 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
       throw Error("Dependency work has no authorized plan amendment.");
     if (entry.phase === "verified" && (!entry.commitSha || !entry.review ||
         entry.review.verdict !== "pass" || (!entry.fixture && !entry.reviewerSession) ||
-        entry.reviewSourceSha && (!entry.originalReview || !entry.originalReviewerSession)))
+        entry.reviewSourceSha && !(entry.eventRepair
+          ? /^[a-f0-9]{40}$/.test(entry.eventRepair.sourceSha) &&
+            /^[a-f0-9]{40}$/.test(entry.eventRepair.commitSha) &&
+            /^[a-f0-9]{64}$/.test(entry.eventRepair.proofDigest)
+          : entry.originalReview && entry.originalReviewerSession)))
       throw Error("Dependency completion lacks verified work and independent review receipts.");
+    if (entry.phase === "verified" && entry.eventRepair) {
+      const request = saved.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
+      const correction = entry.eventRepair;
+      const proof = await readRepairCommitProof(job, "repair-" + correction.sourceSha);
+      const first = await readRepairCommitProof(job, "repair-" + request!.sourceSha);
+      const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const point = points.find(p => p.commitSha === correction.commitSha);
+      const sealed = point && await inspectCheckpointReview(job, point);
+      const eventPath = request?.findings[0]?.path;
+      const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+      if (!request?.originalWorkItem.startsWith("event-") ||
+          request.findings.length !== 1 || !eventPath?.startsWith("events/") ||
+          proof.sourceCommitSha !== correction.sourceSha ||
+          proof.rootFailureSha !== request.sourceSha ||
+          !entry.commitSha || first.beforeHead !== entry.commitSha ||
+          (correction.sourceSha !== request.sourceSha &&
+            (first.commitSha !== correction.sourceSha ||
+              proof.beforeHead !== first.commitSha)) ||
+          proof.commitSha !== correction.commitSha || proof.digest !== correction.proofDigest ||
+          !point || sealed?.status !== "passed" ||
+          proof.assignmentId !== request.originalAssignmentId ||
+          !entry.commitSha || proof.beforeHead === request.sourceSha ||
+          dependencyGit(job, "diff", "--name-only", entry.commitSha, correction.commitSha) !==
+            prefix + eventPath)
+        throw Error("Event dependency completion lacks a sealed, separately owned correction and passing review.");
+      dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha, correction.commitSha);
+      auditEventParticipantCorrection(
+        dependencyGit(job, "show", entry.commitSha + ":" + prefix + eventPath),
+        dependencyGit(job, "show", correction.commitSha + ":" + prefix + eventPath),
+        entry.amendment!.assignment.targets[0]!);
+    }
     if (entry.phase === "verified") {
       const a = entry.amendment!;
       const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", a.assignment.id + ".json"), "utf8"));
@@ -193,6 +233,8 @@ export async function recordReviewDependency(job: JobStartResult, request: Revie
       throw Error("Review dependency request changed at the same source SHA.");
     if (head !== request.sourceSha) {
       const entry = plan.entries.find(e => e.reviewSourceSha === request.sourceSha);
+      if (entry?.phase === "verified" && entry.eventRepair?.commitSha === head)
+        return request; // inspectDependencyPlan already attested the final Event repair.
       const proofPath = entry?.amendment && join(job.stateDir, "dependency-items",
         entry.amendment.assignment.id + ".json");
       if (!entry || !entry.amendment || !proofPath || !existsSync(proofPath) ||
@@ -227,17 +269,22 @@ export async function recordReviewDependency(job: JobStartResult, request: Revie
 export async function registerReviewDependency(
   job: JobStartResult, request: ReviewDependencyRequest, validatorSource?: string,
 ) {
+  const foundations = request.originalWorkItem === "character-foundations";
+  const event = /^event-[a-z][a-z0-9-]*$/.test(request.originalWorkItem);
   if (request.classification !== "new-full-story-record" ||
       request.action !== "controller-amendment-required" ||
       request.findings.length !== 1 ||
-      !/^arcs\/[a-z][a-z0-9-]*\.md$/.test(request.findings[0]!.path))
-    throw Error("Review dependency cannot be safely reduced to one scoped Character/Arc assignment.");
+      !(foundations && /^arcs\/[a-z][a-z0-9-]*\.md$/.test(request.findings[0]!.path) ||
+        event && /^events\/[a-z][a-z0-9-]*\.md$/.test(request.findings[0]!.path)))
+    throw Error("Review dependency cannot be safely reduced to one scoped Character prerequisite.");
   const saved = await inspectDependencyPlan(job);
   if (!saved?.reviewRequests?.some(r => JSON.stringify(r) === JSON.stringify(request)))
     throw Error("Review dependency has not been sealed into the shared work plan.");
   const head = await dependencyBoundary(job);
   const prior = saved.entries.find(e => e.reviewSourceSha === request.sourceSha);
   if (prior) {
+    if (prior.phase === "verified" && prior.eventRepair?.commitSha === head)
+      return { plan: saved, entry: prior };
     if (head !== request.sourceSha) {
       const path = prior.amendment && join(job.stateDir, "dependency-items",
         prior.amendment.assignment.id + ".json");
@@ -257,6 +304,30 @@ export async function registerReviewDependency(
   if (!original.objective || original.kind !== "full-story" ||
       original.digest !== request.turnDigest)
     throw Error("Review dependency lost the whole-Story objective.");
+  if (event) {
+    // Reviewer prose cannot convert an invented Event into a genuine
+    // prerequisite. Authenticate the original committed Event writer and
+    // Pi session BEFORE any new Character path is allocated.
+    const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+      p.eligible && p.commitSha === request.sourceSha &&
+      p.workItem === request.originalWorkItem &&
+      p.assurance?.assignmentId === request.originalAssignmentId);
+    if (!point) throw Error("Missing source-bound Event owner checkpoint.");
+    const { readRejectedRepairOrigin } = await import("./rejected-review-repair.js");
+    const origin = await readRejectedRepairOrigin(job, point);
+    const receipt = JSON.parse(await readFile(join(job.stateDir, "event-items",
+      request.originalWorkItem.slice("event-".length) + ".json"), "utf8")) as {
+      milestoneId?: string; workItemId?: string; commitSha?: string;
+      phase?: string; worker?: string; paths?: string[];
+    };
+    if (origin.workItem !== request.originalWorkItem ||
+        receipt.workItemId !== request.originalWorkItem ||
+        receipt.milestoneId !== "milestone." + request.originalWorkItem.slice("event-".length) ||
+        receipt.commitSha !== request.sourceSha ||
+        receipt.phase !== "committed" || receipt.worker !== "pi" ||
+        !receipt.paths?.includes(request.findings[0]!.path))
+      throw Error("Event Character dependency lacks the original signed Event writer and exact owned source.");
+  }
   const validation = await validateStoryJob(job, validatorSource, { ...job, baseSha: head });
   const report = validation.report as { records?: CanonicalScopeRecord[]; diagnostics?: unknown[];
     protection?: { status?: string; base?: string; changes?: unknown[]; warnings?: unknown[] } } | undefined;
@@ -265,22 +336,28 @@ export async function registerReviewDependency(
       report.protection.changes?.length || report.protection.warnings?.length)
     throw Error("Review dependency requires a clean native-verifiable canonical source.");
   const finding = request.findings[0]!;
-  const arc = report.records.find(r => r.path === finding.path && r.metadata.type === "arc" &&
+  const sourceRecord = report.records.find(r => r.path === finding.path &&
+    r.metadata.type === (foundations ? "arc" : "event") &&
     r.metadata.status !== "superseded");
-  if (!arc || !/^arc\.[a-z][a-z0-9-]*$/.test(arc.metadata.id))
-    throw Error("Review dependency's cited Arc lacks verified canonical type/ID.");
+  if (!sourceRecord ||
+      !(foundations ? /^arc\.[a-z][a-z0-9-]*$/.test(sourceRecord.metadata.id) :
+        /^event\.[a-z][a-z0-9-]*$/.test(sourceRecord.metadata.id) &&
+        Array.isArray(sourceRecord.metadata.participants) &&
+        new Set(sourceRecord.metadata.participants).size ===
+          sourceRecord.metadata.participants.length))
+    throw Error("Review dependency cited source lacks verified canonical type, participants or ID.");
   const file = join(job.worktreeStoryRoot, finding.path);
   if (await realpath(file) !== file)
-    throw Error("Review dependency Arc is symlinked.");
+    throw Error("Review dependency source is symlinked.");
   const content = await readFile(file, "utf8");
   const line = content.split(/\r?\n/)[finding.line - 1];
-  if (!line?.trim()) throw Error("Review dependency lost its exact cited Arc source line.");
+  if (!line?.trim()) throw Error("Review dependency lost its exact cited source line.");
   const obligation = original.objective.obligations.find(x => /\bcharacters\b/i.test(x));
   if (!obligation) throw Error("Original approved Turn has no Character delivery obligation.");
   const reportValue: DependencyReport = {
     sourceSha: head, turnDigest: request.turnDigest,
     assignmentId: request.originalAssignmentId, obligation,
-    missing: finding.requiredCorrection, affectedIds: [arc.metadata.id],
+    missing: finding.requiredCorrection, affectedIds: [sourceRecord.metadata.id],
     sources: [{ path: finding.path, sha256: sourceDigest(content), quote: line.trim() }],
     likelySpecialist: "nt-character-development", authorDecisionRequired: false,
   };
@@ -357,6 +434,109 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
   entry.phase = "authorized"; plan.version = amendment.afterVersion;
   await saveDependencyPlan(job, plan);
 }
+/** A read-only view of the verified Character specialist prerequisite.
+ * The Event specialist never receives the Character writer's path grant.
+ * This source-bound field grant is used only with the original failed review. */
+export async function inspectReviewEventSupport(
+  job: JobStartResult, failedSourceSha: string,
+): Promise<EventCharacterRepairGrant | null> {
+  const plan = await inspectDependencyPlan(job);
+  const request = plan?.reviewRequests?.find(r => r.sourceSha === failedSourceSha);
+  if (!request?.originalWorkItem.startsWith("event-") ||
+      request.classification !== "new-full-story-record" ||
+      request.action !== "controller-amendment-required" ||
+      request.findings.length !== 1) return null;
+  const entry = plan?.entries.find(e => e.reviewSourceSha === failedSourceSha);
+  if (!entry || !["reviewing", "verified"].includes(entry.phase)) return null;
+  const assignment = entry.amendment?.assignment;
+  const path = request.findings[0]!.path;
+  const target = assignment?.targets[0];
+  if (!entry.commitSha || entry.review?.verdict !== "pass" ||
+      !entry.reviewerSession || !assignment ||
+      assignment.specialist !== "nt-character-development" ||
+      JSON.stringify(assignment.authority.recordTypes) !== JSON.stringify(["character"]) ||
+      assignment.authority.existingPaths.length !== 0 ||
+      assignment.authority.newPaths?.length !== 1 ||
+      assignment.authority.newPaths[0] !== "characters/" + target?.slice(10) + ".md" ||
+      !/^character\.[a-z][a-z0-9-]*$/.test(target ?? "") ||
+      !/^events\/[a-z][a-z0-9-]*\.md$/.test(path) ||
+      entry.amendment!.sourceSha !== failedSourceSha ||
+      entry.amendment!.resumes !== request.originalAssignmentId)
+    throw Error("Event Character support lacks an exact approved and independently reviewed Character creation.");
+  const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items",
+    assignment.id + ".json"), "utf8"));
+  const newPath = assignment.authority.newPaths[0]!;
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  if (proof.phase !== "committed" || proof.jobId !== job.jobId ||
+      proof.commitSha !== entry.commitSha || proof.expectedHead !== failedSourceSha ||
+      proof.workItemId !== assignment.id || proof.worker !== "pi" ||
+      proof.assignmentDigest !== request.turnDigest ||
+      proof.validation?.status !== "passed" ||
+      proof.validation.validatorVersion !== job.validatorVersion ||
+      proof.validation.baseSha !== failedSourceSha ||
+      JSON.stringify(proof.paths) !== JSON.stringify(assignment.authority.newPaths) ||
+      dependencyGit(job, "rev-parse", entry.commitSha + "^") !== failedSourceSha ||
+      dependencyGit(job, "diff", "--name-only", failedSourceSha, entry.commitSha) !==
+        prefix + newPath ||
+      proof.sha256 !== dependencyDigest([[newPath,
+        sourceDigest(dependencyGit(job, "show", entry.commitSha + ":" + prefix + newPath))]]))
+    throw Error("Event Character support has no exact native-validated specialist receipt.");
+  // The lease is re-attested while an Event correction may have a dirty
+  // draft. Validate the verified Git head here; the actual writer admission
+  // separately requires a completely clean boundary.
+  const head = await trustedHead(job);
+  if (dependencyGit(job, "rev-parse", "HEAD") !== head)
+    throw Error("Event Character support is not on the trusted Story HEAD.");
+  dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha, head);
+  return { id: target!, path, failedSourceSha, supportingCommitSha: entry.commitSha };
+}
+
+/** Advance only after the separate original Event owner has a passing
+ * source-linked corrective checkpoint. Never rewrite the negative verdict. */
+export async function finalizeReviewEventDependency(job: JobStartResult, failedSourceSha: string) {
+  const grant = await inspectReviewEventSupport(job, failedSourceSha);
+  if (!grant) return false;
+  const plan = (await inspectDependencyPlan(job))!;
+  const entry = plan.entries.find(e => e.reviewSourceSha === failedSourceSha)!;
+  if (entry.phase === "verified") return true;
+  const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
+  let repairedSource = failedSourceSha;
+  let repairedCommit: string | undefined;
+  // The existing bounded repair controller permits a second attempt only
+  // after an independently failed successor. Both negative verdicts survive.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const repair = await inspectRejectedRepair(job, repairedSource);
+    if (repair.phase === "passed") {
+      repairedCommit = repair.repairedCommitSha;
+      break;
+    }
+    if (repair.phase !== "failed" || !repair.repairedCommitSha) return false;
+    repairedSource = repair.repairedCommitSha;
+  }
+  if (!repairedCommit) return false;
+  const proof = await readRepairCommitProof(job, "repair-" + repairedSource);
+  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+    p.eligible && p.commitSha === repairedCommit);
+  const sealed = point && await inspectCheckpointReview(job, point);
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  if (point?.semanticReview !== "passed" || sealed?.status !== "passed" ||
+      proof.rootFailureSha !== failedSourceSha || proof.commitSha !== repairedCommit ||
+      JSON.stringify(proof.paths) !== JSON.stringify([grant.path]) ||
+      dependencyGit(job, "diff", "--name-only", grant.supportingCommitSha, repairedCommit) !==
+        prefix + grant.path ||
+      await dependencyBoundary(job) !== repairedCommit)
+    throw Error("Suspended Event correction is not separately source-bound, reviewed and clean.");
+  auditEventParticipantCorrection(
+    dependencyGit(job, "show", grant.supportingCommitSha + ":" + prefix + grant.path),
+    dependencyGit(job, "show", repairedCommit + ":" + prefix + grant.path), grant.id);
+  entry.eventRepair = { sourceSha: repairedSource,
+    commitSha: repairedCommit, proofDigest: proof.digest };
+  entry.phase = "verified";
+  await saveDependencyPlan(job, plan);
+  await inspectDependencyPlan(job);
+  return true;
+}
+
 /** Writer admission never accepts an assignment supplied by a model or caller. */
 export async function authorizedDependency(job: JobStartResult, assignmentId: string, fixture: boolean) {
   const plan = await inspectDependencyPlan(job);

@@ -66,13 +66,18 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       "causal correction with inventing an off-page occurrence or granting new-record authority. " +
       (reviewRequest
         ? "This is a SEALED negative review for a missing central Character under the existing approved " +
-          "whole-Story objective, not a request to widen scope. First inspect the cited Arc and existing " +
-          "Characters. Reject a duplicate or irrelevant new Character, invented history, protected " +
-          "retcon, or unearned knowledge. You cannot grant write authority. If necessary return ONLY " +
-          "JSON {sourceSha,reportDigest,target,specialist,title,outcome,reason}: target is ONE newly " +
-          "chosen unused typed character.slug ID (not a path), title is a concise Character title, " +
-          "specialist is nt-character-development, and outcome must copy the report's missing work. " +
-          "The controller separately verifies the exact new path/ID and Arc link. " :
+          "whole-Story objective, not a request to widen scope. First inspect the cited " +
+          (reviewRequest.originalWorkItem.startsWith("event-") ? "Event" : "Arc") +
+          " and existing Characters. Reject a duplicate or irrelevant new Character, invented " +
+          "history, protected retcon, or unearned knowledge. You cannot grant write authority. " +
+          "If necessary return ONLY JSON {sourceSha,reportDigest,target,specialist,title,outcome,reason}: " +
+          "target is ONE newly chosen unused typed character.slug ID (not a path), title is a concise " +
+          "Character title, specialist is nt-character-development, and outcome must copy the " +
+          "report's missing work. The controller separately verifies the exact new path/ID " +
+          (reviewRequest.originalWorkItem.startsWith("event-")
+            ? "and assigns an Event-only participant/prose correction to its original Event owner " +
+              "AFTER independent review of the new Character. No Event write grant belongs to you. "
+            : "and the one existing Arc's link-only field. ") :
           "You cannot grant authority. Only one directly connected EXISTING record, owned by the proper different " +
           "specialist, can be proposed. New records or changes to protected decisions require separate approval. " +
           "If necessary, return ONLY JSON {sourceSha,reportDigest,target,specialist,outcome,reason}. " +

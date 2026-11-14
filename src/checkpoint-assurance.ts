@@ -167,8 +167,10 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
     for (const ancestor of ancestors) covered.set(ancestor, "not-required");
   }
   // S14: only the shared dependency ledger's *verified* new-Character commit
-  // plus two independent passing reviews can cover the previously failed
-  // foundations checkpoint. The old independent verdict and checkpoint are
+  // plus two independent passing reviews (Character + Foundations), OR a
+  // separately reviewed Event-owner correction after a passing supporting
+  // Character review, can cover the originally failed checkpoint.
+  // The old independent verdict and checkpoint are
   // never edited, deleted or retroactively marked passed. The dependency
   // inspector authenticates the Turn/owner/grant, exact Git diff and native
   // validation receipt before any coverage is derived from it.
@@ -176,8 +178,10 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
   const dependencies = await inspectDependencyPlan(job);
   for (const entry of dependencies?.entries ?? []) {
     if (!entry.reviewSourceSha || entry.phase !== "verified" ||
-        entry.review?.verdict !== "pass" || entry.originalReview?.verdict !== "pass" ||
-        !entry.reviewerSession || !entry.originalReviewerSession || !entry.commitSha)
+        entry.review?.verdict !== "pass" ||
+        !(entry.eventRepair || entry.originalReview?.verdict === "pass") ||
+        !entry.reviewerSession ||
+        !(entry.eventRepair || entry.originalReviewerSession) || !entry.commitSha)
       continue;
     const source = byCommit.get(entry.reviewSourceSha);
     const request = dependencies?.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
@@ -189,8 +193,12 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
         entry.report.turnDigest !== request.turnDigest ||
         entry.amendment?.resumes !== request.originalAssignmentId ||
         entry.amendment?.assignment.authority.newPaths?.length !== 1 ||
-        entry.amendment?.assignment.authority.existingPaths.length !== 1 ||
-        entry.amendment.sourceSha !== source.commitSha)
+        entry.amendment?.assignment.authority.existingPaths.length !==
+          (request.originalWorkItem.startsWith("event-") ? 0 : 1) ||
+        entry.amendment.sourceSha !== source.commitSha ||
+        (request.originalWorkItem.startsWith("event-")
+          ? !entry.eventRepair
+          : !entry.originalReview || !entry.originalReviewerSession))
       throw Error("Passing Character dependency cannot supersede an unrelated, stale or unverified negative checkpoint.");
     covered.set(source.commitSha, "not-required");
   }

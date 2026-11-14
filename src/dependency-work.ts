@@ -143,6 +143,7 @@ export async function advanceReviewCharacterDependency(input: {
 }) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const request = input.request;
+  const eventSource = request.originalWorkItem.startsWith("event-");
   if (request.classification !== "new-full-story-record" ||
       request.action !== "controller-amendment-required" ||
       request.turnDigest !== input.turnPlanDigest)
@@ -152,6 +153,9 @@ export async function advanceReviewCharacterDependency(input: {
     const { plan, entry } = await registerReviewDependency(job, request,
       input.validatorSource ?? input.skillsSource);
     if (entry.phase === "verified") return entry.amendment!.assignment;
+    if (entry.phase === "reviewing" && eventSource &&
+        entry.review?.verdict === "pass" && entry.commitSha === head)
+      return entry.amendment!.assignment;
     if (entry.phase === "planning" || entry.phase === "reviewing" || entry.phase === "rejected")
       throw Error("Interrupted or rejected review-dependency work requires exact manual reconciliation; never replay model sessions.");
     if (entry.phase !== "reported" && entry.phase !== "authorized")
@@ -179,6 +183,8 @@ export async function advanceReviewCharacterDependency(input: {
     throw Error("New Character supporting assignment lost its approved work-plan version.");
   if (entry.phase === "verified")
     return { status: "dependency-verified" as const, sourceSha: request.sourceSha };
+  if (entry.phase === "reviewing" && eventSource && entry.review?.verdict === "pass")
+    return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
   if (entry.phase !== "authorized")
     throw Error("Review-dependency authoring is not in an approved phase.");
   const result = await runFocusedWorkItem({
@@ -250,11 +256,17 @@ export async function advanceReviewCharacterDependency(input: {
     };
     const support: ReviewAssignment = {
       ...base, paths, specialistAssignments: [assignment],
-      turnGoal: "Review ONLY this new Character specialist's exact necessary support for the " +
-        "original complete-Story Character Foundations requirement. No later Events, " +
-        "Choices or authored dialogue need to be complete at this checkpoint. " +
-        "Demand authentic motivation/initial knowledge and a single legitimate Arc link; " +
-        "reject retconned Character history, invented culprit, unearned facts or any unrelated change.",
+      turnGoal: eventSource
+        ? "Review ONLY the separately authorized new Character's grounded role in the " +
+          "original Event source; that Event is READ-ONLY and still has a failed review. " +
+          "The Event specialist, NOT this Character specialist, must later append the " +
+          "Character to participants and correct its prose. Require coherent motivation " +
+          "and initial knowledge; do not demand the still-suspended Event repair here."
+        : "Review ONLY this new Character specialist's exact necessary support for the " +
+          "original complete-Story Character Foundations requirement. No later Events, " +
+          "Choices or authored dialogue need to be complete at this checkpoint. " +
+          "Demand authentic motivation/initial knowledge and a single legitimate Arc link; " +
+          "reject retconned Character history, invented culprit, unearned facts or any unrelated change.",
       dependency: { sourceSha: request.sourceSha, commitSha: head,
         obligation: current.report.obligation, reason: current.amendment.reason,
         sources: current.report.sources.map(s => ({ path: s.path, quote: s.quote })), diff },
@@ -274,6 +286,13 @@ export async function advanceReviewCharacterDependency(input: {
       current.phase = "rejected";
       await saveDependencyPlan(job, persisted);
       throw Error("Independent review rejected the new Character or Arc link; preserve original failure and model session.");
+    }
+    if (eventSource) {
+      // The Character work is independently reviewed, but the Event stays
+      // negative until a distinct Event-owned participant/prose correction
+      // passes its existing source-linked specialist-repair review gate.
+      await saveDependencyPlan(job, persisted);
+      return;
     }
     const reassess: ReviewAssignment = {
       ...base, paths: [...new Set([...originalPoint.assurance.changedPaths, ...paths])].sort(),
@@ -300,5 +319,6 @@ export async function advanceReviewCharacterDependency(input: {
     if (current.phase !== "verified")
       throw Error("Suspended Character Foundations obligation still failed independent rereview; preserve original negative checkpoint.");
   });
-  return { status: "dependency-verified" as const, sourceSha: request.sourceSha };
+  return { status: eventSource ? "dependency-support-verified" as const :
+    "dependency-verified" as const, sourceSha: request.sourceSha };
 }
