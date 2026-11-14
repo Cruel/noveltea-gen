@@ -208,6 +208,15 @@ test("public CLI commits a reachable causal Event cluster with validated Milesto
   assert.deepEqual(data.validation.routes.map((route: any) => route.status), ["reachable"]);
   assert.equal(data.validation.eventProgress[0].status, "reachable");
   assert.equal(data.validation.protectionBase, before);
+  assert.equal(data.consequenceProof.milestone.id, "milestone.disclosure");
+  assert.ok(data.consequenceProof.milestone.claim.includes("investigator"));
+  assert.ok(data.consequenceProof.events.some((item: any) => item.id === "event.disclose-ledger"));
+  assert.ok(data.consequenceProof.events.flatMap((item: any) => item.outcomes)
+    .flatMap((branch: any) => branch.effects).some((effect: any) =>
+      effect.step === "admit" && effect.branch === "disclose" &&
+      effect.slot.includes("knowledge:") && effect.line > 0));
+  assert.deepEqual(data.consequenceProof.diagnostics, []);
+  assert.match(data.consequenceProof.sourceDigest, /^[a-f0-9]{64}$/);
   assert.match(data.validation.validatorVersion, /^\d+\.\d+\.\d+/);
   assert.ok(data.outstanding.every((o: any) => o.id !== "milestone.disclosure" || o.field !== "fulfillment.any_of"));
   assert.equal(data.completionEvidence.unrelatedComposition, "not-required");
@@ -232,6 +241,28 @@ test("public CLI commits a reachable causal Event cluster with validated Milesto
   const replay = event();
   assert.equal(replay.status, 0, replay.stderr);
   assert.equal(JSON.parse(replay.stdout).headSha, data.headSha);
+});
+
+test("an Event's source-bound consequence proof cannot be altered after its verified commit", {
+  skip: !available,
+}, () => {
+  const f = setup("sealed-event-consequence");
+  f.prepare();
+  const run = f.event();
+  assert.equal(run.status, 0, run.stderr);
+  const event = JSON.parse(run.stdout);
+  const footer = git(f.job.worktreeRoot, "log", "-1", "--format=%B");
+  assert.match(footer, /NovelTea-Event-Consequence: [a-f0-9]{64}/);
+  const file = join(f.job.stateDir, "event-items/disclosure.json");
+  const receipt = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(receipt.consequenceProof.events[0].id, "event.disclose-ledger");
+  receipt.consequenceProof.events[0].observation = "Fabricated source evidence";
+  writeFileSync(file, JSON.stringify(receipt));
+  const repeat = f.event();
+  assert.notEqual(repeat.status, 0);
+  assert.match(repeat.stderr, /typed consequence proof differs from its sealed source/);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), event.headSha);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
 test("an unbound decision Event commits as a reviewed-ready partial Milestone without a synthetic Choice ID", { skip: !available }, () => {

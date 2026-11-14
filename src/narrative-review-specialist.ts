@@ -334,7 +334,8 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "Independently review ONLY each immutable, committed reviewedWorkItem against " +
       "its assigned outcome, unitOutcome and authorized changes. Reject unsupported " +
       "causal fulfillment, creative additions, omissions, contradictory or protected edits. " +
-      "For an Event, verify witnessed evidence before inference and typed consequence.",
+      "For an Event, compare the source-linked typed effect slots with the in-scene evidence, " +
+      "Character access, Milestone promise and route prerequisites; do not equate reachable with true.",
     sources: boundedPinnedSources("nt-narrative-review"),
     sourceUse:
       "Read the pinned review method and catalog. The REVIEW PACKET contains " +
@@ -368,7 +369,18 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "requiredCorrection must identify a concrete edit, not 'retry'. affectedPaths " +
       "must exist in the same packet and include that changed record. " +
       "Every passing checkpoint needs evidence; never fabricate a PASS. " +
-      "The controller verifies packet digest, line attribution, findings and receipt.",
+      "For an Event causal failure, name the exact Event/step/branch and affected " +
+      "knowledge, belief, revelation or Relationship slot in requiredCorrection. Choose " +
+      "a justified effect, a revised unsupported claim, preserved uncertainty or " +
+      "a needed other-owner source. Check BOTH prose and typed state; do not approve " +
+      "cosmetic prose changes that leave the typed discrepancy. The optional " +
+      "eventConsequenceProof is a source index, not a verdict or permission to edit. " +
+      "If rejectedEventComparison is present, verify the NEW committed typed " +
+      "state and prose against the SAME original failed promise and findings; " +
+      "do not pass on a cosmetic paraphrase. " +
+      "Identical provisional outcomes awaiting formal Choice binding are deferred, " +
+      "not invented Event-stage obligations. The controller verifies packet digest, " +
+      "line attribution, findings and receipt.",
     assignmentLabel: "IMMUTABLE REVIEW PACKET",
     assignment: packet,
   });

@@ -13,6 +13,8 @@ import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { fixtureCluster } from "./fixture-cluster.js";
+import { buildEventConsequenceProof, eventConsequenceProofDigest,
+  type EventConsequenceProof } from "./event-consequence-proof.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
@@ -33,6 +35,8 @@ interface EventReceipt {
   skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
   conflicts?: string[]; obligations?: string[];
+  /** Advisory typed evidence tied to native-validated draft and final commit. */
+  consequenceProof?: EventConsequenceProof;
   /** A completed, clean no-write original session; never executable authority. */
   prerequisite?: { expectedHead: string; sessionSha256: string; sessionId: string;
     assignmentDigest: string; snapshotId: string; sessionFile: string; worker: "pi" | "fixture";
@@ -247,6 +251,23 @@ async function contentDigest(job: JobStartResult, paths: string[]) {
   return hash(JSON.stringify(await Promise.all(paths.map(async path =>
     [path, hash(await readFile(join(job.worktreeStoryRoot, path)))]))));
 }
+/** Use ONLY native-validated metadata for the typed inventory. Actual Story bytes
+ * provide exact source lines. Read-only related context is not a write grant. */
+async function consequenceProof(job: JobStartResult, report: Report,
+  assignment: EventAssignment, paths: string[], obligations: string[]) {
+  const authored = report.records.filter(r => paths.includes(r.path) && r.metadata.type === "event")
+    .map(r => r.path);
+  const selected = [...new Set([assignment.milestonePath, ...authored,
+    ...assignment.sourcePaths])];
+  if (selected.length > 32) throw Error("Event consequence proof exceeds bounded source context.");
+  const sources = await Promise.all(selected.map(async path => {
+    const record = report.records.find(r => r.path === path);
+    if (!record) throw Error("Event proof lacks native source metadata: " + path);
+    return { path, metadata: record.metadata,
+      content: await readFile(join(job.worktreeStoryRoot, path), "utf8") };
+  }));
+  return buildEventConsequenceProof(sources, assignment.milestoneId, authored, obligations);
+}
 function metadataReferences(value: unknown, found = new Set<string>()): Set<string> {
   if (typeof value === "string") {
     if (/^(?:fact|revelation|relationship)\.[a-z][a-z0-9-]*$/.test(value)) found.add(value);
@@ -359,6 +380,11 @@ function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string
       !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Plan-Version: " + receipt.planVersion + "\n")) {
     throw new Error("Event commit provenance or previous verified HEAD changed.");
   }
+  if (receipt.consequenceProof && !git(job, "log", "-1", "--format=%B", commit)
+    .split("\n").includes("NovelTea-Event-Consequence: " +
+      eventConsequenceProofDigest(receipt.consequenceProof))) {
+    throw new Error("Committed Event typed consequence proof differs from its sealed source.");
+  }
   if (receipt.validation?.milestoneState &&
       !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Event-Completion: " +
         eventCompletionDigest({ milestoneId: receipt.milestoneId,
@@ -382,6 +408,7 @@ function output(job: JobStartResult, state: EventReceipt) {
     obligations: state.obligations, conflicts: state.conflicts,
     outstanding: state.validation?.remaining ?? [],
     failure: state.failure, prerequisite: state.prerequisite, sessionFile: state.sessionFile, skillReads: state.skillReads,
+    consequenceProof: state.consequenceProof,
     skillSnapshot: state.snapshot?.id,
     completionEvidence: { eventReachability: state.phase === "committed",
       milestoneState: state.validation?.milestoneState ?? "unverified",
@@ -657,8 +684,12 @@ export async function runEventWorkItem(input: EventOptions) {
             if (repairablePathError) return [repairablePathError +
               " Edit an authorized Event if necessary, or correct modifiedRecords to list the exact Git changes. " +
               "Do not modify the Milestone merely to make it appear in the diff."];
-            try { acceptance(draft, assign, paths!, candidate.obligations); return []; }
-            catch (error) { return [String(error)]; }
+            try {
+              acceptance(draft, assign, paths!, candidate.obligations);
+              const proof = await consequenceProof(job, draft, assign, paths!, candidate.obligations);
+              return proof.diagnostics.map(d =>
+                `${d.path}:${d.line} ${d.event}/${d.step}/${d.branch} ${d.slot}: ${d.message}`);
+            } catch (error) { return [String(error)]; }
           };
           let evidence: EventEvidence;
           if (receipt.worker === "fixture") {
@@ -773,6 +804,11 @@ export async function runEventWorkItem(input: EventOptions) {
           throw new Error("Authored Event inventory changed or has architectural conflicts.");
         }
         const proof = acceptance(report, assign, receipt.paths, receipt.obligations ?? []);
+        const typedProof = await consequenceProof(job, report, assign, receipt.paths,
+          receipt.obligations ?? []);
+        if (typedProof.diagnostics.length) throw new Error("Event has contradictory typed effects: " +
+          typedProof.diagnostics.map(d => `${d.path}:${d.line} ${d.event}/${d.step}/${d.branch} ${d.slot} ${d.message}`).join("; "));
+        const typedDigest = eventConsequenceProofDigest(typedProof);
         const completionDigest = eventCompletionDigest({ milestoneId: receipt.milestoneId,
           expectedHead: receipt.expectedHead, snapshotId: receipt.snapshot!.id,
           contentDigest: receipt.contentDigest, eventIds: proof.eventIds,
@@ -785,10 +821,11 @@ export async function runEventWorkItem(input: EventOptions) {
           }
           git(job, "add", "--", ...paths.map(p => repoPath(job, p)));
           git(job, "-c", "user.name=NovelTea Generator", "-c", "user.email=noveltea-gen@users.noreply.github.com",
-            "commit", "-m", `Realize ${receipt.milestoneId} [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Plan-Version: ${receipt.planVersion}\nNovelTea-Event-Design: ${receipt.contentDigest}\nNovelTea-Event-Completion: ${completionDigest}`);
+            "commit", "-m", `Realize ${receipt.milestoneId} [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Plan-Version: ${receipt.planVersion}\nNovelTea-Event-Design: ${receipt.contentDigest}\nNovelTea-Event-Completion: ${completionDigest}\nNovelTea-Event-Consequence: ${typedDigest}`);
         }
         if (dirty(job).length) throw new Error("Event commit left unexpected modifications.");
         const commit = git(job, "rev-parse", "HEAD");
+        receipt.consequenceProof = typedProof;
         verifyCommit(job, receipt, commit);
         receipt.validation = { status: "passed", validatorVersion: checked.validator.version,
           protectionBase: prior, ...proof };

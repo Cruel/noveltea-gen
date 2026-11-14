@@ -14,6 +14,7 @@ import { changedRepairPaths, disagreementQuestion, repairFeedback,
 import type { RecoveryCheckpoint } from "../src/recovery-checkpoints.js";
 import { readIndependentReview } from "../src/checkpoint-assurance.js";
 import { removeTestTree } from "./helpers.js";
+import { buildEventConsequenceProof, eventConsequenceProofDigest } from "../src/event-consequence-proof.js";
 
 const sha = "a".repeat(40);
 function git(cwd: string, ...args: string[]) {
@@ -166,6 +167,69 @@ test("Event repair receives the exact committed offending line and read-only cau
   state.findings[0]!.line = 2;
   state.findings[0]!.affectedPaths!.push(".story-inbox/ideas/private.md");
   await assert.rejects(prepareRejectedRepairFeedback(job, state), /canonical|unsafe/i);
+});
+
+test("rejected Event feedback carries sealed typed slots and read-only sibling Event, never a forged map", async t => {
+  const root = mkdtempSync(join(tmpdir(), "nt-event-repair-proof-"));
+  t.after(() => removeTestTree(root));
+  mkdirSync(join(root, "story/events"), { recursive: true });
+  mkdirSync(join(root, "story/milestones"));
+  const sourceText = "# Absence\nAda trusts the witness before speaking with them.\n";
+  const siblingText = "# Witness\nThe caretaker reports seeing the visitor near the archive.\n";
+  const milestoneText = "# Establish absence\nThe player encounters the witness.\n";
+  writeFileSync(join(root, "story/events/absence.md"), sourceText);
+  writeFileSync(join(root, "story/events/witness.md"), siblingText);
+  writeFileSync(join(root, "story/milestones/absence.md"), milestoneText);
+  const proof = buildEventConsequenceProof([
+    { path: "milestones/absence.md", content: milestoneText,
+      metadata: { type: "milestone", id: "milestone.absence" } },
+    { path: "events/absence.md", content: sourceText,
+      metadata: { type: "event", id: "event.absence", steps: [{
+        id: "judgment", branches: [{ id: "accept", conditions: [], effects: [{
+          kind: "relationship", relationship: "relationship.ada-caretaker", value: "trusting",
+        }] }],
+      }] } },
+    { path: "events/witness.md", content: siblingText,
+      metadata: { type: "event", id: "event.witness", steps: [] } },
+  ], "milestone.absence", ["events/absence.md", "events/witness.md"], []);
+  git(root, "init", "-q"); git(root, "config", "user.name", "Test");
+  git(root, "config", "user.email", "test@example.test");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "Rejected Event source\n\nNovelTea-Event-Consequence: " +
+    eventConsequenceProofDigest(proof));
+  const sourceCommitSha = git(root, "rev-parse", "HEAD");
+  const state = rejected();
+  state.sourceCommitSha = sourceCommitSha;
+  state.source = { ...state.source, commitSha: sourceCommitSha };
+  state.origin.workItem = "event-absence";
+  state.allowedPaths = ["events/absence.md"];
+  state.findings = [{ path: "events/absence.md", line: 2,
+    message: "The trusting relationship is premature.",
+    requiredCorrection: "Remove the transition or deliver a believable source first.",
+    affectedPaths: ["events/absence.md", "events/witness.md"] }];
+  mkdirSync(join(root, ".git/event-items"));
+  const receiptPath = join(root, ".git/event-items/absence.json");
+  const receipt = { commitSha: sourceCommitSha, consequenceProof: proof,
+    assignment: { sourcePaths: ["milestones/absence.md"] } };
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  const job = { worktreeRoot: root, storyRelativePath: "story",
+    stateDir: join(root, ".git") } as JobStartResult;
+  const feedback = await prepareRejectedRepairFeedback(job, state);
+  assert.equal(feedback.originalConsequenceProof?.sourceDigest, proof.sourceDigest);
+  assert.equal(feedback.originalConsequenceProof?.events.length, 2);
+  assert.deepEqual(feedback.context.map(record => [record.path, record.writable]), [
+    ["events/absence.md", true], ["events/witness.md", false], ["milestones/absence.md", false],
+  ]);
+  assert.equal(feedback.offendingSources[0]!.text,
+    "Ada trusts the witness before speaking with them.");
+  assert.deepEqual(feedback.allowedPaths, ["events/absence.md"]);
+  // Uncommitted receipt changes cannot manufacture another semantic conclusion.
+  receipt.consequenceProof.events[0]!.observation = "Forged correction";
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  const forged = await prepareRejectedRepairFeedback(job, state);
+  assert.equal(forged.originalConsequenceProof, undefined);
+  assert.deepEqual(forged.allowedPaths, ["events/absence.md"]);
+  assert.ok(!forged.context.some(item => item.path === "events/witness.md" && item.writable));
 });
 
 test("repair context refuses inbox paths, symlink blobs, missing sources and oversized packets", async t => {

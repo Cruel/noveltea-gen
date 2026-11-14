@@ -1,4 +1,6 @@
 import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
+import { eventConsequenceProofDigest,
+  type EventConsequenceProof } from "./event-consequence-proof.js";
 import { rejectedRepairContext } from "./review-repair-context.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -347,15 +349,38 @@ export async function prepareRejectedRepairFeedback(job: JobStartResult, state: 
     const info = await lstat(file);
     if (!info.isFile() || info.isSymbolicLink() || info.size > 512_000)
       throw Error("Unsafe original Event source receipt.");
-    const receipt = JSON.parse(await readFile(file, "utf8")) as { assignment?: EventRepairSources };
+    const receipt = JSON.parse(await readFile(file, "utf8")) as {
+      assignment?: EventRepairSources; commitSha?: string; consequenceProof?: EventConsequenceProof };
     const paths = receipt.assignment?.sourcePaths;
     if (!Array.isArray(paths) || paths.some(p => typeof p !== "string"))
       throw Error("Original Event assignment has no pinned causal sources.");
-    sourcePaths = paths;
+    const sealedProof = receipt.commitSha === state.sourceCommitSha &&
+      receipt.consequenceProof?.version === 1 &&
+      git(job, "log", "-1", "--format=%B", state.sourceCommitSha).split("\n")
+        .includes("NovelTea-Event-Consequence: " +
+          eventConsequenceProofDigest(receipt.consequenceProof)) &&
+      Array.isArray(receipt.consequenceProof.sourceHashes)
+      ? receipt.consequenceProof : undefined;
+    // Include other authored Events from the exact sealed cluster. A finding
+    // on one Event may depend on a sibling branch; all remain read-only unless
+    // the separately authorized repair path explicitly allows a write.
+    sourcePaths = [...new Set([...paths, ...(sealedProof?.sourceHashes.map(s => s.path) ?? [])])];
+    const context = rejectedRepairContext(job, state, sourcePaths);
+    const proof = sealedProof?.sourceHashes.every(source =>
+      context.context.some(record => record.path === source.path &&
+        hash(record.content) === source.sha256)) ? sealedProof : undefined;
+    // The original typed slots are read-only comparison evidence. The exact
+    // committed offending line and original independent finding remain primary.
+    const citedEffects = proof ? state.findings.map(finding => ({
+      path: finding.path, line: finding.line,
+      effects: proof.events.filter(e => e.path === finding.path).flatMap(e =>
+        e.outcomes.flatMap(outcome => outcome.effects.filter(effect =>
+          effect.line === finding.line))),
+    })) : [];
+    return { ...repairFeedback(state), ...context, causalGrounding: EVENT_CAUSAL_GROUNDING,
+      ...(proof ? { originalConsequenceProof: proof, citedEffects } : {}) };
   }
-  return { ...repairFeedback(state), ...rejectedRepairContext(job, state, sourcePaths),
-    ...(event ? { causalGrounding: EVENT_CAUSAL_GROUNDING } : {}),
-  };
+  return { ...repairFeedback(state), ...rejectedRepairContext(job, state, sourcePaths) };
 }
 export async function claimRejectedRepair(job: JobStartResult, sha: string) {
   const state = await inspectRejectedRepair(job, sha);
@@ -829,6 +854,10 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       "the causal gap within your original authorized file where possible: " +
       "for example, present concrete playable observations before asking the " +
       "player to compare them in that Event instead of inventing new file paths. " +
+      "For Event corrections, compare the cited effect slot and narrative claim: " +
+      "a prose-only rewrite cannot resolve a remaining typed mismatch. " +
+      "If truthful state cannot fit the original slots, report the later Choice " +
+      "dependency or required source rather than inventing a Fact or Relationship transition. " +
       "If a genuine disagreement prevents " +
       "correction, explain it in your response without editing; the controller " +
       "will ask the author. Your explanation cannot change the reviewer verdict. " +

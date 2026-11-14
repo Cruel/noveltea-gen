@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadSealedReviewContext, type SealedReviewRecord } from "./sealed-review-context.js";
 import { reviewRepairTargets } from "./review-repair-amendment.js";
+import { eventConsequenceProofDigest,
+  type EventConsequenceProof } from "./event-consequence-proof.js";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
@@ -29,6 +31,11 @@ export interface SemanticReviewItem {
   readOnlyPaths: string[];
   /** Ceiling only: the repair controller must still authorize an amendment. */
   repairTargets: string[];
+  /** Advisory inventory from the native-validated Event checkpoint, not a verdict. */
+  eventConsequenceProof?: EventConsequenceProof;
+  /** Historical failed promise, not an additional grant or inherited verdict. */
+  rejectedEventComparison?: { sourceCommitSha: string; findings: IndependentReviewResult["findings"];
+    originalProof: EventConsequenceProof };
 }
 export interface SemanticReviewPacket {
   policy: "assignment-fidelity/v1";
@@ -144,9 +151,67 @@ export async function prepareSemanticReview(job: JobStartResult,
     const canonicalContext = await loadSealedReviewContext(job, point.commitSha, paths);
     const repairTargets = reviewRepairTargets(assurance.changedPaths, point.workItem);
     const readOnlyPaths = canonicalContext.map(c => c.path).filter(p => !repairTargets.includes(p));
+    let eventConsequenceProof: EventConsequenceProof | undefined;
+    if (point.workItem.startsWith("event-")) {
+      const slug = point.workItem.slice("event-".length);
+      if (/^[a-z][a-z0-9-]*$/.test(slug)) {
+        const file = join(job.stateDir, "event-items", slug + ".json");
+        try {
+          const receipt = JSON.parse(await readFile(file, "utf8")) as {
+            commitSha?: string; expectedHead?: string; consequenceProof?: EventConsequenceProof };
+          // A later Event receipt or an old checkpoint never supplies evidence
+          // for this exact reviewed SHA. The sealed sources remain primary.
+          if (receipt.commitSha === point.commitSha &&
+              receipt.expectedHead === point.parentSha &&
+              receipt.consequenceProof?.version === 1 &&
+              receipt.consequenceProof.milestone.id === "milestone." + slug &&
+              git(job, "log", "-1", "--format=%B", point.commitSha).split("\n")
+                .includes("NovelTea-Event-Consequence: " +
+                  eventConsequenceProofDigest(receipt.consequenceProof)) &&
+              Array.isArray(receipt.consequenceProof.sourceHashes) &&
+              receipt.consequenceProof.sourceHashes.every(source => {
+                const record = canonicalContext.find(record => record.path === source.path);
+                return !record || hash(record.content) === source.sha256;
+              }) &&
+              receipt.consequenceProof.events.every(event =>
+                canonicalContext.some(record => record.path === event.path &&
+                  event.outcomes.every(outcome => outcome.effects.every(effect =>
+                    record.content.split(/\r?\n/)[effect.line - 1]?.includes("kind: " + effect.kind))))))
+            eventConsequenceProof = receipt.consequenceProof;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+    }
+    let rejectedEventComparison: SemanticReviewItem["rejectedEventComparison"];
+    if (point.workItem.startsWith("repair-") && assignment.specialist === "nt-event-design") {
+      const sourceCommitSha = point.workItem.slice("repair-".length);
+      if (/^[a-f0-9]{40}$/.test(sourceCommitSha)) {
+        const repairFile = join(job.stateDir, "review-repairs", sourceCommitSha + ".json");
+        const repair = JSON.parse(await readFile(repairFile, "utf8")) as {
+          sourceCommitSha: string; findings: IndependentReviewResult["findings"];
+          origin: { workItem: string } };
+        if (repair.sourceCommitSha !== sourceCommitSha ||
+            !repair.origin.workItem.startsWith("event-"))
+          throw Error("Repaired Event review lost its original rejected assignment.");
+        const slug = repair.origin.workItem.slice("event-".length);
+        if (!/^[a-z][a-z0-9-]*$/.test(slug)) throw Error("Unsafe original Event work item.");
+        const originFile = join(job.stateDir, "event-items", slug + ".json");
+        const origin = JSON.parse(await readFile(originFile, "utf8")) as {
+          commitSha?: string; consequenceProof?: EventConsequenceProof };
+        if (origin.commitSha === sourceCommitSha && origin.consequenceProof?.version === 1 &&
+            git(job, "log", "-1", "--format=%B", sourceCommitSha).split("\n")
+              .includes("NovelTea-Event-Consequence: " +
+                eventConsequenceProofDigest(origin.consequenceProof)))
+          rejectedEventComparison = { sourceCommitSha, findings: repair.findings,
+            originalProof: origin.consequenceProof };
+      }
+    }
     items.push({ assignment, reviewedWorkItem: point.workItem,
       unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist), assurance, diff, canonicalContext,
-      readOnlyPaths, repairTargets });
+      readOnlyPaths, repairTargets,
+      ...(eventConsequenceProof ? { eventConsequenceProof } : {}),
+      ...(rejectedEventComparison ? { rejectedEventComparison } : {}) });
   }
   // Group only commits on a single ancestry chain. Unrelated branches and
   // unrelated assignment batches are never silently combined.
