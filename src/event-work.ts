@@ -257,6 +257,13 @@ function metadataReferences(value: unknown, found = new Set<string>()): Set<stri
   }
   return found;
 }
+/** A staged Event may hand off the same formal binding to the later Choice
+ * owner, specialist, writer or Choice Point. Do not mistake general mentions
+ * of a future choice for an actual binding obligation. */
+export function hasDeferredChoiceBinding(obligations: string[]): boolean {
+  return obligations.some(obligation =>
+    /choice[ -]?(?:point|binding|specialist|writer|owner)|\bformal choice\b/i.test(obligation));
+}
 function acceptance(report: Report, assignment: EventAssignment, paths: string[], obligations: string[]) {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
   if (paths.some(path => !records.some(r => r.path === path))) {
@@ -277,8 +284,7 @@ function acceptance(report: Report, assignment: EventAssignment, paths: string[]
   if (!milestone || !Array.isArray(milestone.metadata.fulfillment?.any_of)) {
     throw new Error("Selected Milestone lacks a valid fulfillment declaration.");
   }
-  const missingChoice = obligations.some(obligation =>
-    /choice[ -]?point|choice binding|formal choice|choice specialist/i.test(obligation));
+  const missingChoice = hasDeferredChoiceBinding(obligations);
   const deferredChoice = milestone.metadata.completeness === "partial" &&
     milestone.metadata.fulfillment.any_of.length === 0 && missingChoice;
   if (missingChoice && !deferredChoice) {

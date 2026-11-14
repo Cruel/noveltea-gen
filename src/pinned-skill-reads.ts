@@ -37,14 +37,18 @@ export async function requirePinnedSkillReads(session: AgentSession, root: strin
   const reads = () => completedPinnedSkillReads(session.messages, root, snapshotRoot);
   const missing = () => required.filter(path => !reads().includes(path));
   if (missing().length) {
-    await promptStorySpecialist(session,
+    await promptStorySpecialist(
+      session,
       "Your previous attempt did NOT successfully read every mandatory pinned skill reference. " +
-      "Read each missing reference using the read tool with its EXACT absolute path, " +
-      "without altering any characters or snapshot hash. Reassess your existing draft against " +
-      "the newly read guidance; repair only authorized Story files if needed, " +
-      "run story_validate, then repeat the COMPLETE modifiedRecords/architecturalConflicts/" +
-      "laterObligations JSON manifest. Do not stage or commit anything.\nMISSING EXACT PATHS:\n" +
-      missing().join("\n"));
+        "Read each missing reference using the read tool with its EXACT stable skill:// " +
+        "address, never an absolute snapshot hash path. Reassess your existing draft against " +
+        "the newly read guidance; repair only authorized Story files if needed, " +
+        "run story_validate, then repeat the COMPLETE modifiedRecords/architecturalConflicts/" +
+        "laterObligations JSON manifest. Do not stage or commit anything.\nMISSING PINNED REFERENCES:\n" +
+        missing()
+          .map((path) => "skill://" + path.slice(path.lastIndexOf("/skills/") + 8))
+          .join("\n"),
+    );
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
       throw new Error(stage + " pinned-skill correction failed; preserve the current work-item draft.");

@@ -16,10 +16,15 @@ import { removeTestTree } from "./helpers.js";
 import { startStoryJob } from "../src/job.js";
 import { withStoryJobLock } from "../src/job-lock.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
-import { reviewNarrative, type ReviewAssignment } from "../src/narrative-review-specialist.js";
+import { reviewNarrative, reviewSpecialistAssignments, type ReviewAssignment } from "../src/narrative-review-specialist.js";
+import { loadSealedReviewContext } from "../src/sealed-review-context.js";
+import { semanticUnitOutcome, type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
+import { canonicalPinnedReadPath } from "../src/pinned-skill-reads.js";
 
 test(
-  "opt-in two real pinned Pi specialists build and certify a Choice/Puzzle interactive slice",
+  process.env.NT_LIVE_ARCHITECTURE_ONLY === "1"
+    ? "opt-in real Luna Architecture authors partial Milestones without premature Event binding"
+    : "opt-in two real pinned Pi specialists build and certify a Choice/Puzzle interactive slice",
   {
     skip:
       process.env.NT_LIVE_INTERACTIVE !== "1"
@@ -204,11 +209,31 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
           },
         }),
       );
-      assert.equal(
-        (await cli("architecture", "run", "--fixture", "--skills-source", source, "--contract", contract))
-          .status,
-        "architecture-committed",
-      );
+      const liveArchitecture = process.env.NT_LIVE_ARCHITECTURE_ONLY === "1";
+      const archArgs = [
+        "architecture", "run", ...(liveArchitecture ? [] : ["--fixture"]),
+        "--skills-source", source, "--contract", contract,
+      ];
+      if (liveArchitecture && process.env.NT_PROVIDER) archArgs.push("--provider", process.env.NT_PROVIDER);
+      if (liveArchitecture && process.env.NT_MODEL) archArgs.push("--model", process.env.NT_MODEL);
+      const architecture = await cli(...archArgs);
+      assert.equal(architecture.status, "architecture-committed");
+      if (liveArchitecture) {
+        const milestones = readdirSync(join(job.worktreeStoryRoot, "milestones"));
+        assert.ok(milestones.length > 0, "Live Architecture must author a Milestone");
+        for (const file of milestones) {
+          const content = readFileSync(join(job.worktreeStoryRoot, "milestones", file), "utf8");
+          assert.match(content, /completeness: partial/);
+          assert.match(content, /fulfillment:\s*(?:\{any_of: \[\]\}|any_of: \[\])/);
+        }
+        assert.equal(existsSync(join(job.worktreeStoryRoot, "events")), false,
+          "Architecture must leave Event authoring to the later specialist");
+        assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+        assert.equal(git(repo, "rev-parse", "HEAD"), originalHead);
+        assert.ok(architecture.skillReads?.length === 5);
+        completed = true;
+        return;
+      }
       assert.equal(
         (await cli("foundations", "run", "--fixture", "--skills-source", source)).status,
         "foundations-committed",
@@ -234,7 +259,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
           "A live Event must not fulfill the player's still-unbound decision",
         );
         assert.ok(event.obligations.some((obligation: string) => /choice/i.test(obligation)));
-        assert.equal(event.skillReads.length, 6);
+        assert.equal(event.skillReads.length, 5);
       }
       // The Event CLI pins its default thinking profile; requesting a new one
       // at Choice would violate the saved model-resolution contract.
@@ -261,7 +286,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
       }
       assert.equal(result.specialistUnits[1].validation.protectionBase, result.specialistUnits[0].commitSha);
       for (const unit of result.specialistUnits) {
-        assert.equal(unit.skillReads.length, 6);
+        assert.equal(unit.skillReads.length, 5);
         assert.match(unit.commitSha, /^[0-9a-f]{40}$/);
         const messages = readFileSync(unit.piSessionFile, "utf8").trim().split("\n").map(JSON.parse);
         if (["low", "medium", "high"].includes(thinking ?? "")) {
@@ -276,7 +301,11 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
           .flatMap((m: any) => m.message?.content ?? [])
           .filter((c: any) => c.type === "toolCall");
         const reads = calls.filter((c: any) => c.name === "read").map((c: any) => c.arguments?.path);
-        assert.ok(unit.skillReads.every((p: string) => reads.includes(p)));
+        const snapshotRoot = unit.skillReads[0].slice(0, unit.skillReads[0].lastIndexOf("/skills/"));
+        const canonicalReads = reads.map((p: string) =>
+          canonicalPinnedReadPath(p, job.worktreeStoryRoot, snapshotRoot));
+        assert.ok(unit.skillReads.every((p: string) => canonicalReads.includes(p)),
+          "All immutable pinned sources must have successful exact read-tool evidence");
         assert.ok(calls.some((c: any) => ["write", "edit"].includes(c.name)));
       }
       assert.ok(result.specialistUnits[0].validation.choices.length > 0);
@@ -315,6 +344,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
             depth: "interactive",
             constraints: [
               "Preserve the protected author Choice and implement its genuine outcome effects",
+              "The Choice writer may bind outcomes/effects within the original Event steps while preserving the original Event prerequisites verbatim",
               "Never elevate the partial Milestone without separate authorization",
             ],
           },
@@ -339,7 +369,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
             "Milestone completion and final Authored Content are separately authorized downstream work",
           ],
           turnGoal:
-            "Independently review ONLY this bounded Event-to-Choice handoff and its immediate outcome effects, not a completed Story. The separately authored Puzzle, Milestone closeout, and composition are OUTSIDE this checkpoint review. Keep the Milestone partial until a separately authorized source-backed closeout; do not demand downstream-unit completion.",
+            "This is the POST-CHOICE checkpoint, NOT the earlier source-pinned Event-only checkpoint (reviewed separately). The later Choice writer is authorized to bind its outcomes and real effects in previously committed Event steps, including the original setup Event; this does NOT authorize edits to original Event prerequisites. Empty conditions on parallel branches represent selectable alternatives, not simultaneous execution. Inspect meaningful branch-specific effects and later consumers. The separately authored Puzzle, Milestone closeout, and final composition are OUTSIDE this checkpoint; keep the Milestone partial. Report unsupported causal or relationship changes, but do not fail merely because the authorized Choice unit modified an existing Event record.",
         };
         const envKeys = [
           "NT_STATE_DIR",
@@ -361,6 +391,46 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
           });
           assert.ok(reviewerSnapshot);
           const reviewJob = await startStoryJob({ story, job: jobId }, false);
+          if (process.env.NT_LIVE_ASSIGNMENT_REVIEW === "1") {
+            // This packet is built from the actual validated Event commit, not the
+            // newer Choice/Puzzle worktree. Only the current Event's assignment
+            // may be judged; missing later units are not source defects.
+            const changed = event.paths as string[];
+            const eventContext = await loadSealedReviewContext(reviewJob, event.headSha, changed);
+            const eventItem = {
+              reviewedWorkItem: "event-disclosure",
+              unitOutcome: semanticUnitOutcome("event-disclosure"),
+              assignment: {
+                id: "event-disclosure", specialist: "nt-event-design",
+                outcome: "Author a reachable source-grounded Event setup without enacting or " +
+                  "binding the protected later player Choice; keep the Milestone partial.",
+                targets: ["milestone.disclosure"], dependsOn: [],
+                discovery: "canonical-story-read-only" as const,
+                authority: { recordTypes: ["event"], existingPaths: [], mayCreate: true },
+              },
+              assurance: {
+                commitSha: event.headSha, parentSha: event.validation.protectionBase,
+                changedPaths: changed,
+              },
+              diff: git(job.worktreeRoot, "diff", "--no-ext-diff", event.validation.protectionBase,
+                event.headSha, "--", ...changed.map((p) => "story/" + p)),
+              canonicalContext: eventContext,
+              readOnlyPaths: eventContext.map((r) => r.path).filter((p) => !changed.includes(p)),
+              repairTargets: changed,
+            };
+            const items = [eventItem];
+            const packet: SemanticReviewPacket = {
+              policy: "assignment-fidelity/v1",
+              sourceDigest: sha(JSON.stringify({ policy: "assignment-fidelity/v1", items })),
+              items,
+            } as unknown as SemanticReviewPacket;
+            const semantic = await withStoryJobLock(reviewJob, "independent-assignment-review", () =>
+              reviewSpecialistAssignments(reviewJob, reviewerSnapshot, packet,
+                process.env.NT_PROVIDER ?? "openai", process.env.NT_MODEL ?? "gpt-6-luna",
+                undefined, async () => {}));
+            process.stderr.write("LIVE_EVENT_ASSIGNMENT_REVIEW " + JSON.stringify(semantic) + "\n");
+            assert.equal(semantic.verdict, "pass", JSON.stringify(semantic.findings));
+          }
           const reviewer = await withStoryJobLock(reviewJob, "independent-narrative-review", () =>
             reviewNarrative(
               reviewJob,
@@ -373,7 +443,20 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
             ),
           );
           process.stderr.write("LIVE_EVENT_CHOICE_REVIEW " + JSON.stringify(reviewer) + "\n");
-          assert.equal(reviewer.verdict, "pass", JSON.stringify(reviewer.findings));
+          if (process.env.NT_LIVE_EXPECT_REVIEW_BLOCK === "1") {
+            // Opt-in negative replay from an existing checkpoint with a
+            // documented premature relationship effect. A source-backed
+            // BLOCK is the correct independent review behavior, not failure
+            // of the prompt-composition / reviewer-isolation contract.
+            assert.equal(reviewer.verdict, "block", "The known source defect must remain blocking");
+            assert.ok(reviewer.findings.some((f) => f.severity === "blocking" &&
+              ["continuity", "player-agency", "conditional-knowledge"].includes(f.dimension) &&
+              /events\//.test(f.source) &&
+              /relationship|premature|effect|choice/i.test(f.message)),
+            "Negative Luna reviewer must cite the exact causal defect, not an unrelated objection");
+          } else {
+            assert.equal(reviewer.verdict, "pass", JSON.stringify(reviewer.findings));
+          }
         } finally {
           envKeys.forEach((key, index) => {
             if (previous[index] === undefined) delete process.env[key];

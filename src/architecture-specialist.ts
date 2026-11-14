@@ -16,6 +16,7 @@ import type { Plan } from "./architecture.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
+import { boundedPinnedSources, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 
 /** A new agent-authored Arc/Milestone decision cannot silently grant itself
  * author protection. Previously pinned author-protected decisions are retained
@@ -60,14 +61,58 @@ export function architectureMilestoneOrder(text: string): string[] | null {
   return ids;
 }
 
-const REQUIRED = [
-  "nt-story-architecture/SKILL.md",
-  "nt-catalog/SKILL.md",
-  "nt-catalog/references/records.md",
-  "nt-catalog/references/progression.md",
-  "nt-catalog/references/authority-and-validation.md",
-  "nt-catalog/references/glossary.md",
-] as const;
+const REQUIRED = boundedPinnedSources("nt-story-architecture");
+
+/** Architecture is the plan-only unit, not the owner of later Event bindings. */
+export function architectureSpecialistPrompt(
+  snapshot: SkillSnapshot,
+  plan: Plan,
+  sandboxed: boolean,
+  authorTask?: string,
+): string {
+  return renderBoundedPrompt(snapshot, {
+    goal:
+      "Author the selected causal Arc/Milestone architecture from the actual " +
+      "Creative Direction. Establish an ordered chain of substantive turning points " +
+      "and their enabling conditions, meaningful changes and later payoffs in enduring " +
+      "in-world prose, without inventing Event IDs or later-stage records.",
+    sources: REQUIRED,
+    sourceUse:
+      "Read Creative Direction and relevant existing canonical Story records. " +
+      "Never search the noncanonical .story-inbox/ideas directory; only explicitly " +
+      "supplied scoped author constraints may influence this unit.",
+    writableScope:
+      "Only authorized arcs/*.md and milestones/*.md; all other records, " +
+      "including Creative Direction and Events, are read-only. Do not change existing " +
+      "protected decisions or create new user-protected decisions: new agent decisions " +
+      "have origin: agent and authority: delegated. File stems are untyped slugs, not IDs. " +
+      (sandboxed
+        ? "Use the networkless /story sandbox; no host Git, paths or credentials."
+        : "Do not stage, commit, checkout or reset; Git status/diff inspection is permitted."),
+    doneWhen:
+      "Arc and Milestone schema 0.1 Markdown names plausible prior conditions, " +
+      "turning point outcomes and their causal successor (or terminal payoff). " +
+      "For investigations distinguish discovery, evidence, inference, confrontation " +
+      "and consequential player decision without asserting unsupported facts. " +
+      "Stage-incomplete Milestones must keep completeness: partial and " +
+      "fulfillment: {any_of: []}; no speculative Events or artificial completion. " +
+      "Bodies remain true after subsequent World/Character/Event authorship; never " +
+      "describe temporary implementation status. Validate with story_validate and " +
+      "repair errors before reporting. Preserve the plan's depth, targets and protections.",
+    laterObligations:
+      "World and Character Foundations, Event prerequisites and " +
+      "fulfillment routes, Choice/Puzzle and final prose are later owners. " +
+      "Describe their necessary work; do not author it in this unit.",
+    requiredOutput:
+      "Return the actual selected Milestone execution order as exactly " +
+      "one final line: CAUSAL_MILESTONE_ORDER: milestone.first,milestone.next " +
+      "(replace with all real ordered Milestone IDs; no other claims on this line). " +
+      "The controller verifies source, writes and approval separately.",
+    assignmentLabel: "AUTHORIZED PLAN AND SCOPE",
+    assignment: plan,
+    authorInstruction: specialistAuthorInstruction(authorTask),
+  });
+}
 
 /** The specialist authors Markdown; it cannot approve, validate, or commit its own output. */
 export async function authorArchitecture(
@@ -117,64 +162,8 @@ export async function authorArchitecture(
     if (!sessionFile) throw new Error("Architecture Pi session transcript cannot be persisted; writer will not begin.");
     await onSession(session.sessionId, sessionFile);
     await context.beforeTurn(sessionFile);
-    await promptStorySpecialist(session,
-      context.contextNote + "You are the NovelTea Story architecture specialist, working on an isolated Git-backed Story. " +
-      "Read every pinned skill and catalog reference below using the read tool BEFORE writing. " +
-      "These stable skill:// addresses resolve to role-authorized files in the verified immutable snapshot; " +
-      "do not construct or copy long snapshot hash paths:\n" +
-      REQUIRED.map(path => "skill://" + path).join("\n") +
-      "\nRead the actual canonical Creative Direction and any relevant existing Story records. " +
-      "Do not read or search the noncanonical .story-inbox/ideas directory (including via git grep/show or rg --hidden); " +
-      "dormant author concepts and dialogue must not influence early architecture. Only use explicitly supplied scoped constraints. " +
-      "Follow nt-story-architecture and nt-catalog. Do not invent an alternative narrative schema. " +
-      "AUTHOR actual Arc and Milestone Markdown inside the Story root using ordinary write/edit tools. " +
-      "Only write arcs/*.md and milestones/*.md; do not edit Creative Direction, Events, other records, or project files. " +
-      "Record filenames use ONLY the untyped slug, not the typed ID: for example " +
-      "arc.missing-passenger MUST be saved as arcs/missing-passenger.md, NEVER " +
-      "arcs/arc.missing-passenger.md; milestone.disclosure-choice MUST be saved " +
-      "as milestones/disclosure-choice.md. A period in a filename stem is invalid. " +
-      "Use schema '0.1', valid typed IDs/references and honest status draft. " +
-      "Planning-stage Milestones without real Events MUST have completeness: partial and fulfillment: {any_of: []}. " +
-      "Describe plausible future routes and their required causal prerequisites in prose, not as speculative typed Event IDs. " +
-      "CAUSAL ARCHITECTURE: every selected Milestone is a dramatic turning point in an ordered chain, " +
-      "not a disconnected outline entry. Its enduring body prose must name the meaningful prior " +
-      "condition or observation that makes this change possible, what changes for the player/world, " +
-      "and which later turning point that change enables (or that it is a terminal outcome). " +
-      "For investigations, distinguish the triggering discovery, evidence gathering, inference, " +
-      "confrontation and consequential player decision in the selected Arc order; make the transition " +
-      "between each causally explicit and give plausible evidence ACCESS without inventing specific " +
-      "events, scenes, timelines, Characters or objective proof beyond the pinned source. " +
-      "A generic sentence that 'Event design will determine prerequisites' is insufficient if it " +
-      "leaves WHY one selected Milestone leads to the next unspecified. " +
-      "Keep the actual Event prerequisites and fulfillment bindings delegated to Event design. " +
-      "World and Character Foundations are authored in subsequent separate stages. " +
-      "Write Arc/Milestone body prose as ENDURING in-world dramatic direction, " +
-      "not a progress report about the record graph or authoring process. Never " +
-      "claim 'no Characters exist', 'Characters are not yet established', " +
-      "'Character links will be populated', 'Characters will be added later', " +
-      "or other temporary implementation status. Those statements become " +
-      "false as soon as the next specialist legitimately completes the records. " +
-      "Instead describe conflict, investigative stakes, uncertainty and causal " +
-      "turning points in timeless terms that remain true when typed links are " +
-      "later populated. Avoid contradictory interim assertions. " +
-      "Never invent Events, fixed act/ending/Puzzle counts, approvals, or completion claims. " +
-      "All NEW Arc/Milestone decisions written by the agent MUST use origin: agent and authority: delegated. " +
-      "Never set authority: user-protected for an agent suggestion, even when it restates the author's fair-play goals. " +
-      "Only previously pinned, exactly unchanged author-protected decisions retain that authority; " +
-      "the Architecture writer cannot create or authorize new protected decisions. " +
-      "Preserve existing user-protected decisions; never change an existing record unless safely authorized. " +
-      "Honor branch/depth/target selection and do not shrink or redefine the contract yourself. " +
-      (sandboxTools ? "The shell operates only inside /story, without Git, host credentials or network. Read pinned skills through the read tool; use story_validate for native validation. " :
-        "Do not run git add/commit/reset/checkout or alter Git history. Grep, rg, git status/diff and similar inspections are allowed. ") +
-      "The graph independently validates, inspects and commits your changes. " +
-      "Production economy is an explicit constraint, not a universal fixed budget. " +
-      "Frontmatter free-text YAML scalars must be quoted; avoid invalid colon-containing unquoted values. " +
-      "Before finishing, call story_validate with no arguments, inspect diagnostics and coverage, repair problems and rerun validation; the graph independently decides acceptance. Explain downstream obligations.\n" +
-      "End your final answer with exactly one line: CAUSAL_MILESTONE_ORDER: milestone.earliest,milestone.next,milestone.last (substitute EVERY actual selected canonical Milestone ID, in narrative cause-to-consequence order, from triggering discovery through evidence/inference to meaningful payoff). This is only the trusted work-EXECUTION order: do not invent Event IDs, file paths, completion claims or write permissions.\n" +
-      "AUTHORIZED PLAN AND SCOPE:\n" + JSON.stringify(plan, null, 2) +
-      specialistAuthorInstruction(authorTask) +
-      "\nOnly implement the global architecture work item now, not the downstream realization or composition items.",
-    );
+    await promptStorySpecialist(session, context.contextNote +
+      architectureSpecialistPrompt(snapshot, plan, Boolean(sandboxTools), authorTask));
     const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!assistant || assistant.role !== "assistant" ||
         ["error", "aborted"].includes(assistant.stopReason)) {

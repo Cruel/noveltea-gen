@@ -10,7 +10,7 @@ import type { ValidationResult } from "../src/validator.js";
 import type { Plan } from "../src/architecture.js";
 import { auditNarrativeScope } from "../src/narrative-review.js";
 import { verifiedNarrativeChain } from "../src/job-successor.js";
-import { checkEditorialVerdict, type ReviewAssignment } from "../src/narrative-review-specialist.js";
+import { assertEditorialCorrectionPreserved, checkEditorialVerdict, type ReviewAssignment } from "../src/narrative-review-specialist.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-narrative-review-"));
 after(() => removeTestTree(root));
@@ -66,6 +66,28 @@ function validated(report: ReturnType<typeof fixtureReport>): ValidationResult {
       sha256: "a".repeat(64), executable: "/fixture/noveltea" },
   } as ValidationResult;
 }
+test("Luna source-range formatting correction cannot erase independent editorial blockers", () => {
+  const before = { verdict: "block", findings: [{
+    severity: "blocking", dimension: "continuity", source: "events/disclosure.md:28-33",
+    message: "Immediate relationship change lacks branch-specific evidence.",
+    repair: "event",
+  }], evidence: ["events/disclosure.md:28 before correction"] };
+  assert.throws(() => assertEditorialCorrectionPreserved(before,
+    { verdict: "pass", findings: [], evidence: [] }), /cannot erase/);
+  const corrected = assertEditorialCorrectionPreserved(before, {
+    verdict: "block", findings: [{
+      severity: "advisory", dimension: "pacing", source: "events/disclosure.md:28",
+      message: "Unfounded reassessment", repair: "composition",
+    }], evidence: ["events/disclosure.md:28 source-linked evidence"],
+  });
+  assert.deepEqual((corrected.findings as any[])[0], {
+    ...before.findings[0], source: "events/disclosure.md:28",
+  });
+  const assignment = { paths: ["events/disclosure.md"], routes: [],
+    puzzleRoutes: [], milestoneRoutes: [], specialistAssignments: [] } as unknown as ReviewAssignment;
+  assert.equal(checkEditorialVerdict(corrected, assignment).verdict, "block");
+});
+
 test("partial scope ignores unrelated catalog failures, full scope requires the other Arc", () => {
   const report = fixtureReport();
   const partial = auditNarrativeScope(plan(), validated(report), "expected");

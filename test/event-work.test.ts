@@ -5,8 +5,24 @@ import { hostname as requireHostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { changedPaths, eventPrerequisiteReportDigest } from "../src/event-work.js";
+import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding } from "../src/event-work.js";
 import { canonicalFrontmatterStructureError, parseEventManifest } from "../src/event-specialist.js";
+
+test("Event handoff recognizes Luna's explicit Choice-owner binding without accepting a vague choice mention", () => {
+  for (const instruction of [
+    "The later Choice owner must bind protect-or-confront outcomes and effects.",
+    "Formal Choice binding remains for the separately reviewed interactive unit.",
+    "A formal Choice must be added by the subsequent specialist.",
+    "Choice Point binding is required for both outcomes.",
+    "The Choice specialist must author the selected outcome.",
+  ]) {
+    assert.equal(hasDeferredChoiceBinding([instruction]), true, instruction);
+  }
+  assert.equal(hasDeferredChoiceBinding([
+    "A player choice may become relevant in final prose.",
+    "Puzzle owner will add new clues.",
+  ]), false);
+});
 
 test("no-write Event reports are explicit, bounded and never confused with a successful author manifest", () => {
   const input = '{"modifiedRecords":[],"architecturalConflicts":["Needs a Choice specialist"],"laterObligations":["Interactive route outcomes"]}';

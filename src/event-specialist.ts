@@ -1,4 +1,4 @@
-import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
+import { boundedPinnedSources, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { parseSpecialistChoice, extractSpecialistChoice, authorChoiceDirection,
@@ -9,7 +9,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { promptStorySpecialist } from "./story-interruption.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
-import { lastSpecialistManifest } from "./specialist-manifest.js";
+import { lastSpecialistManifest, requireSpecialistManifest } from "./specialist-manifest.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
@@ -18,16 +18,9 @@ import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
-import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
+import type { SkillSnapshot } from "./snapshot.js";
 
-const REQUIRED = [
-  "nt-event-design/SKILL.md",
-  "nt-catalog/SKILL.md",
-  "nt-catalog/references/records.md",
-  "nt-catalog/references/progression.md",
-  "nt-catalog/references/authority-and-validation.md",
-  "nt-catalog/references/glossary.md",
-] as const;
+const REQUIRED = boundedPinnedSources("nt-event-design");
 
 /** Cheap, read-only early diagnosis for half-written model records. Native
  * validation remains authoritative for YAML schema, references and reachability.
@@ -77,6 +70,65 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
     laterObligations: obj.laterObligations };
 }
 
+/** Pure production prompt for fixture comparison and controller-contract tests. */
+export function eventSpecialistPrompt(
+  snapshot: SkillSnapshot,
+  assignment: EventAssignment,
+  sandboxed: boolean,
+): string {
+  return renderBoundedPrompt(snapshot, {
+    goal:
+      "Author exactly ONE Event-design cluster for the assigned Milestone and its authored " +
+      "Arc and Character context. Author a reachable in-scene setup grounded in those sources; " +
+      "do not assert unshown past evidence, unearned typed effects or completed player decisions.",
+    sources: REQUIRED,
+    sourceUse:
+      "Read the selected Milestone/Arc, connected Characters/Facts and reachable earlier " +
+      "Events. Follow only relevant typed links. 'after' orders Events if both occur; actual " +
+      "enabling conditions use prerequisites.any_of.",
+    writableScope:
+      "Only events/*.md and causally connected authorized arcs/*.md, new facts/*.md, " +
+      "revelations/*.md or relationships/*.md. The selected milestones/*.md may change ONLY its " +
+      "fulfillment/completeness fields. All other Milestones, Creative Direction, Character " +
+      "baselines and protected choices are read-only; sourcePaths do not grant writes. " +
+      (sandboxed
+        ? "The networkless /story sandbox cannot use host Git, paths or credentials."
+        : "Do not stage, commit, reset or checkout; Git diff/status inspection is permitted."),
+    doneWhen:
+      "The canonical schema 0.1 Event files have complete YAML frontmatter and " +
+      "substantive Markdown. A new in-scene observation or explicitly sourced testimony " +
+      "may establish evidence without a pre-existing Fact or earlier Event; do not invent " +
+      "off-screen history or promote uncertain claims to truth. Show evidence before " +
+      "justified inferences/effects. " +
+      "A nondecision Event needs no artificial typed effect. If the authored Milestone requires " +
+      "an enacted player decision, produce a reachable setup, preserve partial Milestone " +
+      "completeness with empty fulfillment.any_of, and leave formal outcome binding for Choice. " +
+      "A setup Event is complete unless its own text claims the decision enacted. " +
+      "For a completed nondecision Milestone, bind only genuinely fulfilled routes. " +
+      "Call story_validate without arguments, repair introduced errors and revalidate; " +
+      "independent controller checks remain authoritative.",
+    laterObligations:
+      "Include a concrete laterObligations entry naming formal Choice binding, " +
+      "missing outcome effects and later consumers; defer Puzzle and final prose. Missing Choice, Puzzle, " +
+      "clue, or composed scene records are NOT blockers for this Event setup; write the " +
+      "bounded Event now rather than requesting those later units first. Never invent " +
+      "a Choice Point ID or unrelated effects to claim completion. For truly impossible out-of-scope or " +
+      "protected prerequisites, make NO edits and return concrete conflicts/obligations; " +
+      "only the controller may authorize changed scope.",
+    requiredOutput:
+      "Return one unfenced JSON object with cumulative Story-relative " +
+      "modifiedRecords, architecturalConflicts and laterObligations arrays. Include all " +
+      "changed records. An optional authorDecisionRequest for consequential ambiguity " +
+      "may be free-text (question), yes-no (question/recommendation), or alternatives " +
+      "(question, 2–4 options and recommendation); structured choices include Other. " +
+      "No choice authorizes protected changes. No-write prerequisite reports have modifiedRecords:[] " +
+      "and must precede any edit. The graph verifies source, manifests, authority and validation.",
+    assignmentLabel: "AUTHORIZED ASSIGNMENT",
+    assignment,
+    authorInstruction: specialistAuthorInstruction(assignment.authorTask),
+  });
+}
+
 export async function authorEventCluster(
   job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
   provider: string, modelId: string, onSession: (file: string) => Promise<void>,
@@ -120,57 +172,7 @@ export async function authorEventCluster(
     const file = session.sessionManager.getSessionFile();
     if (file) await onSession(file);
     const required = REQUIRED.map(name => join(snapshot.path, "skills", name));
-    let prompt = "You are the pinned NovelTea nt-event-design specialist. Read ALL the following real skill instructions " +
-      "and references with the read tool BEFORE editing. Use exact stable skill:// references, " +
-      "never copy or invent absolute snapshot paths containing long hash directories:\n" +
-      pinnedSkillReferences(snapshot, required) +
-      "\nRead the specified source files and follow their typed links only where necessary. " +
-      "Work in this isolated canonical Story root. Implement exactly ONE bounded Milestone Event-design cluster, " +
-      "with meaningful dramatic stakes, actions, actual causes, and typed consequences. " +
-      "Event 'after' is optional chronology IF both Events occur; it does not require the earlier Event. " +
-      "Actual enabling conditions belong in prerequisites.any_of, with nonempty alternatives containing completed and not_completed lists. " +
-      "Explicitly model knowledge, truth, relationship and player revelation at the correct branch; do not infer them from prose. " +
-      "Before writing, read the selected authored Milestone and Arc prose, linked Characters/current Facts and relevant earlier Events. " +
-      "This Event stage precedes the specialized Choice/Puzzle and final prose stages. " +
-      "Implement only what actually occurs in this Event. Do not add artificial typed effects. " +
-      "If the Milestone promises an enacted player decision needing formal Choice binding, " +
-      "author the reachable Event setup, leave the Milestone completeness: partial and " +
-      "fulfillment: {any_of: []}, and explicitly name the missing Choice binding, " +
-      "real outcome effects and later consumers in laterObligations. A complete setup Event is valid; " +
-      "if its own text claims the decision enacted before outcomes exist, mark the Event partial too. " +
-      "Never fabricate an unknown choice-point ID or unrelated Relationship/Knowledge changes. " +
-      "The later Choice writer owns outcome binding and must retain existing Event entry gates. " +
-      "Do not refuse to author an Event merely because a Choice Point or ending scene is not yet written. " +
-      "If a genuinely impossible prerequisite requires another scoped specialist or a protected revision, " +
-      "make NO edits, and return modifiedRecords:[] with specific architecturalConflicts and laterObligations; " +
-      "the controller will preserve this as a blocked plan report, NOT an authorization or completed Event. " +
-      "Trace each promised inference to its delivered evidence, source/uncertainty, route gate and consequence; " +
-      "check that chain before reporting fulfillment. Source paths are read-only context unless separately authorized below. " +
-      EVENT_CAUSAL_GROUNDING +
-      "If a new Revelation is required, create a correctly typed canonical revelation with an existing Fact; do not invent a Choice Point, Puzzle, engine Room or game state snapshot. " +
-      "For a genuinely completed nondecision Milestone, bind only actually fulfilled reachable Event routes " +
-      "and complete the selected Milestone; otherwise leave its unbound partial state intact. " +
-      "When legitimately editing the selected Milestone, change ONLY its fulfillment and completeness fields. " +
-      "Do NOT edit any other Milestone, Creative Direction, unrelated Arc, or any Character baseline. " +
-      "You may write events/*.md and strictly connected, authorized arcs/*.md, facts/*.md, revelations/*.md and relationships/*.md. " +
-      "All records must contain valid schema '0.1' frontmatter with ONLY allowed fields and nonempty Markdown body prose. " +
-      "Every Markdown file MUST begin with a standalone --- opening line, end the YAML " +
-      "header with a SECOND standalone --- closing line, and include substantive " +
-      "plain Markdown prose after that closing delimiter. Never stop inside YAML, " +
-      "even when the Event steps/effects are complete. " +
-      "Do not invent references; preserve user-protected author choices. New work remains draft, not author-approved. " +
-      (sandboxTools ?
-        "Shell and file searches run only in networkless /story; Git, host paths and credentials are unavailable. Use story_validate for native checks. " :
-        "Do not run git add, commit, checkout or reset. Git diff/status and grep inspection are permitted. ") +
-      "If the scope cannot be fulfilled without changing a protected or unrelated record, report an architectural conflict rather than editing it. " +
-      "Any unresolved future alternative must be a concrete later obligation, not a fabricated Event ID. " +
-      "Only if a consequential ambiguity needs author input, optionally return JSON with authorDecisionRequest of kind free-text (question), yes-no (question and optional recommendedId/recommendationReason), or alternatives (question, 2–4 meaningful options with id/title/approach/benefits/tradeoffs and reasoned recommendation), and modifiedRecords:[all changed paths]. All structured choices include Other. This is not authority for protected changes. " +
-      "REPORT an exact JSON object at the end (no markdown fences): " +
-      '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":["Future alternative requires Event design"]}. ' +
-      "The modifiedRecords list MUST include every Story-relative file changed in this ENTIRE work item. " +
-      "Call story_validate with no arguments after authoring, inspect diagnostic and reachability evidence, repair and revalidate before reporting. Your own claims are not sufficient evidence; the graph independently checks changes, protection and acceptance.\n" +
-      "AUTHORIZED ASSIGNMENT:\n" + JSON.stringify(assignment, null, 2) +
-      specialistAuthorInstruction(assignment.authorTask);
+    let prompt = eventSpecialistPrompt(snapshot, assignment, Boolean(sandboxTools));
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       const direction = resume?.answer
@@ -202,7 +204,7 @@ export async function authorEventCluster(
       const calls = session.messages.flatMap(m => m.role === "assistant"
         ? m.content.filter(c => c.type === "toolCall") : []);
 
-      const summary = parseEventManifest(finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
+      const summary = await requireSpecialistManifest(session, parseEventManifest, "Event");
       if (!summary.modifiedRecords.length) {
         // Only a genuinely no-write, settled model turn may report missing
         // prerequisites. A modified/reverted or interrupted writer has no

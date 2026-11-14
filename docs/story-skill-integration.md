@@ -30,6 +30,94 @@ records the source Git commit and preserves the original bytes.
 New workflows may select a newer verified snapshot; an already selected
 workflow must use its original snapshot/receipt, never the current checkout.
 
+## Task-first bounded prompts (#165)
+
+Studio runtime prompts use `src/bounded-specialist-prompt.ts` for six ordered
+sections: **CURRENT GOAL, PINNED SOURCES, WRITABLE SCOPE, DONE WHEN,
+LATER OBLIGATIONS, REQUIRED OUTPUT**, followed by exact controller assignment
+data. The controller-bound author instruction appears immediately under CURRENT
+GOAL, never as an implied permission. Architecture, Event, Choice/Puzzle,
+assignment-fidelity review and targeted composition repair use their production
+prompt builders directly; do not introduce another scheduler or duplicate
+the portable craft specification in runtime prose.
+
+All these roles must read their method, `nt-catalog/SKILL.md`, and the
+catalog's **records**, **progression**, and **authority-and-validation**
+references. The **glossary** is available on demand for ambiguous terms, not
+a mandatory up-front read. The original immutable snapshot, verified real read
+calls and role-isolated loader are still authoritative. Missing reads require
+recovery in the original session via stable `skill://` addresses; a fabricated
+self-report is not proof. A reviewer remains read-only, and reviewing an early
+unit never implies final Turn acceptance. `semanticUnitOutcome` describes
+stage-specific reviewer authority, not a second normative Event craft method.
+
+To compare actual prompt expressions against the pre-change local baseline
+`0adf3ba` on an identical bounded synthetic Story fixture:
+
+```sh
+pnpm exec tsx scripts/compare-bounded-prompts.ts 0adf3ba
+pnpm exec tsx --test test/bounded-specialist-prompt.test.ts \
+  test/pinned-skill-reads.test.ts test/semantic-assignment-review.test.ts
+```
+
+| Prompt (same fixture) | Pre-#165 runtime words | #165 runtime words |
+| --- | ---: | ---: |
+| Architecture | 756 | 392 |
+| Event | 1,289 | 498 |
+| Choice | 616 | 401 |
+| Targeted composition repair | 101 | 249 |
+| Assignment reviewer | 427 | 430 |
+
+This comparison evaluates the historic **rendered expressions**, not source-line
+length. The fixture uses the same assignment and snapshot identity on both
+sides. It excludes the independently supplied `contextNote` and the mutable
+Story source bytes. Writers and final Turn reviewers retain their normal current-source
+context. The **assignment-fidelity** reviewer intentionally omits `contextNote`
+and the live `story_context` tool, so it cannot mistake later Story edits for
+an earlier sealed checkpoint. That role reads only immutable pinned method
+files and evaluates the complete sealed source packet; the controller rejects
+unlisted read-tool sources rather than silently permitting source drift. Tokens
+reported by the script use a **characters/4 approximation**, not Luna tokenizer
+measurements. The required
+Event installed skill/reference texts measured 4,121 words before and 3,818
+after; the 303-word difference is the optional glossary, not lost schema or
+progression guidance. A smaller prompt does **not** establish behavioral
+reliability. Reproduce live Luna certification using the rootless hosted-Pi
+controller and `noveltea-sandbox:local` image; the opt-in suite preserves
+private evidence only when explicitly requested:
+
+```sh
+NT_LIVE_INTERACTIVE=1 NT_LIVE_ARCHITECTURE_ONLY=1 \
+  NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
+  pnpm exec tsx --test test/interactive-live.test.ts
+
+NT_LIVE_INTERACTIVE=1 NT_LIVE_EVENT_CHOICE=1 \
+  NT_LIVE_ASSIGNMENT_REVIEW=1 NT_LIVE_INTERACTIVE_REVIEW=1 \
+  NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
+  pnpm exec tsx --test test/interactive-live.test.ts
+```
+
+The #165 real Luna Architecture run passed with partial Milestones, no speculative
+Event bindings and no unapproved edits. A distinct Luna Event-to-Choice run
+committed source-bound Event, Choice and Puzzle checkpoints with native/controller
+validation. Its subsequent independent **assignment-fidelity** reviewer initially
+confused the Event checkpoint with newer Choice edits because it received the
+live-worktree context note. With that context removed and review tools narrowed
+to pinned read-only methods, a new real Luna review of the **same sealed Event
+commit** passed with exact line-linked evidence and no findings. This is a
+reviewer-isolation correction, not a relaxed review criterion.
+
+The same certified Choice checkpoint also provided a **negative literary review
+case**: the Choice author selected `estranged` immediately and a later Event
+unjustifiably reverted the Relationship to `wary`. The real Luna narrative
+review BLOCKED on this source-linked discontinuity, and the opt-in
+`NT_LIVE_EXPECT_REVIEW_BLOCK=1` replay passed by requiring a genuine continuity
+or agency blocker, not a false `pass`. Follow-up quality work is tracked under
+Gen #37; this case does not certify a fully coherent/playable Story. A malformed
+model source range can be corrected once in the same read-only review session,
+without discarding an original BLOCK. The saved #164 certification used the
+old prompt and is not counted as #165 model evidence.
+
 ## One matrix, two responsibilities
 
 The skills repository owns portable method evaluation and matched guided/control

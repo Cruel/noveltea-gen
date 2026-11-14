@@ -5,7 +5,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { createJobModelRuntime } from "./model-runtime.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
-import { lastSpecialistManifest } from "./specialist-manifest.js";
+import { lastSpecialistManifest, requireSpecialistManifest } from "./specialist-manifest.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -13,7 +13,8 @@ import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
-import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
+import type { SkillSnapshot } from "./snapshot.js";
+import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
@@ -41,24 +42,11 @@ export interface InteractiveEvidence {
   skillReads: string[];
   piSessionFile?: string;
 }
-const CATALOG = [
-  "nt-catalog/SKILL.md",
-  "nt-catalog/references/records.md",
-  "nt-catalog/references/progression.md",
-  "nt-catalog/references/authority-and-validation.md",
-  "nt-catalog/references/glossary.md",
-];
 const SPECIALISTS = {
-  choice: {
-    name: "nt-interactive-narrative",
-    guidance: "Use the exact original Event source and missing obligations in ASSIGNMENT.eventSource. A partial decision Milestone is NOT complete until authorized post-Choice closeout; do not edit it. Develop a real two-outcome Choice Point. Canonical choice-point.outcomes MUST be an array of plain outcome slug strings (for example [protect, confront]), not objects, labels or descriptions; put option explanations in the Markdown body. The Story model intentionally does not represent engine UI input binding: a step with multiple enabled conditions: [] branches, each setting a distinct kind: outcome effect, is the canonical representation of selectable narrative alternatives (exact user-facing UI controls are downstream work, not an architectural blocker). Place each exclusive outcome effect in a reachable Event step branch, with materially different immediate state and a later conditional consumer. Preserve original Event prerequisites verbatim. Never reveal branch-exclusive information in shared prose or the other branch. Complete the choice/branch work before proposing the Puzzle. Do not create Puzzle records in this unit.",
-  },
-  puzzle: {
-    name: "nt-puzzle-design",
-    guidance: "Ensure a complete narrative Puzzle with at least TWO distinct reachable solving Events and pre-solution Authored Content clues each attached to a separate reachable discovery Event. Reuse verified existing solutions and clues, rather than recreating them just to include them in the diff. Clue Markdown must actually describe the player-visible observation, and Puzzle prose should explain goal, inference, failed attempts, hints and solution payoffs. Do not link content first presented in a solution Event as a Puzzle clue. Solution Events must have real gated prerequisites and consequences, not merely be named in the Puzzle. Preserve original Event prerequisites and Choice Point outcomes.",
-  },
+  choice: { name: "nt-interactive-narrative" },
+  puzzle: { name: "nt-puzzle-design" },
 } as const;
-function parseManifest(text: string) {
+export function parseInteractiveManifest(text: string) {
   const obj = lastSpecialistManifest(text);
   const strings = (v: unknown): v is string[] =>
     Array.isArray(v) && v.every(x => typeof x === "string" && x.length > 0);
@@ -69,6 +57,66 @@ function parseManifest(text: string) {
   return { paths: obj.modifiedRecords, conflicts: obj.architecturalConflicts,
     obligations: obj.laterObligations };
 }
+/** The same rendered contract is used in live Pi and prompt conformance tests. */
+export function interactiveSpecialistPrompt(
+  snapshot: SkillSnapshot,
+  domain: InteractiveDomain,
+  assignment: InteractiveAssignment,
+  sandboxed: boolean,
+): string {
+  const choice = domain === "choice";
+  return renderBoundedPrompt(snapshot, {
+    goal: choice
+      ? "Complete exactly ONE Choice unit: bind real alternatives to the original verified " +
+        "Event, using its missing obligations and producing reachable, distinct outcome effects " +
+        "and later conditional consumers."
+      : "Complete exactly ONE Puzzle unit: author a solvable Puzzle with accessible pre-solution " +
+        "clues and genuinely reachable distinct solution Events.",
+    sources: boundedPinnedSources(SPECIALISTS[domain].name),
+    sourceUse:
+      "Read ASSIGNMENT.eventSource (when provided), assigned canonical sources and only " +
+      "necessary typed links. Use installed skills for schema fields, craft and validation.",
+    writableScope:
+      "ASSIGNMENT.sourcePaths and authorContract.scope.targets are read-only context " +
+      "and goals; authorizedPaths is only a directory ceiling. Existing Fact, Relationship, " +
+      "Character, World Entity, Arc, Milestone and Creative Direction files are read-only. " +
+      "Never edit milestones/ or existing Event prerequisites. Only assigned writable Event, " +
+      "Choice Point, Revelation and Authored Content records and connected new records may change; " +
+      "no author-protected retcons. " +
+      (sandboxed
+        ? "Tools are confined to the networkless /story sandbox; no host Git or credentials."
+        : "Do not stage, commit, reset or checkout; Git status/diff inspection is permitted."),
+    doneWhen:
+      (choice
+        ? "Choice Point outcomes are slug strings, not objects. Use multiple enabled " +
+          "conditions: [] Event-step branches with distinct kind: outcome effects for selectable " +
+          "alternatives, source-grounded branch consequences and later consumers. Shared prose " +
+          "must not leak exclusive information. Preserve the original Event entry gate verbatim. " +
+          "Do not create a Puzzle in this unit."
+        : "At least two separately reachable solving Events and pre-solution Authored Content " +
+          "clues attached to distinct reachable discovery Events, with genuine gated " +
+          "consequences and readable player-facing clue prose. Reuse existing valid records " +
+          "instead of creating cosmetic duplicates. Do not modify original Choice outcomes.") +
+      " Author schema 0.1 Markdown and run story_validate, repair and revalidate. " +
+      "The controller checks actual final-state coverage, not output-file count.",
+    laterObligations: choice
+      ? "Leave Milestone fulfillment/completeness for a separately authorized closeout; " +
+        "report any required Milestone changes in laterObligations. Puzzle and composition " +
+        "belong to later units."
+      : "Report downstream prose or other-owner dependencies; do not treat read access or " +
+        "review suggestions as write approval.",
+    requiredOutput:
+      "Return exactly one unfenced JSON object with cumulative " +
+      '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":[]}.' +
+      " ALL three arrays contain ONLY strings, never {id,path} objects. Include every " +
+      "changed Story-relative path; report protected or unrelated blockers, never edit them. " +
+      "Controller validation, scope audit and independent review decide acceptance.",
+    assignmentLabel: "AUTHORIZED ASSIGNMENT",
+    assignment,
+    authorInstruction: specialistAuthorInstruction(assignment.authorTask),
+  });
+}
+
 export async function authorInteractive(job: JobStartResult, snapshot: SkillSnapshot,
   domain: InteractiveDomain, assignment: InteractiveAssignment, provider: string, modelId: string,
   thinking: "low" | "medium" | "high" | undefined,
@@ -76,7 +124,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
   verifyDraft: (evidence: InteractiveEvidence) => Promise<string[]>): Promise<InteractiveEvidence> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const selected = SPECIALISTS[domain];
-  const required = [selected.name + "/SKILL.md", ...CATALOG];
+  const required = boundedPinnedSources(selected.name);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: [selected.name, "nt-catalog"] };
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, config);
@@ -110,40 +158,8 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
     }
     const sessionFile = session.sessionManager.getSessionFile();
     if (sessionFile) await onSession(sessionFile);
-    const pinned = required.map(name => join(snapshot.path, "skills", name));
-    let prompt = `You are the real pinned NovelTea ${selected.name} specialist authoring ONE bounded ${domain} work item.\n` +
-      "Read each of these exact stable skill:// references using the read tool BEFORE authoring; " +
-      "never copy or invent long absolute snapshot hash paths:\n" +
-      pinnedSkillReferences(snapshot, pinned) +
-      "\nRead the relevant Story sources in the assignment. Follow only necessary typed references. " +
-      "Use canonical schema '0.1' Story Markdown only, with nonempty narrative body and exact permitted fields. " +
-      "No engine Dialogue/Room/Scene records, no speculative typed IDs, and no author-protected retcons. " +
-      "Existing Fact, Relationship, Character, World Entity, Arc, Milestone and Creative Direction records are strictly READ-ONLY, " +
-      "including their Markdown prose. In particular, NEVER edit milestones/ files, their fulfillment clauses or their prose. " +
-      "ASSIGNMENT.sourcePaths lists records to READ, not permission to edit. " +
-      "ASSIGNMENT.authorContract.scope.targets are narrative goals, not writable file paths. " +
-      "ASSIGNMENT.authorizedPaths is a directory ceiling, NOT blanket permission to modify existing records; " +
-      "only assigned existing files of writable types may be edited. " +
-      "If an Event payoff suggests changing Milestone fulfillment, record that need in laterObligations or " +
-      "architecturalConflicts without touching the Milestone. " +
-      "Do not revise or reword an existing objective Fact even to clarify it; " +
-      "put clarification in Event prose or create a NEW connected Fact only if genuinely needed. " +
-      "Existing Event prerequisites are immutable and must remain textually identical. " +
-      "You may edit existing authorized Event, Choice Point, Revelation and Authored Content files, " +
-      "and create connected new canonical records in your assigned directories. " +
-      "Reuse valid existing Choice/Puzzle definitions, solutions and clues instead of rewriting or " +
-      "recreating them solely to satisfy an output-file count; the controller audits final-state coverage. " +
-      (sandboxTools ?
-        "File and shell tools operate only in the networkless /story sandbox; Git and host paths are unavailable. " :
-        "Do not stage, reset, checkout or commit. Grep, rg and Git diff/status inspections are permitted. ") +
-      selected.guidance + "\n" +
-      "Report any unavoidable architectural conflict without editing protected or out-of-domain canon. " +
-      "A valid structure alone does not prove the reader actually sees the clue or that prose obeys choice branches. " +
-      "Record conditional writing and later payoff obligations explicitly. " +
-      "At the end output ONE unfenced JSON object with the exact cumulative Story-relative file inventory: " +
-      '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":["Review branch-specific prose before composition"]}. ' +
-      "Call story_validate with no arguments after authoring, inspect Puzzle/Choice route coverage and protection, repair and revalidate before reporting. The graph independently checks all bytes, protection and progression.\nASSIGNMENT:\n" +
-      JSON.stringify(assignment, null, 2) + specialistAuthorInstruction(assignment.authorTask);
+    const pinned = pinnedSourcePaths(snapshot, required);
+    let prompt = interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools));
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
@@ -167,7 +183,7 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       // A linked Choice/Puzzle may already exist. The independent audit must
       // check its final state; tool-call evidence need not show a cosmetic edit
       // to that particular record type.
-      const data = parseManifest(last.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
+      const data = await requireSpecialistManifest(session, parseInteractiveManifest, "Interactive");
       const evidence: InteractiveEvidence = { modifiedRecords: data.paths, conflicts: data.conflicts,
         obligations: data.obligations, skillReads,
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined };

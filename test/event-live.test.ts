@@ -82,7 +82,7 @@ Ada and Neri disagree about whether a concealed ledger should be revealed. The p
     assert.ok(generated.validation.eventProgress.every((p: any) => p.status === "reachable"));
     assert.ok(generated.validation.routes.some((p: any) => p.status === "reachable"));
     assert.equal(generated.validation.protectionBase, foundations.headSha);
-    assert.equal(generated.skillReads.length, 6);
+    assert.equal(generated.skillReads.length, 5);
     const messages = readFileSync(generated.sessionFile, "utf8").trim().split("\n").map(JSON.parse);
     const calls = messages.flatMap((m: any) => m.message?.content ?? [])
       .filter((item: any) => item.type === "toolCall");
