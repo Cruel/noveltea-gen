@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspectDependencyPlan, saveDependencyPlan, type DependencyPlan } from "../src/dependency-state.js";
+import type { JobStartResult } from "../src/job.js";
 import { auditEventParticipantCorrection } from "../src/event-participant-correction.js";
 import { authorizeReviewCharacterDependency } from "../src/dependency-amendments.js";
 import { deriveReviewDependencyRequest, deriveReviewRepairAmendment,
@@ -201,6 +204,43 @@ test("S14 #170: Event participants append is exact; all other metadata and old p
   const blockAfter = blockBefore.replace("  - character.lev",
     "  - character.lev\n  - character.mara");
   assert.doesNotThrow(() => auditEventParticipantCorrection(blockBefore, blockAfter, "character.mara"));
+});
+
+test("S14 #170: disconnected ledger reads never transfer authorization across jobs or Threads", async t => {
+  const root = mkdtempSync(join(tmpdir(), "nt170-isolation-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const { digest: _old, ...body } = {
+    ...turn, assignments: [{ ...foundations, dependsOn: [] }, owner],
+  };
+  const pinned: TurnEvidence = { ...body, digest: hash(body) };
+  writeFileSync(join(stateDir, "turn-plan.json"), JSON.stringify(pinned));
+  const job = { stateDir, jobId: "event-job", threadId: "root:event-job",
+    baseSha: base } as JobStartResult;
+  const plan: DependencyPlan = {
+    schema: "noveltea-dependency-plan/v1", jobId: job.jobId,
+    threadId: job.threadId, turnDigest: pinned.digest, version: 1,
+    entries: [], reviewRequests: [], digest: "",
+  };
+  await saveDependencyPlan(job, plan);
+  const initial = await inspectDependencyPlan(job);
+  assert.equal(initial?.version, 1);
+  assert.deepEqual(await inspectDependencyPlan({ ...job }), initial,
+    "a disconnected process reads the same authoritative ledger without rewriting it");
+  await assert.rejects(inspectDependencyPlan({ ...job, threadId: "root:other" }),
+    /identity|source/i, "a foreign Thread cannot inherit the controller-owned plan");
+  await assert.rejects(inspectDependencyPlan({ ...job, jobId: "other-job" }),
+    /identity|source/i, "another Job cannot inherit the controller-owned plan");
+  const stored = readFileSync(join(stateDir, "dependency-plan.json"), "utf8");
+  const altered = JSON.parse(stored) as DependencyPlan;
+  altered.version = 2;
+  assert.notEqual(altered.digest, hash((({ digest: _discard, ...rest }) => rest)(altered)));
+  writeFileSync(join(stateDir, "dependency-plan.json"), JSON.stringify(altered));
+  await assert.rejects(inspectDependencyPlan(job), /identity|version|source/i,
+    "a stale or corrupted amendment version cannot be resurrected on restart");
+  writeFileSync(join(stateDir, "dependency-plan.json"), stored);
+  assert.deepEqual(await inspectDependencyPlan(job), initial);
 });
 
 test("S14 #170: preserved Event-review negative remains immutable when external fixture is supplied", {
