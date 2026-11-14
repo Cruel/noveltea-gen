@@ -450,7 +450,7 @@ Ada suspects Neri has concealed the ledger record that could explain the witness
             // of the prompt-composition / reviewer-isolation contract.
             assert.equal(reviewer.verdict, "block", "The known source defect must remain blocking");
             assert.ok(reviewer.findings.some((f) => f.severity === "blocking" &&
-              ["continuity", "player-agency", "conditional-knowledge"].includes(f.dimension) &&
+              ["continuity", "characterization", "player-agency", "conditional-knowledge"].includes(f.dimension) &&
               /events\//.test(f.source) &&
               /relationship|premature|effect|choice/i.test(f.message)),
             "Negative Luna reviewer must cite the exact causal defect, not an unrelated objection");

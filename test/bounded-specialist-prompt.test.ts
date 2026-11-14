@@ -10,7 +10,7 @@ import {
 } from "../src/narrative-review-specialist.js";
 import { boundedPinnedSources, pinnedSourcePaths } from "../src/bounded-specialist-prompt.js";
 import type { CompletionContract, Plan } from "../src/architecture.js";
-import type { SemanticReviewPacket } from "../src/semantic-assignment-review.js";
+import { semanticUnitOutcome, type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
 
 const snapshot: SkillSnapshot = {
@@ -207,7 +207,24 @@ test("same scoped fixture has no conflicting write grants or future-owner obliga
   assert.ok(rendered["Assignment reviewer"].includes(packet.sourceDigest));
 });
 
-test("each actual pinned-read list retains portable method, representation, progression and authority", () => {
+test("Choice writer and independent review trace source-linked typed payoff continuity", () => {
+  assert.match(rendered.Choice, /the immediate typed outcome AND consequential state effects/);
+  assert.match(rendered.Choice, /estranged/);
+  assert.match(rendered.Choice, /without a visible reconciliation/);
+  assert.doesNotMatch(rendered.Puzzle, /UNJUSTIFIED reversal/);
+  assert.doesNotMatch(rendered["Assignment reviewer"], /an estranged-to-wary transition/);
+  const choicePacket = {
+    ...packet, items: [{ ...packet.items[0]!, reviewedWorkItem: "interactive-choice-disclosure",
+      unitOutcome: semanticUnitOutcome("interactive-choice-disclosure") }],
+  };
+  const reviewer = assignmentFidelityPrompt(snapshot, choicePacket);
+  assert.match(reviewer, /an estranged-to-wary transition/);
+  assert.match(reviewer, /EXACT offending changed path and source line/);
+  assert.match(reviewer, /read-only predecessor path/);
+  assert.match(reviewer, /NONE\. This is a read-only reviewer/);
+});
+
+test("each actual pinned-read list retains portable method, representation and authority", () => {
   for (const method of [
     "nt-story-architecture",
     "nt-event-design",

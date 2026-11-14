@@ -10,7 +10,7 @@ import type { ValidationResult } from "../src/validator.js";
 import type { Plan } from "../src/architecture.js";
 import { auditNarrativeScope } from "../src/narrative-review.js";
 import { verifiedNarrativeChain } from "../src/job-successor.js";
-import { assertEditorialCorrectionPreserved, checkEditorialVerdict, type ReviewAssignment } from "../src/narrative-review-specialist.js";
+import { assertEditorialCorrectionPreserved, checkEditorialVerdict, missingEditorialRouteWitnesses, type ReviewAssignment } from "../src/narrative-review-specialist.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-narrative-review-"));
 after(() => removeTestTree(root));
@@ -128,6 +128,29 @@ test("unreachable branch, unknown progression and unfulfilled obligation cannot 
   assert.ok(auditNarrativeScope(plan(), validated(missing), "expected")
     .diagnostics.some(d => d.code === "unfulfilled-obligation"));
 });
+test("independent PASS requires exact source-linked route identities, not a #step/ paraphrase", () => {
+  const assignment: ReviewAssignment = { contract: {}, planVersion: 1,
+    scopeIds: ["milestone.disclosure"], paths: ["events/choice.md"],
+    routes: [
+      { event: "event.choice", step: "choose", branch: "protect", status: "reachable", witness: [] },
+      { event: "event.choice", step: "choose", branch: "confront", status: "reachable", witness: [] },
+    ], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [] };
+  const malformed = [
+    "event.choice#step/choose/protect: events/choice.md:20",
+    "event.choice#step/choose/confront: events/choice.md:25",
+  ];
+  assert.deepEqual(missingEditorialRouteWitnesses(assignment, malformed), [
+    "event.choice#choose/protect", "event.choice#choose/confront",
+  ]);
+  assert.throws(() => checkEditorialVerdict({ verdict: "pass", findings: [], evidence: malformed },
+    assignment), /route witness/);
+  const grounded = ["event.choice#choose/protect: events/choice.md:20",
+    "event.choice#choose/confront: events/choice.md:25"];
+  assert.deepEqual(missingEditorialRouteWitnesses(assignment, grounded), []);
+  assert.equal(checkEditorialVerdict({ verdict: "pass", findings: [], evidence: grounded },
+    assignment).verdict, "pass");
+});
+
 test("weak choice and Revelation leak remain independent editorial blocks", () => {
   const assignment: ReviewAssignment = { contract: plan().contract, planVersion: 4,
     scopeIds: ["arc.truth"], paths: ["authored-content/confront.md"],

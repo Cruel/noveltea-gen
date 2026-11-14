@@ -16,6 +16,7 @@ import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
+import { CHOICE_PAYOFF_AUTHOR, CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
 export interface InteractiveAssignment {
@@ -92,7 +93,7 @@ export function interactiveSpecialistPrompt(
           "conditions: [] Event-step branches with distinct kind: outcome effects for selectable " +
           "alternatives, source-grounded branch consequences and later consumers. Shared prose " +
           "must not leak exclusive information. Preserve the original Event entry gate verbatim. " +
-          "Do not create a Puzzle in this unit."
+          CHOICE_PAYOFF_AUTHOR + " Do not create a Puzzle in this unit."
         : "At least two separately reachable solving Events and pre-solution Authored Content " +
           "clues attached to distinct reachable discovery Events, with genuine gated " +
           "consequences and readable player-facing clue prose. Reuse existing valid records " +
@@ -200,7 +201,9 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
         "retain your authorized changes. The sourcePaths inventory and scope.targets are READ-ONLY context/goals, " +
         "not edit permissions. Compare changed files against the originally read sources and provide " +
         "the FULL cumulative modifiedRecords manifest EXCLUDING restored files. " +
-        "Do not claim a conditional or unverified path is proven. Diagnostics:\n" + diagnostics.join("\n");
+        "Do not claim a conditional or unverified path is proven. " +
+        (domain === "choice" ? CHOICE_PAYOFF_REPAIR + " " : "") +
+        "Diagnostics:\n" + diagnostics.join("\n");
     }
     throw new Error("Unexpected interactive repair loop termination.");
   } finally { session.dispose(); }

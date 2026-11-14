@@ -405,11 +405,25 @@ function verifyChoice(report: Report, paths: string[], assign: InteractiveAssign
       const order = (origin.metadata.steps as Array<{ id: string }>).findIndex(s => s.id === witness.step);
       const conditionalNextSteps = linked.filter(b => b.event === witness.event &&
         (origin.metadata.steps as Array<{ id: string }>).findIndex(s => s.id === b.step) > order);
-      const effects = [...witness.effects.filter(e => e.kind !== "outcome"),
-        ...conditionalNextSteps.flatMap(b => b.effects.filter(e => e.kind !== "outcome"))];
+      // The first justified state change may be in a separate reachable,
+      // outcome-gated Event. Never force an invented relationship/knowledge
+      // effect into the original selecting branch solely for certification.
+      const conditionalConsumers = [
+        ...linked.filter(b => b.event !== witness.event),
+        ...branches.filter(b => prerequisiteConsumers.some(e => e.metadata.id === b.event) &&
+          report.coverage.branchProgress.some(p => p.event === b.event &&
+            p.step === b.step && p.branch === b.branch && p.status === "reachable")),
+      ];
+      const consequences = new Map([witness, ...conditionalNextSteps, ...conditionalConsumers]
+        .map(b => [b.event + "#" + b.step + "/" + b.branch, b]));
+      const effects = [...consequences.values()].flatMap(b =>
+        b.effects.filter(e => e.kind !== "outcome"));
       if (!effects.length) {
         throw new Error("Choice outcome lacks a consequential typed effect at selection or in a later conditional step: " +
-          record.metadata.id + "/" + outcome);
+          record.metadata.id + "/" + outcome + " at " + witness.event + "#" + witness.step + "/" + witness.branch +
+          ". Add only a causally justified effect in the authorized selection or reachable later " +
+          "outcome-conditioned Event/step; " +
+          "an arbitrary Relationship severity or invented Fact is not a valid payoff.");
       }
       // A later reachable conditional step within the selecting Event is a
       // genuine payoff, just like a conditional consumer in another Event.
@@ -428,7 +442,10 @@ function verifyChoice(report: Report, paths: string[], assign: InteractiveAssign
           ((o.includes(record.metadata.id) && (/outcome/i.test(o) || o.includes(outcome))) ||
            (typedRefs.some(ref => o.includes(ref)) && typedValues.some(value => o.includes(value)))));
         if (!explicit) throw new Error("Choice outcome lacks a reachable later consumer or specific conditional writing obligation: " +
-          record.metadata.id + "/" + outcome);
+          record.metadata.id + "/" + outcome + " selected at " + witness.event + "#" + witness.step + "/" + witness.branch +
+          ". Add a justified reachable later step/Event conditioned on this exact outcome, or name the " +
+          "Choice/outcome, typed effect and future conditional consumer in laterObligations; do not change an " +
+          "immutable original Event prerequisite gate.");
         if (explicit) downstream.push("conditional-writing-obligation");
       }
       return { name: outcome, event: witness.event, step: witness.step,
@@ -627,7 +644,8 @@ async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
     await add("choice-points", "loyalty", "choice-point",
       'prompt: "Protect Neri or challenge the concealment?"\noutcomes: [protect, challenge]',
       "Protecting the friend preserves intimacy, while challenging the concealment risks the friendship in exchange for accountability.");
-    await add("revelations", "ledger-secret", "revelation",
+    const delayedEffect = ["downstream-effect-only", "downstream-no-effect"].includes(variant);
+    if (!delayedEffect) await add("revelations", "ledger-secret", "revelation",
       "fact: fact.evidence-concealed",
       "If Ada challenges Neri, the ledger detail is exposed to the player within that branch.");
     if (variant === "choice-content") {
@@ -667,9 +685,34 @@ revelations: [revelation.ledger-secret]`,
             value: estranged` : "") +
         text.slice(end);
     });
+    if (delayedEffect) await rewrite(event, text => {
+      const start = text.indexOf("steps:");
+      const end = text.indexOf("\n---", start);
+      if (start < 0 || end < 0) throw Error("Fixture has no Event step frontmatter.");
+      return text.slice(0, start) + `steps:
+  - id: decision
+    branches:
+      - id: protect
+        conditions: []
+        effects:
+          - kind: outcome
+            choice_point: choice-point.loyalty
+            value: protect
+      - id: challenge
+        conditions: []
+        effects:
+          - kind: outcome
+            choice_point: choice-point.loyalty
+            value: challenge` + text.slice(end);
+    });
     if (!["conditional-writing", "choice-id-obligation", "unpaid-choice", "same-event-payoff"].includes(variant)) await add("events", "aftermath", "event",
       `participants: [character.ada, character.neri]\narcs: [${arc}]\nconsequences: ["A choice changes how Ada and Neri collaborate afterward"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: [${cluster.text("event.disclose-ledger")}]\n      not_completed: []\nsteps:\n  - id: consequence\n    branches:\n      - id: protect-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: protect\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting\n      - id: challenge-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: challenge\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: estranged`,
       "If Ada protects Neri, they continue investigating as trusted collaborators. If she challenges Neri, the confrontation leaves their alliance damaged.");
+    if (variant === "downstream-no-effect") {
+      await rewrite("events/aftermath.md", text => text
+        .replace(/effects:\n          - kind: relationship\n            relationship: relationship\.ada-neri\n            value: trusting/, "effects: []")
+        .replace(/effects:\n          - kind: relationship\n            relationship: relationship\.ada-neri\n            value: estranged/, "effects: []"));
+    }
     if (variant === "bypass-gate") {
       await rewrite(event, s => s.replace("prerequisites:\n  any_of:",
         "prerequisites:\n  any_of:\n    - completed: []\n      not_completed: []"));

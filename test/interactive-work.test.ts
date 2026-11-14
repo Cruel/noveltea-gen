@@ -260,12 +260,42 @@ test("reachable later conditional steps in the selecting Event count as genuine 
   assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
 });
 
+test("Choice may enact its first justified typed effects only in reachable downstream Events", { skip: !available }, () => {
+  const x = setup("downstream-effect-only");
+  const prior = x.prepare();
+  const result = x.interactive("downstream-effect-only");
+  assert.equal(result.status, 0, result.stderr);
+  const choice = JSON.parse(result.stdout).specialistUnits[0];
+  assert.equal(choice.validation.protectionBase, prior);
+  const outcomes = choice.validation.choices[0].outcomes;
+  assert.deepEqual(outcomes.map((o: any) => o.name), ["protect", "challenge"]);
+  assert.ok(outcomes.every((o: any) => o.downstream.includes("event.aftermath")));
+  assert.ok(outcomes.every((o: any) => JSON.parse(o.consequence).every((effect: any) =>
+    effect.kind !== "outcome")));
+  assert.notEqual(outcomes[0].consequence, outcomes[1].consequence,
+    "Distinct consequential state appears after, not at, Choice selection");
+  assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
+});
+
+test("outcome-only selection with no later typed consequence remains rejected", { skip: !available }, () => {
+  const x = setup("downstream-no-effect");
+  const head = x.prepare();
+  const invalid = x.interactive("downstream-no-effect");
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /lacks a consequential typed effect at selection/);
+  assert.match(invalid.stderr, /outcome-conditioned Event\/step/);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
 test("rejects an outcome with neither a later consumer nor a precise writing obligation", { skip: !available }, () => {
   const x = setup("unpaid-choice");
   const head = x.prepare();
   const invalid = x.interactive("unpaid-choice");
   assert.notEqual(invalid.status, 0);
   assert.match(invalid.stderr, /lacks a reachable later consumer or specific conditional writing obligation/);
+  assert.match(invalid.stderr, /selected at event\.disclose-ledger#/);
+  assert.match(invalid.stderr, /conditioned on this exact outcome/);
+  assert.match(invalid.stderr, /immutable original Event prerequisite gate/);
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(inspect(x).specialistUnits[0].phase, "authored");
 });

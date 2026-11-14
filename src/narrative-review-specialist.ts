@@ -16,6 +16,7 @@ import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import type { SkillConfig } from "./skills.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignment-review.js";
+import { CHOICE_PAYOFF_REVIEW } from "./choice-payoff-guidance.js";
 import { normalizeOmittedSemanticEvidenceSha, validateSemanticVerdict } from "./semantic-assignment-review.js";
 import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfillment.js";
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
@@ -64,6 +65,21 @@ const repairs = ["composition", "event", "interactive", "architecture", "protect
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every(x => typeof x === "string" && x.trim().length > 0);
 
+/** Exact route tokens needed for a PASS, not verdicts or fabricated witnesses.
+ * The same list drives the read-only correction prompt and final gate. */
+export function missingEditorialRouteWitnesses(
+  assignment: ReviewAssignment, evidence: readonly string[],
+): string[] {
+  const linked = (line: string) => /[a-z][a-z0-9-]*\/[^\s:]+\.md:[1-9][0-9]*/.test(line);
+  const routes = [
+    ...assignment.routes.map(r => [r.event + "#" + r.step + "/" + r.branch]),
+    ...assignment.milestoneRoutes.map(r => [r.milestone + "#" + r.alternative,
+      r.milestone + "#alternative " + r.alternative]),
+    ...assignment.puzzleRoutes.map(r => [r.puzzle + "/" + r.event]),
+  ];
+  return routes.filter(labels => !evidence.some(line => linked(line) &&
+    labels.some(label => line.includes(label)))).map(labels => labels[0]!);
+}
 export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignment): EditorialVerdict {
   const v = value as Partial<EditorialVerdict> | null;
   if (!v || !["pass", "block"].includes(v.verdict ?? "") ||
@@ -92,12 +108,7 @@ export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignme
     if ([...owned].some(path => !v.evidence!.some(line => line.split(path + ":")
       .slice(1).some(rest => /^[1-9][0-9]*/.test(rest)))))
       throw new Error("Passing reviewer omitted source-linked evidence for a specialist assignment.");
-    const routes = [...assignment.routes.map(r => [r.event + "#" + r.step + "/" + r.branch]),
-      ...assignment.milestoneRoutes.map(r => [r.milestone + "#" + r.alternative,
-        r.milestone + "#alternative " + r.alternative]),
-      ...assignment.puzzleRoutes.map(r => [r.puzzle + "/" + r.event])];
-    if (routes.some(labels => !v.evidence!.some(line => linked(line) &&
-      labels.some(label => line.includes(label)))))
+    if (missingEditorialRouteWitnesses(assignment, v.evidence!).length)
       throw new Error("Passing narrative reviewer omitted a source-linked file:line for a representative route witness.");
   }
   return { verdict: v.verdict!, findings: v.findings, evidence: v.evidence };
@@ -217,6 +228,15 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
         "pick a winner. Do not claim exhaustive route verification. " : "") +
       "Use the bounded progression witnesses as representative routes, NOT exhaustive proof. " +
       "Review every listed Choice outcome and Puzzle solution, including least-informed routes. " +
+      "CHECKPOINT SCOPE: If ASSIGNMENT.turnGoal specifies a POST-CHOICE checkpoint, " +
+      "assess only authored Choice selectors, typed consequences, actual downstream " +
+      "conditional consumers and current source prose. Future Puzzle authorship, " +
+      "Milestone closeout, Composition and full-game completeness are explicitly " +
+      "NOT blocking defects at this checkpoint; describe them as downstream " +
+      "obligations or advisory context, not fabricated failures of the Choice unit. " +
+      "A true contradiction in a Choice relationship/knowledge effect or source prose " +
+      "IS still blocking, regardless of native reachability. " +
+      "If the assignment is for Event-only work, likewise defer later Choice binding. " +
       "Assess scope constraints, production envelope, and binding obligations. " +
       "When Turn assignments are supplied, independently compare EACH specialist\'s changes " +
       "with its specific outcome and authorization, not merely the top-level author brief; " +
@@ -227,7 +247,9 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "Do not edit files or invoke shell. If evidence is insufficient, block. " +
       "Return ONE unfenced JSON object: " +
       '{ "verdict":"pass|block", "findings":[{"severity":"blocking|advisory","dimension":"continuity|pacing|characterization|puzzle-fairness|player-agency|dramatic-payoff|conditional-knowledge|obligation","source":"authored-content/a.md:12","message":"...","repair":"composition|event|interactive|architecture|protected"}], "evidence":["event.x#step/branch: source.md:line ...","puzzle.x/event.y: source.md:line ..."] }. ' +
-      "Provide source-linked evidence for EVERY event#step/branch, milestone#alternative, and puzzle/event route.\n" +
+      "Provide source-linked evidence for EVERY EXACT event#step/branch, milestone#alternative, and puzzle/event route. " +
+      "For example event.disclosure-setup#choose-response/protect: events/disclosure-setup.md:29. " +
+      "Do not insert an extra #step/ segment; copy the exact event, step and branch IDs from ASSIGNMENT.routes.\n" +
       "PINNED REFERENCES:\n" + pinnedSkillReferences(snapshot, pinned) + "\nSTORY PATHS:\n" +
       assignment.paths.join("\n") + "\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
     const missingReads = () => {
@@ -254,16 +276,24 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       // required path:line. Repair only the JSON source-link presentation in
       // this same read-only session; a blocking finding cannot become a pass.
       if (!(error instanceof Error) ||
-          !/invalid severity\/source-linked editorial findings|Narrative review requires evidence linked/.test(error.message))
+          !/invalid severity\/source-linked editorial findings|Narrative review requires evidence linked|Passing narrative reviewer omitted a source-linked file:line for a representative route witness/.test(error.message))
         throw error;
+      const gaps = initial.verdict === "pass" && Array.isArray(initial.evidence)
+        ? missingEditorialRouteWitnesses(assignment, initial.evidence) : [];
       await promptStorySpecialist(session,
-        "Your review JSON failed only the source-link format contract. Keep " +
+        "Your review JSON failed the strict source-link evidence format contract. Keep " +
         "the SAME verdict, finding count, severity, dimension, message and repair " +
         "owner; do not soften or discard any blocking finding. Every finding.source " +
         "must be one canonical path and ONE positive integer line, e.g. " +
-        "events/example.md:28, never line ranges such as :28-33. Keep evidence " +
-        "with real path:line witnesses. Return a fresh complete unfenced JSON " +
-        "object; no write, shell, approval or repair tools.");
+        "events/example.md:28, never line ranges such as :28-33. " +
+        (gaps.length ? "The PASS is missing these EXACT representative route tokens: " +
+          JSON.stringify(gaps) + ". For EACH, inspect the real canonical source and cite " +
+          "the exact token followed by a valid path:line and grounded explanation, " +
+          "for example event.x#choose/protect: events/x.md:24. No extra #step/ prefix. " +
+          "If any route is not supported by actual source, return an actionable BLOCK instead; " +
+          "never fabricate positive evidence. " : "") +
+        "Return a fresh complete unfenced JSON object; no write, shell, " +
+        "approval or repair tools.");
       const revised = parseSpecialistJson(lastReply(session));
       verdict = checkEditorialVerdict(assertEditorialCorrectionPreserved(initial, revised), assignment);
     }
@@ -354,7 +384,9 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "Allow only verified stage-specific supporting records, even if the top-level " +
       "recordTypes is coarser. Do not fail upstream work only because future Composition " +
       "or final playable Story obligations remain. Still reject false enactment, " +
-      "unsupported cause/effect and unauthorized changes.",
+      "unsupported cause/effect and unauthorized changes." +
+      (packet.items.some(item => item.reviewedWorkItem.startsWith("interactive-choice-"))
+        ? " " + CHOICE_PAYOFF_REVIEW : ""),
     laterObligations:
       "The controller and later specialists own deferred units and " +
       "final literary review. If a defect needs protected or other-owner edits, " +
