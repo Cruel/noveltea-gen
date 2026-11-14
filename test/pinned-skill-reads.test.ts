@@ -1,7 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { canonicalPinnedReadPath, completedPinnedSkillReads } from "../src/pinned-skill-reads.js";
+import { canonicalPinnedReadPath, completedPinnedSkillReads, requirePinnedSkillReads } from "../src/pinned-skill-reads.js";
+
+test("snapshot roots containing /skills/ credit successful pinned skill:// reads", async () => {
+  const root = "/tmp/cert/skills/abc123";
+  const required = ["nt-interactive-narrative/SKILL.md",
+    "nt-catalog/references/authority-and-validation.md", "nt-catalog/references/glossary.md"]
+    .map(name => root + "/skills/" + name);
+  const messages = [
+    { role: "assistant", content: required.map((name, index) => ({
+      type: "toolCall", name: "read", id: "ref" + index,
+      arguments: { path: "skill://" + name.slice((root + "/skills/").length) },
+    })) },
+    ...required.map((_, index) => ({ role: "toolResult", toolCallId: "ref" + index, isError: false })),
+  ] as unknown as AgentSession["messages"];
+  assert.deepEqual(await requirePinnedSkillReads({ messages } as AgentSession,
+    "/story/job", required, "Interactive specialist"), required);
+});
 
 test("counts only completed exact skill reads, never typo paths or failed tool calls", () => {
   const root = "/story/job";

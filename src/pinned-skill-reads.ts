@@ -30,7 +30,10 @@ export function completedPinnedSkillReads(messages: AgentSession["messages"], ro
 
 export async function requirePinnedSkillReads(session: AgentSession, root: string,
   required: string[], stage: string): Promise<string[]> {
-  const snapshotRoot = required.find(path => path.includes("/skills/"))?.split("/skills/")[0];
+  const first = required.find(path => path.includes("/skills/"));
+  // Cache roots themselves can contain /skills/ (e.g. $TMP/skills/<digest>).
+  // The final /skills/ component names the actual snapshot skill directory.
+  const snapshotRoot = first?.slice(0, first.lastIndexOf("/skills/"));
   const reads = () => completedPinnedSkillReads(session.messages, root, snapshotRoot);
   const missing = () => required.filter(path => !reads().includes(path));
   if (missing().length) {

@@ -5,6 +5,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { createJobModelRuntime } from "./model-runtime.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
+import { lastSpecialistManifest } from "./specialist-manifest.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -58,9 +59,7 @@ const SPECIALISTS = {
   },
 } as const;
 function parseManifest(text: string) {
-  const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
-  let obj: Record<string, unknown> | undefined;
-  try { obj = JSON.parse(match ?? "null") as Record<string, unknown>; } catch { /* reject */ }
+  const obj = lastSpecialistManifest(text);
   const strings = (v: unknown): v is string[] =>
     Array.isArray(v) && v.every(x => typeof x === "string" && x.length > 0);
   if (!obj || !strings(obj.modifiedRecords) || !obj.modifiedRecords.length ||

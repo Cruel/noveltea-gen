@@ -9,6 +9,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { promptStorySpecialist } from "./story-interruption.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
+import { lastSpecialistManifest } from "./specialist-manifest.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
@@ -63,10 +64,7 @@ export interface EventEvidence {
 }
 
 export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[]; laterObligations: string[] } {
-  const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
-  let parsed: unknown;
-  try { parsed = JSON.parse(match ?? "null"); } catch { /* reject below */ }
-  const obj = parsed as Record<string, unknown> | null;
+  const obj = lastSpecialistManifest(text);
   const strings = (value: unknown): value is string[] =>
     Array.isArray(value) && value.every(x => typeof x === "string" && x.trim().length > 0);
   if (!obj || !strings(obj.modifiedRecords) ||
