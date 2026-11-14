@@ -224,6 +224,21 @@ test("same scoped fixture has no conflicting write grants or future-owner obliga
   assert.ok(rendered["Assignment reviewer"].includes(packet.sourceDigest));
 });
 
+test("investigation architecture specifies a testable independent evidence comparison without inventing Events", () => {
+  assert.match(rendered.Architecture, /independent observation/);
+  assert.match(rendered.Architecture, /what that observation can and cannot establish/);
+  assert.match(rendered.Architecture, /without inventing Event IDs/);
+});
+
+test("Event author keeps central speakers in typed Character participants and tests actual evidence", () => {
+  assert.match(rendered.Event, /named speaking witness or central actor/);
+  assert.match(rendered.Event, /existing canonical Character/);
+  assert.match(rendered.Event, /typed participants/);
+  assert.match(rendered.Event, /before any edits/);
+  assert.match(rendered.Event, /independent observation/);
+  assert.match(rendered.Event, /cannot establish the disputed timing/);
+});
+
 test("empty-Story Architecture correction never replays a writer with attempted edits or dirty sources", () => {
   assert.equal(canCorrectEmptyArchitecture(false, false), true);
   assert.equal(canCorrectEmptyArchitecture(true, false), false);

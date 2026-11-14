@@ -285,3 +285,39 @@ acceptance result was fabricated for these incomplete Stories.
 checks and external quality assessment are completed and recorded. A
 deterministic check, intact source snapshot or successfully implemented
 certification command is not closure evidence by itself.
+
+## November 14 Luna retest after #168 and #169: still incomplete
+
+Two fresh independent Studio/real-Pi invocations used Gen source
+`bb9fc8782754eddb5fcbc5582653859e1b9f060c`, clean skills checkout
+`4c0a591e9e435de061ea58add8e7b14f2b40f605`, `openai/gpt-6-luna`, Pi
+1.5.0 and native CLI 1.0.0. Both began with a sparse mystery prompt, baseline
+questions and recommendations, a partial delegated answer, exact author
+approval, and automatic continuation of the original Turn. Both wrote real
+canonical records and **passed native validation**, but neither passed the
+full playable-Story assertion:
+
+| Mode | Saved private root / Job | Final verified HEAD | Outcome |
+| --- | --- | --- | --- |
+| Autonomous | `/tmp/nt158-vmsiJX` / `9c56b749-2ab9-49ed-824f-dca3927f23ed` | `158079cf01aa7e5727417974fb259165653a8aca` | **blocked** after two Event corrections failed independent review: a response count and undated bell indicator did not actually test the claimed conflicting accounts. |
+| Collaborative | `/tmp/nt158-6o7r2Z` / `0b58a215-d3b6-4545-a7e0-8d09dcebbfe4` | `b5803f40fb92c402d1a852f0baf102233b7ba1c1` | **paused** after independent Event review found a central named speaker without a canonical Character or typed Event participant. No actionable authenticated Author Choice was presented by the existing runner. |
+
+The initial disposable Story SHAs were
+`edfe9d732eac8c4fd7b351ec67400a21a52533b3` (Autonomous) and
+`953a86b4f03fe00ec91b688155fee1b7cb91d717` (Collaborative).
+Both runs retained source-linked negative-review receipts and private agent
+transcripts. Neither reached complete Choice/Puzzle/Content routes or final
+whole-Story editorial review. The first failed despite legitimate bounded
+corrections; the second exposed an Event-to-Character dependency beyond the
+Character-Foundations-only #169 path. Do not classify either as a creative pass.
+
+The full `pnpm check` on this pre-hardening source passed, and focused
+Event/Character/review regressions passed (60 passed, 3 private replay skips).
+The follow-up bounded Architecture and Event prompt guidance now explicitly
+requires a testable independent observation and typed participation by existing
+Characters, with regressions for both. **Prompt tests are not proof that Luna
+will follow the guidance in a fresh full run.** A controller-authorized,
+source-bound Event-to-Character dependency path remains separate work. Neither
+a worker restart/isolation audit nor external literary quality attestation was
+obtained, so `pnpm certify:new-story` cannot be claimed eligible and #158
+remains open.

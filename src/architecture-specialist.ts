@@ -104,6 +104,9 @@ export function architectureSpecialistPrompt(
       "turning point outcomes and their causal successor (or terminal payoff). " +
       "For investigations distinguish discovery, evidence, inference, confrontation " +
       "and consequential player decision without asserting unsupported facts. " +
+      "If a Milestone promises to test conflicting accounts, name the independent observation " +
+      "and what that observation can and cannot establish. Plan the comparison, " +
+      "not a prematurely proven inference or a fabricated Event. " +
       "Stage-incomplete Milestones must keep completeness: partial and " +
       "fulfillment: {any_of: []}; no speculative Events or artificial completion. " +
       "Bodies remain true after subsequent World/Character/Event authorship; never " +

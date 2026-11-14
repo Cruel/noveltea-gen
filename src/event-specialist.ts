@@ -103,6 +103,11 @@ export function eventSpecialistPrompt(
       "author the discovery and Character access NOW with justified in-scene " +
       "knowledge effects, rather than asking who should author the discovery. " +
       "The Story does not require a pre-existing discovery Event to start. " +
+      "Every named speaking witness or central actor present in the scene must be an " +
+      "existing canonical Character listed in this Event's typed participants. " +
+      "Use the existing cast; if a missing Character is genuinely essential, " +
+      "report that dependency before any edits rather than creating the Character " +
+      "or beginning an incomplete Event. " +
       "A new in-scene observation or explicitly sourced testimony " +
       "may establish evidence without a pre-existing Fact or earlier Event; do not invent " +
       "off-screen history or promote uncertain claims to truth. Show evidence before " +
@@ -117,6 +122,8 @@ export function eventSpecialistPrompt(
       "of an empty or locked place NOW does not prove it was continuously locked " +
       "or inaccessible EARLIER; neither a witness claim nor a possible discrepancy " +
       "alone proves that all the Milestone's evidence has been established. " +
+      "For a promised contradiction, test the claims against an independent observation " +
+      "the player can inspect: an undated physical trace cannot establish the disputed timing. " +
       "When an essential clause is not yet established, retain partial " +
       "completeness and empty fulfillment.any_of, and name the exact missing " +
       "support as a later obligation; do NOT make a false completed route. " +
