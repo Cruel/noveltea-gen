@@ -124,6 +124,15 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         assert.equal(verified.checkpoint.nextWorkItem, 'character-foundations')
         assert.deepEqual(verified.checkpoint.completedWorkItems, world.completedWorkItems)
         assert.equal(verified.latest.jobId, parentId)
+        const earlier = (await inspectRecoveryCheckpoints(parent)).find(point =>
+          point.eligible && point.commitSha !== world.commitSha)
+        assert.ok(earlier, 'Certification must permit choosing an earlier verified checkpoint')
+        const rewind = await inspectPreservedCheckpointRetry({
+          ...selection, checkpointSha: earlier.commitSha,
+        })
+        assert.equal(rewind.checkpoint.commitSha, earlier.commitSha)
+        assert.notEqual(rewind.checkpoint.commitSha, verified.checkpoint.commitSha)
+        assert.ok(rewind.checkpoint.completedWorkItems.length < verified.checkpoint.completedWorkItems.length)
         await assert.rejects(() => inspectPreservedCheckpointRetry({
           ...selection, checkpointSha: initial,
         }), /finalized and eligible/)
