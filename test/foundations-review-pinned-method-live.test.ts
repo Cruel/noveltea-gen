@@ -29,6 +29,7 @@ test("saved Luna World reviewer uses only exact pinned World/Character methods",
   const required = pinnedSourcePaths(receipt.snapshot, boundedPinnedSources("nt-narrative-review"));
   const optional = assignmentReviewerOptionalMethods(receipt.snapshot, packet);
   assert.deepEqual(optional, [
+    join(receipt.snapshot.path, "skills/nt-story-architecture/SKILL.md"),
     join(receipt.snapshot.path, "skills/nt-worldbuilding/SKILL.md"),
     join(receipt.snapshot.path, "skills/nt-character-development/SKILL.md"),
   ]);
@@ -43,6 +44,10 @@ test("saved Luna World reviewer uses only exact pinned World/Character methods",
     .flatMap(m => m.content ?? [])
     .filter(c => c.type === "toolCall" && c.name === "read" && successful.has(c.id))
     .map(c => c.arguments?.path);
+  // Architecture is an upstream dependency of World Foundations. The latest
+  // real Luna run consulted it; it is allowed only from the same snapshot.
+  if (reads.includes("skill://nt-story-architecture/SKILL.md"))
+    assert.ok(optional.includes(join(receipt.snapshot.path, "skills/nt-story-architecture/SKILL.md")));
   assert.ok(reads.includes("skill://nt-worldbuilding/SKILL.md"));
   assert.ok(reads.includes("skill://nt-character-development/SKILL.md"));
   for (const ref of reads) {

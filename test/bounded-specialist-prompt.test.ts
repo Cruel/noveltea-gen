@@ -370,6 +370,7 @@ test("retrospective reviewer allows only pinned craft methods from each unit and
   })) };
   const method = (name: string) => snapshot.path + "/skills/" + name;
   const foundationMethods = [
+    method("nt-story-architecture/SKILL.md"),
     method("nt-worldbuilding/SKILL.md"),
     method("nt-character-development/SKILL.md"),
   ];

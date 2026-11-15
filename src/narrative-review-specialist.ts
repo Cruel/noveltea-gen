@@ -403,10 +403,11 @@ export function assignmentReviewerOptionalMethods(
   const puzzle = any("interactive-puzzle-");
   const composition = any("composition-");
   const afterFoundations = event || choice || puzzle || composition;
+  const afterArchitecture = foundations || afterFoundations;
   const afterEvent = choice || puzzle || composition;
   const afterChoice = puzzle || composition;
   const methods = [
-    ...(architecture ? ["nt-story-architecture/SKILL.md"] : []),
+    ...((architecture || afterArchitecture) ? ["nt-story-architecture/SKILL.md"] : []),
     ...((foundations || afterFoundations)
       ? ["nt-worldbuilding/SKILL.md", "nt-character-development/SKILL.md"] : []),
     ...(afterFoundations ? ["nt-event-design/SKILL.md"] : []),

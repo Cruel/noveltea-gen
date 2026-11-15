@@ -29,6 +29,7 @@ test("saved Luna Event reviewer may compare exact immutable source-role methods"
   const required = pinnedSourcePaths(receipt.snapshot, boundedPinnedSources("nt-narrative-review"));
   const optional = assignmentReviewerOptionalMethods(receipt.snapshot, packet);
   assert.deepEqual(optional, [
+    join(receipt.snapshot.path, "skills/nt-story-architecture/SKILL.md"),
     join(receipt.snapshot.path, "skills/nt-worldbuilding/SKILL.md"),
     join(receipt.snapshot.path, "skills/nt-character-development/SKILL.md"),
     join(receipt.snapshot.path, "skills/nt-event-design/SKILL.md"),
