@@ -291,6 +291,30 @@ async function assertSafeInteractiveRepair(job: JobStartResult, before: string,
     throw new Error("Interactive repair refused: unverified or protected Story changes, or mismatched job identity.");
   }
 }
+/** A writer's conflict report is not proof that its own draft is unrepairable.
+ * The native validator may identify defects entirely within the already-audited
+ * writable files (for example an outcome that tests itself before selection).
+ * Only those source-local diagnostics may be returned for an in-session retry;
+ * a cross-owner diagnostic never expands the writer's grant. */
+export function interactiveConflictRepairFeedback(
+  conflicts: readonly string[], changedPaths: readonly string[],
+  diagnostics: readonly Report["diagnostics"][number][],
+): string[] | undefined {
+  if (!conflicts.length || !diagnostics.length ||
+      !diagnostics.every(item => changedPaths.includes(item.path) &&
+        item.code && item.message)) return undefined;
+  return [
+    ...diagnostics.slice(0, 24).map(item =>
+      `${item.path}:${item.line ?? 1}:${item.column ?? 1} ${item.code}: ${item.message}`),
+    "These native errors concern only files already within your audited write grant. " +
+      "Correct the reachable selecting step and any other actual defects in those files " +
+      "using the SAME Pi session; do not edit existing Event prerequisite gates, " +
+      "read-only records, or protected author decisions. Do not make an outcome " +
+      "condition depend on that outcome's own first assignment. " +
+      "Revalidate before clearing architecturalConflicts. If a genuine dependency " +
+      "outside your grant remains, report it unchanged; this feedback grants no new scope.",
+  ];
+}
 /** Only offer repair when the job identity and pinned Git protection prove
  * the out-of-scope edit did not alter protected author decisions. Nothing is
  * reverted or authorized by the graph on the agent's behalf. */
@@ -663,6 +687,10 @@ async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
       'prompt: "Protect Neri or challenge the concealment?"\noutcomes: [protect, challenge]',
       "Protecting the friend preserves intimacy, while challenging the concealment risks the friendship in exchange for accountability.");
     const delayedEffect = ["downstream-effect-only", "downstream-no-effect"].includes(variant);
+    const selectorConditions = (outcome: "protect" | "challenge") =>
+      variant === "self-conditioned-selection"
+        ? `\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: ${outcome}`
+        : " []";
     if (!delayedEffect) await add("revelations", "ledger-secret", "revelation",
       "fact: fact.evidence-concealed",
       "If Ada challenges Neri, the ledger detail is exposed to the player within that branch.");
@@ -678,8 +706,8 @@ revelations: [revelation.ledger-secret]`,
       if (begin < 0 || end < 0) throw new Error("Fixture expected existing complete Event steps.");
       const leak = variant === "state-leak";
       return text.slice(0, begin) +
-        `steps:\n` + (leak ? `  - id: premature\n    branches:\n      - id: shared\n        conditions: []\n        effects:\n          - kind: revealed\n            revelation: revelation.ledger-secret\n            value: true\n` : "") + `  - id: admit\n    branches:\n      - id: disclose\n        conditions: []\n        effects:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: protect\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows` +
-        `\n      - id: challenge\n        conditions: []\n        effects:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: challenge\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: wary\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows\n          - kind: revealed\n            revelation: revelation.ledger-secret\n            value: true` +
+        `steps:\n` + (leak ? `  - id: premature\n    branches:\n      - id: shared\n        conditions: []\n        effects:\n          - kind: revealed\n            revelation: revelation.ledger-secret\n            value: true\n` : "") + `  - id: admit\n    branches:\n      - id: disclose\n        conditions:${selectorConditions("protect")}\n        effects:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: protect\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows` +
+        `\n      - id: challenge\n        conditions:${selectorConditions("challenge")}\n        effects:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: challenge\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: wary\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows\n          - kind: revealed\n            revelation: revelation.ledger-secret\n            value: true` +
         (variant === "same-event-payoff" ? `
   - id: later-payoff
     branches:
@@ -1042,12 +1070,22 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
               throw error;
             }
             assertHead(job, before);
-            if (evidence.conflicts.length) throw new Error("Unresolved interactive architectural conflict: " + evidence.conflicts.join("; "));
             const checked = await validate(before);
             const report = checked.report as unknown as Report | undefined;
             if (report?.protection?.status !== "checked" || report.protection.changes.length ||
                 report.protection.warnings.length) {
               throw new Error("Interactive draft has protected/unverified changes; no automatic retcon allowed.");
+            }
+            if (evidence.conflicts.length) {
+              const feedback = interactiveConflictRepairFeedback(
+                evidence.conflicts, paths, report.diagnostics);
+              if (!feedback) throw new Error("Unresolved interactive architectural conflict: " +
+                evidence.conflicts.join("; "));
+              // A model's "architectural conflict" label is not a grant.
+              // Independently reverify this job, baseline and exact pinned
+              // Git protection before returning any in-scope correction.
+              await assertSafeInteractiveRepair(job, before, validate);
+              return feedback;
             }
             if (report.diagnostics.length) return report.diagnostics.slice(0, 24).map(d =>
               `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);

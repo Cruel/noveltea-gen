@@ -453,6 +453,34 @@ test("Choice may enact its first justified typed effects only in reachable downs
   assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
 });
 
+test("native rejects self-conditioned Choice selectors, but accepts unguarded selectors with conditional consumers", { skip: !available }, () => {
+  const x = setup("self-conditioned-selection");
+  const head = x.prepare();
+  const rejected = x.interactive("self-conditioned-selection");
+  assert.notEqual(rejected.status, 0, "The native invalid Choice cannot become a commit.");
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  const invalid = JSON.parse(x.cli(["validate"]).stdout);
+  assert.equal(invalid.status, "rejected");
+  assert.ok(invalid.report.diagnostics.some((d: any) =>
+    d.code === "impossible-branch" && d.path === "events/disclose-ledger.md"),
+    "Outcome predicates cannot require an outcome before the first assignment.");
+  const eventPath = join(x.job.worktreeStoryRoot, "events/disclose-ledger.md");
+  const authored = readFileSync(eventPath, "utf8");
+  const correctSelector = (text: string, id: string, outcome: string) =>
+    text.replace(
+      `- id: ${id}\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: ${outcome}\n        effects:`,
+      `- id: ${id}\n        conditions: []\n        effects:`,
+    );
+  const fixed = correctSelector(
+    correctSelector(authored, "disclose", "protect"), "challenge", "challenge");
+  assert.notEqual(fixed, authored);
+  assert.match(fixed, /- id: disclose\n        conditions: \[\]/);
+  assert.match(fixed, /- id: challenge\n        conditions: \[\]/);
+  writeFileSync(eventPath, fixed);
+  const valid = JSON.parse(x.cli(["validate"]).stdout);
+  assert.equal(valid.status, "passed", JSON.stringify(valid.report.diagnostics));
+});
+
 test("outcome-only selection with no later typed consequence remains rejected", { skip: !available }, () => {
   const x = setup("downstream-no-effect");
   const head = x.prepare();

@@ -3,6 +3,15 @@
  * and separately sealed review can decide acceptance; this guidance is not a
  * new schema or permission to revise source Event prerequisites. */
 export const CHOICE_PAYOFF_AUTHOR = [
+  "A Choice needs a REACHABLE selecting step BEFORE any outcome has been set. " +
+    "At that step, give each player-selectable branch conditions: [] and a distinct " +
+    "kind: outcome effect assigning that branch's Choice outcome. Exactly ONE " +
+    "eligible branch executes; they are alternatives, not simultaneous effects. " +
+    "Only LATER steps or Events may test kind: outcome conditions to consume " +
+    "the previously established selection. NEVER test an outcome as a prerequisite " +
+    "on the very branch that first assigns it: that creates a circular, impossible " +
+    "branch and no player-facing selection. Do not rewrite an existing Event entry " +
+    "gate to make this work; create or adjust only authorized selecting branches. ",
   "For EACH selected Choice outcome, trace its verified entry Event/step/branch,",
   "the immediate typed outcome AND consequential state effects, and the later",
   "reachable outcome-conditioned Event/step consuming that choice.",
@@ -65,6 +74,12 @@ export const CHOICE_PAYOFF_REVIEW = [
 ].join(" ");
 
 export const CHOICE_PAYOFF_REPAIR = [
+  "If native validation reports impossible-branch or impossible-prerequisite " +
+    "on a newly authored outcome Event, first check for self-conditioned selection: " +
+    "the first assignment of an outcome must be an effect of an eligible " +
+    "conditions: [] branch, and only subsequent consumers may condition on it. " +
+    "Correct the local selecting step and downstream references within the " +
+    "original grant; never force reachability by editing a protected Event gate. ",
   "For a rejected Choice assignment, compare the original outcome selector",
   "and typed effect with the offending later conditional Event/step/branch;",
   "repair BOTH the committed causal state and visible explanation within",
