@@ -147,13 +147,22 @@ export function scopedEventEvidenceConflict(
   assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
   conflicts: readonly string[],
 ): boolean {
-  return conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text =>
-    text.includes(assignment.milestoneId) &&
-    /\b(?:validator|milestone|fulfillment|reachable)\b/i.test(text) &&
-    /\b(?:does not establish|lacks?|missing|not yet established|insufficient)\b/i.test(text) &&
-    /\b(?:evidence|observation|testimony|witness|access|time|interval|material clause|support|route)\b/i.test(text) &&
-    !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|cannot (?:author|create)|need (?:an? )?(?:new|another|second) (?:fact|character|arc|milestone|event)|(?:new|another|second) (?:fact|character|arc|milestone|event) (?:is )?(?:required|needed))\b/i.test(text),
-  );
+  return conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text => {
+    // The controller already supplies the target Milestone. A specialist may
+    // refer to "the Milestone" instead of repeating its ID; requiring the ID
+    // blocked a valid in-scope correction in a preserved Luna run.
+    // However, ANY explicit reference to a different Milestone still fails
+    // closed, even when the text also mentions the selected one.
+    const named = text.match(/\bmilestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*\b/g) ?? [];
+    const current = named.length
+      ? named.every(id => id === assignment.milestoneId)
+      : /\b(?:the|this|selected|assigned|current)\s+milestone\b/i.test(text);
+    return current &&
+      /\b(?:validator|milestone|fulfillment|reachable)\b/i.test(text) &&
+      /\b(?:does not establish|lacks?|missing|not yet established|insufficient)\b/i.test(text) &&
+      /\b(?:evidence|observation|testimony|witness|access|time|interval|material clause|support|route)\b/i.test(text) &&
+      !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|cannot (?:author|create)|need (?:an? )?(?:new|another|second) (?:fact|character|arc|milestone|event)|(?:new|another|second) (?:fact|character|arc|milestone|event) (?:is )?(?:required|needed))\b/i.test(text);
+  });
 }
 
 /** One bounded correction in the original authenticated Pi session. It does

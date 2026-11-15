@@ -95,6 +95,42 @@ test("an authored Event's missing in-scope access evidence receives a bounded co
   assert.equal(scopedEventEvidenceConflict(assignment, [exact, "New Character required"]), false);
 });
 
+test("saved Luna Event evidence gap uses the assigned Milestone without repeating its ID", () => {
+  const assignment = {
+    milestoneId: "milestone.accounts-and-traces-compared",
+    milestonePath: "milestones/accounts-and-traces-compared.md",
+  };
+  // Exact conflict from a preserved Luna certification. Native validation passed,
+  // but Luna accurately reported an insufficient comparison in its own Event.
+  const conflict = "The Event supplies an independent present-day physical observation, " +
+    "but does not establish the Milestone’s required comparison of materially conflicting accounts. " +
+    "Ines’s remembered sighting and an unauthenticated, undated note do not materially conflict; " +
+    "the trace cannot establish timing. The Milestone therefore remains partial and unbound.";
+  assert.equal(scopedEventEvidenceConflict(assignment, [conflict]), true,
+    "The controller owns the target identity; Luna need not repeat its canonical ID.");
+  const feedback = eventEvidenceRepairFeedback(assignment, [conflict],
+    ["event.accounts-and-traces-compared"]);
+  assert.match(feedback, /EVENT_LOCAL_EVIDENCE/);
+  assert.match(feedback, /SAME authorized Event/);
+  assert.match(feedback, /milestone\.accounts-and-traces-compared/);
+  assert.match(feedback, /event\.accounts-and-traces-compared/);
+  assert.match(feedback, /do not invent.*(?:time record|Character)/i);
+  assert.match(feedback, /review happens AFTER/i);
+
+  for (const invalid of [
+    conflict + " Actually fulfill milestone.arrival-and-resolution instead.",
+    conflict + " Modify milestone.arrival-and-resolution, not this one.",
+    conflict + " A protected author decision must change first.",
+    conflict + " A new Character is required to supply the other account.",
+    "A different Milestone has no testable evidence.",
+    "The Event lacks a basis for writing to unrelated records.",
+    "The Event needs a new upstream Fact before this Milestone can be completed.",
+  ]) assert.equal(scopedEventEvidenceConflict(assignment, [invalid]), false, invalid);
+  assert.equal(scopedEventEvidenceConflict(assignment, [
+    "The physical observation does not establish timing, without any identified Milestone.",
+  ]), false, "Unanchored prose must not be treated as current-Milestone authority");
+});
+
 test("only a source-exact Milestone body drift is repairable without expanding Event authority", () => {
   const baseline = [
     "---", "schema: '0.1'", "type: milestone",
