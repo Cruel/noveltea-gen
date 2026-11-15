@@ -460,6 +460,12 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "continuity, other (do not invent specialized kind names). " +
       "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. Use one real " +
       "changed record and 1-based canonicalContext line for every source-linked finding; " +
+      "supporting evidence MAY ALSO cite a source-bound, immutable read-only " +
+      "canonicalContext record (such as a Character's initial knowledge that " +
+      "contradicts a changed Event effect), with exact path and 1-based line. " +
+      "A PASS still needs an anchored evidence citation to an actual changed " +
+      "record for EVERY reviewed assignment; a FAIL needs a finding in an " +
+      "actual changed record. Read-only context never becomes a repair grant. " +
       "requiredCorrection must identify a concrete edit, not 'retry'. affectedPaths " +
       "must exist in the same packet and include that changed record. " +
       "Every passing checkpoint needs evidence; never fabricate a PASS. " +

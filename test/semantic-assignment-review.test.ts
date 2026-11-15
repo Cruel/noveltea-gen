@@ -478,6 +478,49 @@ test("ambiguous player-visible witness evidence can pass without proving harm or
   assert.equal(result.verdict, "pass");
 });
 
+test("a real Event continuity FAIL may cite sealed Character knowledge without authorizing Character edits", () => {
+  const packet = makeEventPacket("The investigator checks an empty berth and is marked as learning a Fact already known.");
+  const item = packet.items[0]!;
+  const unchanged = "characters/investigator.md";
+  item.canonicalContext.push({ path: unchanged,
+    content: "# Investigator\ninitial_knowledge:\n  - fact: fact.passenger-absent\n    value: knows",
+    commitSha: item.assurance.commitSha, blobSha: "a".repeat(40) });
+  item.readOnlyPaths.push(unchanged);
+  const eventEvidence = evidence("event", "events/absence.md");
+  const baselineEvidence = { ...evidence("event", unchanged), line: 3,
+    explanation: "The immutable Character starting state already knows the Fact." };
+  const actualFinding = { ...finding("event", "events/absence.md"),
+    kind: "continuity" as const,
+    message: "The changed Event adds redundant knowledge already present at Story start.",
+    requiredCorrection: "Remove the redundant knowledge effect from the changed Event; retain the original Character baseline.",
+    affectedPaths: ["events/absence.md"] };
+  const validFail = { sourceDigest: packet.sourceDigest, verdict: "fail",
+    findings: [actualFinding], evidence: [eventEvidence, baselineEvidence] };
+  assert.equal(validateSemanticVerdict(packet, validFail).verdict, "fail",
+    "A source-grounded negative finding cannot be discarded for citing read-only context.");
+  assert.equal(validateSemanticVerdict(packet, { ...validFail, evidence: [baselineEvidence] }).verdict,
+    "fail", "The changed-file FINDING itself anchors the failed assignment.");
+  assert.throws(() => validateSemanticVerdict(packet, {
+    ...validFail, verdict: "pass", findings: [], evidence: [baselineEvidence],
+  }), /source-linked/, "A PASS needs its own changed-file anchor, not just read-only context.");
+  assert.equal(validateSemanticVerdict(packet, {
+    ...validFail, verdict: "pass", findings: [], evidence: [eventEvidence, baselineEvidence],
+  }).verdict, "pass", "A PASS can include supporting context after a real changed-file citation.");
+  for (const changed of [
+    { ...baselineEvidence, path: "characters/foreign.md" },
+    { ...baselineEvidence, line: 999 },
+    { ...baselineEvidence, assignmentId: "other-assignment" },
+    { ...baselineEvidence, commitSha: "c".repeat(40) },
+  ]) assert.throws(() => validateSemanticVerdict(packet, {
+    ...validFail, evidence: [eventEvidence, changed],
+  }), /source-linked/, "Only exact sealed context, scope, and source lines may support the review.");
+  assert.throws(() => validateSemanticVerdict(packet, {
+    ...validFail, findings: [{ ...actualFinding, path: unchanged }],
+  }), /source-linked/, "A finding cannot target an unmodified Character.");
+  assert.deepEqual(item.repairTargets, ["events/absence.md"]);
+  assert.deepEqual(item.assurance.changedPaths, ["events/absence.md"]);
+});
+
 test("cross-domain causal defect names real linked context but cannot invent a writable record", () => {
   const packet = makePacket();
   packet.items[0]!.canonicalContext.push({ path: "facts/promise.md",

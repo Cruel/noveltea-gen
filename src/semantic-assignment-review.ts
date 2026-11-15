@@ -272,7 +272,6 @@ export function normalizeOmittedSemanticEvidenceSha(packet: SemanticReviewPacket
         typeof entry.explanation !== "string" || !entry.explanation.trim()) return entry;
     const candidates = packet.items.filter(item => {
       if (item.assignment.id !== entry.assignmentId ||
-          !item.assurance.changedPaths.includes(entry.path) ||
           !item.canonicalContext.some(c => c.path === entry.path &&
             entry.line <= c.content.split("\n").length)) return false;
       const expected = item.assurance.commitSha;
@@ -327,13 +326,14 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
       !Array.isArray(verdict.findings) || !Array.isArray(verdict.evidence) ||
       verdict.findings.length > 100 || verdict.evidence.length > 100)
     throw new Error("Semantic reviewer returned malformed or stale findings.");
-  const belongs = (sha: string, id: string, path: string, line: number) =>
+  const belongs = (sha: string, id: string, path: string, line: number,
+    changedOnly = false) =>
     packet.items.some(item => item.assurance.commitSha === sha && item.assignment.id === id &&
-      item.assurance.changedPaths.includes(path) &&
+      (!changedOnly || item.assurance.changedPaths.includes(path)) &&
       Number.isSafeInteger(line) && line > 0 &&
       item.canonicalContext.some(c => c.path === path &&
         line <= c.content.split("\n").length));
-  if (verdict.findings.some(f => !f || !belongs(f.commitSha, f.assignmentId, f.path, f.line) ||
+  if (verdict.findings.some(f => !f || !belongs(f.commitSha, f.assignmentId, f.path, f.line, true) ||
         !["missing-requirement", "unrequested-change", "continuity", "other"].includes(f.kind) ||
         typeof f.message !== "string" || !f.message.trim() || f.message.length > 2000 ||
         typeof f.requiredCorrection !== "string" ||
@@ -350,9 +350,11 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
       (verdict.verdict === "fail" && !verdict.findings.length) ||
       packet.items.some(item =>
         !verdict.evidence.some(e => e.commitSha === item.assurance.commitSha &&
-          e.assignmentId === item.assignment.id) &&
+          e.assignmentId === item.assignment.id &&
+          item.assurance.changedPaths.includes(e.path)) &&
         !verdict.findings.some(f => f.commitSha === item.assurance.commitSha &&
-          f.assignmentId === item.assignment.id)))
+          f.assignmentId === item.assignment.id &&
+          item.assurance.changedPaths.includes(f.path))))
     throw new Error("Semantic reviewer lacks assignment-specific, source-linked evidence.");
   return verdict;
 }
