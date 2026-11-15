@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { validRecoveryReviewCoverage, resolvedInheritedRecoveryReviews } from '../src/recovery-fork-state'
-import { unresolvedNativePrerequisites } from '../src/checkpoint-assurance'
+import { unresolvedNativePrerequisites, blockedByRequiredReview, executionId } from '../src/checkpoint-assurance'
 
 const sha = (letter: string) => letter.repeat(40)
 const world = sha('a'), repair = sha('b'), character = sha('c')
@@ -31,6 +31,17 @@ test('a passing repair unlocks inherited dependencies without changing historica
   assert.equal(derived[1]?.status, 'passed')
   assert.deepEqual(unresolvedNativePrerequisites('event:milestone.incident',
     dependencies, derived), [])
+  const inventory = [
+    { id: 'foundations', dependencies: ['architecture'], status: 'verified' },
+    { id: 'event:milestone.incident', dependencies: ['foundations', 'architecture'], status: 'pending' },
+  ]
+  const decisions = (items: typeof coverage) => items.map(item => ({
+    assignmentId: executionId(item.workItem), status: item.status,
+  }))
+  assert.ok(blockedByRequiredReview(inventory, decisions(original))
+    .has('event:milestone.incident'))
+  assert.equal(blockedByRequiredReview(inventory, decisions(derived)).size, 0,
+    'Graph inventory and native dependency gates must agree about repaired inherited failures')
   assert.equal(resolvedInheritedRecoveryReviews([
     { ...coverage[0] }, { ...coverage[1], status: 'failed' }, coverage[2],
   ])[0]?.status, 'failed', 'A failed repair does not unblock the source')

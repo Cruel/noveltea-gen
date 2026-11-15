@@ -1,6 +1,6 @@
 import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
-import { readRecoveryFork, verifyReadyRecoveryFork } from "./recovery-fork-state.js";
+import { readRecoveryFork, verifyReadyRecoveryFork, resolvedInheritedRecoveryReviews } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -315,7 +315,7 @@ async function reconciledFailures(job: JobStartResult, failures: Record<string, 
 async function reviewGatedInventory(job: JobStartResult, inventory: GenerationInventory) {
   const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(point =>
     point.eligible && point.assurance);
-  const inherited = readRecoveryFork(job)?.reviewCoverage ?? [];
+  const inherited = resolvedInheritedRecoveryReviews(readRecoveryFork(job)?.reviewCoverage ?? []);
   const resolved = await resolvedCheckpointReviews(job, checkpoints);
   const decisions = [
     ...inherited.map(point => ({ assignmentId: executionId(point.workItem), status: point.status })),
