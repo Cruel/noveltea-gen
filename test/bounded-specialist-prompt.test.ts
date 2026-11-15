@@ -355,7 +355,7 @@ test("Puzzle writer and reviewer require equivalent objective evidence for every
   assert.doesNotMatch(rendered["Assignment reviewer"], /weaker or different fact/);
 });
 
-test("retrospective reviewer allows only exact immutable writer methods for Choice/Puzzle packets", () => {
+test("retrospective reviewer allows only pinned craft methods from each unit and its causal predecessors", () => {
   const choicePacket = { ...packet, items: packet.items.map(item => ({
     ...item, reviewedWorkItem: "interactive-choice-disclosure",
   })) };
@@ -368,12 +368,14 @@ test("retrospective reviewer allows only exact immutable writer methods for Choi
   const characterPacket = { ...packet, items: packet.items.map(item => ({
     ...item, reviewedWorkItem: "character-foundations",
   })) };
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, packet), [],
-    "Ordinary Event reviews cannot read any writer method as a supplement.");
+  const method = (name: string) => snapshot.path + "/skills/" + name;
   const foundationMethods = [
-    snapshot.path + "/skills/nt-worldbuilding/SKILL.md",
-    snapshot.path + "/skills/nt-character-development/SKILL.md",
+    method("nt-worldbuilding/SKILL.md"),
+    method("nt-character-development/SKILL.md"),
   ];
+  const eventMethods = [...foundationMethods, method("nt-event-design/SKILL.md")];
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, packet), eventMethods,
+    "An Event reviewer may compare exact World/Character/Event methods, never future roles.");
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, worldPacket), foundationMethods);
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, characterPacket), foundationMethods);
   assert.match(assignmentFidelityPrompt(snapshot, worldPacket),
@@ -381,25 +383,36 @@ test("retrospective reviewer allows only exact immutable writer methods for Choi
   assert.match(assignmentFidelityPrompt(snapshot, characterPacket),
     /skill:\/\/nt-character-development\/SKILL\.md/);
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, choicePacket),
-    [snapshot.path + "/skills/nt-interactive-narrative/SKILL.md",
-      snapshot.path + "/skills/nt-catalog/references/progression.md"]);
+    [...eventMethods, method("nt-interactive-narrative/SKILL.md"),
+      method("nt-catalog/references/progression.md")]);
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, puzzlePacket),
-    [snapshot.path + "/skills/nt-puzzle-design/SKILL.md",
-      snapshot.path + "/skills/nt-catalog/references/progression.md"]);
+    [...eventMethods, method("nt-interactive-narrative/SKILL.md"),
+      method("nt-puzzle-design/SKILL.md"),
+      method("nt-catalog/references/progression.md")]);
+  const architecturePacket = { ...packet, items: packet.items.map(item => ({
+    ...item, reviewedWorkItem: "global-architecture",
+  })) };
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, architecturePacket),
+    [method("nt-story-architecture/SKILL.md")]);
+  const compositionPacket = { ...packet, items: packet.items.map(item => ({
+    ...item, reviewedWorkItem: "composition-disclosure",
+  })) };
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, compositionPacket),
+    [...eventMethods, method("nt-interactive-narrative/SKILL.md"),
+      method("nt-puzzle-design/SKILL.md"), method("nt-narrative-composition/SKILL.md"),
+      method("nt-catalog/references/progression.md")]);
   assert.match(assignmentFidelityPrompt(snapshot, choicePacket),
     /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
   assert.match(assignmentFidelityPrompt(snapshot, puzzlePacket),
     /skill:\/\/nt-puzzle-design\/SKILL\.md/);
   assert.doesNotMatch(assignmentFidelityPrompt(snapshot, packet),
     /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
-  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, packet),
-    /skill:\/\/nt-worldbuilding\/SKILL\.md/);
-  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
-    /skill:\/\/nt-character-development\/SKILL\.md/);
+  assert.match(assignmentFidelityPrompt(snapshot, packet),
+    /skill:\/\/nt-event-design\/SKILL\.md/);
   assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
     /skill:\/\/nt-puzzle-design\/SKILL\.md/);
-  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
-    /skill:\/\/nt-worldbuilding\/SKILL\.md/);
+  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, worldPacket),
+    /skill:\/\/nt-event-design\/SKILL\.md/);
 });
 
 test("each actual pinned-read list retains portable method, representation and authority", () => {

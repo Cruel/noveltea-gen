@@ -38,6 +38,9 @@ test(
     const required = pinnedSourcePaths(receipt.snapshot, boundedPinnedSources("nt-narrative-review"));
     const optional = assignmentReviewerOptionalMethods(receipt.snapshot, packet);
     assert.deepEqual(optional, [
+      join(receipt.snapshot.path, "skills/nt-worldbuilding/SKILL.md"),
+      join(receipt.snapshot.path, "skills/nt-character-development/SKILL.md"),
+      join(receipt.snapshot.path, "skills/nt-event-design/SKILL.md"),
       join(receipt.snapshot.path, "skills/nt-interactive-narrative/SKILL.md"),
       join(receipt.snapshot.path, "skills/nt-catalog/references/progression.md"),
     ]);

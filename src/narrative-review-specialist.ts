@@ -383,29 +383,39 @@ export function assertSemanticCorrectionPreserved(before: Record<string, unknown
   return { ...after, findings };
 }
 
-/** Assignment reviewers may consult the writer's ORIGINAL immutable pinned
- * craft method and the catalog's exact progression semantics. This remains a
- * read-only supplement, never permission to read mutable Story files or grant
- * writer authority. Every optional read is authenticated to the snapshot. */
+/** An independent reviewer may inspect only the original, immutable craft
+ * methods for its unit and its upstream specialist dependencies. The stage
+ * graph is fixed by the controller; no model output or source text can add
+ * method paths. This allows causal cross-role comparison without ever
+ * exposing mutable Story files, extra roles or writer tools. */
 export function assignmentReviewerOptionalMethods(
   snapshot: SkillSnapshot, packet: SemanticReviewPacket,
 ): string[] {
-  const choice = packet.items.some(item =>
-    item.reviewedWorkItem.startsWith("interactive-choice-"));
-  const puzzle = packet.items.some(item =>
-    item.reviewedWorkItem.startsWith("interactive-puzzle-"));
-  // World and Character form one planned Foundations stage, but have
-  // separately committed and reviewed units. Either reviewer may compare
-  // their immutable stage-local methods without gaining authoring authority.
-  const foundations = packet.items.some(item =>
-    ["world-foundations", "character-foundations"].includes(item.reviewedWorkItem));
+  const names = packet.items.map(item => item.reviewedWorkItem);
+  const any = (prefix: string) => names.some(name => name.startsWith(prefix));
+  const architecture = names.includes("global-architecture");
+  const foundations = names.some(name =>
+    ["world-foundations", "character-foundations"].includes(name));
+  const event = any("event-") || packet.items.some(item =>
+    item.reviewedWorkItem.startsWith("repair-") &&
+    item.assignment.specialist === "nt-event-design");
+  const choice = any("interactive-choice-");
+  const puzzle = any("interactive-puzzle-");
+  const composition = any("composition-");
+  const afterFoundations = event || choice || puzzle || composition;
+  const afterEvent = choice || puzzle || composition;
+  const afterChoice = puzzle || composition;
   const methods = [
-    ...(foundations ? ["nt-worldbuilding/SKILL.md", "nt-character-development/SKILL.md"] : []),
-    ...(choice ? ["nt-interactive-narrative/SKILL.md"] : []),
-    ...(puzzle ? ["nt-puzzle-design/SKILL.md"] : []),
-    ...((choice || puzzle) ? ["nt-catalog/references/progression.md"] : []),
+    ...(architecture ? ["nt-story-architecture/SKILL.md"] : []),
+    ...((foundations || afterFoundations)
+      ? ["nt-worldbuilding/SKILL.md", "nt-character-development/SKILL.md"] : []),
+    ...(afterFoundations ? ["nt-event-design/SKILL.md"] : []),
+    ...(afterEvent ? ["nt-interactive-narrative/SKILL.md"] : []),
+    ...(afterChoice ? ["nt-puzzle-design/SKILL.md"] : []),
+    ...(composition ? ["nt-narrative-composition/SKILL.md"] : []),
+    ...(afterEvent ? ["nt-catalog/references/progression.md"] : []),
   ];
-  return pinnedSourcePaths(snapshot, methods);
+  return pinnedSourcePaths(snapshot, [...new Set(methods)]);
 }
 
 /** A bounded schema-reconsideration request, never a controller PASS. A
