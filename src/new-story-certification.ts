@@ -51,6 +51,21 @@ export interface StudioStoryWitness {
  * unverified browser-provided objects as authenticated job evidence. */
 export interface NewStoryEvidence {
   mode: NewStoryMode;
+  /** Verified by the read-only CLI against controller-owned finalized fork
+   * receipts and the original parent checkpoint at every hop. */
+  lineage?: {
+    originalJobId: string;
+    originalSourceSha: string;
+    terminalJobId: string;
+    hops: Array<{
+      sourceJobId: string;
+      childJobId: string;
+      sourceBaseSha: string;
+      checkpointSha: string;
+      proofDigest: string;
+      verified: true;
+    }>;
+  };
   approval: {
     scope: string;
     jobId: string;
@@ -162,8 +177,28 @@ function nonempty(value: unknown): boolean {
 }
 export function auditNewStory(evidence: NewStoryEvidence): NewStoryAudit {
   const failures: string[] = [];
-  const { mode, approval, turn, selection, planning, report, canonical, quality, studio } = evidence;
+  const { mode, approval, turn, selection, planning, report, canonical, quality, studio, lineage } = evidence;
   const { identity, generation, plan } = report;
+  const originalJobId = lineage?.originalJobId ?? identity.jobId;
+  const originalSourceSha = lineage?.originalSourceSha ?? identity.baseSha;
+  let lineageJob = originalJobId;
+  let lineageBase = originalSourceSha;
+  const hops = lineage?.hops ?? [];
+  const visited = new Set([lineageJob]);
+  let validLineage = !lineage || (hops.length > 0 && hops.length <= 16 &&
+    SHA.test(originalSourceSha));
+  for (const hop of hops) {
+    validLineage &&= hop.verified === true &&
+      hop.sourceJobId === lineageJob && hop.sourceBaseSha === lineageBase &&
+      SHA.test(hop.checkpointSha) && DIGEST.test(hop.proofDigest) &&
+      !visited.has(hop.childJobId);
+    lineageJob = hop.childJobId;
+    lineageBase = hop.checkpointSha;
+    visited.add(lineageJob);
+  }
+  if (lineage) validLineage &&= lineageJob === lineage.terminalJobId &&
+    lineageJob === identity.jobId && lineageBase === identity.baseSha;
+  stage(failures, validLineage, "Verified checkpoint continuation lineage missing or inconsistent.");
   const { scope, protection, editorial, logicalUnverified } = report.evidence;
   stage(failures, mode === "autonomous" || mode === "collaborative", "Unknown creative mode.");
   stage(
@@ -171,10 +206,10 @@ export function auditNewStory(evidence: NewStoryEvidence): NewStoryAudit {
     !!approval &&
       approval.scope === "whole-story" &&
       approval.creativeMode === mode &&
-      approval.jobId === identity.jobId &&
-      approval.firstTurnId === identity.jobId &&
+      approval.jobId === originalJobId &&
+      approval.firstTurnId === originalJobId &&
       SHA.test(approval.sourceSha) &&
-      approval.sourceSha === identity.baseSha &&
+      approval.sourceSha === originalSourceSha &&
       DIGEST.test(approval.proposalDigest) &&
       DIGEST.test(approval.skillId) &&
       nonempty(approval.originalObjective) &&
@@ -188,7 +223,7 @@ export function auditNewStory(evidence: NewStoryEvidence): NewStoryAudit {
       turn.kind === "full-story" &&
       !!approval &&
       turn.originalRequest === approval.originalObjective &&
-      turn.source.verifiedSha === identity.baseSha &&
+      turn.source.verifiedSha === originalSourceSha &&
       DIGEST.test(turn.digest) &&
       turn.objective?.breadth === "whole-story" &&
       turn.objective.deliveryDepth === "composition" &&
@@ -204,7 +239,7 @@ export function auditNewStory(evidence: NewStoryEvidence): NewStoryAudit {
     !!selection &&
       !!turn &&
       selection.skillName === "nt-story-orchestrate" &&
-      selection.storySourceSha === identity.baseSha &&
+      selection.storySourceSha === originalSourceSha &&
       selection.turnPlanDigest === turn.digest &&
       selection.role === "orchestrator" &&
       selection.reviewRole === "reviewer" &&
@@ -225,7 +260,7 @@ export function auditNewStory(evidence: NewStoryEvidence): NewStoryAudit {
       !!turn &&
       !!approval &&
       planning.phase === "planned" &&
-      planning.sourceSha === identity.baseSha &&
+      planning.sourceSha === originalSourceSha &&
       planning.turnDigest === turn.digest &&
       planning.snapshotId === selection.skillSnapshot.id &&
       planning.provider === approval.provider &&
@@ -366,8 +401,9 @@ export function auditNewStoryMatrix(evidence: NewStoryEvidence[]): NewStoryAudit
     blockers.push("Certification requires exactly one independent run per creative mode.");
   const unique = (values: string[]) => new Set(values).size === values.length;
   if (
+    !unique(evidence.map((e) => e.lineage?.originalJobId ?? e.report.identity.jobId)) ||
+    !unique(evidence.map((e) => e.lineage?.originalSourceSha ?? e.report.identity.baseSha)) ||
     !unique(evidence.map((e) => e.report.identity.jobId)) ||
-    !unique(evidence.map((e) => e.report.identity.baseSha)) ||
     !unique(evidence.map((e) => e.report.identity.headSha)) ||
     !unique(evidence.map((e) => e.studio?.threadId ?? ""))
   )

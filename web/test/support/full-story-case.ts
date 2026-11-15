@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { submitFirstStoryTurn } from '../../src/lib/story-first-chat.server'
 import { storyChatDiscoveryRequest } from '../../src/lib/story-chat-discovery.server'
@@ -13,6 +14,9 @@ import type { StudioAuth } from '../../src/lib/auth'
 import type { TestStudioDatabase } from './studio-database'
 import type { JobStartResult } from '../../../src/job'
 import { validateStoryJob } from '../../../src/validator'
+import { inspectRecoveryCheckpoints, type RecoveryInspection } from '../../../src/recovery-checkpoints'
+import { readRecoveryFork } from '../../../src/recovery-fork-state'
+import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
 
 type Mode = 'autonomous' | 'collaborative'
@@ -238,8 +242,63 @@ export async function verifyLiveNewStory(
   const changed = git(job.worktreeRoot, 'diff', '--name-only', sourceSha, finalHead)
     .split('\n')
     .filter(Boolean)
-  const validation = await validateStoryJob(job, skills, { ...job, baseSha: sourceSha })
+  let validationStatus = 'not-checked'
+  let validationError: string | null = null
+  try {
+    validationStatus = (await validateStoryJob(job, skills, { ...job, baseSha: sourceSha })).status
+  } catch (error) {
+    validationStatus = 'error'
+    validationError = error instanceof Error ? error.message : 'Native validation could not be read'
+  }
   const events = await listGenerationEvents(store, ownerId, jobId, 0)
+  const queuePhase = (await queueRecord(store, jobId))?.phase
+  // Each attempt owns immutable evidence. Source worktrees, original Pi sessions
+  // and receipts remain at their original absolute paths; no moving or replay.
+  const attempts = join(root, 'attempts', jobId)
+  mkdirSync(attempts, { recursive: true, mode: 0o700 })
+  let checkpointState: unknown = null
+  const graphFile = join(job.stateDir, 'web-generation.sqlite')
+  if (existsSync(graphFile) && queuePhase !== 'running') {
+    try {
+      const runtime = openWebGenerationGraph(graphFile)
+      try {
+        const execution = await store.persistence.generation.jobs.state(ownerId, jobId)
+        if (execution?.threadId) {
+          const saved = await runtime.graph.getState({ configurable: { thread_id: execution.threadId } })
+          const state = saved.values as { status?: string; reason?: string; active?: unknown;
+            failures?: unknown; inventory?: { items?: unknown[] } }
+          checkpointState = { status: state.status, reason: state.reason,
+            active: state.active, failures: state.failures,
+            inventory: state.inventory?.items, pendingNodes: saved.next }
+        }
+      } finally { runtime.saver.db.close() }
+    } catch (error) {
+      checkpointState = { inspectionError: error instanceof Error ? error.message : 'Graph checkpoint unreadable' }
+    }
+  }
+  let recoveryPoints: RecoveryInspection[] = []
+  let recoveryError: string | null = null
+  try { recoveryPoints = await inspectRecoveryCheckpoints(job) }
+  catch (error) { recoveryError = error instanceof Error ? error.message : 'Recovery checkpoints unreadable' }
+  let fork: ReturnType<typeof readRecoveryFork> = null
+  try { fork = readRecoveryFork(job) }
+  catch (error) { recoveryError = error instanceof Error ? error.message : 'Recovery bundle unreadable' }
+  // Store a content-addressed inventory of exact saved controller receipts.
+  // No Pi transcripts or credential-bearing files are duplicated into this index.
+  const receiptPaths = ['foundation.json', 'architecture.json', 'character-world.json',
+    'turn-plan.json', 'objective-planning.json', 'orchestrator-selection.json']
+  for (const folder of ['event-items', 'interactive-items', 'composition-items',
+    'review-repairs', 'review-repairs/proofs', 'assignment-reviews', 'review-items']) {
+    const dir = join(job.stateDir, folder)
+    if (!existsSync(dir)) continue
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith('.json')) receiptPaths.push(folder + '/' + entry.name)
+    }
+  }
+  assert.ok(receiptPaths.length <= 512, 'Certification receipt inventory exceeds its safety limit')
+  const receipts = receiptPaths.filter(path => existsSync(join(job.stateDir, path)))
+    .map(path => ({ path, sha256: createHash('sha256')
+      .update(readFileSync(join(job.stateDir, path))).digest('hex') }))
   const evidence = {
     mode,
     provider: args.model,
@@ -247,16 +306,35 @@ export async function verifyLiveNewStory(
     sourceSha,
     finalHead,
     terminal,
-    queuePhase: (await queueRecord(store, jobId))?.phase,
+    queuePhase,
     changed,
-    nativeValidation: validation.status,
+    nativeValidation: validationStatus,
+    validationError,
+    recoveryError,
     authorChoices,
     finished: events.filter((event) => event.kind === 'finished').map((event) => event.status),
+    checkpointState,
+    selectedFork: fork ? { sourceJobId: fork.sourceJobId,
+      commitSha: fork.checkpoint.commitSha, completed: fork.checkpoint.completedWorkItems } : null,
+    recoveryCheckpoints: recoveryPoints.map(point => ({ commitSha: point.commitSha,
+      workItem: point.workItem, eligible: point.eligible, reason: point.reason,
+      completed: point.completedWorkItems, nextWorkItem: point.nextWorkItem,
+      proofDigest: point.proofDigest, semanticReview: point.semanticReview })),
+    receipts,
   }
-  writeFileSync(join(root, 'certification-observation.json'), JSON.stringify(evidence, null, 2))
-  console.log('Live ' + mode + ' final:', JSON.stringify(evidence))
+  writeFileSync(join(attempts, 'observation.json'), JSON.stringify(evidence, null, 2) + '\n',
+    { flag: 'wx', mode: 0o600 })
+  if (!existsSync(join(root, 'certification-observation.json')))
+    writeFileSync(join(root, 'certification-observation.json'), JSON.stringify(evidence, null, 2) + '\n',
+      { flag: 'wx', mode: 0o600 })
+  // The full diagnostic (including reviewer reason) remains private in the
+  // owner-only observation file; console output contains no raw model context.
+  console.log('Live ' + mode + ' final:', JSON.stringify({ mode, jobId, finalHead,
+    terminal, nativeValidation: validationStatus,
+    eligibleCheckpoints: recoveryPoints.filter(point => point.eligible).length,
+  }))
   assert.equal(terminal, 'completed', 'The complete Story is required; Foundation alone is insufficient')
-  assert.equal(validation.status, 'passed')
+  assert.equal(validationStatus, 'passed')
   assert.ok(changed.some((path) => path.startsWith('story/authored-content/')))
   assert.ok(changed.some((path) => path.startsWith('story/events/')))
   assert.ok(

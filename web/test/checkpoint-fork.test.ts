@@ -23,6 +23,8 @@ import { sendAuthorUpdate } from '../../src/author-updates'
 import { previewThreadMessageEdit, branchEditedThreadMessage, syncAppliedAuthorMessages } from '../src/lib/thread-message-edit.server'
 import { startStoryJob } from '../../src/job'
 import { readRecoveryFork } from '../../src/recovery-fork-state'
+import { verifyCertifiedRecoveryLineage } from '../../src/certification-lineage'
+import { inspectPreservedCheckpointRetry } from './support/preserved-checkpoint-retry'
 import { specialistAuthorInstruction } from '../../src/specialist-author-instruction'
 import { validateStoryJob } from '../../src/validator'
 
@@ -106,6 +108,32 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       writeFileSync(join(parent.stateDir, 'pi-budget.json'), 'parent budget evidence')
       await ensureRootThreads(store, user.id, storyId)
       const sourceThreadId = 'root:' + parentId
+      // Simulate a new test process reopening the actual source database and
+      // choosing an exact historical World checkpoint before invoking any Pi.
+      writeFileSync(join(root, 'certification-source.json'), JSON.stringify({
+        version: 1, mode: 'collaborative', jobId: parentId, storyId,
+        ownerId: user.id, repositoryId: repoId, sourceSha: initial,
+        storyRoot: parent.storyRoot, nativeCli: native, skillsSource: skills,
+      }))
+      const reopenedStore = openStudioDatabase(join(root, 'studio.sqlite'))
+      try {
+        const selection = { root, store: reopenedStore, skills, mode: 'collaborative',
+          nativeCli: native, checkpointSha: world.commitSha }
+        const verified = await inspectPreservedCheckpointRetry(selection)
+        assert.equal(verified.parent.jobId, parentId)
+        assert.equal(verified.checkpoint.nextWorkItem, 'character-foundations')
+        assert.deepEqual(verified.checkpoint.completedWorkItems, world.completedWorkItems)
+        assert.equal(verified.latest.jobId, parentId)
+        await assert.rejects(() => inspectPreservedCheckpointRetry({
+          ...selection, checkpointSha: initial,
+        }), /finalized and eligible/)
+        await assert.rejects(() => inspectPreservedCheckpointRetry({
+          ...selection, mode: 'autonomous',
+        }), /creative mode/)
+        await assert.rejects(() => inspectPreservedCheckpointRetry({
+          ...selection, nativeCli: join(root, 'other-cli'),
+        }), /validator executable/)
+      } finally { await reopenedStore.close() }
       const insertMessage = async (id: string, ownerUserId: string, threadId: string,
         sequence: number, status: string, body: string, verifiedCommitSha: string | null) => {
         ;(await store.testing.records.insert('story_thread_messages', { id, ownerUserId, threadId,
@@ -214,6 +242,11 @@ test('authenticated finalized World fork is isolated from a running dirty parent
       assert.equal(JSON.parse(readFileSync(join(child.stateDir, 'job.json'), 'utf8')).validatorVersion, currentVersion)
       assert.equal(parent.validatorVersion, sourceVersion)
       assert.equal(readRecoveryFork(child)?.toolchain.validator.version, currentVersion)
+      const certifiedLineage = await verifyCertifiedRecoveryLineage(parent, child)
+      assert.equal(certifiedLineage?.originalJobId, parent.jobId)
+      assert.equal(certifiedLineage?.originalSourceSha, parent.baseSha)
+      assert.equal(certifiedLineage?.terminalJobId, child.jobId)
+      assert.deepEqual(certifiedLineage?.hops.map(hop => hop.checkpointSha), [world.commitSha])
       assert.notEqual(child.threadId, parent.threadId); assert.notEqual(child.branch, parent.branch)
       assert.equal(git(child.worktreeRoot, 'status', '--porcelain'), '')
       assert.equal(existsSync(join(child.worktreeStoryRoot, 'characters', 'ada.md')), false,
@@ -232,6 +265,7 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         tampered.completedStages.push({ stage: 'event', milestone: 'milestone.fabricated', status: 'committed', headSha: world.commitSha })
         writeFileSync(bundleFile, JSON.stringify(tampered))
         assert.throws(() => readRecoveryFork(child), /immutable job pin/)
+        await assert.rejects(() => verifyCertifiedRecoveryLineage(parent, child), /immutable job pin/)
       } finally { writeFileSync(bundleFile, bundleBytes) }
       assert.equal((await fork(input)).body.id, childId)
       assert.equal((await fork({ ...input, guidance: 'Changed after submission' })).status, 409,

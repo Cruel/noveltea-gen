@@ -32,6 +32,7 @@ import { readIsolatedStudioOAuth } from './studio-oauth-source'
 import { localPiOAuth, syncLocalPiOAuth } from './support/local-pi-oauth'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
 import { beginLiveNewStoryChat, approveLiveNewStoryChat, verifyLiveNewStory } from './support/full-story-case'
+import { runPreservedCheckpointRetry } from './support/preserved-checkpoint-retry'
 
 const subscriptionTest = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
 const isolatedLocalOAuth = process.env.NT_TEST_WEB_PI_LOCAL_OAUTH === '1'
@@ -80,18 +81,48 @@ test(fullStory
           process.env.NT_TEST_WEB_PI_SOURCE_USER_ID, process.env.NT_TEST_WEB_PI_PROVIDER!,
         )
     : null
-  const root = mkdtempSync(join(tmpdir(), fullStory ? 'nt158-' : 'nt-web-real-pi-'))
-  if (fullStory && process.env.NT_TEST_WEB_PI_PRESERVE === '1')
-    console.log('Private live Story evidence:', root)
+  const retryRoot = fullStory ? process.env.NT_TEST_WEB_PI_RETRY_ROOT : undefined
+  const selectedRoot = fullStory ? process.env.NT_TEST_WEB_PI_ROOT : undefined
+  assert.ok(!retryRoot || !selectedRoot || resolve(retryRoot) === resolve(selectedRoot),
+    'Certification root and retry root must agree')
+  const persistentBase = resolve(import.meta.dirname, '../../.local/certification/live-new-story/runs')
+  if (fullStory) mkdirSync(persistentBase, { recursive: true, mode: 0o700 })
+  const root = retryRoot ? resolve(retryRoot) : selectedRoot ? resolve(selectedRoot) :
+    mkdtempSync(join(fullStory ? persistentBase : tmpdir(), fullStory ? 'nt158-' : 'nt-web-real-pi-'))
+  if (retryRoot) {
+    assert.ok(existsSync(join(root, 'certification-source.json')),
+      'Checkpoint retry requires a preserved certification source')
+    const previousAgent = join(root, 'certification-agent.json')
+    if (existsSync(previousAgent)) {
+      const saved = JSON.parse(readFileSync(previousAgent, 'utf8')) as { pid?: number }
+      if (Number.isSafeInteger(saved.pid) && saved.pid! > 1) {
+        let running = false
+        try { process.kill(saved.pid!, 0); running = true } catch { /* dead agent */ }
+        assert.equal(running, false, 'Previous certification agent is still alive; do not start competing writers')
+      }
+    }
+  }
+  else if (selectedRoot) {
+    assert.ok(existsSync(root) && !existsSync(join(root, 'state')),
+      'A new certification requires a fresh private root; existing state must never be overwritten')
+  }
+  if (fullStory) console.log('Private live Story evidence:', root)
   const envKeys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_PI_CREDENTIAL_KEY', 'NT_REQUIRE_USER_PI_RUNTIME',
     'NT_SANDBOX_SOCKET', 'NT_SANDBOX_TOKEN_FILE', 'NT_SKILL_CACHE_DIR', 'NT_CONFIG_FILE',
     'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN'] as const
   const old = Object.fromEntries(envKeys.map(name => [name, process.env[name]]))
   const app = join(root, 'app'), state = join(root, 'state'), cache = join(root, 'cache')
-  for (const dir of [app, state, cache]) mkdirSync(dir)
+  if (!retryRoot) for (const dir of [app, state, cache]) mkdirSync(dir)
+  else for (const dir of [app, state, cache]) assert.ok(existsSync(dir),
+    'Preserved certification state, cache and Studio database must remain at their original paths')
   process.env.NT_STATE_DIR = state
   process.env.NT_GIT_CACHE_DIR = cache
-  process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
+  // The disposable Studio vault contains only renewable local-Pi access tokens,
+  // never its refresh grant. Its key must survive a process restart to reopen
+  // encrypted user credentials. The entire root is private and operator-owned.
+  const vaultKey = join(root, 'studio-vault.key')
+  if (!retryRoot) writeFileSync(vaultKey, randomBytes(32).toString('base64'), { flag: 'wx', mode: 0o600 })
+  process.env.NT_PI_CREDENTIAL_KEY = readFileSync(vaultKey, 'utf8').trim()
   process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshots')
   process.env.NT_CONFIG_FILE = join(root, 'local-config.json')
@@ -99,7 +130,7 @@ test(fullStory
   const token = randomBytes(48).toString('hex')
   const tokenFile = join(root, 'controller-token')
   const socket = join(root, 'controller', 'sandbox.sock')
-  mkdirSync(join(root, 'controller'))
+  mkdirSync(join(root, 'controller'), { recursive: true, mode: 0o700 })
   writeFileSync(tokenFile, token, { mode: 0o600 })
   process.env.NT_SANDBOX_SOCKET = socket
   process.env.NT_SANDBOX_TOKEN_FILE = tokenFile
@@ -116,6 +147,14 @@ test(fullStory
   let oauthSync: Promise<void> | undefined
   let oauthFailure: Error | undefined
   try {
+    if (retryRoot) {
+      await runPreservedCheckpointRetry({ root, skills, store, server, oauth, token,
+        socket, config, setAgent: value => { agent = value },
+        setAcquiredJob: value => { acquiredJob = value },
+        setOauthRelay: value => { oauthRelay = value },
+        setOauthSync: value => { oauthSync = value } })
+      return
+    }
     await migrateStudio(store, config)
     const auth = createStudioAuth(store, config)
     const ctx = await auth.$context
@@ -149,6 +188,12 @@ test(fullStory
       repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story',
       commit, jobId, verifiedSizeBytes: Buffer.byteLength(baselineStory), verifiedBlobCount: 1 })
     acquiredJob = job
+    if (fullStory) writeFileSync(join(root, 'certification-source.json'), JSON.stringify({
+      version: 1, mode: process.env.NT_TEST_WEB_PI_STORY_MODE === 'collaborative' ? 'collaborative' : 'autonomous',
+      jobId, storyId, ownerId: user.id, repositoryId, sourceSha: commit,
+      storyRoot: job.storyRoot, nativeCli: process.env.NT_NATIVE_CLI,
+      skillsSource: skills,
+    }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
     await store.persistence.repositories.upsert(user.id, 'github', '123',
       'Story/Live', null, repositoryId, '2026-11-01')
     await store.persistence.onboarding.importStory({
@@ -249,6 +294,8 @@ test(fullStory
         NT_REQUIRE_SANDBOX_TOOLS: '1' },
     })
     if (fullStory) {
+      writeFileSync(join(root, 'certification-agent.json'), JSON.stringify({ pid: agent.pid }) + '\n',
+        { mode: 0o600 })
       agent.stdout?.on('data', chunk => appendFileSync(join(root, 'agent.log'), chunk))
       agent.stderr?.on('data', chunk => appendFileSync(join(root, 'agent.log'), chunk))
     }
@@ -491,7 +538,7 @@ test(fullStory
       if (old[key] === undefined) delete process.env[key]
       else process.env[key] = old[key]
     }
-    if (!fullStory || process.env.NT_TEST_WEB_PI_PRESERVE !== '1') removeTestTree(root)
+    if (!fullStory || (process.env.NT_TEST_WEB_PI_PRESERVE === '0' && !retryRoot)) removeTestTree(root)
   }
 })
 }

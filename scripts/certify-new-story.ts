@@ -3,8 +3,10 @@
  */
 import { execFileSync } from "node:child_process";
 import { readFile, lstat } from "node:fs/promises";
+import { openSharedStudioStore } from "../web/src/db/shared-studio-store.js";
 import { resolve, join } from "node:path";
 import { startStoryJob, type JobStartResult } from "../src/job.js";
+import { verifyCertifiedRecoveryLineage } from "../src/certification-lineage.js";
 import { inspectJobReport } from "../src/job-report.js";
 import { readChatApprovedFoundation } from "../src/chat-approved-foundation.js";
 import { readTurnEvidence, type TurnEvidence } from "../src/turn-plan-evidence.js";
@@ -24,6 +26,10 @@ import {
 interface CaseInput {
   story: string;
   job: string;
+  /** Optional verified terminal continuation. 'job' remains the original first Turn. */
+  finalJob?: string;
+  /** Required for a continuation: persisted Studio Thread ownership ledger. */
+  certificationRoot?: string;
   quality: ExternalStoryQuality;
   /** Manually verified Studio Chat/recovery evidence, with a private reference. */
   studio: StudioStoryWitness;
@@ -68,32 +74,74 @@ async function regularFile(path: string): Promise<boolean> {
     return false;
   }
 }
+
+async function verifyStudioLineage(input: CaseInput, mode: NewStoryMode,
+  source: JobStartResult, terminal: JobStartResult,
+  lineage: NonNullable<NewStoryEvidence["lineage"]>) {
+  if (!input.certificationRoot) throw new Error(
+    "Continuation acceptance requires the preserved Studio certificationRoot to verify the original Thread.");
+  const root = resolve(input.certificationRoot);
+  const manifest = JSON.parse(await readFile(join(root, "certification-source.json"), "utf8")) as {
+    version: number; ownerId: string; jobId: string; mode: string; sourceSha: string; storyRoot: string;
+  };
+  if (manifest.version !== 1 || manifest.jobId !== source.jobId ||
+      manifest.sourceSha !== source.baseSha || manifest.storyRoot !== source.storyRoot ||
+      manifest.mode !== mode || !manifest.ownerId)
+    throw new Error("Preserved certification source differs from the approved first Turn.");
+  const db = join(root, "app/studio.sqlite");
+  if (!await regularFile(db)) throw new Error("Preserved Studio authorization ledger is missing.");
+  const store = openSharedStudioStore({ backend: "sqlite", path: db });
+  try {
+    await store.assertReady();
+    const originalThread = await store.persistence.advancedThreads.sourceThread(manifest.ownerId, source.jobId);
+    if (originalThread?.id !== "root:" + source.jobId)
+      throw new Error("The original Story Chat Thread is not verified in Studio.");
+    let previousOrder = await store.persistence.advancedThreads.runOrder(
+      manifest.ownerId, originalThread.id, source.jobId);
+    if (previousOrder === null) throw new Error("Original Story execution has no source-linked Thread order.");
+    for (const hop of lineage.hops) {
+      const child = await store.persistence.advancedThreads.sourceThread(manifest.ownerId, hop.childJobId);
+      const order = await store.persistence.advancedThreads.runOrder(
+        manifest.ownerId, originalThread.id, hop.childJobId);
+      if (child?.id !== originalThread.id || order === null || order <= previousOrder)
+        throw new Error("Checkpoint recovery changed the visible Story Thread or execution order.");
+      previousOrder = order;
+    }
+    if (lineage.terminalJobId !== terminal.jobId)
+      throw new Error("Studio execution lineage does not end at the certified Job.");
+  } finally { await store.close(); }
+}
+
 async function loadCase(file: string, mode: NewStoryMode): Promise<NewStoryEvidence> {
   const input = JSON.parse(await readFile(resolve(file), "utf8")) as CaseInput;
   if (!input || !input.story || !input.job || !input.quality || !input.studio)
     throw new Error(mode + " must provide story, job, external quality and Studio witness.");
-  const job = await startStoryJob({ story: resolve(input.story), job: input.job }, false);
+  const original = await startStoryJob({ story: resolve(input.story), job: input.job }, false);
+  const job = input.finalJob ? await startStoryJob({ story: original.storyRoot, job: input.finalJob }, false) : original;
+  const lineage = await verifyCertifiedRecoveryLineage(original, job);
+  if (lineage) await verifyStudioLineage(input, mode, original, job, lineage);
   const report = await inspectJobReport({ story: job.storyRoot, job: job.jobId });
-  const approval = await readChatApprovedFoundation(job);
+  const approval = await readChatApprovedFoundation(original);
   if (!approval) throw new Error(mode + ": saved exact Chat baseline approval is missing.");
-  const planPath = join(job.stateDir, "turn-plan.json");
+  const planPath = join(original.stateDir, "turn-plan.json");
   const rawTurn = JSON.parse(await readFile(planPath, "utf8")) as TurnEvidence;
-  const turn = await readTurnEvidence(job, rawTurn.contract, approval.originalObjective, rawTurn.digest);
+  const turn = await readTurnEvidence(original, rawTurn.contract, approval.originalObjective, rawTurn.digest);
   if (!turn) throw new Error(mode + ": original saved Turn is missing.");
   const selectedRaw = JSON.parse(
-    await readFile(join(job.stateDir, "orchestrator-selection.json"), "utf8"),
+    await readFile(join(original.stateDir, "orchestrator-selection.json"), "utf8"),
   ) as StoryOrchestratorReceipt;
-  const selected = await loadSelectedStoryOrchestrator(job, selectedRaw.graphThreadId, {
+  const selected = await loadSelectedStoryOrchestrator(original, selectedRaw.graphThreadId, {
     task: turn.originalRequest,
     kind: "full-story",
     turnPlanDigest: turn.digest,
   });
-  const planning = await readPinnedObjectivePlanning(job, selected, turn, approval.provider, approval.model);
+  const planning = await readPinnedObjectivePlanning(original, selected, turn, approval.provider, approval.model);
   // Load the checked, source-bound controller receipts; do not accept author
   // manifest fields as a substitute for the controller's saved identities.
   const verified = await regularFile(planning.sessionFile);
   return {
     mode,
+    lineage,
     approval,
     turn,
     selection: selected.receipt,
@@ -126,7 +174,9 @@ async function main() {
         status: result.status,
         sources: cases.map((item) => ({
           mode: item.mode,
-          sourceSha: item.report.identity.baseSha,
+          sourceSha: item.lineage?.originalSourceSha ?? item.report.identity.baseSha,
+          terminalJob: item.report.identity.jobId,
+          checkpointContinuations: item.lineage?.hops.length ?? 0,
           headSha: item.report.identity.headSha,
           skillSnapshotId: item.selection?.skillSnapshot.id,
           qualityReviewer: item.quality?.reviewer,

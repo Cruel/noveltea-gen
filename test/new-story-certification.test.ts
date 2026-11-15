@@ -258,6 +258,63 @@ test("pinned method, original objective, provenance and distinct collaborative r
   );
 });
 
+test("a final checkpoint continuation retains original author approval and the complete Story quality gate", () => {
+  const original = evidence("autonomous", "a");
+  const finalJobId = "job-recovery-2";
+  const next: NewStoryEvidence = {
+    ...original,
+    lineage: {
+      originalJobId: original.report.identity.jobId,
+      originalSourceSha: original.report.identity.baseSha,
+      terminalJobId: finalJobId,
+      hops: [
+        { sourceJobId: original.report.identity.jobId, childJobId: "job-recovery-1",
+          sourceBaseSha: original.report.identity.baseSha, checkpointSha: sha("c"),
+          proofDigest: digest("1"), verified: true },
+        { sourceJobId: "job-recovery-1", childJobId: finalJobId,
+          sourceBaseSha: sha("c"), checkpointSha: sha("f"),
+          proofDigest: digest("2"), verified: true },
+      ],
+    },
+    report: { ...original.report, identity: {
+      ...original.report.identity, jobId: finalJobId, baseSha: sha("f"),
+    } },
+  };
+  assert.deepEqual(auditNewStory(next).blockers, []);
+  assert.equal(auditNewStory({ ...next, lineage: undefined }).status, "blocked",
+    "A terminal child must not masquerade as the original approved first Turn");
+  assert.match(auditNewStory({ ...next, lineage: {
+    ...next.lineage!, hops: next.lineage!.hops.map((hop, i) =>
+      i === 1 ? { ...hop, sourceBaseSha: sha("b") } : hop),
+  } }).blockers.join(" "), /lineage/i);
+  assert.equal(auditNewStory({ ...next, lineage: {
+    ...next.lineage!, terminalJobId: "other-job",
+  } }).status, "blocked");
+  assert.equal(auditNewStory({ ...next, lineage: {
+    ...next.lineage!, hops: next.lineage!.hops.map((hop, i) =>
+      i === 0 ? { ...hop, verified: false as true } : hop),
+  } }).status, "blocked");
+  assert.equal(auditNewStory({ ...next, quality: { ...original.quality!, headSha: sha("b") } }).status,
+    "blocked", "External quality must still evaluate the terminal HEAD");
+});
+
+test("independence is checked against original sources, not only continuation baselines", () => {
+  const a = evidence("autonomous", "a");
+  const b = evidence("collaborative", "b");
+  // Even distinct terminal SHA and Job IDs cannot certify the same original Story twice.
+  const duplicate = {
+    ...b, lineage: { originalJobId: a.report.identity.jobId,
+      originalSourceSha: a.report.identity.baseSha,
+      terminalJobId: b.report.identity.jobId,
+      hops: [{ sourceJobId: a.report.identity.jobId, childJobId: b.report.identity.jobId,
+        sourceBaseSha: a.report.identity.baseSha, checkpointSha: b.report.identity.baseSha,
+        proofDigest: digest("3") as string, verified: true as const }],
+    },
+  };
+  assert.equal(auditNewStoryMatrix([a, duplicate]).status, "blocked");
+  assert.match(auditNewStoryMatrix([a, duplicate]).blockers.join(" "), /reuse/i);
+});
+
 test("false, stale or unsupported external quality and Chat assertions block release acceptance", () => {
   const source = evidence("autonomous", "a");
   assert.equal(auditNewStory({ ...source, quality: null }).status, "blocked");

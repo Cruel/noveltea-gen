@@ -102,6 +102,18 @@ Job IDs, Threads, final SHAs and evaluations for each creative mode.
 The external assessment is an operator-held attestation: the command cannot
 cryptographically prove that a named person read the work.
 
+A Story completed through checkpoint recovery supplies the **original** Job in
+`job`, plus `finalJob` (the terminal continuation ID) and `certificationRoot`
+(the preserved Studio certification run directory). The checker follows each
+controller-owned, finalized recovery fork backward to that original Job,
+re-verifies each parent checkpoint proof, and checks the persisted Studio
+execution order and original visible Thread. It reads original approval,
+first-Turn plan, and pinned orchestrator evidence from the first Job, and the
+final native, editorial and narrative-quality evidence from `finalJob`.
+A child Job's checkpoint-base SHA does not become a substitute for the
+original Story source SHA. Missing parents, changed proofs, cross-Thread
+continuations and reused initial Story sources fail closed.
+
 The command only reads the existing Job and Git commits. It validates saved
 Chat foundation approval, the original Turn and controller-owned objective,
 pinned orchestrator selection, immutable skill snapshot and real Pi planner
@@ -140,8 +152,15 @@ NT_TEST_WEB_PI_NEW_STORY=1 NT_TEST_WEB_PI_STORY_MODE=autonomous \
 ```
 
 Repeat with `NT_TEST_WEB_PI_STORY_MODE=collaborative` against a separate
-fresh Job. `NT_TEST_WEB_PI_PRESERVE=1` saves private evidence in a disposable
-`/tmp/nt158-*` location, rather than exposing transcripts in Git. The
+fresh Job. `NT_TEST_WEB_PI_PRESERVE=1` retains private evidence under the durable,
+Git-ignored `.local/certification/live-new-story/runs/` directory (or an
+explicit new `NT_TEST_WEB_PI_ROOT`). It does not relocate generated jobs:
+Git worktrees, the Studio database, receipts, immutable skill snapshots and
+Pi sessions keep their original absolute paths across retries. The private
+root is owner-only and includes the encrypted disposable Studio OAuth vault
+and its key; it contains no usable local Pi refresh credential. Treat the
+whole directory as sensitive and delete it only after certification evidence
+is no longer needed. The
 isolated local-OAuth helper copies an unexpired **access token only** from the
 existing Pi login; it never copies the usable refresh token into Studio. For
 long full-Story runs it checks the access-token lifetime and uses Pi's supported
@@ -165,11 +184,33 @@ node scripts/live-new-story-runner.mjs start autonomous
 node scripts/live-new-story-runner.mjs status autonomous
 node scripts/live-new-story-runner.mjs start collaborative
 node scripts/live-new-story-runner.mjs status collaborative
+
+# After inspecting the failed root's attempts/<job-id>/observation.json,
+# choose an eligible point and its original owning source Job. This resumes
+# the same visible Thread in a new, isolated execution without replaying work.
+node scripts/live-new-story-runner.mjs retry collaborative <40-char-checkpoint-sha> [source-job-id] [optional-corrective-guidance]
+node scripts/live-new-story-runner.mjs status collaborative
 ```
 
-The launcher retains process/exit status, the exact Git source HEAD and private
-full logs under `.local/certification/live-new-story/`; the underlying tests
-continue to create separate disposable, owner-isolated `/tmp/nt158-*` roots.
+The launcher retains process/exit status, exact Git source HEAD, private full
+logs and durable root pointer under `.local/certification/live-new-story/`.
+`start` creates a fresh owner-isolated source root; `retry` requires the exact
+finalized checkpoint SHA and reopens its saved source, controller and Story
+state. Repeated retries may target the same verified checkpoint, each with a
+new child Job and independent Pi sessions. No completed writer, original
+interview or approved baseline is rerun. Existing blocked or dirty writers
+remain in their original worktrees for manual inspection.
+
+Each execution retains `attempts/<job-id>/observation.json` with the terminal
+status, active failure, checkpoint eligibility, exact saved-receipt digests,
+and any inherited checkpoint. The receipt files and Pi transcripts stay at
+their original locations; no model response is treated as a recovery grant.
+If the attempt is interrupted before an observation is written, examine the
+preserved State directory and the retry request in `attempts/<child-id>/`.
+The live test still needs valid local Pi credentials and a rootless Docker
+host. A checkpoint retry is a focused *debugging* run; the final acceptance
+gate additionally requires the original-Turn interruption/reconnect and
+external quality evidence. Fixture tests never substitute for a Luna pass.
 Only the explicitly selected real Luna model runs. A launched run is **not**
 a passing certification: inspect the final status and real source-bound
 findings, including blockers, independent quality and recovery evidence.
