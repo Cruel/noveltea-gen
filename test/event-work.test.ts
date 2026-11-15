@@ -13,7 +13,7 @@ import {
   canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
   eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
-  eventMilestoneBodyRestoreFeedback,
+  observedNondecisionMilestone, eventMilestoneBodyRestoreFeedback,
 } from "../src/event-specialist.js";
 
 test("Event handoff recognizes Luna's explicit Choice-owner binding without accepting a vague choice mention", () => {
@@ -153,13 +153,28 @@ test("nondecision Milestone authority metadata does not require a formal Choice 
     "the independent validator reports that an unbound Choice obligation cannot certify a completed " +
     "Milestone or its fulfillment IDs. The Milestone is therefore left partial with empty " +
     "fulfillment.any_of; this does not certify fulfillment of the nondecision Milestone.";
-  assert.equal(scopedNondecisionChoiceDeferral([conflict]), true);
+  const observed = "The player has encountered an observable basis for treating a passenger " +
+    "as missing, and inquiry into the absence has become the shared immediate problem aboard " +
+    "the stranded train; the passenger's fate and cause remain unresolved.";
+  assert.equal(observedNondecisionMilestone(observed), true);
+  assert.equal(scopedNondecisionChoiceDeferral([conflict], observed), true);
+  const realConflict = "The validator rejected binding event.disappearance-established to " +
+    "the selected Milestone because an unbound Choice obligation cannot certify a " +
+    "completed Milestone or authored fulfillment IDs. The Milestone is therefore " +
+    "left partial with fulfillment.any_of empty; the Event remains complete and reachable as a setup.";
+  assert.equal(scopedNondecisionChoiceDeferral([realConflict], observed), true,
+    "Exact real Luna failure must not depend on the model saying 'nondecision'.");
+  assert.equal(currentMilestoneChoiceBinding([
+    "After the Choice obligation is resolved, reassess and bind the reachable Event route to milestone.disappearance-established.",
+    "Author the later formal Choice, its enacted consequences, and different endings.",
+  ], "milestone.disappearance-established", observed), false,
+  "A false Choice prerequisite and future Choice do not become source requirements.");
   const assignment = {
     milestoneId: "milestone.disappearance-established",
     milestonePath: "milestones/disappearance-established.md",
   };
   const feedback = eventNondecisionChoiceCorrection(
-    assignment, [conflict], ["event.disappearance-established"]);
+    assignment, [conflict], observed, ["event.disappearance-established"]);
   assert.match(feedback, /decisions: as AUTHOR authority metadata/);
   assert.match(feedback, /NOT executable Choice Point/);
   assert.match(feedback, /event\.disappearance-established/);
@@ -173,10 +188,14 @@ test("nondecision Milestone authority metadata does not require a formal Choice 
     "A formal Choice Point is required by the protected author.",
     "The Milestone is nondecision, but a new Character is needed.",
     "An unbound Choice still prevents a separate unrelated Milestone.",
-  ]) assert.equal(scopedNondecisionChoiceDeferral([source]), false, source);
-  assert.equal(scopedNondecisionChoiceDeferral([]), false);
+  ]) assert.equal(scopedNondecisionChoiceDeferral([source], observed), false, source);
+  assert.equal(scopedNondecisionChoiceDeferral([], observed), false);
+  assert.equal(scopedNondecisionChoiceDeferral([conflict],
+    "The player chooses which suspect to confront and must enact two different outcomes."), false,
+  "A true Choice-dependent source cannot be downgraded by a model report.");
+  assert.equal(scopedNondecisionChoiceDeferral([conflict], ""), false);
   assert.throws(() => eventNondecisionChoiceCorrection(assignment,
-    ["The author expressly requires a formal Choice Point"]), /cannot be downgraded/);
+    ["The author expressly requires a formal Choice Point"], observed), /cannot be downgraded/);
 });
 
 test("Event prompt distinguishes material nondecision evidence from later Choice binding", () => {

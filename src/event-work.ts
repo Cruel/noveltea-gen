@@ -10,6 +10,7 @@ import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
 import { authorEventCluster, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
+  observedNondecisionMilestone,
   eventMilestoneBodyRestoreFeedback, type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
@@ -297,20 +298,19 @@ export function hasDeferredChoiceBinding(obligations: string[]): boolean {
 export function currentMilestoneChoiceBinding(
   obligations: string[], milestoneId: string, sourceChange: string,
 ): boolean {
-  const sourceRequiresChoice =
-    /\b(?:choice|chooses?|choosing|decision|decides?|deciding|branch|alternate outcomes?|either\b.{0,90}\bor\b)\b/i
-      .test(sourceChange);
-  // Never assume that silence about Choice permits completed fulfillment.
-  // Ignore a later unrelated Story Choice only for a positively stated
-  // initial observation/inquiry objective; ambiguous milestones retain the
-  // original fail-closed Choice gate.
-  const explicitlyObservedNondecision = !sourceRequiresChoice &&
-    /\b(?:knows?|learns?|recogniz(?:e|es|ed)|identif(?:y|ies|ied)|observes?|becomes aware)\b/i.test(sourceChange) &&
-    /\b(?:investigat(?:ion|e|ing)|inquir(?:y|e)|missing|disappearance|subject|evidence|situation)\b/i.test(sourceChange);
+  // Model-generated handoff language cannot manufacture a Choice
+  // requirement in an observed, nondecision Milestone. A later Choice can
+  // still bind this Milestone only when the handoff explicitly says its
+  // Choice *outcomes* are required, not merely that a later Event route
+  // should be reassessed after a future Choice.
+  const observed = observedNondecisionMilestone(sourceChange);
   return obligations.some(obligation =>
     hasDeferredChoiceBinding([obligation]) &&
-    (!explicitlyObservedNondecision || obligation.includes(milestoneId) ||
-      !/\b(?:later|future|subsequent|another|next)\b/i.test(obligation)));
+    (!observed ||
+      !/\b(?:later|future|subsequent|another|next|after)\b/i.test(obligation) ||
+      obligation.includes(milestoneId) &&
+        /\b(?:outcomes?|effects|branches|chooses?|decision)\b/i.test(obligation) &&
+        /\b(?:must|required|needs?)\b/i.test(obligation)));
 }
 function acceptance(report: Report, assignment: EventAssignment, paths: string[], obligations: string[]) {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
@@ -814,10 +814,6 @@ export async function runEventWorkItem(input: EventOptions) {
             // Protected, upstream and out-of-scope claims still fail closed.
             const localEvidenceGap = candidate.claimedPaths.length > 0 &&
               scopedEventEvidenceConflict(assign, candidate.conflicts);
-            const falseChoiceDeferral = candidate.claimedPaths.length > 0 &&
-              scopedNondecisionChoiceDeferral(candidate.conflicts);
-            if (candidate.conflicts.length && !localEvidenceGap && !falseChoiceDeferral)
-              throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
             const checked = await validate(receipt.expectedHead);
             const draft = checked.report as unknown as Report | undefined;
             if (draft?.protection?.status !== "checked" ||
@@ -830,6 +826,16 @@ export async function runEventWorkItem(input: EventOptions) {
             if (repairablePathError) return [repairablePathError +
               " Edit an authorized Event if necessary, or correct modifiedRecords to list the exact Git changes. " +
               "Do not modify the Milestone merely to make it appear in the diff."];
+            // Derive the exception from the native-validated, protected
+            // SOURCE Milestone, never the model's choice of conflict label.
+            const sourceMilestone = draft.records.find(record =>
+              record.metadata.type === "milestone" && record.metadata.id === assign.milestoneId);
+            const sourceChange = String(sourceMilestone?.metadata.change ?? "");
+            const falseChoiceDeferral = candidate.claimedPaths.length > 0 &&
+              scopedNondecisionChoiceDeferral(candidate.conflicts, sourceChange) &&
+              !currentMilestoneChoiceBinding(candidate.obligations, assign.milestoneId, sourceChange);
+            if (candidate.conflicts.length && !localEvidenceGap && !falseChoiceDeferral)
+              throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
             const authoredEventIds = draft.records
               .filter(record => paths!.includes(record.path) &&
                 record.metadata.type === "event" && record.metadata.status !== "superseded")
@@ -837,7 +843,8 @@ export async function runEventWorkItem(input: EventOptions) {
             if (localEvidenceGap)
               return [eventEvidenceRepairFeedback(assign, candidate.conflicts, authoredEventIds)];
             if (falseChoiceDeferral)
-              return [eventNondecisionChoiceCorrection(assign, candidate.conflicts, authoredEventIds)];
+              return [eventNondecisionChoiceCorrection(
+                assign, candidate.conflicts, sourceChange, authoredEventIds)];
             try {
               acceptance(draft, assign, paths!, candidate.obligations);
               const proof = await consequenceProof(job, draft, assign, paths!, candidate.obligations);

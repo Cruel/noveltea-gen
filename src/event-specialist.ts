@@ -70,14 +70,29 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
     laterObligations: obj.laterObligations };
 }
 
+/** The actual selected Milestone must positively describe player-visible
+ * investigation/observation rather than executable choice. A model-generated
+ * label of "nondecision" cannot confer permission to complete a Milestone. */
+export function observedNondecisionMilestone(change: string): boolean {
+  return !/\b(?:choice|chooses?|choosing|decision|decides?|deciding|branch|alternate outcomes?|either\b.{0,90}\bor\b)\b/i
+    .test(change) &&
+    /\b(?:knows?|learns?|recogniz(?:e|es|ed)|identif(?:y|ies|ied)|observes?|encounters?|encountered|becomes aware)\b/i
+      .test(change) &&
+    /\b(?:investigat(?:ion|e|ing)|inquir(?:y|e)|missing|disappearance|absence|subject|evidence|situation)\b/i
+      .test(change);
+}
+
 /** Source-local model confusion: the Milestone's decisions metadata
  * records protected/delegated AUTHOR direction, not executable Choice Point
  * routes. A self-identified nondecision milestone cannot be held partial
  * merely because a later Story Choice remains unbound. The controller
  * still requires an actual reachable authored Event and independent review. */
-export function scopedNondecisionChoiceDeferral(conflicts: readonly string[]): boolean {
-  return conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text =>
-    /\bnondecision\s+milestone\b/i.test(text) &&
+export function scopedNondecisionChoiceDeferral(
+  conflicts: readonly string[], sourceChange: string,
+): boolean {
+  return observedNondecisionMilestone(sourceChange) &&
+    conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text =>
+    /\b(?:milestone|fulfillment|validator)\b/i.test(text) &&
     /\b(?:unbound|pending|awaiting|deferred)\s+(?:formal\s+)?choice\b/i.test(text) &&
     /\b(?:fulfillment|complete(?:d|ness)?|route)\b/i.test(text) &&
     !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|new character|new fact|new milestone|unreachable|impossible)\b/i.test(text));
@@ -85,9 +100,10 @@ export function scopedNondecisionChoiceDeferral(conflicts: readonly string[]): b
 
 export function eventNondecisionChoiceCorrection(
   assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
-  conflicts: readonly string[], nativeEventIds: readonly string[] = [],
+  conflicts: readonly string[], sourceChange: string,
+  nativeEventIds: readonly string[] = [],
 ): string {
-  if (!scopedNondecisionChoiceDeferral(conflicts))
+  if (!scopedNondecisionChoiceDeferral(conflicts, sourceChange))
     throw Error("An actual formal-Choice or other-owner conflict cannot be downgraded.");
   const ids = [...new Set(nativeEventIds)].filter(id =>
     /^event\.[a-z][a-z0-9-]*$/.test(id)).slice(0, 8);
