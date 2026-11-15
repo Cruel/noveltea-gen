@@ -95,10 +95,14 @@ export function scopedEventEvidenceConflict(
 export function eventEvidenceRepairFeedback(
   assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
   conflicts: readonly string[],
+  nativeEventIds: readonly string[] = [],
 ): string {
   if (!scopedEventEvidenceConflict(assignment, conflicts))
     throw new Error("An out-of-scope Event conflict cannot be routed as local evidence.");
-  return "EVENT_LOCAL_EVIDENCE: The CURRENT authored Event is missing a material clause " +
+  const eventIds = [...new Set(nativeEventIds)].filter(id =>
+    /^event\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)).slice(0, 8);
+  return "EVENT_LOCAL_EVIDENCE: The CURRENT authored Event has not yet delivered " +
+    "a verified Milestone binding for the material clause " +
     "of the selected Milestone " + assignment.milestoneId + " in " + assignment.milestonePath + ". " +
     "This is evidence the CURRENT Event specialist can gather within the SAME authorized " +
     "Event and existing-character context; it is not automatically a prerequisite for a new writer. " +
@@ -110,8 +114,20 @@ export function eventEvidenceRepairFeedback(
     "and which access facts remain unknown. A reported past sighting is testimony, NOT objective " +
     "truth or proof of continuous enclosure; do not invent an authoritative offscreen investigation, " +
     "time record, new Character, protected change, or unsupported certainty. " +
-    "Only then bind a reachable fulfillment route for a nondecision Milestone; never " +
-    "invent fulfillment IDs, steps or effects merely to pass validation. " +
+    "When this in-scene evidence materially supports the nondecision Milestone's " +
+    "actual change, YOU are authorized and REQUIRED to edit the selected " +
+    assignment.milestonePath + " yourself NOW: change ONLY its YAML " +
+    "completeness to complete and fulfillment.any_of to a reachable route through " +
+    "your authored Event IDs. The formal binding is part of YOUR Event assignment, " +
+    "not a later specialist, Choice owner, or independent reviewer task. " +
+    "Independent semantic review happens AFTER this native-validated commit " +
+    "and will reject unsupported claims. Do not merely add a laterObligations " +
+    "entry asking another owner to bind this nondecision Milestone. " +
+    (eventIds.length ? "Native-identified candidate Event IDs from the actual draft: " +
+      JSON.stringify(eventIds) + ". Use only genuinely sufficient and reachable Events; " +
+      "for ONE sufficient Event, the source's YAML can express fulfillment: " +
+      "{any_of: [[" + eventIds[0] + "]]}. " : "") +
+    "Never invent fulfillment IDs, steps or effects merely to pass validation. " +
     "If the Milestone actually requires a player decision, keep that Milestone partial " +
     "and hand off only the formally unbound Choice. " +
     "Re-run story_validate and report EXACT cumulative modifiedRecords, " +
@@ -184,17 +200,23 @@ export function eventSpecialistPrompt(
       "alone proves that all the Milestone's evidence has been established. " +
       "For a promised contradiction, test the claims against an independent observation " +
       "the player can inspect: an undated physical trace cannot establish the disputed timing. " +
-      "For a nondecision Milestone, THIS Event assignment owns delivering each " +
-      "material evidence clause in a reachable in-scene observation or identified, " +
+      "For a nondecision Milestone, THIS Event assignment owns BOTH delivering " +
+      "each material evidence clause and binding its reachable Event IDs in the " +
+      "selected Milestone's fulfillment.any_of and completeness fields. " +
+      "These two YAML fields are already writable for you; formal Milestone binding " +
+      "is NOT a separate future reviewer/Choice assignment for nondecision work. " +
+      "Independent review occurs AFTER the validated Event commit. " +
+      "Deliver the material evidence in a reachable in-scene observation or identified, " +
       "uncertainty-qualified testimony, including which relevant spaces or people " +
       "were accessible if the selected Milestone asks for access evidence. " +
       "Do not substitute present absence for past access proof; a genuine limited " +
       "witness account can establish what that witness observed without claiming " +
       "omniscient certainty. If one observation is insufficient, revise this Event " +
       "or author a causally linked second Event within the existing writable scope. " +
-      "Do not merely leave a nondecision Milestone partial and delegate its missing " +
-      "material evidence to an unspecified later Event; a complete nondecision " +
-      "Milestone requires genuine reachable fulfillment NOW. " +
+      "Do not merely leave a nondecision Milestone partial, or delegate its " +
+      "evidence OR formal fulfillment binding to an unspecified later Event, " +
+      "interactive owner or reviewer; a complete nondecision Milestone requires " +
+      "genuine reachable evidence AND its narrow YAML binding NOW. " +
       "Partial completeness and empty fulfillment.any_of are appropriate for an " +
       "unbound later formal Choice or a genuinely impossible out-of-scope requirement, " +
       "but a reported conflict is NOT a successful Event. Do not fabricate a " +

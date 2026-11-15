@@ -37,13 +37,20 @@ test("an authored Event's missing in-scope access evidence receives a bounded co
     "which spaces and people were accessible during the relevant interval. " +
     "Binding this Event alone would claim a fulfilled route without establishing that material clause.";
   assert.equal(scopedEventEvidenceConflict(assignment, [exact]), true);
-  const correction = eventEvidenceRepairFeedback(assignment, [exact]);
+  const correction = eventEvidenceRepairFeedback(assignment, [exact], [
+    "event.incident-inquiry",
+  ]);
   assert.match(correction, /same|CURRENT/i);
   assert.match(correction, /source|witness|testimony/i);
   assert.match(correction, /current.*Event|Event.*current/i);
   assert.match(correction, /access|interval/);
   assert.match(correction, /not.*(?:proof|objective|omniscient|truth)/i);
   assert.match(correction, /fulfillment/);
+  assert.match(correction, /milestones\/train-milestones.md/);
+  assert.match(correction, /event\.incident-inquiry/);
+  assert.match(correction, /complete and fulfillment\.any_of/);
+  assert.match(correction, /NOT a later specialist|not a later specialist/i);
+  assert.match(correction, /review happens AFTER/i);
   assert.match(correction, /story_validate/);
   assert.doesNotMatch(correction, /(?:grant|authorize) (?:new|additional)/i);
   for (const invalid of [
@@ -86,6 +93,8 @@ test("Event prompt distinguishes material nondecision evidence from later Choice
   const snapshot = { id: "f".repeat(64), path: "/pinned/skills", commit: "a".repeat(40) } as any;
   const prompt = eventSpecialistPrompt(snapshot, assignment, true);
   assert.match(prompt, /nondecision Milestone/i);
+  assert.match(prompt, /fulfillment\.any_of/);
+  assert.match(prompt, /Independent review occurs AFTER/);
   assert.match(prompt, /in this Event/i);
   assert.match(prompt, /witness|testimony/i);
   assert.match(prompt, /partial.*Choice/i);

@@ -773,8 +773,12 @@ export async function runEventWorkItem(input: EventOptions) {
             if (repairablePathError) return [repairablePathError +
               " Edit an authorized Event if necessary, or correct modifiedRecords to list the exact Git changes. " +
               "Do not modify the Milestone merely to make it appear in the diff."];
+            const authoredEventIds = draft.records
+              .filter(record => paths!.includes(record.path) &&
+                record.metadata.type === "event" && record.metadata.status !== "superseded")
+              .map(record => record.metadata.id);
             if (localEvidenceGap)
-              return [eventEvidenceRepairFeedback(assign, candidate.conflicts)];
+              return [eventEvidenceRepairFeedback(assign, candidate.conflicts, authoredEventIds)];
             try {
               acceptance(draft, assign, paths!, candidate.obligations);
               const proof = await consequenceProof(job, draft, assign, paths!, candidate.obligations);
@@ -790,7 +794,7 @@ export async function runEventWorkItem(input: EventOptions) {
                   "Milestone " + assign.milestoneId +
                   " lacks a deterministically reachable evidence route: the Event does not establish " +
                   "the material observation or witness support promised by the selected Milestone.",
-                ])];
+                ], authoredEventIds)];
               }
               return [message];
             }
