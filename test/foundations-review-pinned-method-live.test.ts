@@ -4,12 +4,10 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assignmentReviewerOptionalMethods } from "../src/narrative-review-specialist.js";
-import { boundedPinnedSources, pinnedSourcePaths } from "../src/bounded-specialist-prompt.js";
+import { reviewerPinnedSkillPath } from "../src/skills.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
-import type { SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 
-test("saved Luna World reviewer uses only exact pinned World/Character methods", {
+test("saved Luna World reviewer uses only canonical verified snapshot references", {
   skip: !process.env.NT_PRESERVED_FOUNDATIONS_REVIEW_SOURCE &&
     "Set NT_PRESERVED_FOUNDATIONS_REVIEW_SOURCE to the private /tmp/nt158-* run.",
 }, () => {
@@ -25,14 +23,6 @@ test("saved Luna World reviewer uses only exact pinned World/Character methods",
   assert.equal(receipt.units[0]?.id, "world-foundations");
   assert.equal(receipt.units[0]?.phase, "committed");
   assert.match(receipt.units[0]?.commitSha ?? "", /^[a-f0-9]{40}$/);
-  const packet = { items: [{ reviewedWorkItem: "world-foundations" }] } as SemanticReviewPacket;
-  const required = pinnedSourcePaths(receipt.snapshot, boundedPinnedSources("nt-narrative-review"));
-  const optional = assignmentReviewerOptionalMethods(receipt.snapshot, packet);
-  assert.deepEqual(optional, [
-    join(receipt.snapshot.path, "skills/nt-story-architecture/SKILL.md"),
-    join(receipt.snapshot.path, "skills/nt-worldbuilding/SKILL.md"),
-    join(receipt.snapshot.path, "skills/nt-character-development/SKILL.md"),
-  ]);
   const root = join(state, "review-sessions/assignment-fidelity");
   const sessions = readdirSync(root).filter(name => name.endsWith(".jsonl"));
   assert.equal(sessions.length, 1);
@@ -44,17 +34,13 @@ test("saved Luna World reviewer uses only exact pinned World/Character methods",
     .flatMap(m => m.content ?? [])
     .filter(c => c.type === "toolCall" && c.name === "read" && successful.has(c.id))
     .map(c => c.arguments?.path);
-  // Architecture is an upstream dependency of World Foundations. The latest
-  // real Luna run consulted it; it is allowed only from the same snapshot.
-  if (reads.includes("skill://nt-story-architecture/SKILL.md"))
-    assert.ok(optional.includes(join(receipt.snapshot.path, "skills/nt-story-architecture/SKILL.md")));
   assert.ok(reads.includes("skill://nt-worldbuilding/SKILL.md"));
   assert.ok(reads.includes("skill://nt-character-development/SKILL.md"));
   for (const ref of reads) {
     assert.match(ref ?? "", /^skill:\/\//, "Reviewer must not read mutable Story files");
     const full = join(receipt.snapshot.path, "skills", ref!.slice("skill://".length));
-    assert.ok([...required, ...optional].includes(full),
-      "Reviewer must not gain unrelated or unpinned skill reads: " + ref);
+    assert.ok(reviewerPinnedSkillPath(receipt.snapshot.path, full),
+      "Reviewer must not read outside canonical pinned references: " + ref);
   }
   console.log("SAVED_WORLD_REVIEW_PINNED_METHODS",
     JSON.stringify({ commit: receipt.units[0]?.commitSha, successfulReads: reads.length }));

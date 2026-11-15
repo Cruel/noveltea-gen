@@ -4,12 +4,10 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assignmentReviewerOptionalMethods } from "../src/narrative-review-specialist.js";
-import { boundedPinnedSources, pinnedSourcePaths } from "../src/bounded-specialist-prompt.js";
+import { reviewerPinnedSkillPath } from "../src/skills.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
-import type { SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 
-test("saved Luna Event reviewer may compare exact immutable source-role methods", {
+test("saved Luna Event reviewer reads only canonical verified snapshot references", {
   skip: !process.env.NT_PRESERVED_EVENT_REVIEW_SOURCE &&
     "Set NT_PRESERVED_EVENT_REVIEW_SOURCE to the private /tmp/nt158-* run.",
 }, () => {
@@ -25,15 +23,6 @@ test("saved Luna Event reviewer may compare exact immutable source-role methods"
   };
   assert.equal(receipt.phase, "committed");
   assert.match(receipt.commitSha, /^[a-f0-9]{40}$/);
-  const packet = { items: [{ reviewedWorkItem: "event-" + items[0]!.slice(0, -5) }] } as SemanticReviewPacket;
-  const required = pinnedSourcePaths(receipt.snapshot, boundedPinnedSources("nt-narrative-review"));
-  const optional = assignmentReviewerOptionalMethods(receipt.snapshot, packet);
-  assert.deepEqual(optional, [
-    join(receipt.snapshot.path, "skills/nt-story-architecture/SKILL.md"),
-    join(receipt.snapshot.path, "skills/nt-worldbuilding/SKILL.md"),
-    join(receipt.snapshot.path, "skills/nt-character-development/SKILL.md"),
-    join(receipt.snapshot.path, "skills/nt-event-design/SKILL.md"),
-  ]);
   const sessionsRoot = join(state, "review-sessions/assignment-fidelity");
   const sessions = readdirSync(sessionsRoot).filter(x => x.endsWith(".jsonl"));
   assert.equal(sessions.length, 1);
@@ -52,8 +41,8 @@ test("saved Luna Event reviewer may compare exact immutable source-role methods"
   for (const path of reads) {
     assert.match(path, /^skill:\/\//, "The reviewer cannot read live Story or absolute paths");
     const absolute = join(receipt.snapshot.path, "skills", path.slice("skill://".length));
-    assert.ok([...required, ...optional].includes(absolute),
-      "Only stage-local pinned methods are allowed: " + path);
+    assert.ok(reviewerPinnedSkillPath(receipt.snapshot.path, absolute),
+      "Only immutable reviewer-visible snapshot methods are allowed: " + path);
   }
   console.log("SAVED_EVENT_REVIEW_PINNED_METHODS",
     JSON.stringify({ commit: receipt.commitSha, successfulReads: reads.length }));

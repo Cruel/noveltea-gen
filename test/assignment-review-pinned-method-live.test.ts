@@ -4,13 +4,12 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assignmentReviewerOptionalMethods } from "../src/narrative-review-specialist.js";
+import { reviewerPinnedSkillPath } from "../src/skills.js";
 import { boundedPinnedSources, pinnedSourcePaths } from "../src/bounded-specialist-prompt.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
-import type { SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 
 test(
-  "saved Choice reviewer reads only immutable pinned review and its own Choice method",
+  "saved Choice reviewer reads only canonical verified snapshot references",
   {
     skip:
       !process.env.NT_PRESERVED_ASSIGNMENT_REVIEW_SOURCE &&
@@ -32,19 +31,7 @@ test(
     assert.equal(receipt.units[0]?.domain, "choice");
     assert.equal(receipt.units[0]?.phase, "committed");
     assert.ok(receipt.units[0]?.commitSha);
-    const packet = {
-      items: [{ reviewedWorkItem: receipt.workItemId.replace(/^interactive-/, "interactive-choice-") }],
-    } as SemanticReviewPacket;
     const required = pinnedSourcePaths(receipt.snapshot, boundedPinnedSources("nt-narrative-review"));
-    const optional = assignmentReviewerOptionalMethods(receipt.snapshot, packet);
-    assert.deepEqual(optional, [
-      join(receipt.snapshot.path, "skills/nt-story-architecture/SKILL.md"),
-      join(receipt.snapshot.path, "skills/nt-worldbuilding/SKILL.md"),
-      join(receipt.snapshot.path, "skills/nt-character-development/SKILL.md"),
-      join(receipt.snapshot.path, "skills/nt-event-design/SKILL.md"),
-      join(receipt.snapshot.path, "skills/nt-interactive-narrative/SKILL.md"),
-      join(receipt.snapshot.path, "skills/nt-catalog/references/progression.md"),
-    ]);
     const sessionRoot = join(state, "review-sessions/assignment-fidelity");
     const sessions = readdirSync(sessionRoot).filter((file) => file.endsWith(".jsonl"));
     assert.equal(sessions.length, 1);
@@ -86,8 +73,8 @@ test(
       const relative = path.slice("skill://".length);
       const full = join(receipt.snapshot.path, "skills", relative);
       assert.ok(
-        required.includes(full) || optional.includes(full),
-        "Original reviewer reads only the newly permitted exact skills: " + path,
+        reviewerPinnedSkillPath(receipt.snapshot.path, full),
+        "Reviewer's reads stay within the verified reviewer-visible snapshot: " + path,
       );
     }
     assert.ok(reads.length >= required.length);
@@ -96,7 +83,7 @@ test(
       JSON.stringify({
         sourceCommit: receipt.units[0].commitSha,
         readCount: reads.length,
-        optionalMethod: "nt-interactive-narrative/SKILL.md",
+        crossDomainRead: "nt-interactive-narrative/SKILL.md",
       }),
     );
   },

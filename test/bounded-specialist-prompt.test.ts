@@ -15,11 +15,11 @@ import { CRITICAL_CAST_GUIDANCE } from "../src/character-world-specialist.js";
 import { interactiveSpecialistPrompt, type InteractiveAssignment } from "../src/interactive-specialist.js";
 import {
   assignmentFidelityPrompt,
-  assignmentReviewerOptionalMethods,
   narrativeRepairPrompt,
   type ReviewAssignment,
 } from "../src/narrative-review-specialist.js";
 import { boundedPinnedSources, pinnedSourcePaths } from "../src/bounded-specialist-prompt.js";
+import { reviewerPinnedSkillPath } from "../src/skills.js";
 import type { CompletionContract, Plan } from "../src/architecture.js";
 import { semanticUnitOutcome, type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
@@ -355,65 +355,49 @@ test("Puzzle writer and reviewer require equivalent objective evidence for every
   assert.doesNotMatch(rendered["Assignment reviewer"], /weaker or different fact/);
 });
 
-test("retrospective reviewer allows only pinned craft methods from each unit and its causal predecessors", () => {
-  const choicePacket = { ...packet, items: packet.items.map(item => ({
-    ...item, reviewedWorkItem: "interactive-choice-disclosure",
-  })) };
-  const puzzlePacket = { ...packet, items: packet.items.map(item => ({
-    ...item, reviewedWorkItem: "interactive-puzzle-disclosure",
-  })) };
-  const worldPacket = { ...packet, items: packet.items.map(item => ({
-    ...item, reviewedWorkItem: "world-foundations",
-  })) };
-  const characterPacket = { ...packet, items: packet.items.map(item => ({
-    ...item, reviewedWorkItem: "character-foundations",
-  })) };
-  const method = (name: string) => snapshot.path + "/skills/" + name;
-  const foundationMethods = [
-    method("nt-story-architecture/SKILL.md"),
-    method("nt-worldbuilding/SKILL.md"),
-    method("nt-character-development/SKILL.md"),
+test("retrospective reviewers may read any canonical snapshot documentation, even after repair", () => {
+  const variants = [
+    packet,
+    ...["global-architecture", "world-foundations", "character-foundations",
+      "event-disclosure", "interactive-choice-disclosure", "interactive-puzzle-disclosure",
+      "composition-disclosure", "repair-604e6190"].map(reviewedWorkItem =>
+      ({ ...packet, items: packet.items.map(item => ({ ...item, reviewedWorkItem })) })),
   ];
-  const eventMethods = [...foundationMethods, method("nt-event-design/SKILL.md")];
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, packet), eventMethods,
-    "An Event reviewer may compare exact World/Character/Event methods, never future roles.");
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, worldPacket), foundationMethods);
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, characterPacket), foundationMethods);
-  assert.match(assignmentFidelityPrompt(snapshot, worldPacket),
-    /skill:\/\/nt-worldbuilding\/SKILL\.md/);
-  assert.match(assignmentFidelityPrompt(snapshot, characterPacket),
-    /skill:\/\/nt-character-development\/SKILL\.md/);
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, choicePacket),
-    [...eventMethods, method("nt-interactive-narrative/SKILL.md"),
-      method("nt-catalog/references/progression.md")]);
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, puzzlePacket),
-    [...eventMethods, method("nt-interactive-narrative/SKILL.md"),
-      method("nt-puzzle-design/SKILL.md"),
-      method("nt-catalog/references/progression.md")]);
-  const architecturePacket = { ...packet, items: packet.items.map(item => ({
-    ...item, reviewedWorkItem: "global-architecture",
-  })) };
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, architecturePacket),
-    [method("nt-story-architecture/SKILL.md")]);
-  const compositionPacket = { ...packet, items: packet.items.map(item => ({
-    ...item, reviewedWorkItem: "composition-disclosure",
-  })) };
-  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, compositionPacket),
-    [...eventMethods, method("nt-interactive-narrative/SKILL.md"),
-      method("nt-puzzle-design/SKILL.md"), method("nt-narrative-composition/SKILL.md"),
-      method("nt-catalog/references/progression.md")]);
-  assert.match(assignmentFidelityPrompt(snapshot, choicePacket),
-    /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
-  assert.match(assignmentFidelityPrompt(snapshot, puzzlePacket),
-    /skill:\/\/nt-puzzle-design\/SKILL\.md/);
-  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, packet),
-    /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
-  assert.match(assignmentFidelityPrompt(snapshot, packet),
-    /skill:\/\/nt-event-design\/SKILL\.md/);
-  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
-    /skill:\/\/nt-puzzle-design\/SKILL\.md/);
-  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, worldPacket),
-    /skill:\/\/nt-event-design\/SKILL\.md/);
+  for (const item of variants) {
+    const reviewer = assignmentFidelityPrompt(snapshot, item);
+    assert.match(reviewer, /mandatory pinned review\/catalog references/);
+    assert.match(reviewer, /other canonical craft, schema or review references/);
+    assert.match(reviewer, /same verified skill:\/\/ snapshot/);
+    assert.match(reviewer, /or while evaluating a repair/);
+    assert.match(reviewer, /Do not read orchestrator instructions/);
+    assert.match(reviewer, /COMPLETE sealed Git diff/);
+    assert.match(reviewer, /NONE\. This is a read-only reviewer/);
+    assert.doesNotMatch(reviewer, /you MAY also read these immutable pinned craft methods/);
+  }
+
+  const pinned = (name: string) => snapshot.path + "/skills/" + name;
+  for (const path of [
+    "nt-story-architecture/SKILL.md",
+    "nt-worldbuilding/SKILL.md",
+    "nt-character-development/references/craft.md",
+    "nt-event-design/SKILL.md",
+    "nt-interactive-narrative/SKILL.md",
+    "nt-puzzle-design/SKILL.md",
+    "nt-narrative-composition/SKILL.md",
+    "nt-story-discovery/SKILL.md",
+    "nt-narrative-review/SKILL.md",
+    "nt-catalog/references/progression.md",
+  ]) assert.equal(reviewerPinnedSkillPath(snapshot.path, pinned(path)), true, path);
+  for (const path of [
+    pinned("nt-story-orchestrate/SKILL.md"),
+    pinned("nt-story-collaborate/SKILL.md"),
+    pinned("nt-story-import/SKILL.md"),
+    pinned("nt-catalog/../nt-story-orchestrate/SKILL.md"),
+    snapshot.path + "/story/characters/person.md",
+    "/story/characters/person.md",
+    "/tmp/private.md",
+    snapshot.path + "/skills",
+  ]) assert.equal(reviewerPinnedSkillPath(snapshot.path, path), false, path);
 });
 
 test("each actual pinned-read list retains portable method, representation and authority", () => {

@@ -8,6 +8,7 @@ import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tool
 import { createProjectResourceLoader } from "./pi.js";
 import { completedContextReads } from "./story-context.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
+import { reviewerPinnedSkillPath } from "./skills.js";
 import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
@@ -383,42 +384,6 @@ export function assertSemanticCorrectionPreserved(before: Record<string, unknown
   return { ...after, findings };
 }
 
-/** An independent reviewer may inspect only the original, immutable craft
- * methods for its unit and its upstream specialist dependencies. The stage
- * graph is fixed by the controller; no model output or source text can add
- * method paths. This allows causal cross-role comparison without ever
- * exposing mutable Story files, extra roles or writer tools. */
-export function assignmentReviewerOptionalMethods(
-  snapshot: SkillSnapshot, packet: SemanticReviewPacket,
-): string[] {
-  const names = packet.items.map(item => item.reviewedWorkItem);
-  const any = (prefix: string) => names.some(name => name.startsWith(prefix));
-  const architecture = names.includes("global-architecture");
-  const foundations = names.some(name =>
-    ["world-foundations", "character-foundations"].includes(name));
-  const event = any("event-") || packet.items.some(item =>
-    item.reviewedWorkItem.startsWith("repair-") &&
-    item.assignment.specialist === "nt-event-design");
-  const choice = any("interactive-choice-");
-  const puzzle = any("interactive-puzzle-");
-  const composition = any("composition-");
-  const afterFoundations = event || choice || puzzle || composition;
-  const afterArchitecture = foundations || afterFoundations;
-  const afterEvent = choice || puzzle || composition;
-  const afterChoice = puzzle || composition;
-  const methods = [
-    ...((architecture || afterArchitecture) ? ["nt-story-architecture/SKILL.md"] : []),
-    ...((foundations || afterFoundations)
-      ? ["nt-worldbuilding/SKILL.md", "nt-character-development/SKILL.md"] : []),
-    ...(afterFoundations ? ["nt-event-design/SKILL.md"] : []),
-    ...(afterEvent ? ["nt-interactive-narrative/SKILL.md"] : []),
-    ...(afterChoice ? ["nt-puzzle-design/SKILL.md"] : []),
-    ...(composition ? ["nt-narrative-composition/SKILL.md"] : []),
-    ...(afterEvent ? ["nt-catalog/references/progression.md"] : []),
-  ];
-  return pinnedSourcePaths(snapshot, [...new Set(methods)]);
-}
-
 /** A bounded schema-reconsideration request, never a controller PASS. A
  * reviewer may confuse two *enabled* alternatives with two *executed*
  * branches. The sealed packet must actually show distinct, selectable typed
@@ -472,15 +437,14 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "Character access, Milestone promise and route prerequisites; do not equate reachable with true.",
     sources: boundedPinnedSources("nt-narrative-review"),
     sourceUse:
-      "Read ONLY pinned skill:// review-method and catalog references with the " +
-      "read tool. " +
-      (assignmentReviewerOptionalMethods(snapshot, packet).length
-        ? "For the exact reviewed unit in this sealed packet you MAY also read " +
-          "these immutable pinned craft methods and, where applicable, the canonical " +
-          "branch progression contract for craft/schema comparison, never as a new authoring role " +
-          "or permission to inspect current Story files: " +
-          pinnedSkillReferences(snapshot, assignmentReviewerOptionalMethods(snapshot, packet)) + ". "
-        : "") +
+      "Read the mandatory pinned review/catalog references above using read. " +
+      "You MAY consult other canonical craft, schema or review references from the " +
+      "same verified skill:// snapshot when relevant, including across specialist " +
+      "boundaries or while evaluating a repair. Start with the method named by " +
+      "the assigned specialist when relevant; consult related methods only where " +
+      "the source evidence calls for them. Do not read orchestrator instructions; " +
+      "optional reference access grants no additional authoring role or scope. " +
+      "Do not read every skill simply because it is available. " +
       "The REVIEW PACKET inline contains the COMPLETE sealed Git diff, " +
       "canonicalContext, blobSha and commitSha: use ONLY THOSE supplied bytes as " +
       "Story evidence. Do NOT call read with any Story filename, /story path, " +
@@ -595,11 +559,9 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       throw new Error(
         "Assignment reviewer did not read mandatory pinned skills: " + missingPinned().join(", "),
       );
-    // Any access to current Story files would contaminate the sealed snapshot,
-    // even if the model later cites only the packet. Exact immutable methods
-    // governing the reviewed Choice/Puzzle work are optional read-only
-    // references; every other extra skill or path remains prohibited.
-    const optional = assignmentReviewerOptionalMethods(snapshot, packet);
+    // Skill reads are constrained by the read tool to verified SHA-256 pinned
+    // files and reviewer-visible craft/schema/review packages. No work-item
+    // naming (including repair IDs) narrows that trusted reference boundary.
     // A completed read-only model turn may copy one malformed Git SHA or
     // source line despite identifying a real defect. Correct only formatting
     // and provenance in the SAME Pi session; never infer success or dilute the
@@ -645,13 +607,13 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       verdict = validateSemanticVerdict(packet,
         normalizeFailedSemanticFindingKinds(parseSpecialistJson(lastReply(session))));
     }
-    // Re-audit after ALL correction turns, not just the first response. A
-    // schema recheck permits one pinned progression reference, never a mutable
-    // Story read or an unrelated role/skill.
+    // Re-audit after ALL correction turns. No successful worktree read,
+    // orchestrator instruction read, or unpinned source may contaminate the
+    // historical packet, even if the model does not cite it in the verdict.
     const otherReads = completedReads(session, job.worktreeStoryRoot, snapshot.path)
-      .filter(path => !required.includes(path) && !optional.includes(path));
+      .filter(path => !reviewerPinnedSkillPath(snapshot.path, path));
     if (otherReads.length)
-      throw new Error("Assignment reviewer read outside immutable pinned methods: " +
+      throw new Error("Assignment reviewer read outside verified reviewer skill snapshot: " +
         otherReads.join(", "));
     await context!.completed(file!, session.sessionId);
     return verdict;

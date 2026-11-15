@@ -19,6 +19,16 @@ const CROSS_DOMAIN_GUIDANCE = new Set([
   "nt-narrative-composition", "nt-story-discovery",
 ]);
 
+/** Independent reviewers may consult any canonical craft/schema/review document
+ * from their verified snapshot. This path check is for audit only: the read
+ * tool additionally enforces loaded skill roots and per-file SHA-256 hashes.
+ * Orchestrator instructions are not reviewer reference material. */
+export function reviewerPinnedSkillPath(snapshotRoot: string, readPath: string): boolean {
+  const parts = relative(join(snapshotRoot, "skills"), readPath).split(sep);
+  return parts.length >= 2 && parts.every(part => part && part !== "." && part !== "..") &&
+    (CROSS_DOMAIN_GUIDANCE.has(parts[0]!) || parts[0] === "nt-narrative-review");
+}
+
 /** Skill visibility is knowledge, never a grant to invoke a role or write Story records. */
 export function roleVisibleSkills(skills: readonly Skill[], role: SkillReadRole,
   allowCollaborativeMethod = true): Skill[] {

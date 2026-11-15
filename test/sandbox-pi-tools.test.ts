@@ -174,6 +174,17 @@ test("retrospective assignment reviewer can read pinned methods but cannot open 
     JSON.stringify((await call(readTool, { path: "skill://nt-narrative-review/SKILL.md" })).content),
     /narrative-review guidance/,
   );
+  assert.match(
+    JSON.stringify((await call(readTool, {
+      path: "skill://nt-character-development/references/craft.md",
+    })).content),
+    /character-development pinned craft reference/,
+    "A repair reviewer may consult relevant canonical references across roles",
+  );
+  await assert.rejects(call(readTool, { path: "skill://nt-story-orchestrate/SKILL.md" }),
+    /Skill read denied/, "Orchestrator instructions are not canonical reviewer references");
+  await assert.rejects(call(readTool, { path: "skill://nt-catalog/../nt-story-orchestrate/SKILL.md" }),
+    /Skill read denied/, "Pinned read policy must reject path traversal");
   for (const path of [
     "milestones/disclosure.md",
     "events/disclosure.md",
