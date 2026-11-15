@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { validRecoveryReviewCoverage } from '../src/recovery-fork-state'
+import { validRecoveryReviewCoverage, resolvedInheritedRecoveryReviews } from '../src/recovery-fork-state'
+import { unresolvedNativePrerequisites } from '../src/checkpoint-assurance'
 
 const sha = (letter: string) => letter.repeat(40)
 const world = sha('a'), repair = sha('b'), character = sha('c')
@@ -16,6 +17,23 @@ test('a verified repair of a failed completed specialist can be inherited withou
   assert.equal(validRecoveryReviewCoverage(coverage, completed, required), true)
   assert.equal(validRecoveryReviewCoverage(coverage.filter(item => item.commitSha !== repair),
     completed, required), true, 'Original failure history remains independently recorded')
+})
+
+test('a passing repair unlocks inherited dependencies without changing historical reviewer verdicts', () => {
+  const dependencies = { 'event:milestone.incident': ['world-foundations', 'character-foundations'],
+    'character-foundations': ['world-foundations'] }
+  const original = coverage.map(entry => ({ ...entry }))
+  assert.deepEqual(unresolvedNativePrerequisites('event:milestone.incident',
+    dependencies, original), ['world-foundations'])
+  const derived = resolvedInheritedRecoveryReviews(original)
+  assert.equal(coverage[0].status, 'failed', 'Saved World verdict must remain immutable')
+  assert.equal(derived[0]?.status, 'not-required')
+  assert.equal(derived[1]?.status, 'passed')
+  assert.deepEqual(unresolvedNativePrerequisites('event:milestone.incident',
+    dependencies, derived), [])
+  assert.equal(resolvedInheritedRecoveryReviews([
+    { ...coverage[0] }, { ...coverage[1], status: 'failed' }, coverage[2],
+  ])[0]?.status, 'failed', 'A failed repair does not unblock the source')
 })
 
 test('repair coverage rejects absent, unrelated, cyclic or excessive failed-review ancestry', () => {

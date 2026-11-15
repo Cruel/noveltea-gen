@@ -212,13 +212,13 @@ export class IndependentReviewGateError extends Error {
  * verified checkpoint rather than write past its mandatory independent review. */
 export async function assertNativeReviewDependencies(job: JobStartResult, nextWorkItem: string) {
   const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
-  const { readRecoveryFork } = await import("./recovery-fork-state.js");
+  const { readRecoveryFork, resolvedInheritedRecoveryReviews } = await import("./recovery-fork-state.js");
   const current = (await inspectRecoveryCheckpoints(job)).filter(point => point.eligible);
   const fork = readRecoveryFork(job);
   const resolved = await resolvedCheckpointReviews(job, current);
   const dependencies = current.at(-1)?.dependencies ?? fork?.checkpoint.dependencies ?? {};
   const statuses = [
-    ...(fork?.reviewCoverage ?? []),
+    ...resolvedInheritedRecoveryReviews(fork?.reviewCoverage ?? []),
     ...current.filter(point => point.assurance).map(point => ({ workItem: point.workItem,
       status: resolved.get(point.commitSha) ??
         (point.semanticReview === "untracked" ? "required-pending" as const : point.semanticReview) })),

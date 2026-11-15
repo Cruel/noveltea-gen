@@ -68,6 +68,31 @@ export function validRecoveryReviewCoverage(
   return !required || coverage.some(item =>
     item.commitSha === required.commitSha && item.workItem === required.workItem);
 }
+/** Compute dependency-gate status from immutable inherited verdicts. Only a
+ * passing, proof-bound repair whose source was a recorded failure can
+ * supersede that source; callers retain the original verdict ledger intact. */
+export function resolvedInheritedRecoveryReviews(
+  coverage: NonNullable<RecoveryForkBundle["reviewCoverage"]>,
+): NonNullable<RecoveryForkBundle["reviewCoverage"]> {
+  const byCommit = new Map(coverage.map(entry => [entry.commitSha, entry]));
+  const covered = new Set<string>();
+  for (const entry of coverage) {
+    if (entry.status !== "passed" || !entry.workItem.startsWith("repair-")) continue;
+    let current = entry;
+    const sources: string[] = [];
+    for (let depth = 0; depth < 2; depth++) {
+      const sourceSha = /^repair-([a-f0-9]{40})$/.exec(current.workItem)?.[1];
+      if (!sourceSha) break;
+      const source = byCommit.get(sourceSha);
+      if (!source || source.status !== "failed") break;
+      sources.push(source.commitSha);
+      current = source;
+    }
+    if (!current.workItem.startsWith("repair-")) sources.forEach(sha => covered.add(sha));
+  }
+  return coverage.map(entry => covered.has(entry.commitSha)
+    ? { ...entry, status: "not-required" as const } : entry);
+}
 export function readRecoveryFork(job: JobStartResult, requireReady = true): RecoveryForkBundle | null {
   if (!job.recoveryFork) return null;
   const bundle = JSON.parse(regular(join(job.stateDir, "recovery-fork.json"))) as RecoveryForkBundle;
