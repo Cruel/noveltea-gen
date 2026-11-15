@@ -331,6 +331,52 @@ test("Character commit just before checkpoint is recovered without replaying a s
   assert.equal(git(job.worktreeRoot, "rev-list", "--count", arch.headSha + "..HEAD"), "2");
 });
 
+test("pending Character rejects an unreviewed World successor even with a forged verified-head pointer", {
+  skip: !available,
+}, () => {
+  const { cli, job, architecture } = setup("unreviewed-world-successor");
+  architecture();
+  const completed = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(completed.status, 0, completed.stderr);
+  const receiptPath = join(job.stateDir, "character-world.json");
+  const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+  assert.equal(receipt.units[0].phase, "committed");
+  assert.equal(receipt.units[1].phase, "committed");
+  const world = receipt.units[0].commitSha as string;
+  // Construct an isolated native-fixture World-committed/Character-pending
+  // checkpoint. The separate saved-source replay above exercises the real
+  // non-fixture independent review/proof; this fixture tests untrusted Git.
+  git(job.worktreeRoot, "reset", "--hard", world);
+  receipt.units[1] = { id: "character-foundations", domain: "character", phase: "pending" };
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  const markerPath = join(job.stateDir, "revisions", "verified-head.json");
+  const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+  writeFileSync(markerPath, JSON.stringify({ ...marker, headSha: world,
+    workItemId: "world-foundations" }));
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), world);
+  const original = readFileSync(join(job.worktreeStoryRoot, "world-entities/archive.md"), "utf8");
+  writeFileSync(join(job.worktreeStoryRoot, "world-entities/archive.md"),
+    original + "\nUnsupported correction without independent review.\n");
+  git(job.worktreeRoot, "add", "story/world-entities/archive.md");
+  git(job.worktreeRoot, "commit", "-qm", "Unreviewed World successor");
+  const unreviewed = git(job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD^"), world);
+  writeFileSync(markerPath, JSON.stringify({ ...marker, headSha: unreviewed }));
+  // Even a forged head pointer cannot substitute for independent review,
+  // authenticated correction proof and validated immutable checkpoint.
+  const inspected = cli(["foundations", "inspect"]);
+  if (inspected.status === 0) {
+    const data = JSON.parse(inspected.stdout);
+    assert.equal(data.status, "blocked");
+    assert.match(data.recovery.reason, /checkpoint|review|correction|provenance|lineage/i);
+  } else {
+    assert.match(inspected.stderr, /verified|checkpoint|review|correction|head|branch/i);
+  }
+  assert.notEqual(cli(["foundations", "run", "--fixture"]).status, 0);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), unreviewed);
+  assert.equal(JSON.parse(readFileSync(receiptPath, "utf8")).units[1].phase, "pending");
+});
+
 test("World recovery fails closed for missing Pi transcript and staged changes", { skip: !available }, () => {
   const { cli, job, architecture } = setup("world-unsafe-recovery");
   architecture();

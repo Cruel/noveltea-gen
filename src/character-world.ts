@@ -15,10 +15,10 @@ import { recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { steeringForAssignment } from "./steering-amendments.js";
-import { assertNativeReviewDependencies } from "./checkpoint-assurance.js";
+import { assertNativeReviewDependencies, readRepairCommitProof } from "./checkpoint-assurance.js";
 import { DEFAULT_CREATIVE_POLICY } from "./creative-policy.js";
 import { trustedHead } from "./revision.js";
-import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
+import { finalizeRecoveryCheckpoint, inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -405,7 +405,8 @@ async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: Foundation
 function output(job: JobStartResult, receipt: Receipt) {
   return { status: receipt.units.every(unit => unit.phase === "committed") ? "foundations-committed" : "in-progress",
     jobId: job.jobId, branch: job.branch, worktreeStoryRoot: job.worktreeStoryRoot,
-    headSha: receipt.units[1].commitSha ?? receipt.units[0].commitSha ?? receipt.startHead ?? receipt.architectureHead,
+    headSha: receipt.units[1].commitSha ?? receipt.units[1].beforeHead ??
+      receipt.units[0].commitSha ?? receipt.startHead ?? receipt.architectureHead,
     architectureHead: receipt.architectureHead, planVersion: receipt.planVersion,
     items: receipt.units.map(unit => ({ ...unit, dependencies: unit.domain === "world" ? ["global-architecture"] : ["world-foundations"],
       specialist: unit.domain === "world" ? "nt-worldbuilding" : "nt-character-development" })),
@@ -417,10 +418,73 @@ function output(job: JobStartResult, receipt: Receipt) {
 type Recovery = {
   status: "ready" | "recoverable-commit" | "blocked";
   actualHead: string;
+  /** Verified successor to the immutable original World author commit. */
+  characterBeforeHead?: string;
   changes: string[];
   reason?: string;
   candidate?: { unit: string; paths: string[]; digest: string };
 };
+
+/** Only an independently passing, immutable World correction chain can become
+ * Character's parent. A valid descendant or a passing model claim alone is
+ * NOT sufficient. Original World authorship and failed review remain intact.
+ *
+ * A maximum of two exact, contiguous repair commits is supported. Every
+ * checkpoint is verified against the original controller plan, Git diff,
+ * protected baseline and independent review by the recovery inspector;
+ * every repair proof is separately bound to the original rejected owner.
+ */
+export async function verifiedWorldReviewHandoff(
+  job: JobStartResult, originalWorldSha: string, requestedHead: string,
+): Promise<string> {
+  if (!/^[a-f0-9]{40}$/.test(originalWorldSha) ||
+      !/^[a-f0-9]{40}$/.test(requestedHead))
+    throw new Error("World correction handoff lacks exact Git commit identities.");
+  if (originalWorldSha === requestedHead) return originalWorldSha;
+  if (git(job, "symbolic-ref", "--short", "HEAD") !== job.branch ||
+      git(job, "rev-parse", requestedHead + "^{commit}") !== requestedHead)
+    throw new Error("World correction handoff differs from the original branch.");
+  const verified = await trustedHead(job);
+  try {
+    git(job, "merge-base", "--is-ancestor", requestedHead, verified);
+    git(job, "merge-base", "--is-ancestor", requestedHead, "HEAD");
+  } catch {
+    throw new Error("World correction is not on the current verified Job branch.");
+  }
+  const points = await inspectRecoveryCheckpoints(job);
+  const original = points.find(point => point.eligible && point.commitSha === originalWorldSha &&
+    point.workItem === "world-foundations");
+  if (!original?.assurance || original.semanticReview !== "failed")
+    throw new Error("World correction lacks its original independently failed World checkpoint.");
+  let source = originalWorldSha;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const successors = points.filter(point => point.eligible &&
+      point.workItem === "repair-" + source);
+    if (successors.length !== 1)
+      throw new Error("World correction has missing/ambiguous verified repair lineage.");
+    const next = successors[0]!;
+    const proof = await readRepairCommitProof(job, next.workItem);
+    if (!next.assurance || proof.sourceCommitSha !== source ||
+        proof.rootFailureSha !== originalWorldSha ||
+        proof.commitSha !== next.commitSha ||
+        proof.beforeHead !== source || next.parentSha !== source ||
+        proof.assignmentId !== original.assurance.assignmentId ||
+        next.assurance.assignmentId !== original.assurance.assignmentId ||
+        next.planVersion !== original.planVersion ||
+        proof.paths.some(path => !original.assurance!.changedPaths.includes(path)) ||
+        !["failed", "passed"].includes(next.semanticReview))
+      throw new Error("World correction lacks source-scoped original-owner provenance.");
+    if (next.commitSha === requestedHead) {
+      if (next.semanticReview !== "passed")
+        throw new Error("World correction has no passing independent successor review.");
+      return requestedHead;
+    }
+    if (next.semanticReview !== "failed")
+      throw new Error("World correction has unexpected commits after its passing review.");
+    source = next.commitSha;
+  }
+  throw new Error("World correction exceeds the two-attempt independent repair limit.");
+}
 
 /** Inspect actual Git and the original Pi transcript before any resumed writer. */
 async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<Recovery> {
@@ -433,8 +497,15 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
     }
     const index = receipt.units.findIndex(unit => unit.phase !== "committed");
     if (index < 0) {
-      const last = receipt.units[1]!.commitSha;
-      if (!last || changes.length) return blocked("Committed foundations have unexpected worktree or staged changes.");
+      const [world, character] = receipt.units;
+      const last = character.commitSha;
+      if (!last || !world.commitSha || changes.length)
+        return blocked("Committed foundations have unexpected worktree or staged changes.");
+      verifyCommit(job, world, receipt.startHead ?? receipt.architectureHead, world.commitSha);
+      const characterParent = character.beforeHead ?? world.commitSha;
+      if (characterParent !== world.commitSha)
+        await verifiedWorldReviewHandoff(job, world.commitSha, characterParent);
+      verifyCommit(job, character, characterParent, last);
       if (actualHead !== last) {
         if (actualHead !== await trustedHead(job)) return blocked("Foundations HEAD is not a verified successor.");
         git(job, "merge-base", "--is-ancestor", last, actualHead);
@@ -442,9 +513,19 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
       return { status: "ready", actualHead, changes };
     }
     const unit = receipt.units[index]!;
-    const before = index ? receipt.units[index - 1]!.commitSha : (receipt.startHead ?? receipt.architectureHead);
-    if (!before || unit.beforeHead && unit.beforeHead !== before) return blocked("Saved work-item parent differs from the verified chain.");
-    if (index && receipt.units[0]!.commitSha) verifyCommit(job, receipt.units[0]!, receipt.startHead ?? receipt.architectureHead, before);
+    const worldSha = index ? receipt.units[0]!.commitSha : undefined;
+    let before = index ? worldSha : (receipt.startHead ?? receipt.architectureHead);
+    if (!before) return blocked("Saved work-item parent differs from the verified chain.");
+    if (index && worldSha) {
+      verifyCommit(job, receipt.units[0]!, receipt.startHead ?? receipt.architectureHead, worldSha);
+      if (unit.beforeHead && unit.beforeHead !== worldSha ||
+          unit.phase === "pending" && actualHead !== worldSha) {
+        const requested = unit.beforeHead ?? actualHead;
+        before = await verifiedWorldReviewHandoff(job, worldSha, requested);
+      }
+    }
+    if (unit.beforeHead && unit.beforeHead !== before)
+      return blocked("Saved work-item parent differs from the verified correction chain.");
     if (unit.phase === "awaiting-author") {
       if (!unit.authorChoiceId) return blocked("Author question receipt missing from the saved work item.");
       try {
@@ -453,7 +534,7 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
           return blocked("Character/World is waiting for an author choice; answer in Author questions and approvals.");
         await verifySpecialistChoice(job, unit.authorChoiceId, "answered");
         if (choice.headSha !== before) return blocked("Author-choice Git HEAD no longer matches the work item.");
-        return { status: "ready", actualHead, changes };
+        return { status: "ready", actualHead, changes, ...(index ? { characterBeforeHead: before } : {}) };
       } catch (error) { return blocked("Author choice cannot safely resume: " + String(error)); }
     }
     if (unit.phase === "writing") {
@@ -472,7 +553,8 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
     }
     if (unit.phase === "pending") {
       return actualHead === before && !changes.length
-        ? { status: "ready", actualHead, changes }
+        ? { status: "ready", actualHead, changes,
+            ...(index ? { characterBeforeHead: before } : {}) }
         : blocked("Unexpected Git history, staged data or worktree changes before specialist handoff.");
     }
     if (!unit.paths?.length || !unit.digest) return blocked("Authored foundation inventory is missing or corrupt.");
@@ -485,13 +567,15 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
           await fileDigest(job, unit.paths) !== unit.digest) {
         return blocked("Authored foundation files differ from recorded paths or bytes; preserve for review.");
       }
-      return { status: "ready", actualHead, changes };
+      return { status: "ready", actualHead, changes,
+        ...(index ? { characterBeforeHead: before } : {}) };
     }
     if (changes.length) return blocked("Staged or uncommitted changes accompany a completed specialist commit.");
     if (git(job, "rev-parse", "HEAD^") !== before) return blocked("Unexpected commit parent after specialist crash.");
     verifyCommit(job, unit, before, actualHead);
     if (await fileDigest(job, unit.paths) !== unit.digest) return blocked("Committed specialist bytes differ from recorded digest.");
-    return { status: "recoverable-commit", actualHead, changes };
+    return { status: "recoverable-commit", actualHead, changes,
+      ...(index ? { characterBeforeHead: before } : {}) };
   } catch (error) {
     return blocked("Character/World recovery cannot be trusted: " + (error instanceof Error ? error.message : String(error)));
   }
@@ -557,7 +641,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     const recovery = await inspectRecovery(job, receipt);
     if (input.action === "inspect") {
       const result = output(job, receipt);
-      return { ...result, status: recovery.status === "blocked" ? "blocked" : result.status, recovery };
+      return { ...result, headSha: recovery.characterBeforeHead ?? result.headSha,
+        status: recovery.status === "blocked" ? "blocked" : result.status, recovery };
     }
     if (input.action === "run" && recovery.status === "blocked") {
       throw new Error(recovery.reason ?? "Foundations recovery blocked.");
@@ -578,12 +663,15 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     if (input.action === "run" && receipt.units.every(unit => unit.phase === "committed")) {
       const [world, character] = receipt.units;
       verifyCommit(job, world, receipt.startHead ?? receipt.architectureHead, world.commitSha!);
-      verifyCommit(job, character, world.commitSha!, character.commitSha!);
+      const characterParent = character.beforeHead ?? world.commitSha!;
+      if (characterParent !== world.commitSha!)
+        await verifiedWorldReviewHandoff(job, world.commitSha!, characterParent);
+      verifyCommit(job, character, characterParent, character.commitSha!);
       // A later independently verified inbox capture is not a reason to replay
       // specialists. Restore a missing final verified-head publication only if
       // the Character commit itself remains the current worktree HEAD.
       if (recovery.actualHead === character.commitSha) {
-        await publishHead(job, world.commitSha!, character.commitSha!, character.id);
+        await publishHead(job, characterParent, character.commitSha!, character.id);
       }
       return output(job, receipt);
     }
@@ -614,7 +702,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           recovery.candidate.digest !== input.recoveryDigest) {
         throw new Error("Foundations reconciliation requires an interrupted writer and exact inspected --digest; Git, Pi or file inventory is unsafe.");
       }
-      const before = index ? receipt.units[index - 1]!.commitSha : (receipt.startHead ?? receipt.architectureHead);
+      const before = index ? (unit.beforeHead ?? recovery.characterBeforeHead ??
+        receipt.units[index - 1]!.commitSha) : (receipt.startHead ?? receipt.architectureHead);
       if (!before) throw new Error("Missing parent work-item commit.");
       assertHead(job, before);
       const preReport = reportOf(await validate(before), before);
@@ -641,8 +730,11 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       const index = state.units.indexOf(unit);
       const prior = index ? state.units[index - 1]!.commitSha : (state.startHead ?? state.architectureHead);
       if (!prior) throw new Error("Character specialist cannot run before the Worldbuilding work-item commit.");
-      if (unit.beforeHead && unit.beforeHead !== prior) throw new Error("Work-unit head changed since assignment.");
-      const before = prior;
+      const before = index ? (unit.beforeHead ?? recovery.characterBeforeHead ?? prior) : prior;
+      if (unit.beforeHead && unit.beforeHead !== before)
+        throw new Error("Work-unit head changed since reviewed correction assignment.");
+      if (index && before !== prior)
+        await verifiedWorldReviewHandoff(job, prior, before);
       if (unit.phase === "committed") {
         if (!unit.commitSha || !unit.digest || !unit.paths) {
           throw new Error("Saved foundation commit provenance cannot be verified.");
@@ -650,15 +742,21 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         verifyCommit(job, unit, before, unit.commitSha);
         const current = git(job, "rev-parse", "HEAD");
         if (index === state.units.length - 1 || state.units[index + 1]!.phase === "pending") {
-          assertHead(job, unit.commitSha);
+          const pendingParent = index === 0 ? (recovery.characterBeforeHead ?? unit.commitSha) : unit.commitSha;
+          assertHead(job, pendingParent);
           if (dirty(job).length) throw new Error("Unexpected edits after specialist commit.");
         } else if (current !== unit.commitSha) {
           const next = state.units[index + 1]!;
           if (next.phase === "authored") {
-            verifyCommit(job, next, unit.commitSha, current);
-            if (dirty(job).length || await fileDigest(job, next.paths!) !== next.digest) {
-              throw new Error("Unverified next specialist commit or uncommitted changes.");
+            if (current !== next.beforeHead) {
+              verifyCommit(job, next, next.beforeHead ?? unit.commitSha, current);
+              if (dirty(job).length || await fileDigest(job, next.paths!) !== next.digest)
+                throw new Error("Unverified next specialist commit or uncommitted changes.");
             }
+          } else if (next.phase === "awaiting-author" && current === next.beforeHead &&
+              !dirty(job).length) {
+            // No new author turn or write grant is inferred; the answered,
+            // original source-bound choice remains checked by its own gate.
           } else if (current !== next.commitSha) {
             throw new Error("Foundation Git chain changed unexpectedly.");
           }
