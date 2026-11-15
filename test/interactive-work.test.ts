@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
+import { startStoryJob } from "../src/job.js";
+import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
+import { readPuzzleNoWrite } from "../src/puzzle-obligation.js";
 import { auditInteractivePaths, checkOutput, selectAssignment,
   RepairableInteractiveGateError, RepairableInteractiveScopeError,
   scopeRepairFeedback } from "../src/interactive-work.js";
@@ -77,7 +83,59 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
   }
   const interactive = (variant?: string, milestone = "milestone.disclosure") =>
     cli(["interactive", "run", "--fixture", "--milestone", milestone, "--skills-source", source], variant);
-  return { repo, story, baseline, job, cli, prepare, interactive };
+  const saveTurn = (request: string, obligations: string[]) =>
+    saveFixtureTurn(job, JSON.parse(readFileSync(contract, "utf8")), request, obligations);
+  const seal = async (workItem: string) => {
+    const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    try {
+      const current = await startStoryJob({ story, job: "draft" }, false);
+      const point = (await inspectRecoveryCheckpoints(current)).find(p => p.eligible && p.workItem === workItem);
+      assert.ok(point?.assurance, "Missing fixture checkpoint " + workItem);
+      if (point.semanticReview === "not-required") return;
+      assert.equal(point.semanticReview, "required-pending");
+      await reviewBoundedAssignments(current, [point], async packet => ({
+        sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
+        evidence: packet.items.map(item => ({
+          commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+          path: item.assurance.changedPaths[0]!, line: 1,
+          explanation: "Deterministic fixture: source- and native-validated prerequisite.",
+        })),
+      }), "deterministic-prerequisite-fixture", true);
+    } finally {
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  };
+  const prepareWithTurn = async (request: string, obligations: string[]) => {
+    const original = JSON.parse(readFileSync(contract, "utf8"));
+    writeFileSync(contract, JSON.stringify({ ...original,
+      scope: { kind: "full-story", depth: "composition", targets: [], branches: [] } }));
+    saveTurn(request, obligations);
+    const arch = cli(["architecture", "run", "--fixture", "--contract", contract, "--skills-source", source]);
+    assert.equal(arch.status, 0, arch.stderr);
+    await seal("global-architecture");
+    const first = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+    assert.notEqual(first.status, 0, "World prerequisite must require independent review");
+    await seal("world-foundations");
+    const foundations = cli(["foundations", "run", "--fixture", "--skills-source", source]);
+    assert.equal(foundations.status, 0, foundations.stderr);
+    await seal("character-foundations");
+    const event = cli(["event", "run", "--fixture", "--milestone", "milestone.disclosure", "--skills-source", source]);
+    assert.equal(event.status, 0, event.stderr);
+    await seal("event-disclosure");
+    return JSON.parse(event.stdout).headSha as string;
+  };
+  const interactiveWithChoiceReview = async (variant: string) => {
+    const first = interactive(variant);
+    assert.notEqual(first.status, 0, "Choice must pause for its selected independent checkpoint review");
+    await seal("interactive-choice-disclosure");
+    return interactive(variant);
+  };
+  return { repo, story, baseline, job, cli, prepare, interactive, saveTurn, prepareWithTurn, seal,
+    interactiveWithChoiceReview };
 }
 const inspect = (x: ReturnType<typeof setup>) => {
   const result = x.cli(["interactive", "inspect", "--milestone", "milestone.disclosure"]);
@@ -93,6 +151,96 @@ test("interactive CLI accepts and persists medium thinking for both specialist s
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).thinking, "medium");
   assert.equal(inspect(x).thinking, "medium");
+});
+
+test("optional Puzzle can conclude with a sealed no-write receipt after a real Choice commit", { skip: !available }, async () => {
+  const x = setup("choice-only-no-write");
+  await x.prepareWithTurn("Create a fair-play mystery with an enacted Choice and meaningfully different endings.", [
+    "Branch effects must be perceivable and consequential.",
+    "Present fair-play clues and independently review the mystery payoff and distinct endings.",
+  ]);
+  const result = await x.interactiveWithChoiceReview("puzzle-no-write");
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.status, "interactive-slice-committed");
+  assert.deepEqual(output.specialistUnits.map((u: any) => u.phase), ["committed", "not-applicable"]);
+  assert.equal(output.completionEvidence.deterministicChoicePathAndOptionalPuzzle, true);
+  assert.equal(output.completionEvidence.deterministicChoiceAndPuzzlePaths, false);
+  assert.equal(output.completionEvidence.puzzleDisposition, "not-applicable");
+  assert.equal(output.headSha, output.specialistUnits[0].commitSha);
+  assert.equal(output.specialistUnits[1].beforeHead, output.headSha);
+  assert.equal(output.specialistUnits[1].paths.length, 0);
+  assert.ok(output.specialistUnits[1].noWrite.digest);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD^"),
+    output.specialistUnits[0].beforeHead);
+  assert.match(git(x.job.worktreeRoot, "log", "-1", "--format=%B"),
+    /NovelTea-Work-Item: interactive-choice-disclosure/);
+  assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
+  const seal = JSON.parse(readFileSync(join(x.job.stateDir, "interactive-no-write/disclosure.json"), "utf8"));
+  assert.equal(seal.payload.decision, "not-applicable");
+  assert.equal(seal.payload.choiceHead, output.headSha);
+  assert.equal(seal.payload.piSessionSha256, null, "Fixture writes cannot masquerade as real Pi transcripts");
+  assert.equal(seal.payload.report.modifiedRecords.length, 0);
+  await assert.rejects(readPuzzleNoWrite({
+    ...x.job, threadId: "root:foreign-thread",
+  }, "milestone.disclosure", output.specialistUnits[1].noWrite),
+  /source\/owner\/digest/, "A sealed omission cannot be reused by another Thread");
+  assert.ok(seal.payload.report.architecturalConflicts[0].includes("two proved solution Events"));
+  assert.equal(JSON.parse(x.interactive("puzzle-no-write").stdout).headSha, output.headSha);
+  assert.equal(inspect(x).headSha, output.headSha);
+});
+
+test("approved player-solving obligation blocks a no-write Puzzle report", { skip: !available }, async () => {
+  const x = setup("required-puzzle-no-write");
+  await x.prepareWithTurn("The player must solve the mystery using two different puzzle methods.", [
+    "Players must solve the mystery with a genuinely solvable Puzzle.",
+  ]);
+  const result = await x.interactiveWithChoiceReview("puzzle-no-write");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Puzzle|no-write/i);
+  const receipt = JSON.parse(readFileSync(join(x.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
+  assert.notEqual(receipt.units[1].phase, "not-applicable");
+  assert.equal(existsSync(join(x.job.stateDir, "interactive-no-write/disclosure.json")), false);
+});
+
+test("optional Puzzle proof rejects stale source, mismatched owner and dirty Story", { skip: !available }, async () => {
+  const cases = ["source-head", "turn-source", "owner", "sealed-digest", "dirty-story"] as const;
+  const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  for (const variant of cases) {
+    const x = setup("no-write-tamper-" + variant);
+    await x.prepareWithTurn("A mystery with fair-play clues and divergent choice consequences.", [
+      "Review the enacted Choice and distinct written outcomes.",
+    ]);
+    const result = await x.interactiveWithChoiceReview("puzzle-no-write");
+    assert.equal(result.status, 0, result.stderr);
+    const path = join(x.job.stateDir, "interactive-items/disclosure.json");
+    const receipt = JSON.parse(readFileSync(path, "utf8"));
+    if (variant === "source-head") receipt.units[1].beforeHead = receipt.eventHead;
+    else if (variant === "turn-source") {
+      const sourcePath = join(x.job.stateDir, "turn-plan.json");
+      const turn = JSON.parse(readFileSync(sourcePath, "utf8"));
+      turn.originalRequest += " Now the player must solve a formal Puzzle.";
+      const { digest: _old, ...body } = turn;
+      turn.digest = hash(body);
+      writeFileSync(sourcePath, JSON.stringify(turn));
+    } else if (variant === "owner") {
+      const sealPath = join(x.job.stateDir, "interactive-no-write/disclosure.json");
+      const seal = JSON.parse(readFileSync(sealPath, "utf8"));
+      seal.payload.threadId = "another-thread";
+      seal.digest = hash(seal.payload);
+      receipt.units[1].noWrite.digest = seal.digest;
+      writeFileSync(sealPath, JSON.stringify(seal));
+    } else if (variant === "sealed-digest") receipt.units[1].noWrite.digest = "0".repeat(64);
+    else {
+      mkdirSync(join(x.job.worktreeStoryRoot, "authored-content"), { recursive: true });
+      writeFileSync(join(x.job.worktreeStoryRoot, "authored-content/dirt.md"), "Untracked, unapproved source");
+    }
+    if (["source-head", "owner", "sealed-digest"].includes(variant))
+      writeFileSync(path, JSON.stringify(receipt));
+    const replay = x.interactive("puzzle-no-write");
+    assert.notEqual(replay.status, 0, variant);
+    assert.match(replay.stderr, /head|seal|dirty|source|mismatch|receipt|assurance/i);
+  }
 });
 
 test("reference adventure authors two independently certified Choice/Puzzle commits", { skip: !available }, () => {

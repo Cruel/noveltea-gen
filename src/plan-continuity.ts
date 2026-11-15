@@ -5,6 +5,7 @@ import { join, relative } from "node:path";
 import { readRecoveryFork } from "./recovery-fork-state.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract, Plan } from "./architecture.js";
+import { readPuzzleNoWriteSync, type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { verifyAuthorEvidence, type AuthorApprovalEvidence } from "./author-evidence.js";
 
 export interface PlanHistoryStep {
@@ -54,8 +55,13 @@ function historicalCommit(stage: string, receipt: any): string | undefined {
     return receipt.units[1]?.commitSha;
   }
   if (stage.startsWith("interactive:")) {
-    if (receipt.units?.length !== 2 || receipt.units.some((u: any) => u.phase !== "committed")) return;
-    return receipt.units[1]?.commitSha;
+    if (receipt.units?.length !== 2 || receipt.units[0]?.phase !== "committed") return;
+    // The controller's separately sealed optional Puzzle no-write receipt
+    // leaves Choice as the last authored interactive commit.
+    if (receipt.units[1]?.phase === "not-applicable" && receipt.units[1]?.noWrite &&
+        receipt.units[1]?.beforeHead) return receipt.units[0].commitSha;
+    if (receipt.units[1]?.phase !== "committed") return;
+    return receipt.units[1].commitSha;
   }
   return receipt.phase === "committed" ? receipt.commitSha : undefined;
 }
@@ -66,7 +72,8 @@ function checkHistoricalWork(job: JobStartResult, stage: string, version: number
   const path = receiptFile(job, stage);
   if (!existsSync(path)) throw new Error("Cannot carry forward missing " + stage + " receipt.");
   const receipt = JSON.parse(readFileSync(path, "utf8")) as {
-    jobId?: string; planVersion?: number; milestoneId?: string; units?: unknown[];
+    jobId?: string; planVersion?: number; planDigest?: string; milestoneId?: string;
+    units?: Array<{ phase?: string; commitSha?: string; beforeHead?: string; noWrite?: PuzzleNoWriteRef }>;
     commitSha?: string; phase?: string;
   };
   const commit = historicalCommit(stage, receipt);
@@ -77,8 +84,17 @@ function checkHistoricalWork(job: JobStartResult, stage: string, version: number
   }
   git(job, "cat-file", "-e", commit + "^{commit}");
   git(job, "merge-base", "--is-ancestor", commit, head);
+  if (stage.startsWith("interactive:") && receipt.units?.[1]?.phase === "not-applicable") {
+    const proof = readPuzzleNoWriteSync(job, stage.split(":")[1]!, receipt.units[1].noWrite);
+    if (proof.unitId !== "interactive-puzzle-" + stage.split(".").at(-1) ||
+        proof.choiceHead !== commit || proof.verifiedHead !== receipt.units[1].beforeHead ||
+        proof.planDigest !== receipt.planDigest || proof.planVersion !== receipt.planVersion)
+      throw new Error("Historical optional Puzzle lacks exact controller no-write provenance.");
+    git(job, "merge-base", "--is-ancestor", proof.verifiedHead, head);
+  }
   const expected = stage === "foundations" ? "character-foundations"
-    : stage.startsWith("interactive:") ? "interactive-puzzle-" + stage.split(".").at(-1)
+    : stage.startsWith("interactive:") ? (receipt.units?.[1]?.phase === "not-applicable"
+      ? "interactive-choice-" : "interactive-puzzle-") + stage.split(".").at(-1)
     : stage.startsWith("event:") ? "event-" + stage.split(".").at(-1)
     : "composition-" + stage.split(".").at(-1);
   if (!git(job, "log", "-1", "--format=%B", commit).split("\n").includes("NovelTea-Work-Item: " + expected)) {

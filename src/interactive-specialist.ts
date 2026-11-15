@@ -33,6 +33,8 @@ export interface InteractiveAssignment {
     milestoneState: "complete" | "partial-choice-pending"; missingObligations: string[] };
   sourcePaths: string[];
   authorContract: unknown;
+  /** Controller decision derived from the source-bound Turn, never Pi authority. */
+  puzzleObligation?: { required: boolean; reasons: string[] };
   protectedRouteGates: "immutable-existing-event-prerequisites";
   authorizedPaths: string[];
   downstreamRequirements: string[];
@@ -48,11 +50,12 @@ const SPECIALISTS = {
   choice: { name: "nt-interactive-narrative" },
   puzzle: { name: "nt-puzzle-design" },
 } as const;
-export function parseInteractiveManifest(text: string) {
+export function parseInteractiveManifest(text: string, domain: InteractiveDomain = "choice") {
   const obj = lastSpecialistManifest(text);
   const strings = (v: unknown): v is string[] =>
     Array.isArray(v) && v.every(x => typeof x === "string" && x.length > 0);
-  if (!obj || !strings(obj.modifiedRecords) || !obj.modifiedRecords.length ||
+  if (!obj || !strings(obj.modifiedRecords) ||
+      (domain === "choice" && !obj.modifiedRecords.length) ||
       !strings(obj.architecturalConflicts) || !strings(obj.laterObligations)) {
     throw new Error("Interactive specialist must return complete modifiedRecords, architecturalConflicts and laterObligations JSON.");
   }
@@ -72,8 +75,13 @@ export function interactiveSpecialistPrompt(
       ? "Complete exactly ONE Choice unit: bind real alternatives to the original verified " +
         "Event, using its missing obligations and producing reachable, distinct outcome effects " +
         "and later conditional consumers."
-      : "Complete exactly ONE Puzzle unit: author a solvable Puzzle with accessible pre-solution " +
-        "clues and genuinely reachable distinct solution Events.",
+      : "Assess exactly ONE Puzzle unit against the pinned Story and controller objective. " +
+        (assignment.puzzleObligation?.required === false
+          ? "Only author a solvable Puzzle if the verified Story actually supports its goal. " +
+            "Otherwise return an explicit clean no-write report with concrete negative findings; " +
+            "NEVER fabricate clue routes or solution Events to satisfy a stage name."
+          : "A Puzzle is a required approved obligation; author a genuinely solvable Puzzle " +
+            "or return a blocking dependency, never claim completion without it."),
     sources: boundedPinnedSources(SPECIALISTS[domain].name),
     sourceUse:
       "Read ASSIGNMENT.eventSource (when provided), assigned canonical sources and only " +
@@ -95,11 +103,26 @@ export function interactiveSpecialistPrompt(
           "alternatives, source-grounded branch consequences and later consumers. Shared prose " +
           "must not leak exclusive information. Preserve the original Event entry gate verbatim. " +
           CHOICE_PAYOFF_AUTHOR + " Do not create a Puzzle in this unit."
-        : "At least two separately reachable solving Events and pre-solution Authored Content " +
-          "clues attached to distinct reachable discovery Events, with genuine gated " +
-          "consequences and readable player-facing clue prose. Reuse existing valid records " +
-          "instead of creating cosmetic duplicates. Do not modify original Choice outcomes. " +
-          PUZZLE_GOAL_AUTHOR) +
+        : (assignment.puzzleObligation?.required === false
+          ? "Choose exactly one truthful outcome: (A) if the verified sources support " +
+            "a genuinely playable formal Puzzle, author at least two separately " +
+            "reachable solution Events and accessible pre-solution clues; every " +
+            "solution must satisfy the SAME Puzzle objective, with distinct " +
+            "consequences. (B) if no source-grounded formal Puzzle is justified, " +
+            "make ZERO file edits and report the specific negative source evidence " +
+            'as modifiedRecords: [], architecturalConflicts: ["specific finding"], ' +
+            "laterObligations: [remaining Story requirements]. This is a " +
+            "controller-reviewed no-write disposition, NOT a Puzzle pass or " +
+            "permission to drop fair clues, Choice consequences or endings. " +
+            "Never invent a Puzzle to satisfy the pipeline stage. "
+          : "The approved Story requires a formal Puzzle: create at least two " +
+            "separately reachable solving Events with accessible pre-solution " +
+            "Authored Content clues attached to distinct reachable discovery " +
+            "Events, genuine gated consequences and readable clue prose. " +
+            "If the original authorized sources cannot support that goal, " +
+            "report the exact blocker; do NOT claim success or downgrade it. ") +
+          "Reuse existing valid records, not cosmetic duplicates. Do not " +
+          "modify original Choice outcomes. " + PUZZLE_GOAL_AUTHOR) +
       " Author schema 0.1 Markdown and run story_validate, repair and revalidate. " +
       "The controller checks actual final-state coverage, not output-file count.",
     laterObligations: choice
@@ -180,13 +203,18 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
       const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
         typeof c.arguments?.path === "string").map(c =>
         relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
-      if (!edits.length) {
-        throw new Error("Interactive specialist made no canonical Story edits.");
-      }
       // A linked Choice/Puzzle may already exist. The independent audit must
       // check its final state; tool-call evidence need not show a cosmetic edit
       // to that particular record type.
-      const data = await requireSpecialistManifest(session, parseInteractiveManifest, "Interactive");
+      const data = await requireSpecialistManifest(session,
+        text => parseInteractiveManifest(text, domain), "Interactive");
+      if (data.paths.length === 0) {
+        if (domain !== "puzzle" || assignment.puzzleObligation?.required !== false ||
+            edits.length || !data.conflicts.length)
+          throw new Error("Only an optional Puzzle may return a genuine, untouched no-write report.");
+      } else if (!edits.length) {
+        throw new Error("Interactive specialist made no canonical Story edits.");
+      }
       const evidence: InteractiveEvidence = { modifiedRecords: data.paths, conflicts: data.conflicts,
         obligations: data.obligations, skillReads,
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
@@ -204,6 +232,11 @@ export async function authorInteractive(job: JobStartResult, snapshot: SkillSnap
         "not edit permissions. Compare changed files against the originally read sources and provide " +
         "the FULL cumulative modifiedRecords manifest EXCLUDING restored files. " +
         "Do not claim a conditional or unverified path is proven. " +
+        (domain === "puzzle" && assignment.puzzleObligation?.required === false
+          ? "If there is NO source-grounded solvable Puzzle, restore every draft edit and " +
+            'return modifiedRecords: [] with specific architecturalConflicts. ' +
+            "Do not fabricate missing clue or solution evidence. "
+          : "") +
         (domain === "choice" ? CHOICE_PAYOFF_REPAIR : PUZZLE_GOAL_REPAIR) + " " +
         "Diagnostics:\n" + diagnostics.join("\n");
     }

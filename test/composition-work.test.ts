@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
+import { startStoryJob } from "../src/job.js";
+import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { parseSpecialistJson } from "../src/composition-specialist.js";
 import { selectAssignment, verifyCompositionProse } from "../src/composition-work.js";
 
@@ -57,6 +61,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
       "--story", story, "--job", "draft"], { encoding: "utf8",
       timeout: process.env.NT_LIVE_COMPOSITION === "1" ? 1_000_000 : 120_000,
       maxBuffer: 24 * 1024 * 1024, env: { ...env, NT_COMPOSITION_FIXTURE_CASE: fixtureCase,
+        NT_INTERACTIVE_FIXTURE_CASE: fixtureCase,
         NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE: process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE ?? "" } });
   }
   const start = cli(["start"]);
@@ -82,10 +87,77 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     }
     return git(job.worktreeRoot, "rev-parse", "HEAD");
   }
+  const seal = async (workItem: string) => {
+    const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    try {
+      const current = await startStoryJob({ story, job: "draft" }, false);
+      const point = (await inspectRecoveryCheckpoints(current)).find(p => p.eligible && p.workItem === workItem);
+      assert.ok(point?.assurance, "Missing fixture checkpoint " + workItem);
+      if (point.semanticReview === "not-required") return;
+      assert.equal(point.semanticReview, "required-pending");
+      await reviewBoundedAssignments(current, [point], async packet => ({
+        sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
+        evidence: packet.items.map(item => ({
+          commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+          path: item.assurance.changedPaths[0]!, line: 1,
+          explanation: "Deterministic fixture: source- and native-validated prerequisite.",
+        })),
+      }), "deterministic-prerequisite-fixture", true);
+    } finally {
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  };
+  const prepareWithOptionalPuzzle = async () => {
+    const original = JSON.parse(readFileSync(contract, "utf8"));
+    const full = { ...original,
+      scope: { kind: "full-story", depth: original.scope.depth, targets: [], branches: [] } };
+    writeFileSync(contract, JSON.stringify(full));
+    saveFixtureTurn(job, full,
+      "Make a fair-play mystery with meaningful choices and readable divergent endings.",
+      ["Reachable Choice alternatives and earned narrative consequences.",
+        "Independent clue and outcome continuity review across the available routes."]);
+    const runStage = (stage: string, extra: string[] = [], variant = "") =>
+      cli([stage, "run", "--fixture", ...extra, "--skills-source", source], variant);
+    const arch = runStage("architecture", ["--contract", contract]);
+    assert.equal(arch.status, 0, arch.stderr);
+    await seal("global-architecture");
+    const first = runStage("foundations");
+    assert.notEqual(first.status, 0);
+    await seal("world-foundations");
+    const foundations = runStage("foundations");
+    assert.equal(foundations.status, 0, foundations.stderr);
+    await seal("character-foundations");
+    const event = runStage("event", ["--milestone", "milestone.disclosure"]);
+    assert.equal(event.status, 0, event.stderr);
+    await seal("event-disclosure");
+    const choice = runStage("interactive", ["--milestone", "milestone.disclosure"], "puzzle-no-write");
+    assert.notEqual(choice.status, 0);
+    await seal("interactive-choice-disclosure");
+    const result = runStage("interactive", ["--milestone", "milestone.disclosure"], "puzzle-no-write");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).completionEvidence.puzzleDisposition, "not-applicable");
+    return JSON.parse(result.stdout).headSha as string;
+  };
   const run = (variant = "") => cli(["composition", "run", "--fixture", "--milestone",
     "milestone.disclosure", "--skills-source", source], variant);
   const inspect = () => cli(["composition", "inspect", "--milestone", "milestone.disclosure"]);
-  return { repo, original, job, cli, prepare, run, inspect };
+  const recovery = async () => {
+    const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    try {
+      return await inspectRecoveryCheckpoints(await startStoryJob({ story, job: "draft" }, false));
+    } finally {
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  };
+  return { repo, original, job, cli, prepare, prepareWithOptionalPuzzle, run, inspect, seal, recovery };
 }
 
 test("parses a complete nested manifest despite commentary or fenced JSON", () => {
@@ -122,6 +194,40 @@ test("composes two outcomes and two alternative puzzle endings into validated co
   assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
   assert.equal(JSON.parse(x.inspect().stdout).headSha, result.headSha);
   assert.equal(JSON.parse(x.run().stdout).headSha, result.headSha);
+});
+
+test("Choice-only interactive source composes distinct prose without inventing Puzzle endings", { skip: !available }, async () => {
+  const x = setup("choice-only-composition");
+  const before = await x.prepareWithOptionalPuzzle();
+  const composition = x.run();
+  assert.equal(composition.status, 0, composition.stderr);
+  const result = JSON.parse(composition.stdout);
+  assert.equal(result.status, "composition-committed");
+  assert.equal(result.interactiveHead, before);
+  assert.equal(result.validation.branchReview.status, "passed");
+  assert.deepEqual(result.validation.branchReview.outcomes, ["challenge", "protect"]);
+  assert.deepEqual(result.validation.branchReview.solutions, []);
+  assert.ok(result.paths.some((p: string) => p === "authored-content/disclosure-scene.md"));
+  const body = readFileSync(join(x.job.worktreeStoryRoot, "authored-content/disclosure-scene.md"), "utf8");
+  assert.match(body, /## Shared entry/);
+  assert.match(body, /## Protect selected/);
+  assert.match(body, /## Challenge selected/);
+  assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(JSON.parse(x.cli(["validate"]).stdout).status, "passed");
+  assert.equal(JSON.parse(x.run().stdout).headSha, result.headSha);
+  assert.equal(JSON.parse(x.cli(["interactive", "inspect", "--milestone", "milestone.disclosure"]).stdout)
+    .headSha, before);
+  const points = await x.recovery();
+  const checkpoint = points.find(point => point.workItem === "composition-disclosure");
+  assert.ok(checkpoint?.eligible, checkpoint?.reason ?? "Composition recovery checkpoint missing");
+  assert.deepEqual(checkpoint.omittedWorkItems?.map(item => item.workItem),
+    ["interactive-puzzle-disclosure"]);
+  assert.ok(!checkpoint.completedWorkItems.includes("interactive-puzzle-disclosure"),
+    "A no-write decision must not masquerade as a completed Git commit");
+  assert.ok(!checkpoint.remainingWorkItems.includes("interactive-puzzle-disclosure"));
+  assert.ok(checkpoint.remainingWorkItems.includes("review"));
+  assert.notEqual(checkpoint.nextWorkItem, "interactive-puzzle-disclosure");
+  assert.equal(git(x.repo, "rev-parse", "HEAD"), x.original);
 });
 
 test("scoped prose revision may reuse other fully composed Event content", { skip: !available }, async () => {

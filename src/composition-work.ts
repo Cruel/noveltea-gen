@@ -20,6 +20,8 @@ import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
+import { puzzleObligation, readPuzzleNoWrite,
+  type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 
 interface RecordItem { path: string; metadata: Record<string, any> & { id: string; type: string; status: string } }
 interface Report {
@@ -36,9 +38,12 @@ interface EventSourceReceipt {
   jobId: string; milestoneId: string; phase: string; paths?: string[]; commitSha?: string;
 }
 interface InteractiveReceipt {
-  jobId: string; milestoneId: string; planVersion: number; eventHead?: string;
+  jobId: string; milestoneId: string; planVersion: number; planDigest: string;
+  eventHead?: string; baseSha?: string; worker?: string; provider?: string; model?: string;
+  snapshot?: SkillSnapshot; eventSource?: { eventIds: string[]; missingObligations: string[] };
   units: Array<{ id: string; phase: string; commitSha?: string; beforeHead?: string;
-    digest?: string; paths?: string[];
+    digest?: string; paths?: string[]; claimedPaths?: string[]; noWrite?: PuzzleNoWriteRef;
+    conflicts?: string[]; obligations?: string[]; skillReads?: string[]; piSessionFile?: string;
     validation?: { choices?: Array<{ id: string; outcomes: Array<{ name: string; event: string; step: string; branch: string }> }>;
       puzzles?: Array<{ id: string; solutions: Array<{ event: string; status: string; clueAccess: string }> }> } }>;
 }
@@ -111,7 +116,8 @@ export function selectAssignment(plan: Plan, r: Report, source: InteractiveRecei
   const eventIds = eventRecords.map(record => record.metadata.id);
   const choices = source.units[0]?.validation?.choices ?? [];
   const puzzles = source.units[1]?.validation?.puzzles ?? [];
-  if (!choices.length || !puzzles.length) throw new Error("Interactive source lacks proven Choice/Puzzle evidence.");
+  if (!choices.length || (!puzzles.length && source.units[1]?.phase !== "not-applicable"))
+    throw new Error("Interactive source lacks proven Choice or required Puzzle evidence.");
   const choicePoints = choices.map(c => {
     const record = records.find(x => x.metadata.type === "choice-point" && x.metadata.id === c.id);
     const outcomes = record?.metadata.outcomes as string[] | undefined;
@@ -463,10 +469,13 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
         !architecture.plan || architecture.plan.contract.scope.depth !== "composition" ||
         units?.length !== 2 ||
-        units.some(u => u.phase !== "committed" || !u.commitSha || !u.validation))
-      throw new Error("Composition requires the same authorized and fully committed interactive milestone.");
+        units[0]?.phase !== "committed" || !units[0].commitSha || !units[0].validation ||
+        !(units[1]?.phase === "committed" && units[1].commitSha && units[1].validation ||
+          units[1]?.phase === "not-applicable" && units[1].beforeHead && units[1].noWrite))
+      throw new Error("Composition requires the same authorized and verified interactive milestone.");
     assertPlanContinuity(job, architecture, "interactive:" + input.milestone, source.planVersion);
-    const interactiveHead = units[1]!.commitSha!;
+    const optionalPuzzle = units[1]!.phase === "not-applicable";
+    const interactiveHead = optionalPuzzle ? units[1]!.beforeHead! : units[1]!.commitSha!;
     if (!source.eventHead) throw new Error("Interactive receipt is missing its Event baseline.");
     git(job, "merge-base", "--is-ancestor", eventSource.commitSha!, source.eventHead);
     const choiceHead = units[0]!.commitSha!;
@@ -475,7 +484,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     if (!choiceBaseline) throw new Error("Interactive source Event baseline is not recorded.");
     for (const [unit, sha, before] of [
       [units[0]!, choiceHead, choiceBaseline],
-      [units[1]!, interactiveHead, puzzleBaseline],
+      ...(!optionalPuzzle ? [[units[1]!, interactiveHead, puzzleBaseline] as const] : []),
     ] as const) {
       if (git(job, "rev-parse", sha + "^") !== before || !unit.digest || !unit.paths?.length) {
         throw new Error("Interactive commit chain/provenance differs from work item.");
@@ -497,6 +506,37 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     }
     if (puzzleBaseline !== choiceHead) await verifiedNarrativeChain(job, choiceHead, puzzleBaseline);
     const planDigest = hash(JSON.stringify(architecture.plan));
+    if (optionalPuzzle) {
+      const skipped = units[1]!;
+      const proof = await readPuzzleNoWrite(job, input.milestone, skipped.noWrite);
+      if (!source.snapshot?.id || source.planDigest !== planDigest ||
+          proof.eventHead !== source.eventHead || proof.choiceHead !== choiceHead ||
+          proof.verifiedHead !== interactiveHead || proof.unitId !== skipped.id ||
+          proof.unitId !== "interactive-puzzle-" + input.milestone.slice(10) ||
+          proof.planDigest !== source.planDigest || proof.planVersion !== source.planVersion ||
+          proof.snapshotId !== source.snapshot.id || proof.worker !== source.worker ||
+          proof.provider !== source.provider || proof.model !== source.model ||
+          proof.piSessionFile !== (skipped.piSessionFile ?? null) ||
+          skipped.paths?.length !== 0 || skipped.claimedPaths?.length !== 0 ||
+          JSON.stringify(proof.report.architecturalConflicts) !== JSON.stringify(skipped.conflicts) ||
+          JSON.stringify(proof.report.laterObligations) !== JSON.stringify(skipped.obligations) ||
+          JSON.stringify(proof.skillReads) !== JSON.stringify(skipped.skillReads))
+        throw new Error("Composition rejected stale, mismatched or unsealed optional Puzzle evidence.");
+      // Re-evaluate the original promise and actual scoped canonical Story, not
+      // just the specialist's stored claim that a Puzzle was not needed.
+      const sourceReport = verified(await validateStoryJob(
+        await startStoryJob({ story: input.story, job: input.job }, false),
+        input.validatorSource ?? input.skillsSource, { ...job, baseSha: interactiveHead }), interactiveHead);
+      const related = sourceReport.records.filter(record => record.metadata.type === "event" &&
+        (record.metadata.arcs as string[] ?? []).some(id => {
+          const milestone = sourceReport.records.find(item => item.metadata.id === input.milestone);
+          return (milestone?.metadata.arcs as string[] ?? []).includes(id);
+        })).map(record => record.metadata.id);
+      const obligation = await puzzleObligation(job, architecture.plan, sourceReport.records, related,
+        source.eventSource?.missingObligations ?? []);
+      if (obligation.required || obligation.turnDigest !== proof.turnDigest)
+        throw new Error("Optional Puzzle source no longer satisfies the approved goal obligation.");
+    }
     let state: Receipt;
     if (existsSync(file)) {
       state = JSON.parse(await readFile(file, "utf8")) as Receipt;

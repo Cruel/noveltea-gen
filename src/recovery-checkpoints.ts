@@ -8,6 +8,7 @@ import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { trustedHead } from "./revision.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
+import { readPuzzleNoWrite, type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { checkpointAssurance, inspectCheckpointReview, readRepairCommitProof,
   type CheckpointAssurance, type SemanticReviewStatus } from "./checkpoint-assurance.js";
 
@@ -160,6 +161,8 @@ export interface RecoveryCheckpoint {
   workItem: string; stage: string; planVersion: number | null;
   planDigest: string | null; plan: unknown;
   completedWorkItems: string[]; remainingWorkItems: string[];
+  /** A sealed omission is a satisfied dependency, not a fabricated Git commit. */
+  omittedWorkItems?: Array<{ workItem: string; seal: PuzzleNoWriteRef }>;
   nextWorkItem: string | null; dependencies: Record<string, string[]>;
   validation: { status: "passed" | "unverified-empty-baseline" | "not-verified"; validatorVersion: string };
   source: string; proofDigest: string; snapshotId: string | null;
@@ -295,6 +298,41 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
     depth >= 3 ? "interactive-puzzle-" : "event-") + milestone.slice("milestone.".length)));
   return { order, dependencies: deps };
 }
+/** No-write decisions remain independently proven and never become completed Git work. */
+async function verifyOmissions(job: JobStartResult,
+  entries: RecoveryCheckpoint["omittedWorkItems"], head: string): Promise<Set<string>> {
+  const omissions = new Set<string>();
+  if (entries === undefined) return omissions;
+  if (!Array.isArray(entries) || entries.length > 64)
+    throw new Error("Recovery Puzzle omissions are not a bounded controller inventory.");
+  for (const entry of entries) {
+    const match = /^interactive-puzzle-([a-z][a-z0-9-]*)$/.exec(entry?.workItem ?? "");
+    if (!match || omissions.has(entry.workItem))
+      throw new Error("Invalid or duplicate Puzzle omission in recovery checkpoint.");
+    const milestone = "milestone." + match[1]!;
+    const proof = await readPuzzleNoWrite(job, milestone, entry.seal);
+    const path = join(job.stateDir, "interactive-items", match[1] + ".json");
+    const source = JSON.parse(await readFile(path, "utf8")) as {
+      planDigest?: string; units?: Array<{
+        id: string; phase: string; commitSha?: string; beforeHead?: string;
+        noWrite?: PuzzleNoWriteRef }>;
+    };
+    const choice = source.units?.[0], puzzle = source.units?.[1];
+    if (proof.unitId !== entry.workItem || proof.choiceHead !== choice?.commitSha ||
+        proof.verifiedHead !== puzzle?.beforeHead ||
+        source.planDigest !== proof.planDigest ||
+        puzzle?.phase !== "not-applicable" ||
+        JSON.stringify(puzzle.noWrite) !== JSON.stringify(entry.seal) ||
+        !isAncestor(job, proof.choiceHead, proof.verifiedHead) ||
+        !isAncestor(job, proof.verifiedHead, head) ||
+        !git(job, "log", "-1", "--format=%B", proof.choiceHead)
+          .split("\n").includes("NovelTea-Work-Item: interactive-choice-" + match[1])) {
+      throw new Error("Recovery Puzzle omission differs from its sealed Choice checkpoint.");
+    }
+    omissions.add(entry.workItem);
+  }
+  return omissions;
+}
 function verifiedBaselineStages(job: JobStartResult,
   plan: Awaited<ReturnType<typeof planFor>>, item: string) {
   const fork = readRecoveryFork(job);
@@ -374,15 +412,18 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
   }
   const planned = workPlan(point.plan as Awaited<ReturnType<typeof planFor>>, point.workItem);
   const completed = point.completedWorkItems;
+  const omissions = await verifyOmissions(job, point.omittedWorkItems, point.commitSha);
+  const remaining = planned.order.filter(id => !completed.includes(id) && !omissions.has(id));
+  const next = remaining.find(id => (planned.dependencies[id] ?? []).every(
+    dep => completed.includes(dep) || omissions.has(dep))) ?? null;
   if (!["passed", "unverified-empty-baseline"].includes(point.validation.status) ||
       point.planDigest !== (point.plan ? digest(point.plan) : null) ||
       !Array.isArray(completed) || new Set(completed).size !== completed.length ||
       completed.some(id => !planned.order.includes(id)) ||
+      [...omissions].some(id => !planned.order.includes(id) || completed.includes(id)) ||
       JSON.stringify(point.dependencies) !== JSON.stringify(planned.dependencies) ||
-      JSON.stringify(point.remainingWorkItems) !== JSON.stringify(
-        planned.order.filter(id => !completed.includes(id))) ||
-      point.nextWorkItem !== (planned.order.filter(id => !completed.includes(id))
-        .find(id => (planned.dependencies[id] ?? []).every(dep => completed.includes(dep))) ?? null)) {
+      JSON.stringify(point.remainingWorkItems) !== JSON.stringify(remaining) ||
+      point.nextWorkItem !== next) {
     throw new Error("Recovery continuation inventory or plan has been modified.");
   }
   // A Foundation correction can be committed and independently reviewed
@@ -578,8 +619,24 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     isAncestor(job, p.commitSha, commitSha));
   const completed = [...new Set([...verifiedBaselineStages(job, plan, workItem),
     ...previous.flatMap(p => p.completedWorkItems).filter(id => work.order.includes(id)), workItem])];
-  const remaining = work.order.filter(id => !completed.includes(id));
-  const next = remaining.find(id => (work.dependencies[id] ?? []).every(dep => completed.includes(dep))) ?? null;
+  const omissions = previous.flatMap(p => p.omittedWorkItems ?? []);
+  if (workItem.startsWith("composition-")) {
+    const slug = workItem.slice("composition-".length);
+    const source = JSON.parse(await readFile(
+      join(job.stateDir, "interactive-items", slug + ".json"), "utf8")) as {
+      units?: Array<{ phase?: string; noWrite?: PuzzleNoWriteRef }> };
+    if (source.units?.[1]?.phase === "not-applicable") {
+      if (!source.units[1].noWrite) throw new Error("Composition omitted Puzzle without a controller seal.");
+      omissions.push({ workItem: "interactive-puzzle-" + slug, seal: source.units[1].noWrite });
+    }
+  }
+  const unique = [...new Map(omissions.map(entry => [entry.workItem, entry])).values()];
+  if (unique.length !== omissions.length)
+    throw new Error("Recovery attempted to duplicate an optional Puzzle no-write decision.");
+  const omitted = await verifyOmissions(job, unique, commitSha);
+  const remaining = work.order.filter(id => !completed.includes(id) && !omitted.has(id));
+  const next = remaining.find(id => (work.dependencies[id] ?? []).every(dep =>
+    completed.includes(dep) || omitted.has(dep))) ?? null;
   const point: RecoveryCheckpoint = {
     version: 1, status: "finalized", jobId: job.jobId, repository: job.gitRoot, story: job.storyRoot,
     storyRelativePath: job.storyRelativePath, branch: job.branch,
@@ -588,6 +645,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     planVersion: receipt.planVersion ?? plan?.version ?? null,
     planDigest: plan ? digest(plan) : null, plan,
     completedWorkItems: completed, remainingWorkItems: remaining,
+    ...(unique.length ? { omittedWorkItems: unique } : {}),
     nextWorkItem: next, dependencies: work.dependencies,
     validation: { status: sourceProof.validation === "unverified-empty-baseline"
       ? "unverified-empty-baseline" : "passed", validatorVersion: job.validatorVersion },

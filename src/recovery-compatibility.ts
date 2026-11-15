@@ -110,9 +110,16 @@ export function assertRecoveryReceiptCompatibility(
       : (() => { const slug = source.slice("interactive-items/".length, -5);
         return ["interactive-choice-" + slug, "interactive-puzzle-" + slug]; })();
     if (receipt.version !== 1 || !Array.isArray(receipt.units) || receipt.units.length !== 2 ||
-        receipt.units.some((unit: Record<string, any>, index: number) =>
-          unit.id !== domains[index] || unit.phase !== (completed.has(unit.id) ? "committed" : "pending") ||
-          (completed.has(unit.id) && !/^[a-f0-9]{40}$/.test(unit.commitSha ?? "")))) incompatible();
+        receipt.units.some((unit: Record<string, any>, index: number) => {
+          const optionalPuzzle = source.startsWith("interactive-items/") && index === 1 &&
+            !completed.has(unit.id) && unit.phase === "not-applicable" &&
+            /^[a-f0-9]{40}$/.test(unit.beforeHead ?? "") &&
+            /^[a-f0-9]{64}$/.test(unit.noWrite?.digest ?? "") &&
+            /^[a-f0-9-]{36}$/.test(unit.noWrite?.nonce ?? "");
+          return unit.id !== domains[index] ||
+            !(optionalPuzzle || unit.phase === (completed.has(unit.id) ? "committed" : "pending")) ||
+            (completed.has(unit.id) && !/^[a-f0-9]{40}$/.test(unit.commitSha ?? ""));
+        })) incompatible();
     return;
   }
   if (source.startsWith("event-items/") || source.startsWith("composition-items/") ||

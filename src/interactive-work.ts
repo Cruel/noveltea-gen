@@ -21,13 +21,16 @@ import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
+import { puzzleObligation, sealPuzzleNoWrite, readPuzzleNoWrite, puzzleNoWriteSessionDigest,
+  type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 
-type Phase = "pending" | "writing" | "authored" | "committed";
+type Phase = "pending" | "writing" | "authored" | "committed" | "not-applicable";
 interface Unit {
   id: string; domain: InteractiveDomain; phase: Phase;
   beforeHead?: string; commitSha?: string; paths?: string[]; digest?: string;
   claimedPaths?: string[]; piSessionFile?: string; skillReads?: string[];
   conflicts?: string[]; obligations?: string[]; failure?: string;
+  noWrite?: PuzzleNoWriteRef;
   validation?: { status: "passed"; validatorVersion: string; protectionBase: string;
     choices: ChoiceEvidence[]; puzzles: PuzzleEvidence[]; downstreamObligations: string[]; searchTruncated: boolean };
 }
@@ -597,11 +600,16 @@ function verifyCommit(job: JobStartResult, receipt: Receipt, unit: Unit, parent:
     throw new Error("Interactive commit includes unauthorized files.");
   }
 }
+function completed(receipt: Receipt) {
+  return receipt.units[0].phase === "committed" &&
+    ["committed", "not-applicable"].includes(receipt.units[1].phase);
+}
 function output(job: JobStartResult, receipt: Receipt) {
-  return { status: receipt.units.every(u => u.phase === "committed") ? "interactive-slice-committed" : "in-progress",
+  return { status: completed(receipt) ? "interactive-slice-committed" : "in-progress",
     jobId: job.jobId, milestoneId: receipt.milestoneId,
     worktreeStoryRoot: job.worktreeStoryRoot, headSha: receipt.units[1].commitSha ??
-      receipt.units[0].commitSha ?? receipt.eventHead,
+      (receipt.units[1].phase === "not-applicable" ? receipt.units[1].beforeHead :
+        receipt.units[0].commitSha) ?? receipt.eventHead,
     eventHead: receipt.eventHead, eventSource: receipt.eventSource,
     milestoneState: receipt.eventSource?.milestoneState === "partial-choice-pending"
       ? receipt.units[0].phase === "committed"
@@ -613,6 +621,9 @@ function output(job: JobStartResult, receipt: Receipt) {
     specialistUnits: receipt.units.map(u => ({ ...u, specialist: u.domain === "choice"
       ? "nt-interactive-narrative" : "nt-puzzle-design" })),
     completionEvidence: { deterministicChoiceAndPuzzlePaths: receipt.units.every(u => u.phase === "committed"),
+      deterministicChoicePathAndOptionalPuzzle: completed(receipt),
+      puzzleDisposition: receipt.units[1].phase === "not-applicable" ? "not-applicable" :
+        receipt.units[1].phase === "committed" ? "committed" : "pending",
       playerPerceptionAndFairness: "unverified", conditionalWriting: "must-review",
       engineImplementation: "not-started", fullStory: false }, skillSnapshot: receipt.snapshot?.id };
 }
@@ -640,6 +651,13 @@ async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
   const arc = assignment.arcIds[0]!;
   const event = assignment.eventIds.includes(cluster.text("event.disclose-ledger"))
     ? cluster.path("events/disclose-ledger.md") : "events/" + assignment.eventIds[0]!.slice(6) + ".md";
+  if (domain === "puzzle" && variant === "puzzle-no-write") {
+    return { modifiedRecords: [], conflicts: [
+      "The original Turn promises branch consequences and fair-play clues, not a formal Puzzle. " +
+      "No existing route presents a single independently solvable Puzzle goal with two proved solution Events."
+    ], obligations: ["Preserve fair-play clue continuity and distinct authored endings in Composition."],
+    skillReads: [] };
+  }
   if (domain === "choice") {
     await add("choice-points", "loyalty", "choice-point",
       'prompt: "Protect Neri or challenge the concealment?"\noutcomes: [protect, challenge]',
@@ -918,6 +936,29 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         ? await verifiedNarrativeSuccessor(job, sourceHead) : sourceHead);
       if (!before) throw new Error("Puzzle specialist is blocked until the Choice work item is committed.");
       if (unit.beforeHead && unit.beforeHead !== before) throw new Error("Interactive unit authority head changed.");
+      if (unit.phase === "not-applicable") {
+        if (index !== 1 || unit.domain !== "puzzle" || !unit.beforeHead ||
+            unit.paths?.length !== 0 || unit.claimedPaths?.length !== 0)
+          throw new Error("Invalid optional Puzzle state; no writer replay allowed.");
+        const proof = await readPuzzleNoWrite(job, state.milestoneId, unit.noWrite);
+        if (proof.unitId !== unit.id || proof.eventHead !== state.eventHead ||
+            proof.choiceHead !== state.units[0]!.commitSha || proof.verifiedHead !== before ||
+            proof.planDigest !== state.planDigest || proof.planVersion !== state.planVersion ||
+            proof.snapshotId !== state.snapshot?.id || proof.worker !== state.worker ||
+            proof.provider !== state.provider || proof.model !== state.model ||
+            proof.piSessionFile !== (unit.piSessionFile ?? null) ||
+            JSON.stringify(proof.report.architecturalConflicts) !== JSON.stringify(unit.conflicts) ||
+            JSON.stringify(proof.report.laterObligations) !== JSON.stringify(unit.obligations) ||
+            JSON.stringify(proof.skillReads) !== JSON.stringify(unit.skillReads))
+          throw new Error("Optional Puzzle no-write source, worker, or specialist report mismatches its seal.");
+        if (dirty(job).length) throw new Error("Optional Puzzle no-write state has a dirty Story.");
+        const current = git(job, "rev-parse", "HEAD");
+        if (current !== before) {
+          try { await verifiedNarrativeSuccessor(job, before); }
+          catch { await verifiedCompositionSuccessor(job, state.milestoneId, before); }
+        }
+        return;
+      }
       if (unit.phase === "committed") {
         if (!unit.commitSha) throw new Error("Committed unit lacks a verifiable commit SHA.");
         verifyCommit(job, state, unit, before, unit.commitSha);
@@ -930,8 +971,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           } catch (error) {
             // A fully committed Interactive slice may now have separately
             // verified Composition as its successor, without replaying Choice/Puzzle.
-            if (!state.units.every(saved => saved.phase === "committed")) throw error;
-            await verifiedCompositionSuccessor(job, state.milestoneId, state.units[1]!.commitSha!);
+            if (!completed(state)) throw error;
+            await verifiedCompositionSuccessor(job, state.milestoneId,
+              state.units[1]!.commitSha ?? state.units[1]!.beforeHead!);
           }
         }
         if (current === unit.commitSha) await publishHead(job, before, unit.commitSha, unit.id);
@@ -953,8 +995,13 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Interactive writer requires a clean Story boundary.");
       }
       const baseline = reportOf(await validate(before), before);
-      const assign = { ...selectAssignment(architecture.plan!, baseline, state.milestoneId,
-        state.eventSource ?? eventSource),
+      const selected = selectAssignment(architecture.plan!, baseline, state.milestoneId,
+        state.eventSource ?? eventSource);
+      const puzzleDecision = unit.domain === "puzzle"
+        ? await puzzleObligation(job, architecture.plan!, baseline.records,
+            selected.eventIds, eventSource.missingObligations) : undefined;
+      const assign = { ...selected,
+        ...(puzzleDecision ? { puzzleObligation: puzzleDecision } : {}),
         ...(input.task ? { authorTask: input.task } : {}) };
       if (unit.phase === "pending") {
         await preflightPiAssignment(job, "interactive:" + assign.workItemId + ":" + unit.domain,
@@ -964,6 +1011,21 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         await persist(file, state);
         try {
           const verifyDraft = async (evidence: InteractiveEvidence) => {
+            if (unit.domain === "puzzle" && evidence.modifiedRecords.length === 0) {
+              if (puzzleDecision?.required !== false || !evidence.conflicts.length)
+                throw new Error("Required Puzzle has no solvable output; the approved goal remains blocked.");
+              assertHead(job, before);
+              if (dirty(job).length)
+                throw new Error("No-write Puzzle report disagrees with the actual dirty Story tree.");
+              const checked = reportOf(await validate(before), before);
+              const current = await puzzleObligation(job, architecture.plan!, checked.records,
+                assign.eventIds, eventSource.missingObligations);
+              if (current.required || current.turnDigest !== puzzleDecision.turnDigest)
+                throw new Error("Puzzle source obligation changed before optional no-write decision.");
+              verifyChoice(checked, state.units[0]!.paths ?? [], assign,
+                state.units[0]!.obligations ?? []);
+              return [];
+            }
             let paths: string[];
             try {
               paths = await auditInteractivePaths(job, assign, unit.domain, evidence.modifiedRecords);
@@ -1009,6 +1071,38 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           unit.obligations = evidence.obligations;
           unit.skillReads = evidence.skillReads;
           unit.piSessionFile = evidence.piSessionFile ?? unit.piSessionFile;
+          if (unit.domain === "puzzle" && evidence.modifiedRecords.length === 0) {
+            if (puzzleDecision?.required !== false || !puzzleDecision.turnDigest ||
+                !evidence.conflicts.length || !state.snapshot?.id)
+              throw new Error("Cannot classify the approved Puzzle obligation as optional.");
+            assertHead(job, before);
+            if (dirty(job).length) throw new Error("No-write Puzzle left dirty Story files.");
+            const checked = reportOf(await validate(before), before);
+            const current = await puzzleObligation(job, architecture.plan!, checked.records,
+              assign.eventIds, eventSource.missingObligations);
+            if (current.required || current.turnDigest !== puzzleDecision.turnDigest)
+              throw new Error("Puzzle no-write source changed since initial assessment.");
+            verifyChoice(checked, state.units[0]!.paths ?? [], assign,
+              state.units[0]!.obligations ?? []);
+            unit.noWrite = await sealPuzzleNoWrite(job, {
+              version: 1, decision: "not-applicable", jobId: job.jobId, threadId: job.threadId,
+              branch: job.branch, baseSha: job.baseSha, milestoneId: state.milestoneId,
+              unitId: unit.id, eventHead: state.eventHead,
+              choiceHead: state.units[0]!.commitSha!, verifiedHead: before,
+              planVersion: state.planVersion, planDigest: state.planDigest,
+              turnDigest: current.turnDigest!, snapshotId: state.snapshot.id,
+              worker: state.worker, provider: state.provider, model: state.model,
+              piSessionFile: unit.piSessionFile ?? null,
+              piSessionSha256: state.worker === "pi" && unit.piSessionFile
+                ? puzzleNoWriteSessionDigest(job, unit.id, unit.piSessionFile) : null,
+              report: { modifiedRecords: [], architecturalConflicts: evidence.conflicts,
+                laterObligations: evidence.obligations }, skillReads: evidence.skillReads,
+            });
+            unit.paths = []; unit.phase = "not-applicable";
+            delete unit.failure;
+            await persist(file, state);
+            return;
+          }
           unit.paths = await auditInteractivePaths(job, assign, unit.domain, evidence.modifiedRecords);
           unit.digest = await fileDigest(job, unit.paths);
           unit.phase = "authored";
