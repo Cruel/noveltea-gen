@@ -325,6 +325,9 @@ test("Choice writer and independent review trace source-linked typed payoff cont
   };
   const reviewer = assignmentFidelityPrompt(snapshot, choicePacket);
   assert.match(reviewer, /an estranged-to-wary transition/);
+  assert.match(reviewer, /Exactly ONE enabled branch executes/);
+  assert.match(reviewer, /Do NOT require mutually exclusive condition guards/);
+  assert.match(reviewer, /skill:\/\/nt-catalog\/references\/progression\.md/);
   assert.match(reviewer, /EXACT offending changed path and source line/);
   assert.match(reviewer, /read-only predecessor path/);
   assert.match(reviewer, /NONE\. This is a read-only reviewer/);
@@ -362,9 +365,11 @@ test("retrospective reviewer allows only exact immutable writer methods for Choi
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, packet), [],
     "Ordinary Event reviews cannot read any writer method as a supplement.");
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, choicePacket),
-    [snapshot.path + "/skills/nt-interactive-narrative/SKILL.md"]);
+    [snapshot.path + "/skills/nt-interactive-narrative/SKILL.md",
+      snapshot.path + "/skills/nt-catalog/references/progression.md"]);
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, puzzlePacket),
-    [snapshot.path + "/skills/nt-puzzle-design/SKILL.md"]);
+    [snapshot.path + "/skills/nt-puzzle-design/SKILL.md",
+      snapshot.path + "/skills/nt-catalog/references/progression.md"]);
   assert.match(assignmentFidelityPrompt(snapshot, choicePacket),
     /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
   assert.match(assignmentFidelityPrompt(snapshot, puzzlePacket),

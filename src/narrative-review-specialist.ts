@@ -384,20 +384,62 @@ export function assertSemanticCorrectionPreserved(before: Record<string, unknown
 }
 
 /** Assignment reviewers may consult the writer's ORIGINAL immutable pinned
- * craft method when judging a Choice or Puzzle unit. This is a bounded
- * read-only supplement to mandatory reviewer/catalog methods, not permission
- * to read live Story files, inferred paths, other roles, or external skills.
- * The controller still authenticates every read against the exact snapshot. */
+ * craft method and the catalog's exact progression semantics. This remains a
+ * read-only supplement, never permission to read mutable Story files or grant
+ * writer authority. Every optional read is authenticated to the snapshot. */
 export function assignmentReviewerOptionalMethods(
   snapshot: SkillSnapshot, packet: SemanticReviewPacket,
 ): string[] {
+  const choice = packet.items.some(item =>
+    item.reviewedWorkItem.startsWith("interactive-choice-"));
+  const puzzle = packet.items.some(item =>
+    item.reviewedWorkItem.startsWith("interactive-puzzle-"));
   const methods = [
-    ...(packet.items.some(item => item.reviewedWorkItem.startsWith("interactive-choice-"))
-      ? ["nt-interactive-narrative/SKILL.md"] : []),
-    ...(packet.items.some(item => item.reviewedWorkItem.startsWith("interactive-puzzle-"))
-      ? ["nt-puzzle-design/SKILL.md"] : []),
+    ...(choice ? ["nt-interactive-narrative/SKILL.md"] : []),
+    ...(puzzle ? ["nt-puzzle-design/SKILL.md"] : []),
+    ...((choice || puzzle) ? ["nt-catalog/references/progression.md"] : []),
   ];
   return pinnedSourcePaths(snapshot, methods);
+}
+
+/** A bounded schema-reconsideration request, never a controller PASS. A
+ * reviewer may confuse two *enabled* alternatives with two *executed*
+ * branches. The sealed packet must actually show distinct, selectable typed
+ * outcomes in an authorized changed Event. Any other or additional defect
+ * proceeds through the ordinary independent failure/repair path. */
+export function choiceSelectionSchemaRecheck(
+  packet: SemanticReviewPacket, verdict: SemanticVerdict,
+): string | null {
+  if (packet.items.length !== 1 || verdict.verdict !== "fail" ||
+      verdict.findings.length !== 1) return null;
+  const item = packet.items[0]!;
+  const finding = verdict.findings[0]!;
+  if (!item.reviewedWorkItem.startsWith("interactive-choice-") ||
+      !item.assurance.changedPaths.includes(finding.path) ||
+      !finding.path.startsWith("events/")) return null;
+  const claim = finding.message + " " + finding.requiredCorrection;
+  if (!/(?:conditions:\s*\[\]|empty conditions)/i.test(claim) ||
+      !/(?:both|two|parallel)\b.{0,110}\bbranch/i.test(claim) ||
+      !/(?:execut|simultan|select|enabl|outcome)/i.test(claim)) return null;
+  const source = item.canonicalContext.find(c => c.path === finding.path)?.content ?? "";
+  if ((source.match(/conditions:\s*\[\]/g) ?? []).length < 2 ||
+      (source.match(/kind:\s*outcome\b/g) ?? []).length < 2 ||
+      !source.includes("choice_point:")) return null;
+  return "SCHEMA_RECHECK (read-only, SAME independent Pi session): Your sole negative " +
+    "finding appears to infer that two selectable Event-step branches with " +
+    "conditions: [] execute simultaneously or cannot encode the player's choice. " +
+    "The canonical NovelTea 0.1 progression contract says exactly ONE enabled branch executes " +
+    "per step; [] makes an alternative eligible, not automatically selected or jointly executed. " +
+    "Read the immutable skill://nt-catalog/references/progression.md with read, " +
+    "then re-examine the actual sealed Choice Point prompt, selecting Event branches, " +
+    "Authored Content options, distinct typed outcomes and downstream effects. " +
+    "The source contains distinct outcome branches, but that ALONE is not an approval " +
+    "or proof of credible player-facing agency. If there is a separate concrete defect, " +
+    "keep FAIL and identify its exact changed source line and actionable correction; " +
+    "otherwise issue PASS only with genuine source-linked evidence. " +
+    "Do not fabricate conditions, force extra guards, erase unrelated failures, " +
+    "write files, or infer author approval. Return one COMPLETE unfenced verdict JSON " +
+    "with unchanged sourceDigest and exact checkpoint identities.";
 }
 
 /** Task-first, stage-local assignment review, distinct from final literary
@@ -417,8 +459,9 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "read tool. " +
       (assignmentReviewerOptionalMethods(snapshot, packet).length
         ? "For the Choice/Puzzle work in this exact sealed packet you MAY also read " +
-          "its immutable pinned writer method for craft comparison, never as " +
-          "a new authoring role or permission to inspect current Story files: " +
+          "its immutable pinned writer method and the canonical branch progression " +
+          "contract for craft/schema comparison, never as a new authoring role " +
+          "or permission to inspect current Story files: " +
           pinnedSkillReferences(snapshot, assignmentReviewerOptionalMethods(snapshot, packet)) + ". "
         : "") +
       "The REVIEW PACKET inline contains the COMPLETE sealed Git diff, " +
@@ -540,11 +583,6 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     // governing the reviewed Choice/Puzzle work are optional read-only
     // references; every other extra skill or path remains prohibited.
     const optional = assignmentReviewerOptionalMethods(snapshot, packet);
-    const otherReads = completedReads(session, job.worktreeStoryRoot, snapshot.path)
-      .filter(path => !required.includes(path) && !optional.includes(path));
-    if (otherReads.length)
-      throw new Error("Assignment reviewer read outside immutable pinned methods: " +
-        otherReads.join(", "));
     // A completed read-only model turn may copy one malformed Git SHA or
     // source line despite identifying a real defect. Correct only formatting
     // and provenance in the SAME Pi session; never infer success or dilute the
@@ -581,6 +619,23 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       verdict = validateSemanticVerdict(packet,
         normalizeOmittedSemanticEvidenceSha(packet, preserved));
     }
+    const schemaRecheck = choiceSelectionSchemaRecheck(packet, verdict);
+    if (schemaRecheck) {
+      // This is NOT an override of the failed verdict. The same independent
+      // reviewer must produce a NEW fully source-linked verdict from pinned
+      // sources, and the normal validator still owns admission.
+      await promptStorySpecialist(session, schemaRecheck);
+      verdict = validateSemanticVerdict(packet,
+        normalizeFailedSemanticFindingKinds(parseSpecialistJson(lastReply(session))));
+    }
+    // Re-audit after ALL correction turns, not just the first response. A
+    // schema recheck permits one pinned progression reference, never a mutable
+    // Story read or an unrelated role/skill.
+    const otherReads = completedReads(session, job.worktreeStoryRoot, snapshot.path)
+      .filter(path => !required.includes(path) && !optional.includes(path));
+    if (otherReads.length)
+      throw new Error("Assignment reviewer read outside immutable pinned methods: " +
+        otherReads.join(", "));
     await context!.completed(file!, session.sessionId);
     return verdict;
   } finally { session.dispose(); }

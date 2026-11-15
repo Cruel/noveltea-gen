@@ -16,7 +16,8 @@ import { prepareSemanticReview, reviewBoundedAssignments,
   normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKinds,
   validateSemanticVerdict, semanticUnitOutcome,
   type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
-import { assertSemanticCorrectionPreserved } from "../src/narrative-review-specialist.js";
+import { assertSemanticCorrectionPreserved,
+  choiceSelectionSchemaRecheck } from "../src/narrative-review-specialist.js";
 
 const makePacket = (group = false): SemanticReviewPacket => {
   const item = (id: string, path: string, sha: string) => ({
@@ -519,6 +520,57 @@ test("a real Event continuity FAIL may cite sealed Character knowledge without a
   }), /source-linked/, "A finding cannot target an unmodified Character.");
   assert.deepEqual(item.repairTargets, ["events/absence.md"]);
   assert.deepEqual(item.assurance.changedPaths, ["events/absence.md"]);
+});
+
+test("false simultaneous-Choice premise receives one read-only schema recheck, not a synthetic pass", () => {
+  const packet = makeEventPacket("The player chooses a response.");
+  const item = packet.items[0]!;
+  item.reviewedWorkItem = "interactive-choice-steward-response";
+  item.unitOutcome = semanticUnitOutcome(item.reviewedWorkItem);
+  item.assignment.id = "interactive";
+  item.assurance.assignmentId = "interactive";
+  item.canonicalContext[0]!.content = [
+    "---", "type: event", "id: event.confront-and-choose", "steps:",
+    "  - id: select-steward-response", "    branches:",
+    "      - id: choose-private-request", "        conditions: []", "        effects:",
+    "          - kind: outcome", "            choice_point: choice-point.steward-response",
+    "            value: ask-privately",
+    "      - id: choose-public-accusation", "        conditions: []", "        effects:",
+    "          - kind: outcome", "            choice_point: choice-point.steward-response",
+    "            value: accuse-publicly", "---",
+  ].join("\n");
+  const original = {
+    sourceDigest: packet.sourceDigest, verdict: "fail" as const,
+    findings: [{ ...finding("interactive", "events/absence.md"),
+      kind: "other" as const, line: 8,
+      message: "Both branches have empty conditions: [] and so both are enabled; the player's selection cannot determine which branch executes.",
+      requiredCorrection: "Add unsupported branch guards so the two outcomes are not simultaneously assigned.",
+    }], evidence: [],
+  };
+  assert.equal(validateSemanticVerdict(packet, original).verdict, "fail",
+    "An independent negative verdict is not erased by source normalization.");
+  const correction = choiceSelectionSchemaRecheck(packet, original);
+  assert.ok(correction);
+  assert.match(correction, /exactly ONE enabled branch executes/i);
+  assert.match(correction, /skill:\/\/nt-catalog\/references\/progression\.md/);
+  assert.match(correction, /keep FAIL|retain FAIL/i);
+  assert.match(correction, /not.*(?:an approval|permission to fabricate)/i);
+  assert.equal(choiceSelectionSchemaRecheck(packet, { ...original,
+    verdict: "pass", findings: [], evidence: [evidence("interactive", "events/absence.md")] }), null);
+  assert.equal(choiceSelectionSchemaRecheck(packet, { ...original,
+    findings: [{ ...original.findings[0]!, message: "The two selected outcomes have no downstream consequence." }] }), null);
+  assert.equal(choiceSelectionSchemaRecheck(packet, { ...original,
+    findings: [...original.findings, { ...original.findings[0]!,
+      message: "The player is never offered the choice in authored content." }] }), null);
+  assert.equal(choiceSelectionSchemaRecheck(packet, { ...original,
+    findings: [{ ...original.findings[0]!, path: "events/unapproved.md" }] }), null);
+  const unproven = structuredClone(packet);
+  unproven.items[0]!.canonicalContext[0]!.content = "No selected outcome branches appear here";
+  assert.equal(choiceSelectionSchemaRecheck(unproven, original), null,
+    "A reviewer narrative alone cannot trigger a source-free exception.");
+  const eventOnly = structuredClone(packet);
+  eventOnly.items[0]!.reviewedWorkItem = "event-disclosure";
+  assert.equal(choiceSelectionSchemaRecheck(eventOnly, original), null);
 });
 
 test("cross-domain causal defect names real linked context but cannot invent a writable record", () => {

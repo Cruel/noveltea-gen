@@ -38,6 +38,15 @@ export const CHOICE_PAYOFF_AUTHOR = [
 ].join(" ");
 
 export const CHOICE_PAYOFF_REVIEW = [
+  "NovelTea 0.1 Event-step selection semantics: conditions: [] makes a branch",
+  "ELIGIBLE, not executed. Exactly ONE enabled branch executes at a step.",
+  "Multiple empty-condition branches can be valid player-selectable alternatives,",
+  "each writing a DIFFERENT Choice outcome. They do not execute together.",
+  "Do NOT require mutually exclusive condition guards on a selection step or",
+  "claim that both outcomes are assigned simply because both branches are enabled.",
+  "Instead verify the actual Choice Point prompt and player-facing options,",
+  "each distinct reachable outcome route, and its causal payoff. A missing",
+  "player-visible choice or unsupported outcome still fails.",
   "For interactive Choice review, check EACH reachable outcome's committed",
   "selector Event/step/branch, immediate typed effects, subsequent conditional",
   "consumers, and player-visible source prose as a SINGLE ordered causal chain.",

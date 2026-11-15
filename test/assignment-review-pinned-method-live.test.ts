@@ -37,7 +37,10 @@ test(
     } as SemanticReviewPacket;
     const required = pinnedSourcePaths(receipt.snapshot, boundedPinnedSources("nt-narrative-review"));
     const optional = assignmentReviewerOptionalMethods(receipt.snapshot, packet);
-    assert.deepEqual(optional, [join(receipt.snapshot.path, "skills/nt-interactive-narrative/SKILL.md")]);
+    assert.deepEqual(optional, [
+      join(receipt.snapshot.path, "skills/nt-interactive-narrative/SKILL.md"),
+      join(receipt.snapshot.path, "skills/nt-catalog/references/progression.md"),
+    ]);
     const sessionRoot = join(state, "review-sessions/assignment-fidelity");
     const sessions = readdirSync(sessionRoot).filter((file) => file.endsWith(".jsonl"));
     assert.equal(sessions.length, 1);
