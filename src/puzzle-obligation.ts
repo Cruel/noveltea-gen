@@ -24,13 +24,17 @@ export function explicitlyRequiresPuzzle(statement: string): boolean {
   const formal =
     /\b(puzzles?|riddles?|ciphers?|cryptograms?|code[ -]breaking|logic challenges?|escape[ -]room challenges?)\b/i;
   const deferred =
-    /\b(?:deferred|optional|if appropriate|where appropriate|if relevant|as needed|not required)\b/i;
+    /\b(?:defer|defers|deferred|deferring|postpone|postponed|optional|if appropriate|where appropriate|if relevant|as needed|not required|belongs? to (?:a )?later|leave to (?:a )?later)\b/i;
   const prohibited =
-    /\b(?:no|without|avoid|exclude|do not|don't|never)\s+(?:(?:require|add|create|author|include)\s+)?(?:(?:a|any)\s+)?(?:formal\s+)?(?:puzzles?|riddles?|ciphers?|cryptograms?)\b/i;
+    /\b(?:no|without|avoid|exclude|do not|don't|never|must not)\s+(?:(?:require|add|create|author|include)\s+)?(?:(?:a|any)\s+)?(?:formal\s+)?(?:puzzles?|riddles?|ciphers?|cryptograms?)\b/i;
+  // A nearby "must" can govern *Choice*, *Event evidence*, or even "must
+  // defer Puzzle". Only an explicit Puzzle-specific mandate can override a
+  // deferral. A specialist's mixed-purpose obligation is not author intent.
+  const formalMandatory =
+    /\b(?:require[ds]?|mandatory|essential|must (?:author|create|include|implement|solve|complete|build|have))\b.{0,40}\b(?:puzzles?|riddles?|ciphers?|cryptograms?)\b|\b(?:puzzles?|riddles?|ciphers?|cryptograms?)\b.{0,40}\b(?:must (?:be (?:authored|solved|implemented|included)|have)|is required|mandatory|essential)\b/i;
   if (prohibited.test(text)) return false;
   if (formal.test(text)) {
-    if (/\b(?:must|require[ds]?|mandatory|necessary|essential|player (?:will|has to|needs to))\b/i.test(text))
-      return true;
+    if (formalMandatory.test(text)) return true;
     if (deferred.test(text) || /\b(?:choice|choices)\s*(?:\/|or)\s*puzzles?\b/i.test(text)) return false;
     // An explicit author-requested formal Puzzle ("a puzzle mystery") is a
     // requirement even when the author did not use the word "must".

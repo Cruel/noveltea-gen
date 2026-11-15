@@ -13,11 +13,16 @@ test("optional formal-Puzzle handoffs are not author obligations", () => {
     "A compact atmospheric mystery with fair-play clues, an enacted Choice and different endings",
     "Puzzle implementation and final composed visual-novel scene remain deferred.",
     "Puzzle/clue implementation and final authored-scene composition remain deferred to their respective owners.",
+    "Later investigation must supply enough fair-play evidence to support the response; the current empty-case and latch observations do not identify who removed the lantern or when. Bind Milestone fulfillment only after the required evidence and enacted choice are established. Defer Puzzle and final prose.",
+    "The Event writer must defer Puzzle and final prose until a later owner.",
+    "Choice and Puzzle belong to later units.",
+    "The Puzzle implementation is postponed until clues are known.",
     "Choice/Puzzle/Content as appropriate",
     "A Puzzle is optional if relevant to the approved Story",
     "Do not require a formal Puzzle; solve the mystery through consequential choices",
     "Avoid puzzles and use only meaningful choices",
     "No puzzles, please",
+    "The player must not create puzzles while making the Choice.",
   ]) {
     assert.equal(explicitlyRequiresPuzzle(statement), false, statement);
   }
@@ -62,6 +67,8 @@ test("explicit formal Puzzle or player-solving promises stay binding", () => {
     "Make a puzzle game",
     "An escape room challenge on an overnight train",
     "A required Puzzle with independently reachable solution Events",
+    "An independently solvable Puzzle is mandatory, even if implementation is deferred.",
+    "The author requires a Puzzle, but its implementation is deferred to a separate specialist.",
     "The mystery must be solved through clues the player actually uses",
   ]) {
     assert.equal(explicitlyRequiresPuzzle(statement), true, statement);

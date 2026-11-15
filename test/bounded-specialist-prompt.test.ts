@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { architectureSpecialistPrompt, emptyArchitectureCorrectionPrompt,
-  canCorrectEmptyArchitecture } from "../src/architecture-specialist.js";
-import { eventSpecialistPrompt, eventQuestionCorrectionFeedback,
-  type EventAssignment } from "../src/event-specialist.js";
+import {
+  architectureSpecialistPrompt,
+  emptyArchitectureCorrectionPrompt,
+  canCorrectEmptyArchitecture,
+} from "../src/architecture-specialist.js";
+import {
+  eventSpecialistPrompt,
+  eventQuestionCorrectionFeedback,
+  type EventAssignment,
+} from "../src/event-specialist.js";
 import { parseSpecialistChoice } from "../src/specialist-choice.js";
 import { CRITICAL_CAST_GUIDANCE } from "../src/character-world-specialist.js";
 import { interactiveSpecialistPrompt, type InteractiveAssignment } from "../src/interactive-specialist.js";
@@ -161,6 +167,33 @@ const headings = [
   "REQUIRED OUTPUT",
 ];
 
+test("optional Puzzle has a single no-write manifest example and mandatory Puzzle stays binding", () => {
+  const optional = interactiveSpecialistPrompt(
+    snapshot,
+    "puzzle",
+    {
+      ...interactive,
+      puzzleObligation: { required: false, reasons: [] },
+    },
+    true,
+  );
+  const required = interactiveSpecialistPrompt(
+    snapshot,
+    "puzzle",
+    {
+      ...interactive,
+      puzzleObligation: { required: true, reasons: ["Explicit source-bound Puzzle objective"] },
+    },
+    true,
+  );
+  assert.match(optional, /An empty architecturalConflicts array is INVALID/);
+  assert.match(optional, /"modifiedRecords":\[\],"architecturalConflicts":\["No justified Puzzle objective/);
+  assert.doesNotMatch(optional, /"modifiedRecords":\["events\/example.md"\]/);
+  assert.match(required, /approved Story requires a formal Puzzle/);
+  assert.match(required, /two separately reachable solving Events/);
+  assert.doesNotMatch(required, /An empty architecturalConflicts array is INVALID/);
+});
+
 test("actual production prompt builders give a single current work item before references", () => {
   for (const [role, prompt] of Object.entries(rendered)) {
     let last = -1;
@@ -254,8 +287,10 @@ test("empty-Story Architecture correction never replays a writer with attempted 
 });
 
 test("malformed first-Event author request receives one non-granting correction in the same session", () => {
-  const recorded = { type: "free-text",
-    question: "Should another worker create the missing death-discovery Event first?" };
+  const recorded = {
+    type: "free-text",
+    question: "Should another worker create the missing death-discovery Event first?",
+  };
   assert.throws(() => parseSpecialistChoice(recorded), /Invalid bounded author question/);
   const corrected = eventQuestionCorrectionFeedback(new Error("Invalid bounded author question."));
   assert.match(corrected, /An empty events\/ directory is normal/);
@@ -264,9 +299,11 @@ test("malformed first-Event author request receives one non-granting correction 
   assert.match(corrected, /kind \(never type\)/);
   assert.match(corrected, /SAME Pi session, not a writer replay or new authority/);
   assert.doesNotMatch(corrected, /permission to edit protected records/);
-  assert.equal(parseSpecialistChoice({ kind: "free-text",
-    question: recorded.question }).kind, "free-text",
-  "A genuinely needed author question remains available after syntax correction");
+  assert.equal(
+    parseSpecialistChoice({ kind: "free-text", question: recorded.question }).kind,
+    "free-text",
+    "A genuinely needed author question remains available after syntax correction",
+  );
 });
 
 test("Choice writer and independent review trace source-linked typed payoff continuity", () => {
@@ -276,8 +313,14 @@ test("Choice writer and independent review trace source-linked typed payoff cont
   assert.doesNotMatch(rendered.Puzzle, /UNJUSTIFIED reversal/);
   assert.doesNotMatch(rendered["Assignment reviewer"], /an estranged-to-wary transition/);
   const choicePacket = {
-    ...packet, items: [{ ...packet.items[0]!, reviewedWorkItem: "interactive-choice-disclosure",
-      unitOutcome: semanticUnitOutcome("interactive-choice-disclosure") }],
+    ...packet,
+    items: [
+      {
+        ...packet.items[0]!,
+        reviewedWorkItem: "interactive-choice-disclosure",
+        unitOutcome: semanticUnitOutcome("interactive-choice-disclosure"),
+      },
+    ],
   };
   const reviewer = assignmentFidelityPrompt(snapshot, choicePacket);
   assert.match(reviewer, /an estranged-to-wary transition/);
@@ -292,8 +335,14 @@ test("Puzzle writer and reviewer require equivalent objective evidence for every
   assert.match(rendered.Puzzle, /without breaking|required alternatives|author-approved objective/);
   assert.doesNotMatch(rendered.Choice, /confirming a seal or chain of custody alone/);
   const puzzlePacket = {
-    ...packet, items: [{ ...packet.items[0]!, reviewedWorkItem: "interactive-puzzle-disclosure",
-      unitOutcome: semanticUnitOutcome("interactive-puzzle-disclosure") }],
+    ...packet,
+    items: [
+      {
+        ...packet.items[0]!,
+        reviewedWorkItem: "interactive-puzzle-disclosure",
+        unitOutcome: semanticUnitOutcome("interactive-puzzle-disclosure"),
+      },
+    ],
   };
   const reviewer = assignmentFidelityPrompt(snapshot, puzzlePacket);
   assert.match(reviewer, /EVERY listed solution Event/);

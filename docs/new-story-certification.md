@@ -157,6 +157,24 @@ verified Git worktree instead of a remote GitHub API, which must be certified
 separately. A passing E2E run does **not** replace the separate external
 quality and recovery audit below.
 
+When the remote command runner has a shorter execution ceiling than the full
+Studio test, use the same existing test through the bounded local launcher:
+
+```sh
+node scripts/live-new-story-runner.mjs start autonomous
+node scripts/live-new-story-runner.mjs status autonomous
+node scripts/live-new-story-runner.mjs start collaborative
+node scripts/live-new-story-runner.mjs status collaborative
+```
+
+The launcher retains process/exit status, the exact Git source HEAD and private
+full logs under `.local/certification/live-new-story/`; the underlying tests
+continue to create separate disposable, owner-isolated `/tmp/nt158-*` roots.
+Only the explicitly selected real Luna model runs. A launched run is **not**
+a passing certification: inspect the final status and real source-bound
+findings, including blockers, independent quality and recovery evidence.
+Do not publish transcripts, access tokens or local Story roots in Git.
+
 ## Automation and current evidence
 
 Controller and safety checks (no real provider requests):
