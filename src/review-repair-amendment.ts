@@ -96,7 +96,7 @@ export function reviewNeedsDependency(
     (f.kind === "missing-requirement" &&
       /\b(?:create|add|introduce|new)\b/i.test(f.requiredCorrection ?? "") &&
       /\bcharacter\b/i.test(f.requiredCorrection ?? "") &&
-      /\b(?:record|profile)\b/i.test(f.requiredCorrection ?? "") &&
+      /\b(?:foundation|record|profile)\b/i.test(f.requiredCorrection ?? "") &&
       !/\b(?:existing|already authored|already present)\b.{0,90}\bcharacter\b/i.test(
         f.requiredCorrection ?? "")));
 }

@@ -70,6 +70,36 @@ test("reviewer cannot grant an unrelated path, changed owner, or stale source", 
     planVersion: 0 }), /new writer|path|protected/);
 });
 
+test("new missing Character foundation routes to controller dependency, not existing-file retry", () => {
+  const changed = { ...assurance, workItem: "character-foundations",
+    changedPaths: ["arcs/night-train-mystery.md", "characters/rowan-bell.md",
+      "characters/maeve-sloane.md", "relationships/maeve-rowan.md"] };
+  const finding = { ...result.findings[0]!, path: "characters/rowan-bell.md",
+    kind: "missing-requirement" as const,
+    message: "The missing passenger has no Character foundation and the Arc requires that central role.",
+    requiredCorrection: "Create a Character foundation for the missing passenger, then add " +
+      "that Character's ID to the existing Arc's characters array while preserving other fields.",
+    affectedPaths: ["characters/rowan-bell.md", "arcs/night-train-mystery.md"] };
+  const review = { ...result, findings: [finding] };
+  assert.equal(reviewNeedsDependency(changed, review, "character-foundations"), true,
+    "Exact preserved Luna wording must request a new authorized Character");
+  assert.equal(reviewNeedsDependency(changed, { ...review, findings: [{
+    ...finding, requiredCorrection: "Create a new Character record for the missing passenger.",
+  }] }, "character-foundations"), true);
+  for (const correction of [
+    "Revise the Character foundation already authored for the passenger.",
+    "Update the existing Character record's dialogue and Fact knowledge.",
+    "Change Rowan's existing characterization so the witness has a credible motivation.",
+  ]) assert.equal(reviewNeedsDependency(changed, { ...review, findings: [{
+    ...finding, requiredCorrection: correction,
+  }] }, "character-foundations"), false,
+  "Existing Character corrections must stay in their original bounded lease");
+  assert.deepEqual(reviewRepairTargets(changed.changedPaths, "character-foundations"), [
+    "characters/maeve-sloane.md", "characters/rowan-bell.md",
+    "relationships/maeve-rowan.md",
+  ], "Arc changes still cannot be authorized by a rejected review");
+});
+
 test("Character checkpoint's verified Arc links remain read-only while owned Characters can be repaired", () => {
   const character: TurnAssignmentEvidence = {
     id: "foundations", specialist: "nt-character-development", outcome: "Introduce the witnesses",
