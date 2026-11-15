@@ -33,6 +33,7 @@ import { localPiOAuth, syncLocalPiOAuth } from './support/local-pi-oauth'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
 import { beginLiveNewStoryChat, approveLiveNewStoryChat, verifyLiveNewStory } from './support/full-story-case'
 import { runPreservedCheckpointRetry } from './support/preserved-checkpoint-retry'
+import { createLiveCertificationIpc } from './support/live-certification-ipc'
 
 const subscriptionTest = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
 const isolatedLocalOAuth = process.env.NT_TEST_WEB_PI_LOCAL_OAUTH === '1'
@@ -129,8 +130,10 @@ test(fullStory
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))
   const token = randomBytes(48).toString('hex')
   const tokenFile = join(root, 'controller-token')
-  const socket = join(root, 'controller', 'sandbox.sock')
-  mkdirSync(join(root, 'controller'), { recursive: true, mode: 0o700 })
+  // Durable root paths exceed Linux sun_path (107 bytes). Only IPC is ephemeral;
+  // controller authority, database and recovery data remain under root.
+  const ipc = createLiveCertificationIpc()
+  const socket = ipc.socket
   writeFileSync(tokenFile, token, { mode: 0o600 })
   process.env.NT_SANDBOX_SOCKET = socket
   process.env.NT_SANDBOX_TOKEN_FILE = tokenFile
@@ -534,6 +537,7 @@ test(fullStory
       server.close()
       await once(server, 'close')
     }
+    ipc.dispose()
     for (const key of envKeys) {
       if (old[key] === undefined) delete process.env[key]
       else process.env[key] = old[key]
