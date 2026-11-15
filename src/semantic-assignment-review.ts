@@ -359,6 +359,31 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
   return verdict;
 }
 
+/** Pure projection of the validated reviewer response into independent
+ * controller receipts. Offline replay and production sealing use the same path. */
+export function independentReviewResults(packet: SemanticReviewPacket, verdict: SemanticVerdict,
+  reviewer: string): IndependentReviewResult[] {
+  if (!reviewer.trim()) throw new Error("Independent reviewer identity is required.");
+  return packet.items.map(item => {
+    const findings = verdict.findings.filter(f => f.commitSha === item.assurance.commitSha &&
+      f.assignmentId === item.assignment.id);
+    return {
+      version: 1,
+      source: { jobId: item.assurance.jobId, commitSha: item.assurance.commitSha,
+        turnDigest: item.assurance.turnDigest, assignmentId: item.assurance.assignmentId,
+        assignmentDigest: item.assurance.assignmentDigest, diffDigest: item.assurance.diffDigest,
+        validationProofDigest: item.assurance.validationProofDigest },
+      reviewer, status: findings.length ? "failed" : "passed",
+      findings: findings.map(f => ({ path: f.path, message: f.path + ":" + f.line + " " + f.message,
+        kind: f.kind, line: f.line, affectedPaths: f.affectedPaths,
+        requiredCorrection: f.requiredCorrection })),
+      evidence: JSON.stringify({ policy: packet.policy, sourceDigest: packet.sourceDigest,
+        evidence: verdict.evidence.filter(e => e.commitSha === item.assurance.commitSha &&
+          e.assignmentId === item.assignment.id) }),
+    } satisfies IndependentReviewResult;
+  });
+}
+
 /** Independent evaluator is not allowed to seal or write. Only the controller
  * converts verified findings to immutable per-checkpoint review receipts. */
 export async function reviewBoundedAssignments(job: JobStartResult,
@@ -368,25 +393,10 @@ export async function reviewBoundedAssignments(job: JobStartResult,
   const packet = await prepareSemanticReview(job, points);
   const verdict = validateSemanticVerdict(packet, await evaluator(structuredClone(packet)));
   if (seal) {
-    for (const item of packet.items) {
-      const findings = verdict.findings.filter(f => f.commitSha === item.assurance.commitSha &&
-        f.assignmentId === item.assignment.id);
-      const result: IndependentReviewResult = {
-        version: 1,
-        source: { jobId: item.assurance.jobId, commitSha: item.assurance.commitSha,
-          turnDigest: item.assurance.turnDigest, assignmentId: item.assurance.assignmentId,
-          assignmentDigest: item.assurance.assignmentDigest, diffDigest: item.assurance.diffDigest,
-          validationProofDigest: item.assurance.validationProofDigest },
-        reviewer, status: findings.length ? "failed" : "passed",
-        findings: findings.map(f => ({ path: f.path, message: f.path + ":" + f.line + " " + f.message,
-          kind: f.kind, line: f.line, affectedPaths: f.affectedPaths,
-          requiredCorrection: f.requiredCorrection })),
-        evidence: JSON.stringify({ policy: packet.policy, sourceDigest: packet.sourceDigest,
-          evidence: verdict.evidence.filter(e => e.commitSha === item.assurance.commitSha &&
-            e.assignmentId === item.assignment.id) }),
-      };
-      const point = points.find(p => p.commitSha === item.assurance.commitSha)!;
-      await sealIndependentReview(job, point, result);
+    const results = independentReviewResults(packet, verdict, reviewer);
+    for (let i = 0; i < packet.items.length; i++) {
+      const point = points.find(p => p.commitSha === packet.items[i]!.assurance.commitSha)!;
+      await sealIndependentReview(job, point, results[i]!);
     }
   }
   return { packet, verdict };
