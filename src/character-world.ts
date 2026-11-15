@@ -23,7 +23,8 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { CompletionContract, Plan } from "./architecture.js";
-import { authorCharacterWorld, type FoundationAssignment, type FoundationDomain, type SpecialistEvidence,
+import { authorCharacterWorld, characterInitialKnowledgeCorrection,
+  type FoundationAssignment, type FoundationDomain, type SpecialistEvidence,
   type SpecialistChoiceProposal } from "./character-world-specialist.js";
 
 type Phase = "pending" | "writing" | "awaiting-author" | "authored" | "committed";
@@ -74,7 +75,7 @@ interface ArchitectureReceipt {
 }
 interface Obligation { id: string; path: string; field: string; requiredBy: string; code: string; message: string }
 interface CatalogRecord { path: string; metadata: { type: string; id: string; status: string; arcs?: string[];
-  characters?: string[]; initial_knowledge?: Array<{ fact: string }> } }
+  characters?: string[]; initial?: boolean; initial_knowledge?: Array<{ fact: string }> } }
 interface CatalogReport {
   records: CatalogRecord[];
   diagnostics: unknown[];
@@ -856,6 +857,16 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
               try { await checkOutput(job, report, candidate, assign); return []; }
               catch (error) {
                 if (!/^Error: (World foundations require|Foundation cluster requires|Character foundations require)/.test(String(error))) throw error;
+                if (unit.domain === "character" &&
+                    String(error).includes("Character foundations require at least one explicit, typed initial Fact-knowledge baseline.")) {
+                  const factIds = report.records.filter(record =>
+                    record.metadata.type === "fact" &&
+                    record.metadata.status !== "superseded" &&
+                    record.metadata.initial !== false).map(record => record.metadata.id);
+                  // Source-constrained, same-session repair. No new Fact,
+                  // author decision or scope is granted by this diagnostic.
+                  if (factIds.length) return [characterInitialKnowledgeCorrection(factIds)];
+                }
                 return [String(error)];
               }
             }

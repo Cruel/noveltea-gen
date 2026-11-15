@@ -6,7 +6,8 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { deriveFoundationAssignment, auditPaths, checkOutput } from "../src/character-world.js";
-import { foundationManifestCorrectionPrompt } from "../src/character-world-specialist.js";
+import { foundationManifestCorrectionPrompt, characterInitialKnowledgeCorrection,
+  CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE } from "../src/character-world-specialist.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-character-world-"));
 after(() => removeTestTree(root));
@@ -41,6 +42,25 @@ test("character assignment includes existing canonical Character paths instead o
   assert.ok(!character.sourcePaths.includes("characters/unrelated.md"));
   const world = deriveFoundationAssignment("world", plan as any, report as any, []);
   assert.ok(!world.sourcePaths.includes("characters/nia.md"));
+});
+
+test("Character Fact baseline is mandatory, source-bound and repairable in the original session", () => {
+  assert.match(CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE, /At least ONE/);
+  assert.match(CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE, /EXISTING Fact|EXISTING.*Fact/i);
+  assert.match(CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE, /initial_knowledge:/);
+  assert.match(CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE, /value: knows/);
+  assert.match(CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE, /NEVER leave every Character/);
+  assert.doesNotMatch(CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE, /author a new Fact/i);
+  const feedback = characterInitialKnowledgeCorrection([
+    "fact.train-stranded-far-from-help", "fact.train-stranded-far-from-help",
+    "../outside", "fact.other-possible-source",
+  ]);
+  assert.match(feedback, /SAME original Pi session/);
+  assert.match(feedback, /fact.train-stranded-far-from-help/);
+  assert.match(feedback, /initial_knowledge:\n  - fact: fact.train-stranded-far-from-help\n    value: knows/);
+  assert.doesNotMatch(feedback, /\.\.\/outside/);
+  assert.match(feedback, /not.*permission|not permission|no.*grant|Do not.*invent/i);
+  assert.throws(() => characterInitialKnowledgeCorrection(["../outside"]), /No canonical Fact/);
 });
 
 test("completed foundation writer can correct a missing manifest in the same bounded session", () => {

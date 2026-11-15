@@ -68,6 +68,41 @@ export const CRITICAL_CAST_GUIDANCE = [
   "obligation rather than imply that two other leads cover it.",
 ].join(" ");
 
+/** The controller requires one real, typed starting knowledge witness.
+ * A wholly empty initial_knowledge array across the cast is not acceptable
+ * when an existing, observable Fact is available. Do not invent future
+ * discoveries or treat objective truth as automatic Character knowledge. */
+export const CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE =
+  "MANDATORY CHARACTER BASELINE: At least ONE in-scope canonical Character " +
+  "MUST have a non-empty initial_knowledge YAML list referencing an EXISTING " +
+  "Fact ID from the World foundations. Inspect the selected Fact record and " +
+  "Character's actual starting circumstances. An already visible initial Fact " +
+  "(for example, a visibly stranded train) may truly be KNOWN to an on-scene " +
+  "Character. No one automatically knows an unobserved cause or culprit. " +
+  "Use schema shape initial_knowledge:\n  - fact: fact.<EXACT-EXISTING-ID>\n    value: knows\n" +
+  "(replace the placeholder with the original Fact's exact canonical ID). " +
+  "NEVER leave every Character's initial_knowledge: [] and NEVER invent a " +
+  "new Fact, Character, author approval or premature discovery to fill this gate. ";
+
+export function characterInitialKnowledgeCorrection(factIds: readonly string[]): string {
+  const known = [...new Set(factIds)].filter(id => /^fact\.[a-z][a-z0-9-]*$/.test(id)).slice(0, 12);
+  if (!known.length) throw new Error("No canonical Fact IDs available for a safe Character knowledge correction.");
+  return "CHARACTER_INITIAL_KNOWLEDGE_REPAIR: The current Character draft has " +
+    "no explicit typed initial Fact-knowledge witness. Edit only the existing " +
+    "authorized Character YAML, not the Fact, Milestone or protected Arc. " +
+    "At least one Character must have initial_knowledge: [ {fact, value} ] " +
+    "with a genuine starting relationship to a fact visible in the pinned " +
+    "World sources. Exact current canonical Fact candidates: " +
+    JSON.stringify(known) + ". Pick one that the Character plausibly KNOWS " +
+    "at the start, and use a YAML list:\ninitial_knowledge:\n  - fact: " +
+    known[0] + "\n    value: knows\n" +
+    "This is an EXAMPLE shape, not permission to attribute unseen or contested " +
+    "knowledge; read the actual Fact and Character first and choose accordingly. " +
+    "Do not leave every initial_knowledge array empty. Run story_validate, " +
+    "recheck protected choices and return the complete changedPaths manifest " +
+    "in the SAME original Pi session without starting a second writer.";
+}
+
 const DOMAINS = {
   world: {
     name: "nt-worldbuilding",
@@ -77,7 +112,7 @@ const DOMAINS = {
   character: {
     name: "nt-character-development",
     owns: ["characters/*.md", "relationships/*.md", "arcs/*.md (characters array only)"],
-    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. FIRST inspect the listed existing Character records and typed IDs. If a Character ID already exists, REUSE and develop its exact existing file; never create a second filename for the same canonical ID. A draft status does not make an existing character disposable. " + CRITICAL_CAST_GUIDANCE + " Use character records (type-specific fields motivation and optional initial_knowledge) for people, relationship records (characters exactly two distinct IDs and initial) for the bond. Every record MUST have readable narrative prose after its closing --- frontmatter line. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
+    guidance: "Develop at least two distinct Characters with credible motivations and voices, a consequential initial Relationship and honest Fact knowledge baselines. " + CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE + " FIRST inspect the listed existing Character records and typed IDs. If a Character ID already exists, REUSE and develop its exact existing file; never create a second filename for the same canonical ID. A draft status does not make an existing character disposable. " + CRITICAL_CAST_GUIDANCE + " Use character records (type-specific fields motivation and at least one non-empty initial_knowledge in the assigned Character cluster) for people, relationship records (characters exactly two distinct IDs and initial) for the bond. Every record MUST have readable narrative prose after its closing --- frontmatter line. Existing Arc characters arrays may be extended only to link new Characters, without changing any other Arc text. Future/branch-specific discoveries are obligations for Events, not initial knowledge.",
   },
 } as const;
 
