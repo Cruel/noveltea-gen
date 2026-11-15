@@ -6,7 +6,10 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding } from "../src/event-work.js";
-import { canonicalFrontmatterStructureError, parseEventManifest } from "../src/event-specialist.js";
+import {
+  canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
+  eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
+} from "../src/event-specialist.js";
 
 test("Event handoff recognizes Luna's explicit Choice-owner binding without accepting a vague choice mention", () => {
   for (const instruction of [
@@ -22,6 +25,71 @@ test("Event handoff recognizes Luna's explicit Choice-owner binding without acce
     "A player choice may become relevant in final prose.",
     "Puzzle owner will add new clues.",
   ]), false);
+});
+
+test("an authored Event's missing in-scope access evidence receives a bounded correction, not a new authority", () => {
+  const milestone = "milestone.disappearance-established";
+  const assignment = { milestoneId: milestone,
+    milestonePath: "milestones/train-milestones.md",
+    characterIds: ["character.ines-vale", "character.soren-ward"] } as any;
+  const exact = "The validator requires a deterministically reachable fulfillment route for " +
+    milestone + ", but the Event does not establish the Milestone’s access-related support: " +
+    "which spaces and people were accessible during the relevant interval. " +
+    "Binding this Event alone would claim a fulfilled route without establishing that material clause.";
+  assert.equal(scopedEventEvidenceConflict(assignment, [exact]), true);
+  const correction = eventEvidenceRepairFeedback(assignment, [exact]);
+  assert.match(correction, /same|CURRENT/i);
+  assert.match(correction, /source|witness|testimony/i);
+  assert.match(correction, /current.*Event|Event.*current/i);
+  assert.match(correction, /access|interval/);
+  assert.match(correction, /not.*(?:proof|objective|omniscient|truth)/i);
+  assert.match(correction, /fulfillment/);
+  assert.match(correction, /story_validate/);
+  assert.doesNotMatch(correction, /(?:grant|authorize) (?:new|additional)/i);
+  for (const invalid of [
+    "The architecture requires a new upstream Character for " + milestone,
+    "A protected author decision must be retconned to establish " + milestone,
+    "Out of scope: add a new Fact before " + milestone,
+    "The Event's absence is impossible: no existing witness can observe it.",
+    "The validator requires a route for milestone.some-other-scope, not " + milestone,
+  ]) assert.equal(scopedEventEvidenceConflict(assignment, [invalid]), false, invalid);
+  assert.equal(scopedEventEvidenceConflict(assignment, []), false);
+  assert.equal(scopedEventEvidenceConflict(assignment, [exact, "New Character required"]), false);
+});
+
+test("only one additional evidence-only correction fits the bounded Event retry budget", () => {
+  const local = "EVENT_LOCAL_EVIDENCE: Missing player-observed access during the interval.";
+  assert.equal(eventEvidenceRetryAllowed(0, ["ordinary native diagnostic"]), true);
+  assert.equal(eventEvidenceRetryAllowed(1, ["ordinary native diagnostic"]), true);
+  assert.equal(eventEvidenceRetryAllowed(2, [local]), true);
+  assert.equal(eventEvidenceRetryAllowed(2, [local, local]), true);
+  assert.equal(eventEvidenceRetryAllowed(2, ["Selected Milestone lacks a route"]), false);
+  assert.equal(eventEvidenceRetryAllowed(2, [local, "Unauthorized protected author change"]), false);
+  assert.equal(eventEvidenceRetryAllowed(2, []), false);
+  assert.equal(eventEvidenceRetryAllowed(3, [local]), false);
+  assert.equal(eventEvidenceRetryAllowed(4, [local]), false);
+  assert.equal(eventEvidenceRetryAllowed(-1, [local]), false);
+});
+
+test("Event prompt distinguishes material nondecision evidence from later Choice binding", () => {
+  const assignment = {
+    milestoneId: "milestone.disappearance-established",
+    milestonePath: "milestones/train-milestones.md",
+    sourcePaths: ["milestones/train-milestones.md", "facts/absence.md"],
+    arcIds: ["arc.mystery"], characterIds: ["character.one", "character.two"],
+    workItemId: "event-disappearance-established", contract: {
+      scope: { kind: "full-story" }, envelope: { presentation: "Visual novel" },
+      constraints: [],
+    }, authority: { existingProtectedChoices: "no-retcon", delegatedChoices: "draft",
+      signingRequiredForProtectedChanges: true },
+  } as any;
+  const snapshot = { id: "f".repeat(64), path: "/pinned/skills", commit: "a".repeat(40) } as any;
+  const prompt = eventSpecialistPrompt(snapshot, assignment, true);
+  assert.match(prompt, /nondecision Milestone/i);
+  assert.match(prompt, /in this Event/i);
+  assert.match(prompt, /witness|testimony/i);
+  assert.match(prompt, /partial.*Choice/i);
+  assert.match(prompt, /do not.*(?:invent|assert)/i);
 });
 
 test("no-write Event reports are explicit, bounded and never confused with a successful author manifest", () => {

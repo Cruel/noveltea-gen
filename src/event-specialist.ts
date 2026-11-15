@@ -70,6 +70,66 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
     laterObligations: obj.laterObligations };
 }
 
+/** An Event owns its own in-scene evidence. A model's claim that its draft
+ * lacks source-grounded access/timing/testimony is repair feedback, not a new
+ * specialist grant. Only a concrete deficit in the assigned Milestone's
+ * existing material evidence may be corrected here; anything demanding new
+ * upstream canon, a protected change or a different owner remains blocked.
+ * The native path/protection verifier still owns every actual edit. */
+export function scopedEventEvidenceConflict(
+  assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
+  conflicts: readonly string[],
+): boolean {
+  return conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text =>
+    text.includes(assignment.milestoneId) &&
+    /\b(?:validator|milestone|fulfillment|reachable)\b/i.test(text) &&
+    /\b(?:does not establish|lacks?|missing|not yet established|insufficient)\b/i.test(text) &&
+    /\b(?:evidence|observation|testimony|witness|access|time|interval|material clause|support|route)\b/i.test(text) &&
+    !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|cannot (?:author|create)|need (?:an? )?(?:new|another|second) (?:fact|character|arc|milestone|event)|(?:new|another|second) (?:fact|character|arc|milestone|event) (?:is )?(?:required|needed))\b/i.test(text),
+  );
+}
+
+/** One bounded correction in the original authenticated Pi session. It does
+ * not waive Event completion, create a new grant or automatically trust the
+ * model's assertion that the requirement has been met. */
+export function eventEvidenceRepairFeedback(
+  assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
+  conflicts: readonly string[],
+): string {
+  if (!scopedEventEvidenceConflict(assignment, conflicts))
+    throw new Error("An out-of-scope Event conflict cannot be routed as local evidence.");
+  return "EVENT_LOCAL_EVIDENCE: The CURRENT authored Event is missing a material clause " +
+    "of the selected Milestone " + assignment.milestoneId + " in " + assignment.milestonePath + ". " +
+    "This is evidence the CURRENT Event specialist can gather within the SAME authorized " +
+    "Event and existing-character context; it is not automatically a prerequisite for a new writer. " +
+    "Re-read the Milestone's exact change and narrative promise, then revise the existing " +
+    "Event (or author another causally connected Event under its already granted events/ scope) " +
+    "so the player actually observes the relevant access, timing, space or source limitations, " +
+    "or hears a named, existing participant provide firsthand, uncertainty-qualified testimony " +
+    "IN this Event. Specify which spaces and people the witness observed as accessible, " +
+    "and which access facts remain unknown. A reported past sighting is testimony, NOT objective " +
+    "truth or proof of continuous enclosure; do not invent an authoritative offscreen investigation, " +
+    "time record, new Character, protected change, or unsupported certainty. " +
+    "Only then bind a reachable fulfillment route for a nondecision Milestone; never " +
+    "invent fulfillment IDs, steps or effects merely to pass validation. " +
+    "If the Milestone actually requires a player decision, keep that Milestone partial " +
+    "and hand off only the formally unbound Choice. " +
+    "Re-run story_validate and report EXACT cumulative modifiedRecords, " +
+    "architecturalConflicts and laterObligations. If source-grounded evidence truly cannot " +
+    "be authored within the original grant, report the concrete blocker; the controller " +
+    "must remain blocked, not infer proof or waive the review. " +
+    "SOURCE DEFICITS: " + JSON.stringify(conflicts).slice(0, 1800);
+}
+
+/** Exactly one extra turn is permitted ONLY for a controller-identified,
+ * source-local evidence gap after the usual three attempts. No other error
+ * category gains a retry and a fourth failure is always terminal. */
+export function eventEvidenceRetryAllowed(attempt: number, diagnostics: readonly string[]): boolean {
+  return Number.isInteger(attempt) && (attempt === 0 || attempt === 1 ||
+    attempt === 2 && diagnostics.length > 0 &&
+    diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:")));
+}
+
 /** Pure production prompt for fixture comparison and controller-contract tests. */
 export function eventSpecialistPrompt(
   snapshot: SkillSnapshot,
@@ -124,9 +184,21 @@ export function eventSpecialistPrompt(
       "alone proves that all the Milestone's evidence has been established. " +
       "For a promised contradiction, test the claims against an independent observation " +
       "the player can inspect: an undated physical trace cannot establish the disputed timing. " +
-      "When an essential clause is not yet established, retain partial " +
-      "completeness and empty fulfillment.any_of, and name the exact missing " +
-      "support as a later obligation; do NOT make a false completed route. " +
+      "For a nondecision Milestone, THIS Event assignment owns delivering each " +
+      "material evidence clause in a reachable in-scene observation or identified, " +
+      "uncertainty-qualified testimony, including which relevant spaces or people " +
+      "were accessible if the selected Milestone asks for access evidence. " +
+      "Do not substitute present absence for past access proof; a genuine limited " +
+      "witness account can establish what that witness observed without claiming " +
+      "omniscient certainty. If one observation is insufficient, revise this Event " +
+      "or author a causally linked second Event within the existing writable scope. " +
+      "Do not merely leave a nondecision Milestone partial and delegate its missing " +
+      "material evidence to an unspecified later Event; a complete nondecision " +
+      "Milestone requires genuine reachable fulfillment NOW. " +
+      "Partial completeness and empty fulfillment.any_of are appropriate for an " +
+      "unbound later formal Choice or a genuinely impossible out-of-scope requirement, " +
+      "but a reported conflict is NOT a successful Event. Do not fabricate a " +
+      "completed route or change protected canon to pass this gate. " +
       "For a completed nondecision Milestone, bind only genuinely fulfilled routes. " +
       "Call story_validate without arguments, repair introduced errors and revalidate; " +
       "independent controller checks remain authoritative.",
@@ -148,8 +220,10 @@ export function eventSpecialistPrompt(
       "(question, 2–4 options and recommendation); structured choices include Other. " +
       "Do not request author permission for a discovery Event already in this " +
       "authorized work item. No choice authorizes protected changes. " +
-      "No-write prerequisite reports have modifiedRecords:[] " +
-      "and must precede any edit. The graph verifies source, manifests, authority and validation.",
+      "No-write prerequisite reports have modifiedRecords:[] and must precede " +
+      "any edit. An authored Event with an in-scope evidence gap needs a bounded " +
+      "same-session correction, not an invented downstream owner. The graph verifies " +
+      "source, manifests, authority and validation.",
     assignmentLabel: "AUTHORIZED ASSIGNMENT",
     assignment,
     authorInstruction: specialistAuthorInstruction(assignment.authorTask),
@@ -223,7 +297,14 @@ export async function authorEventCluster(
     if (file) await onSession(file);
     const required = REQUIRED.map(name => join(snapshot.path, "skills", name));
     let prompt = eventSpecialistPrompt(snapshot, assignment, Boolean(sandboxTools));
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // The normal budget is three bounded turns. A final local-evidence
+    // diagnostic may earn ONE additional correction turn, under the SAME
+    // assignment and original Pi session. This is not writer replay or an
+    // automatic grant for an upstream/protected dependency.
+    let extraEvidenceCorrection = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt === 3 && !extraEvidenceCorrection)
+        throw new Error("Event specialist correction exceeded its original bounded budget.");
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       const direction = resume?.answer
         ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer) +
@@ -298,7 +379,7 @@ export async function authorEventCluster(
         }
       }
       if (structural.length) {
-        if (attempt === 2)
+        if (attempt >= 2)
           throw new Error("Event specialist left structurally incomplete Markdown after bounded repairs: " +
             structural.join("; "));
         prompt = "The files you just wrote have an OBJECTIVE source formatting error, " +
@@ -322,13 +403,26 @@ export async function authorEventCluster(
         await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
         return evidence;
       }
-      if (attempt === 2) throw new Error("Event specialist exhausted bounded repair attempts: " + JSON.stringify(diagnostics));
-      prompt = "The independent canonical validator rejected your UNCOMMITTED Event cluster. " +
-        "You may repair only files already within the authorized assignment. " +
-        "Re-read nt-catalog progression as needed; check all Event prerequisites, branch state, and typed references. " +
-        "Do not change protected author decisions, add speculative Event IDs, or stage files. " +
-        "At the end return the COMPLETE modifiedRecords/architecturalConflicts/laterObligations manifest again. " +
-        "Localized diagnostics:\n" + diagnostics.join("\n");
+      const localEvidence = diagnostics.length > 0 &&
+        diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:"));
+      if (!eventEvidenceRetryAllowed(attempt, diagnostics))
+        throw new Error("Event specialist exhausted bounded repair attempts: " + JSON.stringify(diagnostics));
+      if (attempt === 2) extraEvidenceCorrection = true;
+      prompt = localEvidence
+        ? "IN-SCOPE EVENT EVIDENCE CORRECTION ONLY. Keep the original " +
+          "Milestone, approved cast, protected facts and event-scope permissions. " +
+          "Do not convert this evidence deficit into an upstream approval request, " +
+          "nor claim partial fulfillment is a pass for a nondecision Milestone. " +
+          "Read the selected source and revise only the already-authorized Event " +
+          "cluster in this SAME Pi session. After editing, run story_validate and " +
+          "return a complete cumulative manifest. Exact controller findings:\n" +
+          diagnostics.join("\n")
+        : "The independent canonical validator rejected your UNCOMMITTED Event cluster. " +
+          "You may repair only files already within the authorized assignment. " +
+          "Re-read nt-catalog progression as needed; check all Event prerequisites, branch state, and typed references. " +
+          "Do not change protected author decisions, add speculative Event IDs, or stage files. " +
+          "At the end return the COMPLETE modifiedRecords/architecturalConflicts/laterObligations manifest again. " +
+          "Localized diagnostics:\n" + diagnostics.join("\n");
     }
     throw new Error("Unexpected Event repair termination.");
   } finally { session.dispose(); }

@@ -7,7 +7,8 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
-import { authorEventCluster, type EventAssignment, type EventEvidence } from "./event-specialist.js";
+import { authorEventCluster, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
+  type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
@@ -751,7 +752,15 @@ export async function runEventWorkItem(input: EventOptions) {
               repairablePathError = message;
             }
             assertHead(job, receipt.expectedHead);
-            if (candidate.conflicts.length) throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
+            // A model that has already authored in-scope Event files may
+            // report a missing piece of reachable observation/testimony as
+            // an "architectural conflict". This is one bounded correction in
+            // the SAME authenticated session, never a new writer/owner grant.
+            // Protected, upstream and out-of-scope claims still fail closed.
+            const localEvidenceGap = candidate.claimedPaths.length > 0 &&
+              scopedEventEvidenceConflict(assign, candidate.conflicts);
+            if (candidate.conflicts.length && !localEvidenceGap)
+              throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
             const checked = await validate(receipt.expectedHead);
             const draft = checked.report as unknown as Report | undefined;
             if (draft?.protection?.status !== "checked" ||
@@ -764,12 +773,27 @@ export async function runEventWorkItem(input: EventOptions) {
             if (repairablePathError) return [repairablePathError +
               " Edit an authorized Event if necessary, or correct modifiedRecords to list the exact Git changes. " +
               "Do not modify the Milestone merely to make it appear in the diff."];
+            if (localEvidenceGap)
+              return [eventEvidenceRepairFeedback(assign, candidate.conflicts)];
             try {
               acceptance(draft, assign, paths!, candidate.obligations);
               const proof = await consequenceProof(job, draft, assign, paths!, candidate.obligations);
               return proof.diagnostics.map(d =>
                 `${d.path}:${d.line} ${d.event}/${d.step}/${d.branch} ${d.slot}: ${d.message}`);
-            } catch (error) { return [String(error)]; }
+            } catch (error) {
+              const message = String(error);
+              if (/Selected Milestone lacks a deterministically reachable Event fulfillment route\./.test(message)) {
+                // No formal Choice deferral was established. This nondecision
+                // milestone is not complete merely because the Event is
+                // structurally reachable; show the needed evidence in-scene.
+                return [eventEvidenceRepairFeedback(assign, [
+                  "Milestone " + assign.milestoneId +
+                  " lacks a deterministically reachable evidence route: the Event does not establish " +
+                  "the material observation or witness support promised by the selected Milestone.",
+                ])];
+              }
+              return [message];
+            }
           };
           let evidence: EventEvidence;
           if (receipt.worker === "fixture") {
