@@ -622,6 +622,37 @@ test("clean no-write Event report authorizes one new bounded Event setup without
     "The source author's checkout stays unmodified");
 });
 
+test("S14 #173: clean unmet access evidence gets one authorized Event reassignment, then Choice can proceed", {
+  skip: !available,
+}, () => {
+  const f = setup("event-local-access-evidence");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-evidence-once" });
+  const result = f.cli(f.start);
+  const stage = result.inventory.items.find((i: any) => i.id === "event:milestone.disclosure");
+  assert.equal(stage?.status, "verified", JSON.stringify(stage));
+  const receiptPath = join(f.job.stateDir, "event-items/disclosure.json");
+  const raw = readFileSync(receiptPath, "utf8");
+  const receipt = JSON.parse(raw);
+  assert.equal(receipt.phase, "committed");
+  assert.match(receipt.reroutedTask, /IN-SCOPE EVENT EVIDENCE/);
+  const originalPath = join(f.job.stateDir, "event-prerequisite-history",
+    "disclosure-" + receipt.reroutedFrom + ".json");
+  const original = JSON.parse(readFileSync(originalPath, "utf8"));
+  assert.equal(original.phase, "prerequisite-reported");
+  assert.deepEqual(original.claimedPaths, []);
+  assert.deepEqual(original.obligations, []);
+  assert.equal(original.prerequisite.reportDigest, receipt.reroutedFrom);
+  assert.equal(result.inventory.items.find((i: any) =>
+    i.id === "interactive:milestone.disclosure")?.status, "verified",
+    "Downstream Choice must wait for a real, verified Event commit.");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  f.cli(["generate", "resume"]);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(receiptPath, "utf8"), raw, "The original no-write turn cannot be replayed.");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+});
+
 test("rerouted Event task and original receipt remain immutable across recovery", { skip: !available }, () => {
   const f = setup("event-prerequisite-immutable");
   Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-once" });

@@ -144,7 +144,7 @@ export function eventNondecisionChoiceCorrection(
  * upstream canon, a protected change or a different owner remains blocked.
  * The native path/protection verifier still owns every actual edit. */
 export function scopedEventEvidenceConflict(
-  assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
+  assignment: Pick<EventAssignment, "milestoneId">,
   conflicts: readonly string[],
 ): boolean {
   return conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text => {

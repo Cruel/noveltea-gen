@@ -449,6 +449,7 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
   rerouted = false): Promise<EventEvidence> {
   const configured = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
   const variant = configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" :
+    configured === "no-write-evidence-once" ? rerouted ? "fulfilled" : "no-write-evidence" :
     configured === "phantom-milestone" ? "decision-pending" : configured;
   const cluster = fixtureCluster(assignment.milestoneId);
   const files: string[] = [];
@@ -460,7 +461,7 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
       `---\nschema: '0.1'\ntype: event\nid: event.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${prose}\n`, { flag: "wx" });
     files.push(local);
   };
-  if (["no-write-prerequisite", "no-write-dirty", "no-write-empty", "no-write-protected"].includes(variant)) {
+  if (["no-write-prerequisite", "no-write-evidence", "no-write-dirty", "no-write-empty", "no-write-protected"].includes(variant)) {
     if (variant === "no-write-dirty") {
       await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
       await writeFile(join(job.worktreeStoryRoot, "events/uncertain-draft.md"), "Unapproved draft.\n");
@@ -468,8 +469,10 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
     return { claimedPaths: [], skillReads: [],
       conflicts: variant === "no-write-empty" ? [] : variant === "no-write-protected"
         ? ["Protected author approval for an out-of-scope new Milestone is required."] :
+        variant === "no-write-evidence"
+          ? ["The selected Milestone lacks the material evidence of which spaces and people were accessible during the relevant interval; the current Event does not establish it."] :
         ["A distinct Choice and authored ending are needed beyond this Event writer's scope."],
-      obligations: variant === "no-write-empty" ? [] :
+      obligations: ["no-write-empty", "no-write-evidence"].includes(variant) ? [] :
         ["Arrange controller-approved interactive work before concluding the resolution."] };
   }
   if (["optional", "alternative-routes", "contradiction", "failed-repair", "repair"].includes(variant)) {
