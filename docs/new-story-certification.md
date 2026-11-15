@@ -189,6 +189,9 @@ node scripts/live-new-story-runner.mjs status collaborative
 # choose an eligible point and its original owning source Job. This resumes
 # the same visible Thread in a new, isolated execution without replaying work.
 node scripts/live-new-story-runner.mjs retry collaborative <40-char-checkpoint-sha> [source-job-id] [optional-corrective-guidance]
+# If the authenticated recovery controller prepared a child but admission was
+# temporarily blocked, start THAT EXACT child after fixing the blocker:
+node scripts/live-new-story-runner.mjs resume collaborative <prepared-child-job-id>
 node scripts/live-new-story-runner.mjs status collaborative
 ```
 
@@ -197,7 +200,9 @@ logs and durable root pointer under `.local/certification/live-new-story/`.
 `start` creates a fresh owner-isolated source root; `retry` requires the exact
 finalized checkpoint SHA and reopens its saved source, controller and Story
 state. Repeated retries may target the same verified checkpoint, each with a
-new child Job and independent Pi sessions. No completed writer, original
+new child Job and independent Pi sessions. `resume` is different: it reuses the
+existing authenticated same-Thread prepared child, immutable checkpoint proof
+and exactly saved corrective guidance; it never allocates another child Job. No completed writer, original
 interview or approved baseline is rerun. Existing blocked or dirty writers
 remain in their original worktrees for manual inspection.
 

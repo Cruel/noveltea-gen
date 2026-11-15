@@ -13,7 +13,7 @@ import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
 import type { JobStartResult } from '../../../src/job'
 import { createStudioAuth } from '../../src/lib/auth'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../../src/lib/pi-credentials.server'
-import { authorizedStoryJob } from '../../src/lib/fixture-jobs.server'
+import { authorizedStoryJob, selectedJob } from '../../src/lib/fixture-jobs.server'
 import { checkpointContinueRequest } from '../../src/lib/checkpoint-fork.server'
 import type { TestStudioDatabase } from './studio-database'
 import { localPiOAuth, syncLocalPiOAuth } from './local-pi-oauth'
@@ -182,14 +182,26 @@ export async function runPreservedCheckpointRetry(args: {
   }
   assert.equal(ready, true, 'Trusted agent must accept the continuation')
 
-  const childId = randomUUID()
+  const preparedChildId = process.env.NT_TEST_WEB_PI_RETRY_CHILD_ID
+  const childId = preparedChildId || randomUUID()
   const attempt = join(root, 'attempts', childId)
-  mkdirSync(attempt, { recursive: true, mode: 0o700 })
-  writeFileSync(join(attempt, 'retry-request.json'), JSON.stringify({
+  const retryRequest = {
     version: 1, mode: source.mode, originalJobId: source.jobId,
     sourceJobId: sourceId, checkpointSha: selectedSha, completed: checkpoint.completedWorkItems,
     nextWorkItem: checkpoint.nextWorkItem, childId, guidance: correctiveGuidance,
-  }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+  }
+  if (preparedChildId) {
+    assert.match(preparedChildId, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,
+      'Prepared continuation requires an exact prior Job UUID')
+    const saved = JSON.parse(readFileSync(join(attempt, 'retry-request.json'), 'utf8'))
+    assert.deepEqual(saved, retryRequest, 'Prepared retry is bound to its original checkpoint and guidance')
+    assert.equal((await selectedJob(store, source.ownerId, childId)).status, 'paused',
+      'Only an unstarted prepared child can be admitted again')
+  } else {
+    mkdirSync(attempt, { recursive: true, mode: 0o700 })
+    writeFileSync(join(attempt, 'retry-request.json'), JSON.stringify(retryRequest, null, 2) + '\n',
+      { flag: 'wx', mode: 0o600 })
+  }
   const response = await checkpointContinueRequest(auth, store,
     new Request(config.baseURL + '/api/jobs/' + sourceId + '/continue', {
       method: 'POST', headers,

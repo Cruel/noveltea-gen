@@ -20,9 +20,9 @@ const skills = join(process.env.HOME ?? "/home/thomas", "dev/noveltea-skills");
 const [action, mode, checkpointSha, sourceJobId, guidance = ""] = process.argv.slice(2);
 if (
   !["autonomous", "collaborative"].includes(mode ?? "") ||
-  !["start", "status", "retry", "worker"].includes(action ?? "")
+  !["start", "status", "retry", "resume", "worker"].includes(action ?? "")
 ) {
-  console.error("Usage: live-new-story-runner.mjs <start|status> <autonomous|collaborative> OR retry <mode> <checkpoint-sha> [source-job-id] [guidance]");
+  console.error("Usage: live-new-story-runner.mjs <start|status> <mode> | retry <mode> <checkpoint-sha> [source-job-id] [guidance] | resume <mode> <prepared-child-job-id>");
   process.exit(2);
 }
 mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -50,27 +50,42 @@ if (action === "status") {
   );
   process.exit(0);
 }
-if (action === "start" || action === "retry") {
+if (action === "start" || action === "retry" || action === "resume") {
   const previous = state();
   if (previous && previous.status === "running" && alive(previous.pid))
     throw Error("Existing " + mode + " certification is already running: " + previous.pid);
   if (!existsSync(nativeCli) || !existsSync(join(skills, "skills/nt-story-orchestrate/SKILL.md")))
     throw Error("Missing native CLI or portable skills.");
   let root;
+  let prepared = null;
   if (action === "start") {
     const runs = join(directory, "runs");
     mkdirSync(runs, { recursive: true, mode: 0o700 });
     root = mkdtempSync(join(runs, mode + "-"));
   } else {
-    if (!/^[a-f0-9]{40}$/.test(checkpointSha ?? ""))
-      throw Error("Retry requires the exact 40-character verified checkpoint SHA.");
-    if (sourceJobId && !/^[a-f0-9-]{36}$/.test(sourceJobId))
-      throw Error("Optional source job ID must be a UUID.");
-    if (guidance.length > 2000) throw Error("Corrective guidance exceeds 2000 characters.");
     root = previous?.root;
     if (!root || !root.startsWith(join(directory, "runs") + "/") ||
         !existsSync(join(root, "certification-source.json")))
       throw Error("No preserved certification root for this mode. Start a new source run first.");
+    if (action === "retry") {
+      if (!/^[a-f0-9]{40}$/.test(checkpointSha ?? ""))
+        throw Error("Retry requires the exact 40-character verified checkpoint SHA.");
+      if (sourceJobId && !/^[a-f0-9-]{36}$/.test(sourceJobId))
+        throw Error("Optional source job ID must be a UUID.");
+      if (guidance.length > 2000) throw Error("Corrective guidance exceeds 2000 characters.");
+    } else {
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(checkpointSha ?? ""))
+        throw Error("Resume requires an exact prepared child Job UUID.");
+      const file = join(root, "attempts", checkpointSha, "retry-request.json");
+      if (!existsSync(file)) throw Error("Prepared child has no saved immutable retry request.");
+      prepared = JSON.parse(readFileSync(file, "utf8"));
+      if (prepared.childId !== checkpointSha ||
+          !/^[a-f0-9]{40}$/.test(prepared.checkpointSha ?? "") ||
+          !/^[a-f0-9-]{36}$/.test(prepared.sourceJobId ?? "") ||
+          typeof prepared.guidance !== "string" || prepared.guidance.length > 2000 ||
+          prepared.mode !== mode)
+        throw Error("Saved prepared retry intent has inconsistent identity or guidance.");
+    }
   }
   const output = openSync(log, "a", 0o600);
   const child = spawn(process.execPath, [resolve(import.meta.filename), "worker", mode], {
@@ -82,10 +97,13 @@ if (action === "start" || action === "retry") {
   }).trim();
   save({ status: "running", pid: child.pid, startedAt: new Date().toISOString(), mode,
     gitHead, log, root, kind: action,
-    ...(action === "retry" ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}) });
+    ...(action === "retry" ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}),
+    ...(prepared ? { checkpointSha: prepared.checkpointSha, sourceJobId: prepared.sourceJobId,
+      guidance: prepared.guidance, retryChildId: prepared.childId } : {}) });
   child.unref();
   console.log(JSON.stringify({ status: "running", mode, pid: child.pid, root, log,
-    kind: action, ...(action === "retry" ? { checkpointSha } : {}) }));
+    kind: action, ...(action === "retry" ? { checkpointSha } : {}),
+    ...(prepared ? { preparedChildId: prepared.childId } : {}) }));
   process.exit(0);
 }
 // The detached worker can start before the parent has published its intent.
@@ -103,11 +121,12 @@ const env = {
   ...process.env,
   NT_TEST_WEB_PI_NEW_STORY: "1",
   NT_TEST_WEB_PI_STORY_MODE: mode,
-  ...(initial.kind === "retry" ? {
+  ...(["retry", "resume"].includes(initial.kind) ? {
     NT_TEST_WEB_PI_RETRY_ROOT: initial.root,
     NT_TEST_WEB_PI_RETRY_CHECKPOINT: initial.checkpointSha,
     NT_TEST_WEB_PI_RETRY_SOURCE_JOB: initial.sourceJobId ?? "",
     NT_TEST_WEB_PI_RETRY_GUIDANCE: initial.guidance ?? "",
+    NT_TEST_WEB_PI_RETRY_CHILD_ID: initial.retryChildId ?? "",
   } : { NT_TEST_WEB_PI_ROOT: initial.root }),
   NT_TEST_WEB_PI_AUTH: "device-code",
   NT_TEST_WEB_PI_LOCAL_OAUTH: "1",

@@ -35,6 +35,39 @@ function regular(path: string) {
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Fork evidence must be a regular controller-owned file.");
   return readFileSync(path, "utf8");
 }
+/** Review repairs have immutable, independently verified commits, but are not
+ * normal plan work items. A repair may be inherited only when it points to a
+ * recorded failed review rooted in a completed specialist (max two repairs).
+ * The entire coverage ledger remains bound by the immutable bundle digest. */
+export function validRecoveryReviewCoverage(
+  coverage: RecoveryForkBundle["reviewCoverage"],
+  completed: string[],
+  required?: { commitSha: string; workItem: string },
+): boolean {
+  if (coverage === undefined) return required === undefined;
+  if (!Array.isArray(coverage)) return false;
+  const byCommit = new Map(coverage.map(item => [item.commitSha, item]));
+  if (byCommit.size !== coverage.length ||
+      coverage.some(item => !/^[a-f0-9]{40}$/.test(item.commitSha) ||
+        !["not-required", "required-pending", "passed", "failed"].includes(item.status)))
+    return false;
+  const completedSet = new Set(completed);
+  for (const item of coverage) {
+    let cursor = item;
+    let repairs = 0;
+    const seen = new Set<string>();
+    while (!completedSet.has(cursor.workItem)) {
+      const sourceSha = /^repair-([a-f0-9]{40})$/.exec(cursor.workItem)?.[1];
+      if (!sourceSha || ++repairs > 2 || seen.has(sourceSha)) return false;
+      seen.add(sourceSha);
+      const source = byCommit.get(sourceSha);
+      if (!source || source.status !== "failed") return false;
+      cursor = source;
+    }
+  }
+  return !required || coverage.some(item =>
+    item.commitSha === required.commitSha && item.workItem === required.workItem);
+}
 export function readRecoveryFork(job: JobStartResult, requireReady = true): RecoveryForkBundle | null {
   if (!job.recoveryFork) return null;
   const bundle = JSON.parse(regular(join(job.stateDir, "recovery-fork.json"))) as RecoveryForkBundle;
@@ -49,13 +82,9 @@ export function readRecoveryFork(job: JobStartResult, requireReady = true): Reco
       bundle.sourceJobId !== pin.sourceJobId || bundle.sourceBaseSha !== pin.sourceBaseSha ||
       bundle.checkpoint.commitSha !== job.baseSha || pin.commitSha !== job.baseSha ||
       forkDigest(bundle) !== pin.bundleSha256 ||
-      (bundle.reviewCoverage !== undefined && (!Array.isArray(bundle.reviewCoverage) ||
-        bundle.reviewCoverage.some(item => !/^[a-f0-9]{40}$/.test(item.commitSha) ||
-          !bundle.checkpoint.completedWorkItems.includes(item.workItem) ||
-          !["not-required", "required-pending", "passed", "failed"].includes(item.status)) ||
-        new Set(bundle.reviewCoverage.map(item => item.commitSha)).size !== bundle.reviewCoverage.length)) ||
-      (bundle.checkpoint.assurance && !bundle.reviewCoverage?.some(item =>
-        item.commitSha === bundle.checkpoint.commitSha && item.workItem === bundle.checkpoint.workItem)) ||
+      !validRecoveryReviewCoverage(bundle.reviewCoverage, bundle.checkpoint.completedWorkItems,
+        bundle.checkpoint.assurance ? { commitSha: bundle.checkpoint.commitSha,
+          workItem: bundle.checkpoint.workItem } : undefined) ||
       (requireReady && regular(join(job.stateDir, "recovery-fork-ready")).trim() !== pin.bundleSha256)) {
     throw new Error("Fork continuation is incomplete or differs from its immutable job pin.");
   }
