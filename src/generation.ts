@@ -41,6 +41,7 @@ import { blockedByRequiredReview, executionId, resolvedCheckpointReviews,
   IndependentReviewGateError, assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { assessTurnFulfillment } from "./turn-fulfillment.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { loadSkillConfig } from "./skills.js";
 import { hasStoryOrchestratorSelection, loadSelectedStoryOrchestrator,
@@ -538,12 +539,22 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
       !accepted[s.active.stage].includes(s.result.status)) return {};
   const job = await openJob(s);
   try {
+    // A fork does not inherit author approval grants, but it MUST retain the
+    // exact source Turn's read-only review criteria. Legacy forks that lost
+    // them are unsafe to advance beyond a committed specialist checkpoint.
+    if (job.recoveryFork && !await readReviewTurnEvidence(job))
+      throw Error("Recovered real-Pi Story lost its original independent-review Turn; " +
+        "no downstream specialist may start until a new verified continuation is prepared.");
     const { runPiAssignmentReview } = await import("./semantic-assignment-review.js");
     const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
     const { createSkillSnapshot } = await import("./snapshot.js");
     const { loadSkillConfig } = await import("./skills.js");
     const { inspectPiPolicy } = await import("./job-pi-policy.js");
-    const points = (await inspectRecoveryCheckpoints(job))
+    const history = await inspectRecoveryCheckpoints(job);
+    if (job.recoveryFork && history.some(point => point.eligible && !point.assurance))
+      throw Error("Recovered Story has a native-verified specialist checkpoint without " +
+        "independent-review assurance; do not dispatch Choice or other dependent work.");
+    const points = history
       .filter(point => point.eligible && point.assurance &&
         point.assurance.reviewSelection.status === "required-pending")
       .sort((a, b) => a.completedWorkItems.length - b.completedWorkItems.length);

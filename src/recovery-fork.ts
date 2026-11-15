@@ -6,6 +6,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { inspectRecoveryCheckpoints, type RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { validateStoryJob } from "./validator.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
 import { assertRecoveryCompatibility, assertRecoveryReceiptCompatibility,
   selectCurrentRecoveryToolchain, RecoveryCompatibilityError } from "./recovery-compatibility.js";
@@ -53,6 +54,16 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   assertRecoveryCompatibility(selected);
   const { eligible: _eligible, reason: _reason, semanticReview: _semanticReview, ...checkpoint } = selected;
   const inherited = readRecoveryFork(parent);
+  const parentReviewTurn = await readReviewTurnEvidence(parent);
+  // The same original, controller-verified Turn may supply review criteria in
+  // a successor Thread; it is NOT transplanted into child turn-plan.json and
+  // never conveys approvals or authoring grants. Every parent checkpoint with
+  // assurance must match that review-only Turn before a fork is admitted.
+  if (selected.assurance && (!parentReviewTurn ||
+      parentReviewTurn.digest !== selected.assurance.turnDigest))
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "Historical independent review has lost its original authorized Turn evidence.");
+  const reviewTurn = inherited?.reviewTurn ?? parentReviewTurn;
   // Each source reviewer decision is resolved exactly at fork admission. The
   // child retains that versioned status and cannot inherit a later pass.
   const previousCoverage = inherited?.reviewCoverage ?? [];
@@ -136,7 +147,8 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   const toolchain = await selectCurrentRecoveryToolchain(parent, checkpoint, skillsSource);
   return { version: 2, toolchain, sourceJobId: parent.jobId, sourceBaseSha: parent.baseSha,
     storyRoot: parent.storyRoot, childId, checkpoint: checkpoint as RecoveryCheckpoint,
-    reviewCoverage, contract: plan?.contract ?? contract, receipts, commits, completedStages };
+    reviewCoverage, contract: plan?.contract ?? contract,
+    ...(reviewTurn ? { reviewTurn } : {}), receipts, commits, completedStages };
 }
 async function writeOnce(path: string, value: string) {
   if (existsSync(path)) {

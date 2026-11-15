@@ -7,7 +7,8 @@ import { captureStorySnapshot } from "./story-debug-snapshot.js";
 import type { JobStartResult } from "./job.js";
 import { inspectSpecialistChoice, authorChoiceDirection } from "./specialist-choice.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
-import { readTurnEvidence, type TurnAssignmentEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
+import { type TurnAssignmentEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const digest = (data: unknown) => createHash("sha256").update(JSON.stringify(data)).digest("hex");
@@ -347,12 +348,7 @@ function git(job: JobStartResult, ...args: string[]) {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
 }
 async function turnEvidence(job: JobStartResult): Promise<TurnEvidence | null> {
-  const path = join(job.stateDir, "turn-plan.json");
-  if (!existsSync(path)) return null;
-  // The contract is only a lookup hint. readTurnEvidence verifies the immutable
-  // plan hash, source SHA, assignments, and original controller-owned receipt.
-  const hint = JSON.parse(await readFile(path, "utf8")) as TurnEvidence;
-  return readTurnEvidence(job, hint.contract);
+  return readReviewTurnEvidence(job);
 }
 function exactDiff(job: JobStartResult, parentSha: string, commitSha: string) {
   if (!SHA.test(parentSha) || !SHA.test(commitSha))

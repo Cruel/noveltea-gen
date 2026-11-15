@@ -6,6 +6,7 @@ import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import type { SemanticReviewStatus } from "./checkpoint-assurance.js";
 import type { GenerationEvidence } from "./generation-plan.js";
 import type { CompletionContract } from "./architecture.js";
+import type { TurnEvidence } from "./turn-plan-evidence.js";
 import { openSkillSnapshot } from "./snapshot.js";
 import { assertNativeVersion } from "./native-cli-version.js";
 import { RecoveryCompatibilityError, type RecoveryToolchain } from "./recovery-compatibility.js";
@@ -25,6 +26,9 @@ export interface RecoveryForkBundle {
    * authorize writes in this independently versioned child Thread. */
   reviewCoverage?: Array<{ workItem: string; commitSha: string; status: SemanticReviewStatus }>;
   contract: CompletionContract;
+  /** Original controller-verified author Turn, REVIEW-ONLY. It is never
+   * copied into child turn-plan.json and grants no new authoring authority. */
+  reviewTurn?: TurnEvidence;
   receipts: Record<string, SpecialistReceipt>;
   commits: Record<string, { sha: string; jobId: string; planVersion: number | null }>;
   completedStages: GenerationEvidence[];

@@ -14,6 +14,7 @@ import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { assertTurnDeliveryHistory } from "./turn-delivery.js";
 import { steeringForAssignment } from "./steering-amendments.js";
 import type { PlanHistoryStep } from "./plan-continuity.js";
@@ -416,8 +417,10 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
     const savedTurnPath = join(job.stateDir, "turn-plan.json");
     const savedTurn = existsSync(savedTurnPath)
       ? JSON.parse(await readFile(savedTurnPath, "utf8")) as TurnEvidence : null;
-    const turnEvidence = await readTurnEvidence(job, savedTurn?.contract ?? plan.contract,
-      undefined, input.turnPlanDigest);
+    const turnEvidence = input.turnPlanDigest
+      ? await readTurnEvidence(job, savedTurn?.contract ?? plan.contract,
+          undefined, input.turnPlanDigest)
+      : await readReviewTurnEvidence(job);
     if (turnEvidence) assertTurnDeliveryHistory(turnEvidence.contract, plan.contract, arch.history);
     const withTurnAssignments = async (audit: ScopeAudit, headSha: string): Promise<ScopeAudit> => {
       if (turnEvidence) {

@@ -18,7 +18,8 @@ import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints, finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview, readRepairCommitProof, repairReviewAssignment,
   type IndependentReviewResult, type RepairCommitProof } from "./checkpoint-assurance.js";
-import { readTurnEvidence, type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
+import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { inspectSpecialistChoice, recordSpecialistChoice, claimSpecialistChoice,
   completeSpecialistChoice, authorChoiceDirection, type SpecialistChoiceQuestion } from "./specialist-choice.js";
 import { verifyJobPiSession } from "./job-session.js";
@@ -233,9 +234,7 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   if (!SHA.test(point.commitSha)) throw Error("Invalid rejected commit.");
   if (existsSync(pathFor(job, point.commitSha))) return inspectRejectedRepair(job, point.commitSha);
   const failure = await verifiedFailure(job, point);
-  const planHint = JSON.parse(await readFile(join(job.stateDir, "turn-plan.json"), "utf8")) as {
-    contract: import("./architecture.js").CompletionContract };
-  const plan = await readTurnEvidence(job, planHint.contract);
+  const plan = await readReviewTurnEvidence(job);
   const original = plan?.assignments.find(a => a.id === point.assurance?.assignmentId);
   const assignment = original ? await repairReviewAssignment(job, point.workItem, original) : null;
   if (!assignment || point.assurance?.assignmentDigest !== hash(assignment))
@@ -330,9 +329,7 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
   if (state.phase === "passed" && !state.repairedCommitSha)
     throw Error("Repair cannot pass without a reviewed successor checkpoint.");
   const sealed = await verifiedFailure(job, current);
-  const planHint = JSON.parse(await readFile(join(job.stateDir, "turn-plan.json"), "utf8")) as {
-    contract: import("./architecture.js").CompletionContract };
-  const turn = await readTurnEvidence(job, planHint.contract);
+  const turn = await readReviewTurnEvidence(job);
   if (!turn) throw Error("Repair lost its pinned original Turn plan.");
   const origin = await readRejectedRepairOrigin(job, current);
   const previous = current.workItem.startsWith("repair-")

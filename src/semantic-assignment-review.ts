@@ -11,7 +11,8 @@ import { eventConsequenceProofDigest,
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
-import { readTurnEvidence, type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
+import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { sealIndependentReview, repairReviewAssignment, readRepairCommitProof,
   type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
 
@@ -116,8 +117,7 @@ export async function prepareSemanticReview(job: JobStartResult,
   if (!requested.length || requested.length > MAX_ITEMS)
     throw new Error("Semantic review group must be bounded to 1–8 checkpoints.");
   const saved = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.assurance);
-  const planHint = JSON.parse(await readFile(join(job.stateDir, "turn-plan.json"), "utf8"));
-  const plan = await readTurnEvidence(job, planHint.contract);
+  const plan = await readReviewTurnEvidence(job);
   if (!plan) throw new Error("Semantic reviewer requires the pinned original Turn.");
   const seen = new Set<string>();
   const items: SemanticReviewItem[] = [];

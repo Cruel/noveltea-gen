@@ -7,7 +7,8 @@ import type { JobStartResult } from "./job.js";
 import type { JobReport } from "./job-report.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
-import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
+import { type TurnEvidence } from "./turn-plan-evidence.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { assertTurnDeliveryHistory, deliveryCriteria, type NarrativeDeliveryCriteria } from "./turn-delivery.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -94,13 +95,15 @@ async function regular(path: string) {
  * Every source identity comes from the controller's immutable plan and Git proof. */
 export async function prepareTurnFulfillment(job: JobStartResult,
   input: TurnFulfillmentContext): Promise<TurnFulfillmentPacket | null> {
-  const path = join(job.stateDir, "turn-plan.json");
-  if (!existsSync(path)) return null; // Explicit legacy CLI contracts are not per-Turn plans.
+  const turn = await readReviewTurnEvidence(job);
+  if (!turn) {
+    if (job.recoveryFork)
+      throw Error("Recovered Story cannot claim full-Turn fulfillment without inherited review evidence.");
+    return null; // Explicit legacy CLI contracts are not per-Turn plans.
+  }
   if (git(job, "rev-parse", "HEAD").trim() !== job.headSha)
     throw new Error("Story HEAD changed since the controller verified the Turn.");
-  const saved = JSON.parse(await readFile(path, "utf8")) as TurnEvidence;
-  const turn = await readTurnEvidence(job, saved.contract);
-  if (!turn || turn.kind === "protected-amendment") return null;
+  if (turn.kind === "protected-amendment") return null;
   if (!input.scopeCurrent || !input.scopeComplete || !input.editorialPass ||
       input.headSha !== job.headSha || input.baseSha !== job.baseSha)
     throw new Error("Turn completeness requires a current native-validated and editorially reviewed Story.");
