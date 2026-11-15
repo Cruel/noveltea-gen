@@ -5,12 +5,14 @@ import { hostname as requireHostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding } from "../src/event-work.js";
+import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding,
+  currentMilestoneChoiceBinding } from "../src/event-work.js";
 import { milestoneBodyOnlyDrift, milestoneBaselineBody,
   assertMilestoneFulfillmentOnly } from "../src/milestone-field-scope.js";
 import {
   canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
   eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
+  scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
   eventMilestoneBodyRestoreFeedback,
 } from "../src/event-specialist.js";
 
@@ -28,6 +30,32 @@ test("Event handoff recognizes Luna's explicit Choice-owner binding without acce
     "A player choice may become relevant in final prose.",
     "Puzzle owner will add new clues.",
   ]), false);
+});
+
+test("later Story Choice obligations do not block the source-supported opening nondecision Milestone", () => {
+  const opening = "The disappearance is recognized as the immediate unresolved problem: " +
+    "the player knows whom travelers mean by the missing passenger and has a usable starting point " +
+    "for inquiry, but does not yet know what happened.";
+  const later = [
+    "The later consequential player choice, its outcomes, and supported outcome effects remain " +
+      "to be authored and bound; no Choice Point ID is established.",
+    "The next formal Choice will belong to milestone.explanation-and-choice.",
+  ];
+  assert.equal(hasDeferredChoiceBinding(later), true, "The unscoped text mentions Choice work");
+  assert.equal(currentMilestoneChoiceBinding(
+    later, "milestone.disappearance-established", opening), false,
+  "Unrelated future Choice must not block a distinct nondecision milestone.");
+  assert.equal(currentMilestoneChoiceBinding([
+    "A formal Choice owner must bind this milestone.disappearance-established's outcomes.",
+  ], "milestone.disappearance-established", opening), true,
+  "A source-specific binding for the current Milestone remains mandatory.");
+  assert.equal(currentMilestoneChoiceBinding(later, "milestone.explanation-and-choice",
+    "The player chooses whether to expose or conceal the evidence, with different consequences."), true,
+  "An authored Milestone that explicitly promises Choice remains incomplete until enacted.");
+  assert.equal(currentMilestoneChoiceBinding([
+    "Choice Point binding is required for both outcomes",
+  ], "milestone.disappearance-established", opening), true,
+  "An unqualified outstanding Choice binding must still fail closed.");
 });
 
 test("an authored Event's missing in-scope access evidence receives a bounded correction, not a new authority", () => {
@@ -120,6 +148,37 @@ test("only one additional evidence-only correction fits the bounded Event retry 
   assert.equal(eventEvidenceRetryAllowed(-1, [local]), false);
 });
 
+test("nondecision Milestone authority metadata does not require a formal Choice Point", () => {
+  const conflict = "The opening Event is reachable and provides the investigation setup, but " +
+    "the independent validator reports that an unbound Choice obligation cannot certify a completed " +
+    "Milestone or its fulfillment IDs. The Milestone is therefore left partial with empty " +
+    "fulfillment.any_of; this does not certify fulfillment of the nondecision Milestone.";
+  assert.equal(scopedNondecisionChoiceDeferral([conflict]), true);
+  const assignment = {
+    milestoneId: "milestone.disappearance-established",
+    milestonePath: "milestones/disappearance-established.md",
+  };
+  const feedback = eventNondecisionChoiceCorrection(
+    assignment, [conflict], ["event.disappearance-established"]);
+  assert.match(feedback, /decisions: as AUTHOR authority metadata/);
+  assert.match(feedback, /NOT executable Choice Point/);
+  assert.match(feedback, /event\.disappearance-established/);
+  assert.match(feedback, /fulfillment\.any_of/);
+  assert.match(feedback, /completeness: complete\nfulfillment:\n  any_of:\n    - - event\.disappearance-established/);
+  assert.match(feedback, /SAME Pi session/);
+  assert.match(feedback, /source-supported|genuine/i);
+  assert.doesNotMatch(feedback, /new writing grant|ignore protection/i);
+  for (const source of [
+    conflict + " A protected author decision must change.",
+    "A formal Choice Point is required by the protected author.",
+    "The Milestone is nondecision, but a new Character is needed.",
+    "An unbound Choice still prevents a separate unrelated Milestone.",
+  ]) assert.equal(scopedNondecisionChoiceDeferral([source]), false, source);
+  assert.equal(scopedNondecisionChoiceDeferral([]), false);
+  assert.throws(() => eventNondecisionChoiceCorrection(assignment,
+    ["The author expressly requires a formal Choice Point"]), /cannot be downgraded/);
+});
+
 test("Event prompt distinguishes material nondecision evidence from later Choice binding", () => {
   const assignment = {
     milestoneId: "milestone.disappearance-established",
@@ -137,6 +196,8 @@ test("Event prompt distinguishes material nondecision evidence from later Choice
   assert.match(prompt, /nondecision Milestone/i);
   assert.match(prompt, /fulfillment\.any_of/);
   assert.match(prompt, /Independent review occurs AFTER/);
+  assert.match(prompt, /Do not confuse the selected Milestone's YAML decisions:/);
+  assert.match(prompt, /NOT require a future Choice/);
   assert.match(prompt, /in this Event/i);
   assert.match(prompt, /witness|testimony/i);
   assert.match(prompt, /partial.*Choice/i);

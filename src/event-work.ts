@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
 import { authorEventCluster, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
+  scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
   eventMilestoneBodyRestoreFeedback, type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
@@ -288,6 +289,29 @@ export function hasDeferredChoiceBinding(obligations: string[]): boolean {
   return obligations.some(obligation =>
     /choice[ -]?(?:point|binding|specialist|writer|owner)|\bformal choice\b/i.test(obligation));
 }
+/** A later, unrelated Story Choice cannot invalidate a currently completed
+ * nondecision Milestone. The controller still treats an explicit Choice
+ * requirement on THIS source Milestone, or an unqualified outstanding Choice
+ * binding, as mandatory. This scopes model-authored handoff descriptions;
+ * it never changes the immutable author objective or grants permission. */
+export function currentMilestoneChoiceBinding(
+  obligations: string[], milestoneId: string, sourceChange: string,
+): boolean {
+  const sourceRequiresChoice =
+    /\b(?:choice|chooses?|choosing|decision|decides?|deciding|branch|alternate outcomes?|either\b.{0,90}\bor\b)\b/i
+      .test(sourceChange);
+  // Never assume that silence about Choice permits completed fulfillment.
+  // Ignore a later unrelated Story Choice only for a positively stated
+  // initial observation/inquiry objective; ambiguous milestones retain the
+  // original fail-closed Choice gate.
+  const explicitlyObservedNondecision = !sourceRequiresChoice &&
+    /\b(?:knows?|learns?|recogniz(?:e|es|ed)|identif(?:y|ies|ied)|observes?|becomes aware)\b/i.test(sourceChange) &&
+    /\b(?:investigat(?:ion|e|ing)|inquir(?:y|e)|missing|disappearance|subject|evidence|situation)\b/i.test(sourceChange);
+  return obligations.some(obligation =>
+    hasDeferredChoiceBinding([obligation]) &&
+    (!explicitlyObservedNondecision || obligation.includes(milestoneId) ||
+      !/\b(?:later|future|subsequent|another|next)\b/i.test(obligation)));
+}
 function acceptance(report: Report, assignment: EventAssignment, paths: string[], obligations: string[]) {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
   if (paths.some(path => !records.some(r => r.path === path))) {
@@ -308,7 +332,8 @@ function acceptance(report: Report, assignment: EventAssignment, paths: string[]
   if (!milestone || !Array.isArray(milestone.metadata.fulfillment?.any_of)) {
     throw new Error("Selected Milestone lacks a valid fulfillment declaration.");
   }
-  const missingChoice = hasDeferredChoiceBinding(obligations);
+  const missingChoice = currentMilestoneChoiceBinding(
+    obligations, assignment.milestoneId, String(milestone.metadata.change ?? ""));
   const deferredChoice = milestone.metadata.completeness === "partial" &&
     milestone.metadata.fulfillment.any_of.length === 0 && missingChoice;
   if (missingChoice && !deferredChoice) {
@@ -789,7 +814,9 @@ export async function runEventWorkItem(input: EventOptions) {
             // Protected, upstream and out-of-scope claims still fail closed.
             const localEvidenceGap = candidate.claimedPaths.length > 0 &&
               scopedEventEvidenceConflict(assign, candidate.conflicts);
-            if (candidate.conflicts.length && !localEvidenceGap)
+            const falseChoiceDeferral = candidate.claimedPaths.length > 0 &&
+              scopedNondecisionChoiceDeferral(candidate.conflicts);
+            if (candidate.conflicts.length && !localEvidenceGap && !falseChoiceDeferral)
               throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
             const checked = await validate(receipt.expectedHead);
             const draft = checked.report as unknown as Report | undefined;
@@ -809,6 +836,8 @@ export async function runEventWorkItem(input: EventOptions) {
               .map(record => record.metadata.id);
             if (localEvidenceGap)
               return [eventEvidenceRepairFeedback(assign, candidate.conflicts, authoredEventIds)];
+            if (falseChoiceDeferral)
+              return [eventNondecisionChoiceCorrection(assign, candidate.conflicts, authoredEventIds)];
             try {
               acceptance(draft, assign, paths!, candidate.obligations);
               const proof = await consequenceProof(job, draft, assign, paths!, candidate.obligations);

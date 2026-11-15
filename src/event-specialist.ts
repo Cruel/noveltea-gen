@@ -70,6 +70,57 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
     laterObligations: obj.laterObligations };
 }
 
+/** Source-local model confusion: the Milestone's decisions metadata
+ * records protected/delegated AUTHOR direction, not executable Choice Point
+ * routes. A self-identified nondecision milestone cannot be held partial
+ * merely because a later Story Choice remains unbound. The controller
+ * still requires an actual reachable authored Event and independent review. */
+export function scopedNondecisionChoiceDeferral(conflicts: readonly string[]): boolean {
+  return conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text =>
+    /\bnondecision\s+milestone\b/i.test(text) &&
+    /\b(?:unbound|pending|awaiting|deferred)\s+(?:formal\s+)?choice\b/i.test(text) &&
+    /\b(?:fulfillment|complete(?:d|ness)?|route)\b/i.test(text) &&
+    !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|new character|new fact|new milestone|unreachable|impossible)\b/i.test(text));
+}
+
+export function eventNondecisionChoiceCorrection(
+  assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
+  conflicts: readonly string[], nativeEventIds: readonly string[] = [],
+): string {
+  if (!scopedNondecisionChoiceDeferral(conflicts))
+    throw Error("An actual formal-Choice or other-owner conflict cannot be downgraded.");
+  const ids = [...new Set(nativeEventIds)].filter(id =>
+    /^event\.[a-z][a-z0-9-]*$/.test(id)).slice(0, 8);
+  return "EVENT_LOCAL_EVIDENCE: You reported a nondecision Milestone but " +
+    "incorrectly deferred its completion to a formal Choice Point. The " +
+    "selected Milestone " + assignment.milestoneId + " uses decisions: as " +
+    "AUTHOR authority metadata, NOT executable Choice Point branches. " +
+    "A linear player-visible investigative step (identify a missing passenger, " +
+    "ask a named witness, acquire a grounded first inquiry) can fulfill its " +
+    "nondecision change without any formal player Choice. " +
+    "Re-read the Milestone change and your actual reachable Event. If the " +
+    "Event supplies the promised change with genuine in-scene evidence, " +
+    "edit ONLY completeness: complete and fulfillment.any_of in " +
+    assignment.milestonePath + " to bind the real authored Event; do not " +
+    "defer the binding to a later owner or independent reviewer. " +
+    "In laterObligations, distinguish any genuinely FUTURE Choice Point " +
+    "for another Milestone from this nondecision Milestone. Do not call a " +
+    "future Story choice an unbound Choice binding of " + assignment.milestoneId +
+    " merely because it happens later in the narrative. " +
+    (ids.length ? "Actual native Event candidates: " + JSON.stringify(ids) +
+      ". For ONE genuinely sufficient and reachable Event, the selected " +
+      "Milestone can use YAML shape: completeness: complete\nfulfillment:\n" +
+      "  any_of:\n    - - " + ids[0] + "\n" +
+      "This is NOT a claim that the source evidence is sufficient; verify it " +
+      "first, use only the actual authored Event IDs and validate the route. " : "") +
+    "Preserve the Milestone's original narrative body, all protected decisions, " +
+    "other metadata and external canon. If the original Milestone in fact " +
+    "requires a consequential choice branch, state that exact unmet source " +
+    "obligation rather than fabricating a completed route. " +
+    "Run story_validate, then return a complete cumulative manifest in this " +
+    "SAME Pi session. CONTROLLER FINDINGS: " + JSON.stringify(conflicts).slice(0, 1400);
+}
+
 /** An Event owns its own in-scene evidence. A model's claim that its draft
  * lacks source-grounded access/timing/testimony is repair feedback, not a new
  * specialist grant. Only a concrete deficit in the assigned Milestone's
@@ -229,6 +280,12 @@ export function eventSpecialistPrompt(
       "alone proves that all the Milestone's evidence has been established. " +
       "For a promised contradiction, test the claims against an independent observation " +
       "the player can inspect: an undated physical trace cannot establish the disputed timing. " +
+      "Do not confuse the selected Milestone's YAML decisions: entries, which " +
+      "preserve delegated/protected AUTHOR authority, with executable formal " +
+      "Choice Points. A linear Event where the player identifies the subject " +
+      "and starts investigating does NOT require a future Choice to fulfill " +
+      "that initial nondecision turning point. Later choices may remain " +
+      "unbound without preventing its source-supported fulfillment. " +
       "For a nondecision Milestone, THIS Event assignment owns BOTH delivering " +
       "each material evidence clause and binding its reachable Event IDs in the " +
       "selected Milestone's fulfillment.any_of and completeness fields. " +
