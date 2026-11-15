@@ -28,6 +28,32 @@ test("optional formal-Puzzle handoffs are not author obligations", () => {
   }
 });
 
+test("verified Event handoffs cannot create a Puzzle obligation from stage names alone", () => {
+  for (const statement of [
+    "Puzzle specialist will handle clues at a later unit.",
+    "Puzzle work and final scenes belong to downstream owners.",
+    "The Puzzle owner should consider formal solutions if the evidence permits.",
+    "The interactive owner must bind the Choice; Puzzle and prose follow later.",
+    "More Puzzle investigation will be needed once evidence is available.",
+  ]) {
+    assert.equal(explicitlyRequiresPuzzle(statement, "event-handoff"), false, statement);
+    // A bare direct author request for a formal Puzzle is different from a
+    // model's downstream stage inventory.
+  }
+  for (const statement of [
+    "A mandatory Puzzle with two distinct reachable solution Events is required.",
+    "The player must solve the mystery through verifiable clues.",
+    "The source-bound Puzzle must be solved using two independently reachable Events.",
+  ]) {
+    assert.equal(explicitlyRequiresPuzzle(statement, "event-handoff"), true, statement);
+  }
+  assert.equal(
+    explicitlyRequiresPuzzle("Make a puzzle mystery game"),
+    true,
+    "Explicit formal Puzzle in the original author brief remains mandatory.",
+  );
+});
+
 test("no-write Pi transcript is source-bound, regular, and content-addressed", () => {
   const root = mkdtempSync(join(tmpdir(), "nt-puzzle-no-write-witness-"));
   try {

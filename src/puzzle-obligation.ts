@@ -16,7 +16,10 @@ const MILESTONE = /^milestone\.[a-z][a-z0-9-]*$/;
 /** A bare "mystery" or "fair-play clues" is a delivery obligation, NOT a
  * request to construct a formal Puzzle with two solution Events. An explicit
  * puzzle mechanism or player-solving goal is different. */
-export function explicitlyRequiresPuzzle(statement: string): boolean {
+export function explicitlyRequiresPuzzle(
+  statement: string,
+  source: "approved-turn" | "event-handoff" = "approved-turn",
+): boolean {
   // A specialist saying that its *stage* is deferred is not an approved
   // requirement. Neither is a choice of methods ("Choice or Puzzle") or a
   // prohibition ("no puzzles"). An unresolved mandatory goal is different.
@@ -36,9 +39,10 @@ export function explicitlyRequiresPuzzle(statement: string): boolean {
   if (formal.test(text)) {
     if (formalMandatory.test(text)) return true;
     if (deferred.test(text) || /\b(?:choice|choices)\s*(?:\/|or)\s*puzzles?\b/i.test(text)) return false;
-    // An explicit author-requested formal Puzzle ("a puzzle mystery") is a
-    // requirement even when the author did not use the word "must".
-    return true;
+    // A formal Puzzle named by the AUTHOR is itself a request, even without
+    // "must". A specialist's later, model-authored handoff cannot create that
+    // requirement merely by naming its next pipeline stage.
+    return source === "approved-turn";
   }
   return (
     /\b(?:player|protagonist|reader)\b.{0,60}\b(?:must|needs? to|has to|will)\s+(?:actually\s+)?(?:solve|deduce|identify|unmask|figure out|work out)\b.{0,90}\b(?:mystery|case|crime|culprit|murderer|killer|perpetrator)\b/i.test(
@@ -88,14 +92,14 @@ export async function puzzleObligation(
     ];
     if (turn.objective.requestedTargets.some((id) => id.startsWith("puzzle.")))
       reasons.push("Original source-bound target explicitly requires a Puzzle.");
-    if (source.some(explicitlyRequiresPuzzle))
+    if (source.some((statement) => explicitlyRequiresPuzzle(statement)))
       reasons.push("Original source-bound Turn requires a Puzzle or player-solved mystery.");
   }
   if (
     plan.contract.scope.targets.some((id) => id.startsWith("puzzle.")) ||
     (plan.contract.scope.supportingTargets ?? []).some((id) => id.startsWith("puzzle.")) ||
-    plan.contract.constraints.some(explicitlyRequiresPuzzle) ||
-    sourceObligations.some(explicitlyRequiresPuzzle)
+    plan.contract.constraints.some((statement) => explicitlyRequiresPuzzle(statement)) ||
+    sourceObligations.some((statement) => explicitlyRequiresPuzzle(statement, "event-handoff"))
   ) {
     reasons.push("Controller-approved scope or verified Event obligations require Puzzle work.");
   }
