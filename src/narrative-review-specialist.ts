@@ -383,6 +383,23 @@ export function assertSemanticCorrectionPreserved(before: Record<string, unknown
   return { ...after, findings };
 }
 
+/** Assignment reviewers may consult the writer's ORIGINAL immutable pinned
+ * craft method when judging a Choice or Puzzle unit. This is a bounded
+ * read-only supplement to mandatory reviewer/catalog methods, not permission
+ * to read live Story files, inferred paths, other roles, or external skills.
+ * The controller still authenticates every read against the exact snapshot. */
+export function assignmentReviewerOptionalMethods(
+  snapshot: SkillSnapshot, packet: SemanticReviewPacket,
+): string[] {
+  const methods = [
+    ...(packet.items.some(item => item.reviewedWorkItem.startsWith("interactive-choice-"))
+      ? ["nt-interactive-narrative/SKILL.md"] : []),
+    ...(packet.items.some(item => item.reviewedWorkItem.startsWith("interactive-puzzle-"))
+      ? ["nt-puzzle-design/SKILL.md"] : []),
+  ];
+  return pinnedSourcePaths(snapshot, methods);
+}
+
 /** Task-first, stage-local assignment review, distinct from final literary
  * review. The executing reviewer has no writer or approval tools, and only the
  * controller may validate/seal its findings. */
@@ -397,7 +414,14 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
     sources: boundedPinnedSources("nt-narrative-review"),
     sourceUse:
       "Read ONLY pinned skill:// review-method and catalog references with the " +
-      "read tool. The REVIEW PACKET inline contains the COMPLETE sealed Git diff, " +
+      "read tool. " +
+      (assignmentReviewerOptionalMethods(snapshot, packet).length
+        ? "For the Choice/Puzzle work in this exact sealed packet you MAY also read " +
+          "its immutable pinned writer method for craft comparison, never as " +
+          "a new authoring role or permission to inspect current Story files: " +
+          pinnedSkillReferences(snapshot, assignmentReviewerOptionalMethods(snapshot, packet)) + ". "
+        : "") +
+      "The REVIEW PACKET inline contains the COMPLETE sealed Git diff, " +
       "canonicalContext, blobSha and commitSha: use ONLY THOSE supplied bytes as " +
       "Story evidence. Do NOT call read with any Story filename, /story path, " +
       "or absolute worktree path; those reads are denied, as the live worktree " +
@@ -506,10 +530,12 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
         "Assignment reviewer did not read mandatory pinned skills: " + missingPinned().join(", "),
       );
     // Any access to current Story files would contaminate the sealed snapshot,
-    // even if the model later cites only the packet. Only exact pinned methods
-    // are legitimate read-tool sources for assignment-fidelity review.
+    // even if the model later cites only the packet. Exact immutable methods
+    // governing the reviewed Choice/Puzzle work are optional read-only
+    // references; every other extra skill or path remains prohibited.
+    const optional = assignmentReviewerOptionalMethods(snapshot, packet);
     const otherReads = completedReads(session, job.worktreeStoryRoot, snapshot.path)
-      .filter(path => !required.includes(path));
+      .filter(path => !required.includes(path) && !optional.includes(path));
     if (otherReads.length)
       throw new Error("Assignment reviewer read outside immutable pinned methods: " +
         otherReads.join(", "));

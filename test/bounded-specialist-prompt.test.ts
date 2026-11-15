@@ -15,6 +15,7 @@ import { CRITICAL_CAST_GUIDANCE } from "../src/character-world-specialist.js";
 import { interactiveSpecialistPrompt, type InteractiveAssignment } from "../src/interactive-specialist.js";
 import {
   assignmentFidelityPrompt,
+  assignmentReviewerOptionalMethods,
   narrativeRepairPrompt,
   type ReviewAssignment,
 } from "../src/narrative-review-specialist.js";
@@ -349,6 +350,31 @@ test("Puzzle writer and reviewer require equivalent objective evidence for every
   assert.match(reviewer, /weaker or different fact/);
   assert.match(reviewer, /NONE\. This is a read-only reviewer/);
   assert.doesNotMatch(rendered["Assignment reviewer"], /weaker or different fact/);
+});
+
+test("retrospective reviewer allows only exact immutable writer methods for Choice/Puzzle packets", () => {
+  const choicePacket = { ...packet, items: packet.items.map(item => ({
+    ...item, reviewedWorkItem: "interactive-choice-disclosure",
+  })) };
+  const puzzlePacket = { ...packet, items: packet.items.map(item => ({
+    ...item, reviewedWorkItem: "interactive-puzzle-disclosure",
+  })) };
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, packet), [],
+    "Ordinary Event reviews cannot read any writer method as a supplement.");
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, choicePacket),
+    [snapshot.path + "/skills/nt-interactive-narrative/SKILL.md"]);
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, puzzlePacket),
+    [snapshot.path + "/skills/nt-puzzle-design/SKILL.md"]);
+  assert.match(assignmentFidelityPrompt(snapshot, choicePacket),
+    /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
+  assert.match(assignmentFidelityPrompt(snapshot, puzzlePacket),
+    /skill:\/\/nt-puzzle-design\/SKILL\.md/);
+  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, packet),
+    /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
+  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
+    /skill:\/\/nt-puzzle-design\/SKILL\.md/);
+  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
+    /skill:\/\/nt-worldbuilding\/SKILL\.md/);
 });
 
 test("each actual pinned-read list retains portable method, representation and authority", () => {
