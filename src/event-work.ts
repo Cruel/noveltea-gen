@@ -1,6 +1,7 @@
 import { execFileSync } from "./git-read-cache.js";
 import { commitOrigin } from "./recovery-fork-state.js";
-import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
+import { assertMilestoneFulfillmentOnly, milestoneBodyOnlyDrift,
+  milestoneBaselineBody } from "./milestone-field-scope.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
@@ -8,7 +9,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
 import { authorEventCluster, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
-  type EventAssignment, type EventEvidence } from "./event-specialist.js";
+  eventMilestoneBodyRestoreFeedback, type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
@@ -741,17 +742,46 @@ export async function runEventWorkItem(input: EventOptions) {
           const verifyDraft = async (candidate: EventEvidence) => {
             let paths: string[] | undefined;
             let repairablePathError: string | undefined;
+            let bodyRestoreFeedback: string | undefined;
             try {
               paths = await changedPaths(job, assign, candidate.claimedPaths);
             } catch (error) {
               const message = String(error);
-              // Only incomplete work/manifest claims are repairable. Unauthorized
-              // edits, unsafe paths and protected mutations remain hard failures.
-              if (!message.includes("must change at least one Event") &&
-                  !message.includes("modifiedRecords differ from the actual authorized Git diff")) throw error;
-              repairablePathError = message;
+              if (message.includes("Event specialist changed unrelated Milestone metadata/body.")) {
+                // The latest real Luna source authored an Event and an otherwise
+                // valid selected-Milestone binding, but appended a justification
+                // to the Milestone's immutable narrative body. Permit ONE
+                // correction of exact original bytes in the SAME session,
+                // never tolerance of the changed body or metadata at commit.
+                const baseline = rawGit(job, "show", "HEAD:" + repoPath(job, assign.milestonePath));
+                const current = await readFile(join(job.worktreeStoryRoot, assign.milestonePath), "utf8");
+                const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+                const modified = dirty(job);
+                const paths = modified.map(entry => entry.slice(3));
+                if (!milestoneBodyOnlyDrift(baseline, current) ||
+                    !modified.some(entry => entry.slice(3) === repoPath(job, assign.milestonePath)) ||
+                    !paths.some(path => path.startsWith(prefix + "events/")) ||
+                    modified.some(entry => ![" M", "??"].includes(entry.slice(0, 2)) ||
+                      !entry.slice(3).startsWith(prefix) ||
+                      entry.slice(3) !== repoPath(job, assign.milestonePath) &&
+                      !/^events\/[a-z][a-z0-9-]*\.md$/.test(entry.slice(3).slice(prefix.length)))) {
+                  // Any changed protected decision, other frontmatter, staged
+                  // file or unrelated path retains the original hard block.
+                  throw error;
+                }
+                bodyRestoreFeedback = eventMilestoneBodyRestoreFeedback(
+                  assign.milestonePath, milestoneBaselineBody(baseline));
+              } else {
+                // Only incomplete work/manifest claims are otherwise repairable.
+                // Unauthorized edits, unsafe paths and protected mutations fail closed.
+                if (!message.includes("must change at least one Event") &&
+                    !message.includes("modifiedRecords differ from the actual authorized Git diff"))
+                  throw error;
+                repairablePathError = message;
+              }
             }
             assertHead(job, receipt.expectedHead);
+            if (bodyRestoreFeedback) return [bodyRestoreFeedback];
             // A model that has already authored in-scope Event files may
             // report a missing piece of reachable observation/testimony as
             // an "architectural conflict". This is one bounded correction in

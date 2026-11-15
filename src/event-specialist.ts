@@ -137,13 +137,42 @@ export function eventEvidenceRepairFeedback(
     "SOURCE DEFICITS: " + JSON.stringify(conflicts).slice(0, 1800);
 }
 
+/** The source-authoritative Milestone narrative is immutable to the Event
+ * writer. A body-only drift receives exact bytes to restore in the SAME
+ * original session; the controller never edits or accepts the changed body.
+ * All non-binding frontmatter changes still fail closed without this path. */
+export function eventMilestoneBodyRestoreFeedback(
+  milestonePath: string, originalBody: string,
+): string {
+  if (!/^milestones\/[a-z][a-z0-9-]*\.md$/.test(milestonePath) ||
+      !originalBody.trim() || originalBody.length > 16_000)
+    throw new Error("Cannot safely restore unbounded or noncanonical Milestone body.");
+  return "EVENT_MILESTONE_BODY_RESTORE: Your authored Event may update ONLY " +
+    "the completeness and fulfillment.any_of YAML slots of " + milestonePath + ". " +
+    "Your latest Milestone edit ALSO changed the narrative body, which is NOT " +
+    "authorized even if the explanation seems helpful. Restore the Milestone " +
+    "body EXACTLY to these original source-bound bytes, preserving its original " +
+    "whitespace and punctuation. Keep the supported new completeness/fulfillment " +
+    "fields only if the authored Event truly satisfies the Milestone; do not " +
+    "add narrative explanation to the Milestone. Evidence and testimony belong " +
+    "in the already-authorized Event prose. Do not touch any protected choice, " +
+    "other metadata, new Fact, Character or other-owner file. " +
+    "Then run story_validate again and return a complete cumulative manifest " +
+    "of actual changed Story-relative paths in this SAME Pi session. " +
+    "The controller will re-audit the exact original source against the final " +
+    "Milestone; NO new permission or review bypass has been granted. " +
+    "ORIGINAL NARRATIVE BODY (JSON-encoded exact text): " +
+    JSON.stringify(originalBody);
+}
+
 /** Exactly one extra turn is permitted ONLY for a controller-identified,
- * source-local evidence gap after the usual three attempts. No other error
- * category gains a retry and a fourth failure is always terminal. */
+ * source-local evidence gap or the original Milestone-body restoration.
+ * No other error category gains a retry and a fourth failure is terminal. */
 export function eventEvidenceRetryAllowed(attempt: number, diagnostics: readonly string[]): boolean {
   return Number.isInteger(attempt) && (attempt === 0 || attempt === 1 ||
     attempt === 2 && diagnostics.length > 0 &&
-    diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:")));
+    diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:") ||
+      message.startsWith("EVENT_MILESTONE_BODY_RESTORE:")));
 }
 
 /** Pure production prompt for fixture comparison and controller-contract tests. */
@@ -426,12 +455,13 @@ export async function authorEventCluster(
         return evidence;
       }
       const localEvidence = diagnostics.length > 0 &&
-        diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:"));
+        diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:") ||
+          message.startsWith("EVENT_MILESTONE_BODY_RESTORE:"));
       if (!eventEvidenceRetryAllowed(attempt, diagnostics))
         throw new Error("Event specialist exhausted bounded repair attempts: " + JSON.stringify(diagnostics));
       if (attempt === 2) extraEvidenceCorrection = true;
       prompt = localEvidence
-        ? "IN-SCOPE EVENT EVIDENCE CORRECTION ONLY. Keep the original " +
+        ? "IN-SCOPE EVENT EVIDENCE OR MILESTONE-BODY RESTORATION ONLY. Keep the original " +
           "Milestone, approved cast, protected facts and event-scope permissions. " +
           "Do not convert this evidence deficit into an upstream approval request, " +
           "nor claim partial fulfillment is a pass for a nondecision Milestone. " +

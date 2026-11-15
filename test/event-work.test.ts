@@ -6,9 +6,12 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding } from "../src/event-work.js";
+import { milestoneBodyOnlyDrift, milestoneBaselineBody,
+  assertMilestoneFulfillmentOnly } from "../src/milestone-field-scope.js";
 import {
   canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
   eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
+  eventMilestoneBodyRestoreFeedback,
 } from "../src/event-specialist.js";
 
 test("Event handoff recognizes Luna's explicit Choice-owner binding without accepting a vague choice mention", () => {
@@ -64,11 +67,50 @@ test("an authored Event's missing in-scope access evidence receives a bounded co
   assert.equal(scopedEventEvidenceConflict(assignment, [exact, "New Character required"]), false);
 });
 
+test("only a source-exact Milestone body drift is repairable without expanding Event authority", () => {
+  const baseline = [
+    "---", "schema: '0.1'", "type: milestone",
+    "id: milestone.absence-recognized", "title: The Absence Becomes a Case", "status: draft",
+    "completeness: partial", "decisions:", "  - id: baseline",
+    "    statement: A protected observation", "    authority: user-protected",
+    "fulfillment:", "  any_of: []", "---",
+    "", "This is the original narrative promise, not the eventual Event proof.",
+  ].join("\n");
+  const binding = baseline.replace("completeness: partial", "completeness: complete")
+    .replace("  any_of: []", "  any_of:\n    - - event.absence-recognized");
+  const polluted = binding.replace(
+    "This is the original narrative promise, not the eventual Event proof.",
+    "The Event is now finished and the Milestone body should explain why.");
+  assert.equal(milestoneBodyOnlyDrift(baseline, binding), false);
+  assert.equal(milestoneBodyOnlyDrift(baseline, polluted), true);
+  assert.throws(() => assertMilestoneFulfillmentOnly(baseline, polluted, true),
+    /unrelated Milestone metadata\/body/);
+  const body = milestoneBaselineBody(baseline);
+  assert.match(body, /original narrative promise/);
+  const feedback = eventMilestoneBodyRestoreFeedback("milestones/absence-recognized.md", body);
+  assert.match(feedback, /ORIGINAL NARRATIVE BODY/);
+  assert.match(feedback, /SAME Pi session/);
+  assert.match(feedback, /fulfillment\.any_of/);
+  assert.doesNotThrow(() => assertMilestoneFulfillmentOnly(baseline, binding, true));
+  for (const tampered of [
+    polluted.replace("A protected observation", "A fake author override"),
+    polluted.replace("title: The Absence Becomes a Case", "title: A New Scope"),
+    polluted.replace("id: milestone.absence-recognized", "id: milestone.other-scope"),
+  ]) assert.equal(milestoneBodyOnlyDrift(baseline, tampered), false,
+    "Protected/other metadata must never be corrected by the body-only path.");
+  assert.throws(() => eventMilestoneBodyRestoreFeedback("../escape.md", body), /noncanonical/);
+  assert.throws(() => eventMilestoneBodyRestoreFeedback(
+    "milestones/absence-recognized.md", "x".repeat(16_001)), /unbounded/);
+});
+
 test("only one additional evidence-only correction fits the bounded Event retry budget", () => {
   const local = "EVENT_LOCAL_EVIDENCE: Missing player-observed access during the interval.";
   assert.equal(eventEvidenceRetryAllowed(0, ["ordinary native diagnostic"]), true);
   assert.equal(eventEvidenceRetryAllowed(1, ["ordinary native diagnostic"]), true);
   assert.equal(eventEvidenceRetryAllowed(2, [local]), true);
+  assert.equal(eventEvidenceRetryAllowed(2, [
+    "EVENT_MILESTONE_BODY_RESTORE: Restore the exact original Milestone body.",
+  ]), true);
   assert.equal(eventEvidenceRetryAllowed(2, [local, local]), true);
   assert.equal(eventEvidenceRetryAllowed(2, ["Selected Milestone lacks a route"]), false);
   assert.equal(eventEvidenceRetryAllowed(2, [local, "Unauthorized protected author change"]), false);
