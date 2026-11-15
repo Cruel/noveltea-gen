@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { deriveFoundationAssignment, auditPaths, checkOutput } from "../src/character-world.js";
+import { foundationManifestCorrectionPrompt } from "../src/character-world-specialist.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-character-world-"));
 after(() => removeTestTree(root));
@@ -40,6 +41,17 @@ test("character assignment includes existing canonical Character paths instead o
   assert.ok(!character.sourcePaths.includes("characters/unrelated.md"));
   const world = deriveFoundationAssignment("world", plan as any, report as any, []);
   assert.ok(!world.sourcePaths.includes("characters/nia.md"));
+});
+
+test("completed foundation writer can correct a missing manifest in the same bounded session", () => {
+  const feedback = foundationManifestCorrectionPrompt();
+  assert.match(feedback, /SAME original Pi session/);
+  assert.match(feedback, /modifiedRecords/);
+  assert.match(feedback, /architecturalConflicts/);
+  assert.match(feedback, /laterObligations/);
+  assert.match(feedback, /do not edit or rerun the files/i);
+  assert.match(feedback, /actual Git diff/);
+  assert.doesNotMatch(feedback, /grant new paths|skip validation/i);
 });
 
 function setup(name: string, protectedFoundation = false) {

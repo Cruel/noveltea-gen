@@ -81,6 +81,19 @@ const DOMAINS = {
   },
 } as const;
 
+/** A completed writer may omit its required output envelope. This is an
+ * in-session reporting correction, never permission to replay the writer. */
+export function foundationManifestCorrectionPrompt(): string {
+  return "MANIFEST-ONLY CORRECTION in the SAME original Pi session: You authored " +
+    "canonical files but did not return the required complete JSON manifest. " +
+    "Do not edit or rerun the files. Report one unfenced JSON object containing " +
+    "modifiedRecords (all changed Story-relative paths), architecturalConflicts " +
+    "and laterObligations (both string arrays). Only name actual changes; the " +
+    "controller independently checks the actual Git diff, native validation, " +
+    "protected decisions and original writable scope. No new files, write grants " +
+    "or Story decisions are authorized by this correction.";
+}
+
 /** Real Pi authoring: no commit, validation or authorization power is delegated to the specialist. */
 export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: FoundationAssignment, provider: string, modelId: string,
@@ -218,12 +231,16 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }
       const paths = (declared as { modifiedRecords?: unknown })?.modifiedRecords;
       if (!Array.isArray(paths) || paths.length === 0 || !paths.every(p => typeof p === "string")) {
-        throw new Error("Foundation specialist did not provide a valid modifiedRecords manifest.");
+        if (attempt === 2) throw new Error("Foundation specialist did not provide a valid modifiedRecords manifest.");
+        prompt = foundationManifestCorrectionPrompt();
+        continue;
       }
       const messages = declared as { architecturalConflicts?: unknown; laterObligations?: unknown };
       const strings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === "string" && x.trim());
       if (!strings(messages.architecturalConflicts) || !strings(messages.laterObligations)) {
-        throw new Error("Specialist must explicitly report architectural conflicts and downstream obligations.");
+        if (attempt === 2) throw new Error("Specialist must explicitly report architectural conflicts and downstream obligations.");
+        prompt = foundationManifestCorrectionPrompt();
+        continue;
       }
       const evidence: SpecialistEvidence = { claimedPaths: paths, skillReads,
         architecturalConflicts: messages.architecturalConflicts as string[],

@@ -321,3 +321,42 @@ source-bound Event-to-Character dependency path remains separate work. Neither
 a worker restart/isolation audit nor external literary quality attestation was
 obtained, so `pnpm certify:new-story` cannot be claimed eligible and #158
 remains open.
+
+## November 14 after #170: current-source Luna certification still blocked
+
+Both fresh real-Pi cases ran against clean Gen source
+`aa2a84d9ffa28835c7990462d4ca90add91272ec`, clean portable skills
+`4c0a591e9e435de061ea58add8e7b14f2b40f605`, `openai/gpt-6-luna`, Pi
+1.5.0 and native CLI 1.0.0. Each established the baseline with recommendations,
+partial delegation, reloaded the same proposed digest, obtained exact author
+approval, and continued the original Turn. Neither finished a playable Story.
+
+| Mode | Private evidence / Job | Verified HEAD | Unresolved gate |
+| --- | --- | --- | --- |
+| Autonomous | `/tmp/nt158-qVAIaR` / `4aa73e8a-17a2-44ae-adcd-ee5ca12122b0` | `9c344eb9ceb6d0f8c24923b7a1b867f39bba6954` | **blocked** at World Foundations: Luna wrote source-grounded, native-valid World Entity/Fact files but omitted its final JSON `modifiedRecords` manifest. The controller made no unverified World commit. |
+| Collaborative | `/tmp/nt158-4N3cxD` / `7a2624fa-2cc5-4355-b56d-9a7d6ca359ef` | `6bda8dc2702e06b7cca5dd09da74a12240bb3e46` | **blocked** at Puzzle: World, Character, all four Events and a Choice were written. One Event's first review and first correction failed for unsupported account comparisons, then its second correction passed independent rereview. The Puzzle writer returned a clean no-edit prerequisite report because a concrete solvable Puzzle objective and two independent solution routes lacked evidence. |
+
+Both source repositories happened to have the same initial SHA
+`fc7c425b2188f6ddf126f808cdd0a15d19c0ba4e`: the disposable Git seed commit
+had identical contents, author metadata, message and timestamp. This is a
+certification-fixture identity defect, not cross-Thread leakage. The runner is
+now adjusted to give distinct disposable baseline commit messages, so future
+real runs will have unique immutable source identities.
+
+The World missing-manifest path now offers a bounded same-session reporting
+correction and then checks the actual Git diff, native validation and original
+write authority. Its focused regression passes; it has **not** been proven by
+another fresh Luna run. Issue [#171](https://github.com/Cruel/noveltea-gen/issues/171)
+tracks an independent controller-contract gap: `interactive-work.ts` and
+`composition-work.ts` require both Choice and Puzzle, while #158 requires
+Choice/Puzzle as appropriate and this author requested fair-play clues and
+consequential choices rather than a formal Puzzle. A Puzzle may be skipped only
+when the signed original objective and independent review allow it; necessary
+mystery-clue and outcome work may not be skipped or fabricated.
+
+Native validation passed for both Story heads, and regular `pnpm check` passed
+on the tested source (root 503 passed / 31 opt-in skips; Studio 411 passed /
+53 opt-in skips). Neither reached final composed scenes, native full-Story
+readiness, whole-Turn review, worker interruption/isolation certification or
+external literary quality evaluation. No `eligible` release certification was
+produced. **Keep #158 OPEN.**

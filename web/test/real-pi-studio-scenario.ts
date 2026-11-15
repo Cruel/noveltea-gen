@@ -137,7 +137,9 @@ test(fullStory
     git(repo, 'config', 'user.name', 'Author')
     git(repo, 'config', 'user.email', 'author@web-live.test')
     git(repo, 'add', '.')
-    git(repo, 'commit', '-qm', 'Story baseline')
+    // Distinct disposable repositories need distinct immutable source SHAs even
+    // when their noncanonical baseline files and Git timestamps match.
+    git(repo, 'commit', '-qm', 'Story baseline ' + randomUUID())
     const commit = git(repo, 'rev-parse', 'HEAD')
     assert.equal(git(repo, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'story')
       .split('\n').filter(path => path.endsWith('.md')).length, 0,
