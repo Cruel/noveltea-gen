@@ -394,7 +394,13 @@ export function assignmentReviewerOptionalMethods(
     item.reviewedWorkItem.startsWith("interactive-choice-"));
   const puzzle = packet.items.some(item =>
     item.reviewedWorkItem.startsWith("interactive-puzzle-"));
+  // World and Character form one planned Foundations stage, but have
+  // separately committed and reviewed units. Either reviewer may compare
+  // their immutable stage-local methods without gaining authoring authority.
+  const foundations = packet.items.some(item =>
+    ["world-foundations", "character-foundations"].includes(item.reviewedWorkItem));
   const methods = [
+    ...(foundations ? ["nt-worldbuilding/SKILL.md", "nt-character-development/SKILL.md"] : []),
     ...(choice ? ["nt-interactive-narrative/SKILL.md"] : []),
     ...(puzzle ? ["nt-puzzle-design/SKILL.md"] : []),
     ...((choice || puzzle) ? ["nt-catalog/references/progression.md"] : []),
@@ -458,9 +464,9 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "Read ONLY pinned skill:// review-method and catalog references with the " +
       "read tool. " +
       (assignmentReviewerOptionalMethods(snapshot, packet).length
-        ? "For the Choice/Puzzle work in this exact sealed packet you MAY also read " +
-          "its immutable pinned writer method and the canonical branch progression " +
-          "contract for craft/schema comparison, never as a new authoring role " +
+        ? "For the exact reviewed unit in this sealed packet you MAY also read " +
+          "these immutable pinned craft methods and, where applicable, the canonical " +
+          "branch progression contract for craft/schema comparison, never as a new authoring role " +
           "or permission to inspect current Story files: " +
           pinnedSkillReferences(snapshot, assignmentReviewerOptionalMethods(snapshot, packet)) + ". "
         : "") +

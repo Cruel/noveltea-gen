@@ -362,8 +362,24 @@ test("retrospective reviewer allows only exact immutable writer methods for Choi
   const puzzlePacket = { ...packet, items: packet.items.map(item => ({
     ...item, reviewedWorkItem: "interactive-puzzle-disclosure",
   })) };
+  const worldPacket = { ...packet, items: packet.items.map(item => ({
+    ...item, reviewedWorkItem: "world-foundations",
+  })) };
+  const characterPacket = { ...packet, items: packet.items.map(item => ({
+    ...item, reviewedWorkItem: "character-foundations",
+  })) };
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, packet), [],
     "Ordinary Event reviews cannot read any writer method as a supplement.");
+  const foundationMethods = [
+    snapshot.path + "/skills/nt-worldbuilding/SKILL.md",
+    snapshot.path + "/skills/nt-character-development/SKILL.md",
+  ];
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, worldPacket), foundationMethods);
+  assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, characterPacket), foundationMethods);
+  assert.match(assignmentFidelityPrompt(snapshot, worldPacket),
+    /skill:\/\/nt-worldbuilding\/SKILL\.md/);
+  assert.match(assignmentFidelityPrompt(snapshot, characterPacket),
+    /skill:\/\/nt-character-development\/SKILL\.md/);
   assert.deepEqual(assignmentReviewerOptionalMethods(snapshot, choicePacket),
     [snapshot.path + "/skills/nt-interactive-narrative/SKILL.md",
       snapshot.path + "/skills/nt-catalog/references/progression.md"]);
@@ -376,6 +392,10 @@ test("retrospective reviewer allows only exact immutable writer methods for Choi
     /skill:\/\/nt-puzzle-design\/SKILL\.md/);
   assert.doesNotMatch(assignmentFidelityPrompt(snapshot, packet),
     /skill:\/\/nt-interactive-narrative\/SKILL\.md/);
+  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, packet),
+    /skill:\/\/nt-worldbuilding\/SKILL\.md/);
+  assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
+    /skill:\/\/nt-character-development\/SKILL\.md/);
   assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
     /skill:\/\/nt-puzzle-design\/SKILL\.md/);
   assert.doesNotMatch(assignmentFidelityPrompt(snapshot, choicePacket),
