@@ -31,6 +31,7 @@
     "studio:input": "tsx src/studio-input.ts",
     "trace:show": "tsx src/trace-show.ts",
     "replay:step": "tsx scripts/replay-execution.ts",
+    "story:snapshots": "tsx scripts/story-debug-snapshots.ts",
     "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm build && pnpm --filter @noveltea/studio check"
   },
   "engines": {

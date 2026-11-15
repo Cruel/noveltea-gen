@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { hostname } from "node:os";
 import { mkdir, readFile, rename, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { captureStorySnapshot, pruneRoutineStorySnapshots,
+  type StorySnapshotPhase } from "./story-debug-snapshot.js";
 import type { JobStartResult } from "./job.js";
 
 export interface StoryWriterContext {
@@ -13,6 +15,26 @@ export interface StoryWriterContext {
   active: boolean;
 }
 const storyWriter = new AsyncLocalStorage<StoryWriterContext>();
+/** Keep diagnostic Git refs out of routine controller and read-only leases. */
+export function isStorySpecialistLease(item: string) {
+  return item === "foundation" || item === "global-architecture" ||
+    item === "character-world" || item === "rejected-review-writer" ||
+    item === "idea-placement" || item === "rejected-review-validation" ||
+    item === "rejected-review-commit" ||
+    /^(?:event-|interactive-|composition-|focus:)/.test(item);
+}
+function saveDiagnostic(job: JobStartResult, phase: StorySnapshotPhase, item: string) {
+  try {
+    captureStorySnapshot(job, phase, item);
+    if (phase === "after-work" || phase === "before-work")
+      pruneRoutineStorySnapshots(job);
+  } catch (error) {
+    // A failed debugging facility must never hide the original writer error or
+    // change the Story's recovery/author-approval semantics.
+    console.warn("[Story diagnostic snapshot]", phase, item,
+      error instanceof Error ? error.message : String(error));
+  }
+}
 export function activeStoryWriter(): StoryWriterContext | undefined {
   return storyWriter.getStore();
 }
@@ -75,6 +97,7 @@ async function withJobLease<T>(job: JobStartResult, workItem: string, prefix: st
     version: 1, jobId: job.jobId, pid: process.pid,
     host: hostname(), nonce: randomUUID(), workItem,
   };
+  let recoveredOwner: Owner | undefined;
   try {
     await mkdir(lock);
   } catch (error) {
@@ -94,6 +117,7 @@ async function withJobLease<T>(job: JobStartResult, workItem: string, prefix: st
       // The stale owner is saved as an audit artifact; two would-be reclaimers
       // cannot both acquire the new lock because the guard is a mkdir.
       await rename(lock, join(jobRoot, `${prefix}-stale-${previous.nonce}`));
+      recoveredOwner = previous;
       await mkdir(lock);
     } finally {
       if (claimed) await rmdir(reclaim);
@@ -105,7 +129,19 @@ async function withJobLease<T>(job: JobStartResult, workItem: string, prefix: st
     await writeFile(join(lock, "owner.json"), JSON.stringify(owner) + "\n", { flag: "wx", mode: 0o600 });
     published = true;
     if (prefix === ".story-job") {
-      return await storyWriter.run(leaseContext, run);
+      return await storyWriter.run(leaseContext, async () => {
+        if (recoveredOwner) saveDiagnostic(job, "interrupted", recoveredOwner.workItem);
+        const specialist = isStorySpecialistLease(workItem);
+        if (specialist) saveDiagnostic(job, "before-work", workItem);
+        let failed = true;
+        try {
+          const result = await run();
+          failed = false;
+          return result;
+        } finally {
+          if (specialist) saveDiagnostic(job, failed ? "work-failed" : "after-work", workItem);
+        }
+      });
     }
     return await run();
   } finally {

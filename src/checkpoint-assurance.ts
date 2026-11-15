@@ -3,6 +3,7 @@ import { execFileSync } from "./git-read-cache.js";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { captureStorySnapshot } from "./story-debug-snapshot.js";
 import type { JobStartResult } from "./job.js";
 import { inspectSpecialistChoice, authorChoiceDirection } from "./specialist-choice.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
@@ -513,6 +514,17 @@ export async function sealIndependentReview(job: JobStartResult, point: Recovery
     const existing = (await readIndependentReview(job, assurance)).result;
     if (JSON.stringify(existing) !== JSON.stringify(result))
       throw new Error("Concurrent independent review already sealed a different result.");
+  }
+  if (result.status === "failed") {
+    try {
+      // Pin the exact reviewed Git source even if subsequent work has already
+      // advanced HEAD. Never snapshot a newer repair as the original failure.
+      captureStorySnapshot(job, "review-failed", point.workItem,
+        { sourceCommit: point.commitSha });
+    } catch (error) {
+      console.warn("[Story diagnostic snapshot] review-failed",
+        error instanceof Error ? error.message : String(error));
+    }
   }
 }
 export async function inspectCheckpointReview(job: JobStartResult,

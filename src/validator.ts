@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { nativeValidate } from "./native-validator.js";
+import { activeStoryWriter, isStorySpecialistLease } from "./job-lock.js";
+import { captureStorySnapshot } from "./story-debug-snapshot.js";
 import { assertNativeVersion, nativeVersion } from "./native-cli-version.js";
 import type { JobStartResult } from "./job.js";
 
@@ -74,6 +76,24 @@ async function nativePin(job: JobStartResult): Promise<NativeValidatorPin> {
  * is needed. sourceCheckout is a deprecated, ignored compatibility argument. */
 export async function validateStoryJob(job: JobStartResult, _sourceCheckout?: string,
   view?: ValidationView): Promise<ValidationResult> {
+  const writer = activeStoryWriter();
+  const mayCapture = writer?.active && isStorySpecialistLease(writer.workItem) &&
+    writer.job.jobId === job.jobId &&
+    writer.job.worktreeRoot === job.worktreeRoot &&
+    (!view || view.worktreeRoot === job.worktreeRoot &&
+      view.worktreeStoryRoot === job.worktreeStoryRoot);
+  const snapshot = (phase: "validation-attempt" | "validation-failed") => {
+    if (!mayCapture) return;
+    try {
+      captureStorySnapshot(job, phase, writer!.workItem);
+    } catch (error) {
+      console.warn("[Story diagnostic snapshot]", phase,
+        error instanceof Error ? error.message : String(error));
+    }
+  };
+  snapshot("validation-attempt");
   const pin = await nativePin(job);
-  return nativeValidate(view ? { ...job, ...view } : job, pin);
+  const result = nativeValidate(view ? { ...job, ...view } : job, pin);
+  if (result.status !== "passed") snapshot("validation-failed");
+  return result;
 }
