@@ -25,6 +25,7 @@ import { emptyAdaptiveState, readAdaptiveState,
 import { proposeAdaptiveWork, InvalidAdaptiveProposalError } from "./adaptive-planner.js";
 import { readEventOnlyOmission } from "./interactive-event-only.js";
 import { readPuzzleNoWrite } from "./puzzle-obligation.js";
+import { reviewedAdaptiveOmissions } from "./adaptive-omission.js";
 import { milestoneFulfillmentProjection } from "./milestone-field-scope.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
 import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
@@ -291,12 +292,21 @@ export async function reconcileAdaptiveWork(input: {
   assertAdaptiveSettled(state);
   const protectedPaths = report.records.filter(r =>
     r.metadata.type === "creative-direction" || (r.metadata.decisions?.length ?? 0) > 0).map(r => r.path);
+  let omissionProofs = await reviewedAdaptiveOmissions({
+    job, request, inventory: original, records: report.records, sourceHashes,
+    saved: state.entries.flatMap(entry => entry.omissions),
+    allowReview: false, authorTargets: turn.objective.requestedTargets,
+    planning, protectedPaths,
+    planDigest: createHash("sha256").update(JSON.stringify(plan)).digest("hex"),
+  });
   const authorized = (inventory: GenerationInventory, proposal: AdaptiveProposal): AdaptiveAdmission => ({
     proposal, inventory, plan, turnDigest: turn.digest, version: proposal.beforeVersion,
     verifiedSource: true, records: report.records, sourceHashes, milestoneSourceHashes,
     protectedPaths, typedEdges: architectureCausalEdges(plan),
     authorTargets: turn.objective!.requestedTargets,
-    planning, carried: reviewedCarry(inventory), omissionProofs: [],
+    planning, carried: reviewedCarry(inventory), omissionProofs,
+    authenticatedProofAncestors: omissionProofs.filter(proof =>
+      proof.sourceSha !== inventory.headSha).map(proof => proof.sourceSha),
   });
   let effective = original;
   let order: string[] | null = null;
@@ -320,6 +330,16 @@ export async function reconcileAdaptiveWork(input: {
       metricSources: budget.sourceRevisionsDigest,
     });
     if (await beginAdaptiveAttempt(job, state, original.headSha, signature)) {
+      // Only a new, persisted controller attempt may make another independent
+      // review request. Pure restarts or unchanged source HEADs never consume
+      // an extra model turn; interrupted review retains its original fence.
+      omissionProofs = await reviewedAdaptiveOmissions({
+        job, request, inventory: effective, records: report.records, sourceHashes,
+        saved: state.entries.flatMap(entry => entry.omissions),
+        allowReview: true, authorTargets: turn.objective.requestedTargets,
+        planning, protectedPaths,
+        planDigest: createHash("sha256").update(JSON.stringify(plan)).digest("hex"),
+      });
       // The persisted 'planning' fence is deliberate. An interrupted Pi
       // session is never replaced by another potentially costly/inconsistent
       // proposal on automatic resume.
@@ -330,6 +350,10 @@ export async function reconcileAdaptiveWork(input: {
           provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
           version: state.version, signature,
           typedEdges: architectureCausalEdges(plan),
+          omissionCandidates: omissionProofs.filter(proof => effective.items.some(item =>
+            item.id === proof.assignmentId && item.status === "pending"))
+            .map(proof => ({ assignmentId: proof.assignmentId,
+              sourcePath: proof.path, evidence: proof.evidence })),
           sourceEvidence: report.records.filter(r =>
             r.metadata.type === "milestone" && r.metadata.status !== "superseded" &&
             milestoneSourceHashes[r.path])

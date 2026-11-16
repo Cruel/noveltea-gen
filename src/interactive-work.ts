@@ -12,7 +12,7 @@ import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { verifiedNarrativeSuccessor, verifiedCompositionSuccessor } from "./job-successor.js";
-import { withStoryJobLock } from "./job-lock.js";
+import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
 import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
@@ -73,7 +73,7 @@ interface ChoiceEvidence {
 }
 interface PuzzleEvidence { id: string; solutions: Array<{ event: string; status: Status; clueAccess: Status; clueIds: string[] }> }
 export interface InteractiveOptions {
-  story: string; job: string; action: "run" | "inspect"; milestone: string;
+  story: string; job: string; action: "run" | "inspect" | "review-omission"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; task?: string; thinking?: "low" | "medium" | "high";
   /** Production graph can checkpoint Choice and Puzzle independently; the
    * persisted two-unit receipt and original writer/review gates are shared. */
@@ -930,7 +930,11 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
   const root = job.stateDir;
   const file = join(root, "interactive-items", input.milestone.slice(10) + ".json");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("No interactive work item receipt.");
-  return withStoryJobLock(job, "interactive-" + input.milestone.slice(10), async () => {
+  // Adaptive admission may request a no-write review from the already locked
+  // generation boundary. The probe must never dispatch a specialist writer.
+  const execute = async () => {
+    if (input.action === "review-omission" && input.unit)
+      throw Error("Adaptive omission review applies to a whole interactive assignment.");
     if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
     if (!existsSync(join(root, "architecture.json")) || !existsSync(join(root, "character-world.json")) ||
         !existsSync(join(root, "event-items", input.milestone.slice(10) + ".json"))) {
@@ -988,8 +992,13 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       }
       assertPlanContinuity(job, architecture, "interactive:" + input.milestone,
         receipt.planVersion, receipt.planDigest);
+      if (input.action === "review-omission" &&
+          !(receipt.units[0]?.phase === "not-applicable" &&
+            receipt.units[1]?.phase === "not-applicable" && receipt.units[0]?.eventOnly))
+        throw Error("An interactive specialist receipt already exists; reconcile it, never replace it with an omission.");
     } else {
-      if (input.action !== "run") throw new Error("No saved interactive work item.");
+      if (input.action !== "run" && input.action !== "review-omission")
+        throw new Error("No saved interactive work item.");
       if (input.unit === "puzzle") throw new Error("A Puzzle assignment cannot start before its original Choice receipt.");
       if (dirty(job).length) throw new Error("Interactive design requires a clean verified Story worktree.");
       await verifiedNarrativeSuccessor(job, event.commitSha);
@@ -999,7 +1008,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       // Event. The controller, not a forced Choice author, asks an independent
       // reviewer whether both interactive assignments are genuinely optional.
       // Fixtures exercise provenance only and never claim literary certification.
-      if (!input.fixture || process.env.NT_INTERACTIVE_FIXTURE_CASE === "event-only") {
+      if (input.action === "review-omission" || !input.fixture ||
+          process.env.NT_INTERACTIVE_FIXTURE_CASE === "event-only") {
         if (!input.fixture)
           await assertNativeReviewDependencies(job, "interactive-choice-" + input.milestone.slice(10));
         const head = await trustedHead(job);
@@ -1027,6 +1037,11 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           return output(job, receipt, input.unit);
         }
       }
+      // The independently reviewed Event does not warrant skipping gameplay.
+      // Leave the interactive assignment available to its original writers.
+      if (input.action === "review-omission")
+        return { status: "omission-not-justified", headSha: await trustedHead(job),
+          milestoneId: input.milestone };
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         workItemId: "interactive-" + input.milestone.slice(10),
         milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
@@ -1343,5 +1358,10 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "interactive-work");
     return { ...output(job, result.receipt, input.unit), authorUpdates };
-  });
+  };
+  const owner = activeStoryWriter();
+  if (input.action === "review-omission" && owner?.active &&
+      owner.workItem === "generation-boundary" && owner.job.stateDir === job.stateDir)
+    return execute();
+  return withStoryJobLock(job, "interactive-" + input.milestone.slice(10), execute);
 }

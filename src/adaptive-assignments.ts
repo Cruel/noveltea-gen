@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import type { Plan } from "./architecture.js";
 import type { GenerationInventory, ExecutionItem, GenerationStage } from "./generation-plan.js";
 import type { StoryPlanning } from "./story-planning.js";
+import type { EventOnlyRef } from "./interactive-event-only.js";
 
 const SHA = /^[a-f0-9]{40}$/, HASH = /^[a-f0-9]{64}$/;
 const MILESTONE = /^milestone\.[a-z][a-z0-9-]*$/;
@@ -28,6 +29,8 @@ export interface AdaptiveProposal {
 export interface AdaptiveOmissionProof {
   assignmentId: string; sourceSha: string; path: string; sourceHash: string;
   evidence: string; reviewerSession: string; reviewerSnapshot: string;
+  /** Private Event-only receipt reference, reopened on every live restart. */
+  eventOnly?: EventOnlyRef;
 }
 export interface AdaptiveAmendment {
   schema: "noveltea-adaptive-assignments/v1";
@@ -60,6 +63,9 @@ export interface AdaptiveAdmission {
   carried: Array<{ id: string; sha: string }>;
   /** Reviewer receipts authenticated by the caller before admission. */
   omissionProofs: AdaptiveOmissionProof[];
+  /** Only the trusted production caller may attest original reviewed HEADs
+   * that remain ancestral after unrelated work advances the Story branch. */
+  authenticatedProofAncestors?: string[];
 }
 const exactly = (value: unknown, fields: string[]) =>
   !!value && typeof value === "object" && !Array.isArray(value) &&
@@ -132,6 +138,24 @@ function validateCausal(items: ExecutionItem[], order: string[]) {
   }
   if (items.some(i => i.status === "blocked" && order.includes(i.id)))
     throw Error("Blocked work cannot be treated as authorized pending work.");
+}
+
+/** Use the same conservative Story-wide promise check BEFORE asking for
+ * omission review and again when admitting the exact independent proof.
+ * A finished canonical record count is never a substitute for reviewed
+ * consequential gameplay or a still-authorized specialist assignment. */
+export function preservesWholeStoryInteraction(
+  items: ExecutionItem[], omitted: ExecutionItem, planning: StoryPlanning,
+): boolean {
+  const other = items.filter(i => i.id !== omitted.id &&
+    ["interactive", "choice", "puzzle"].includes(i.stage) &&
+    (i.status === "pending" || i.status === "verified" && !i.omission));
+  const requiresChoice = (planning.choice_points?.min ?? 0) > 0 ||
+    !!planning.choice_frequency && planning.choice_frequency !== "none";
+  const requiresPuzzle = (planning.puzzle_count?.min ?? 0) > 0 ||
+    ["custom", "hybrid"].includes(planning.puzzle_emphasis ?? "none");
+  return (!requiresChoice || other.some(i => i.stage !== "puzzle")) &&
+    (!requiresPuzzle || other.some(i => i.stage !== "choice"));
 }
 
 /** All operations are authorized independently of proposal prose. */
@@ -253,20 +277,12 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
       // No global interactive obligation may be erased simply because *one*
       // Milestone is observational. Other independently certified work or
       // remaining assignments must still satisfy the original Story baseline.
-      const other = items.filter(i => i.id !== item.id && ["interactive", "choice", "puzzle"].includes(i.stage) &&
-        i.status === "pending");
-      const choiceCount = input.records.filter(r => r.metadata.type === "choice-point" &&
-        r.metadata.status !== "superseded").length;
-      const puzzleCount = input.records.filter(r => r.metadata.type === "puzzle" &&
-        r.metadata.status !== "superseded").length;
-      if (((input.planning.choice_points?.min ?? 0) > choiceCount ||
-          ["frequent", "continuous"].includes(input.planning.choice_frequency ?? "")) &&
-          !other.some(i => i.stage !== "puzzle") ||
-          (input.planning.puzzle_count?.min ?? 0) > puzzleCount &&
-          !other.some(i => i.stage !== "choice"))
+      if (!preservesWholeStoryInteraction(items, item, input.planning))
         throw Error("Adaptive omission would erase the remaining whole-Story interaction obligation.");
       item.status = "verified";
-      item.verifiedSha = input.inventory.headSha;
+      // This is the independently reviewed Event HEAD, not a fictitious
+      // interactive writer commit at the current (possibly later) HEAD.
+      item.verifiedSha = proof.sourceSha;
       item.omission = { reason: input.proposal.reason, evidence: proof.evidence,
         reviewerSession: proof.reviewerSession };
     } else throw Error("Adaptive operation kind is unknown.");
@@ -308,7 +324,8 @@ export function admitAdaptiveAssignments(input: AdaptiveAdmission): AdaptiveAmen
     if (action.kind !== "omit") continue;
     const proof = input.omissionProofs.find(p => p.assignmentId === action.item);
     const record = input.records.find(r => r.path === proof?.path);
-    if (!proof || proof.sourceSha !== inventory.headSha ||
+    if (!proof || (proof.sourceSha !== inventory.headSha &&
+        !input.authenticatedProofAncestors?.includes(proof.sourceSha)) ||
         !PATH.test(proof.path) || record?.metadata.status === "superseded" ||
         input.protectedPaths.includes(proof.path) ||
         (record?.metadata.decisions?.length ?? 0) > 0 ||
@@ -536,7 +553,7 @@ export function applyAdaptiveAssignments(inventory: GenerationInventory,
       const item = byId.get(action.item);
       const proof = amendment.omissions.find(p => p.assignmentId === action.item);
       if (!item || !proof) throw Error("Adaptive omission lost its sealed reviewer.");
-      item.status = "verified"; item.verifiedSha = amendment.sourceSha;
+      item.status = "verified"; item.verifiedSha = proof.sourceSha;
       item.omission = { reason: amendment.reason, evidence: proof.evidence,
         reviewerSession: proof.reviewerSession };
     } else throw Error("Unknown adaptive action.");

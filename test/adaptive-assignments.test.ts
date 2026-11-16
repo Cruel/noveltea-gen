@@ -341,6 +341,57 @@ test("narrative-led no-Puzzle omission needs independent source-bound evidence; 
   assert.equal(undone.items.find(i => i.id === "interactive:milestone.discovery")?.status,
     "pending", "the omission is not an authored commit and may need re-review on later source");
 });
+test("raw Choice and Puzzle record counts never authorize erasing the last Story-wide gameplay assignment", () => {
+  const p = proposal([{ kind: "omit", item: "interactive:milestone.discovery" }],
+    ["composition:milestone.discovery", "review"]);
+  const src = base(p);
+  src.records.push(...Array.from({ length: 4 }, (_, i) => ({
+    path: "choice-points/choice-" + i + ".md",
+    metadata: { type: "choice-point", id: "choice-point.choice-" + i,
+      status: "approved", decisions: [] },
+  })));
+  src.planning = { choice_frequency: "occasional", puzzle_emphasis: "none",
+    choice_points: { min: 2, max: 10 } };
+  src.omissionProofs = [{
+    assignmentId: "interactive:milestone.discovery", sourceSha: head,
+    path: "milestones/discovery.md", sourceHash: hashes["milestones/discovery.md"]!,
+    evidence: "milestones/discovery.md:12 independent Event-only review",
+    reviewerSession: "/private/review.jsonl", reviewerSnapshot: "f".repeat(64),
+  }];
+  assert.throws(() => admitAdaptiveAssignments(src), /remaining whole-Story interaction/i,
+    "a catalog full of Choice records is not evidence of playable, reviewed consequences");
+  const other = work("interactive:milestone.choice", "interactive", ["event:milestone.discovery"]);
+  src.inventory.items.splice(-1, 0, other);
+  src.inventory.items.at(-1)!.dependencies.push(other.id);
+  src.proposal.order = ["interactive:milestone.choice",
+    "composition:milestone.discovery", "review"];
+  assert.doesNotThrow(() => admitAdaptiveAssignments(src),
+    "a remaining authorized interactive specialist and final review can fulfill global promises");
+});
+test("unchanged source-bound independently reviewed omission survives unrelated verified descendants", () => {
+  const p = proposal([{ kind: "omit", item: "interactive:milestone.discovery" }],
+    ["composition:milestone.discovery", "review"]);
+  const src = base(p);
+  src.planning = { choice_frequency: "none", puzzle_emphasis: "none", choice_points: { max: 0 } };
+  const proof = {
+    assignmentId: "interactive:milestone.discovery", sourceSha: head,
+    path: "milestones/discovery.md", sourceHash: hashes["milestones/discovery.md"]!,
+    evidence: "milestones/discovery.md:12 independent Event-only review",
+    reviewerSession: "/private/review.jsonl", reviewerSnapshot: "f".repeat(64),
+  };
+  src.omissionProofs = [proof];
+  const original = admitAdaptiveAssignments(src);
+  const descendantHead = "e".repeat(40);
+  const descendant = { ...src, inventory: { ...src.inventory, headSha: descendantHead },
+    proposal: { ...p, sourceSha: descendantHead },
+    authenticatedProofAncestors: [head] };
+  assert.doesNotThrow(() => admitAdaptiveAssignments(descendant));
+  assert.throws(() => admitAdaptiveAssignments({ ...descendant,
+    authenticatedProofAncestors: [] }), /independent|omission/i);
+  assert.throws(() => admitAdaptiveAssignments({ ...descendant,
+    sourceHashes: { ...hashes, "milestones/discovery.md": "0".repeat(64) } }), /independent|omission/i);
+  assert.equal(original.omissions[0]?.sourceSha, head, "review origin must not be rewritten");
+});
 test("controller rejects stale, protected, tampered, unauthorized and cyclic amendments", () => {
   const p = proposal([{ kind: "add", stage: "event", milestone: "milestone.choice",
     dependsOn: ["foundations"] }], ["interactive:milestone.discovery", "composition:milestone.discovery",

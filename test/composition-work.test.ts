@@ -16,6 +16,8 @@ import { collectRecoveryFork } from "../src/recovery-fork.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { parseSpecialistJson } from "../src/composition-specialist.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
+import { runInteractiveWorkItem } from "../src/interactive-work.js";
+import { reviewedAdaptiveOmissions } from "../src/adaptive-omission.js";
 import { selectAssignment, verifyCompositionProse } from "../src/composition-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-composition-"));
@@ -167,7 +169,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     assert.equal(JSON.parse(result.stdout).completionEvidence.puzzleDisposition, "not-applicable");
     return JSON.parse(result.stdout).headSha as string;
   };
-  const prepareEventOnly = async (reviewer: "fixture" | "pi" = "fixture") => {
+  const prepareEventOnly = async (reviewer: "fixture" | "pi" = "fixture", probeOnly = false) => {
     const original = JSON.parse(readFileSync(contract, "utf8"));
     const full = { ...original, scope: { kind: "full-story", depth: "composition", targets: [], branches: [] } };
     writeFileSync(contract, JSON.stringify(full));
@@ -189,13 +191,32 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     assert.equal(event.status, 0, event.stderr);
     await seal("event-disclosure");
     const before = git(job.worktreeRoot, "rev-parse", "HEAD");
-    const interactive = reviewer === "fixture"
-      ? stage("interactive", ["--milestone", "milestone.disclosure"])
-      : await cliAsync(["interactive", "run", "--milestone", "milestone.disclosure",
-        "--skills-source", source, "--provider", process.env.NT_PROVIDER ?? "openai",
-        "--model", process.env.NT_MODEL ?? "gpt-6-luna"], "event-only");
-    assert.equal(interactive.status, 0, interactive.stderr);
-    const disposition = JSON.parse(interactive.stdout);
+    let disposition: any;
+    if (probeOnly) {
+      assert.equal(reviewer, "fixture");
+      const old = Object.fromEntries([...Object.keys(env), "NT_INTERACTIVE_FIXTURE_CASE"]
+        .map(key => [key, process.env[key]]));
+      Object.assign(process.env, env);
+      process.env.NT_INTERACTIVE_FIXTURE_CASE = "event-only";
+      try {
+        disposition = await runInteractiveWorkItem({ story, job: jobId,
+          milestone: "milestone.disclosure", action: "review-omission",
+          fixture: true, skillsSource: source });
+      } finally {
+        for (const [key, value] of Object.entries(old)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    } else {
+      const interactive = reviewer === "fixture"
+        ? stage("interactive", ["--milestone", "milestone.disclosure"])
+        : await cliAsync(["interactive", "run", "--milestone", "milestone.disclosure",
+          "--skills-source", source, "--provider", process.env.NT_PROVIDER ?? "openai",
+          "--model", process.env.NT_MODEL ?? "gpt-6-luna"], "event-only");
+      assert.equal(interactive.status, 0, interactive.stderr);
+      disposition = JSON.parse(interactive.stdout);
+    }
     assert.equal(disposition.completionEvidence.eventOnlyDisposition, "sealed-no-write");
     assert.equal(disposition.completionEvidence.eventOnlyReview,
       reviewer === "pi" ? "independent-pi" : "fixture-structural-only");
@@ -521,6 +542,45 @@ test("Event-only Milestone composes playable evidence with two genuine no-write 
   assert.ok(!checkpoint.remainingWorkItems.includes("interactive-puzzle-disclosure"));
   assert.ok(checkpoint.remainingWorkItems.includes("review"));
   assert.equal(git(x.repo, "rev-parse", "HEAD"), x.original);
+});
+
+test("omission-only production preflight seals both interactive dispositions without invoking writers, but fixture review cannot authorize a live plan", { skip: !available }, async () => {
+  const x = setup("adaptive-omission-probe");
+  const { before, disposition } = await x.prepareEventOnly("fixture", true);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), before);
+  assert.equal(disposition.completionEvidence.eventOnlyDisposition, "sealed-no-write");
+  const resumed = x.cli(["interactive", "run", "--fixture", "--milestone",
+    "milestone.disclosure", "--skills-source", source], "event-only");
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).headSha, before);
+  const path = "milestones/disclosure.md";
+  const sourceHash = createHash("sha256")
+    .update(readFileSync(join(x.job.worktreeStoryRoot, path))).digest("hex");
+  const original = disposition.specialistUnits[0].eventOnly;
+  const evidence = {
+    assignmentId: "interactive:milestone.disclosure", sourceSha: before, path, sourceHash,
+    evidence: path + ":12 untrusted fixture assertion",
+    reviewerSession: "/private/fixture.jsonl", reviewerSnapshot: "f".repeat(64),
+    eventOnly: original,
+  };
+  await assert.rejects(reviewedAdaptiveOmissions({
+    job: x.job, request: { story: x.job.storyRoot, job: x.job.jobId, task: "Observe",
+      fixture: false, contract: { scope: { kind: "full-story", depth: "composition",
+        targets: [], branches: [] }, constraints: [], envelope: {
+          presentation: "visual novel", hardLimits: [], preferences: [] } } },
+    inventory: { version: 1, planVersion: 1, headSha: before, rationale: "",
+      items: [] }, records: [{ path, metadata: {
+        id: "milestone.disclosure", type: "milestone", status: "approved" } }],
+    sourceHashes: { [path]: sourceHash }, saved: [evidence],
+    allowReview: false, authorTargets: [], protectedPaths: [],
+    planning: { choice_frequency: "none", puzzle_emphasis: "none" },
+    planDigest: JSON.parse(readFileSync(join(x.job.stateDir,
+      "interactive-items/disclosure.json"), "utf8")).planDigest,
+  }), /omission|review|provenance/i,
+  "fixture-only no-write may certify structure but never claim a live independent Pi review");
+  const composition = x.run("event-only");
+  assert.equal(composition.status, 0, composition.stderr);
+  assert.equal(JSON.parse(composition.stdout).status, "composition-committed");
 });
 
 test("Event-only omission rejects modified sealed proof and cannot replay an interrupted reviewer", { skip: !available }, async () => {

@@ -32,10 +32,11 @@ export async function proposeAdaptiveWork(input: {
   metrics: StoryArchitectureMetrics;
   provider: string; model: string; version: number; signature: string;
   typedEdges: Array<{ item: string; needs: string }>;
+  omissionCandidates: Array<{ assignmentId: string; sourcePath: string; evidence: string }>;
   sourceEvidence: Array<{ milestone: string; path: string; sha256: string }>;
 }): Promise<{ proposal: AdaptiveProposal; sessionFile: string; skillReads: string[] }> {
   const { job, selected, turn, inventory, planning, metrics, provider, model, version, signature,
-    typedEdges, sourceEvidence } = input;
+    typedEdges, omissionCandidates, sourceEvidence } = input;
   if (selected.receipt.storySourceSha !== job.baseSha ||
       selected.receipt.turnPlanDigest !== turn.digest ||
       inventory.headSha === job.baseSha ||
@@ -99,8 +100,11 @@ export async function proposeAdaptiveWork(input: {
       "never change a completed assignment or remove existing dependencies. " +
       "'Puzzle' is a decision/possible no-write work unit, " +
       "not an obligation to invent a formal Puzzle. Do not ask routine author questions. " +
-      "Never omit an assignment unless the controller has ALREADY supplied an independently sealed " +
-      "Event-only omission proof. NO such omissions are preauthorized here. " +
+      "You MAY omit a still-pending interactive assignment ONLY when it appears in the " +
+      "controller-authenticated Event-only omission candidate list below; that list is " +
+      "reviewed source evidence, not blanket permission to erase Story-wide gameplay. " +
+      "A local omission must not erase required choices, consequential routes, formal Puzzle " +
+      "promises or explicit author-targeted work. Never invent or infer a new proof. " +
       "You cannot change a completed or blocked item, add a new canonical target ID, " +
       "or remove the final Story-wide independent review. " +
       "Prefer the minimal change: empty actions when current work is sound. " +
@@ -122,6 +126,8 @@ export async function proposeAdaptiveWork(input: {
       }) +
       "\nCurrent controller inventory (verified work stays immutable): " + JSON.stringify(inventory.items) +
       "\nOnly currently pending IDs: " + JSON.stringify(pending.map(i => i.id)) +
+      "\nController-authenticated independently reviewed Event-only omission candidates " +
+      "(empty means no omits permitted): " + JSON.stringify(omissionCandidates) +
       "\nNative Milestone immutable planning/body projections eligible for narrowing " +
       "(sha256 hashes exclude only Event-owned completeness/fulfillment slots; not grants): " +
       JSON.stringify(sourceEvidence) +
@@ -133,7 +139,8 @@ export async function proposeAdaptiveWork(input: {
       "{kind:'split',item:'interactive:milestone.<slug>',domains:['choice','puzzle']}, " +
       "{kind:'depend',item:'event:milestone.<slug>',needs:'event:milestone.<prerequisite>'}, " +
       "{kind:'narrow',item:'pending assignment id',sourcePath:'listed Milestone path', " +
-      "sourceHash:'listed sha256',outcome:'bounded goal within existing authority'}. " +
+      "sourceHash:'listed sha256',outcome:'bounded goal within existing authority'}, or " +
+      "{kind:'omit',item:'exact authenticated Event-only candidate assignment ID'}. " +
       "Narrowing evidence MUST be the selected assignment's own Milestone and " +
       "cannot grant any path, owner, protected decision or new canonical target. " +
       "Use strict JSON DOUBLE QUOTES. order MUST contain EVERY resulting pending ID " +
