@@ -239,6 +239,37 @@ test("single-Milestone generation checkpoints foundation then resumes all specia
   assert.equal(git(f.repo, "status", "--porcelain"), "");
 });
 
+test("a committed Interactive checkpoint ignores later diagnostics but rejects altered verified evidence", {
+  skip: !available,
+}, () => {
+  const f = setup("committed-interactive-diagnostic");
+  const result = f.cli(f.start);
+  const checkpoint = result.recoveryCheckpoints.find((point: any) =>
+    point.workItem === "interactive-choice-disclosure");
+  assert.ok(checkpoint?.eligible, JSON.stringify(result.recoveryCheckpoints));
+  const originalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const path = join(f.job.stateDir, "interactive-items/disclosure.json");
+  const original = readFileSync(path, "utf8");
+  const receipt = JSON.parse(original);
+  const unit = receipt.units.find((item: any) =>
+    item.id === "interactive-choice-disclosure");
+  assert.equal(unit?.phase, "committed");
+  unit.failure = "Error: Controller scheduling failed after the validated commit.";
+  writeFileSync(path, JSON.stringify(receipt));
+  const inspect = () => f.cli(["generate", "inspect"]).recoveryCheckpoints.find(
+    (point: any) => point.commitSha === checkpoint.commitSha);
+  assert.ok(inspect()?.eligible, "An after-the-fact diagnostic cannot change an immutable proof.");
+  unit.validation.status = "failed";
+  writeFileSync(path, JSON.stringify(receipt));
+  assert.equal(inspect()?.eligible, false,
+    "Actual validation evidence is still covered by the checkpoint proof.");
+  writeFileSync(path, original);
+  assert.ok(inspect()?.eligible);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), originalHead,
+    "No diagnostic or receipt inspection can regenerate the specialist.");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
 test("generation rejects a lost orchestrator selection after checkpoint without repinning or replay", { skip: !available }, () => {
   const f = setup("missing-orchestrator-selection");
   const paused = f.cli([...f.start, "--pause-after", "foundation"]);
@@ -338,6 +369,13 @@ test("independent World and Character checkpoints survive restart and reconcile 
   writeFileSync(worldFile, JSON.stringify(forged));
   const tampered = f.cli(["generate", "inspect"]).recoveryCheckpoints as typeof points;
   assert.ok(tampered.some(point => point.commitSha === world.commitSha && !point.eligible));
+  writeFileSync(worldFile, savedPoint);
+  const invented = JSON.parse(savedPoint);
+  invented.completedWorkItems.push("repair-" + "f".repeat(40));
+  writeFileSync(worldFile, JSON.stringify(invented));
+  assert.ok((f.cli(["generate", "inspect"]).recoveryCheckpoints as typeof points).some(point =>
+    point.commitSha === world.commitSha && !point.eligible),
+    "A fabricated repair is not a legitimate historical completed work item.");
   writeFileSync(worldFile, savedPoint);
   // A self-consistent hash inside an edited checkpoint is not authorization:
   // the independently saved intent and controller plan must match exactly.

@@ -9,12 +9,66 @@ import { verifiedNarrativeChain } from "../src/job-successor.js";
 import { inspectRejectedRepair } from "../src/rejected-review-repair.js";
 import { readReviewTurnEvidence } from "../src/fork-review-turn.js";
 import { collectRecoveryFork } from "../src/recovery-fork.js";
+import { inspectRecoveryCheckpoints, finalizeRecoveryCheckpoint } from "../src/recovery-checkpoints.js";
 
 const root = process.env.NT_TEST_PRESERVED_FORK_REVIEW_ROOT;
 const original = "2127e9afd42d43f22a4efef05109ee2ca7d29754";
 const repaired = "1f030a7f345ee0e73cdc47919d16aff45dec5002";
 const priorEvent = "42451fbf1231c0854cbb9c3c419465db3f4ece0c";
 const inheritedEvent = "e3de2c884d54398e18e90de05731da3513d9b826";
+
+test(
+  "historical fork checkpoint accepts a source-bound, already completed review repair",
+  {
+    skip: !root && "Set NT_TEST_PRESERVED_FORK_REVIEW_ROOT to the saved run",
+  },
+  async () => {
+    const source = JSON.parse(readFileSync(join(root!, "certification-source.json"), "utf8")) as {
+      storyRoot: string;
+    };
+    const job = await startStoryJob(
+      { story: source.storyRoot, job: "8b2f83f3-1b68-4891-aac6-74557b088350" },
+      false,
+    );
+    const checkpointSha = "9029a67593f5974252a768f5cc0ff2d8d3b7c10c";
+    const file = join(job.stateDir, "recovery-checkpoints", checkpointSha + ".json");
+    const before = readFileSync(file, "utf8");
+    const points = await inspectRecoveryCheckpoints(job);
+    const point = points.find((entry) => entry.commitSha === checkpointSha);
+    assert.ok(point?.eligible, point?.reason ?? "The verified Choice checkpoint was not found.");
+    assert.ok(point.completedWorkItems.includes("repair-" + original));
+    assert.equal(point.workItem, "interactive-choice-accounts-tested");
+    assert.equal(point.validation.status, "passed");
+    const resumed = await finalizeRecoveryCheckpoint(job, point.workItem, point.parentSha, checkpointSha);
+    assert.equal(
+      resumed.commitSha,
+      checkpointSha,
+      "Idempotent finalization must reuse the original specialist commit, not dispatch Pi.",
+    );
+    assert.equal(
+      readFileSync(file, "utf8"),
+      before,
+      "Inspection and restart must not rewrite the saved checkpoint.",
+    );
+    const turn = await readReviewTurnEvidence(job);
+    assert.ok(turn);
+    const fork = await collectRecoveryFork(
+      job,
+      "599be32f-45a7-4aec-9f55-97bdbd97aef1",
+      checkpointSha,
+      turn.contract,
+      process.env.NT_STUDIO_SKILLS_SOURCE,
+    );
+    assert.equal(fork.checkpoint.commitSha, checkpointSha);
+    assert.ok(fork.checkpoint.completedWorkItems.includes("repair-" + original));
+    assert.equal(
+      fork.reviewCoverage.find((entry) => entry.commitSha === checkpointSha)?.status,
+      "required-pending",
+      "The native-valid commit must still obtain its independent review.",
+    );
+    assert.equal(readFileSync(file, "utf8"), before, "Preparing a fork cannot rewrite the source evidence.");
+  },
+);
 
 test(
   "S14 #173: nested fork authenticates original Job's passed repair trailer",

@@ -99,6 +99,15 @@ function proofOf(id: string, receipt: Receipt, sha: string) {
       throw new Error("Committed specialist lacks passing validation evidence.");
     }
   }
+  // A controller may annotate an already committed Interactive unit with a
+  // diagnostic failure after checkpoint finalization (e.g. a later graph
+  // scheduling error). That mutable error does not change its pinned Git
+  // paths, validation or specialist evidence. Hash only the original
+  // committed unit bytes; leave every other field within the immutable proof.
+  if (id.startsWith("interactive-") && "failure" in item) {
+    const { failure: _diagnostic, ...committed } = item;
+    return committed;
+  }
   return item;
 }
 async function receiptProof(job: JobStartResult, id: string, sha: string, archivedArchitecture?: Receipt) {
@@ -234,13 +243,27 @@ async function planFor(job: JobStartResult, requiredDigest?: string | null) {
     throw new Error("Checkpoint plan differs from controller-authorized plan history.");
   return selected as Plan;
 }
-function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: string): { order: string[]; dependencies: Record<string,string[]> } {
+function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: string,
+  historicalRepairs: readonly string[] = []): { order: string[]; dependencies: Record<string,string[]> } {
   const order = ["foundation", "global-architecture"];
   const deps: Record<string, string[]> = { foundation: [], "global-architecture": ["foundation"] };
   const add = (id: string, dependency: string[]) => {
     if (order.includes(id)) return;
     order.push(id); deps[id] = dependency;
   };
+  // A passed, source-bound correction is a real completed work item, not a
+  // new specialist assignment. Keep its exact identity in subsequent derived
+  // inventories; verifyFinal separately authenticates inherited baselines and
+  // original same-Job Git history, so this cannot fabricate a completion.
+  for (const id of historicalRepairs) {
+    if (!/^repair-[a-f0-9]{40}$/.test(id))
+      throw Error("Historical review repair has an invalid work-item identity.");
+    // Historic repairs are completed provenance, not executable plan tasks.
+    // Existing finalized checkpoints never inserted them in the dependency
+    // map; only a repair's own checkpoint has that executable work item.
+    if (id === committedItem) add(id, []);
+    else if (!order.includes(id)) order.push(id);
+  }
   if (!plan) {
     if (stageOf(committedItem) === "repair") add(committedItem, []);
     return { order, dependencies: deps };
@@ -410,7 +433,8 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
       (point.nextWorkItem !== null && !point.remainingWorkItems.includes(point.nextWorkItem))) {
     throw new Error("Recovery checkpoint identity, compatibility, or continuation is invalid.");
   }
-  const planned = workPlan(point.plan as Awaited<ReturnType<typeof planFor>>, point.workItem);
+  const planned = workPlan(point.plan as Awaited<ReturnType<typeof planFor>>, point.workItem,
+    point.completedWorkItems.filter(id => id.startsWith("repair-")));
   const completed = point.completedWorkItems;
   const omissions = await verifyOmissions(job, point.omittedWorkItems, point.commitSha);
   const remaining = planned.order.filter(id => !completed.includes(id) && !omissions.has(id));
@@ -612,12 +636,14 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     await verifyFinal(job, point);
     return point;
   }
-  const work = workPlan(plan, workItem);
-  if (!work.order.includes(workItem))
-    throw new Error("Work item does not belong to the authorized continuation plan.");
   const previous = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.commitSha !== commitSha &&
     isAncestor(job, p.commitSha, commitSha));
-  const completed = [...new Set([...verifiedBaselineStages(job, plan, workItem),
+  const baseline = verifiedBaselineStages(job, plan, workItem);
+  const history = [...baseline, ...previous.flatMap(p => p.completedWorkItems)];
+  const work = workPlan(plan, workItem, history.filter(id => id.startsWith("repair-")));
+  if (!work.order.includes(workItem))
+    throw new Error("Work item does not belong to the authorized continuation plan.");
+  const completed = [...new Set([...baseline,
     ...previous.flatMap(p => p.completedWorkItems).filter(id => work.order.includes(id)), workItem])];
   const omissions = previous.flatMap(p => p.omittedWorkItems ?? []);
   if (workItem.startsWith("composition-")) {
