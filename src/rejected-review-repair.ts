@@ -559,6 +559,32 @@ export async function validateRejectedRepairDraft(job: JobStartResult, sha: stri
       report.protection.base !== state.baselineHead ||
       report.protection.changes?.length || report.protection.warnings?.length)
     throw Error("Native validation/protected-canon gate rejected the repaired draft; preserve its bytes.");
+  if (state.origin.workItem.startsWith("interactive-choice-")) {
+    // Native structure and a prose-focused independent reviewer can both
+    // approve a superficially convincing correction that deletes the ONLY
+    // typed payoff for a Choice branch. Recheck the same executable Choice
+    // contract used by the original specialist before sealing a new repair.
+    // This merely checks the original immutable Choice unit; it never gives
+    // the repair new writable paths or permission to invent an effect.
+    const slug = state.origin.workItem.slice("interactive-choice-".length);
+    if (!/^[a-z][a-z0-9-]*$/.test(slug))
+      throw Error("Original repaired Choice identity is malformed.");
+    const source = JSON.parse(await readFile(
+      join(job.stateDir, "interactive-items", slug + ".json"), "utf8")) as {
+      units?: Array<{ id: string; phase: string; commitSha?: string;
+        paths?: string[]; obligations?: string[] }> };
+    const choice = source.units?.find(unit => unit.id === state.origin.workItem);
+    if (choice?.phase !== "committed" || choice.commitSha !== state.sourceCommitSha ||
+        !choice.paths?.length || !Array.isArray(choice.obligations))
+      throw Error("Repaired Choice lost its source-bound original unit and consequences.");
+    const { verifyRepairedChoicePayoff } = await import("./interactive-work.js");
+    try {
+      verifyRepairedChoicePayoff(result.report, choice.paths, choice.obligations);
+    } catch (error) {
+      throw Error("Repaired Choice would invalidate its previously verified causal outcome payoff: " +
+        (error instanceof Error ? error.message : String(error)));
+    }
+  }
   state.validationProof = hash({ validator: result.validator, base: state.baselineHead,
     draft: digest, report });
   state.phase = "awaiting-checkpoint";

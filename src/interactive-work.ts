@@ -503,6 +503,22 @@ function verifyChoice(report: Report, paths: string[], assign: InteractiveAssign
     return { id: record.metadata.id, outcomes: evidence };
   });
 }
+/** A bounded independent-review repair must preserve the original Choice
+ * specialist's executable payoff contract, not merely native YAML validity.
+ * This is a read-only check on the repaired Story; it confers no new writer
+ * authority and uses the same outcome/conditional-consumer rules as Choice. */
+export function verifyRepairedChoicePayoff(
+  report: unknown,
+  originalPaths: string[],
+  originalObligations: string[],
+): void {
+  const evidence = verifyChoice(
+    report as Report, originalPaths,
+    { sourcePaths: originalPaths } as InteractiveAssignment, originalObligations,
+  );
+  if (!evidence.length) throw Error("Repaired Choice has no surviving verified outcome.");
+}
+
 function verifyPuzzle(report: Report, paths: string[], assign: InteractiveAssignment): PuzzleEvidence[] {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
   const changedRecordIds = new Set(records.filter(r => paths.includes(r.path))

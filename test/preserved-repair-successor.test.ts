@@ -11,6 +11,9 @@ import { readReviewTurnEvidence } from "../src/fork-review-turn.js";
 import { collectRecoveryFork } from "../src/recovery-fork.js";
 import { inspectRecoveryCheckpoints, finalizeRecoveryCheckpoint } from "../src/recovery-checkpoints.js";
 import { puzzleObligation } from "../src/puzzle-obligation.js";
+import { validateStoryJob } from "../src/validator.js";
+import { verifyRepairedChoicePayoff } from "../src/interactive-work.js";
+import { execFileSync } from "node:child_process";
 import type { Plan } from "../src/architecture.js";
 
 const root = process.env.NT_TEST_PRESERVED_FORK_REVIEW_ROOT;
@@ -18,6 +21,47 @@ const original = "2127e9afd42d43f22a4efef05109ee2ca7d29754";
 const repaired = "1f030a7f345ee0e73cdc47919d16aff45dec5002";
 const priorEvent = "42451fbf1231c0854cbb9c3c419465db3f4ece0c";
 const inheritedEvent = "e3de2c884d54398e18e90de05731da3513d9b826";
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+test(
+  "S14 #173: originally approved Choice repair lost the typed payoff for one outcome",
+  {
+    skip: !root && "Set NT_TEST_PRESERVED_FORK_REVIEW_ROOT to the saved run",
+  },
+  async () => {
+    const source = JSON.parse(readFileSync(join(root!, "certification-source.json"), "utf8")) as {
+      storyRoot: string;
+    };
+    const job = await startStoryJob(
+      { story: source.storyRoot, job: "8b2f83f3-1b68-4891-aac6-74557b088350" },
+      false,
+    );
+    const receipt = JSON.parse(
+      readFileSync(join(job.stateDir, "interactive-items/accounts-tested.json"), "utf8"),
+    ) as {
+      units: Array<{ id: string; phase: string; paths?: string[]; obligations?: string[] }>;
+    };
+    const choice = receipt.units.find((unit) => unit.id === "interactive-choice-accounts-tested");
+    assert.ok(choice?.paths?.length);
+    const originalHead = git(job.worktreeRoot, "rev-parse", "HEAD");
+    assert.equal(originalHead, "608536807d153f0de7d6458910773d57a62a3f2b");
+    const validated = await validateStoryJob(job, undefined, {
+      ...job,
+      baseSha: "9029a67593f5974252a768f5cc0ff2d8d3b7c10c",
+    });
+    assert.equal(
+      validated.status,
+      "passed",
+      "Native validity alone did not catch the missing outcome payoff.",
+    );
+    assert.throws(
+      () => verifyRepairedChoicePayoff(validated.report, choice.paths!, choice.obligations ?? []),
+      /lacks a consequential typed effect/,
+      "Do not accept a seemingly successful prose correction that deletes a required consequence.",
+    );
+    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), originalHead);
+  },
+);
 
 test(
   "S14 #173 inherited approved Story Turn keeps formal Puzzles optional without a local Turn grant",
