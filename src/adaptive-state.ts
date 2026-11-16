@@ -113,11 +113,14 @@ export async function readAdaptiveState(job: JobStartResult, turnDigest: string,
   return state;
 }
 
-/** A begun read-only Pi turn requires explicit recovery, even when HEAD has
- * remained clean. No other worker can claim the same attempt. */
+/** Interrupted or rejected planning requires explicit reconciliation, even
+ * when HEAD stayed clean. Settling a rejection records evidence, not permission
+ * to dispatch the old plan or silently replace the original model attempt. */
 export function assertAdaptiveSettled(state: AdaptiveState) {
   if (state.attempts.some(a => a.phase === "planning"))
     throw Error("Interrupted adaptive orchestrator session: preserve its transcript and reconcile before another plan.");
+  if (state.attempts.some(a => a.phase === "rejected"))
+    throw Error("Rejected adaptive orchestrator proposal: preserve its evidence and reconcile before dispatching remaining work.");
 }
 export async function beginAdaptiveAttempt(job: JobStartResult, state: AdaptiveState,
   sourceSha: string, signature: string): Promise<boolean> {

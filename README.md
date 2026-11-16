@@ -244,6 +244,46 @@ pnpm exec tsx --test test/pending-work-amendments.test.ts test/orchestrator-plan
 ```
 Fixture and live evidence must be reported separately.
 
+## Adaptive specialist assignment groundwork (#177)
+
+`NT_ADAPTIVE_PLANNING=1` enables the experimental, read-only adaptive planner
+for explicit, source-bound full-Story Pi requests with approved planning metadata
+and verified Architecture. The existing production graph remains the only
+scheduler; the flag grants no new Story write authority. It is not yet a completed
+implementation or real-Pi certification of #177.
+
+The controller admits versioned proposals against native Story sources and the
+original Turn. Supported operations are splitting pending Interactive work into
+separately checkpointed Choice/Puzzle decisions, adding missing Milestone-stage
+work within verified Architecture, adding a native Architecture-backed Event
+prerequisite to pending Event work, and dependency-safe reordering. A Puzzle
+assignment is an assessment, not a requirement to invent a formal Puzzle.
+Existing dependencies and verified commits cannot be removed by a proposal.
+Architecture-only delivery cannot acquire Event writing through an amendment.
+Even an unchanged proposal must pass source, objective, schema and carry-forward
+checks. HEAD, clean worktree and source hashes are rechecked after planning.
+
+Private `adaptive-plan.json` and `adaptive-planning-sessions/` retain the plan
+history and original transcript evidence. Interrupted **or rejected** proposals
+fence further dispatch, including after restart or disabling the feature flag;
+inspect and reconcile the preserved evidence rather than deleting receipts or
+replaying the planner. Inspection restores existing history but never starts a
+new adaptive planning session.
+
+Remaining integration work includes supplying independently authenticated
+omission evidence to adaptive admission (currently only the separate Interactive
+Event-only path can make that reviewed no-write decision), richer supporting and
+record-level assignments, and end-to-end certification of amended-plan recovery
+and whole-Story interaction fulfillment. The adaptive ledger uses integrity
+digests and job-private provenance; these are not author signatures or approval
+of material scope changes. Do not treat the flag or unit tests as certification
+of these remaining requirements.
+
+```sh
+pnpm exec tsx --test test/adaptive-assignments.test.ts test/adaptive-state.test.ts
+pnpm exec tsx --test test/interactive-work.test.ts
+```
+
 ## Checkpointed scope-driven Story generation (#32, #33)
 
 Start a Git-backed job once, then give the production parent graph an explicit

@@ -18,6 +18,8 @@ const names: Record<NonNullable<ProgressEvent['stage']>, string> = {
   foundations: 'world and character foundations',
   event: 'Event',
   interactive: 'interactive design',
+  choice: 'Choice design',
+  puzzle: 'Puzzle assessment',
   composition: 'composition',
   focus: 'focused revision',
   review: 'Story review',

@@ -7,7 +7,10 @@ import { join } from "node:path";
 import type { JobStartResult } from "../src/job.js";
 import { pendingDigest } from "../src/pending-work-amendments.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
-import { assertAdaptiveFallbackAllowed } from "../src/adaptive-work.js";
+import { assertAdaptiveFallbackAllowed, reconcileAdaptiveWork } from "../src/adaptive-work.js";
+import type { GenerationRequest } from "../src/generation.js";
+import type { Plan } from "../src/architecture.js";
+import type { GenerationInventory } from "../src/generation-plan.js";
 import { emptyAdaptiveState, readAdaptiveState,
   beginAdaptiveAttempt, settleAdaptiveAttempt, assertAdaptiveSettled } from "../src/adaptive-state.js";
 
@@ -26,6 +29,46 @@ function fixture() {
     threadId: "thread", jobId: "job", branch } as JobStartResult;
   return { root, job, git, sha };
 }
+test("inspection of a Story without adaptive history does not enter planning or create receipts", async () => {
+  const f = fixture();
+  const previousFlag = process.env.NT_ADAPTIVE_PLANNING;
+  process.env.NT_ADAPTIVE_PLANNING = "1";
+  try {
+    const contract: Plan["contract"] = { scope: { kind: "full-story", depth: "composition", targets: [], branches: [] },
+      constraints: [], envelope: { presentation: "VN", hardLimits: [], preferences: [] } };
+    const request = { story: f.root, job: "job", task: "Develop the Story", fixture: false,
+      orchestrationPolicy: "explicit", turnPlanDigest: turn, contract } as GenerationRequest;
+    const inventory: GenerationInventory = { version: 1, planVersion: 1, headSha: f.sha, items: [], rationale: "Inspection" };
+    const result = await reconcileAdaptiveWork({ job: f.job, request,
+      plan: { version: 1, contract, items: [] }, inventory,
+      validation: { contract: "noveltea-validator/v1", status: "passed", exitCode: 0,
+        jobId: f.job.jobId, baseSha: f.sha, worktreeStoryRoot: f.root,
+        validator: { contract: "noveltea-validator/v1", implementation: "native-cli", version: "fixture" } },
+      completed: [], graphThreadId: "thread:generation",
+      allowAmend: false });
+    assert.deepEqual(result, { inventory, order: null, version: null });
+    assert.equal(await readAdaptiveState(f.job, turn, 1), null);
+  } finally {
+    if (previousFlag === undefined) delete process.env.NT_ADAPTIVE_PLANNING;
+    else process.env.NT_ADAPTIVE_PLANNING = previousFlag;
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("rejected adaptive proposals block restart instead of falling back to old assignments", async () => {
+  const f = fixture();
+  try {
+    const state = emptyAdaptiveState(f.job, turn, 1);
+    const signature = pendingDigest({ source: f.sha });
+    await beginAdaptiveAttempt(f.job, state, f.sha, signature);
+    await settleAdaptiveAttempt(f.job, state, signature, "rejected");
+    const restored = (await readAdaptiveState(f.job, turn, 1))!;
+    assert.throws(() => assertAdaptiveSettled(restored), /Rejected adaptive/);
+    await assert.rejects(beginAdaptiveAttempt(f.job, restored, f.sha, signature), /Rejected adaptive/);
+    await assert.rejects(assertAdaptiveFallbackAllowed(f.job, turn, 1, null), /Rejected adaptive/);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("adaptive controller history is Thread-bound, durable, source-ancestral and refuses interrupted planner replay", async () => {
   const f = fixture();
   try {

@@ -92,7 +92,10 @@ export async function proposeAdaptiveWork(input: {
       "Milestone into an exact pair of Choice then Puzzle decision specialists, or add a " +
       "missing Event/Interactive/Composition unit for a Milestone present in the VERIFIED Architecture " +
       "scope. Each addition needs explicit causal dependency IDs and must remain within the " +
-      "original depth and author goal. 'Puzzle' is a decision/possible no-write work unit, " +
+      "original depth and author goal. You may also add a verified Architecture Event-to-Event " +
+      "prerequisite to an existing pending Event assignment with a depend action; " +
+      "never change a completed assignment or remove existing dependencies. " +
+      "'Puzzle' is a decision/possible no-write work unit, " +
       "not an obligation to invent a formal Puzzle. Do not ask routine author questions. " +
       "Never omit an assignment unless the controller has ALREADY supplied an independently sealed " +
       "Event-only omission proof. NO such omissions are preauthorized here. " +
@@ -122,7 +125,8 @@ export async function proposeAdaptiveWork(input: {
       ", turnDigest=" + turn.digest + ", beforeVersion=" + version + ". " +
       "actions entries must be one of {kind:'add',stage:'event'|'interactive'|'composition'," +
       "milestone:'milestone.<slug>',dependsOn:['existing assignment id']}, " +
-      "{kind:'split',item:'interactive:milestone.<slug>',domains:['choice','puzzle']}. " +
+      "{kind:'split',item:'interactive:milestone.<slug>',domains:['choice','puzzle']}, " +
+      "{kind:'depend',item:'event:milestone.<slug>',needs:'event:milestone.<prerequisite>'}. " +
       "Use strict JSON DOUBLE QUOTES. order MUST contain EVERY resulting pending ID " +
       "exactly once in dependency-safe order after all actions. " +
       "No omitted tasks, no extra keys, no invented milestones or quota assumptions.";

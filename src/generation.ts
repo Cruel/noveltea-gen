@@ -433,7 +433,7 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const adaptive = plan && validation && receipt.phase === "committed"
     ? await reconcileAdaptiveWork({ job, request, plan, validation,
       inventory: pending.inventory, completed: completedStages,
-      graphThreadId: s.graphThreadId, pinnedVersion: s.adaptiveVersion }) : null;
+      graphThreadId: s.graphThreadId, pinnedVersion: s.adaptiveVersion, allowAmend }) : null;
   const effective = adaptive?.inventory ?? pending.inventory;
   const pendingOrder = adaptive?.order ?? pending.order ?? s.pendingOrder ?? null;
   return { request, planVersion: plan?.version ?? null, completedStages, failures,

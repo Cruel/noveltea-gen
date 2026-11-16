@@ -4,7 +4,7 @@ import type { Plan } from "../src/architecture.js";
 import type { ExecutionItem, GenerationInventory } from "../src/generation-plan.js";
 import { invalidateChangedVerifiedPrerequisites } from "../src/generation-plan.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
-  removeAdaptiveOverlays,
+  removeAdaptiveOverlays, evaluateAdaptiveProposal,
   type AdaptiveProposal } from "../src/adaptive-assignments.js";
 
 const head = "a".repeat(40), turn = "b".repeat(64);
@@ -56,6 +56,64 @@ const proposal = (actions: AdaptiveProposal["actions"], order: string[]): Adapti
   sourceSha: head, turnDigest: turn, beforeVersion: 1, reason: "Source-backed causal coverage",
   actions, order,
 });
+test("architecture-only objectives cannot gain Event writing through an adaptive amendment", () => {
+  const p = proposal([{ kind: "add", stage: "event", milestone: "milestone.choice", dependsOn: ["foundations"] }],
+    ["interactive:milestone.discovery", "composition:milestone.discovery", "event:milestone.choice", "review"]);
+  const src = base(p);
+  src.plan.contract.scope.depth = "architecture";
+  assert.throws(() => admitAdaptiveAssignments(src), /scope/);
+});
+
+test("unchanged adaptive proposals still authenticate exact source, objective and schema", () => {
+  const p = proposal([], ["interactive:milestone.discovery", "composition:milestone.discovery", "review"]);
+  const src = base(p);
+  assert.equal(evaluateAdaptiveProposal(src), null);
+  for (const replacement of [
+    { sourceSha: "0".repeat(40) }, { turnDigest: "0".repeat(64) },
+    { beforeVersion: 2 }, { reason: "" }, { authority: "author-approved" },
+  ]) assert.throws(() => evaluateAdaptiveProposal({ ...src,
+    proposal: { ...p, ...replacement } }), /source|objective|version/);
+  assert.throws(() => evaluateAdaptiveProposal({ ...src, verifiedSource: false }), /verified/);
+  assert.throws(() => evaluateAdaptiveProposal({ ...src, carried: [] }), /verified/);
+});
+
+test("pending Event assignments can acquire a native causal prerequisite without replaying verified work", () => {
+  const p = proposal([
+    { kind: "depend", item: "event:milestone.choice", needs: "event:milestone.discovery" },
+  ], ["event:milestone.choice", "interactive:milestone.discovery", "composition:milestone.discovery", "review"]);
+  const src = base(p);
+  src.inventory.items.splice(4, 0, work("event:milestone.choice", "event", ["foundations"]));
+  src.inventory.items.at(-1)!.dependencies.push("event:milestone.choice");
+  assert.throws(() => admitAdaptiveAssignments(src), /typed causal/);
+  src.typedEdges.push({ item: "event:milestone.choice", needs: "event:milestone.discovery" });
+  const receipt = admitAdaptiveAssignments(src);
+  const updated = applyAdaptiveAssignments(src.inventory, receipt);
+  assert.deepEqual(updated.items.find(i => i.id === "event:milestone.choice")!.dependencies,
+    ["foundations", "event:milestone.discovery"]);
+  assert.deepEqual(updated.items.filter(i => i.status === "verified"),
+    src.inventory.items.filter(i => i.status === "verified"));
+  const finished = structuredClone(updated);
+  const finishedEvent = finished.items.find(i => i.id === "event:milestone.choice")!;
+  finishedEvent.status = "verified"; finishedEvent.verifiedSha = head;
+  const reconciled = structuredClone(finished);
+  invalidateChangedVerifiedPrerequisites(reconciled.items, removeAdaptiveOverlays(finished, [receipt]));
+  assert.equal(reconciled.items.find(i => i.id === finishedEvent.id)!.status, "verified",
+    "a native-backed prerequisite is not a transient alias to erase before canonical reconciliation");
+  assert.deepEqual(revalidateAdaptiveAmendment(receipt, src).inventory.items, updated.items);
+  const nativeCaughtUp = { ...src, inventory: updated };
+  assert.deepEqual(revalidateAdaptiveAmendment(receipt, nativeCaughtUp).inventory.items, updated.items);
+  assert.throws(() => revalidateAdaptiveAmendment(receipt, { ...nativeCaughtUp, typedEdges: [] }), /typed causal/);
+  const cyclic = structuredClone(src);
+  cyclic.proposal.actions.push({ kind: "depend", item: "event:milestone.choice", needs: "event:milestone.choice" });
+  cyclic.typedEdges.push({ item: "event:milestone.choice", needs: "event:milestone.choice" });
+  assert.throws(() => admitAdaptiveAssignments(cyclic), /cycle/);
+  const completed = structuredClone(src);
+  completed.inventory.items.find(i => i.id === "event:milestone.choice")!.status = "verified";
+  completed.inventory.items.find(i => i.id === "event:milestone.choice")!.verifiedSha = head;
+  completed.carried.push({ id: "event:milestone.choice", sha: head });
+  assert.throws(() => admitAdaptiveAssignments(completed), /pending/);
+});
+
 test("choice-heavy Story splits only the selected Milestone, adds a verified-architecture Event, and retains whole-Story review", () => {
   const p = proposal([
     { kind: "split", item: "interactive:milestone.discovery", domains: ["choice", "puzzle"] },

@@ -82,7 +82,9 @@ export function interpretNaturalStoryPrompt(input: unknown, edits: PlanEdits = {
   // The preview's executable stage inventory must stay in sync with the
   // trusted generation graph. Missing, reordered or cyclic stages block
   // admission rather than advertising an invented plan.
-  const required = generationStages.filter(stage => stage !== 'focus')
+  // Choice/Puzzle are conditional refinements of Interactive, not additional
+  // mandatory full-Story stages. They are admitted only at a verified boundary.
+  const required = generationStages.filter(stage => !['focus', 'choice', 'puzzle'].includes(stage))
   const ordered = new Set<GenerationStage>()
   for (const [index, stage] of fullStoryStages.entries()) {
     if (stage.id !== required[index] || stage.dependsOn.some(parent => !ordered.has(parent)))

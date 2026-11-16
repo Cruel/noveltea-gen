@@ -17,7 +17,7 @@ import { parseStoryPlanning } from "./story-planning.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics } from "./story-metrics.js";
 import { dependencyGit } from "./dependency-state.js";
 import { pendingDigest } from "./pending-work-amendments.js";
-import { admitAdaptiveAssignments, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
+import { evaluateAdaptiveProposal, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
   removeAdaptiveOverlays,
   type AdaptiveProposal, type AdaptiveAdmission, type AdaptiveAmendment } from "./adaptive-assignments.js";
 import { emptyAdaptiveState, readAdaptiveState,
@@ -237,6 +237,8 @@ export async function reconcileAdaptiveWork(input: {
   inventory: GenerationInventory; validation: ValidationResult;
   completed: GenerationEvidence[]; graphThreadId: string | null;
   pinnedVersion?: number | null;
+  /** Inspection restores authenticated history but must never start a Pi turn. */
+  allowAmend?: boolean;
 }): Promise<{ inventory: GenerationInventory; order: string[] | null; version: number | null }> {
   const { job, request, plan, validation, completed } = input;
   const original = input.inventory;
@@ -252,6 +254,9 @@ export async function reconcileAdaptiveWork(input: {
     await assertAdaptiveFallbackAllowed(job, request.turnPlanDigest, plan.version, input.pinnedVersion);
     return { inventory: original, order: null, version: null };
   }
+  if (input.allowAmend === false && (input.pinnedVersion ?? 1) <= 1 &&
+      !existsSync(join(job.stateDir, "adaptive-plan.json")))
+    return { inventory: original, order: null, version: null };
   const turn = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
   if (!turn || turn.kind !== "full-story" || !turn.objective) {
     await assertAdaptiveFallbackAllowed(job, request.turnPlanDigest, plan.version, input.pinnedVersion);
@@ -299,8 +304,8 @@ export async function reconcileAdaptiveWork(input: {
     effective = await restoreCompletedAdaptiveWork(job, restored.inventory, completed);
     order = restored.order.filter(id => effective.items.some(i => i.id === id && i.status === "pending"));
   }
-  if (state.entries.length < 4 && effective.items.some(i => i.stage === "interactive" &&
-      i.status === "pending")) {
+  if (input.allowAmend !== false && state.entries.length < 4 &&
+      effective.items.some(i => i.stage === "interactive" && i.status === "pending")) {
     const signature = pendingDigest({
       // One paid planning attempt per canonical Git source. A pure scheduling
       // amendment, a restart, or a commitless no-write decision cannot launch
@@ -333,22 +338,26 @@ export async function reconcileAdaptiveWork(input: {
         provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
         skillReads: proposed.skillReads, proposalDigest: pendingDigest(p),
       };
-      if (!Array.isArray(p.actions) || !Array.isArray(p.order)) {
+      if (!p || !Array.isArray(p.actions) || !Array.isArray(p.order)) {
         await settleAdaptiveAttempt(job, state, signature, "rejected", undefined, session);
         throw Error("Adaptive orchestrator proposal lacks bounded typed assignments.");
       }
-      const current = effective.items.filter(i => i.status === "pending").map(i => i.id);
-      if (!p.actions.length && JSON.stringify(p.order) === JSON.stringify(current)) {
+      let amendment: AdaptiveAmendment | null;
+      try {
+        // A read-only session is not an atomic source snapshot. Recheck the
+        // native-validated files and clean HEAD before admitting even a no-op.
+        const after = await verifySource(job, validation, original);
+        if (pendingDigest(after.sourceHashes) !== pendingDigest(sourceHashes))
+          throw Error("Adaptive source bytes changed during planning.");
+        amendment = evaluateAdaptiveProposal(authorized(effective, p));
+      } catch (error) {
+        await settleAdaptiveAttempt(job, state, signature, "rejected", undefined, session);
+        throw Error("Read-only adaptive proposal was rejected by controller: " +
+          (error instanceof Error ? error.message : String(error)));
+      }
+      if (!amendment) {
         await settleAdaptiveAttempt(job, state, signature, "unchanged", undefined, session);
       } else {
-        let amendment: AdaptiveAmendment;
-        try {
-          amendment = admitAdaptiveAssignments(authorized(effective, p));
-        } catch (error) {
-          await settleAdaptiveAttempt(job, state, signature, "rejected", undefined, session);
-          throw Error("Read-only adaptive proposal was rejected by controller: " +
-            (error instanceof Error ? error.message : String(error)));
-        }
         await settleAdaptiveAttempt(job, state, signature, "admitted", amendment, session);
         effective = applyAdaptiveAssignments(effective, amendment);
         order = amendment.order;

@@ -18,6 +18,7 @@ type WorkStage = "event" | "interactive" | "composition";
 type Action =
   | { kind: "add"; stage: WorkStage; milestone: string; dependsOn: string[] }
   | { kind: "split"; item: string; domains: Array<"choice" | "puzzle"> }
+  | { kind: "depend"; item: string; needs: string }
   | { kind: "omit"; item: string };
 export interface AdaptiveProposal {
   sourceSha: string; turnDigest: string; beforeVersion: number; reason: string;
@@ -115,7 +116,7 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
           !["approved", "draft"].includes(current.get(action.milestone)!.metadata.status) ||
           !input.sourceHashes[current.get(action.milestone)!.path] ||
           action.stage === "composition" && input.plan.contract.scope.depth !== "composition" ||
-          action.stage === "interactive" && input.plan.contract.scope.depth === "architecture" ||
+          input.plan.contract.scope.depth === "architecture" ||
           !Array.isArray(action.dependsOn) || action.dependsOn.length > 32 ||
           new Set(action.dependsOn).size !== action.dependsOn.length)
         throw Error("Adaptive addition exceeds verified Architecture scope or native Story state.");
@@ -180,6 +181,16 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
       byId.delete(original.id); byId.set(choice.id, choice);
       if (action.domains.includes("puzzle")) byId.set(puzzle.id, puzzle);
       for (const item of items) item.dependencies = item.dependencies.map(id => id === original.id ? replacement : id);
+    } else if (action.kind === "depend") {
+      const item = byId.get(action.item);
+      if (!exactly(action, ["kind", "item", "needs"]) ||
+          !item || item.status !== "pending" || item.stage !== "event" ||
+          byId.get(action.needs)?.stage !== "event" ||
+          item.dependencies.includes(action.needs))
+        throw Error("Adaptive prerequisite changes require pending Event work and a new Event dependency.");
+      if (!input.typedEdges?.some(edge => edge.item === action.item && edge.needs === action.needs))
+        throw Error("Adaptive prerequisite lacks a native source-grounded typed causal edge.");
+      item.dependencies.push(action.needs);
     } else if (action.kind === "omit") {
       if (!exactly(action, ["kind", "item"])) throw Error("Adaptive omission action is malformed.");
       const item = byId.get(action.item);
@@ -223,6 +234,15 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
   review.dependencies = [...new Set(review.dependencies)];
   validateCausal(items, input.proposal.order);
   return { ...input.inventory, items, rationale: input.proposal.reason };
+}
+
+/** No-op proposals are still untrusted input. Validate the complete contract
+ * before deciding whether a new plan version is necessary. */
+export function evaluateAdaptiveProposal(input: AdaptiveAdmission): AdaptiveAmendment | null {
+  const amendment = admitAdaptiveAssignments(input);
+  const current = input.inventory.items.filter(item => item.status === "pending").map(item => item.id);
+  return !amendment.actions.length && JSON.stringify(amendment.order) === JSON.stringify(current)
+    ? null : amendment;
 }
 
 export function admitAdaptiveAssignments(input: AdaptiveAdmission): AdaptiveAmendment {
@@ -304,6 +324,13 @@ export function removeAdaptiveOverlays(
         items.splice(position, 0, restored);
         for (const other of items) other.dependencies = other.dependencies.map(dep =>
           dep === choice.id || dep === puzzle.id ? action.item : dep);
+      } else if (action.kind === "depend") {
+        const found = item(action.item);
+        if (!found || !found.dependencies.includes(action.needs))
+          throw Error("Adaptive prerequisite lost its original pending assignment.");
+        // Unlike split aliases, this is an actual native-backed causal edge.
+        // Retain it for canonical prerequisite-drift detection after completion;
+        // erasing it would make unchanged verified work appear newly affected.
       } else if (action.kind === "omit") {
         const found = item(action.item);
         if (!found || found.stage !== "interactive" || found.status !== "verified" || !found.omission)
@@ -352,6 +379,15 @@ export function revalidateAdaptiveAmendment(
       const milestone = action.item.slice("interactive:".length);
       pending.add("choice:" + milestone);
       if (action.domains.includes("puzzle")) pending.add("puzzle:" + milestone);
+    } else if (action.kind === "depend") {
+      // A completed assignment retains its exact amended prerequisite; the
+      // controller must not re-author it. Native reconciliation may already
+      // contain the edge, so only replay structural changes still needed.
+      const item = current.inventory.items.find(i => i.id === action.item);
+      if (!current.typedEdges?.some(edge => edge.item === action.item && edge.needs === action.needs))
+        throw Error("Adaptive prerequisite lost its native source-grounded typed causal edge.");
+      if (!item || !item.dependencies.includes(action.needs) && !pending.has(action.item))
+        throw Error("Adaptive prerequisite no longer targets its original pending assignment.");
     } else if (action.kind === "omit") {
       if (!pending.delete(action.item))
         throw Error("Previously omitted adaptive assignment already changed source state.");
@@ -363,7 +399,8 @@ export function revalidateAdaptiveAmendment(
   const proposal: AdaptiveProposal = {
     sourceSha: current.inventory.headSha, turnDigest: amendment.turnDigest,
     beforeVersion: amendment.beforeVersion, reason: amendment.reason,
-    actions: structuredClone(amendment.actions), order,
+    actions: structuredClone(amendment.actions.filter(action => action.kind !== "depend" ||
+      !current.inventory.items.find(i => i.id === action.item)?.dependencies.includes(action.needs))), order,
   };
   const certified = admitAdaptiveAssignments({ ...current, proposal,
     version: amendment.beforeVersion, omissionProofs: amendment.omissions });
@@ -411,6 +448,11 @@ export function applyAdaptiveAssignments(inventory: GenerationInventory,
       if (action.domains.includes("puzzle")) byId.set(puzzle.id, puzzle);
       for (const item of items)
         item.dependencies = item.dependencies.map(dep => dep === old.id ? replacement : dep);
+    } else if (action.kind === "depend") {
+      const item = byId.get(action.item);
+      if (!item || item.status !== "pending" || item.dependencies.includes(action.needs))
+        throw Error("Adaptive prerequisite lost its pending source assignment.");
+      item.dependencies.push(action.needs);
     } else if (action.kind === "omit") {
       const item = byId.get(action.item);
       const proof = amendment.omissions.find(p => p.assignmentId === action.item);
