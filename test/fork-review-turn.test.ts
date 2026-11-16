@@ -9,6 +9,7 @@ import type { TurnEvidence } from "../src/turn-plan-evidence.js";
 import { forkDigest, readRecoveryFork } from "../src/recovery-fork-state.js";
 import { projectReviewTurn, readReviewTurnEvidence } from "../src/fork-review-turn.js";
 import { selectCheckpointReview } from "../src/checkpoint-assurance.js";
+import { sealPuzzleNoWrite, readPuzzleNoWrite, readPuzzleNoWriteSync } from "../src/puzzle-obligation.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const sourceSha = "a".repeat(40),
@@ -130,6 +131,49 @@ test("fork retains authenticated original Turn for independent review only, not 
         status: "required-pending",
         reasons: ["high-impact-record"],
       },
+    );
+  }));
+
+test("inherited Turn authorizes a source-bound optional Puzzle no-write seal without a child author grant", () =>
+  withFork(async ({ job: bare }) => {
+    const job = { ...bare, branch: "noveltea-gen/next-child", threadId: "fork:next-child" } as JobStartResult;
+    const turn = await readReviewTurnEvidence(job);
+    assert.ok(turn);
+    assert.equal(existsSync(join(job.stateDir, "turn-plan.json")), false);
+    const payload = {
+      version: 1 as const,
+      decision: "not-applicable" as const,
+      jobId: job.jobId,
+      threadId: job.threadId,
+      branch: job.branch,
+      baseSha: job.baseSha,
+      milestoneId: "milestone.incident",
+      unitId: "interactive-puzzle-incident",
+      eventHead: job.baseSha,
+      choiceHead: job.baseSha,
+      verifiedHead: job.baseSha,
+      planVersion: 1,
+      planDigest: "a".repeat(64),
+      turnDigest: turn.digest,
+      snapshotId: "d".repeat(64),
+      worker: "fixture" as const,
+      provider: "fixture",
+      model: "fixture",
+      piSessionFile: null,
+      piSessionSha256: null,
+      report: {
+        modifiedRecords: [] as [],
+        architecturalConflicts: ["No original formal Puzzle requirement"],
+        laterObligations: ["Preserve source-bound fair clues"],
+      },
+      skillReads: [],
+    };
+    const ref = await sealPuzzleNoWrite(job, payload);
+    assert.deepEqual(readPuzzleNoWriteSync(job, payload.milestoneId, ref), payload);
+    assert.deepEqual(await readPuzzleNoWrite(job, payload.milestoneId, ref), payload);
+    assert.throws(
+      () => readPuzzleNoWriteSync(job, payload.milestoneId, { ...ref, digest: "f".repeat(64) }),
+      /source\/owner\/digest/,
     );
   }));
 

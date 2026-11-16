@@ -35,6 +35,14 @@ export async function readReviewTurnEvidence(job: JobStartResult): Promise<TurnE
     const hint = JSON.parse(await readFile(local, "utf8")) as TurnEvidence;
     return readTurnEvidence(job, hint.contract);
   }
+  return readInheritedReviewTurn(job);
+}
+
+/** Synchronous source-bound review projection for integrity checks that must
+ * remain synchronous (notably saved Puzzle no-write/plan continuity). The
+ * inherited Turn is read-only evidence of requirements, NEVER a new writer or
+ * protected-author grant. */
+export function readInheritedReviewTurn(job: JobStartResult): TurnEvidence | null {
   const fork = readRecoveryFork(job);
   if (!fork) return null; // unplanned fixture/legacy CLI job
   const original = fork.reviewTurn;

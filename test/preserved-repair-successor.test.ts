@@ -1,7 +1,7 @@
 /** Opt-in, read-only regression against a privately preserved certified Luna
  * repair. Never mutate real Story worktrees or sealed review receipts. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startStoryJob } from "../src/job.js";
@@ -10,12 +10,65 @@ import { inspectRejectedRepair } from "../src/rejected-review-repair.js";
 import { readReviewTurnEvidence } from "../src/fork-review-turn.js";
 import { collectRecoveryFork } from "../src/recovery-fork.js";
 import { inspectRecoveryCheckpoints, finalizeRecoveryCheckpoint } from "../src/recovery-checkpoints.js";
+import { puzzleObligation } from "../src/puzzle-obligation.js";
+import type { Plan } from "../src/architecture.js";
 
 const root = process.env.NT_TEST_PRESERVED_FORK_REVIEW_ROOT;
 const original = "2127e9afd42d43f22a4efef05109ee2ca7d29754";
 const repaired = "1f030a7f345ee0e73cdc47919d16aff45dec5002";
 const priorEvent = "42451fbf1231c0854cbb9c3c419465db3f4ece0c";
 const inheritedEvent = "e3de2c884d54398e18e90de05731da3513d9b826";
+
+test(
+  "S14 #173 inherited approved Story Turn keeps formal Puzzles optional without a local Turn grant",
+  {
+    skip: !root && "Set NT_TEST_PRESERVED_FORK_REVIEW_ROOT to the saved run",
+  },
+  async () => {
+    const source = JSON.parse(readFileSync(join(root!, "certification-source.json"), "utf8")) as {
+      storyRoot: string;
+    };
+    const job = await startStoryJob(
+      { story: source.storyRoot, job: "09532e4b-8905-4040-86c2-cf2cc14a5172" },
+      false,
+    );
+    assert.equal(
+      existsSync(join(job.stateDir, "turn-plan.json")),
+      false,
+      "Fork must not manufacture local author approval or writer authority.",
+    );
+    const original = await readReviewTurnEvidence(job);
+    assert.ok(original?.objective);
+    const saved = JSON.parse(readFileSync(join(job.stateDir, "architecture.json"), "utf8")) as {
+      plan: Plan;
+    };
+    for (const slug of ["accounts-tested", "choice-enacted"]) {
+      const event = JSON.parse(readFileSync(join(job.stateDir, "event-items", slug + ".json"), "utf8")) as {
+        obligations?: string[];
+        validation?: { eventIds?: string[] };
+      };
+      const requirement = await puzzleObligation(
+        job,
+        saved.plan,
+        [],
+        event.validation?.eventIds ?? [],
+        event.obligations ?? [],
+      );
+      assert.equal(
+        requirement.required,
+        false,
+        slug +
+          " must not inherit a mandatory formal Puzzle from a deferred stage: " +
+          JSON.stringify(requirement.reasons),
+      );
+      assert.equal(
+        requirement.turnDigest,
+        original.digest,
+        "Optional-Puzzle proof must bind to the child-projected immutable original Turn.",
+      );
+    }
+  },
+);
 
 test(
   "historical fork checkpoint accepts a source-bound, already completed review repair",
@@ -63,8 +116,8 @@ test(
     assert.ok(fork.checkpoint.completedWorkItems.includes("repair-" + original));
     assert.equal(
       fork.reviewCoverage.find((entry) => entry.commitSha === checkpointSha)?.status,
-      "required-pending",
-      "The native-valid commit must still obtain its independent review.",
+      "failed",
+      "The original negative verdict must remain visible on a fork of the pre-repair checkpoint.",
     );
     assert.equal(readFileSync(file, "utf8"), before, "Preparing a fork cannot rewrite the source evidence.");
   },

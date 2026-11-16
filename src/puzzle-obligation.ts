@@ -6,7 +6,8 @@ import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import type { Plan } from "./architecture.js";
 import type { JobStartResult } from "./job.js";
-import { readTurnEvidence, validTurnObjective, type TurnEvidence } from "./turn-plan-evidence.js";
+import { validTurnObjective, type TurnEvidence } from "./turn-plan-evidence.js";
+import { readReviewTurnEvidence, readInheritedReviewTurn } from "./fork-review-turn.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const SHA = /^[0-9a-f]{40}$/;
@@ -77,11 +78,11 @@ export async function puzzleObligation(
   sourceObligations: string[] = [],
 ): Promise<PuzzleObligation> {
   const reasons: string[] = [];
-  let turn: TurnEvidence | null = null;
-  if (existsSync(join(job.stateDir, "turn-plan.json"))) {
-    const saved = JSON.parse(await readFile(join(job.stateDir, "turn-plan.json"), "utf8")) as TurnEvidence;
-    turn = await readTurnEvidence(job, saved.contract);
-  }
+  // In a recovery fork the immutable original Turn remains available as
+  // review-only source evidence, while no child turn-plan.json is created.
+  // Missing that file must not falsely convert an optional Puzzle into a
+  // mandatory one. A legacy fork with no pinned Turn still fails closed.
+  const turn = await readReviewTurnEvidence(job);
   if (!turn?.objective) reasons.push("No authenticated original Turn objective (legacy/unknown obligation).");
   else {
     const source = [
@@ -256,7 +257,11 @@ function assertSeal(
     throw new Error("Optional Puzzle transcript changed after its exact controller no-write seal.");
   // The original approved Turn is a separate controller authority. A valid
   // replacement Turn must not inherit a Puzzle omission from the prior one.
-  const saved = JSON.parse(readFileSync(join(job.stateDir, "turn-plan.json"), "utf8")) as TurnEvidence;
+  const local = join(job.stateDir, "turn-plan.json");
+  const saved = existsSync(local)
+    ? (JSON.parse(readFileSync(local, "utf8")) as TurnEvidence)
+    : readInheritedReviewTurn(job);
+  if (!saved) throw new Error("Optional Puzzle no-write lost its original authenticated Turn.");
   const { digest, ...body } = saved;
   if (
     digest !== sealed.payload.turnDigest ||
