@@ -22,6 +22,7 @@ import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
 import { reconcilePendingWork } from "./pending-work.js";
+import { reconcileAdaptiveWork } from "./adaptive-work.js";
 import { currentSteeringBoundary } from "./steering-boundary.js";
 import { proposeSteeringAmendment, readSteeringPlan, saveSteeringAmendment,
   steeringForAssignment, steeringSourceIsAncestor } from "./steering-amendments.js";
@@ -194,6 +195,9 @@ const Channels = Annotation.Root({
   /** Source-bound changes to remaining, never already-authored, assignments. */
   pendingOrder: Annotation<string[] | null>(),
   pendingVersion: Annotation<number | null>(),
+  /** Pin the same Studio/CLI graph Thread as the method-selection receipt. */
+  graphThreadId: Annotation<string | null>(),
+  adaptiveVersion: Annotation<number | null>(),
   dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
 });
 type State = typeof Channels.State;
@@ -353,7 +357,8 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     if (e.stage === "architecture") return receipt.phase === "committed";
     const version = e.planVersion ?? s.planVersion ?? 1;
     if (e.stage === "review") return version === plan.version && e.headSha === head;
-    return hasPlanContinuity(job, receipt, e.milestone ? `${e.stage}:${e.milestone}` : e.stage, version);
+    const stage = e.stage === "choice" || e.stage === "puzzle" ? "interactive" : e.stage;
+    return hasPlanContinuity(job, receipt, e.milestone ? `${stage}:${e.milestone}` : stage, version);
   });
   // A commitless Event-only disposition must be reauthenticated at every
   // scheduler restart, including forks. Completed graph stage flags alone are
@@ -410,6 +415,8 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   }
   // A controller-approved plan revision may require another architecture unit before downstream work.
   if (plan && receipt.phase !== "committed") {
+    if ((s.adaptiveVersion ?? 1) > 1)
+      throw Error("An amended adaptive plan cannot be silently replaced by unfinished Architecture; reconcile its verified checkpoints.");
     const inventory = await reviewGatedInventory(job, reconcileInventory(plan, undefined, head,
       completedStages, failures, s.inventory));
     return { request, planVersion: plan.version, completedStages, failures, inventory,
@@ -421,10 +428,16 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const inventory = await reviewGatedInventory(job,
     reconcileInventory(plan, validation, head, completedStages, failures, s.inventory));
   const pending = await reconcilePendingWork(job, request, inventory, s.inventory, validation, allowAmend);
-  const pendingOrder = pending.order ?? s.pendingOrder ?? null;
+  const adaptive = plan && validation && receipt.phase === "committed"
+    ? await reconcileAdaptiveWork({ job, request, plan, validation,
+      inventory: pending.inventory, completed: completedStages,
+      graphThreadId: s.graphThreadId, pinnedVersion: s.adaptiveVersion }) : null;
+  const effective = adaptive?.inventory ?? pending.inventory;
+  const pendingOrder = adaptive?.order ?? pending.order ?? s.pendingOrder ?? null;
   return { request, planVersion: plan?.version ?? null, completedStages, failures,
-    inventory: pending.inventory, pendingOrder, pendingVersion: pending.stateVersion,
-    active: nextExecutionItem(pending.inventory,
+    inventory: effective, pendingOrder, pendingVersion: pending.stateVersion,
+    adaptiveVersion: adaptive?.version ?? s.adaptiveVersion ?? null,
+    active: nextExecutionItem(effective,
       causalDispatchPriority(receipt, pendingOrder ?? s.orchestratorOrder ?? undefined)) ?? null };
 }
 /** The DB receipt and the private graph amendment must never diverge. A
@@ -529,6 +542,8 @@ async function dispatch(s: State) {
     case "foundations": return runCharacterWorldJob({ ...input, steering, action: "run" });
     case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
     case "interactive": return runInteractiveWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
+    case "choice": return runInteractiveWorkItem({ ...input, task: guidedTask, milestone, action: "run", unit: "choice" });
+    case "puzzle": return runInteractiveWorkItem({ ...input, task: guidedTask, milestone, action: "run", unit: "puzzle" });
     case "composition": return runCompositionWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
     case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task, steering });
     case "review": return runNarrativeReview({ ...input, action: "run" });
@@ -538,7 +553,8 @@ async function dispatch(s: State) {
 const accepted: Record<Stage, readonly string[]> = {
   foundation: ["committed"], architecture: ["architecture-committed", "complete-in-scope"],
   foundations: ["foundations-committed"], event: ["event-cluster-committed"],
-  interactive: ["interactive-slice-committed"], composition: ["composition-committed"],
+  interactive: ["interactive-slice-committed"], choice: ["interactive-choice-committed"],
+  puzzle: ["interactive-slice-committed"], composition: ["composition-committed"],
   focus: ["focused-committed"],
   review: ["complete-in-scope", "editorial-unverified", "blocked"],
 };
@@ -634,8 +650,9 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
     }
     if (s.result.status === "review-handoff") {
       const next = s.active.stage === "foundations" ? "character-foundations" :
-        s.active.stage === "interactive" && s.active.milestone
-          ? "interactive-puzzle-" + s.active.milestone.slice(10) : null;
+        ["interactive", "choice", "puzzle"].includes(s.active.stage) && s.active.milestone
+          ? "interactive-" + (s.active.stage === "choice" ? "choice" : "puzzle") +
+            "-" + s.active.milestone.slice(10) : null;
       if (!next) throw Error("Unexpected multi-specialist review handoff.");
       await assertNativeReviewDependencies(job, next);
       return { result: null }; // Re-enter only the unfinished specialist unit.
@@ -822,7 +839,9 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           throw new Error("Pinned orchestration assignment order changed during resume.");
         if (s.orchestratorPlanningDigest && s.orchestratorPlanningDigest !== orchestratorPlanningDigest)
           throw new Error("Pinned orchestration planning receipt changed during resume.");
-        return { request, orchestratorSnapshotId, orchestratorOrder, orchestratorPlanningDigest,
+        if (s.graphThreadId && s.graphThreadId !== graphThreadId)
+          throw Error("Graph Thread changed after original orchestration admission.");
+        return { request, graphThreadId, orchestratorSnapshotId, orchestratorOrder, orchestratorPlanningDigest,
           status: "running" as const, reason: null, failures: s.failures ?? {} };
       } catch (error) { return blocked(error); }
     })
@@ -1135,7 +1154,8 @@ export async function runStoryGeneration(options: GenerationOptions) {
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
-          pendingOrder: null, pendingVersion: null, dependencyHistory: [] };
+          pendingOrder: null, pendingVersion: null, graphThreadId: null, adaptiveVersion: null,
+          dependencyHistory: [] };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)

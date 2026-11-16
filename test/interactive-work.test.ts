@@ -13,7 +13,7 @@ import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { readPuzzleNoWrite } from "../src/puzzle-obligation.js";
 import { auditInteractivePaths, checkOutput, selectAssignment,
   RepairableInteractiveGateError, RepairableInteractiveScopeError,
-  scopeRepairFeedback } from "../src/interactive-work.js";
+  scopeRepairFeedback, runInteractiveWorkItem } from "../src/interactive-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-interactive-work-"));
 after(() => removeTestTree(root));
@@ -134,7 +134,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     await seal("interactive-choice-disclosure");
     return interactive(variant);
   };
-  return { repo, story, baseline, job, cli, prepare, interactive, saveTurn, prepareWithTurn, seal,
+  return { repo, story, baseline, job, env, cli, prepare, interactive, saveTurn, prepareWithTurn, seal,
     interactiveWithChoiceReview };
 }
 const inspect = (x: ReturnType<typeof setup>) => {
@@ -142,6 +142,36 @@ const inspect = (x: ReturnType<typeof setup>) => {
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 };
+
+test("adaptive Choice/Puzzle dispatch uses one original receipt, never replays Choice, and rejects a premature Puzzle",
+  { skip: !available }, async () => {
+    const x = setup("adaptive-split");
+    x.prepare();
+    const prior = Object.fromEntries(Object.keys(x.env).map(k => [k, process.env[k]]));
+    Object.assign(process.env, x.env);
+    try {
+      const options = { story: x.story, job: "draft", fixture: true,
+        milestone: "milestone.disclosure", action: "run" as const, skillsSource: source };
+      await assert.rejects(runInteractiveWorkItem({ ...options, unit: "puzzle" }),
+        /cannot start before its original Choice receipt/);
+      const choice = await runInteractiveWorkItem({ ...options, unit: "choice" });
+      assert.equal(choice.status, "interactive-choice-committed");
+      const before = choice.headSha;
+      assert.equal(choice.specialistUnits[0]?.phase, "committed");
+      assert.equal(choice.specialistUnits[1]?.phase, "pending");
+      const repeated = await runInteractiveWorkItem({ ...options, unit: "choice" });
+      assert.equal(repeated.headSha, before, "already committed Choice cannot be repeated");
+      const puzzle = await runInteractiveWorkItem({ ...options, unit: "puzzle" });
+      assert.equal(puzzle.status, "interactive-slice-committed");
+      assert.equal(puzzle.specialistUnits[0]?.commitSha, before);
+      assert.equal(inspect(x).status, "interactive-slice-committed");
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 
 test("interactive CLI accepts and persists medium thinking for both specialist stages", { skip: !available }, () => {
   const x = setup("medium-thinking");

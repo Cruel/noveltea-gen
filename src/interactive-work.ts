@@ -75,6 +75,9 @@ interface PuzzleEvidence { id: string; solutions: Array<{ event: string; status:
 export interface InteractiveOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; task?: string; thinking?: "low" | "medium" | "high";
+  /** Production graph can checkpoint Choice and Puzzle independently; the
+   * persisted two-unit receipt and original writer/review gates are shared. */
+  unit?: InteractiveDomain;
 }
 const validMilestone = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -661,8 +664,11 @@ function completed(receipt: Receipt) {
       !!receipt.units[0].eventOnly &&
       JSON.stringify(receipt.units[0].eventOnly) === JSON.stringify(receipt.units[1].eventOnly));
 }
-function output(job: JobStartResult, receipt: Receipt) {
-  return { status: completed(receipt) ? "interactive-slice-committed" : "in-progress",
+function output(job: JobStartResult, receipt: Receipt, unit?: InteractiveDomain) {
+  const choiceDone = receipt.units[0].phase === "committed" ||
+    receipt.units[0].phase === "not-applicable" && completed(receipt);
+  return { status: unit === "choice" ? choiceDone ? "interactive-choice-committed" : "in-progress"
+    : completed(receipt) ? "interactive-slice-committed" : "in-progress",
     jobId: job.jobId, milestoneId: receipt.milestoneId,
     worktreeStoryRoot: job.worktreeStoryRoot, headSha: receipt.units[1].commitSha ??
       (receipt.units[1].phase === "not-applicable" ? receipt.units[1].beforeHead :
@@ -940,6 +946,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         receipt.planVersion, receipt.planDigest);
     } else {
       if (input.action !== "run") throw new Error("No saved interactive work item.");
+      if (input.unit === "puzzle") throw new Error("A Puzzle assignment cannot start before its original Choice receipt.");
       if (dirty(job).length) throw new Error("Interactive design requires a clean verified Story worktree.");
       await verifiedNarrativeSuccessor(job, event.commitSha);
       if (await fileDigest(job, event.paths) !== event.contentDigest)
@@ -973,7 +980,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
             thinking: input.thinking, units: [unit("choice"), unit("puzzle")] };
           await persist(file, receipt);
-          return output(job, receipt);
+          return output(job, receipt, input.unit);
         }
       }
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
@@ -1002,9 +1009,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           JSON.stringify(proof.eventIds) !== JSON.stringify(event.validation.eventIds))
         throw Error("Event-only receipt misrepresents its original specialist/reviewer provenance.");
       if (dirty(job).length) throw Error("Event-only omission cannot resume a dirty Story worktree.");
-      return output(job, receipt);
+      return output(job, receipt, input.unit);
     }
-    if (input.action === "inspect") return output(job, receipt);
+    if (input.action === "inspect") return output(job, receipt, input.unit);
     if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
         receipt.units.every(unit => unit.phase === "pending" && !unit.beforeHead ||
           unit.phase === "committed" && commitOrigin(job, unit.id, unit.commitSha!).jobId !== job.jobId)) {
@@ -1042,7 +1049,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     const graph = new StateGraph(Channels)
       .addNode("choice_design", async ({ receipt }) => { await executeUnit(receipt.units[0]!, receipt); return { receipt }; })
       .addNode("puzzle_design", async ({ receipt }) => { await executeUnit(receipt.units[1]!, receipt); return { receipt }; })
-      .addEdge(START, "choice_design").addEdge("choice_design", "puzzle_design")
+      .addConditionalEdges(START, () => input.unit === "puzzle" ? "puzzle_design" : "choice_design")
+      .addConditionalEdges("choice_design", () => input.unit === "choice" ? END : "puzzle_design")
       .addEdge("puzzle_design", END).compile();
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
@@ -1290,6 +1298,6 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "interactive-work");
-    return { ...output(job, result.receipt), authorUpdates };
+    return { ...output(job, result.receipt, input.unit), authorUpdates };
   });
 }

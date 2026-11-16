@@ -4,7 +4,7 @@ import { auditNarrativeScope, type ScopeAudit } from "./narrative-review.js";
 import { type ValidationResult } from "./validator.js";
 import { isFocusedScope } from "./focused-scope.js";
 
-export const generationStages = ["foundation", "architecture", "foundations", "event", "interactive", "composition", "focus", "review"] as const;
+export const generationStages = ["foundation", "architecture", "foundations", "event", "interactive", "choice", "puzzle", "composition", "focus", "review"] as const;
 export type GenerationStage = typeof generationStages[number];
 export interface GenerationEvidence {
   stage: GenerationStage; milestone?: string; headSha: string; status: string; planVersion?: number;
