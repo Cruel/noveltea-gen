@@ -122,6 +122,21 @@ export function assertRecoveryReceiptCompatibility(
         })) incompatible();
     return;
   }
+  if (source.startsWith("review-repairs/proofs/")) {
+    // An independently reviewed correction is a completed Git checkpoint,
+    // NOT an executable writer/approval grant in the fork. The fork carries
+    // its sanitized historical proof and separately pinned review coverage.
+    const match = /^review-repairs\/proofs\/([a-f0-9]{40})\.json$/.exec(source);
+    if (!match || receipt.version !== 1 || receipt.phase !== "committed" ||
+        receipt.workItemId !== "repair-" + match[1] ||
+        receipt.sourceCommitSha !== match[1] ||
+        !completed.has(receipt.workItemId) ||
+        !/^[a-f0-9]{40}$/.test(receipt.beforeHead ?? "") ||
+        !/^[a-f0-9]{40}$/.test(receipt.commitSha ?? "") ||
+        !/^[a-f0-9]{64}$/.test(receipt.digest ?? ""))
+      incompatible();
+    return;
+  }
   if (source.startsWith("event-items/") || source.startsWith("composition-items/") ||
       source.startsWith("focused-items/")) {
     if (receipt.version !== 1 || receipt.phase !== "committed" ||

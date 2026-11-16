@@ -74,6 +74,28 @@ test("obsolete graph, approval and receipt shapes fail closed without replay", (
   rejects(planlessEvent, "obsolete-checkpoint");
 });
 
+test("a source-bound passed review-repair proof is historical fork evidence, never a writer grant", () => {
+  const source = "a".repeat(40);
+  const repair = "repair-" + source;
+  const path = "review-repairs/proofs/" + source + ".json";
+  const receipt = { version: 1, phase: "committed", snapshot: { id: "e".repeat(64) },
+    workItemId: repair, sourceCommitSha: source, commitSha: "b".repeat(40),
+    beforeHead: source, digest: "f".repeat(64) };
+  const completed = new Set([repair]);
+  assert.doesNotThrow(() => assertRecoveryReceiptCompatibility(path, receipt, completed));
+  for (const [name, altered] of [
+    ["unknown work item", { ...receipt, workItemId: "repair-" + "c".repeat(40) }],
+    ["incomplete boundary", { ...receipt, phase: "reviewing" }],
+    ["incorrect source identity", { ...receipt, sourceCommitSha: "c".repeat(40) }],
+    ["missing validated commit", { ...receipt, commitSha: "" }],
+    ["forged digest", { ...receipt, digest: "a" }],
+  ] as const)
+    assert.throws(() => assertRecoveryReceiptCompatibility(path, altered, completed),
+      /incompatible or incomplete layout/, name);
+  assert.throws(() => assertRecoveryReceiptCompatibility(path, receipt, new Set()),
+    /incompatible or incomplete layout/, "Uncompleted review repair is never inherited");
+});
+
 test("current specialist receipt schemas admit only compatible, committed prior units", () => {
   const completed = new Set(["foundation", "global-architecture", "world-foundations"]);
   const snapshot = { id: "e".repeat(64) };

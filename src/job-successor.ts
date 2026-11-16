@@ -56,6 +56,91 @@ function verifyReviewRepair(job: JobStartResult, commit: string, parent: string,
     throw new Error("Reviewed repair successor commit does not match its certified prose bytes.");
 }
 
+/** A source-bound independent-review correction may succeed its own rejected
+ * specialist. The original negative finding remains sealed; a separate,
+ * independently passed successor must prove exact authorized paths and Git
+ * ancestry. Ordinary specialist writes are NOT whitelisted by this exception. */
+async function verifyIndependentReviewRepairSuccessor(job: JobStartResult, commit: string,
+  parent: string, paths: string[], message: string[]) {
+  const item = message.find(line => /^NovelTea-Work-Item: repair-[a-f0-9]{40}$/.test(line))
+    ?.slice("NovelTea-Work-Item: ".length);
+  if (!item || !message.includes("NovelTea-Job: " + job.jobId))
+    throw Error("Independent review correction has no authentic work-item provenance.");
+  const sourceSha = item.slice("repair-".length);
+  const { readRepairCommitProof, inspectCheckpointReview } = await import("./checkpoint-assurance.js");
+  const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
+  const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
+  const proof = await readRepairCommitProof(job, item);
+  const receipt = await inspectRejectedRepair(job, sourceSha);
+  const checkpoints = await inspectRecoveryCheckpoints(job);
+  const point = checkpoints.find(p => p.eligible && p.commitSha === commit);
+  const source = checkpoints.find(p => p.eligible && p.commitSha === sourceSha);
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const expectedPaths = proof.paths.map(path => prefix + path).sort();
+  const actualPaths = [...paths].sort();
+  const verdict = point ? await inspectCheckpointReview(job, point) : null;
+  const originalVerdict = source ? await inspectCheckpointReview(job, source) : null;
+  if (receipt.phase !== "passed" || receipt.sourceCommitSha !== sourceSha ||
+      receipt.repairedCommitSha !== commit ||
+      proof.beforeHead !== parent || proof.commitSha !== commit ||
+      proof.sourceCommitSha !== sourceSha ||
+      !message.includes("NovelTea-Review-Repair: " + proof.digest) ||
+      JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths) ||
+      point?.workItem !== item || point.parentSha !== parent ||
+      JSON.stringify(point.assurance?.changedPaths.slice().sort()) !==
+        JSON.stringify(proof.paths.slice().sort()) ||
+      verdict?.status !== "passed" || originalVerdict?.status !== "failed") {
+    throw Error("Independent review-repair successor lacks exact validated and passed provenance.");
+  }
+}
+
+/** Only actual, source-bound narrative specialist checkpoints whose independent
+ * review requirement is satisfied may appear between two immutable work-item
+ * boundaries. A matching trailer or an arbitrary descendant SHA is never
+ * sufficient. Recovery-fork coverage is pinned before child admission. */
+async function verifyReviewedSpecialistSuccessor(job: JobStartResult, commit: string,
+  parent: string, paths: string[], message: string[]): Promise<boolean> {
+  const workItem = message.find(line =>
+    /^NovelTea-Work-Item: (?:event-|interactive-(?:choice|puzzle)-|composition-)[a-z0-9-]+$/.test(line))
+    ?.slice("NovelTea-Work-Item: ".length);
+  if (!workItem) return false;
+  const { readRecoveryFork, resolvedInheritedRecoveryReviews } =
+    await import("./recovery-fork-state.js");
+  const fork = readRecoveryFork(job);
+  const inherited = fork?.commits[workItem];
+  const originJob = inherited?.sha === commit ? inherited.jobId : job.jobId;
+  if (!message.includes("NovelTea-Job: " + originJob))
+    throw Error("Reviewed narrative successor has incorrect Job provenance.");
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const localPaths = paths.map(p => {
+    if (!p.startsWith(prefix) || !/^[-a-z]+\/[a-z0-9._-]+\.md$/.test(p.slice(prefix.length)))
+      throw Error("Reviewed narrative successor changed a noncanonical Story path.");
+    return p.slice(prefix.length);
+  }).sort();
+  if (!localPaths.length)
+    throw Error("Reviewed narrative successor changed no canonical records.");
+  if (inherited?.sha === commit) {
+    const decision = resolvedInheritedRecoveryReviews(fork!.reviewCoverage ?? []).find(entry =>
+      entry.workItem === workItem && entry.commitSha === commit);
+    if (!decision || !["passed", "not-required"].includes(decision.status))
+      throw Error("Inherited narrative successor lacks passed, source-bound review coverage.");
+    return true;
+  }
+  const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
+  const { resolvedCheckpointReviews } = await import("./checkpoint-assurance.js");
+  const checkpoints = await inspectRecoveryCheckpoints(job);
+  const point = checkpoints.find(item => item.eligible && item.commitSha === commit);
+  if (!point || point.workItem !== workItem || point.parentSha !== parent ||
+      !point.assurance ||
+      JSON.stringify([...point.assurance.changedPaths].sort()) !== JSON.stringify(localPaths))
+    throw Error("Narrative successor lacks an exact authorized recovery checkpoint and diff.");
+  const resolved = await resolvedCheckpointReviews(job, checkpoints);
+  const review = resolved.get(commit) ?? point.semanticReview;
+  if (review !== "passed" && review !== "not-required")
+    throw Error("Narrative successor's mandatory independent review is still pending or failed.");
+  return true;
+}
+
 /**
  * A deferred capture is a distinct verified commit, not a revision to the
  * preceding specialist's narrative premises. Do not accept arbitrary descendant
@@ -78,6 +163,12 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       verifyReviewRepair(job, commit, parents[1]!, paths, trailers);
       continue;
     }
+    if (trailers.some(line => /^NovelTea-Work-Item: repair-[a-f0-9]{40}$/.test(line))) {
+      await verifyIndependentReviewRepairSuccessor(job, commit, parents[1]!, paths, trailers);
+      continue;
+    }
+    if (await verifyReviewedSpecialistSuccessor(job, commit, parents[1]!, paths, trailers))
+      continue;
     if (trailers.includes("NovelTea-Work-Item: idea-placement")) {
       const { verifyPlacementSuccessor } = await import("./idea-placement.js");
       await verifyPlacementSuccessor(job, commit, parents[1]!, paths, trailers);
