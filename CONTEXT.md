@@ -25,6 +25,45 @@ A policy for how much creative initiative an agent takes and when it seeks autho
 **Baseline discovery**:
 The initial author–agent discussion that establishes a new Story's minimum Creative Direction before autonomous or collaborative development. It preserves author-established choices, recommendations, and explicit delegation without requiring complete Story design.
 
+**Interaction profile**:
+The author-approved Story-wide expectation for Choice frequency, branching depth, and adventure versus custom interactive Puzzle emphasis. It describes the intended experience without imposing a uniform Choice or Puzzle quota on each Milestone.
+
+**Adventure Puzzle**:
+A player-solvable challenge expressed through ordinary exploration and interaction with places, Characters, and objects, including collecting, using, or combining items.
+
+**Custom interactive Puzzle**:
+A player-solvable challenge with a bespoke interaction surface or mechanic, such as tile arrangement, a board game, or a card game; it can depend on exploration to obtain its inputs.
+
+**Production budget**:
+The author-approved hard limits and soft targets for costly Story presentation needs, including distinct illustrated backgrounds, meaningful visual variants, and Character artwork tiers. It is separate from the number of narrative locations or engine Rooms.
+
+**Character artwork tier**:
+A production classification of Main, Supporting, or Extra according to expected visual asset effort, independent of a Character's narrative importance.
+
+**Playthrough length**:
+The intended elapsed player experience along one complete Story route, including reading, exploration, and problem-solving. It does not sum the duration of alternative branches.
+
+**Narrative time**:
+Estimated time spent in predominantly authored, sequential dialogue, narration, and other scripted Story presentation.
+
+**Exploration time**:
+Estimated time spent in player-directed investigation, navigation, brief investigative conversations, object interactions, and Puzzle-solving.
+
+**Narrative location**:
+A place in the fiction where Story action occurs. It can support many distinct scenes or conditions and does not imply a one-to-one mapping to engine Rooms or unique background artwork.
+
+**Content footprint**:
+The approximate total distinct content and production effort across all routes, including reused and route-exclusive material; unlike Playthrough length, it accounts for alternatives that a single player may never see.
+
+**Content divergence**:
+The amount of route-exclusive authored content introduced by branching, distinct from how consequential a Choice remains after routes reconverge.
+
+**Generation progress**:
+The estimated share of total required, verified Story production work completed against the current approved scope. It is not the same as completed playtime and may change when the plan changes.
+
+**Playtime coverage**:
+The estimated duration already supported by player-facing Story content along a representative route relative to the approved Playthrough length target. It is distinct from Generation progress.
+
 **Author objective**:
 The Story outcome an author requests in a Turn, independent of the specialist assignments chosen to achieve it.
 
