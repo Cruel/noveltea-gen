@@ -64,9 +64,38 @@ async function verifyIndependentReviewRepairSuccessor(job: JobStartResult, commi
   parent: string, paths: string[], message: string[]) {
   const item = message.find(line => /^NovelTea-Work-Item: repair-[a-f0-9]{40}$/.test(line))
     ?.slice("NovelTea-Work-Item: ".length);
-  if (!item || !message.includes("NovelTea-Job: " + job.jobId))
+  if (!item)
     throw Error("Independent review correction has no authentic work-item provenance.");
   const sourceSha = item.slice("repair-".length);
+  const { readRecoveryFork } = await import("./recovery-fork-state.js");
+  const fork = readRecoveryFork(job);
+  const inherited = fork?.commits[item];
+  if (inherited?.sha === commit) {
+    // In a descendant fork the immutable Git trailer names the *original*
+    // Job, not the child. Admission already authenticated the source proof
+    // and exact failed -> passed reviewer coverage; enforce it again without
+    // importing its historic writer permissions into the new Job.
+    const proof = fork?.receipts["review-repairs/proofs/" + sourceSha + ".json"];
+    const status = fork?.reviewCoverage ?? [];
+    const source = status.find(entry => entry.workItem !== item &&
+      entry.commitSha === sourceSha);
+    const correction = status.find(entry => entry.workItem === item &&
+      entry.commitSha === commit);
+    const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+    if (!message.includes("NovelTea-Job: " + inherited.jobId) ||
+        !proof || proof.version !== 1 || proof.phase !== "committed" ||
+        proof.workItemId !== item || proof.sourceCommitSha !== sourceSha ||
+        proof.commitSha !== commit || proof.beforeHead !== parent ||
+        !message.includes("NovelTea-Review-Repair: " + proof.digest) ||
+        !Array.isArray(proof.paths) ||
+        JSON.stringify(proof.paths.map((p: string) => prefix + p).sort()) !==
+          JSON.stringify([...paths].sort()) ||
+        source?.status !== "failed" || correction?.status !== "passed")
+      throw Error("Inherited review correction lacks source-bound, independently passed fork evidence.");
+    return;
+  }
+  if (!message.includes("NovelTea-Job: " + job.jobId))
+    throw Error("Independent review correction has no authentic work-item provenance.");
   const { readRepairCommitProof, inspectCheckpointReview } = await import("./checkpoint-assurance.js");
   const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
   const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");

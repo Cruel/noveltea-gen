@@ -17,6 +17,27 @@ const priorEvent = "42451fbf1231c0854cbb9c3c419465db3f4ece0c";
 const inheritedEvent = "e3de2c884d54398e18e90de05731da3513d9b826";
 
 test(
+  "S14 #173: nested fork authenticates original Job's passed repair trailer",
+  {
+    skip: !root && "Set NT_TEST_PRESERVED_FORK_REVIEW_ROOT to the saved run",
+  },
+  async () => {
+    const source = JSON.parse(readFileSync(join(root!, "certification-source.json"), "utf8")) as {
+      storyRoot: string;
+    };
+    const child = await startStoryJob(
+      { story: source.storyRoot, job: "e47c3254-bd92-4bd3-9341-97798bd079c8" },
+      false,
+    );
+    assert.equal(
+      await verifiedNarrativeChain(child, inheritedEvent, repaired),
+      repaired,
+      "Inherited reviewed work and the source Job's separately passed repair remain valid.",
+    );
+  },
+);
+
+test(
   "S14 #173: only exact independently passed original-session Choice repair is an allowed successor",
   {
     skip: !root && "Set NT_TEST_PRESERVED_FORK_REVIEW_ROOT to the saved run",
