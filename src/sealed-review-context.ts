@@ -64,10 +64,38 @@ export async function loadSealedReviewContext(job: JobStartResult, commitSha: st
     if (catalogRun.error || catalogRun.status !== 0)
       throw Error("Native sealed review catalog could not be verified.");
     const catalog = JSON.parse(catalogRun.stdout).catalog as {
-      records?: Array<{ path: string; metadata: { id: string } }> };
-    const ids = seeds.map(path => catalog?.records?.find(r => r.path === path)?.metadata.id);
+      records?: Array<{ path: string; metadata: {
+        id: string; type: string;
+        prerequisites?: { any_of?: Array<{ conditions?: Array<{
+          kind: string; choice_point?: string }> }> };
+        steps?: Array<{ branches?: Array<{
+          conditions?: Array<{ kind: string; choice_point?: string }>;
+          effects?: Array<{ kind: string; choice_point?: string }>
+        }> }>;
+      } }> };
+    const catalogRecords = catalog?.records ?? [];
+    const choices = new Set(seeds.flatMap(path => catalogRecords
+      .filter(r => r.path === path && r.metadata.type === "choice-point")
+      .map(r => r.metadata.id)));
+    // A changed Choice may select an outcome in one Event and consume the
+    // other outcome in an unchanged downstream Event. Related-context search
+    // does not reliably bring in that consumer, causing false review failures.
+    // Use native-typed metadata at the EXACT sealed commit, never YAML parsing
+    // or a mutable worktree, to add both sides as read-only review evidence.
+    const touchesChoice = (effect: { kind: string; choice_point?: string }) =>
+      effect.kind === "outcome" && choices.has(effect.choice_point ?? "");
+    const linked = choices.size ? catalogRecords.filter(r => r.metadata.type === "event" &&
+      (r.metadata.prerequisites?.any_of ?? []).some(route =>
+        (route.conditions ?? []).some(touchesChoice)) ||
+      (r.metadata.steps ?? []).some(step => (step.branches ?? []).some(branch =>
+        (branch.conditions ?? []).some(touchesChoice) ||
+        (branch.effects ?? []).some(touchesChoice)))) : [];
+    const paths = [...new Set([...seeds, ...linked.map(record => record.path)])];
+    if (paths.length > 32 || paths.some(path => !blobs.has(path)))
+      throw Error("Sealed Choice review context exceeds bounded native source inventory.");
+    const ids = paths.map(path => catalogRecords.find(r => r.path === path)?.metadata.id);
     if (ids.some(id => typeof id !== "string")) throw Error("Missing native review seed identity.");
-    const context = await new StoryContextReader({ root, cli: nativeExecutable(), initialPaths: seeds,
+    const context = await new StoryContextReader({ root, cli: nativeExecutable(), initialPaths: paths,
       task: { kind: "review", ids: ids as string[], scope: "related" },
     }).get({ batchLimit: 32 });
     if (context.pending.length || context.loaded.length > 32)
