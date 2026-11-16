@@ -76,7 +76,7 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
 export function observedNondecisionMilestone(change: string): boolean {
   return !/\b(?:choice|chooses?|choosing|decision|decides?|deciding|branch|alternate outcomes?|either\b.{0,90}\bor\b)\b/i
     .test(change) &&
-    /\b(?:knows?|learns?|recogniz(?:e|es|ed)|identif(?:y|ies|ied)|observes?|encounters?|encountered|becomes aware)\b/i
+    /\b(?:knows?|learns?|recogniz(?:e|es|ed|ing)|identif(?:y|ies|ied|ying)|observ(?:e|es|ed|ing)|encounter(?:s|ed|ing)?|becomes aware)\b/i
       .test(change) &&
     /\b(?:investigat(?:ion|e|ing)|inquir(?:y|e)|missing|disappearance|absence|subject|evidence|situation)\b/i
       .test(change);

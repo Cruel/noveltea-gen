@@ -6,7 +6,7 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { authorInteractive, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
-import { eventCompletionDigest } from "./event-work.js";
+import { eventCompletionDigest, currentMilestoneChoiceBinding } from "./event-work.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
@@ -127,6 +127,17 @@ export function selectAssignment(plan: Plan, report: Report, milestoneId: string
     Array.isArray(milestone.metadata.fulfillment?.any_of) &&
     milestone.metadata.fulfillment.any_of.length === 0 &&
     eventSource.missingObligations.length > 0 && eventSource.eventIds.length > 0;
+  // Older independently reviewed Event receipts can predate the controller's
+  // nondecision-vs-future-Choice distinction. Do NOT dispatch another Pi
+  // specialist to manufacture a Choice to satisfy their stale "partial"
+  // marker. The Event's selected Milestone needs a separately authorized,
+  // source-bound completeness/fulfillment reconciliation instead.
+  if (staged && !currentMilestoneChoiceBinding(eventSource!.missingObligations,
+      milestoneId, String(milestone!.metadata.change ?? "")))
+    throw new Error("Historical nondecision Event was left partial for a later Story Choice, " +
+      "not a Choice obligation on " + milestoneId + ". Reconcile the selected Event " +
+      "Milestone's fulfillment/completeness with native validation and independent " +
+      "review; do not invent an Interactive Choice or silently mark this unit complete.");
   if (!milestone || !staged && (!milestone.metadata.fulfillment?.any_of?.length ||
       !report.coverage.milestoneRoutes.find(r => r.id === milestoneId)?.routes.some(r => r.status === "reachable"))) {
     throw new Error("Interactive design requires a verified reachable Event cluster or an explicitly staged Choice obligation.");
