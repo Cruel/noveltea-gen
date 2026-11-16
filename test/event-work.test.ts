@@ -24,6 +24,8 @@ test("Event handoff recognizes Luna's explicit Choice-owner binding without acce
     "A formal Choice must be added by the subsequent specialist.",
     "Choice Point binding is required for both outcomes.",
     "The Choice specialist must author the selected outcome.",
+    "Choice author: implement the formal player decision, bind its real outcome routes, " +
+      "and carry consequences into different endings. The milestone remains partial until enacted.",
   ]) {
     assert.equal(hasDeferredChoiceBinding([instruction]), true, instruction);
   }
@@ -31,6 +33,29 @@ test("Event handoff recognizes Luna's explicit Choice-owner binding without acce
     "A player choice may become relevant in final prose.",
     "Puzzle owner will add new clues.",
   ]), false);
+});
+
+test("live Luna decision-setup manifest preserves partial Milestone and original Choice author handoff", () => {
+  const actual = [
+    "Choice author: implement the formal player decision, bind its real outcome routes, and " +
+      "carry their consequences into meaningfully different endings. The milestone remains " +
+      "partial until that decision is enacted.",
+    "Later Event/Choice authors: establish any missing confrontation and decision-dependent " +
+      "outcome effects before claiming the milestone’s full narrative promise is met.",
+    "Composition author: create linked authored content for the Events; this Event’s body " +
+      "is not an engine-playability guarantee.",
+  ];
+  const actualChange =
+    "The player moves from evaluating an evidence-bounded account to enacting a " +
+    "consequential response to the incident and the train's predicament. That response " +
+    "changes what happens to people aboard and opens meaningfully different ending outcomes.";
+  assert.equal(hasDeferredChoiceBinding(actual), true,
+    "Explicit Choice author is an authorized future handoff, not a no-write blocker.");
+  assert.equal(currentMilestoneChoiceBinding(actual, "milestone.choice-enacted", actualChange),
+    true, "This source Milestone really requires later Choice enactment.");
+  assert.equal(hasDeferredChoiceBinding([
+    "The Choice author may provide flavor text, but this Milestone has no pending binding.",
+  ]), false, "A role name alone does not establish a binding obligation.");
 });
 
 test("later Story Choice obligations do not block the source-supported opening nondecision Milestone", () => {

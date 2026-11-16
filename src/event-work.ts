@@ -285,11 +285,11 @@ function metadataReferences(value: unknown, found = new Set<string>()): Set<stri
   return found;
 }
 /** A staged Event may hand off the same formal binding to the later Choice
- * owner, specialist, writer or Choice Point. Do not mistake general mentions
+ * author, owner, specialist, writer or Choice Point. Do not mistake general mentions
  * of a future choice for an actual binding obligation. */
 export function hasDeferredChoiceBinding(obligations: string[]): boolean {
   return obligations.some(obligation =>
-    /choice[ -]?(?:point|binding|specialist|writer|owner)|\bformal choice\b/i.test(obligation));
+    /choice[ -]?(?:point|binding|specialist|writer|owner)|\bformal choice\b|\bchoice[ -]?author\b.{0,120}\b(?:implement|enact|bind|author|write|create)\b/i.test(obligation));
 }
 /** A later, unrelated Story Choice cannot invalidate a currently completed
  * nondecision Milestone. The controller still treats an explicit Choice
