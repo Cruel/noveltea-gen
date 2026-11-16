@@ -51,6 +51,17 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   const selected = points.find(p => p.commitSha === commitSha && p.eligible);
   if (!selected) throw new RecoveryCompatibilityError("invalid-evidence",
     "Checkpoint is not finalized and independently verified.");
+  // An Event-only omission is bound to the original job, Thread, validator,
+  // reviewed Event sources and independent reviewer session. A fork copies
+  // authored commits but cannot inherit that no-write authorization as a
+  // completed Git work item, nor silently rebind the parent's review proof.
+  // Reject before allocating a child until a separately reviewed fork
+  // handoff for optional units exists. Same-Thread restart remains supported.
+  if (selected.omittedWorkItems?.some(entry =>
+      entry.workItem.startsWith("interactive-choice-")))
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "Event-only omissions are source-bound to the original Thread; this checkpoint " +
+      "cannot be forked without a separately reviewed no-write handoff.");
   assertRecoveryCompatibility(selected);
   const { eligible: _eligible, reason: _reason, semanticReview: _semanticReview, ...checkpoint } = selected;
   const inherited = readRecoveryFork(parent);

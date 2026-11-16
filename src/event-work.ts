@@ -487,7 +487,18 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
   const impossible = ["contradiction", "failed-repair", "repair"].includes(variant);
   await add("disclose-ledger",
     `participants: [character.ada, character.neri]\narcs: [${assignment.arcIds[0]}]\nconsequences: ["Neri discloses the ledger, changing Ada's belief and their relationship"]\nafter: ${variant === "optional" ? "[event.inspect-ledger]" : "[]"}\nprerequisites:\n  any_of:\n    - completed: ${impossible ? "[event.inspect-ledger]" : "[]"}\n      not_completed: ${impossible ? "[event.inspect-ledger]" : "[]"}\n      conditions:\n        - kind: knowledge\n          character: character.neri\n          fact: fact.evidence-concealed\n          value: knows\nsteps:\n  - id: admit\n    branches:\n      - id: disclose\n        conditions: []\n        effects:\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting`,
-    "Neri admits concealing the ledger and explains the reason. Ada learns that the concealment is real, while the confession begins repairing their trust. These are typed effects at the disclosure step.");
+    variant === "event-only"
+      ? "Neri opens the original signed transfer ledger for the missing witness on the archive table. " +
+        "He places the matching daily register beside it: the witness's name, dated entry, and " +
+        "transfer stamp agree. The correction ink carries Neri's initials. He admits he kept " +
+        "the ledger out of Ada's sight while protecting the witness from an official inquiry. " +
+        "Ada compares the two primary records herself, recognizing both the genuine transfer " +
+        "evidence and Neri's deliberate concealment. Neri hands her the unaltered original " +
+        "and offers to let her check every remaining page with him. His surrender of control " +
+        "and the corroborating signatures answer Ada's earlier suspicion. She is still " +
+        "upset, but her wariness changes to cautious trust as she takes custody of the evidence. " +
+        "No selectable player decision is introduced at this observational disclosure."
+      : "Neri admits concealing the ledger and explains the reason. Ada learns that the concealment is real, while the confession begins repairing their trust. These are typed effects at the disclosure step.");
   if (["decision-pending", "false-decision-complete", "fake-unrelated-effects", "descriptive"].includes(variant)) {
     const path = join(job.worktreeStoryRoot, "events/disclose-ledger.md");
     const original = await readFile(path, "utf8");
@@ -542,7 +553,9 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
   return { claimedPaths: files, conflicts: [], obligations:
     ["decision-pending", "false-decision-complete", "fake-unrelated-effects"].includes(variant)
       ? ["Formal Choice Point binding and outcome-specific later consumers remain with the Choice specialist."]
-      : ["Player-facing prose and alternate branch details require composition and editorial review."],
+      : variant === "event-only"
+        ? ["Player-facing prose of this source-grounded observational discovery requires Composition and independent editorial review."]
+        : ["Player-facing prose and alternate branch details require composition and editorial review."],
     skillReads: [] };
 }
 

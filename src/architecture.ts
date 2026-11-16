@@ -350,8 +350,10 @@ async function fixtureAuthor(job: JobStartResult, state: Receipt) {
   const records = [
     ...arcs.map(arc => ({ folder: "arcs", id: arc, type: "arc", fields: 'dramatic_question: "Can truth survive loyalty?"\ncharacters: []',
       body: "The inquiry puts a friendship under pressure. Each admission makes concealment harder, until loyalty must mean either silence or accountability." })),
-    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "${process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only" ? "Ada learns the hidden evidence behind the witness disappearance" : "The hidden evidence becomes a shared responsibility"}"\narcs: [${arcs[i % arcs.length]}]\nfulfillment: {any_of: []}`,
-      body: "The investigator can no longer act alone once the witness discloses the evidence. A future conversation could earn this disclosure through trust; an evidence-led confrontation is another possible route. Event design must establish the prerequisites and consequences before either route is bound. Reuse the inquiry setting and express the revelation through dialogue." })),
+    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "${process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only" ? "Ada learns that Neri concealed the missing witness transfer ledger" : "The hidden evidence becomes a shared responsibility"}"\narcs: [${arcs[i % arcs.length]}]\nfulfillment: {any_of: []}`,
+      body: process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only"
+        ? "In the archive, Neri presents Ada with the signed transfer ledger for the missing witness. Ada verifies the entry against the register and learns Neri hid this record. This is a single observational discovery, not a promise of player-selectable branches; its causal evidence and trust shift must be demonstrated within the Event before player-facing prose is composed."
+        : "The investigator can no longer act alone once the witness discloses the evidence. A future conversation could earn this disclosure through trust; an evidence-led confrontation is another possible route. Event design must establish the prerequisites and consequences before either route is bound. Reuse the inquiry setting and express the revelation through dialogue." })),
   ];
   for (const r of records) {
     const path = join(job.worktreeStoryRoot, r.folder, r.id.split(".")[1] + ".md");

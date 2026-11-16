@@ -345,7 +345,16 @@ async function verifyOmissions(job: JobStartResult,
     if (choice?.eventOnly || puzzle?.eventOnly) {
       const seal = choice?.eventOnly;
       const proof = await readEventOnlyOmission(job, milestone, seal);
-      if (choice?.phase !== "not-applicable" || puzzle?.phase !== "not-applicable" ||
+      const event = JSON.parse(await readFile(join(job.stateDir,
+        "event-items", match[2] + ".json"), "utf8")) as {
+        commitSha?: string; snapshot?: { id?: string };
+        planVersion?: number; validation?: { eventIds?: string[] };
+      };
+      if (event.commitSha !== proof.eventHead ||
+          event.snapshot?.id !== proof.eventSnapshotId ||
+          event.planVersion !== proof.planVersion ||
+          JSON.stringify(event.validation?.eventIds) !== JSON.stringify(proof.eventIds) ||
+          choice?.phase !== "not-applicable" || puzzle?.phase !== "not-applicable" ||
           !seal || JSON.stringify(seal) !== JSON.stringify(puzzle.eventOnly) ||
           JSON.stringify(seal) !== JSON.stringify(entry.seal) ||
           choice?.commitSha || puzzle?.commitSha ||

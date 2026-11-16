@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { DatabaseSync } from "node:sqlite";
+import { createControllerServer, SandboxController, type ControllerConfig } from "../web/src/sandbox-controller.js";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { startStoryJob } from "../src/job.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { collectRecoveryFork } from "../src/recovery-fork.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { parseSpecialistJson } from "../src/composition-specialist.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
@@ -15,7 +20,8 @@ import { selectAssignment, verifyCompositionProse } from "../src/composition-wor
 
 const root = mkdtempSync(join(tmpdir(), "nt-composition-"));
 after(() => {
-  if (process.env.NT_LIVE_COMPOSITION === "1" && process.env.NT_KEEP_FAILED_LIVE === "1") {
+  if ((process.env.NT_LIVE_COMPOSITION === "1" || process.env.NT_LIVE_EVENT_ONLY === "1") &&
+      process.env.NT_KEEP_FAILED_LIVE === "1") {
     process.stderr.write("Live composition fixtures preserved: " + root + "\n");
   } else removeTestTree(root);
 });
@@ -26,8 +32,9 @@ function git(cwd: string, ...args: string[]) {
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 }
-function setup(name: string) {
-  const repo = join(root, name), story = join(repo, "story");
+function setup(name: string, registered?: { repo: string; jobId: string; env: Record<string, string> }) {
+  const repo = registered?.repo ?? join(root, name), story = join(repo, "story");
+  const jobId = registered?.jobId ?? "draft";
   mkdirSync(join(story, "creative-direction"), { recursive: true });
   writeFileSync(join(story, "creative-direction/foundation.md"), `---
 schema: '0.1'
@@ -56,16 +63,32 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
   const original = git(repo, "rev-parse", "HEAD");
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "missing-config.json"), NT_SKILL_CACHE_DIR: join(root, "skills"),
-     };
+    ...registered?.env };
   function cli(args: string[], fixtureCase = "") {
     return spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "job", ...args,
-      "--story", story, "--job", "draft"], { encoding: "utf8",
-      timeout: process.env.NT_LIVE_COMPOSITION === "1" ? 1_000_000 : 120_000,
+      "--story", story, "--job", jobId], { encoding: "utf8",
+      timeout: process.env.NT_LIVE_COMPOSITION === "1" || process.env.NT_LIVE_EVENT_ONLY === "1"
+        ? 1_000_000 : 120_000,
       maxBuffer: 24 * 1024 * 1024, env: { ...env, NT_COMPOSITION_FIXTURE_CASE: fixtureCase,
         NT_ARCHITECTURE_FIXTURE_CASE: fixtureCase === "event-only" ? "event-only" : "",
         NT_INTERACTIVE_FIXTURE_CASE: fixtureCase,
+        NT_EVENT_FIXTURE_CASE: fixtureCase === "event-only" ? "event-only" : "",
         NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE: process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE ?? "" } });
   }
+  const cliAsync = async (args: string[], fixtureCase = "") => {
+    const child = spawn(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), "job", ...args,
+      "--story", story, "--job", jobId], {
+        env: { ...env, NT_COMPOSITION_FIXTURE_CASE: fixtureCase,
+          NT_ARCHITECTURE_FIXTURE_CASE: fixtureCase === "event-only" ? "event-only" : "",
+          NT_INTERACTIVE_FIXTURE_CASE: fixtureCase,
+          NT_EVENT_FIXTURE_CASE: fixtureCase === "event-only" ? "event-only" : "" }, timeout: 1_000_000,
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk.toString(); });
+    child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+    const [code] = await once(child, "close");
+    return { status: code, stdout, stderr };
+  };
   const start = cli(["start"]);
   assert.equal(start.status, 0, start.stderr);
   const job = JSON.parse(start.stdout);
@@ -93,7 +116,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
     Object.assign(process.env, env);
     try {
-      const current = await startStoryJob({ story, job: "draft" }, false);
+      const current = await startStoryJob({ story, job: jobId }, false);
       const point = (await inspectRecoveryCheckpoints(current)).find(p => p.eligible && p.workItem === workItem);
       assert.ok(point?.assurance, "Missing fixture checkpoint " + workItem);
       if (point.semanticReview === "not-required") return;
@@ -144,13 +167,13 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     assert.equal(JSON.parse(result.stdout).completionEvidence.puzzleDisposition, "not-applicable");
     return JSON.parse(result.stdout).headSha as string;
   };
-  const prepareEventOnly = async () => {
+  const prepareEventOnly = async (reviewer: "fixture" | "pi" = "fixture") => {
     const original = JSON.parse(readFileSync(contract, "utf8"));
     const full = { ...original, scope: { kind: "full-story", depth: "composition", targets: [], branches: [] } };
     writeFileSync(contract, JSON.stringify(full));
     saveFixtureTurn(job, full,
-      "An observational mystery in which Ada learns the concealed evidence about the missing witness.",
-      ["Preserve actual Event-based causal discovery and make its consequences player-facing."]);
+      "An observational mystery in which Ada discovers Neri concealed the missing witness transfer ledger and verifies the signed record.",
+      ["Preserve the exact Event evidence, causal trust shift, and player-facing discovery without fabricating Choice or Puzzle work."]);
     const stage = (name: string, extra: string[] = []) =>
       cli([name, "run", "--fixture", ...extra, "--skills-source", source], "event-only");
     const arch = stage("architecture", ["--contract", contract]);
@@ -166,11 +189,16 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     assert.equal(event.status, 0, event.stderr);
     await seal("event-disclosure");
     const before = git(job.worktreeRoot, "rev-parse", "HEAD");
-    const interactive = stage("interactive", ["--milestone", "milestone.disclosure"]);
+    const interactive = reviewer === "fixture"
+      ? stage("interactive", ["--milestone", "milestone.disclosure"])
+      : await cliAsync(["interactive", "run", "--milestone", "milestone.disclosure",
+        "--skills-source", source, "--provider", process.env.NT_PROVIDER ?? "openai",
+        "--model", process.env.NT_MODEL ?? "gpt-6-luna"], "event-only");
     assert.equal(interactive.status, 0, interactive.stderr);
     const disposition = JSON.parse(interactive.stdout);
     assert.equal(disposition.completionEvidence.eventOnlyDisposition, "sealed-no-write");
-    assert.equal(disposition.completionEvidence.eventOnlyReview, "fixture-structural-only");
+    assert.equal(disposition.completionEvidence.eventOnlyReview,
+      reviewer === "pi" ? "independent-pi" : "fixture-structural-only");
     assert.deepEqual(disposition.specialistUnits.map((unit: any) => unit.phase),
       ["not-applicable", "not-applicable"]);
     assert.equal(disposition.headSha, before);
@@ -185,7 +213,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
     Object.assign(process.env, env);
     try {
-      return await inspectRecoveryCheckpoints(await startStoryJob({ story, job: "draft" }, false));
+      return await inspectRecoveryCheckpoints(await startStoryJob({ story, job: jobId }, false));
     } finally {
       for (const [key, value] of Object.entries(old)) {
         if (value === undefined) delete process.env[key];
@@ -193,7 +221,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
       }
     }
   };
-  return { repo, original, job, cli, prepare, prepareWithOptionalPuzzle,
+  return { repo, original, job, cli, cliAsync, prepare, prepareWithOptionalPuzzle,
     prepareEventOnly, run, inspect, seal, recovery };
 }
 
@@ -265,6 +293,197 @@ test("Choice-only interactive source composes distinct prose without inventing P
   assert.ok(checkpoint.remainingWorkItems.includes("review"));
   assert.notEqual(checkpoint.nextWorkItem, "interactive-puzzle-disclosure");
   assert.equal(git(x.repo, "rev-parse", "HEAD"), x.original);
+});
+
+test("real independent Pi reviewer verifies an Event-only omission without dispatching Choice/Puzzle writers", {
+  skip: process.env.NT_LIVE_EVENT_ONLY !== "1" ? "requires NT_LIVE_EVENT_ONLY=1" : false,
+  timeout: 1_100_000,
+}, async () => {
+  const flags = JSON.parse(execFileSync("docker", ["info", "--format", "{{json .SecurityOptions}}"], {
+    encoding: "utf8",
+  })) as string[];
+  assert.ok(flags.some(flag => /(^|=)rootless$/.test(flag)),
+    "Live Event-only review requires rootless Docker");
+  assert.equal(execFileSync("docker", ["info", "--format", "{{.CgroupVersion}}/{{.CgroupDriver}}"], {
+    encoding: "utf8",
+  }).trim(), "2/systemd");
+  const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+  const owner = "event-only-cert-owner", providerRepo = "event-only-cert-repo";
+  const jobId = randomUUID();
+  const base = join(root, "live-event-only-host");
+  const app = join(base, "app"), state = join(base, "state"),
+    cache = join(base, "cache"), socketDir = join(base, "controller");
+  const scoped = join(cache, sha(owner), sha("github:" + providerRepo));
+  const repo = join(scoped, "base");
+  for (const path of [app, state, cache, socketDir]) mkdirSync(path, { recursive: true });
+  const token = randomBytes(48).toString("hex");
+  const tokenFile = join(socketDir, "controller.token");
+  writeFileSync(tokenFile, token + "\n", { mode: 0o600 });
+  const config: ControllerConfig = {
+    socket: join(socketDir, "controller.sock"), token,
+    appVolume: app, stateVolume: state, cacheVolume: cache,
+    containerState: state, containerCache: cache,
+    image: process.env.NT_TEST_SANDBOX_IMAGE ?? "noveltea-sandbox:local",
+  };
+  const x = setup("live-event-only", { repo, jobId, env: {
+    NT_STATE_DIR: state, NT_GIT_CACHE_DIR: scoped,
+    NT_SANDBOX_SOCKET: config.socket, NT_SANDBOX_TOKEN_FILE: tokenFile,
+    NT_REQUIRE_SANDBOX_TOOLS: "1",
+  } });
+  const db = new DatabaseSync(join(app, "studio.sqlite"));
+  try {
+    db.exec(`CREATE TABLE studio_sessions (id TEXT, owner_user_id TEXT, story_id TEXT, source_commit_sha TEXT, generation_config_json TEXT);
+      CREATE TABLE stories (id TEXT, owner_user_id TEXT, repository_id TEXT, directory TEXT);
+      CREATE TABLE repositories (id TEXT, owner_user_id TEXT, provider TEXT, provider_repository_id TEXT);`);
+    db.prepare("INSERT INTO repositories VALUES (?,?,?,?)")
+      .run("repo-id", owner, "github", providerRepo);
+    db.prepare("INSERT INTO stories VALUES (?,?,?,?)")
+      .run("story-id", owner, "repo-id", "story");
+    db.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+      .run(jobId, owner, "story-id", x.original, null);
+  } finally { db.close(); }
+  const controller = new SandboxController(config);
+  const server = createControllerServer(controller);
+  try {
+    server.listen(config.socket);
+    await once(server, "listening");
+    const { before, disposition } = await x.prepareEventOnly("pi");
+  assert.equal(disposition.headSha, before);
+  assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
+  const proof = JSON.parse(readFileSync(join(x.job.stateDir,
+    "interactive-event-only/disclosure.json"), "utf8")).payload;
+  assert.equal(proof.reviewMode, "pi");
+  assert.ok(proof.reviewerSnapshotId);
+  assert.ok(proof.reviewerSessionSha256);
+  assert.ok(proof.evidence.some((line: string) => line.includes("milestones/disclosure.md:")));
+  assert.ok(proof.evidence.some((line: string) => line.includes("events/disclose-ledger.md:")));
+  const messages = readFileSync(proof.reviewerSession, "utf8").trim().split("\n").map(JSON.parse);
+  const calls = messages.flatMap((entry: any) => entry.message?.content ?? [])
+    .filter((call: any) => call.type === "toolCall");
+  assert.ok(calls.some((call: any) => call.name === "read" &&
+    String(call.arguments?.path).includes("nt-narrative-review/SKILL.md")));
+  assert.ok(!calls.some((call: any) => ["write", "edit", "bash"].includes(call.name)));
+  const repeat = await x.cliAsync(["interactive", "run", "--milestone", "milestone.disclosure",
+    "--skills-source", source, "--provider", process.env.NT_PROVIDER ?? "openai",
+    "--model", process.env.NT_MODEL ?? "gpt-6-luna"], "event-only");
+  assert.equal(repeat.status, 0, repeat.stderr);
+  assert.equal(JSON.parse(repeat.stdout).headSha, before);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), before);
+  } finally {
+    await controller.dispose(jobId);
+    await new Promise<void>(done => server.close(() => done()));
+  }
+});
+
+/** Reinspect one real paid reviewer checkpoint without re-running its Pi turn.
+ * Only explicit private local opt-in roots are read; never copy historical job state. */
+test("preserved live Event-only review survives a process restart without replaying the model", {
+  skip: !process.env.NT_PRESERVED_LIVE_EVENT_ONLY_ROOT
+    ? "set NT_PRESERVED_LIVE_EVENT_ONLY_ROOT to a saved live fixture root" : false,
+}, () => {
+  const saved = process.env.NT_PRESERVED_LIVE_EVENT_ONLY_ROOT!;
+  const host = join(saved, "live-event-only-host");
+  const state = join(host, "state");
+  const jobs = readdirSync(join(state, "jobs"));
+  assert.equal(jobs.length, 1, "A preserved certification root must select exactly one Job");
+  const jobState = join(state, "jobs", jobs[0]!);
+  const job = JSON.parse(readFileSync(join(jobState, "job.json"), "utf8"));
+  const proof = JSON.parse(readFileSync(join(jobState,
+    "interactive-event-only/disclosure.json"), "utf8")).payload;
+  assert.equal(proof.reviewMode, "pi");
+  git(job.worktreeRoot, "merge-base", "--is-ancestor", proof.reviewHead, "HEAD");
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+  const messages = readFileSync(proof.reviewerSession, "utf8").trim().split("\n").map(JSON.parse);
+  const calls = messages.flatMap((entry: any) => entry.message?.content ?? [])
+    .filter((call: any) => call.type === "toolCall");
+  assert.ok(calls.some((call: any) => call.name === "read" &&
+    String(call.arguments?.path).includes("nt-narrative-review/SKILL.md")));
+  assert.ok(!calls.some((call: any) => ["write", "edit", "bash"].includes(call.name)));
+  assert.ok(proof.evidence.some((line: string) => line.includes("milestones/disclosure.md:")));
+  assert.ok(proof.evidence.some((line: string) => line.includes("events/disclose-ledger.md:")));
+  for (const action of ["inspect", "run"]) {
+    const result = spawnSync(process.execPath,
+      ["--import", "tsx", resolve("src/cli.ts"), "job", "interactive", action,
+        "--milestone", "milestone.disclosure", "--story", job.storyRoot, "--job", job.jobId,
+        ...(action === "run" ? ["--skills-source", source] : [])], {
+        encoding: "utf8", timeout: 120_000,
+        env: { ...process.env, NT_STATE_DIR: state,
+          NT_GIT_CACHE_DIR: dirname(dirname(job.storyRoot)),
+          NT_SKILL_CACHE_DIR: join(saved, "skills"),
+          NT_CONFIG_FILE: join(saved, "missing-config.json"),
+          NT_SANDBOX_SOCKET: "", NT_SANDBOX_TOKEN_FILE: "" },
+      });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.status, "interactive-slice-committed");
+    assert.equal(output.headSha, proof.reviewHead);
+    assert.equal(output.completionEvidence.eventOnlyReview, "independent-pi");
+    assert.deepEqual(output.specialistUnits.map((unit: any) => unit.phase),
+      ["not-applicable", "not-applicable"]);
+  }
+  git(job.worktreeRoot, "merge-base", "--is-ancestor", proof.reviewHead, "HEAD");
+});
+
+test("opt-in real Pi Composition and independent review resume a preserved Event-only checkpoint", {
+  skip: process.env.NT_LIVE_EVENT_ONLY_COMPOSITION !== "1" ||
+    !process.env.NT_PRESERVED_LIVE_EVENT_ONLY_ROOT
+    ? "requires NT_LIVE_EVENT_ONLY_COMPOSITION=1 and NT_PRESERVED_LIVE_EVENT_ONLY_ROOT" : false,
+  timeout: 1_100_000,
+}, async () => {
+  const saved = process.env.NT_PRESERVED_LIVE_EVENT_ONLY_ROOT!;
+  const host = join(saved, "live-event-only-host");
+  const state = join(host, "state");
+  const jobs = readdirSync(join(state, "jobs"));
+  assert.equal(jobs.length, 1);
+  const job = JSON.parse(readFileSync(join(state, "jobs", jobs[0]!, "job.json"), "utf8"));
+  const tokenFile = join(host, "controller/controller.token");
+  const config: ControllerConfig = {
+    socket: join(host, "controller/composition.sock"),
+    token: readFileSync(tokenFile, "utf8").trim(),
+    appVolume: join(host, "app"), stateVolume: state, cacheVolume: join(host, "cache"),
+    containerState: state, containerCache: join(host, "cache"),
+    image: process.env.NT_TEST_SANDBOX_IMAGE ?? "noveltea-sandbox:local",
+  };
+  const controller = new SandboxController(config);
+  const server = createControllerServer(controller);
+  const env = { ...process.env, NT_STATE_DIR: state,
+    NT_GIT_CACHE_DIR: dirname(dirname(job.storyRoot)),
+    NT_SKILL_CACHE_DIR: join(saved, "skills"),
+    NT_CONFIG_FILE: join(saved, "missing-config.json"),
+    NT_SANDBOX_SOCKET: config.socket, NT_SANDBOX_TOKEN_FILE: tokenFile,
+    NT_REQUIRE_SANDBOX_TOOLS: "1" };
+  const cli = async (action: "run" | "inspect") => {
+    const args = ["--import", "tsx", resolve("src/cli.ts"), "job", "composition", action,
+      "--milestone", "milestone.disclosure", "--skills-source", source,
+      "--story", job.storyRoot, "--job", job.jobId];
+    if (action === "run") args.push("--provider", process.env.NT_PROVIDER ?? "openai",
+      "--model", process.env.NT_MODEL ?? "gpt-6-luna");
+    const child = spawn(process.execPath, args, { env, timeout: 1_000_000 });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk.toString(); });
+    child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+    const [code] = await once(child, "close");
+    assert.equal(code, 0, stderr || stdout);
+    return JSON.parse(stdout);
+  };
+  try {
+    server.listen(config.socket);
+    await once(server, "listening");
+    const before = git(job.worktreeRoot, "rev-parse", "HEAD");
+    const composed = await cli("run");
+    assert.equal(composed.status, "composition-committed");
+    assert.equal(composed.interactiveHead, before);
+    assert.equal(composed.validation.branchReview.reviewer, "independent-pi");
+    assert.deepEqual(composed.validation.branchReview.outcomes, []);
+    assert.deepEqual(composed.validation.branchReview.solutions, []);
+    assert.ok(composed.paths.some((path: string) => path.startsWith("authored-content/")));
+    assert.equal(composed.headSha, git(job.worktreeRoot, "rev-parse", "HEAD"));
+    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+    assert.equal((await cli("inspect")).headSha, composed.headSha);
+  } finally {
+    await controller.dispose(job.jobId);
+    await new Promise<void>(done => server.close(() => done()));
+  }
 });
 
 test("Event-only Milestone composes playable evidence with two genuine no-write omissions and recoverable provenance", { skip: !available }, async () => {
@@ -350,6 +569,39 @@ test("Event-only proof rejects foreign Thread, validator/snapshot changes and a 
   const run = x.cli(["composition", "run", "--fixture", "--milestone", "milestone.disclosure",
     "--skills-source", source], "event-only");
   assert.notEqual(run.status, 0, "Composition may not proceed from a dirty Event source");
+});
+
+test("Event-only recovery refuses a changed original Event skill snapshot", { skip: !available }, async () => {
+  const x = setup("event-only-snapshot-drift");
+  await x.prepareEventOnly();
+  const result = x.run("event-only");
+  assert.equal(result.status, 0, result.stderr);
+  const before = (await x.recovery()).find(point => point.workItem === "composition-disclosure");
+  assert.ok(before?.eligible);
+  const sourceFile = join(x.job.stateDir, "event-items/disclosure.json");
+  const sourceReceipt = JSON.parse(readFileSync(sourceFile, "utf8"));
+  sourceReceipt.snapshot.id = "f".repeat(64);
+  writeFileSync(sourceFile, JSON.stringify(sourceReceipt));
+  const after = (await x.recovery()).find(point => point.commitSha === before.commitSha);
+  assert.ok(after && !after.eligible, "Recovery must not preserve a sealed omission after Event skill pin drift");
+  assert.match(after.reason ?? "", /Event-only|event|snapshot|source|recovery/i);
+});
+
+test("Event-only fork admission fails before child allocation rather than losing no-write proofs", { skip: !available }, async () => {
+  const x = setup("event-only-fork");
+  await x.prepareEventOnly();
+  const result = x.run("event-only");
+  assert.equal(result.status, 0, result.stderr);
+  const checkpoint = (await x.recovery()).find(point =>
+    point.workItem === "composition-disclosure");
+  assert.ok(checkpoint?.eligible);
+  const architecture = JSON.parse(readFileSync(join(x.job.stateDir, "architecture.json"), "utf8"));
+  await assert.rejects(
+    collectRecoveryFork(x.job, "a2df21df-67bf-430a-afae-07c0b4ee07c3",
+      checkpoint.commitSha, architecture.plan.contract, source),
+    /Event-only omissions|cannot inherit.*no-write|omission/i,
+    "A child must not inherit skipped assignments without their original source-bound review");
+  assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
 test("a newly linked formal Choice invalidates the Event-only Composition exemption", { skip: !available }, async () => {
