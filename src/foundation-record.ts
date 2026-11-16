@@ -1,4 +1,6 @@
 /** Shared pure canonical Creative Direction serializer for CLI and Studio onboarding. */
+import { parseStoryPlanning, type StoryPlanning } from './story-planning.js'
+
 export interface FoundationDraft {
   id: string
   title: string
@@ -8,6 +10,7 @@ export interface FoundationDraft {
   tone: string
   player_experience: string
   scope: string
+  planning?: StoryPlanning
   decisions: Array<{
     id: string
     statement: string
@@ -37,7 +40,7 @@ export function hasUserProtectedDecision(record: string): boolean {
     /^    authority:[ \t]*(?:user-protected|"user-protected"|'user-protected')[ \t]*$/m.test(block))
 }
 
-export function renderFoundation(draft: FoundationDraft): string {
+export function renderFoundation(draft: FoundationDraft, status: 'draft' | 'approved' = 'draft'): string {
   const decisions = draft.decisions.flatMap(d => [
     `  - id: ${d.id}`,
     `    statement: ${yaml(d.statement)}`,
@@ -48,13 +51,14 @@ export function renderFoundation(draft: FoundationDraft): string {
     '---', "schema: '0.1'", 'type: creative-direction',
     `id: creative-direction.${draft.id}`,
     `title: ${yaml(draft.title)}`,
-    'status: draft', 'decisions:', ...decisions,
+    `status: ${status}`, 'decisions:', ...decisions,
     `premise: ${yaml(draft.premise)}`,
     `central_conflict: ${yaml(draft.central_conflict)}`,
     `genre: ${yaml(draft.genre)}`,
     `tone: ${yaml(draft.tone)}`,
     `player_experience: ${yaml(draft.player_experience)}`,
     `scope: ${yaml(draft.scope)}`,
+    ...(draft.planning ? [`planning: ${JSON.stringify(parseStoryPlanning(draft.planning))}`] : []),
     '---', '', draft.body, '',
   ].join('\n')
 }

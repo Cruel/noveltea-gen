@@ -93,7 +93,7 @@ export function semanticUnitOutcome(workItem: string, specialist?: string): stri
       "Assess the corrected committed evidence against the original Milestone promise and source-linked findings. " +
       "Reject unsupported evidence-to-effect links; do not require future Choice or Composition work."
     );
-  if (workItem === "global-architecture") return "Architecture planning only: Arc and Milestone prose must establish a causally coherent chain of selected turning points, not isolated dramatic labels. Require each Milestone's substantive enabling condition and resulting progression into a later Milestone (or its terminal aftermath) to be articulated in the source; generic promises that Events will discover the causes later are insufficient. However a planning-stage partial Milestone MUST have fulfillment.any_of: [] until actual Events exist; do NOT demand speculative Event IDs, Event prerequisites, completed fulfillment, concrete Choice/Puzzle instances, Character baselines, or Authored Content at this checkpoint. Those are separate downstream specialists. Review the actual approved scope, preserve creative uncertainty and reject unexplained plot jumps or contradictory Milestone ordering.";
+  if (workItem === "global-architecture") return "Architecture planning only: Arc and Milestone prose must establish a causally coherent chain of selected turning points, not isolated dramatic labels. Require each Milestone's substantive enabling condition and resulting progression into a later Milestone (or its terminal aftermath) to be articulated in the source; generic promises that Events will discover the causes later are insufficient. However a planning-stage partial Milestone MUST have fulfillment.any_of: [] until actual Events exist; do NOT demand speculative Event IDs, Event prerequisites, completed fulfillment, concrete Choice/Puzzle instances, Character baselines, or Authored Content at this checkpoint. Those are separate downstream specialists. Review the actual approved scope and canonical Creative Direction planning: across the WHOLE Story evaluate meaningful Choice frequency/impact, branching depth versus route-exclusive content, Adventure versus Custom Puzzle emphasis, and Narrative/Exploration playthrough pacing. An observational/short VN may legitimately have zero Puzzles and rare Choices; a Choice-heavy/deep-divergence brief cannot pass with one token late Choice. Require credible Milestone duration assumptions without fabricating exact route totals; flag source-backed hard Production limit breaches, missing estimates and material soft-budget expansion for author direction. A modest justified soft variance is a warning, not silent new authorization. Favor recurring cast/illustration concepts/narrative locations where sound, but preserve route-exclusive characters/scenes and stateful consequences after reconvergence. Never impose per-Milestone interaction quotas, a three-Act pattern or engine Room translation. Preserve creative uncertainty and reject unexplained plot jumps or contradictory Milestone ordering.";
   if (workItem === "world-foundations") return "World Foundations only: world entities, setting and relevant objective Facts. Character and relationship records are the NEXT separately committed character-foundations unit. Do not fail World Foundations solely for not writing Characters or relationships; do fail missing or contradictory World Foundations.";
   if (workItem === "character-foundations") return "Character Foundations: concrete Character and Relationship records required by the approved story architecture and existing World Foundations. The stage-specific Character specialist is ALSO authorized to extend ONLY the existing, planned Arc's characters array to link newly written Characters, preserving every other Arc field and all prose. The independent Character/World controller already checks this exact before/after Arc restriction and rejects unrelated Arc edits. Treat a verified link-only Arc update as a legitimate supporting change even though the high-level Turn assignment recordTypes lists character/relationship ownership; that simplified list is not a stricter replacement for the stage-specific writer contract. Reject any Arc body, decision, plot, or other-field edit. Review Character and Relationship obligations now; missing central Characters are a failure.";
   if (workItem.startsWith("event-"))
@@ -151,8 +151,19 @@ export async function prepareSemanticReview(job: JobStartResult,
       catch { return []; }
       return p.assurance!.changedPaths;
     });
+    // New and existing Stories may use ANY canonical Creative Direction stem.
+    // Bind the read-only baseline to the exact reviewed commit, not a guessed
+    // filename or mutable filesystem lookup. This adds no repair write grant.
+    const direction = point.workItem === 'global-architecture'
+      ? git(job, 'ls-tree', '-r', '--name-only', point.commitSha, '--',
+        prefix + 'creative-direction/').split('\n').filter(Boolean)
+        .filter(path => path.startsWith(prefix + 'creative-direction/'))
+        .map(path => path.slice(prefix.length)) : [];
+    if (point.workItem === 'global-architecture' && (direction.length !== 1 ||
+      !/^creative-direction\/[a-z0-9][a-z0-9._-]*\.md$/.test(direction[0]!)))
+      throw new Error('Independent Architecture review needs one pinned canonical Creative Direction.');
     const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths,
-      ...dependencies.flatMap(a => a.authority.existingPaths), ...dependencyPaths])];
+      ...dependencies.flatMap(a => a.authority.existingPaths), ...dependencyPaths, ...direction])];
     const canonicalContext = await loadSealedReviewContext(job, point.commitSha, paths);
     let eventMilestone: import("./review-repair-amendment.js").EventMilestoneRepairGrant | undefined;
     if (point.workItem.startsWith("repair-")) {

@@ -67,7 +67,7 @@ function git(cwd: string, ...args: string[]) {
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 }
-function setup(name: string, protectedDecision = false) {
+function setup(name: string, protectedDecision = false, planning = '') {
   const repo = join(root, name);
   mkdirSync(join(repo, "story/creative-direction"), { recursive: true });
   const story = join(repo, "story");
@@ -76,7 +76,7 @@ schema: '0.1'
 type: creative-direction
 id: creative-direction.foundation
 title: "The missing witness"
-status: draft
+status: ${planning ? 'approved' : 'draft'}
 ${protectedDecision ? 'decisions:\n  - id: loyalty\n    statement: "Loyalty must matter"\n    origin: user\n    authority: user-protected' : "decisions: []"}
 premise: "A witness disappears before an inquiry"
 central_conflict: "Expose the truth or preserve a friendship"
@@ -84,7 +84,7 @@ genre: "Mystery"
 tone: "Intimate"
 player_experience: "Consequential conversations"
 scope: "A compact dialogue-led story"
----
+${planning}---
 
 An investigator must decide what loyalty costs when a friend conceals evidence.
 `);
@@ -123,6 +123,8 @@ test("public job builds planning-stage architecture and exposes its dependent re
   assert.equal(data.status, "complete-in-scope");
   assert.equal(data.plan.version, 1);
   assert.equal(data.plan.items[0].status, "verified");
+  assert.equal(data.architectureMetrics, null,
+    'Legacy draft Foundation has no approved planning contract and needs no optional metrics');
   assert.match(data.plan.items[0].verifiedSha, /^[a-f0-9]{40}$/);
   assert.ok(data.plan.items.some((item: any) => item.kind === "realization" && item.dependencies.includes("global-architecture")));
   const realizeIds = data.plan.items.filter((item: any) => item.kind === "realization").map((item: any) => item.id);
@@ -136,6 +138,7 @@ test("public job builds planning-stage architecture and exposes its dependent re
   const inspect = cli("architecture", "inspect");
   assert.equal(inspect.status, 0, inspect.stderr);
   assert.deepEqual(JSON.parse(inspect.stdout).plan, data.plan);
+  assert.deepEqual(JSON.parse(inspect.stdout).architectureMetrics, data.architectureMetrics);
   // Recovery from a completed receipt whose shared verified-head publication
   // was interrupted must restore the exact recorded commit, not repin a new one.
   const verifiedHeadFile = join(job.worktreeRoot, "../revisions/verified-head.json");
@@ -144,6 +147,39 @@ test("public job builds planning-stage architecture and exposes its dependent re
   assert.equal(replay.status, 0, replay.stderr);
   assert.equal(JSON.parse(replay.stdout).plan.items[0].verifiedSha, data.plan.items[0].verifiedSha);
   assert.equal(JSON.parse(readFileSync(verifiedHeadFile, "utf8")).headSha, data.headSha);
+});
+
+test("approved production preferences remain source-bound and surface soft overruns before Event authoring", { skip: !available }, () => {
+  const metadata = `planning:
+  choice_frequency: occasional
+  choice_impact: lasting
+  branching: {depth: shallow, route_exclusivity: limited}
+  puzzle_emphasis: none
+  pacing: narrative-led
+  first_playthrough: {min_minutes: 45, max_minutes: 90}
+  production:
+    illustrated_backgrounds: {count: {max: 1}, firmness: soft}
+  illustration_concepts:
+    - {id: harbor, description: "Shared harbor backdrop"}
+    - {id: tower, description: "Distinct tower illustration"}
+`;
+  const { cli, job, repo, baseline } = setup("soft-budget", false, metadata);
+  const result = cli("architecture", "run", "--fixture", "--contract",
+    contract("soft-budget"), "--skills-source", source);
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  const metrics = output.architectureMetrics;
+  assert.equal(metrics.metrics.foundation.status, 'approved');
+  assert.deepEqual(metrics.metrics.foundation.approvedFirstPlaythroughMinutes,
+    { min_minutes: 45, max_minutes: 90 });
+  assert.match(metrics.catalogSourceRevision, /^xxh3-128:/);
+  assert.equal(metrics.trustedBaseSha, baseline);
+  assert.ok(metrics.findings.some((f: { status: string; dimension: string }) =>
+    f.status === 'soft-overage' && f.dimension === 'illustrated-backgrounds'));
+  assert.ok(metrics.warnings.some((s: string) => /soft preference/.test(s)));
+  assert.equal(metrics.requiresAuthorDirection.length, 0);
+  assert.equal(git(repo, 'rev-parse', 'HEAD'), baseline);
+  assert.equal(git(job.worktreeRoot, 'status', '--porcelain'), '');
 });
 
 function scopedContract(name: string, scope: { kind: string; depth: string; targets: string[]; branches: string[] }) {

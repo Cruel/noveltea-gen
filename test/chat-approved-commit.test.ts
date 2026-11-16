@@ -12,6 +12,7 @@ import { pinReusedFoundation, readReusedFoundation } from "../src/chat-reused-fo
 import { reusableExistingFoundation } from "../src/foundation-readiness.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { renderFoundation, type FoundationDraft } from "../src/foundation-record.js";
+import { nativeStoryMetrics } from '../src/story-metrics.js';
 import { trustedHead } from "../src/revision.js";
 import { validateStoryJob, nativeExecutable } from "../src/validator.js";
 
@@ -76,6 +77,11 @@ const nativeAvailable = existsSync(nativeExecutable());
       central_conflict: "The townspeople disagree on who should know the truth.",
       genre: "Mystery", tone: "Uneasy", player_experience: "Interview witnesses and choose whom to trust.",
       scope: "A single coastal town", body: "# The Last Bell\n\nA bell is stolen during a storm.",
+      planning: { choice_frequency: 'occasional', choice_impact: 'lasting',
+        branching: { depth: 'shallow', route_exclusivity: 'limited' },
+        puzzle_emphasis: 'none', pacing: 'narrative-led',
+        first_playthrough: { min_minutes: 60, max_minutes: 90 },
+        production: { illustrated_backgrounds: { count: { max: 3 }, firmness: 'hard' } } },
       decisions: [
         { id: "author-genre", statement: "Make it a mystery.", origin: "user", authority: "user-protected" },
         { id: "agent-location", statement: "Set it in a coastal town.", origin: "agent", authority: "delegated" },
@@ -98,8 +104,14 @@ const nativeAvailable = existsSync(nativeExecutable());
     const result = await runFoundationJob(request);
     assert.equal(result.status, "committed");
     assert.equal(readFileSync(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
-      renderFoundation(foundation));
+      renderFoundation(foundation, 'approved'));
     assert.notEqual(await trustedHead(job), sourceSha);
+    const metrics = nativeStoryMetrics(job);
+    assert.equal(metrics.foundation.status, 'approved');
+    assert.deepEqual(metrics.foundation.approvedFirstPlaythroughMinutes,
+      { min_minutes: 60, max_minutes: 90 });
+    assert.equal(metrics.foundation.productionBudget &&
+      (metrics.foundation.productionBudget as any).illustrated_backgrounds.firmness, 'hard');
     assert.equal(git(job.worktreeRoot, "rev-list", "--count", sourceSha + "..HEAD"), "1");
     assert.equal(git(repo, "rev-parse", "HEAD"), sourceSha);
     const validation = await validateStoryJob(job, undefined, { ...job, baseSha: await trustedHead(job) });

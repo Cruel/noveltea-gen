@@ -80,7 +80,12 @@ export function architectureSpecialistPrompt(
       "waiting for a separate writer, existing record, or author approval. " +
       "Establish an ordered chain of substantive turning points " +
       "and their enabling conditions, meaningful changes and later payoffs in enduring " +
-      "in-world prose, without inventing Event IDs or later-stage records.",
+      "in-world prose, without inventing Event IDs or later-stage records. " +
+      "The approved Creative Direction planning is a whole-Story constraint: " +
+      "distribute consequential choices and Puzzle work based on its Choice/branching " +
+      "profile, target first-playthrough length, Narrative/Exploration pacing, " +
+      "and hard/soft illustration and Character artwork limits. " +
+      "Do not impose per-Milestone Choice/Puzzle quotas or a fixed three-Act shape.",
     sources: REQUIRED,
     sourceUse:
       "Read Creative Direction and relevant existing canonical Story records IF present. " +
@@ -110,8 +115,19 @@ export function architectureSpecialistPrompt(
       "Stage-incomplete Milestones must keep completeness: partial and " +
       "fulfillment: {any_of: []}; no speculative Events or artificial completion. " +
       "Bodies remain true after subsequent World/Character/Event authorship; never " +
-      "describe temporary implementation status. Validate with story_validate and " +
-      "repair errors before reporting. Preserve the plan's depth, targets and protections.",
+      "describe temporary implementation status. Give each Milestone plausible " +
+      "duration_minutes narrative and exploration RANGES; distinguish missing " +
+      "evidence from known zero. A dialogue-led Story with puzzle_emphasis: none " +
+      "must not gain a gratuitous Puzzle; a choice-heavy or substantially divergent " +
+      "Story needs meaningful decisions throughout the planned routes, not a " +
+      "token ending switch. Stage-only estimates are provisional until native " +
+      "route analysis and semantic review. Reuse core cast, logical illustration " +
+      "concepts and fictional locations where sound, while retaining justified " +
+      "route-exclusive scenes, consequences after convergence and unique visuals. " +
+      "If the brief requires more hard-budget art or a MATERIAL soft scope expansion, " +
+      "report the conflict rather than silently relaxing protected requirements. " +
+      "Validate with story_validate and repair errors before reporting. " +
+      "Preserve the plan's depth, targets and protections.",
     laterObligations:
       "World and Character Foundations, Event prerequisites and " +
       "fulfillment routes, Choice/Puzzle and final prose are later owners. " +

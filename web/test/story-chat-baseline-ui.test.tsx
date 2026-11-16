@@ -11,6 +11,11 @@ function render(phase: 'questions' | 'proposed' | 'approved') {
     id: 'foundation', title: 'The Last Bell', premise: 'A missing bell',
     central_conflict: 'A town conceals the truth', genre: 'Mystery', tone: 'Uneasy',
     player_experience: 'Follow clues', scope: 'One town',
+    planning: { choice_frequency: 'occasional', choice_impact: 'lasting',
+      branching: { depth: 'shallow', route_exclusivity: 'limited' },
+      puzzle_emphasis: 'none', pacing: 'narrative-led',
+      first_playthrough: { min_minutes: 60, max_minutes: 90 },
+      production: { illustrated_backgrounds: { count: { max: 3 }, firmness: 'hard' } } },
     body: 'Player investigation leads to a choice of loyalties.',
     decisions: [{ id: 'author-brief', statement: 'Keep player choices meaningful',
       origin: 'user', authority: 'user-protected' },
@@ -44,6 +49,10 @@ test('exact proposed foundation and author-decision provenance are reviewable be
   const markup = render('proposed')
   assert.match(markup, /The Last Bell/)
   assert.match(markup, /player experience|Player experience/i)
+  assert.match(markup, /Exact proposed planning metadata/)
+  assert.match(markup, /first_playthrough/)
+  assert.match(markup, /narrative-led/)
+  assert.match(markup, /hard/)
   assert.match(markup, /user · user-protected/)
   assert.match(markup, /agent · delegated/)
   assert.match(markup, /Keep player choices meaningful/)

@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { renderFoundation, type FoundationDraft } from '../../../src/foundation-record'
+import { parseStoryPlanning } from '../../../src/story-planning'
 
 export class StoryBootstrapError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
@@ -22,7 +23,8 @@ export function candidate(value: unknown): { file: string; title: string } {
   const fields = ['id', 'title', 'premise', 'central_conflict', 'genre', 'tone',
     'player_experience', 'scope', 'body']
   const withDecisions = Object.hasOwn(input, 'decisions')
-  const expected = [...fields, withDecisions ? 'decisions' : 'decision']
+  const expected = [...fields, withDecisions ? 'decisions' : 'decision',
+    ...(Object.hasOwn(input, 'planning') ? ['planning'] : [])]
   if (Object.keys(input).length !== expected.length || expected.some(field => !Object.hasOwn(input, field))) {
     throw new StoryBootstrapError(400, 'Only the documented Creative Direction onboarding fields are accepted.')
   }
@@ -58,7 +60,12 @@ export function candidate(value: unknown): { file: string; title: string } {
     decisions = [{ id: 'initial-direction', statement: text(input.decision, 'decision'),
       origin: 'user', authority: 'user-protected' }]
   }
-  const record: FoundationDraft = { ...values, decisions }
+  let planning: FoundationDraft['planning']
+  if (Object.hasOwn(input, 'planning')) {
+    try { planning = parseStoryPlanning(input.planning) }
+    catch { throw new StoryBootstrapError(400, 'Invalid canonical Story interaction or production planning metadata.') }
+  }
+  const record: FoundationDraft = { ...values, decisions, ...(planning ? { planning } : {}) }
   return { file: renderFoundation(record), title: record.title }
 }
 export async function validateNewStory(file: string) {

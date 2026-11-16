@@ -21,6 +21,8 @@ export type ChatFoundationApproval = {
   provider: string;
   model: string;
   authoredSha256: string;
+  /** New approvals are canonical approved records; absent on legacy receipts. */
+  canonicalStatus?: 'approved';
 };
 
 const file = (job: JobStartResult) => join(job.stateDir, "chat-approved-foundation.json");
@@ -30,7 +32,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
  * It is not a writer lease: the normal foundation work-item graph owns Git
  * mutation, native validation and crash reconciliation. */
 export async function pinChatApprovedFoundation(job: JobStartResult,
-  approval: Omit<ChatFoundationApproval, "version" | "authoredSha256">): Promise<void> {
+  approval: Omit<ChatFoundationApproval, "version" | "authoredSha256" | "canonicalStatus">): Promise<void> {
   if (approval.jobId !== job.jobId || approval.sourceSha !== job.baseSha ||
       !SHA.test(approval.sourceSha) || !DIGEST.test(approval.proposalDigest) ||
       !DIGEST.test(approval.skillId) || !approval.originalObjective.trim() ||
@@ -38,14 +40,21 @@ export async function pinChatApprovedFoundation(job: JobStartResult,
       !approval.provider || !approval.model)
     throw new Error("Chat foundation handoff identity is invalid.");
   const state: ChatFoundationApproval = {
-    ...approval, version: 1, authoredSha256: hash(renderFoundation(approval.foundation)),
+    ...approval, version: 1, canonicalStatus: 'approved',
+    authoredSha256: hash(renderFoundation(approval.foundation, 'approved')),
   };
   try {
     await writeFile(file(job), JSON.stringify(state, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const existing = await readChatApprovedFoundation(job);
-    if (JSON.stringify(existing) !== JSON.stringify(state))
+    const legacy: ChatFoundationApproval = {
+      ...approval, version: 1, authoredSha256: hash(renderFoundation(approval.foundation)),
+    };
+    // Preserve pre-upgrade receipts exactly: a retried write is idempotent
+    // across code versions, but never upgrades canonical status or changes SHA.
+    if (JSON.stringify(existing) !== JSON.stringify(state) &&
+        JSON.stringify(existing) !== JSON.stringify(legacy))
       throw new Error("This job already has a different approved Creative Direction.");
   }
 }
@@ -65,7 +74,8 @@ export async function readChatApprovedFoundation(job: JobStartResult): Promise<C
       !state.originalObjective?.trim() ||
       !["autonomous", "collaborative"].includes(state.creativeMode) ||
       !state.provider || !state.model || !DIGEST.test(state.authoredSha256) ||
-      state.authoredSha256 !== hash(renderFoundation(state.foundation)))
+      (state.canonicalStatus !== undefined && state.canonicalStatus !== 'approved') ||
+      state.authoredSha256 !== hash(renderFoundation(state.foundation, state.canonicalStatus ?? 'draft')))
     throw new Error("Saved Chat approval differs from its pinned Story foundation.");
   return state;
 }

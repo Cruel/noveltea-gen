@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { renderFoundation } from "../src/foundation-record.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -45,6 +47,30 @@ test("Chat foundation receipt is immutable, source-pinned and safe across retrie
       JSON.stringify({ ...receipt, originalObjective: "silently changed" }));
     await assert.rejects(() => pinChatApprovedFoundation(job, input),
       /different approved Creative Direction/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy pinned draft-status approvals remain valid and exact-idempotent after upgrade", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nt-legacy-chat-"));
+  const job = { stateDir: root, jobId: "job-legacy", baseSha: "a".repeat(40) } as JobStartResult;
+  const approval = {
+    jobId: job.jobId, sourceSha: job.baseSha, firstTurnId: job.jobId,
+    originalObjective: "Keep the previous approval", scope: "whole-story" as const,
+    proposalDigest: "b".repeat(64), skillId: "c".repeat(64), foundation,
+    creativeMode: "autonomous" as const, provider: "openai", model: "gpt-6",
+  };
+  const legacy = {
+    ...approval, version: 1, authoredSha256: createHash("sha256")
+      .update(renderFoundation(foundation)).digest("hex"),
+  };
+  try {
+    writeFileSync(join(root, "chat-approved-foundation.json"), JSON.stringify(legacy));
+    assert.deepEqual(await readChatApprovedFoundation(job), legacy);
+    await pinChatApprovedFoundation(job, approval);
+    assert.deepEqual(await readChatApprovedFoundation(job), legacy);
+    await assert.rejects(() => pinChatApprovedFoundation(job, {
+      ...approval, foundation: { ...foundation, title: "Changed" },
+    }), /different approved Creative Direction/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

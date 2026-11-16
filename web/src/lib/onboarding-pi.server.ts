@@ -10,12 +10,14 @@ import { createUserPiRuntime, assertUserPiSelection, validPiSelection, type PiSe
 import { createSkillSnapshot, openSkillSnapshot } from '../../../src/snapshot'
 import { candidate, validateNewStory } from './story-foundation.server'
 import { parseGenerationContract } from '../../../src/generation'
+import { parseStoryPlanning, type StoryPlanning } from '../../../src/story-planning'
 import { continueApprovedStoryChat, type ContinuationStatus, type ProviderJobGateways } from './story-approved-continuation.server'
 
 type Turn = { role: 'user' | 'assistant'; text: string }
 type Foundation = {
   id: string; title: string; premise: string; central_conflict: string; genre: string
   tone: string; player_experience: string; scope: string; body: string
+  planning?: StoryPlanning
   decisions: Array<{ id: string; statement: string; origin: 'user' | 'agent'; authority: 'user-protected' | 'delegated' }>
 }
 type Proposal = { foundation: Foundation; task: string; contract: ReturnType<typeof parseGenerationContract> }
@@ -23,10 +25,20 @@ type Proposal = { foundation: Foundation; task: string; contract: ReturnType<typ
  * foundations. Even Autonomous mode must ask before advancing to a proposal.
  * A deliberate instruction to choose everything without questions is different. */
 function needsOpeningQuestions(brief: string): boolean {
-  const sparse = brief.trim().split(/\s+/).length <= 18
+  // A long plot synopsis can still omit the player-experience and production
+  // baseline. Length alone is not evidence that these requirements were settled.
+  const dimensions = [
+    /\b(choice|decision|interactive|no choices|dialogue.only|linear)\b/i,
+    /\b(branch|divergen|exclusive|route|ending|linear)\w*/i,
+    /\b(puzzle|investigat|explorat|no puzzles)\w*/i,
+    /\b(pacing|dialogue.led|narrative.led|exploration.led|balanced)\b/i,
+    /\b(\d+\s*(minute|hour|min|hr)s?|playtime|playthrough|duration)\b/i,
+    /\b(art|artwork|budget|illustrat|background|variant|reuse)\w*/i,
+  ]
+  const missing = dimensions.some(dimension => !dimension.test(brief))
   const allDelegated = /\b(?:decide|choose|invent|make up|delegate|leave)\b[\s\S]{0,90}\b(?:everything|all|remaining|the rest|every detail|every choice|every decision)\b/i.test(brief)
   const noQuestions = /\b(?:do not ask|don't ask|no questions|without questions|no need to ask)\b/i.test(brief)
-  return sparse && !(allDelegated && noQuestions)
+  return missing && !(allDelegated && noQuestions)
 }
 type Phase = 'running' | 'questions' | 'proposed' | 'approved' | 'blocked'
 /** Trusted Story Chat identity. The reserved persistence namespace is inaccessible
@@ -53,7 +65,7 @@ function scope(input: Session) {
     ...(input.chat ? { chat: input.chat } : {}) }
 }
 export type DiscoverySessionView = ReturnType<typeof scope>
-function expectedProposal(value: unknown, authorMessages: string[]): Proposal {
+function expectedProposal(value: unknown, authorMessages: string[], newStoryChat: boolean): Proposal {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Malformed discovery reply')
   const output = value as Record<string, unknown>
   if (!output.foundation || typeof output.foundation !== 'object' || Array.isArray(output.foundation) ||
@@ -81,8 +93,11 @@ function expectedProposal(value: unknown, authorMessages: string[]): Proposal {
     id: 'discovery-' + (i + 1), statement: d.statement.trim(), origin: 'agent',
     authority: d.authority === 'delegated' ? 'delegated' : 'user-protected',
   }))
+  const planning = input.planning === undefined
+    ? (newStoryChat ? parseStoryPlanning(undefined, true) : undefined)
+    : parseStoryPlanning(input.planning, newStoryChat)
   const foundation = { ...Object.fromEntries(fields.map(field => [field, (input[field] as string).trim()])),
-    decisions: [...origin, ...selections] } as Foundation
+    ...(planning ? { planning } : {}), decisions: [...origin, ...selections] } as Foundation
   candidate(foundation)
   const contract = parseGenerationContract({
     scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
@@ -90,7 +105,7 @@ function expectedProposal(value: unknown, authorMessages: string[]): Proposal {
   })
   return { foundation, task: output.task.trim(), contract }
 }
-function parseResponse(text: string, authorMessages: string[]):
+function parseResponse(text: string, authorMessages: string[], newStoryChat: boolean):
   { questions: string; proposal?: never } | { questions?: never; proposal: Proposal } {
   if (text.length > 24_000) throw new Error('Discovery reply exceeds the bounded conversation size')
   const clean = text.trim().replace(/^\x60\x60\x60(?:json)?\s*/i, '').replace(/\s*\x60\x60\x60$/, '')
@@ -99,7 +114,7 @@ function parseResponse(text: string, authorMessages: string[]):
       output.questions.trim().length > 5 && output.questions.length <= 6000) {
     return { questions: output.questions.trim() }
   }
-  if (output.phase === 'proposal') return { proposal: expectedProposal(output, authorMessages) }
+  if (output.phase === 'proposal') return { proposal: expectedProposal(output, authorMessages, newStoryChat) }
   throw new Error('Pi discovery did not produce questions or a valid proposal')
 }
 export type DiscoveryInference = (session: Session, instructions: string) => Promise<string>
@@ -145,6 +160,13 @@ NovelTea skill instructions as your governing method. All skill reference materi
 was read by the trusted controller from a verified immutable snapshot. No file,
 network, shell, or writable tool is available to this pre-bootstrap model.
 Only create a minimum coherent Creative Direction, never a full Story.
+For a NEW Story, elicit a compact set of genuinely missing requirements: Choice frequency/impact,
+branch depth and amount of route-exclusive content, adventure vs custom Puzzle emphasis,
+Narrative vs Exploration pacing, single-route first-playthrough minute range, and
+production limits for distinct illustration concepts/variants and Character art tiers.
+Distinguish hard limits from soft preferences, never invent author numeric demands,
+and include a recommendation for each missing choice. A no-Puzzle dialogue-led VN
+is fully valid; neither 3 Acts nor uniform Milestone Choice/Puzzle counts are required.
 Ask all currently answerable essential creative questions in a round, with numbered
 recommendations and reasons. Both Autonomous and Collaborative authors need a coherent
 initial baseline. If (and ONLY if) the author explicitly delegates all remaining
@@ -158,8 +180,19 @@ Respond ONLY as valid JSON, either:
 or {"phase":"proposal","task":"brief generation objective","foundation":{
 "id":"lowercase-slug","title":"...","premise":"...","central_conflict":"...",
 "genre":"...","tone":"...","player_experience":"...","scope":"...",
+"planning":{"choice_frequency":"occasional","choice_impact":"lasting",
+"branching":{"depth":"shallow","route_exclusivity":"limited"},
+"puzzle_emphasis":"adventure","pacing":"balanced",
+"first_playthrough":{"min_minutes":90,"max_minutes":120},
+"production":{"illustrated_backgrounds":{"count":{"max":6},"firmness":"soft"},
+"background_variants":{"count":{"max":2},"firmness":"soft"},
+"character_artwork":{"main":{"count":{"max":3},"firmness":"soft"}}}},
 "body":"meaningful coherent narrative and production prose",
 "decisions":[{"statement":"significant creative choice","authority":"user-protected"}]}}
+The planning block is an ILLUSTRATIVE JSON SHAPE, not default numbers: use source-specific
+approved/delegated values; new-Story proposals MUST include the complete planning core
+and at least one hard/soft production bound. Optional counts/illustration concepts may
+be omitted, but missing author requirements cannot be silently filled as protected facts.
 Use authority 'delegated' ONLY for choices the author explicitly delegated.
 All model-origin proposals remain subject to author approval; the controller
 will preserve the author's exact messages as a separate protected decision.
@@ -344,7 +377,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const instructions = await skillInstructions(session.skillId)
       const invoke = infer ?? ((s: Session, i: string) => realInference(store, actor.id, s, i))
       let raw = await invoke(session, instructions)
-      let outcome = parseResponse(raw, authorMessages(session))
+      let outcome = parseResponse(raw, authorMessages(session), Boolean(chat))
       // A sparse initial author objective must solicit baseline questions even
       // in Autonomous mode. Give one bounded corrective model pass if it skipped
       // discovery; never fabricate questions or accept an unreviewed proposal.
@@ -354,7 +387,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           'supplied a sparse objective without comprehensive delegation. Your previous proposal ' +
           'skipped the required first baseline discovery questions. Return ONLY a questions ' +
           'response with the minimum necessary recommended questions, not a proposal.')
-        outcome = parseResponse(raw, authorMessages(session))
+        outcome = parseResponse(raw, authorMessages(session), Boolean(chat))
         if (outcome.proposal) throw new Error('Required opening discovery questions were not supplied')
       }
       // The model proposes creative details, never replaces the original Turn's

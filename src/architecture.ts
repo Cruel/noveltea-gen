@@ -19,6 +19,8 @@ import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence }
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { validateFocusedCreationGrants } from "./creation-grants.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
+import { nativeStoryMetrics, reviewArchitectureMetrics,
+  type ArchitectureBudgetReview } from "./story-metrics.js";
 
 /** Exact additions to a focused Turn, never a general record-type write grant. */
 export interface PlannedFocusCreate {
@@ -86,12 +88,15 @@ interface Receipt {
   /** Source-bound authoring metadata, not a permission or a gameplay prerequisite. */
   milestoneOrder?: string[];
   outstanding?: Obligation[];
+  /** Native, source/revision-bound advisory planning assessment. */
+  architectureMetrics?: ArchitectureBudgetReview;
 }
 interface Obligation { id: string; path: string; field: string; requiredBy: string; code: string; message: string }
 interface CatalogRecord { path: string; metadata: { id: string; type: string; status: string; arcs?: string[] } }
 interface CatalogReport {
   records: CatalogRecord[];
   diagnostics: unknown[];
+  contractRevision: string;
   outstanding: Obligation[];
   readiness: { design: { stages: Record<string, { minimum: string }> } };
   protection: { status: string; changes: unknown[]; warnings: unknown[] };
@@ -477,6 +482,7 @@ function output(job: JobStartResult, state: Receipt, recovery?: Reconciliation) 
     jobId: job.jobId, branch: job.branch, worktreeStoryRoot: job.worktreeStoryRoot, headSha: state.expectedHead,
     recovery,
     plan: state.plan, proposal: state.proposal, history: state.history, outstanding: state.outstanding ?? [],
+    architectureMetrics: state.architectureMetrics ?? null,
     authorSigningRequest: state.proposal ? {
       version: 1, kind: "plan", jobId: job.jobId, threadId: job.threadId,
       workItemId: "global-architecture", baseSha: job.baseSha,
@@ -697,6 +703,27 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           // Reject a stale or invented order BEFORE committing any Story bytes.
           verifiedArchitectureMilestoneOrder(receipt.milestoneOrder,
             selected.filter(record => record.metadata.type === 'milestone').map(record => record.metadata.id));
+        }
+        // Analyze the EXACT native-validated candidate before any architecture
+        // commit or downstream expensive Event/Composition dispatch. No TS
+        // parsing, guessed route totals, or silently relaxed protected limits.
+        // Focused preexisting-Story work never re-interviews the author.
+        const direction = report.records.find(record =>
+          record.metadata.type === 'creative-direction');
+        if (direction?.metadata.status === 'approved' &&
+          Object.hasOwn(direction.metadata, 'planning')) {
+          const budgetReview = reviewArchitectureMetrics(nativeStoryMetrics(job),
+            report.records, report.contractRevision, workingHead);
+          if (budgetReview.requiresAuthorDirection.length)
+            throw new Error('Architecture exceeds approved hard Production budget: ' +
+              budgetReview.requiresAuthorDirection.join('; ') +
+              '. Redesign authorized Architecture files or obtain exact author-approved Foundation revision.');
+          receipt.architectureMetrics = budgetReview;
+        } else {
+          // Legacy and pre-approval Foundations have no approved planning
+          // contract to compare. Keep ordinary canonical validation operational;
+          // do not make optional native metrics mandatory for unrelated Turns.
+          delete receipt.architectureMetrics;
         }
         if (receipt.paths) {
           if (await contentDigest(job, receipt.paths) !== receipt.contentDigest) throw new Error("Authored architecture bytes changed; do not reuse acceptance.");

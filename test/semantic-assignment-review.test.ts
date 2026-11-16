@@ -240,6 +240,10 @@ test("multi-unit review requires only the exact current specialist unit, not its
   assert.match(architecture, /generic promises that Events will discover/);
   assert.match(architecture, /fulfillment.any_of: \[\]/);
   assert.match(architecture, /do NOT demand speculative Event IDs/);
+  assert.match(architecture, /WHOLE Story evaluate meaningful Choice frequency\/impact/);
+  assert.match(architecture, /material soft-budget expansion for author direction/);
+  assert.match(architecture, /zero Puzzles and rare Choices/);
+  assert.match(architecture, /Never impose per-Milestone interaction quotas/);
   assert.match(world, /NEXT separately committed character-foundations/);
   assert.match(world, /Do not fail World Foundations solely for not writing Characters/);
   assert.match(characters, /missing central Characters are a failure/);

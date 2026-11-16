@@ -175,13 +175,13 @@ test('historical generation pin must be the exact approved Foundation, not a for
     creativeMode: 'autonomous', provider: 'openai', model: 'gpt-6-luna',
   })
   mkdirSync(join(story, 'creative-direction'))
-  writeFileSync(join(story, 'creative-direction', 'foundation.md'), renderFoundation(draft))
+  writeFileSync(join(story, 'creative-direction', 'foundation.md'), renderFoundation(draft, 'approved'))
   git('add', '.'); git('commit', '-qm', 'Approved foundation\n\nNovelTea-Job: ' + ID +
     '\nNovelTea-Work-Item: foundation')
   const foundationSha = git('rev-parse', 'HEAD')
   const foundationReceipt = {
     stage: 'committed', commitSha: foundationSha,
-    authoredSha256: sha(renderFoundation(draft)),
+    authoredSha256: sha(renderFoundation(draft, 'approved')),
   }
   writeFileSync(join(stateDir, 'foundation.json'), JSON.stringify(foundationReceipt))
   mkdirSync(join(story, 'arcs'))

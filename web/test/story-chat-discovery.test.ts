@@ -24,6 +24,12 @@ const proposal = JSON.stringify({ phase: 'proposal', task: 'Model-suggested obje
   foundation: { id: 'foundation', title: 'The Last Bell', premise: 'A bell vanishes',
     central_conflict: 'The community conceals the culprit', genre: 'Mystery', tone: 'Somber',
     player_experience: 'Investigate clues and choose who to trust', scope: 'A coastal town',
+    planning: { choice_frequency: 'occasional', choice_impact: 'lasting',
+      branching: { depth: 'shallow', route_exclusivity: 'limited' },
+      puzzle_emphasis: 'adventure', pacing: 'balanced',
+      first_playthrough: { min_minutes: 90, max_minutes: 120 },
+      production: { illustrated_backgrounds: { count: { max: 5 }, firmness: 'hard' },
+        character_artwork: { main: { count: { max: 3 }, firmness: 'soft' } } } },
     body: 'A disappearance brings the inhabitants of a coastal town together. The investigator must navigate competing testimony and decide which loyalties are worth keeping.',
     decisions: [{statement: 'A branching resolution', authority: 'delegated'}] } })
 
@@ -153,6 +159,9 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
       ['user', 'user', 'agent'])
     assert.equal(proposed.proposal.foundation.decisions[0].authority, 'user-protected')
     assert.equal(proposed.proposal.foundation.decisions[2].authority, 'delegated')
+    assert.equal(proposed.proposal.foundation.planning.production.illustrated_backgrounds.firmness, 'hard')
+    assert.deepEqual(proposed.proposal.foundation.planning.first_playthrough,
+      { min_minutes: 90, max_minutes: 120 })
     assert.equal((await req(storyIds[0]!, firstId, 'POST', {
       action: 'approve', revision: proposed.revision, digest: 'a'.repeat(64),
     })).status, 409)
@@ -177,6 +186,8 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(approve.body.continuation.state, 'blocked',
       'without a real controller the exact approval persists but no writer starts')
     assert.equal(approve.body.session.proposal.foundation.decisions.length, 3)
+    assert.deepEqual(approve.body.session.proposal.foundation.planning,
+      proposed.proposal.foundation.planning)
     const blockedContinuation = await req(storyIds[0]!, firstId, 'POST', {
       action: 'continue', revision: approve.body.session.revision, digest: approve.body.session.digest,
     })
@@ -201,6 +212,8 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     store = openStudioDatabase(filename)
     auth = createStudioAuth(store, config)
     assert.equal((await req(storyIds[0]!, firstId, 'GET')).body.session.phase, 'approved')
+    assert.deepEqual((await req(storyIds[0]!, firstId, 'GET')).body.session.proposal.foundation.planning,
+      proposed.proposal.foundation.planning)
     await store.testing.records.update('stories', { id: storyIds[0]! },
       { sourceCommitSha: 'c'.repeat(40) })
     assert.equal((await req(storyIds[0]!, firstId, 'GET')).status, 409,

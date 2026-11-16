@@ -180,7 +180,7 @@ test('shared GitHub job controller reopens only the saved unpublished initializa
       })
       assert.equal(result.status, 'committed')
       assert.equal(readFileSync(join(firstJob.worktreeStoryRoot,
-        'creative-direction/foundation.md'), 'utf8'), renderFoundation(foundation))
+        'creative-direction/foundation.md'), 'utf8'), renderFoundation(foundation, 'approved'))
       assert.equal(git(firstJob.worktreeRoot, 'rev-list', '--count', pinned + '..HEAD'), '2')
       assert.equal(await trustedHead(firstJob), result.commitSha)
       assert.equal(git(remote, 'rev-parse', 'main'), pinned)

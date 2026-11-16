@@ -1,11 +1,12 @@
 import { Button } from '@/components/ui/button'
+import type { StoryPlanning } from '../../../src/story-planning'
 
 type Decision = { id: string; origin: 'user' | 'agent'
   authority: 'user-protected' | 'delegated'; statement: string }
 type Foundation = {
   id: string; title: string; premise: string; central_conflict: string
   genre: string; tone: string; player_experience: string; scope: string
-  body: string; decisions: Decision[]
+  body: string; planning?: StoryPlanning; decisions: Decision[]
 }
 export type StoryChatBaselineSession = {
   phase: 'running' | 'questions' | 'proposed' | 'approved' | 'blocked'
@@ -52,6 +53,12 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
         <p className="m-0"><strong>Genre and tone:</strong> {foundation.genre} · {foundation.tone}</p>
         <p className="m-0"><strong>Player experience:</strong> {foundation.player_experience}</p>
         <p className="m-0"><strong>Scope:</strong> {foundation.scope}</p>
+        {foundation.planning && <div className="grid gap-1">
+          <strong>Proposed interaction, playthrough and production contract</strong>
+          <pre className="m-0 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-xs"
+            aria-label="Exact proposed planning metadata">{JSON.stringify(foundation.planning, null, 2)}</pre>
+          <p className="m-0 text-xs text-muted-foreground">Hard limits and soft preferences remain distinct. Estimates describe one playthrough, not all branches combined.</p>
+        </div>}
         <p className="m-0 whitespace-pre-wrap">{foundation.body}</p>
       </div>
       <div className="grid gap-1">
