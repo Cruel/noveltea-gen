@@ -47,6 +47,8 @@ export interface AdaptiveAdmission {
   records: Array<{ path: string; metadata: { id: string; type: string; status: string; decisions?: unknown[] } }>;
   sourceHashes: Record<string, string>;
   protectedPaths: string[];
+  /** Native Architecture / controller typed edges, never model asserted. */
+  typedEdges?: Array<{ item: string; needs: string }>;
   authorTargets: string[];
   planning: StoryPlanning;
   /** Independently verified original recovery checkpoints, never claimed by Pi. */
@@ -117,7 +119,32 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
           !Array.isArray(action.dependsOn) || action.dependsOn.length > 32 ||
           new Set(action.dependsOn).size !== action.dependsOn.length)
         throw Error("Adaptive addition exceeds verified Architecture scope or native Story state.");
+      // A topologically valid plan is not necessarily executable. The
+      // native Event specialist always needs Character/World foundations,
+      // Interactive needs its own reviewed Event cluster, and Composition
+      // needs the exact Milestone's sealed interactive decision. Additional
+      // typed causal predecessors are allowed only within the narrative
+      // production pipeline; they do not confer another owner's write grant.
+      const deps = action.dependsOn.map(id => byId.get(id));
+      const predecessor = action.stage === "event"
+        ? action.dependsOn.includes("foundations") && deps.every(item => item &&
+            ["foundations", "event", "choice", "puzzle"].includes(item.stage))
+        : action.stage === "interactive"
+          ? action.dependsOn.includes("event:" + action.milestone) &&
+            deps.every(item => item && ["event", "interactive", "choice", "puzzle"].includes(item.stage))
+          : action.dependsOn.some(id => id === "interactive:" + action.milestone ||
+              id === "puzzle:" + action.milestone) &&
+            deps.every(item => item && ["interactive", "choice", "puzzle", "composition"].includes(item.stage));
+      if (!predecessor)
+        throw Error("Adaptive addition lacks a controller-supported typed causal prerequisite.");
       const id = action.stage + ":" + action.milestone;
+      const intrinsic = (need: string) => action.stage === "event"
+        ? need === "foundations" : action.stage === "interactive"
+          ? need === "event:" + action.milestone
+          : need === "interactive:" + action.milestone || need === "puzzle:" + action.milestone;
+      if (action.dependsOn.some(need => !intrinsic(need) &&
+          !input.typedEdges?.some(edge => edge.item === id && edge.needs === need)))
+        throw Error("Adaptive cross-assignment prerequisite lacks a native source-grounded typed causal edge.");
       if (byId.has(id) || added.has(id)) throw Error("Adaptive addition duplicates an existing assignment.");
       const template = items.find(i => i.stage === action.stage) ??
         input.inventory.items.find(i => i.stage === action.stage);
@@ -138,8 +165,7 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
       const original = byId.get(action.item);
       if (!original || original.stage !== "interactive" || original.status !== "pending" ||
           !original.milestone || !allowed.has(original.milestone) ||
-          input.planning.choice_frequency === "none" ||
-          action.domains.includes("puzzle") && input.planning.puzzle_emphasis === "none")
+          input.planning.choice_frequency === "none")
         throw Error("Adaptive split exceeds approved Choice/Puzzle profile or pending scope.");
       const index = items.indexOf(original);
       const choice = { ...original, id: "choice:" + original.milestone,
@@ -238,6 +264,112 @@ export function admitAdaptiveAssignments(input: AdaptiveAdmission): AdaptiveAmen
 
 /** Recheck the saved seal before *every* dispatch. The native source and
  * actual writer/checkpoint proofs must be reauthenticated by the caller. */
+/** Before the canonical inventory is rebuilt, undo only the private plan\'s
+ * structural overlays on the *previous* graph snapshot. The canonical
+ * reconciler compares newly discovered dependencies against its own prior
+ * architecture shape, never against transient Choice/Puzzle aliases. A
+ * failed, interrupted, or unknown specialist is not restored as pending. */
+export function removeAdaptiveOverlays(
+  previous: GenerationInventory, history: readonly AdaptiveAmendment[],
+): GenerationInventory {
+  const items = structuredClone(previous.items);
+  const item = (id: string) => items.find(entry => entry.id === id);
+  for (const amendment of [...history].reverse()) {
+    const { digest: signature, ...body } = amendment;
+    if (amendment.schema !== "noveltea-adaptive-assignments/v1" ||
+        !HASH.test(signature) || digest(body) !== signature)
+      throw Error("Canonical recovery cannot undo a tampered adaptive overlay.");
+    for (const action of [...amendment.actions].reverse()) {
+      if (action.kind === "add") {
+        const id = action.stage + ":" + action.milestone;
+        const found = item(id);
+        if (!found || found.stage !== action.stage || found.milestone !== action.milestone ||
+            found.status === "blocked")
+          throw Error("Adaptive added specialist is missing or blocked; reconcile its original receipt.");
+        items.splice(items.indexOf(found), 1);
+        for (const other of items) other.dependencies = other.dependencies.filter(dep => dep !== id);
+      } else if (action.kind === "split") {
+        const milestone = action.item.slice("interactive:".length);
+        const choice = item("choice:" + milestone);
+        const puzzle = item("puzzle:" + milestone);
+        if (!choice || !puzzle || choice.stage !== "choice" || puzzle.stage !== "puzzle" ||
+            choice.status === "blocked" || puzzle.status === "blocked")
+          throw Error("Adaptive Choice/Puzzle receipt is missing or blocked; no implicit writer replay.");
+        const position = items.indexOf(choice);
+        items.splice(items.indexOf(puzzle), 1);
+        items.splice(items.indexOf(choice), 1);
+        const restored: ExecutionItem = { ...choice, id: action.item, stage: "interactive",
+          status: "pending", dependencies: [...choice.dependencies] };
+        delete restored.verifiedSha; delete restored.blockingReason; delete restored.omission;
+        items.splice(position, 0, restored);
+        for (const other of items) other.dependencies = other.dependencies.map(dep =>
+          dep === choice.id || dep === puzzle.id ? action.item : dep);
+      } else if (action.kind === "omit") {
+        const found = item(action.item);
+        if (!found || found.stage !== "interactive" || found.status !== "verified" || !found.omission)
+          throw Error("Adaptive omitted assignment lost its source-reviewed disposition.");
+        found.status = "pending";
+        delete found.verifiedSha; delete found.omission;
+      } else throw Error("Unknown persisted adaptive action.");
+    }
+  }
+  if (new Set(items.map(i => i.id)).size !== items.length)
+    throw Error("Canonical recovery duplicated a work assignment.");
+  return { ...previous, items };
+}
+
+/** A stored amendment is not a perpetual write grant. At every verified
+ * descendant HEAD re-admit its EXACT action list against the new native
+ * catalog and unchanged original author intent. Previously reviewed commits
+ * cannot be silently replaced, and a newly discovered pending assignment
+ * must trigger an explicit new plan instead of being lost from the order. */
+export function revalidateAdaptiveAmendment(
+  amendment: AdaptiveAmendment, current: AdaptiveAdmission,
+): { inventory: GenerationInventory; order: string[] } {
+  const { digest: signature, ...saved } = amendment;
+  if (amendment.schema !== "noveltea-adaptive-assignments/v1" ||
+      !HASH.test(signature) || digest(saved) !== signature ||
+      amendment.turnDigest !== current.turnDigest ||
+      amendment.planVersion !== current.plan.version ||
+      amendment.beforeVersion < 1 || amendment.afterVersion !== amendment.beforeVersion + 1)
+    throw Error("Persisted adaptive amendment digest, source objective or plan version was tampered.");
+  const prior = new Map(current.inventory.items.filter(i => i.status === "verified")
+    .map(i => [i.id, i.verifiedSha]));
+  if (amendment.carried.some(item => !SHA.test(item.sha) || prior.get(item.id) !== item.sha) ||
+      new Set(amendment.carried.map(item => item.id)).size !== amendment.carried.length)
+    throw Error("Adaptive amendment lost an independently verified carried checkpoint.");
+  const pending = new Set(current.inventory.items.filter(i => i.status === "pending")
+    .map(i => i.id));
+  for (const action of amendment.actions) {
+    if (action.kind === "add") {
+      const id = action.stage + ":" + action.milestone;
+      if (pending.has(id) || current.inventory.items.some(i => i.id === id))
+        throw Error("Adaptive added work now collides with a new canonical assignment; replan its exact source.");
+      pending.add(id);
+    } else if (action.kind === "split") {
+      if (!pending.delete(action.item))
+        throw Error("Adaptive split no longer targets its original unstarted assignment.");
+      const milestone = action.item.slice("interactive:".length);
+      pending.add("choice:" + milestone);
+      if (action.domains.includes("puzzle")) pending.add("puzzle:" + milestone);
+    } else if (action.kind === "omit") {
+      if (!pending.delete(action.item))
+        throw Error("Previously omitted adaptive assignment already changed source state.");
+    } else throw Error("Unknown persisted adaptive action.");
+  }
+  const order = amendment.order.filter(id => pending.delete(id));
+  if (pending.size || order.length !== new Set(order).size)
+    throw Error("New pending work is absent from the original authenticated adaptive order.");
+  const proposal: AdaptiveProposal = {
+    sourceSha: current.inventory.headSha, turnDigest: amendment.turnDigest,
+    beforeVersion: amendment.beforeVersion, reason: amendment.reason,
+    actions: structuredClone(amendment.actions), order,
+  };
+  const certified = admitAdaptiveAssignments({ ...current, proposal,
+    version: amendment.beforeVersion, omissionProofs: amendment.omissions });
+  return { inventory: applyAdaptiveAssignments(current.inventory, certified), order };
+}
+
 export function applyAdaptiveAssignments(inventory: GenerationInventory,
   amendment: AdaptiveAmendment): GenerationInventory {
   const { digest: seal, ...body } = amendment;

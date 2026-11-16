@@ -22,7 +22,7 @@ import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
 import { reconcilePendingWork } from "./pending-work.js";
-import { reconcileAdaptiveWork } from "./adaptive-work.js";
+import { canonicalPreviousAdaptiveInventory, reconcileAdaptiveWork } from "./adaptive-work.js";
 import { currentSteeringBoundary } from "./steering-boundary.js";
 import { proposeSteeringAmendment, readSteeringPlan, saveSteeringAmendment,
   steeringForAssignment, steeringSourceIsAncestor } from "./steering-amendments.js";
@@ -425,9 +425,11 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   }
   const validation = plan && completedStages.some(e => e.stage === "architecture")
     ? await validateStoryJob(job, request.validatorSource ?? request.skillsSource, { ...job, baseSha: head }) : undefined;
+  const canonicalPrevious = await canonicalPreviousAdaptiveInventory(job,
+    request.turnPlanDigest, plan?.version ?? null, s.inventory, s.adaptiveVersion);
   const inventory = await reviewGatedInventory(job,
-    reconcileInventory(plan, validation, head, completedStages, failures, s.inventory));
-  const pending = await reconcilePendingWork(job, request, inventory, s.inventory, validation, allowAmend);
+    reconcileInventory(plan, validation, head, completedStages, failures, canonicalPrevious));
+  const pending = await reconcilePendingWork(job, request, inventory, canonicalPrevious, validation, allowAmend);
   const adaptive = plan && validation && receipt.phase === "committed"
     ? await reconcileAdaptiveWork({ job, request, plan, validation,
       inventory: pending.inventory, completed: completedStages,

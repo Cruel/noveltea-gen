@@ -8,6 +8,8 @@ import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { startStoryJob } from "../src/job.js";
+import type { GenerationInventory, ExecutionItem } from "../src/generation-plan.js";
+import { restoreCompletedAdaptiveWork } from "../src/adaptive-work.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { readPuzzleNoWrite } from "../src/puzzle-obligation.js";
@@ -165,6 +167,46 @@ test("adaptive Choice/Puzzle dispatch uses one original receipt, never replays C
       assert.equal(puzzle.status, "interactive-slice-committed");
       assert.equal(puzzle.specialistUnits[0]?.commitSha, before);
       assert.equal(inspect(x).status, "interactive-slice-committed");
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+test("adaptive recovery authenticates actual Choice checkpoint and mandatory independent review",
+  { skip: !available }, async () => {
+    const x = setup("adaptive-checkpoint-recovery");
+    await x.prepareWithTurn("Write a consequential mystery with playable Choices and reviewed endings.", [
+      "The player faces distinct supported decisions with downstream consequences.",
+      "Every promised Choice must remain independently reviewed.",
+    ]);
+    const prior = Object.fromEntries(Object.keys(x.env).map(k => [k, process.env[k]]));
+    Object.assign(process.env, x.env);
+    try {
+      const milestone = "milestone.disclosure";
+      const choice = await runInteractiveWorkItem({ story: x.story, job: "draft",
+        action: "run", milestone, fixture: true, skillsSource: source, unit: "choice" });
+      const job = await startStoryJob({ story: x.story, job: "draft" }, false);
+      const item: ExecutionItem = { id: "choice:" + milestone, stage: "choice", milestone,
+        kind: "realization", targetIds: [milestone], dependencies: [], plannedItems: [],
+        skills: ["nt-interactive-narrative"], checks: ["native-validated"],
+        authorization: { source: "explicit-author-cli", planVersion: 1, paths: [] },
+        planVersion: 1, status: "pending" };
+      const original: GenerationInventory = { version: 1, planVersion: 1, headSha: choice.headSha,
+        items: [item], rationale: "Adaptive pending original Choice" };
+      const completed = [{ stage: "choice" as const, milestone, planVersion: 1,
+        headSha: choice.headSha, status: "interactive-choice-committed" }];
+      await assert.rejects(restoreCompletedAdaptiveWork(job, structuredClone(original), completed),
+        /independent review/i);
+      await x.seal("interactive-choice-disclosure");
+      const restored = await restoreCompletedAdaptiveWork(job, structuredClone(original), completed);
+      assert.equal(restored.items[0]?.status, "verified");
+      assert.equal(restored.items[0]?.verifiedSha, choice.headSha);
+      await assert.rejects(restoreCompletedAdaptiveWork(job, structuredClone(original), [
+        { ...completed[0]!, headSha: "0".repeat(40) } ]),
+      /checkpoint|commit|evidence|ancestor|source/i);
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) delete process.env[key];

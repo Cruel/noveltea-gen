@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { JobStartResult } from "../src/job.js";
 import { pendingDigest } from "../src/pending-work-amendments.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
+import { assertAdaptiveFallbackAllowed } from "../src/adaptive-work.js";
 import { emptyAdaptiveState, readAdaptiveState,
   beginAdaptiveAttempt, settleAdaptiveAttempt, assertAdaptiveSettled } from "../src/adaptive-state.js";
 
@@ -36,10 +37,13 @@ test("adaptive controller history is Thread-bound, durable, source-ancestral and
     assert.ok(snapshot);
     const state = emptyAdaptiveState(f.job, turn, 1);
     assert.equal(await readAdaptiveState(f.job, turn, 1), null);
+    await assertAdaptiveFallbackAllowed(f.job, turn, 1, null);
     const one = pendingDigest({ head: f.sha, version: 1 });
     assert.equal(await beginAdaptiveAttempt(f.job, state, f.sha, one), true);
     const interrupted = (await readAdaptiveState(f.job, turn, 1))!;
     assert.throws(() => assertAdaptiveSettled(interrupted), /Interrupted adaptive orchestrator/);
+    await assert.rejects(assertAdaptiveFallbackAllowed(f.job, turn, 1, null),
+      /Interrupted adaptive orchestrator/);
     await assert.rejects(beginAdaptiveAttempt(f.job, interrupted, f.sha, one),
       /Interrupted adaptive orchestrator/);
     await settleAdaptiveAttempt(f.job, state, one, "unchanged");
@@ -66,6 +70,10 @@ test("adaptive controller history is Thread-bound, durable, source-ancestral and
     await settleAdaptiveAttempt(f.job, state, two, "admitted", entry, session);
     const restored = await readAdaptiveState(f.job, turn, 1);
     assert.equal(restored?.version, 2);
+    await assert.rejects(assertAdaptiveFallbackAllowed(f.job, turn, 1, null),
+      /sealed adaptive amendment/);
+    await assert.rejects(assertAdaptiveFallbackAllowed(f.job, turn, 1, 2),
+      /cannot revert/);
     assert.deepEqual(restored?.entries, [entry]);
     writeFileSync(join(f.root, "README.md"), "next\n");
     f.git("add", "."); f.git("commit", "-qm", "after independent work");

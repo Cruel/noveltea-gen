@@ -31,8 +31,10 @@ export async function proposeAdaptiveWork(input: {
   turn: TurnEvidence; inventory: GenerationInventory; planning: StoryPlanning;
   metrics: StoryArchitectureMetrics;
   provider: string; model: string; version: number; signature: string;
+  typedEdges: Array<{ item: string; needs: string }>;
 }): Promise<{ proposal: AdaptiveProposal; sessionFile: string; skillReads: string[] }> {
-  const { job, selected, turn, inventory, planning, metrics, provider, model, version, signature } = input;
+  const { job, selected, turn, inventory, planning, metrics, provider, model, version, signature,
+    typedEdges } = input;
   if (selected.receipt.storySourceSha !== job.baseSha ||
       selected.receipt.turnPlanDigest !== turn.digest ||
       inventory.headSha === job.baseSha ||
@@ -99,6 +101,11 @@ export async function proposeAdaptiveWork(input: {
       "Prefer the minimal change: empty actions when current work is sound. " +
       "The controller will reject unsupported scope changes, invented grants, duplicate IDs, " +
       "missing dependencies and unreviewed omissions. " +
+      "Every added Event needs its Character/World foundations; Interactive " +
+      "must depend on its matching Milestone Event, and Composition on its " +
+      "matching Interactive or Puzzle assessment. Additional cross-Milestone " +
+      "dependencies must appear in these VERIFIED Architecture edges: " +
+      JSON.stringify(typedEdges) + ". Never invent other causal edges. " +
       "\nOriginal author goal: " + turn.goal +
       "\nOriginal author requirements: " + JSON.stringify(turn.objective) +
       "\nOriginal completion contract: " + JSON.stringify(turn.contract) +
