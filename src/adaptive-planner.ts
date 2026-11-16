@@ -32,9 +32,10 @@ export async function proposeAdaptiveWork(input: {
   metrics: StoryArchitectureMetrics;
   provider: string; model: string; version: number; signature: string;
   typedEdges: Array<{ item: string; needs: string }>;
+  sourceEvidence: Array<{ milestone: string; path: string; sha256: string }>;
 }): Promise<{ proposal: AdaptiveProposal; sessionFile: string; skillReads: string[] }> {
   const { job, selected, turn, inventory, planning, metrics, provider, model, version, signature,
-    typedEdges } = input;
+    typedEdges, sourceEvidence } = input;
   if (selected.receipt.storySourceSha !== job.baseSha ||
       selected.receipt.turnPlanDigest !== turn.digest ||
       inventory.headSha === job.baseSha ||
@@ -88,7 +89,8 @@ export async function proposeAdaptiveWork(input: {
       "A choice-heavy Story can need multiple distributed Choices and extra causal Events; " +
       "do not impose uniform per-Milestone quotas or fabricated precise playtime. " +
       "This is a provisional PLAN amendment, NOT approval to modify a protected record. " +
-      "You may reorder only remaining pending assignments, split an UNSTARTED interactive " +
+      "You may reorder only remaining pending assignments, refine a PENDING assignment " +
+      "with a specific source-grounded outcome (narrow), split an UNSTARTED interactive " +
       "Milestone into an exact pair of Choice then Puzzle decision specialists, or add a " +
       "missing Event/Interactive/Composition unit for a Milestone present in the VERIFIED Architecture " +
       "scope. Each addition needs explicit causal dependency IDs and must remain within the " +
@@ -120,13 +122,20 @@ export async function proposeAdaptiveWork(input: {
       }) +
       "\nCurrent controller inventory (verified work stays immutable): " + JSON.stringify(inventory.items) +
       "\nOnly currently pending IDs: " + JSON.stringify(pending.map(i => i.id)) +
+      "\nNative Milestone immutable planning/body projections eligible for narrowing " +
+      "(sha256 hashes exclude only Event-owned completeness/fulfillment slots; not grants): " +
+      JSON.stringify(sourceEvidence) +
       "\nProposal format: ONLY a JSON object with EXACT keys sourceSha, turnDigest, " +
       "beforeVersion, reason, actions, order. sourceSha=" + inventory.headSha +
       ", turnDigest=" + turn.digest + ", beforeVersion=" + version + ". " +
       "actions entries must be one of {kind:'add',stage:'event'|'interactive'|'composition'," +
       "milestone:'milestone.<slug>',dependsOn:['existing assignment id']}, " +
       "{kind:'split',item:'interactive:milestone.<slug>',domains:['choice','puzzle']}, " +
-      "{kind:'depend',item:'event:milestone.<slug>',needs:'event:milestone.<prerequisite>'}. " +
+      "{kind:'depend',item:'event:milestone.<slug>',needs:'event:milestone.<prerequisite>'}, " +
+      "{kind:'narrow',item:'pending assignment id',sourcePath:'listed Milestone path', " +
+      "sourceHash:'listed sha256',outcome:'bounded goal within existing authority'}. " +
+      "Narrowing evidence MUST be the selected assignment's own Milestone and " +
+      "cannot grant any path, owner, protected decision or new canonical target. " +
       "Use strict JSON DOUBLE QUOTES. order MUST contain EVERY resulting pending ID " +
       "exactly once in dependency-safe order after all actions. " +
       "No omitted tasks, no extra keys, no invented milestones or quota assumptions.";

@@ -8,7 +8,7 @@ import type { JobStartResult } from "../src/job.js";
 import type { RecoveryCheckpoint } from "../src/recovery-checkpoints.js";
 import { planRevision } from "../web/src/lib/turn-plan";
 import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server";
-import { selectCheckpointReview, blockedByRequiredReview, checkpointAssurance,
+import { selectCheckpointReview, requireAdaptiveReview, blockedByRequiredReview, checkpointAssurance,
   inspectCheckpointReview, readIndependentReview, sealIndependentReview, executionId,
   unresolvedNativePrerequisites } from "../src/checkpoint-assurance.js";
 import { forkDigest, readRecoveryFork } from "../src/recovery-fork-state.js";
@@ -24,6 +24,15 @@ const routine = {
 
 test("a bounded Character revision is validated without fabricated independent review", () => {
   assert.deepEqual(selectCheckpointReview(routine), { status: "not-required", reasons: [] });
+});
+
+test("controller-admitted assignment refinement always needs semantic review", () => {
+  const ordinary = selectCheckpointReview(routine);
+  const revised = requireAdaptiveReview(ordinary, { item: "event:milestone.discovery",
+    sourceSha: "a".repeat(40), sourcePath: "milestones/discovery.md", sourceHash: "b".repeat(64),
+    outcome: "Author one extra causal reveal", amendmentDigest: "c".repeat(64) });
+  assert.deepEqual(revised, { status: "required-pending", reasons: ["adaptive-controller-outcome"] });
+  assert.deepEqual(requireAdaptiveReview(ordinary, null), ordinary);
 });
 
 test("architectural, protected-adjacent, cross-record, broad and failed review changes require review", () => {

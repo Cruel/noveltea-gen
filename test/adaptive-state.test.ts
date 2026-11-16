@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JobStartResult } from "../src/job.js";
 import { pendingDigest } from "../src/pending-work-amendments.js";
+import { adaptiveReviewBinding } from "../src/adaptive-review-binding.js";
+import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
+import { createHash } from "node:crypto";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { assertAdaptiveFallbackAllowed, reconcileAdaptiveWork } from "../src/adaptive-work.js";
 import type { GenerationRequest } from "../src/generation.js";
@@ -53,6 +56,83 @@ test("inspection of a Story without adaptive history does not enter planning or 
     else process.env.NT_ADAPTIVE_PLANNING = previousFlag;
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test("independent review binds an amended assignment to private original source and Thread", async () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.root, "milestones"), { recursive: true });
+    writeFileSync(join(f.root, "milestones/turning-point.md"), "---\nid: milestone.discovery\ncompleteness: partial\nfulfillment:\n  any_of: []\n---\nCausal outcome\n");
+    mkdirSync(join(f.root, "skills", "test"), { recursive: true });
+    writeFileSync(join(f.root, "skills/test/SKILL.md"), "---\nname: test\n---\nfixture");
+    f.git("add", "."); f.git("commit", "-qm", "Native Milestone and pinned methods");
+    f.sha = f.git("rev-parse", "HEAD");
+    f.job.baseSha = f.sha;
+    const snapshot = await createSkillSnapshot({ discovery: "explicit-only",
+      novelteaSkills: f.root, skillDirs: [], requiredSkills: [] });
+    assert.ok(snapshot);
+    const state = emptyAdaptiveState(f.job, turn, 1);
+    const signature = pendingDigest({ source: f.sha, exact: "review" });
+    await beginAdaptiveAttempt(f.job, state, f.sha, signature);
+    const sourceHash = createHash("sha256").update(milestoneFulfillmentProjection(
+      readFileSync(join(f.root, "milestones/turning-point.md"), "utf8"))).digest("hex");
+    const action = { kind: "narrow" as const, item: "event:milestone.discovery",
+      sourcePath: "milestones/turning-point.md", sourceHash,
+      outcome: "Add a second causal reveal necessary to explain the author's requested ending." };
+    const added = { kind: "add" as const, stage: "composition" as const,
+      milestone: "milestone.discovery", dependsOn: ["interactive:milestone.discovery"] };
+    const body = { schema: "noveltea-adaptive-assignments/v1" as const,
+      sourceSha: f.sha, turnDigest: turn, beforeVersion: 1, afterVersion: 2,
+      inventoryDigest: "b".repeat(64), planVersion: 1, reason: "Causal support",
+      actions: [action, added], order: ["event:milestone.discovery", "composition:milestone.discovery", "review"], carried: [], omissions: [] };
+    const entry = { ...body, digest: pendingDigest(body) };
+    mkdirSync(join(f.root, "adaptive-planning-sessions"), { recursive: true });
+    const sessionFile = join(f.root, "adaptive-planning-sessions", "review.jsonl");
+    writeFileSync(sessionFile, JSON.stringify({ role: "assistant", text: "proposal" }) + "\n");
+    await settleAdaptiveAttempt(f.job, state, signature, "admitted", entry, {
+      sessionFile, sessionSha256: createHash("sha256").update(readFileSync(sessionFile)).digest("hex"),
+      snapshotId: snapshot.id, provider: "openai", model: "fixture",
+      skillReads: [join(snapshot.path, "skills/test/SKILL.md")],
+      proposalDigest: pendingDigest({ sourceSha: f.sha, turnDigest: turn,
+        beforeVersion: 1, reason: entry.reason, actions: entry.actions, order: entry.order }),
+    });
+    const binding = await adaptiveReviewBinding(f.job, turn, 1, f.sha, "event-discovery");
+    assert.deepEqual(binding, { kind: "narrow", item: action.item, amendmentDigest: entry.digest,
+      sourceSha: f.sha, sourcePath: action.sourcePath, sourceHash, outcome: action.outcome });
+    assert.equal(await adaptiveReviewBinding(f.job, turn, 1, f.sha, "event-another"), null);
+    assert.deepEqual(await adaptiveReviewBinding(f.job, turn, 1, f.sha, "composition-discovery"),
+      { kind: "add", item: "composition:milestone.discovery", amendmentDigest: entry.digest,
+        sourceSha: f.sha, outcome: "Independently realize the added composition assignment " +
+          "within verified Architecture milestone.discovery; authenticated causal dependencies: " +
+          "interactive:milestone.discovery." });
+    writeFileSync(join(f.root, "milestones/turning-point.md"),
+      "---\nid: milestone.discovery\ncompleteness: complete\nfulfillment:\n  any_of: [[event.discovered]]\n---\nCausal outcome\n");
+    f.git("add", "."); f.git("commit", "-qm", "Authorized Event fulfillment-only update");
+    const fulfilledSha = f.git("rev-parse", "HEAD");
+    assert.deepEqual(await adaptiveReviewBinding(f.job, turn, 1, fulfilledSha,
+      "event-discovery"), binding, "Event-owned fulfillment changes retain the original promise");
+    writeFileSync(join(f.root, "README.md"), "unrelated verified descendant\n");
+    f.git("add", "."); f.git("commit", "-qm", "Unrelated verified work");
+    assert.deepEqual(await adaptiveReviewBinding(f.job, turn, 1,
+      f.git("rev-parse", "HEAD"), "event-discovery"), binding);
+    writeFileSync(join(f.root, "milestones/turning-point.md"),
+      readFileSync(join(f.root, "milestones/turning-point.md"), "utf8").replace(
+        "Causal outcome", "Unapproved different narrative premise"));
+    f.git("add", "."); f.git("commit", "-qm", "Drifted narrative premise");
+    await assert.rejects(adaptiveReviewBinding(f.job, turn, 1, f.git("rev-parse", "HEAD"),
+      "event-discovery"), /original|source/i);
+    await assert.rejects(adaptiveReviewBinding({ ...f.job, threadId: "other" }, turn, 1,
+      f.git("rev-parse", "HEAD"), "event-discovery"), /identity|source/i);
+    const saved = JSON.parse(readFileSync(join(f.root, "adaptive-plan.json"), "utf8"));
+    saved.entries[0].actions[0].sourceHash = "0".repeat(64);
+    saved.entries[0].digest = pendingDigest(Object.fromEntries(
+      Object.entries(saved.entries[0]).filter(([key]) => key !== "digest")));
+    saved.digest = pendingDigest(Object.fromEntries(
+      Object.entries(saved).filter(([key]) => key !== "digest")));
+    writeFileSync(join(f.root, "adaptive-plan.json"), JSON.stringify(saved));
+    await assert.rejects(adaptiveReviewBinding(f.job, turn, 1,
+      f.git("rev-parse", "HEAD"), "event-discovery"), /original|source|proposal/i);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("rejected adaptive proposals block restart instead of falling back to old assignments", async () => {

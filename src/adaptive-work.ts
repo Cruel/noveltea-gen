@@ -25,6 +25,7 @@ import { emptyAdaptiveState, readAdaptiveState,
 import { proposeAdaptiveWork, InvalidAdaptiveProposalError } from "./adaptive-planner.js";
 import { readEventOnlyOmission } from "./interactive-event-only.js";
 import { readPuzzleNoWrite } from "./puzzle-obligation.js";
+import { milestoneFulfillmentProjection } from "./milestone-field-scope.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
 import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
 
@@ -55,6 +56,7 @@ async function verifySource(job: JobStartResult, validation: ValidationResult,
   const dirty = dependencyGit(job, "status", "--porcelain=v1", "--untracked-files=all");
   if (dirty) throw Error("Adaptive planning cannot run on a dirty Story worktree.");
   const sourceHashes: Record<string, string> = {};
+  const milestoneSourceHashes: Record<string, string> = {};
   if (report.records.length > 2048 || new Set(report.records.map(r => r.path)).size !== report.records.length)
     throw Error("Adaptive Story catalog exceeds a safe unique source inventory.");
   for (const record of report.records) {
@@ -64,9 +66,13 @@ async function verifySource(job: JobStartResult, validation: ValidationResult,
     if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 1024 * 1024 ||
         await realpath(source) !== source)
       throw Error("Adaptive planning cannot inspect an unsafe canonical source.");
-    sourceHashes[record.path] = createHash("sha256").update(await readFile(source)).digest("hex");
+    const bytes = await readFile(source);
+    sourceHashes[record.path] = createHash("sha256").update(bytes).digest("hex");
+    if (record.metadata.type === "milestone")
+      milestoneSourceHashes[record.path] = createHash("sha256")
+        .update(milestoneFulfillmentProjection(bytes.toString("utf8"))).digest("hex");
   }
-  return { report, sourceHashes };
+  return { report, sourceHashes, milestoneSourceHashes };
 }
 /** Only explicit, verified Architecture realization edges can introduce
  * additional Milestone-to-Milestone Event prerequisites. A model cannot
@@ -262,7 +268,7 @@ export async function reconcileAdaptiveWork(input: {
     await assertAdaptiveFallbackAllowed(job, request.turnPlanDigest, plan.version, input.pinnedVersion);
     return { inventory: original, order: null, version: null };
   }
-  const { report, sourceHashes } = await verifySource(job, validation, original);
+  const { report, sourceHashes, milestoneSourceHashes } = await verifySource(job, validation, original);
   const direction = report.records.find(r => r.metadata.type === "creative-direction" &&
     r.metadata.status === "approved");
   if (!direction || !Object.hasOwn(direction.metadata, "planning")) {
@@ -287,7 +293,7 @@ export async function reconcileAdaptiveWork(input: {
     r.metadata.type === "creative-direction" || (r.metadata.decisions?.length ?? 0) > 0).map(r => r.path);
   const authorized = (inventory: GenerationInventory, proposal: AdaptiveProposal): AdaptiveAdmission => ({
     proposal, inventory, plan, turnDigest: turn.digest, version: proposal.beforeVersion,
-    verifiedSource: true, records: report.records, sourceHashes,
+    verifiedSource: true, records: report.records, sourceHashes, milestoneSourceHashes,
     protectedPaths, typedEdges: architectureCausalEdges(plan),
     authorTargets: turn.objective!.requestedTargets,
     planning, carried: reviewedCarry(inventory), omissionProofs: [],
@@ -305,7 +311,7 @@ export async function reconcileAdaptiveWork(input: {
     order = restored.order.filter(id => effective.items.some(i => i.id === id && i.status === "pending"));
   }
   if (input.allowAmend !== false && state.entries.length < 4 &&
-      effective.items.some(i => i.stage === "interactive" && i.status === "pending")) {
+      effective.items.some(i => ["event", "interactive", "choice", "puzzle", "composition"].includes(i.stage) && i.status === "pending")) {
     const signature = pendingDigest({
       // One paid planning attempt per canonical Git source. A pure scheduling
       // amendment, a restart, or a commitless no-write decision cannot launch
@@ -324,6 +330,11 @@ export async function reconcileAdaptiveWork(input: {
           provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
           version: state.version, signature,
           typedEdges: architectureCausalEdges(plan),
+          sourceEvidence: report.records.filter(r =>
+            r.metadata.type === "milestone" && r.metadata.status !== "superseded" &&
+            milestoneSourceHashes[r.path])
+            .map(r => ({ milestone: r.metadata.id, path: r.path,
+              sha256: milestoneSourceHashes[r.path]! })),
         });
       } catch (error) {
         if (error instanceof InvalidAdaptiveProposalError)

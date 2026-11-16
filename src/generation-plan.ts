@@ -14,6 +14,11 @@ export interface ExecutionItem extends WorkItem {
   milestone?: string;
   /** Architecture items refined by this executable unit. Never mutate the author-approved plan. */
   plannedItems: string[];
+  /** Source-authenticated objective guidance for this pending assignment; the
+   * worker's existing type/path enforcement is unchanged, not widened. */
+  adaptiveTask?: { sourcePath: string; sourceHash: string; outcome: string };
+  /** Controller-only provenance for undoing an adaptive Choice/Puzzle split. */
+  splitOriginalSkills?: string[];
   /** Fulfilled by a reviewed, source-bound omission rather than a new writer. */
   omission?: { reason: string; evidence: string; reviewerSession: string };
 }
@@ -235,6 +240,26 @@ export function withCausalEventPriority(plan: Plan, preferred?: readonly string[
   order.splice(eventSlot >= 0 ? eventSlot : nextStage >= 0 ? nextStage : order.length,
     eventSlot >= 0 ? 1 : 0, ...events, "event");
   return order;
+}
+
+/** A successful Story-level report is not sufficient if the current
+ * controller plan still carries unresolved authorized specialist work. */
+export function authorizedInventoryComplete(inventory: GenerationInventory | null): boolean {
+  return !!inventory && inventory.items.length > 0 &&
+    inventory.items.some(item => item.stage === "review") &&
+    inventory.items.every(item => item.status === "verified");
+}
+
+/** The original Turn remains authoritative; a reviewed source-bound
+ * amendment may refine one pending assignment's purpose, not its write scope.
+ * Called at the real production dispatch boundary for every specialist. */
+export function adaptiveDispatchTask(task: string, item: ExecutionItem): string {
+  if (!item.adaptiveTask) return task;
+  const { sourcePath, outcome } = item.adaptiveTask;
+  return task + "\n\nCONTROLLER-ADMITTED ASSIGNMENT REFINEMENT for " + item.id +
+    " (native source: " + sourcePath + "):\n" + outcome +
+    "\nThe refinement is task guidance, NOT a grant to change additional records, " +
+    "protected decisions, the approved interaction profile or Production budget.";
 }
 
 /** Controller checks readiness first; the read-only orchestrator may only

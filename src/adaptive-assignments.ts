@@ -19,6 +19,7 @@ type Action =
   | { kind: "add"; stage: WorkStage; milestone: string; dependsOn: string[] }
   | { kind: "split"; item: string; domains: Array<"choice" | "puzzle"> }
   | { kind: "depend"; item: string; needs: string }
+  | { kind: "narrow"; item: string; sourcePath: string; sourceHash: string; outcome: string }
   | { kind: "omit"; item: string };
 export interface AdaptiveProposal {
   sourceSha: string; turnDigest: string; beforeVersion: number; reason: string;
@@ -47,6 +48,9 @@ export interface AdaptiveAdmission {
   verifiedSource: boolean;
   records: Array<{ path: string; metadata: { id: string; type: string; status: string; decisions?: unknown[] } }>;
   sourceHashes: Record<string, string>;
+  /** Immutable Milestone narrative/plan projection: Event-owned fulfillment
+   * may evolve without changing a pending assignment's causal promise. */
+  milestoneSourceHashes: Record<string, string>;
   protectedPaths: string[];
   /** Native Architecture / controller typed edges, never model asserted. */
   typedEdges?: Array<{ item: string; needs: string }>;
@@ -78,6 +82,37 @@ function checkProposal(proposal: AdaptiveProposal, input: AdaptiveAdmission) {
       !Array.isArray(proposal.actions) || proposal.actions.length > 64 ||
       !Array.isArray(proposal.order))
     throw Error("Adaptive source, objective, verified Architecture or version is invalid.");
+}
+
+/** A new unit is an executor the controller already implements, not a
+ * borrowed grant from an unrelated Milestone or a model-created capability. */
+function addedUnit(stage: WorkStage, milestone: string, dependencies: string[],
+  planVersion: number): ExecutionItem {
+  const skills: Record<WorkStage, string[]> = {
+    event: ["nt-event-design", "nt-catalog"],
+    interactive: ["nt-interactive-narrative", "nt-puzzle-design", "nt-catalog"],
+    composition: ["nt-narrative-composition", "nt-catalog"],
+  };
+  return {
+    id: stage + ":" + milestone, stage, milestone,
+    kind: stage === "composition" ? "composition" : "realization",
+    targetIds: [milestone], dependencies: [...dependencies], plannedItems: [],
+    skills: [...skills[stage]], checks: ["canonical-structure", "native-validation", "independent-specialist-review"],
+    authorization: { source: "trusted-controller", planVersion, paths: [] },
+    planVersion, status: "pending",
+  };
+}
+
+/** New causal work must become a real predecessor of any still-pending
+ * downstream Milestone stage, not merely a new ID sorted in front of it. */
+function wireAddedUnit(items: ExecutionItem[], added: ExecutionItem) {
+  const consumers = added.stage === "event" ? ["interactive", "choice", "puzzle", "composition"] :
+    added.stage === "interactive" ? ["choice", "puzzle", "composition"] : [];
+  for (const item of items) {
+    if (item.milestone === added.milestone && item.status === "pending" &&
+        consumers.includes(item.stage) && !item.dependencies.includes(added.id))
+      item.dependencies.push(added.id);
+  }
 }
 
 function validateCausal(items: ExecutionItem[], order: string[]) {
@@ -147,17 +182,14 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
           !input.typedEdges?.some(edge => edge.item === id && edge.needs === need)))
         throw Error("Adaptive cross-assignment prerequisite lacks a native source-grounded typed causal edge.");
       if (byId.has(id) || added.has(id)) throw Error("Adaptive addition duplicates an existing assignment.");
-      const template = items.find(i => i.stage === action.stage) ??
-        input.inventory.items.find(i => i.stage === action.stage);
-      if (!template) throw Error("Adaptive addition has no controller-authorized executor for that stage.");
-      const item: ExecutionItem = {
-        ...template, id, milestone: action.milestone, kind: action.stage === "composition" ? "composition" : "realization",
-        targetIds: [action.milestone], dependencies: [...action.dependsOn], plannedItems: [],
-        authorization: { source: "trusted-controller", planVersion: input.plan.version, paths: [] },
-        planVersion: input.plan.version, status: "pending",
-      };
-      delete item.verifiedSha; delete item.blockingReason; delete item.omission;
+      const later = action.stage === "event" ? ["interactive", "choice", "puzzle", "composition"] :
+        action.stage === "interactive" ? ["choice", "puzzle", "composition"] : [];
+      if (items.some(item => item.milestone === action.milestone &&
+          item.status === "verified" && later.includes(item.stage)))
+        throw Error("Adaptive new predecessor changes completed dependent work; reconcile its reviewed checkpoint.");
+      const item = addedUnit(action.stage, action.milestone, action.dependsOn, input.plan.version);
       items.push(item); byId.set(id, item); added.add(id);
+      wireAddedUnit(items, item);
     } else if (action.kind === "split") {
       if (!exactly(action, ["kind", "item", "domains"]) ||
           !Array.isArray(action.domains) ||
@@ -165,13 +197,14 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
         throw Error("Adaptive split has unsupported specialist domains.");
       const original = byId.get(action.item);
       if (!original || original.stage !== "interactive" || original.status !== "pending" ||
-          !original.milestone || !allowed.has(original.milestone) ||
+          !original.milestone || original.adaptiveTask || !allowed.has(original.milestone) ||
           input.planning.choice_frequency === "none")
         throw Error("Adaptive split exceeds approved Choice/Puzzle profile or pending scope.");
       const index = items.indexOf(original);
       const choice = { ...original, id: "choice:" + original.milestone,
         stage: "choice" as GenerationStage, dependencies: [...original.dependencies],
-        skills: ["nt-interactive-narrative", "nt-catalog"] };
+        skills: ["nt-interactive-narrative", "nt-catalog"],
+        splitOriginalSkills: [...original.skills] };
       const puzzle = { ...original, id: "puzzle:" + original.milestone,
         stage: "puzzle" as GenerationStage, dependencies: [choice.id],
         skills: ["nt-puzzle-design", "nt-catalog"] };
@@ -191,6 +224,23 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
       if (!input.typedEdges?.some(edge => edge.item === action.item && edge.needs === action.needs))
         throw Error("Adaptive prerequisite lacks a native source-grounded typed causal edge.");
       item.dependencies.push(action.needs);
+    } else if (action.kind === "narrow") {
+      if (!exactly(action, ["kind", "item", "sourcePath", "sourceHash", "outcome"]) ||
+          !PATH.test(action.sourcePath) || !HASH.test(action.sourceHash) ||
+          !nonempty(action.outcome, 800))
+        throw Error("Adaptive pending assignment narrowing has an invalid source or outcome.");
+      const item = byId.get(action.item);
+      const source = current.get(item?.milestone ?? "");
+      if (!item || !item.milestone || !["event", "interactive", "choice", "puzzle", "composition"].includes(item.stage) ||
+          item.status !== "pending" || item.adaptiveTask ||
+          !allowed.has(item.milestone) || !source ||
+          source.path !== action.sourcePath || source.metadata.type !== "milestone" ||
+          input.milestoneSourceHashes[source.path] !== action.sourceHash)
+        throw Error("Adaptive narrowing exceeds pending Milestone scope or source hash.");
+      // The model can refine the intended outcome; it cannot mint a new path,
+      // owner, specialist, or decision grant by naming a desirable result.
+      item.adaptiveTask = { sourcePath: source.path, sourceHash: action.sourceHash,
+        outcome: action.outcome };
     } else if (action.kind === "omit") {
       if (!exactly(action, ["kind", "item"])) throw Error("Adaptive omission action is malformed.");
       const item = byId.get(action.item);
@@ -319,7 +369,9 @@ export function removeAdaptiveOverlays(
         items.splice(items.indexOf(puzzle), 1);
         items.splice(items.indexOf(choice), 1);
         const restored: ExecutionItem = { ...choice, id: action.item, stage: "interactive",
-          status: "pending", dependencies: [...choice.dependencies] };
+          status: "pending", dependencies: [...choice.dependencies],
+          skills: [...(choice.splitOriginalSkills ?? choice.skills)] };
+        delete restored.splitOriginalSkills;
         delete restored.verifiedSha; delete restored.blockingReason; delete restored.omission;
         items.splice(position, 0, restored);
         for (const other of items) other.dependencies = other.dependencies.map(dep =>
@@ -331,6 +383,14 @@ export function removeAdaptiveOverlays(
         // Unlike split aliases, this is an actual native-backed causal edge.
         // Retain it for canonical prerequisite-drift detection after completion;
         // erasing it would make unchanged verified work appear newly affected.
+      } else if (action.kind === "narrow") {
+        const found = item(action.item);
+        if (!found || !found.adaptiveTask ||
+            found.adaptiveTask.sourcePath !== action.sourcePath ||
+            found.adaptiveTask.sourceHash !== action.sourceHash ||
+            found.adaptiveTask.outcome !== action.outcome)
+          throw Error("Adaptive narrowed assignment lost its authenticated original source.");
+        delete found.adaptiveTask;
       } else if (action.kind === "omit") {
         const found = item(action.item);
         if (!found || found.stage !== "interactive" || found.status !== "verified" || !found.omission)
@@ -388,6 +448,14 @@ export function revalidateAdaptiveAmendment(
         throw Error("Adaptive prerequisite lost its native source-grounded typed causal edge.");
       if (!item || !item.dependencies.includes(action.needs) && !pending.has(action.item))
         throw Error("Adaptive prerequisite no longer targets its original pending assignment.");
+    } else if (action.kind === "narrow") {
+      const found = current.inventory.items.find(i => i.id === action.item);
+      if (found?.status === "blocked" || !found && !pending.has(action.item))
+        throw Error("Adaptive narrowed assignment is missing or requires reconciliation.");
+      // Completed specialists keep their original semantic review and do not
+      // need their old task re-issued at a later, legitimate descendant HEAD.
+      if (found?.status !== "verified" && !pending.has(action.item))
+        throw Error("Adaptive narrowing lost its original pending writer.");
     } else if (action.kind === "omit") {
       if (!pending.delete(action.item))
         throw Error("Previously omitted adaptive assignment already changed source state.");
@@ -399,8 +467,12 @@ export function revalidateAdaptiveAmendment(
   const proposal: AdaptiveProposal = {
     sourceSha: current.inventory.headSha, turnDigest: amendment.turnDigest,
     beforeVersion: amendment.beforeVersion, reason: amendment.reason,
-    actions: structuredClone(amendment.actions.filter(action => action.kind !== "depend" ||
-      !current.inventory.items.find(i => i.id === action.item)?.dependencies.includes(action.needs))), order,
+    actions: structuredClone(amendment.actions.filter(action =>
+      action.kind === "depend"
+        ? !current.inventory.items.find(i => i.id === action.item)?.dependencies.includes(action.needs)
+        : action.kind === "narrow"
+          ? current.inventory.items.find(i => i.id === action.item)?.status !== "verified"
+          : true)), order,
   };
   const certified = admitAdaptiveAssignments({ ...current, proposal,
     version: amendment.beforeVersion, omissionProofs: amendment.omissions });
@@ -425,20 +497,16 @@ export function applyAdaptiveAssignments(inventory: GenerationInventory,
   for (const action of amendment.actions) {
     if (action.kind === "add") {
       const id = action.stage + ":" + action.milestone;
-      const template = items.find(i => i.stage === action.stage) ??
-        inventory.items.find(i => i.stage === action.stage);
-      if (!template || byId.has(id)) throw Error("Adaptive receipt has a missing executor or duplicate assignment.");
-      const item = { ...template, id, milestone: action.milestone,
-        targetIds: [action.milestone], dependencies: [...action.dependsOn], plannedItems: [],
-        authorization: { source: "trusted-controller" as const, planVersion: amendment.planVersion, paths: [] },
-        planVersion: amendment.planVersion, status: "pending" as const };
-      delete item.verifiedSha; delete item.blockingReason; delete item.omission;
+      if (byId.has(id)) throw Error("Adaptive receipt duplicates an existing assignment.");
+      const item = addedUnit(action.stage, action.milestone, action.dependsOn, amendment.planVersion);
       items.push(item); byId.set(id, item);
+      wireAddedUnit(items, item);
     } else if (action.kind === "split") {
       const old = byId.get(action.item);
       if (!old || old.stage !== "interactive" || !old.milestone) throw Error("Adaptive split no longer has its original pending unit.");
       const choice = { ...old, id: "choice:" + old.milestone,
-        stage: "choice" as GenerationStage, skills: ["nt-interactive-narrative", "nt-catalog"] };
+        stage: "choice" as GenerationStage, skills: ["nt-interactive-narrative", "nt-catalog"],
+        splitOriginalSkills: [...old.skills] };
       const puzzle = { ...old, id: "puzzle:" + old.milestone,
         stage: "puzzle" as GenerationStage, dependencies: [choice.id],
         skills: ["nt-puzzle-design", "nt-catalog"] };
@@ -453,6 +521,12 @@ export function applyAdaptiveAssignments(inventory: GenerationInventory,
       if (!item || item.status !== "pending" || item.dependencies.includes(action.needs))
         throw Error("Adaptive prerequisite lost its pending source assignment.");
       item.dependencies.push(action.needs);
+    } else if (action.kind === "narrow") {
+      const item = byId.get(action.item);
+      if (!item || item.status !== "pending" || item.adaptiveTask)
+        throw Error("Adaptive narrowing lost its pending source assignment.");
+      item.adaptiveTask = { sourcePath: action.sourcePath, sourceHash: action.sourceHash,
+        outcome: action.outcome };
     } else if (action.kind === "omit") {
       const item = byId.get(action.item);
       const proof = amendment.omissions.find(p => p.assignmentId === action.item);

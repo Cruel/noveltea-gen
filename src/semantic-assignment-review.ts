@@ -136,6 +136,11 @@ export async function prepareSemanticReview(job: JobStartResult,
     const assignment = await repairReviewAssignment(job, point.workItem, original);
     if (hash(JSON.stringify(assignment)) !== assurance.assignmentDigest)
       throw new Error("Reviewer received a changed or unauthorized assignment version.");
+    const { adaptiveReviewBinding } = await import("./adaptive-review-binding.js");
+    const refinement = await adaptiveReviewBinding(job, plan.digest, point.planVersion,
+      point.parentSha, point.workItem);
+    if (JSON.stringify(refinement) !== JSON.stringify(assurance.adaptiveReview ?? null))
+      throw new Error("Independent reviewer refinement differs from the original sealed checkpoint.");
     const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
     const diff = git(job, "diff", "--no-ext-diff", "--unified=3",
       point.parentSha, point.commitSha, "--", ...assurance.changedPaths.map(p => prefix + p));
@@ -243,7 +248,13 @@ export async function prepareSemanticReview(job: JobStartResult,
       }
     }
     items.push({ assignment, reviewedWorkItem: point.workItem,
-      unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist), assurance, diff, canonicalContext,
+      unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist) +
+        (refinement ? " Additional controller-admitted, source-bound assignment outcome (" +
+          refinement.item + ", " + (refinement.sourcePath ?? "verified Architecture") + " at " + refinement.sourceSha +
+          "): " + refinement.outcome +
+          ". Judge its applicable part in THIS unit against the committed evidence; " +
+          "this text grants no additional path, domain or protected-decision authority." : ""),
+      assurance, diff, canonicalContext,
       readOnlyPaths, repairTargets,
       ...(eventMilestone ? { eventMilestoneFieldGrant: { ...eventMilestone,
         fields: ["completeness", "fulfillment"] as ["completeness", "fulfillment"] } } : {}),

@@ -49,6 +49,8 @@ export interface CheckpointAssurance {
   removedLines: number;
   diffDigest: string;
   reviewSelection: ReviewSelection;
+  /** Source-ancestral controller plan refinement sealed at this checkpoint. */
+  adaptiveReview?: import("./adaptive-review-binding.js").AdaptiveReviewBinding;
 }
 export interface IndependentReviewResult {
   version: 1;
@@ -100,6 +102,16 @@ export function selectCheckpointReview(input: {
     ...(input.previousFailure ? ["previous-review-failure"] : []),
   ];
   return { status: reasons.length ? "required-pending" : "not-required", reasons };
+}
+
+/** An admitted source-bound change to an assignment promise needs independent
+ * semantic review even if the Git diff would otherwise be below the ordinary
+ * review-risk threshold. No model can mark its own amendment complete. */
+export function requireAdaptiveReview(selection: ReviewSelection,
+  refinement: CheckpointAssurance["adaptiveReview"] | null): ReviewSelection {
+  if (!refinement) return selection;
+  return { status: "required-pending",
+    reasons: [...new Set([...selection.reasons, "adaptive-controller-outcome"])] };
 }
 
 /** The gate consumes controller review receipts, not the writer's risk claim.
@@ -422,16 +434,20 @@ export async function checkpointAssurance(job: JobStartResult,
     : (await Promise.all((await readAssuranceHistory(job)).filter(entry =>
       entry.commitSha !== point.commitSha && gitAncestor(job, entry.commitSha, point.parentSha))
       .map(async entry => (await readIndependentReview(job, entry)).status))).includes("failed");
-  const selection = selectCheckpointReview({ workItem: point.workItem, paths: diff.paths,
+  const { adaptiveReviewBinding } = await import("./adaptive-review-binding.js");
+  const refinement = await adaptiveReviewBinding(job, turn.digest, point.planVersion,
+    point.parentSha, point.workItem);
+  const selection = requireAdaptiveReview(selectCheckpointReview({ workItem: point.workItem, paths: diff.paths,
     addedLines: diff.addedLines, removedLines: diff.removedLines,
-    dependencyCount: assignment.dependsOn.length, previousFailure: !!proof || previousFailure });
+    dependencyCount: assignment.dependsOn.length, previousFailure: !!proof || previousFailure }), refinement);
   return { version: 1, policyVersion: 1, jobId: job.jobId, baseSha: job.baseSha,
     commitSha: point.commitSha, parentSha: point.parentSha, workItem: point.workItem,
     validationProofDigest: point.proofDigest, validatorVersion: point.validation.validatorVersion,
     turnDigest: turn.digest, assignmentId: id, assignmentDigest: digest(assignment),
     assignmentDependencies: [...assignment.dependsOn], changedPaths: diff.paths,
     changedRecordTypes: types, addedLines: diff.addedLines, removedLines: diff.removedLines,
-    diffDigest: diff.diffDigest, reviewSelection: selection };
+    diffDigest: diff.diffDigest, reviewSelection: selection,
+    ...(refinement ? { adaptiveReview: refinement } : {}) };
 }
 function reviewPath(job: JobStartResult, sha: string) {
   return join(job.stateDir, "independent-reviews", sha + ".json");

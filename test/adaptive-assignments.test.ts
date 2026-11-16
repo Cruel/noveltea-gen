@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Plan } from "../src/architecture.js";
 import type { ExecutionItem, GenerationInventory } from "../src/generation-plan.js";
-import { invalidateChangedVerifiedPrerequisites } from "../src/generation-plan.js";
+import { invalidateChangedVerifiedPrerequisites, adaptiveDispatchTask, authorizedInventoryComplete } from "../src/generation-plan.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
   removeAdaptiveOverlays, evaluateAdaptiveProposal,
   type AdaptiveProposal } from "../src/adaptive-assignments.js";
@@ -42,7 +42,7 @@ const records = [
 const hashes = Object.fromEntries(records.map(r => [r.path, "d".repeat(64)]));
 const base = (p: AdaptiveProposal) => ({
   proposal: p, inventory: inventory(), plan: plan(), turnDigest: turn, version: 1,
-  records, sourceHashes: hashes, protectedPaths: [] as string[],
+  records, sourceHashes: hashes, milestoneSourceHashes: hashes, protectedPaths: [] as string[],
   typedEdges: [] as Array<{ item: string; needs: string }>,
   authorTargets: [] as string[], planning: { choice_frequency: "frequent" as const,
     puzzle_emphasis: "none" as const, choice_points: { min: 2, max: 10 } },
@@ -56,6 +56,23 @@ const proposal = (actions: AdaptiveProposal["actions"], order: string[]): Adapti
   sourceSha: head, turnDigest: turn, beforeVersion: 1, reason: "Source-backed causal coverage",
   actions, order,
 });
+test("whole-Story completion never bypasses an admitted pending or blocked specialist", () => {
+  const original = inventory();
+  assert.equal(authorizedInventoryComplete(null), false);
+  assert.equal(authorizedInventoryComplete(original), false);
+  const finished = structuredClone(original);
+  for (const item of finished.items) {
+    item.status = "verified"; item.verifiedSha = head;
+  }
+  assert.equal(authorizedInventoryComplete(finished), true);
+  const newEvent = work("event:milestone.choice", "event", ["foundations"]);
+  finished.items.splice(-1, 0, newEvent);
+  assert.equal(authorizedInventoryComplete(finished), false,
+    "a previously passed final review cannot conceal a newly admitted specialist");
+  newEvent.status = "blocked";
+  assert.equal(authorizedInventoryComplete(finished), false);
+});
+
 test("architecture-only objectives cannot gain Event writing through an adaptive amendment", () => {
   const p = proposal([{ kind: "add", stage: "event", milestone: "milestone.choice", dependsOn: ["foundations"] }],
     ["interactive:milestone.discovery", "composition:milestone.discovery", "event:milestone.choice", "review"]);
@@ -75,6 +92,51 @@ test("unchanged adaptive proposals still authenticate exact source, objective an
     proposal: { ...p, ...replacement } }), /source|objective|version/);
   assert.throws(() => evaluateAdaptiveProposal({ ...src, verifiedSource: false }), /verified/);
   assert.throws(() => evaluateAdaptiveProposal({ ...src, carried: [] }), /verified/);
+});
+
+test("source-grounded pending assignment narrowing changes the actual dispatch objective and can be reversed", () => {
+  const p = proposal([{ kind: "narrow", item: "interactive:milestone.discovery",
+    sourcePath: "milestones/discovery.md", sourceHash: hashes["milestones/discovery.md"]!,
+    outcome: "Provide a consequential clue Choice that fits the approved discovery Milestone." }],
+    ["interactive:milestone.discovery", "composition:milestone.discovery", "review"]);
+  const src = base(p);
+  const amendment = admitAdaptiveAssignments(src);
+  const changed = applyAdaptiveAssignments(src.inventory, amendment);
+  const interactive = changed.items.find(i => i.id === "interactive:milestone.discovery")!;
+  assert.deepEqual(interactive.adaptiveTask, {
+    sourcePath: "milestones/discovery.md", sourceHash: hashes["milestones/discovery.md"],
+    outcome: "Provide a consequential clue Choice that fits the approved discovery Milestone.",
+  });
+  assert.equal(src.inventory.items.find(i => i.id === interactive.id)?.adaptiveTask, undefined);
+  const protectedBaseline = { ...src, protectedPaths: ["milestones/discovery.md"] };
+  assert.equal(admitAdaptiveAssignments(protectedBaseline).digest, amendment.digest,
+    "reading a protected Milestone as source must not prohibit bounded downstream work");
+  assert.match(adaptiveDispatchTask("Original author goal", interactive),
+    /CONTROLLER-ADMITTED ASSIGNMENT REFINEMENT.*interactive:milestone.discovery/);
+  assert.match(adaptiveDispatchTask("Original author goal", interactive), /consequential clue Choice/);
+  assert.match(adaptiveDispatchTask("Original author goal", interactive), /NOT a grant/);
+  assert.equal(adaptiveDispatchTask("Original author goal", src.inventory.items[4]!), "Original author goal");
+  assert.deepEqual(revalidateAdaptiveAmendment(amendment, src).inventory.items, changed.items);
+  const canonical = removeAdaptiveOverlays(changed, [amendment]);
+  assert.deepEqual(canonical.items, src.inventory.items);
+  const completed = structuredClone(src);
+  const narrowed = completed.inventory.items.find(i => i.id === interactive.id)!;
+  narrowed.status = "verified"; narrowed.verifiedSha = head;
+  completed.carried.push({ id: narrowed.id, sha: head });
+  const inherited = revalidateAdaptiveAmendment(amendment, completed).inventory;
+  assert.equal(inherited.items.find(i => i.id === interactive.id)?.status, "verified");
+  assert.equal(inherited.items.find(i => i.id === interactive.id)?.adaptiveTask, undefined,
+    "later source changes must not replay or renarrow an already reviewed writer");
+  assert.throws(() => admitAdaptiveAssignments({ ...src,
+    proposal: { ...p, actions: [{ ...p.actions[0], sourceHash: "0".repeat(64) }] } }),
+  /source|hash/i);
+  assert.throws(() => admitAdaptiveAssignments({ ...src,
+    proposal: { ...p, actions: [{ ...p.actions[0], item: "event:milestone.discovery" }] } }),
+  /pending/i);
+  assert.throws(() => admitAdaptiveAssignments({ ...src,
+    proposal: { ...p, actions: [{ ...p.actions[0], sourcePath: "creative-direction/foundation.md",
+      sourceHash: hashes["creative-direction/foundation.md"] }] } }),
+  /scope|milestone|protected/i);
 });
 
 test("pending Event assignments can acquire a native causal prerequisite without replaying verified work", () => {
@@ -112,6 +174,65 @@ test("pending Event assignments can acquire a native causal prerequisite without
   completed.inventory.items.find(i => i.id === "event:milestone.choice")!.verifiedSha = head;
   completed.carried.push({ id: "event:milestone.choice", sha: head });
   assert.throws(() => admitAdaptiveAssignments(completed), /pending/);
+});
+
+test("late supporting work cannot invalidate completed dependent gameplay or prose", () => {
+  const p = proposal([{ kind: "add", stage: "event", milestone: "milestone.choice",
+    dependsOn: ["foundations"] }], ["event:milestone.choice", "review"]);
+  const src = base(p);
+  src.inventory.items = src.inventory.items.filter(i =>
+    !["interactive:milestone.discovery", "composition:milestone.discovery"].includes(i.id));
+  src.inventory.items.splice(-1, 0,
+    work("interactive:milestone.choice", "interactive", ["foundations"], "verified"));
+  src.carried.push({ id: "interactive:milestone.choice", sha: head });
+  assert.throws(() => admitAdaptiveAssignments(src), /completed|reconciliation|verified/i);
+});
+
+test("split assignment can narrow an actual pending Choice with exact review context", () => {
+  const p = proposal([
+    { kind: "split", item: "interactive:milestone.discovery", domains: ["choice", "puzzle"] },
+    { kind: "narrow", item: "choice:milestone.discovery",
+      sourcePath: "milestones/discovery.md", sourceHash: hashes["milestones/discovery.md"]!,
+      outcome: "Confront the player with a meaningful, evidence-backed choice." },
+  ], ["choice:milestone.discovery", "puzzle:milestone.discovery",
+    "composition:milestone.discovery", "review"]);
+  const src = base(p);
+  const entry = admitAdaptiveAssignments(src);
+  const after = applyAdaptiveAssignments(src.inventory, entry);
+  assert.match(after.items.find(i => i.id === "choice:milestone.discovery")!.adaptiveTask!.outcome,
+    /meaningful/);
+  assert.deepEqual(revalidateAdaptiveAmendment(entry, src).inventory.items, after.items);
+  assert.deepEqual(removeAdaptiveOverlays(after, [entry]).items, src.inventory.items);
+  const misordered = proposal([p.actions[1]!, p.actions[0]!],
+    ["choice:milestone.discovery", "puzzle:milestone.discovery",
+      "composition:milestone.discovery", "review"]);
+  assert.throws(() => admitAdaptiveAssignments(base(misordered)), /pending|profile|scope/i,
+    "splitting an already-narrowed parent would incorrectly give Puzzle a Choice-only goal");
+});
+
+test("controller derives a fresh executable Event grant when no stage template exists", () => {
+  const p = proposal([{ kind: "add", stage: "event", milestone: "milestone.discovery",
+    dependsOn: ["foundations"] }],
+    ["event:milestone.discovery", "interactive:milestone.discovery",
+      "composition:milestone.discovery", "review"]);
+  const src = base(p);
+  src.inventory.items = src.inventory.items.filter(item => item.id !== "event:milestone.discovery");
+  src.inventory.items.find(item => item.id === "interactive:milestone.discovery")!.dependencies = [];
+  src.carried = src.carried.filter(item => item.id !== "event:milestone.discovery");
+  const amended = applyAdaptiveAssignments(src.inventory, admitAdaptiveAssignments(src));
+  const added = amended.items.find(item => item.id === "event:milestone.discovery")!;
+  assert.deepEqual(added.skills, ["nt-event-design", "nt-catalog"]);
+  assert.deepEqual(added.targetIds, ["milestone.discovery"]);
+  assert.deepEqual(added.authorization.paths, []);
+  assert.deepEqual(amended.items.find(item => item.id === "interactive:milestone.discovery")?.dependencies,
+    ["event:milestone.discovery"], "newly required Event must gate existing Interactive work");
+  assert.ok(amended.items.find(item => item.id === "composition:milestone.discovery")?.dependencies
+    .includes("event:milestone.discovery"),
+  "newly required Event must also gate Composition even when Interactive is omitted");
+  assert.equal(added.authorization.source, "trusted-controller");
+  assert.equal(added.status, "pending");
+  assert.deepEqual(removeAdaptiveOverlays(amended, [admitAdaptiveAssignments(src)]).items,
+    src.inventory.items);
 });
 
 test("choice-heavy Story splits only the selected Milestone, adds a verified-architecture Event, and retains whole-Story review", () => {

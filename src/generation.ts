@@ -53,7 +53,8 @@ import { runPinnedObjectivePlanner, restoreCheckpointedObjectivePlanning,
   type OrchestratorPlanningReceipt } from "./orchestrator-planner.js";
 import { validateStoryJob } from "./validator.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
-import { generationStages, reconcileInventory, nextExecutionItem, withCausalEventPriority,
+import { generationStages, reconcileInventory, nextExecutionItem, withCausalEventPriority, adaptiveDispatchTask,
+  authorizedInventoryComplete,
   type GenerationStage as Stage,
   type GenerationEvidence, type GenerationInventory, type ExecutionItem } from "./generation-plan.js";
 export { generationStages, type GenerationEvidence } from "./generation-plan.js";
@@ -536,7 +537,7 @@ async function dispatch(s: State) {
       return steeringForAssignment(job, turnDigest, s.active!.id, await trustedHead(job));
     })()
     : "";
-  const guidedTask = steering ? input.task + "\n\nSAFE-BOUNDARY AUTHOR PLAN AMENDMENT:\n" + steering : input.task;
+  const guidedTask = adaptiveDispatchTask(steering ? input.task + "\n\nSAFE-BOUNDARY AUTHOR PLAN AMENDMENT:\n" + steering : input.task, s.active!);
   const milestone = s.active?.milestone!;
   switch (s.active?.stage) {
     case "foundation": return runFoundationJob({ ...input, envelope: JSON.stringify(input.contract.envelope) });
@@ -1092,7 +1093,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           const stopped = await authorBoundary(job);
           if (stopped) return stopped;
           const report = await inspectJobReport(s.request);
-          const complete = report.generation.status === "completed";
+          const complete = report.generation.status === "completed" && authorizedInventoryComplete(s.inventory);
           const escalation = complete ? null : reviewEscalation(report, s.inventory);
           const details = s.inventory?.items.filter(i => i.status !== "verified")
             .map(i => i.stage === "review" ? i.blockingReason ?? "Scope remains unverified" :
