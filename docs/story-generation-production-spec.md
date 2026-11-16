@@ -129,6 +129,54 @@ Related work: #144 (one goal-driven orchestrator and one production graph), #158
 25. **No new engine translation.** Creative planning stays at the Story level. Do not generate real Room, Character artwork, Interactable, or Layout implementations as part of this feature. No prescribed Act count, fixed branch topology, or mandatory gameplay mechanic formula.
 26. **One cross-repository specification.** The existing goal-driven orchestration spec remains the architectural foundation. This work spans schema/portable skills, native CLI analysis and Studio orchestration; integrate those contracts in compatible order rather than introducing a second scheduler or several competing specifications.
 
+## Adaptive assignment identity and receipt trust (#179)
+
+The controller's executable boundary is a **Milestone-owned specialist unit**, not
+one arbitrary assignment for every newly authored canonical record. One Event
+unit may realize several source-connected Events and supporting Facts; one
+Choice unit may author several consequential Choice Points; a Puzzle unit
+assesses genuine, solvable Puzzle obligations. The existing native stage audits
+and original specialist receipts verify each authored record, and independent
+review judges the complete unit against the approved Story-wide baseline.
+Choice and Puzzle remain separately reviewed units with a shared original
+Interactive receipt. A new Milestone-stage unit requires verified Architecture
+authority and typed dependencies; a source-grounded `narrow` amendment can
+refine the actual task and independent review obligation of an unstarted unit.
+It cannot invent a new canonical Milestone, change the specialist's file grants,
+or require a protected/author-constraint change. A later change that would
+invalidate completed dependent work is blocked for reconciliation rather than
+refiring the original writer.
+
+The private `adaptive-plan.json` receipt is a **controller-owned integrity
+record**, not an author signature. Its SHA-256 digest detects modification; it
+is not a cryptographic proof of consent. Authenticity comes from the isolated
+controller-held job state, exact job/Thread/Turn/Architecture/source identities,
+the pinned skill snapshot and hashed original settled Pi transcript, clean
+native validation and original Git/checkpoint assurance. Model-directed tools
+have no access to that private state. Independent reviewers consume the
+source-ancestral amendment from this boundary; their prose neither grants
+write capability nor author approval. Any protected decision or material
+expansion must use the separate existing trusted author-approval workflow
+documented in `docs/author-signing.md`; a rejected planner proposal cannot
+silently become a granted or resumable authorization.
+
+A narrowed Milestone source hash covers its immutable planning metadata and
+narrative prose, excluding only the two Event-owned realization fields
+(`completeness` and `fulfillment`). Thus an authorized Event closeout does not
+invalidate an already admitted downstream Choice goal, but source narrative
+drift fails review binding. Filenames are independent of canonical record IDs.
+A completed specialist's task overlay may disappear on reconciliation **only**
+if its original reviewed commit is verified; a missing unstarted overlay still
+fails closed. The original final Story-wide goal review must pass, and the
+controller additionally requires every currently authorized assignment to
+have a verified disposition before reporting completion.
+
+Deterministic fixture/native tests prove admission, multiple outputs, dispatch
+and restart mechanics; they do not certify real-Pi literary judgment. Adaptive
+planning stays opt-in until the real-Pi whole-Story certification in #181.
+Reviewed optional work omissions are explicitly handled by #180, not by
+inventing specialist commits or silently dropping original obligations here.
+
 ## Testing Decisions
 
 **Principal seam: the author-visible Story generation contract.** Prefer existing fixture-backed Studio Story Chat / generation execution tests that exercise Baseline discovery, native-validated canonical records, proposed and approved work plans, specialist dispatch, independent review, Composition, checkpoint persistence and final goal fulfillment. This is the highest seam at which a forced Choice or missing approval is observable.

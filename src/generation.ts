@@ -202,7 +202,7 @@ const Channels = Annotation.Root({
   dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
 });
 type State = typeof Channels.State;
-const openJob = async (s: State) => {
+const openJob = async (s: Pick<State, "request">) => {
   const job = await startStoryJob({ story: s.request.story, job: s.request.job }, false);
   assertNativeVersion(job.validatorVersion);
   return job;
@@ -524,7 +524,7 @@ async function applyLiveSteeringAtBoundary(job: JobStartResult, request: Generat
   return null;
 }
 
-async function dispatch(s: State) {
+async function dispatch(s: Pick<State, "request" | "active">) {
   const input = s.request;
   // Pre-cutover jobs retain their exact historical dispatch path. Modern
   // pinned Turns load their saved amendment even on CLI recovery, so bypassing
@@ -552,6 +552,12 @@ async function dispatch(s: State) {
     case "review": return runNarrativeReview({ ...input, action: "run" });
     default: throw new Error("Invalid generation stage.");
   }
+}
+/** Test seam for exercising the real specialist dispatcher without introducing
+ * a fixture-only authority path into the production scheduler. */
+export async function dispatchGenerationAssignment(s: { request: GenerationRequest; active: ExecutionItem }):
+  Promise<{ status: string; headSha?: string }> {
+  return dispatch(s);
 }
 const accepted: Record<Stage, readonly string[]> = {
   foundation: ["committed"], architecture: ["architecture-committed", "complete-in-scope"],

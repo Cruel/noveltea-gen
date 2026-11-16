@@ -7,7 +7,9 @@ import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
-import { createGenerationGraph } from "../src/generation.js";
+import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
+import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adaptive-assignments.js";
+import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
 import { reconcileInventory, nextExecutionItem, withCausalEventPriority } from "../src/generation-plan.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 
@@ -196,6 +198,102 @@ test("rejected placement remains dormant, blocks binding completion, and is not 
   assert.deepEqual(result.report.evidence.deferredIdeas.scopedOutstanding, ["rejected-concept"]);
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   assert.deepEqual(f.cli(["generate", "resume"]).ideaHistory, result.ideaHistory);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("amended Event objective reaches the real production dispatcher and resume reuses its verified commit", { skip: !available }, async () => {
+  const f = setup("adaptive-dispatch");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const first = f.cli([...f.start, "--pause-after", "foundations"]);
+  assert.equal(first.status, "paused", JSON.stringify(first));
+  const selected = first.inventory.items.find((item: any) =>
+    item.id === "event:milestone.disclosure");
+  assert.equal(selected?.status, "pending");
+  const outcome = "Expose both the ledger's time discrepancy and the witness's independent testimony.";
+  const milestonePath = "milestones/disclosure.md";
+  const bytes = readFileSync(join(f.job.worktreeStoryRoot, milestonePath));
+  const fullHash = createHash("sha256").update(bytes).digest("hex");
+  const projectedHash = createHash("sha256")
+    .update(milestoneFulfillmentProjection(bytes.toString("utf8"))).digest("hex");
+  const architecture = JSON.parse(readFileSync(join(f.job.stateDir, "architecture.json"), "utf8")).plan;
+  const pending = first.inventory.items.filter((item: any) => item.status === "pending")
+    .map((item: any) => item.id);
+  const turnDigest = "b".repeat(64);
+  const proposal = {
+    sourceSha: first.inventory.headSha, turnDigest, beforeVersion: 1,
+    reason: "Native Milestone needs two concrete, independently testable evidence sources.",
+    actions: [{ kind: "narrow" as const, item: selected.id,
+      sourcePath: milestonePath, sourceHash: projectedHash, outcome }],
+    order: pending,
+  };
+  const admitted = admitAdaptiveAssignments({
+    proposal, inventory: first.inventory, plan: architecture, turnDigest, version: 1,
+    verifiedSource: true,
+    records: [{ path: milestonePath, metadata: { id: selected.milestone,
+      type: "milestone", status: "draft" } }],
+    sourceHashes: { [milestonePath]: fullHash },
+    milestoneSourceHashes: { [milestonePath]: projectedHash },
+    protectedPaths: [], typedEdges: [], authorTargets: [],
+    planning: { choice_frequency: "frequent", puzzle_emphasis: "none",
+      choice_points: { min: 2, max: 10 } },
+    carried: first.inventory.items.filter((item: any) => item.status === "verified")
+      .map((item: any) => ({ id: item.id, sha: item.verifiedSha })),
+    omissionProofs: [],
+  });
+  const refined = applyAdaptiveAssignments(first.inventory, admitted).items.find((item: any) =>
+    item.id === selected.id)!;
+  const request = { story: f.story, job: "single",
+    task: "A missing archive witness; invent unspecified details",
+    contract, fixture: true, skillsSource: source };
+  // The child-process CLI uses a private state/config root. The in-process
+  // dispatcher must use that same job rather than the host developer's state.
+  const keys = ["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR", "NT_EVENT_FIXTURE_CASE"] as const;
+  const prior = keys.map(key => process.env[key]);
+  let dispatched: { status: string; headSha?: string };
+  try {
+    for (const key of keys) process.env[key] = f.env[key];
+    process.env.NT_EVENT_FIXTURE_CASE = "alternative-routes";
+    dispatched = await dispatchGenerationAssignment({ request, active: refined });
+  } finally {
+    keys.forEach((key, index) => {
+      if (prior[index] === undefined) delete process.env[key];
+      else process.env[key] = prior[index];
+    });
+  }
+  assert.equal(dispatched.status, "event-cluster-committed");
+  const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  assert.match(receipt.assignment.authorTask, /CONTROLLER-ADMITTED ASSIGNMENT REFINEMENT/);
+  assert.match(receipt.assignment.authorTask, /ledger's time discrepancy/);
+  assert.deepEqual(receipt.validation.eventIds.sort(), ["event.disclose-ledger", "event.inspect-ledger"],
+    "one Event assignment can deliver two native-verified causal Events when justified");
+  const commit = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const resumed = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(resumed.status, "paused", JSON.stringify(resumed));
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), commit,
+    "the graph must reconcile the original specialist receipt instead of creating a second Event");
+  assert.equal(resumed.inventory.items.find((i: any) =>
+    i.id === "event:milestone.disclosure")?.status, "verified");
+  assert.ok(resumed.recoveryCheckpoints.some((point: any) =>
+    point.workItem === "event-disclosure" && point.commitSha === commit && point.eligible));
+});
+
+test("one authorized Choice assignment can certify multiple meaningful Choices within a Milestone", { skip: !available }, () => {
+  const f = setup("multi-choice-bundle");
+  f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
+  const paused = f.cli([...f.start, "--pause-after", "interactive"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
+  assert.equal(receipt.units[0].phase, "committed");
+  assert.deepEqual(receipt.units[0].validation.choices.map((choice: any) => choice.id).sort(),
+    ["choice-point.loyalty", "choice-point.testimony"]);
+  const choices = paused.recoveryCheckpoints.filter((p: any) =>
+    p.workItem === "interactive-choice-disclosure" && p.eligible);
+  assert.equal(choices.length, 1, "a source-bounded Choice cluster requires only one independently reviewed commit");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const again = f.cli(["generate", "inspect"]);
+  assert.equal(again.status, "paused");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 

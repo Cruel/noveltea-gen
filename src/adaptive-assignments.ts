@@ -385,6 +385,11 @@ export function removeAdaptiveOverlays(
         // erasing it would make unchanged verified work appear newly affected.
       } else if (action.kind === "narrow") {
         const found = item(action.item);
+        // Once independently reviewed and verified, the controller replays
+        // only the authenticated commit, not its former task overlay. A
+        // missing *pending* overlay is still tampering or lost graph state.
+        if (found?.status === "verified" && !found.adaptiveTask &&
+            SHA.test(found.verifiedSha ?? "")) continue;
         if (!found || !found.adaptiveTask ||
             found.adaptiveTask.sourcePath !== action.sourcePath ||
             found.adaptiveTask.sourceHash !== action.sourceHash ||

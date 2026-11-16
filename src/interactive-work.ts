@@ -729,6 +729,9 @@ async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
     await add("choice-points", "loyalty", "choice-point",
       'prompt: "Protect Neri or challenge the concealment?"\noutcomes: [protect, challenge]',
       "Protecting the friend preserves intimacy, while challenging the concealment risks the friendship in exchange for accountability.");
+    if (variant === "two-choices") await add("choice-points", "testimony", "choice-point",
+      'prompt: "Disclose the independent witness or protect their anonymity?"\noutcomes: [tell, withhold]',
+      "The witness's identity can corroborate the evidence, but disclosure could endanger them.");
     const delayedEffect = ["downstream-effect-only", "downstream-no-effect"].includes(variant);
     const selectorConditions = (outcome: "protect" | "challenge") =>
       variant === "self-conditioned-selection"
@@ -772,6 +775,47 @@ revelations: [revelation.ledger-secret]`,
           - kind: relationship
             relationship: relationship.ada-neri
             value: estranged` : "") +
+        (variant === "two-choices" ? `
+  - id: testimony-choice
+    branches:
+      - id: tell
+        conditions: []
+        effects:
+          - kind: outcome
+            choice_point: choice-point.testimony
+            value: tell
+          - kind: relationship
+            relationship: relationship.ada-neri
+            value: wary
+      - id: withhold
+        conditions: []
+        effects:
+          - kind: outcome
+            choice_point: choice-point.testimony
+            value: withhold
+          - kind: relationship
+            relationship: relationship.ada-neri
+            value: trusting
+  - id: testimony-payoff
+    branches:
+      - id: disclosure-consequence
+        conditions:
+          - kind: outcome
+            choice_point: choice-point.testimony
+            value: tell
+        effects:
+          - kind: relationship
+            relationship: relationship.ada-neri
+            value: estranged
+      - id: secrecy-consequence
+        conditions:
+          - kind: outcome
+            choice_point: choice-point.testimony
+            value: withhold
+        effects:
+          - kind: relationship
+            relationship: relationship.ada-neri
+            value: trusting` : "") +
         text.slice(end);
     });
     if (delayedEffect) await rewrite(event, text => {

@@ -127,6 +127,12 @@ test("source-grounded pending assignment narrowing changes the actual dispatch o
   assert.equal(inherited.items.find(i => i.id === interactive.id)?.status, "verified");
   assert.equal(inherited.items.find(i => i.id === interactive.id)?.adaptiveTask, undefined,
     "later source changes must not replay or renarrow an already reviewed writer");
+  assert.deepEqual(removeAdaptiveOverlays(inherited, [amendment]).items, completed.inventory.items,
+    "restart canonical reconciliation accepts a verified task without a stale pending overlay");
+  const missing = structuredClone(changed);
+  delete missing.items.find(i => i.id === interactive.id)!.adaptiveTask;
+  assert.throws(() => removeAdaptiveOverlays(missing, [amendment]), /lost.*source|narrowed/i,
+    "an uncompleted task cannot discard its source-backed objective");
   assert.throws(() => admitAdaptiveAssignments({ ...src,
     proposal: { ...p, actions: [{ ...p.actions[0], sourceHash: "0".repeat(64) }] } }),
   /source|hash/i);
