@@ -825,9 +825,41 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         body: 'Later Turn intent must not enter an older checkpoint',
         jobId: repairedId, verifiedCommitSha: world.commitSha, createdAt: '2026-01-02',
       })
+      // A completed-but-blocked continuation with VERIFIED work cannot
+      // silently rewind the original Thread. An explicitly requested fork
+      // of that same historical checkpoint is nevertheless a separate Thread
+      // and must remain possible without rewriting the advanced child.
+      await store.testing.records.update('studio_sessions',
+        { id: repairedId }, { status: 'blocked' })
+      await store.testing.records.update('generation_run_queue',
+        { jobId: repairedId }, { phase: 'finished' })
+      await store.testing.records.update('story_thread_messages',
+        { id: 'guidance:fork:' + continuationId }, { phase: 'blocked' })
+      await store.testing.records.insert('generation_events', {
+        jobId: repairedId, ownerUserId: user.id, kind: 'verified',
+        stage: 'event', filesJson: '["story/events/example.md"]',
+        createdAt: '2026-01-03',
+      })
+      const deniedSameThread = await checkpointContinueRequest(auth, store,
+        new Request(config.baseURL + '/continue', {
+          method: 'POST', headers: { origin: config.baseURL, cookie,
+            'content-type': 'application/json' },
+          body: JSON.stringify({ ...input, childId: randomUUID(),
+            expectedLatestJobId: repairedId }),
+        }), parentId, config.baseURL)
+      assert.equal(deniedSameThread.status, 409,
+        'Verified child progress must prohibit same-Thread historical recovery')
+      const latestBeforeFork = await store.persistence.advancedThreads.run(
+        user.id, sourceThreadId, 'last')
       const laterForkId = randomUUID()
       const forkedOld = await fork({ ...input, childId: laterForkId })
       assert.equal(forkedOld.status, 200, JSON.stringify(forkedOld.body))
+      assert.equal(await store.persistence.advancedThreads.runOrder(
+        user.id, sourceThreadId, laterForkId), null,
+        'An explicit historical fork is never added as another run of the source Thread')
+      assert.deepEqual(await store.persistence.advancedThreads.run(
+        user.id, sourceThreadId, 'last'), latestBeforeFork,
+        'Forking an older checkpoint must not supersede the newer verified execution')
       const olderFork = await readThreadChat(store, user.id, 'fork:' + laterForkId)
       assert.ok(!olderFork.messages.some(item =>
         item.content === 'Later Turn intent must not enter an older checkpoint'),

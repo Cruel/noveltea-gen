@@ -5,6 +5,9 @@
  * node scripts/live-new-story-runner.mjs start autonomous
  * node scripts/live-new-story-runner.mjs status autonomous
  * node scripts/live-new-story-runner.mjs start collaborative
+ * node scripts/live-new-story-runner.mjs fork collaborative <verified-SHA> <source-Job> <guidance>
+ * "retry" continues in the same Thread; "fork" creates a separate historical
+ * Thread, preserving later verified work in the original Thread.
  *
  * Never store/copy access or refresh tokens here. The existing Studio
  * certification harness supplies its own credential isolation and cleanup.
@@ -20,9 +23,9 @@ const skills = join(process.env.HOME ?? "/home/thomas", "dev/noveltea-skills");
 const [action, mode, checkpointSha, sourceJobId, guidance = ""] = process.argv.slice(2);
 if (
   !["autonomous", "collaborative"].includes(mode ?? "") ||
-  !["start", "status", "retry", "resume", "worker"].includes(action ?? "")
+  !["start", "status", "retry", "fork", "resume", "worker"].includes(action ?? "")
 ) {
-  console.error("Usage: live-new-story-runner.mjs <start|status> <mode> | retry <mode> <checkpoint-sha> [source-job-id] [guidance] | resume <mode> <prepared-child-job-id>");
+  console.error("Usage: live-new-story-runner.mjs <start|status> <mode> | retry|fork <mode> <checkpoint-sha> [source-job-id] [guidance] | resume <mode> <prepared-child-job-id>");
   process.exit(2);
 }
 mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -50,7 +53,7 @@ if (action === "status") {
   );
   process.exit(0);
 }
-if (action === "start" || action === "retry" || action === "resume") {
+if (action === "start" || action === "retry" || action === "fork" || action === "resume") {
   const previous = state();
   if (previous && previous.status === "running" && alive(previous.pid))
     throw Error("Existing " + mode + " certification is already running: " + previous.pid);
@@ -67,7 +70,7 @@ if (action === "start" || action === "retry" || action === "resume") {
     if (!root || !root.startsWith(join(directory, "runs") + "/") ||
         !existsSync(join(root, "certification-source.json")))
       throw Error("No preserved certification root for this mode. Start a new source run first.");
-    if (action === "retry") {
+    if (action === "retry" || action === "fork") {
       if (!/^[a-f0-9]{40}$/.test(checkpointSha ?? ""))
         throw Error("Retry requires the exact 40-character verified checkpoint SHA.");
       if (sourceJobId && !/^[a-f0-9-]{36}$/.test(sourceJobId))
@@ -83,7 +86,8 @@ if (action === "start" || action === "retry" || action === "resume") {
           !/^[a-f0-9]{40}$/.test(prepared.checkpointSha ?? "") ||
           !/^[a-f0-9-]{36}$/.test(prepared.sourceJobId ?? "") ||
           typeof prepared.guidance !== "string" || prepared.guidance.length > 2000 ||
-          prepared.mode !== mode)
+          prepared.mode !== mode ||
+          (prepared.forkMode !== undefined && prepared.forkMode !== "isolated"))
         throw Error("Saved prepared retry intent has inconsistent identity or guidance.");
     }
   }
@@ -97,12 +101,12 @@ if (action === "start" || action === "retry" || action === "resume") {
   }).trim();
   save({ status: "running", pid: child.pid, startedAt: new Date().toISOString(), mode,
     gitHead, log, root, kind: action,
-    ...(action === "retry" ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}),
+    ...(["retry", "fork"].includes(action) ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}),
     ...(prepared ? { checkpointSha: prepared.checkpointSha, sourceJobId: prepared.sourceJobId,
-      guidance: prepared.guidance, retryChildId: prepared.childId } : {}) });
+      guidance: prepared.guidance, retryChildId: prepared.childId, forkMode: prepared.forkMode ?? null } : {}) });
   child.unref();
   console.log(JSON.stringify({ status: "running", mode, pid: child.pid, root, log,
-    kind: action, ...(action === "retry" ? { checkpointSha } : {}),
+    kind: action, ...(["retry", "fork"].includes(action) ? { checkpointSha } : {}),
     ...(prepared ? { preparedChildId: prepared.childId } : {}) }));
   process.exit(0);
 }
@@ -121,12 +125,14 @@ const env = {
   ...process.env,
   NT_TEST_WEB_PI_NEW_STORY: "1",
   NT_TEST_WEB_PI_STORY_MODE: mode,
-  ...(["retry", "resume"].includes(initial.kind) ? {
+  ...(["retry", "fork", "resume"].includes(initial.kind) ? {
     NT_TEST_WEB_PI_RETRY_ROOT: initial.root,
     NT_TEST_WEB_PI_RETRY_CHECKPOINT: initial.checkpointSha,
     NT_TEST_WEB_PI_RETRY_SOURCE_JOB: initial.sourceJobId ?? "",
     NT_TEST_WEB_PI_RETRY_GUIDANCE: initial.guidance ?? "",
     NT_TEST_WEB_PI_RETRY_CHILD_ID: initial.retryChildId ?? "",
+    NT_TEST_WEB_PI_RETRY_ISOLATED: (initial.kind === "fork" ||
+      initial.kind === "resume" && initial.forkMode === "isolated") ? "1" : "0",
   } : { NT_TEST_WEB_PI_ROOT: initial.root }),
   NT_TEST_WEB_PI_AUTH: "device-code",
   NT_TEST_WEB_PI_LOCAL_OAUTH: "1",

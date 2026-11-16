@@ -13,8 +13,8 @@ import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
 import type { JobStartResult } from '../../../src/job'
 import { createStudioAuth } from '../../src/lib/auth'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../../src/lib/pi-credentials.server'
-import { authorizedStoryJob, selectedJob } from '../../src/lib/fixture-jobs.server'
-import { checkpointContinueRequest } from '../../src/lib/checkpoint-fork.server'
+import { authorizedStoryJob, selectedJob, generationJobRequest } from '../../src/lib/fixture-jobs.server'
+import { checkpointContinueRequest, checkpointForkRequest } from '../../src/lib/checkpoint-fork.server'
 import type { TestStudioDatabase } from './studio-database'
 import { localPiOAuth, syncLocalPiOAuth } from './local-pi-oauth'
 import { readIsolatedStudioOAuth } from '../studio-oauth-source'
@@ -103,8 +103,10 @@ export async function runPreservedCheckpointRetry(args: {
       mode: process.env.NT_TEST_WEB_PI_STORY_MODE, nativeCli: process.env.NT_NATIVE_CLI,
       checkpointSha: selectedSha, sourceJobId: process.env.NT_TEST_WEB_PI_RETRY_SOURCE_JOB })
   const correctiveGuidance = process.env.NT_TEST_WEB_PI_RETRY_GUIDANCE ?? ''
+  const isolated = process.env.NT_TEST_WEB_PI_RETRY_ISOLATED === '1'
   assert.ok(correctiveGuidance.length <= 2000, 'Corrective guidance exceeds the controller limit')
   console.log('Checkpoint certification retry:', JSON.stringify({
+    branch: isolated ? 'isolated-new-thread' : 'same-thread',
     sourceJob: sourceId, commitSha: selectedSha, completed: checkpoint.completedWorkItems.length,
     nextWorkItem: checkpoint.nextWorkItem,
   }))
@@ -189,6 +191,7 @@ export async function runPreservedCheckpointRetry(args: {
     version: 1, mode: source.mode, originalJobId: source.jobId,
     sourceJobId: sourceId, checkpointSha: selectedSha, completed: checkpoint.completedWorkItems,
     nextWorkItem: checkpoint.nextWorkItem, childId, guidance: correctiveGuidance,
+    ...(isolated ? { forkMode: 'isolated' } : {}),
   }
   if (preparedChildId) {
     assert.match(preparedChildId, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,
@@ -202,19 +205,38 @@ export async function runPreservedCheckpointRetry(args: {
     writeFileSync(join(attempt, 'retry-request.json'), JSON.stringify(retryRequest, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 })
   }
-  const response = await checkpointContinueRequest(auth, store,
-    new Request(config.baseURL + '/api/jobs/' + sourceId + '/continue', {
+  const response = await (isolated ? checkpointForkRequest : checkpointContinueRequest)(auth, store,
+    new Request(config.baseURL + '/api/jobs/' + sourceId + (isolated ? '/fork' : '/continue'), {
       method: 'POST', headers,
       body: JSON.stringify({
         childId, commitSha: selectedSha, sourceBaseSha: parent.baseSha,
         sourceThreadId: sourceThread.id, proofDigest: checkpoint.proofDigest,
-        expectedLatestJobId: latest.jobId, guidance: correctiveGuidance,
+        ...(!isolated ? { expectedLatestJobId: latest.jobId } : {}),
+        guidance: correctiveGuidance,
       }),
     }), sourceId, config.baseURL)
   const result = await response.json() as { id?: string; started?: boolean; warning?: string; error?: string }
-  assert.equal(response.status, 202, JSON.stringify(result))
+  assert.equal(response.status, isolated ? 200 : 202, JSON.stringify(result))
   assert.equal(result.id, childId)
-  assert.equal(result.started, true, result.warning ?? 'Checkpoint continuation was not started')
+  if (isolated) {
+    assert.equal(await store.persistence.advancedThreads.runOrder(source.ownerId,
+      sourceThread.id, childId), null,
+      'A diagnostic historical fork must not become another run of the original Thread')
+    const forkThread = await store.persistence.advancedThreads.sourceThread(source.ownerId, childId)
+    assert.equal(forkThread?.id, 'fork:' + childId,
+      'An independent historical attempt must own a separate, identified Thread')
+    const saved = await selectedJob(store, source.ownerId, childId)
+    assert.ok(saved.configJson, 'Isolated fork has no pinned generation configuration')
+    const draft = JSON.parse(saved.configJson) as { task: string; contract: object }
+    const started = await generationJobRequest(auth, store, new Request(
+      config.baseURL + '/api/jobs/' + childId, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: draft.task, contract: draft.contract }),
+      }), childId, config.baseURL)
+    assert.equal(started.status, 202, await started.clone().text())
+  } else {
+    assert.equal(result.started, true, result.warning ?? 'Checkpoint continuation was not started')
+  }
   const child = await authorizedStoryJob(store, source.ownerId, childId)
   args.setAcquiredJob(child)
   assert.equal(child.baseSha, selectedSha)
