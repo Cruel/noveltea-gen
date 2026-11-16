@@ -10,6 +10,8 @@ import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { type TurnEvidence } from "./turn-plan-evidence.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { assertTurnDeliveryHistory, deliveryCriteria, type NarrativeDeliveryCriteria } from "./turn-delivery.js";
+import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
+import { projectAdaptiveFinal } from "./adaptive-final-review.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const safePath = /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/;
@@ -40,6 +42,7 @@ export interface TurnFulfillmentPacket {
   policy: "turn-completeness/v1";
   source: { jobId: string; baseSha: string; headSha: string; turnDigest: string;
     planVersion: number; planDigest: string; scopeReviewDigest: string;
+    adaptive?: { version: number; digest: string; amendments: string[] };
     checkpoints: Array<{ commitSha: string; assignmentId: string; proofDigest: string;
       review: string; assignmentDigest: string }> };
   goal: string;
@@ -50,7 +53,11 @@ export interface TurnFulfillmentPacket {
   approvedContract: TurnEvidence["contract"];
   criteria: NarrativeDeliveryCriteria;
   objectives: TurnObjective[];
-  plannedWork: Array<{ id: string; kind: string; targets: string[]; status: string }>;
+  plannedWork: Array<{ id: string; kind: string; targets: string[]; status: string;
+    outcome?: string; dependsOn?: string[]; omission?: {
+      sourceSha: string; path: string; evidence: string; reviewerSnapshot: string } }>;
+  /** Pinned canonical Creative Direction, whether or not it changed this Turn. */
+  interactionSources?: string[];
   canonical: Array<{ path: string; content: string }>;
   digest: string;
 }
@@ -103,6 +110,8 @@ export async function prepareTurnFulfillment(job: JobStartResult,
   }
   if (git(job, "rev-parse", "HEAD").trim() !== job.headSha)
     throw new Error("Story HEAD changed since the controller verified the Turn.");
+  if (git(job, "status", "--porcelain=v1", "--untracked-files=all").trim())
+    throw new Error("Final Turn review cannot inspect a dirty or unpublished Story worktree.");
   if (turn.kind === "protected-amendment") return null;
   if (!input.scopeCurrent || !input.scopeComplete || !input.editorialPass ||
       input.headSha !== job.headSha || input.baseSha !== job.baseSha)
@@ -114,6 +123,13 @@ export async function prepareTurnFulfillment(job: JobStartResult,
       JSON.stringify(arch.plan.contract) !== JSON.stringify(input.contract))
     throw new Error("Approved generation plan differs from the final Story scope.");
   assertTurnDeliveryHistory(turn.contract, arch.plan.contract, arch.history);
+  // The original Architecture inventory is not the latest work plan once
+  // controller-admitted amendments exist. Authenticate the private Thread/Turn
+  // ledger, its original Pi transcript and sealed omission history before the
+  // independent reviewer sees or can pass any amended obligations.
+  const adaptiveState = await readAdaptiveState(job, turn.digest, arch.plan.version);
+  if (adaptiveState) assertAdaptiveSettled(adaptiveState);
+  const adaptive = adaptiveState?.entries.length ? projectAdaptiveFinal(adaptiveState) : null;
   const scopeReview = await readFile(join(job.stateDir, "narrative-review.json"), "utf8");
   const inspected = await inspectRecoveryCheckpoints(job);
   if (inspected.some(p => !p.eligible || !p.assurance))
@@ -125,7 +141,18 @@ export async function prepareTurnFulfillment(job: JobStartResult,
   if (checkpoints.some(p => !["passed", "not-required"].includes(p.review)))
     throw new Error("Independent assignment reviews remain pending or failed; Turn cannot complete.");
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  // Include the APPROVED Story-wide Interaction profile even when no specialist
+  // edited Creative Direction in this Turn. A reviewer cannot evaluate Story-
+  // wide Choice distribution or Exploration/Puzzle promises from changed paths
+  // alone. The canonical bytes are read at the same verified Git HEAD.
+  const directionPaths = git(job, "ls-tree", "-r", "--name-only", job.headSha, "--",
+    prefix + "creative-direction").split("\n").filter(Boolean)
+    .filter(path => path.startsWith(prefix + "creative-direction/") && path.endsWith(".md"))
+    .map(path => path.slice(prefix.length));
+  if (adaptive && turn.kind === "full-story" && !directionPaths.length)
+    throw Error("Amended whole-Story completion lacks an approved Creative Direction source.");
   const paths = [...new Set([
+    ...directionPaths,
     ...input.scopedPaths,
     ...turn.assignments.flatMap(a => a.authority.existingPaths),
     ...inspected.flatMap(p => p.assurance!.changedPaths),
@@ -157,15 +184,25 @@ export async function prepareTurnFulfillment(job: JobStartResult,
       ({ id: "approved-target:" + i, text })),
     ...turn.assignments.filter(a => a.id !== "review").map(a =>
       ({ id: "assignment:" + a.id, text: a.outcome })),
+    ...(adaptive?.objectives ?? []),
   ];
   const source = { jobId: job.jobId, baseSha: job.baseSha, headSha: job.headSha,
     turnDigest: turn.digest, planVersion: arch.plan.version, planDigest: hash(arch.plan),
-    scopeReviewDigest: hash(scopeReview), checkpoints };
+    scopeReviewDigest: hash(scopeReview),
+    ...(adaptive ? { adaptive: adaptive.source } : {}), checkpoints };
+  const originalWork = arch.plan.items.map(i => ({ id: i.id, kind: i.kind,
+    targets: i.targetIds, status: i.status }));
+  const latest = new Map<string, TurnFulfillmentPacket["plannedWork"][number]>(
+    originalWork.map(item => [item.id, item]));
+  // A split retires the fixed-plan aggregate; showing it as an additional
+  // completed assignment would double-count the same Choice/Puzzle outcome.
+  for (const retired of adaptive?.superseded ?? []) latest.delete(retired);
+  for (const amended of adaptive?.plannedWork ?? []) latest.set(amended.id, amended);
   const body = { policy: "turn-completeness/v1" as const, source, goal: turn.goal,
     originalRequest: turn.originalRequest, contract: turn.contract,
     approvedContract: arch.plan.contract, criteria, objectives,
-    plannedWork: arch.plan.items.map(i => ({ id: i.id, kind: i.kind,
-      targets: i.targetIds, status: i.status })), canonical };
+    ...(directionPaths.length ? { interactionSources: directionPaths } : {}),
+    plannedWork: [...latest.values()], canonical };
   return { ...body, digest: hash(body) };
 }
 
@@ -177,6 +214,11 @@ export function validateTurnFulfillment(packet: TurnFulfillmentPacket,
   const objectives = new Set(packet.objectives.map(o => o.id));
   const assignmentIds = new Set(packet.objectives.filter(o => o.id.startsWith("assignment:"))
     .map(o => o.id.slice("assignment:".length)));
+  // Amended executable work is independently admitted after the original
+  // Turn. Its exact targets can receive a follow-up PROPOSAL, never a grant.
+  const adaptiveTargets = new Map(packet.source.adaptive ? packet.plannedWork
+    .filter(item => ["controller-admitted", "controller-refined"].includes(item.status))
+    .map(item => [item.id, new Set(item.targets)] as const) : []);
   const allowedTargets = new Set(packet.plannedWork.flatMap(p => p.targets));
   const pathLines = new Map(packet.canonical.map(c => [c.path, c.content.split("\n")]));
   const expectedCriteria = deliveryCriteria(packet.criteria.breadth === "whole-story" ? "full-story" : "revision",
@@ -211,9 +253,12 @@ export function validateTurnFulfillment(packet: TurnFulfillmentPacket,
             !c.evidence.some(e => witnessRoot[c.objectiveId]!.some(p => e.path.startsWith(p))))))) ||
       v.findings.some(f => !objectives.has(f.objectiveId) || !f.message?.trim() ||
         (f.followUp !== null && (!f.followUp ||
-          !assignmentIds.has(f.followUp.assignmentId) || !f.followUp.outcome?.trim() ||
+          !(assignmentIds.has(f.followUp.assignmentId) ||
+            adaptiveTargets.has(f.followUp.assignmentId)) || !f.followUp.outcome?.trim() ||
           !Array.isArray(f.followUp.targets) || !f.followUp.targets.length ||
-          f.followUp.targets.some(t => !allowedTargets.has(t))))) ||
+          f.followUp.targets.some(t => !allowedTargets.has(t) ||
+            (adaptiveTargets.has(f.followUp!.assignmentId) &&
+              !adaptiveTargets.get(f.followUp!.assignmentId)!.has(t)))))) ||
       (v.verdict === "complete" && (v.findings.length > 0 ||
         v.checks.some(c => !c.fulfilled))) ||
       (v.verdict === "incomplete" && (!v.findings.length ||

@@ -270,17 +270,33 @@ inspect and reconcile the preserved evidence rather than deleting receipts or
 replaying the planner. Inspection restores existing history but never starts a
 new adaptive planning session.
 
-Remaining integration work includes supplying independently authenticated
-omission evidence to adaptive admission (currently only the separate Interactive
-Event-only path can make that reviewed no-write decision), richer supporting and
-record-level assignments, and end-to-end certification of amended-plan recovery
-and whole-Story interaction fulfillment. The adaptive ledger uses integrity
-digests and job-private provenance; these are not author signatures or approval
-of material scope changes. Do not treat the flag or unit tests as certification
-of these remaining requirements.
+Adaptive admission now consumes separately reviewed, source-bound omission
+proofs rather than treating a no-write model suggestion as completion (#180).
+The final independent Turn reviewer sees both the original Author goal and the
+latest authenticated adaptive assignment outcomes, including narrowed work,
+added prerequisites, split Choice/Puzzle assignments and reviewed omissions.
+It receives the canonical approved Interaction profile even when Creative
+Direction was untouched during the Turn (#181). A saved final verdict is bound
+to the amendment ledger and source HEAD; the graph reauthenticates the amended
+inventory without launching another planner before completion. Cross-Thread
+forks at or after an amendment are blocked until there is a separately designed
+and independently reviewed handoff; same-Thread checkpoint recovery remains
+the supported path. Earlier pre-amendment forks remain valid.
+
+These checks have fixture/controller test coverage, **not** completed real-Pi
+end-to-end Story certification. The full #177 acceptance still requires a
+reviewed live narrative-led Story with legitimately omitted formal Puzzle, a
+reviewed live nonuniform Choice-heavy Story with causal consequences after
+convergence, recovery at the relevant original checkpoints, and authorization
+of material author-directed changes. Broader supporting/record-level adaptive
+assignments are not conferred by this feature gate. The adaptive ledger uses
+integrity digests and job-private provenance, **not** author signatures or
+approval of material scope changes. Do not advertise the feature as generally
+certified or remove `NT_ADAPTIVE_PLANNING=1` until that evidence exists.
 
 ```sh
 pnpm exec tsx --test test/adaptive-assignments.test.ts test/adaptive-state.test.ts
+pnpm exec tsx --test test/adaptive-final-review.test.ts test/adaptive-final-integration.test.ts
 pnpm exec tsx --test test/interactive-work.test.ts
 ```
 

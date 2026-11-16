@@ -7,6 +7,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { inspectRecoveryCheckpoints, type RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { validateStoryJob } from "./validator.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
+import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
 import { assertRecoveryCompatibility, assertRecoveryReceiptCompatibility,
   selectCurrentRecoveryToolchain, RecoveryCompatibilityError } from "./recovery-compatibility.js";
@@ -41,6 +42,37 @@ const receiptStage = (path: string) => path === "character-world.json" ? "founda
   path.startsWith("interactive-items/") ? "interactive:milestone." + path.slice(18, -5) :
   path.startsWith("composition-items/") ? "composition:milestone." + path.slice(18, -5) : null;
 
+/** A new Thread cannot import an admitted adaptive assignment inventory using
+ * a v2 bundle that carries only original Architecture and historical writers.
+ * A checkpoint from before amendment admission is still independently reusable. */
+export async function assertAdaptiveForkBoundary(parent: JobStartResult, commitSha: string) {
+  if (!existsSync(join(parent.stateDir, "adaptive-plan.json"))) return;
+  const reviewTurn = await readReviewTurnEvidence(parent);
+  const sourcePlan = JSON.parse(await readFile(join(parent.stateDir, "architecture.json"),
+    "utf8")) as { plan?: Plan };
+  if (!reviewTurn || !sourcePlan.plan)
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "Fork source lost the original Turn/Architecture authority for adaptive work.");
+  const adaptive = await readAdaptiveState(parent, reviewTurn.digest, sourcePlan.plan.version);
+  if (!adaptive) throw new RecoveryCompatibilityError("invalid-evidence",
+    "Fork source has missing adaptive plan provenance.");
+  assertAdaptiveSettled(adaptive);
+  for (const amendment of adaptive.entries) {
+    try { git(parent, "merge-base", "--is-ancestor", amendment.sourceSha, commitSha); }
+    catch (error) {
+      if ((error as { status?: number }).status === 1) continue;
+      // Missing commits, repository corruption or an unreadable Git history
+      // cannot masquerade as an eligible pre-amendment recovery point.
+      throw new RecoveryCompatibilityError("invalid-evidence",
+        "Unable to authenticate adaptive amendment ancestry at the requested checkpoint.");
+    } // Fork from BEFORE amendment authorization, without its grants.
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "An amended Story checkpoint cannot be forked into a new Thread without " +
+      "an authenticated adaptive-plan and independent-review handoff; " +
+      "use same-Thread restart or an earlier pre-amendment checkpoint.");
+  }
+}
+
 /** Read-only preflight. Call before acquiring/allocating any child resources.
  * Mutable parent SQLite, unfinished receipts, sessions and grants are excluded. */
 export async function collectRecoveryFork(parent: JobStartResult, childId: string,
@@ -51,6 +83,14 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   const selected = points.find(p => p.commitSha === commitSha && p.eligible);
   if (!selected) throw new RecoveryCompatibilityError("invalid-evidence",
     "Checkpoint is not finalized and independently verified.");
+  // A fork is an independent Thread, not a restart of the original adaptive
+  // graph. The existing v2 bundle transfers committed specialists and original
+  // review criteria, but does NOT transfer authenticated amended assignment
+  // history or independently sealed no-write authority. Reject a checkpoint
+  // at/after amendment admission instead of quietly rescheduling the fixed
+  // Architecture inventory in the child. Pre-amendment checkpoints remain
+  // independently reusable without inheriting unpublished plan changes.
+  await assertAdaptiveForkBoundary(parent, commitSha);
   // An Event-only omission is bound to the original job, Thread, validator,
   // reviewed Event sources and independent reviewer session. A fork copies
   // authored commits but cannot inherit that no-write authorization as a

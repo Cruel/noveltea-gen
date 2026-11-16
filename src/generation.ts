@@ -4,6 +4,7 @@ import { readRecoveryFork, verifyReadyRecoveryFork, resolvedInheritedRecoveryRev
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
@@ -1079,6 +1080,16 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
       try {
         const preflight = await withStoryJobLock(job, "generation-completion-preflight", async () => {
           clean(job); await trustedHead(job); await checkPlan(job, s.request, s.planVersion);
+          // A saved graph inventory is NOT a completion credential. Rebuild
+          // the latest authorized assignments and all omission/review proofs
+          // without invoking the model before accepting a final Story verdict.
+          // Changed or missing amendments may not fall back to Architecture.
+          if ((s.adaptiveVersion ?? 1) > 1) {
+            const restored = await reconcile(s, job, false);
+            if (restored.adaptiveVersion !== s.adaptiveVersion ||
+                !isDeepStrictEqual(restored.inventory?.items, s.inventory?.items))
+              throw Error("Final Story completion lost the exact authenticated adaptive assignments; reconcile their checkpoints.");
+          }
           const stopped = await authorBoundary(job);
           return stopped ? { stopped, report: null } :
             { stopped: null, report: await inspectJobReport(s.request) };

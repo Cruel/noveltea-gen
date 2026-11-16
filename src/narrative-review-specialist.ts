@@ -656,6 +656,15 @@ export async function reviewTurnCompleteness(job: JobStartResult, snapshot: Skil
       "consequential choices and coherent branch outcomes, not just typed references. " +
       "For full composition, check player-facing authored scenes; a complete Story additionally " +
       "requires meaningful branch endings, central mystery payoffs and coherent resolution. " +
+      "Assess the approved canonical Creative Direction Interaction profile across ALL " +
+      "reachable Story routes, including any unchanged interactionSources, rather than " +
+      "counting Choices or imposing uniform per-Milestone quotas. Distinguish ordinary " +
+      "exploration from a formal Puzzle requirement. Check meaningful Choice consequences " +
+      "after routes converge, causal support for added Events, and the necessity of any " +
+      "new Puzzle. The approved Story-wide profile and original Author objective still " +
+      "apply after a reviewed local Event-only or optional-Puzzle omission; independently " +
+      "verify that omission using actual canonical sources and the supplied source-bound " +
+      "review obligation. A controller integrity digest is NOT author consent. " +
       "Record counts, empty YAML fields, validator success and isolated attractive prose " +
       "are never proof of narrative fulfillment. Explicitly fail missing content and " +
       "unsupported semantic claims. Detect missing commitments, " +
