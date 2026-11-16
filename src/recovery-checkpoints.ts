@@ -9,6 +9,7 @@ import { trustedHead } from "./revision.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 import { readPuzzleNoWrite, type PuzzleNoWriteRef } from "./puzzle-obligation.js";
+import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { checkpointAssurance, inspectCheckpointReview, readRepairCommitProof,
   type CheckpointAssurance, type SemanticReviewStatus } from "./checkpoint-assurance.js";
 
@@ -325,22 +326,40 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
 async function verifyOmissions(job: JobStartResult,
   entries: RecoveryCheckpoint["omittedWorkItems"], head: string): Promise<Set<string>> {
   const omissions = new Set<string>();
+  const eventOnlyPairs = new Set<string>();
   if (entries === undefined) return omissions;
   if (!Array.isArray(entries) || entries.length > 64)
-    throw new Error("Recovery Puzzle omissions are not a bounded controller inventory.");
+    throw new Error("Recovery interactive omissions are not a bounded controller inventory.");
   for (const entry of entries) {
-    const match = /^interactive-puzzle-([a-z][a-z0-9-]*)$/.exec(entry?.workItem ?? "");
+    const match = /^interactive-(choice|puzzle)-([a-z][a-z0-9-]*)$/.exec(entry?.workItem ?? "");
     if (!match || omissions.has(entry.workItem))
-      throw new Error("Invalid or duplicate Puzzle omission in recovery checkpoint.");
-    const milestone = "milestone." + match[1]!;
-    const proof = await readPuzzleNoWrite(job, milestone, entry.seal);
-    const path = join(job.stateDir, "interactive-items", match[1] + ".json");
+      throw new Error("Invalid or duplicate interactive omission in recovery checkpoint.");
+    const milestone = "milestone." + match[2]!;
+    const path = join(job.stateDir, "interactive-items", match[2] + ".json");
     const source = JSON.parse(await readFile(path, "utf8")) as {
-      planDigest?: string; units?: Array<{
+      planDigest?: string; worker?: string; planVersion?: number; units?: Array<{
         id: string; phase: string; commitSha?: string; beforeHead?: string;
-        noWrite?: PuzzleNoWriteRef }>;
+        noWrite?: PuzzleNoWriteRef; eventOnly?: EventOnlyRef }>; eventHead?: string;
     };
     const choice = source.units?.[0], puzzle = source.units?.[1];
+    if (choice?.eventOnly || puzzle?.eventOnly) {
+      const seal = choice?.eventOnly;
+      const proof = await readEventOnlyOmission(job, milestone, seal);
+      if (choice?.phase !== "not-applicable" || puzzle?.phase !== "not-applicable" ||
+          !seal || JSON.stringify(seal) !== JSON.stringify(puzzle.eventOnly) ||
+          JSON.stringify(seal) !== JSON.stringify(entry.seal) ||
+          choice?.commitSha || puzzle?.commitSha ||
+          choice?.beforeHead !== proof.reviewHead || puzzle?.beforeHead !== proof.reviewHead ||
+          proof.eventHead !== source.eventHead || proof.planDigest !== source.planDigest ||
+          proof.reviewMode !== source.worker || proof.planVersion !== source.planVersion ||
+          proof.milestoneId !== milestone || !isAncestor(job, proof.reviewHead, head))
+        throw Error("Recovery Event-only omission does not match its independent controller evidence.");
+      omissions.add(entry.workItem);
+      eventOnlyPairs.add(match[2]!);
+      continue;
+    }
+    if (match[1] !== "puzzle") throw Error("A Choice cannot be omitted using a Puzzle no-write seal.");
+    const proof = await readPuzzleNoWrite(job, milestone, entry.seal);
     if (proof.unitId !== entry.workItem || proof.choiceHead !== choice?.commitSha ||
         proof.verifiedHead !== puzzle?.beforeHead ||
         source.planDigest !== proof.planDigest ||
@@ -349,11 +368,17 @@ async function verifyOmissions(job: JobStartResult,
         !isAncestor(job, proof.choiceHead, proof.verifiedHead) ||
         !isAncestor(job, proof.verifiedHead, head) ||
         !git(job, "log", "-1", "--format=%B", proof.choiceHead)
-          .split("\n").includes("NovelTea-Work-Item: interactive-choice-" + match[1])) {
+          .split("\n").includes("NovelTea-Work-Item: interactive-choice-" + match[2])) {
       throw new Error("Recovery Puzzle omission differs from its sealed Choice checkpoint.");
     }
     omissions.add(entry.workItem);
   }
+  // A controller Event-only review omits both units as one indivisible
+  // disposition. A single missing entry must never make dependencies runnable.
+  for (const slug of eventOnlyPairs) if (
+      !omissions.has("interactive-choice-" + slug) ||
+      !omissions.has("interactive-puzzle-" + slug))
+    throw Error("Event-only checkpoint must omit Choice and Puzzle as one indivisible reviewed decision.");
   return omissions;
 }
 function verifiedBaselineStages(job: JobStartResult,
@@ -650,8 +675,15 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     const slug = workItem.slice("composition-".length);
     const source = JSON.parse(await readFile(
       join(job.stateDir, "interactive-items", slug + ".json"), "utf8")) as {
-      units?: Array<{ phase?: string; noWrite?: PuzzleNoWriteRef }> };
-    if (source.units?.[1]?.phase === "not-applicable") {
+      units?: Array<{ phase?: string; noWrite?: PuzzleNoWriteRef; eventOnly?: EventOnlyRef }> };
+    if (source.units?.[0]?.phase === "not-applicable") {
+      const seal = source.units[0].eventOnly;
+      if (!seal || source.units[1]?.phase !== "not-applicable" ||
+          JSON.stringify(seal) !== JSON.stringify(source.units[1].eventOnly))
+        throw Error("Composition omitted Choice without a matched controller Event-only review.");
+      omissions.push({ workItem: "interactive-choice-" + slug, seal },
+        { workItem: "interactive-puzzle-" + slug, seal });
+    } else if (source.units?.[1]?.phase === "not-applicable") {
       if (!source.units[1].noWrite) throw new Error("Composition omitted Puzzle without a controller seal.");
       omissions.push({ workItem: "interactive-puzzle-" + slug, seal: source.units[1].noWrite });
     }

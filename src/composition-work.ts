@@ -22,6 +22,7 @@ import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
 import { puzzleObligation, readPuzzleNoWrite,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
+import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 
 interface RecordItem { path: string; metadata: Record<string, any> & { id: string; type: string; status: string } }
 interface Report {
@@ -36,6 +37,7 @@ interface Report {
 }
 interface EventSourceReceipt {
   jobId: string; milestoneId: string; phase: string; paths?: string[]; commitSha?: string;
+  snapshot?: SkillSnapshot;
 }
 interface InteractiveReceipt {
   jobId: string; milestoneId: string; planVersion: number; planDigest: string;
@@ -43,6 +45,7 @@ interface InteractiveReceipt {
   snapshot?: SkillSnapshot; eventSource?: { eventIds: string[]; missingObligations: string[] };
   units: Array<{ id: string; phase: string; commitSha?: string; beforeHead?: string;
     digest?: string; paths?: string[]; claimedPaths?: string[]; noWrite?: PuzzleNoWriteRef;
+    eventOnly?: EventOnlyRef;
     conflicts?: string[]; obligations?: string[]; skillReads?: string[]; piSessionFile?: string;
     validation?: { choices?: Array<{ id: string; outcomes: Array<{ name: string; event: string; step: string; branch: string }> }>;
       puzzles?: Array<{ id: string; solutions: Array<{ event: string; status: string; clueAccess: string }> }> } }>;
@@ -116,7 +119,16 @@ export function selectAssignment(plan: Plan, r: Report, source: InteractiveRecei
   const eventIds = eventRecords.map(record => record.metadata.id);
   const choices = source.units[0]?.validation?.choices ?? [];
   const puzzles = source.units[1]?.validation?.puzzles ?? [];
-  if (!choices.length || (!puzzles.length && source.units[1]?.phase !== "not-applicable"))
+  // A newly published formal interaction linked to these Events invalidates
+  // the old no-write premise. Composition must not silently bypass it.
+  if (source.units[0]?.eventOnly && records.some(record =>
+      record.metadata.type === "choice-point" &&
+        (record.metadata.events as string[] ?? []).some(id => eventIds.includes(id)) ||
+      record.metadata.type === "puzzle" &&
+        (record.metadata.solutions as string[] ?? []).some(id => eventIds.includes(id))))
+    throw Error("Event-only omission is stale: a linked Choice or Puzzle now requires interactive review.");
+  if ((!choices.length && !source.units[0]?.eventOnly) ||
+      (!puzzles.length && source.units[1]?.phase !== "not-applicable"))
     throw new Error("Interactive source lacks proven Choice or required Puzzle evidence.");
   const choicePoints = choices.map(c => {
     const record = records.find(x => x.metadata.type === "choice-point" && x.metadata.id === c.id);
@@ -415,6 +427,18 @@ async function fixtureAuthor(job: JobStartResult, a: CompositionAssignment): Pro
       `---\nschema: '0.1'\ntype: authored-content\nid: authored-content.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\nevents: [${events.join(", ")}]\nrevelations: [${revelations.join(", ")}]\n---\n\n${body}\n`, { flag: "wx" });
     paths.push(path);
   };
+  if (!a.choicePoints.length) {
+    if (a.puzzleSolutions.length) throw Error("Event-only fixture cannot omit a required Puzzle.");
+    for (const id of a.composeTargets) {
+      await write(id.slice("event.".length) + "-scene", [id],
+        "## Observed discovery\n\nAda notices the ledger entry in the archive register. " +
+        "Neri confirms that the absent witness left a signed transfer note and shows " +
+        "the matching record. Ada compares the dates, learns what was concealed, " +
+        "and recognizes the material evidence without making an invented player decision. " +
+        "Their conversation establishes the discovery and its consequences on the page.");
+    }
+    return { modifiedRecords: paths, conflicts: [], obligations: [], skillReads: [] };
+  }
   const choice = a.choicePoints[0]!;
   const intro = 'Ada studies the register. Neri waits near the closed folder. "We can decide what to do after we hear the whole story," Ada says.';
   const menu = choice.outcomes.map(o => "**" + heading(o) + ":** " +
@@ -467,32 +491,37 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     const sourceFile = join(root, "interactive-items", input.milestone.slice(10) + ".json");
     const eventFile = join(root, "event-items", input.milestone.slice(10) + ".json");
     if (!existsSync(sourceFile) || !existsSync(eventFile) || !existsSync(join(root, "architecture.json")))
-      throw new Error("Composition requires verified interactive Choice/Puzzle work.");
+      throw new Error("Composition requires verified Event and authorized interactive disposition.");
     const source = JSON.parse(await readFile(sourceFile, "utf8")) as InteractiveReceipt;
     const eventSource = JSON.parse(await readFile(eventFile, "utf8")) as EventSourceReceipt;
     const architecture = JSON.parse(await readFile(join(root, "architecture.json"), "utf8")) as ArchReceipt;
     const units = source.units;
+    const eventOnly = units?.[0]?.phase === "not-applicable" && !!units?.[0]?.eventOnly;
     if (source.jobId !== job.jobId || source.milestoneId !== input.milestone ||
         eventSource.jobId !== job.jobId || eventSource.milestoneId !== input.milestone ||
         eventSource.phase !== "committed" || !eventSource.commitSha || !eventSource.paths?.length ||
         architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
         !architecture.plan || architecture.plan.contract.scope.depth !== "composition" ||
         units?.length !== 2 ||
-        units[0]?.phase !== "committed" || !units[0].commitSha || !units[0].validation ||
+        !(units[0]?.phase === "committed" && units[0].commitSha && units[0].validation ||
+          eventOnly && units[0]!.beforeHead && !units[0]!.commitSha &&
+            units[1]?.phase === "not-applicable" &&
+            JSON.stringify(units[0]!.eventOnly) === JSON.stringify(units[1]?.eventOnly)) ||
         !(units[1]?.phase === "committed" && units[1].commitSha && units[1].validation ||
-          units[1]?.phase === "not-applicable" && units[1].beforeHead && units[1].noWrite))
+          units[1]?.phase === "not-applicable" && units[1].beforeHead &&
+            (units[1].noWrite || eventOnly)))
       throw new Error("Composition requires the same authorized and verified interactive milestone.");
     assertPlanContinuity(job, architecture, "interactive:" + input.milestone, source.planVersion);
     const optionalPuzzle = units[1]!.phase === "not-applicable";
     const interactiveHead = optionalPuzzle ? units[1]!.beforeHead! : units[1]!.commitSha!;
     if (!source.eventHead) throw new Error("Interactive receipt is missing its Event baseline.");
     git(job, "merge-base", "--is-ancestor", eventSource.commitSha!, source.eventHead);
-    const choiceHead = units[0]!.commitSha!;
-    const choiceBaseline = units[0]!.beforeHead ?? source.eventHead;
+    const choiceHead = eventOnly ? units[0]!.beforeHead! : units[0]!.commitSha!;
+    const choiceBaseline = eventOnly ? source.eventHead : units[0]!.beforeHead ?? source.eventHead;
     const puzzleBaseline = units[1]!.beforeHead ?? choiceHead;
     if (!choiceBaseline) throw new Error("Interactive source Event baseline is not recorded.");
     for (const [unit, sha, before] of [
-      [units[0]!, choiceHead, choiceBaseline],
+      ...(!eventOnly ? [[units[0]!, choiceHead, choiceBaseline] as const] : []),
       ...(!optionalPuzzle ? [[units[1]!, interactiveHead, puzzleBaseline] as const] : []),
     ] as const) {
       if (git(job, "rev-parse", sha + "^") !== before || !unit.digest || !unit.paths?.length) {
@@ -515,7 +544,22 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     }
     if (puzzleBaseline !== choiceHead) await verifiedNarrativeChain(job, choiceHead, puzzleBaseline);
     const planDigest = hash(JSON.stringify(architecture.plan));
-    if (optionalPuzzle) {
+    if (eventOnly) {
+      if (!eventSource.snapshot?.id || !units[0]!.eventOnly ||
+          !units[1]!.eventOnly || units[1]!.beforeHead !== choiceHead ||
+          units[0]!.paths?.length || units[1]!.paths?.length ||
+          units[0]!.claimedPaths?.length || units[1]!.claimedPaths?.length ||
+          units[0]!.commitSha || units[1]!.commitSha || source.planDigest !== planDigest)
+        throw Error("Event-only Composition lacks a genuine, commitless controller omission.");
+      const proof = await readEventOnlyOmission(job, input.milestone, units[0]!.eventOnly, {
+        eventHead: eventSource.commitSha!, planDigest,
+        eventSnapshotId: eventSource.snapshot.id, validatorVersion: job.validatorVersion,
+      });
+      if (proof.reviewHead !== interactiveHead ||
+          proof.reviewMode !== source.worker || proof.planVersion !== source.planVersion ||
+          JSON.stringify(proof.eventIds) !== JSON.stringify(source.eventSource?.eventIds))
+        throw Error("Event-only Composition changed original Event or omission head.");
+    } else if (optionalPuzzle) {
       const skipped = units[1]!;
       const proof = await readPuzzleNoWrite(job, input.milestone, skipped.noWrite);
       if (!source.snapshot?.id || source.planDigest !== planDigest ||

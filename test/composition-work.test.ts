@@ -10,6 +10,7 @@ import { startStoryJob } from "../src/job.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { parseSpecialistJson } from "../src/composition-specialist.js";
+import { readEventOnlyOmission } from "../src/interactive-event-only.js";
 import { selectAssignment, verifyCompositionProse } from "../src/composition-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-composition-"));
@@ -61,6 +62,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
       "--story", story, "--job", "draft"], { encoding: "utf8",
       timeout: process.env.NT_LIVE_COMPOSITION === "1" ? 1_000_000 : 120_000,
       maxBuffer: 24 * 1024 * 1024, env: { ...env, NT_COMPOSITION_FIXTURE_CASE: fixtureCase,
+        NT_ARCHITECTURE_FIXTURE_CASE: fixtureCase === "event-only" ? "event-only" : "",
         NT_INTERACTIVE_FIXTURE_CASE: fixtureCase,
         NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE: process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE ?? "" } });
   }
@@ -142,6 +144,40 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     assert.equal(JSON.parse(result.stdout).completionEvidence.puzzleDisposition, "not-applicable");
     return JSON.parse(result.stdout).headSha as string;
   };
+  const prepareEventOnly = async () => {
+    const original = JSON.parse(readFileSync(contract, "utf8"));
+    const full = { ...original, scope: { kind: "full-story", depth: "composition", targets: [], branches: [] } };
+    writeFileSync(contract, JSON.stringify(full));
+    saveFixtureTurn(job, full,
+      "An observational mystery in which Ada learns the concealed evidence about the missing witness.",
+      ["Preserve actual Event-based causal discovery and make its consequences player-facing."]);
+    const stage = (name: string, extra: string[] = []) =>
+      cli([name, "run", "--fixture", ...extra, "--skills-source", source], "event-only");
+    const arch = stage("architecture", ["--contract", contract]);
+    assert.equal(arch.status, 0, arch.stderr);
+    await seal("global-architecture");
+    const first = stage("foundations");
+    assert.notEqual(first.status, 0, "World writer must await its independent review");
+    await seal("world-foundations");
+    const foundations = stage("foundations");
+    assert.equal(foundations.status, 0, foundations.stderr);
+    await seal("character-foundations");
+    const event = stage("event", ["--milestone", "milestone.disclosure"]);
+    assert.equal(event.status, 0, event.stderr);
+    await seal("event-disclosure");
+    const before = git(job.worktreeRoot, "rev-parse", "HEAD");
+    const interactive = stage("interactive", ["--milestone", "milestone.disclosure"]);
+    assert.equal(interactive.status, 0, interactive.stderr);
+    const disposition = JSON.parse(interactive.stdout);
+    assert.equal(disposition.completionEvidence.eventOnlyDisposition, "sealed-no-write");
+    assert.equal(disposition.completionEvidence.eventOnlyReview, "fixture-structural-only");
+    assert.deepEqual(disposition.specialistUnits.map((unit: any) => unit.phase),
+      ["not-applicable", "not-applicable"]);
+    assert.equal(disposition.headSha, before);
+    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), before,
+      "Neither omitted specialist is allowed to create a fictitious Git commit");
+    return { before, disposition };
+  };
   const run = (variant = "") => cli(["composition", "run", "--fixture", "--milestone",
     "milestone.disclosure", "--skills-source", source], variant);
   const inspect = () => cli(["composition", "inspect", "--milestone", "milestone.disclosure"]);
@@ -157,7 +193,8 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
       }
     }
   };
-  return { repo, original, job, cli, prepare, prepareWithOptionalPuzzle, run, inspect, seal, recovery };
+  return { repo, original, job, cli, prepare, prepareWithOptionalPuzzle,
+    prepareEventOnly, run, inspect, seal, recovery };
 }
 
 test("parses a complete nested manifest despite commentary or fenced JSON", () => {
@@ -228,6 +265,107 @@ test("Choice-only interactive source composes distinct prose without inventing P
   assert.ok(checkpoint.remainingWorkItems.includes("review"));
   assert.notEqual(checkpoint.nextWorkItem, "interactive-puzzle-disclosure");
   assert.equal(git(x.repo, "rev-parse", "HEAD"), x.original);
+});
+
+test("Event-only Milestone composes playable evidence with two genuine no-write omissions and recoverable provenance", { skip: !available }, async () => {
+  const x = setup("event-only-composition");
+  const { before, disposition } = await x.prepareEventOnly();
+  assert.equal(disposition.specialistUnits[0].eventOnly.digest,
+    disposition.specialistUnits[1].eventOnly.digest);
+  const proofFile = join(x.job.stateDir, "interactive-event-only/disclosure.json");
+  const proof = JSON.parse(readFileSync(proofFile, "utf8"));
+  assert.equal(proof.payload.decision, "event-only");
+  assert.equal(proof.payload.eventHead, before);
+  assert.equal(proof.payload.reviewHead, before);
+  assert.equal(proof.payload.reviewerSession, null, "Fixture cannot claim real Pi review");
+  assert.equal(JSON.parse(x.cli(["interactive", "inspect", "--milestone", "milestone.disclosure"]).stdout)
+    .headSha, before);
+  const composition = x.run("event-only");
+  assert.equal(composition.status, 0, composition.stderr);
+  const result = JSON.parse(composition.stdout);
+  assert.equal(result.status, "composition-committed");
+  assert.equal(result.interactiveHead, before);
+  assert.deepEqual(result.validation.branchReview.outcomes, []);
+  assert.deepEqual(result.validation.branchReview.solutions, []);
+  assert.match(readFileSync(join(x.job.worktreeStoryRoot, "authored-content/disclose-ledger-scene.md"), "utf8"),
+    /observational|discovery|witness|evidence/i);
+  assert.equal(JSON.parse(x.run("event-only").stdout).headSha, result.headSha);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD^"), before);
+  assert.equal(git(x.job.worktreeRoot, "log", "-1", "--format=%B").includes("NovelTea-Work-Item: composition-disclosure"), true);
+  const checkpoint = (await x.recovery()).find(point => point.workItem === "composition-disclosure");
+  assert.ok(checkpoint?.eligible, checkpoint?.reason ?? "Missing Event-only recovery checkpoint");
+  assert.deepEqual(checkpoint.omittedWorkItems?.map(entry => entry.workItem),
+    ["interactive-choice-disclosure", "interactive-puzzle-disclosure"]);
+  assert.ok(!checkpoint.completedWorkItems.includes("interactive-choice-disclosure"));
+  assert.ok(!checkpoint.completedWorkItems.includes("interactive-puzzle-disclosure"));
+  assert.ok(!checkpoint.remainingWorkItems.includes("interactive-choice-disclosure"));
+  assert.ok(!checkpoint.remainingWorkItems.includes("interactive-puzzle-disclosure"));
+  assert.ok(checkpoint.remainingWorkItems.includes("review"));
+  assert.equal(git(x.repo, "rev-parse", "HEAD"), x.original);
+});
+
+test("Event-only omission rejects modified sealed proof and cannot replay an interrupted reviewer", { skip: !available }, async () => {
+  const x = setup("event-only-tamper");
+  await x.prepareEventOnly();
+  const proofFile = join(x.job.stateDir, "interactive-event-only/disclosure.json");
+  const saved = readFileSync(proofFile, "utf8");
+  const proof = JSON.parse(saved);
+  proof.payload.eventHead = "0".repeat(40);
+  writeFileSync(proofFile, JSON.stringify(proof));
+  const inspect = x.cli(["interactive", "inspect", "--milestone", "milestone.disclosure"]);
+  assert.notEqual(inspect.status, 0);
+  assert.match(inspect.stderr, /omission|digest|source|Event-only/i);
+  writeFileSync(proofFile, saved);
+  const restored = x.cli(["interactive", "inspect", "--milestone", "milestone.disclosure"]);
+  assert.equal(restored.status, 0, restored.stderr);
+  writeFileSync(proofFile, JSON.stringify({ phase: "reviewing", eventHead: proof.payload.eventHead }));
+  const blocked = x.cli(["interactive", "run", "--fixture", "--milestone", "milestone.disclosure",
+    "--skills-source", source], "event-only");
+  assert.notEqual(blocked.status, 0);
+  assert.match(blocked.stderr, /omission|controller|review/i);
+});
+
+test("Event-only proof rejects foreign Thread, validator/snapshot changes and a dirty original Event", { skip: !available }, async () => {
+  const x = setup("event-only-stale");
+  const { disposition } = await x.prepareEventOnly();
+  const ref = disposition.specialistUnits[0].eventOnly;
+  const proof = JSON.parse(readFileSync(join(x.job.stateDir, "interactive-event-only/disclosure.json"), "utf8")).payload;
+  const original = await readEventOnlyOmission(x.job, "milestone.disclosure", ref);
+  assert.equal(original.turnDigest, proof.turnDigest);
+  await assert.rejects(readEventOnlyOmission(
+    { ...x.job, threadId: "foreign-thread" }, "milestone.disclosure", ref),
+    /identity|source|validator/, "A fork must not inherit the parent's no-write approval");
+  await assert.rejects(readEventOnlyOmission(
+    { ...x.job, validatorVersion: "999.0.0" }, "milestone.disclosure", ref),
+    /validator/, "Validator identity must remain pinned");
+  await assert.rejects(readEventOnlyOmission(x.job, "milestone.disclosure", ref, {
+    eventHead: proof.eventHead, planDigest: proof.planDigest,
+    eventSnapshotId: "f".repeat(64), validatorVersion: proof.validatorVersion,
+  }), /identity|source|validator/, "Changed Event skill snapshot invalidates an old omission");
+  const path = join(x.job.worktreeStoryRoot, "events/disclose-ledger.md");
+  const bytes = readFileSync(path, "utf8");
+  writeFileSync(path, bytes + "\\nUnreviewed source material.\\n");
+  await assert.rejects(readEventOnlyOmission(x.job, "milestone.disclosure", ref),
+    /canonical evidence changed/, "A source mutation invalidates a previously reviewed omission");
+  const run = x.cli(["composition", "run", "--fixture", "--milestone", "milestone.disclosure",
+    "--skills-source", source], "event-only");
+  assert.notEqual(run.status, 0, "Composition may not proceed from a dirty Event source");
+});
+
+test("a newly linked formal Choice invalidates the Event-only Composition exemption", { skip: !available }, async () => {
+  const x = setup("event-only-late-choice");
+  await x.prepareEventOnly();
+  const native = JSON.parse(x.cli(["validate"]).stdout).report;
+  const source = JSON.parse(readFileSync(join(x.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
+  const event = JSON.parse(readFileSync(join(x.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  const architecture = JSON.parse(readFileSync(join(x.job.stateDir, "architecture.json"), "utf8"));
+  const altered = { ...native, records: [...native.records, {
+    path: "choice-points/late-branch.md",
+    metadata: { id: "choice-point.late-branch", type: "choice-point", status: "draft",
+      events: ["event.disclose-ledger"], outcomes: ["protect", "challenge"] },
+  }] };
+  assert.throws(() => selectAssignment(architecture.plan, altered, source, event, "milestone.disclosure"),
+    /stale: a linked Choice or Puzzle/);
 });
 
 test("scoped prose revision may reuse other fully composed Event content", { skip: !available }, async () => {

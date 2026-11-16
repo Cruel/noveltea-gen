@@ -16,6 +16,7 @@ import { runCharacterWorldJob } from "./character-world.js";
 import { runEventWorkItem } from "./event-work.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { runInteractiveWorkItem } from "./interactive-work.js";
+import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { runCompositionWorkItem } from "./composition-work.js";
 import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
@@ -354,6 +355,32 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     if (e.stage === "review") return version === plan.version && e.headSha === head;
     return hasPlanContinuity(job, receipt, e.milestone ? `${e.stage}:${e.milestone}` : e.stage, version);
   });
+  // A commitless Event-only disposition must be reauthenticated at every
+  // scheduler restart, including forks. Completed graph stage flags alone are
+  // not authority to skip required Choice/Puzzle writers.
+  for (const item of completedStages.filter(e => e.stage === "interactive" && e.milestone)) {
+    const slug = item.milestone!.slice("milestone.".length);
+    const path = join(job.stateDir, "interactive-items", slug + ".json");
+    if (!existsSync(path)) throw Error("Checkpointed interactive work lost its saved specialist receipt.");
+    const saved = JSON.parse(await readFile(path, "utf8")) as {
+      eventHead?: string; planDigest?: string; worker?: string; planVersion?: number; units?: Array<{
+        phase?: string; beforeHead?: string; commitSha?: string; eventOnly?: EventOnlyRef }>;
+    };
+    if (saved.units?.[0]?.phase === "not-applicable" || saved.units?.[0]?.eventOnly) {
+      if (!saved.units[0]?.eventOnly ||
+          saved.units[0].phase !== "not-applicable" ||
+          saved.units[1]?.phase !== "not-applicable" ||
+          JSON.stringify(saved.units[0].eventOnly) !== JSON.stringify(saved.units[1]?.eventOnly) ||
+          saved.units.some(unit => unit.commitSha))
+        throw Error("Checkpointed Event-only omission has a missing or fabricated specialist unit.");
+      const proof = await readEventOnlyOmission(job, item.milestone!, saved.units[0].eventOnly);
+      if (proof.eventHead !== saved.eventHead || proof.planDigest !== saved.planDigest ||
+          proof.reviewMode !== saved.worker || proof.planVersion !== saved.planVersion ||
+          proof.reviewHead !== saved.units[0].beforeHead ||
+          proof.reviewHead !== saved.units[1]?.beforeHead || item.headSha !== proof.reviewHead)
+        throw Error("Checkpointed Event-only omission no longer matches its original Story revision.");
+    }
+  }
   // A new full-Story Turn on a verified existing Story preserves its already
   // approved Creative Direction. The original author's canon is not a license
   // for a new discovery interview or a speculative replacement writer.

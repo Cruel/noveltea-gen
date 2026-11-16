@@ -23,6 +23,7 @@ import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
 import { puzzleObligation, sealPuzzleNoWrite, readPuzzleNoWrite, puzzleNoWriteSessionDigest,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
+import { decideEventOnlyOmission, readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 
 type Phase = "pending" | "writing" | "authored" | "committed" | "not-applicable";
 interface Unit {
@@ -31,6 +32,7 @@ interface Unit {
   claimedPaths?: string[]; piSessionFile?: string; skillReads?: string[];
   conflicts?: string[]; obligations?: string[]; failure?: string;
   noWrite?: PuzzleNoWriteRef;
+  eventOnly?: EventOnlyRef;
   validation?: { status: "passed"; validatorVersion: string; protectionBase: string;
     choices: ChoiceEvidence[]; puzzles: PuzzleEvidence[]; downstreamObligations: string[]; searchTruncated: boolean };
 }
@@ -652,8 +654,12 @@ function verifyCommit(job: JobStartResult, receipt: Receipt, unit: Unit, parent:
   }
 }
 function completed(receipt: Receipt) {
-  return receipt.units[0].phase === "committed" &&
-    ["committed", "not-applicable"].includes(receipt.units[1].phase);
+  return (receipt.units[0].phase === "committed" &&
+    ["committed", "not-applicable"].includes(receipt.units[1].phase)) ||
+    (receipt.units[0].phase === "not-applicable" &&
+      receipt.units[1].phase === "not-applicable" &&
+      !!receipt.units[0].eventOnly &&
+      JSON.stringify(receipt.units[0].eventOnly) === JSON.stringify(receipt.units[1].eventOnly));
 }
 function output(job: JobStartResult, receipt: Receipt) {
   return { status: completed(receipt) ? "interactive-slice-committed" : "in-progress",
@@ -672,7 +678,11 @@ function output(job: JobStartResult, receipt: Receipt) {
     specialistUnits: receipt.units.map(u => ({ ...u, specialist: u.domain === "choice"
       ? "nt-interactive-narrative" : "nt-puzzle-design" })),
     completionEvidence: { deterministicChoiceAndPuzzlePaths: receipt.units.every(u => u.phase === "committed"),
-      deterministicChoicePathAndOptionalPuzzle: completed(receipt),
+      deterministicChoicePathAndOptionalPuzzle: receipt.units[0].phase === "committed" && completed(receipt),
+      eventOnlyDisposition: receipt.units[0].eventOnly ? "sealed-no-write" : "not-selected",
+      eventOnlyReview: receipt.units[0].eventOnly
+        ? receipt.worker === "fixture" ? "fixture-structural-only" : "independent-pi"
+        : "not-applicable",
       puzzleDisposition: receipt.units[1].phase === "not-applicable" ? "not-applicable" :
         receipt.units[1].phase === "committed" ? "committed" : "pending",
       playerPerceptionAndFairness: "unverified", conditionalWriting: "must-review",
@@ -934,6 +944,38 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       await verifiedNarrativeSuccessor(job, event.commitSha);
       if (await fileDigest(job, event.paths) !== event.contentDigest)
         throw new Error("Original Event source bytes changed before Choice binding.");
+      // An observational Milestone may already be fulfilled by its reviewed
+      // Event. The controller, not a forced Choice author, asks an independent
+      // reviewer whether both interactive assignments are genuinely optional.
+      // Fixtures exercise provenance only and never claim literary certification.
+      if (!input.fixture || process.env.NT_INTERACTIVE_FIXTURE_CASE === "event-only") {
+        if (!input.fixture)
+          await assertNativeReviewDependencies(job, "interactive-choice-" + input.milestone.slice(10));
+        const head = await trustedHead(job);
+        const baseline = reportOf(await validateStoryJob(job, input.validatorSource ??
+          input.skillsSource, { ...job, baseSha: head }), head);
+        const omission = await decideEventOnlyOmission(job, architecture.plan, baseline,
+          input.milestone, event.commitSha, event.validation.eventIds, event.snapshot.id,
+          event.obligations ?? [], {
+            fixture: !!input.fixture, skillsSource: input.skillsSource,
+            provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
+          });
+        if (omission) {
+          const unit = (domain: InteractiveDomain): Unit => ({
+            id: "interactive-" + domain + "-" + input.milestone.slice(10), domain,
+            phase: "not-applicable", beforeHead: head, paths: [],
+            claimedPaths: [], eventOnly: omission,
+          });
+          receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
+            workItemId: "interactive-" + input.milestone.slice(10),
+            milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
+            eventHead: event.commitSha, eventSource, worker: input.fixture ? "fixture" : "pi",
+            provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
+            thinking: input.thinking, units: [unit("choice"), unit("puzzle")] };
+          await persist(file, receipt);
+          return output(job, receipt);
+        }
+      }
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         workItemId: "interactive-" + input.milestone.slice(10),
         milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
@@ -942,6 +984,25 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         units: [{ id: "interactive-choice-" + input.milestone.slice(10), domain: "choice", phase: "pending" },
           { id: "interactive-puzzle-" + input.milestone.slice(10), domain: "puzzle", phase: "pending" }] };
       await persist(file, receipt);
+    }
+    if (receipt.units[0].phase === "not-applicable" || receipt.units[0].eventOnly) {
+      const first = receipt.units[0], second = receipt.units[1];
+      if (first.phase !== "not-applicable" || second.phase !== "not-applicable" ||
+          !first.eventOnly || JSON.stringify(first.eventOnly) !== JSON.stringify(second.eventOnly) ||
+          first.beforeHead !== second.beforeHead || !first.beforeHead ||
+          first.paths?.length || second.paths?.length ||
+          first.claimedPaths?.length || second.claimedPaths?.length ||
+          first.commitSha || second.commitSha || receipt.planDigest !== planDigest)
+        throw Error("Event-only omission receipt is not a complete, commitless controller decision.");
+      const proof = await readEventOnlyOmission(job, input.milestone, first.eventOnly, {
+        eventHead: event.commitSha, planDigest, eventSnapshotId: event.snapshot.id,
+        validatorVersion: job.validatorVersion });
+      if (proof.reviewMode !== receipt.worker || proof.reviewHead !== first.beforeHead ||
+          proof.planVersion !== receipt.planVersion ||
+          JSON.stringify(proof.eventIds) !== JSON.stringify(event.validation.eventIds))
+        throw Error("Event-only receipt misrepresents its original specialist/reviewer provenance.");
+      if (dirty(job).length) throw Error("Event-only omission cannot resume a dirty Story worktree.");
+      return output(job, receipt);
     }
     if (input.action === "inspect") return output(job, receipt);
     if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
