@@ -235,7 +235,14 @@ function sections(body: string) {
   const map = new Map<string, string>();
   const parts = body.split(/^## (.+)$/gm);
   for (let i = 1; i < parts.length; i += 2) {
-    const title = parts[i]!.trim().replace(/^([a-z])/, letter => letter.toUpperCase());
+    // Both human-readable headings and the exact slug of an authored Choice
+    // outcome identify the same branch. A specialist using the canonical ID
+    // is not missing that branch merely because it used hyphens instead of
+    // Title Case. Preserve strict outcome identity and duplicate detection.
+    const raw = parts[i]!.trim();
+    const slug = /^([a-z][a-z0-9]*(?:-[a-z0-9]+)+) selected$/i.exec(raw)?.[1];
+    const title = slug ? heading(slug.toLowerCase()) + " selected" :
+      raw.replace(/^([a-z])/, letter => letter.toUpperCase());
     if (map.has(title)) throw new Error("Duplicate prose section: " + title);
     map.set(title, parts[i + 1]?.trim() ?? "");
   }
@@ -299,7 +306,9 @@ export async function verifyCompositionProse(job: JobStartResult, r: Report,
     const intro = section.sections.get("Shared entry")!, menu = section.sections.get("Choice wording")!;
     const labels = menu.split("\n").map(s => s.trim()).filter(Boolean);
     if (intro.length < 30 || labels.length !== choice.outcomes.length ||
-        choice.outcomes.some(o => !labels.some(s => s.toLowerCase().startsWith("**" + heading(o).toLowerCase() + ":**"))))
+        choice.outcomes.some(o => !labels.some(s =>
+          s.toLowerCase().startsWith("**" + heading(o).toLowerCase() + ":**") ||
+          /^[-*] ([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(s)?.[1] === o)))
       throw new Error("Choice wording must be selectable labels only, one per outcome.");
     const reactions = choice.outcomes.map(o => section.sections.get(heading(o) + " selected")!);
     if (reactions.some(s => s.length < 60) || new Set(reactions).size !== reactions.length)

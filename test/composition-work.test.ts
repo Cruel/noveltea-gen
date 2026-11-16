@@ -250,6 +250,27 @@ test("scoped prose revision may reuse other fully composed Event content", { ski
   const checked = await verifyCompositionProse(x.job, report, assignment, [changedPath]);
   assert.ok(checked.outcomes.length >= 2);
   assert.ok(checked.solutions.length >= 2);
+  // Real Pi authors sometimes use canonical Choice outcome IDs rather than
+  // display names as section headings and selectable labels. Both are
+  // unambiguous; neither invents a new Story option.
+  const slugged = originalText
+    .replace("## Protect selected", "## protect selected")
+    .replace("## Challenge selected", "## challenge selected")
+    .replace(/^\*\*Protect:\*\*.*$/m, "- protect")
+    .replace(/^\*\*Challenge:\*\*.*$/m, "- challenge");
+  writeFileSync(join(x.job.worktreeStoryRoot, changedPath), slugged);
+  const stillValid = await verifyCompositionProse(x.job, report, assignment, [changedPath]);
+  assert.deepEqual(stillValid.outcomes.sort(), ["challenge", "protect"]);
+  writeFileSync(join(x.job.worktreeStoryRoot, changedPath),
+    slugged.replace("## challenge selected", "## unrelated selected"));
+  await assert.rejects(verifyCompositionProse(x.job, report, assignment, [changedPath]),
+    /Missing shared\/choice\/branch prose sections/,
+    "Unknown branch labels cannot masquerade as the authorized outcome.");
+  writeFileSync(join(x.job.worktreeStoryRoot, changedPath),
+    slugged.replace("- protect", "- unrelated"));
+  await assert.rejects(verifyCompositionProse(x.job, report, assignment, [changedPath]),
+    /Choice wording must be selectable labels only/,
+    "An unknown menu option cannot pass merely because the count matches.");
 });
 
 test("verified deferred capture between Interactive and Composition does not block prose", { skip: !available }, () => {
