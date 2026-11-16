@@ -18,6 +18,10 @@ import { parseSpecialistJson } from "../src/composition-specialist.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
 import { runInteractiveWorkItem } from "../src/interactive-work.js";
 import { reviewedAdaptiveOmissions } from "../src/adaptive-omission.js";
+import { admitAdaptiveAssignments, applyAdaptiveAssignments,
+  revalidateAdaptiveAmendment } from "../src/adaptive-assignments.js";
+import { reconcileInventory, nextExecutionItem } from "../src/generation-plan.js";
+import { validateStoryJob } from "../src/validator.js";
 import { selectAssignment, verifyCompositionProse } from "../src/composition-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-composition-"));
@@ -390,6 +394,105 @@ test("real independent Pi reviewer verifies an Event-only omission without dispa
   assert.equal(repeat.status, 0, repeat.stderr);
   assert.equal(JSON.parse(repeat.stdout).headSha, before);
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), before);
+
+  // Follow the exact production adaptive admission seam with the real Pi
+  // review, not a fabricated positive proof or a fixture-only reviewer.
+  const arch = JSON.parse(readFileSync(join(x.job.stateDir, "architecture.json"), "utf8")).plan;
+  const validation = await validateStoryJob(x.job, source, { ...x.job, baseSha: before });
+  assert.equal(validation.status, "passed", JSON.stringify(validation.report?.diagnostics));
+  const canonical = (validation.report as { records: Array<{ path: string; metadata: {
+    id: string; type: string; status: string; decisions?: unknown[] } }> }).records;
+  const hashes = Object.fromEntries(canonical.map(record => [record.path,
+    sha(readFileSync(join(x.job.worktreeStoryRoot, record.path)))]));
+  const inventory = reconcileInventory(arch, validation, before, [
+    { stage: "foundation", headSha: before, status: "committed" },
+    { stage: "architecture", headSha: before, status: "architecture-committed" },
+    { stage: "foundations", headSha: before, status: "foundations-committed" },
+    { stage: "event", milestone: "milestone.disclosure", headSha: before,
+      status: "event-cluster-committed" },
+  ], {});
+  const target = "interactive:milestone.disclosure";
+  assert.equal(inventory.items.find(item => item.id === target)?.status, "pending");
+  const interactiveReceipt = JSON.parse(readFileSync(join(x.job.stateDir,
+    "interactive-items/disclosure.json"), "utf8"));
+  const reviewedOptions = {
+    job: x.job, request: { story: x.story, job: x.job.jobId,
+      task: "An observational ledger discovery", contract: arch.contract, fixture: false },
+    inventory, records: canonical, sourceHashes: hashes, saved: [], allowReview: true,
+    authorTargets: [], protectedPaths: canonical.filter(record =>
+      record.metadata.type === "creative-direction" || record.metadata.decisions?.length)
+      .map(record => record.path),
+    // The fixture's observational Turn has no mandatory per-Milestone Choice;
+    // this admission exercises the no-Choice profile without claiming to grade it.
+    planning: { choice_frequency: "none" as const, puzzle_emphasis: "none" as const },
+    planDigest: interactiveReceipt.planDigest as string,
+  };
+  const acceptedProofs = await reviewedAdaptiveOmissions(reviewedOptions);
+  assert.equal(acceptedProofs.length, 1);
+  assert.equal(acceptedProofs[0]!.sourceSha, before);
+  assert.equal(acceptedProofs[0]!.reviewerSession, proof.reviewerSession);
+  assert.ok(acceptedProofs[0]!.eventOnly);
+  const order = inventory.items.filter(item => item.status === "pending" && item.id !== target)
+    .map(item => item.id);
+  const proposal = {
+    sourceSha: before, turnDigest: proof.turnDigest as string, beforeVersion: 1,
+    reason: "The independent Event-only review found this scene observational",
+    actions: [{ kind: "omit" as const, item: target }], order,
+  };
+  const admission = {
+    proposal, inventory, plan: arch, turnDigest: proof.turnDigest as string,
+    version: 1, verifiedSource: true, records: canonical, sourceHashes: hashes,
+    milestoneSourceHashes: hashes, protectedPaths: reviewedOptions.protectedPaths,
+    planning: reviewedOptions.planning, typedEdges: [], authorTargets: [],
+    carried: inventory.items.filter(item => item.status === "verified")
+      .map(item => ({ id: item.id, sha: item.verifiedSha! })),
+    omissionProofs: acceptedProofs,
+  };
+  const amendment = admitAdaptiveAssignments(admission);
+  const applied = applyAdaptiveAssignments(inventory, amendment);
+  const omitted = applied.items.find(item => item.id === target)!;
+  assert.equal(omitted.status, "verified");
+  assert.equal(omitted.verifiedSha, before, "the omission is not a writer commit");
+  assert.equal(applied.items.find(item => item.id === "review")?.status, "pending");
+  assert.equal(nextExecutionItem(applied)?.stage, "composition");
+  const composed = x.run("event-only");
+  assert.equal(composed.status, 0, composed.stderr);
+  assert.equal(JSON.parse(composed.stdout).status, "composition-committed");
+  const advanced = git(x.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.notEqual(advanced, before);
+  // After a validated independent descendant advances HEAD, the original
+  // reviewed source and reviewer session are retained without a new Pi call.
+  const descendantValidation = await validateStoryJob(x.job, source, {
+    ...x.job, baseSha: advanced });
+  assert.equal(descendantValidation.status, "passed");
+  const descendantRecords = (descendantValidation.report as { records: typeof canonical }).records;
+  const descendantHashes = Object.fromEntries(descendantRecords.map(record => [record.path,
+    sha(readFileSync(join(x.job.worktreeStoryRoot, record.path)))]));
+  const recoveredProofs = await reviewedAdaptiveOmissions({
+    ...reviewedOptions, inventory: { ...inventory, headSha: advanced },
+    records: descendantRecords, sourceHashes: descendantHashes,
+    saved: acceptedProofs, allowReview: false,
+  });
+  assert.deepEqual(recoveredProofs, acceptedProofs);
+  const descendantInventory = structuredClone(inventory);
+  descendantInventory.headSha = advanced;
+  const composition = descendantInventory.items.find(item =>
+    item.id === "composition:milestone.disclosure")!;
+  composition.status = "verified"; composition.verifiedSha = advanced;
+  assert.equal(revalidateAdaptiveAmendment(amendment, { ...admission,
+    inventory: descendantInventory, sourceHashes: descendantHashes,
+    records: descendantRecords, carried: descendantInventory.items.filter(item =>
+      item.status === "verified").map(item => ({ id: item.id, sha: item.verifiedSha! })),
+    authenticatedProofAncestors: [before], omissionProofs: recoveredProofs,
+  }).inventory.items.find(item => item.id === target)?.verifiedSha, before);
+  await assert.rejects(reviewedAdaptiveOmissions({
+    ...reviewedOptions, inventory: descendantInventory,
+    records: [...descendantRecords, { path: "choice-points/new-local.md", metadata: {
+      id: "choice-point.new-local", type: "choice-point", status: "draft",
+      events: proof.eventIds } }],
+    sourceHashes: descendantHashes, saved: acceptedProofs, allowReview: false,
+  }), /newly linked Choice\/Puzzle.*reassessment/,
+  "newly related mechanics invalidate the exact omission without re-reviewing unrelated work");
   } finally {
     await controller.dispose(jobId);
     await new Promise<void>(done => server.close(() => done()));

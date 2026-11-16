@@ -18,7 +18,8 @@ import type { StoryPlanning } from "./story-planning.js";
 
 const MILESTONE = /^milestone\.[a-z][a-z0-9-]*$/;
 const HASH = /^[0-9a-f]{64}$/;
-type RecordItem = { path: string; metadata: { id: string; type: string; status: string } };
+type RecordItem = { path: string; metadata: { id: string; type: string; status: string;
+  events?: string[]; solutions?: string[] } };
 
 interface InteractiveOmissionReceipt {
   jobId: string; milestoneId: string; eventHead: string; planVersion: number;
@@ -55,6 +56,15 @@ async function authenticate(job: JobStartResult, milestone: string, planVersion:
       reviewed.planDigest !== receipt.planDigest ||
       JSON.stringify(reviewed.eventIds) !== JSON.stringify(receipt.eventSource?.eventIds))
     throw Error("Adaptive omission lost independently verified Event-only reviewer provenance.");
+  // A newly linked Choice/Puzzle is relevant drift even if every originally
+  // hashed source file is unchanged; unrelated verified work is not.
+  const newLocalMechanic = records.find(r => r.metadata.status !== "superseded" &&
+    (r.metadata.type === "choice-point" && r.metadata.events?.some(id => reviewed.eventIds.includes(id)) ||
+      r.metadata.type === "puzzle" && r.metadata.solutions?.some(id => reviewed.eventIds.includes(id))) &&
+    !Object.hasOwn(reviewed.sourceHashes, r.path));
+  if (newLocalMechanic)
+    throw Error("Reviewed Event-only omission has a newly linked Choice/Puzzle source requiring bounded reassessment: " +
+      newLocalMechanic.path);
   const record = records.find(r => r.metadata.type === "milestone" &&
     r.metadata.status !== "superseded" && r.metadata.id === milestone);
   if (!record || !HASH.test(sourceHashes[record.path] ?? "") ||

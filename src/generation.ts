@@ -314,7 +314,15 @@ async function reconciledFailures(job: JobStartResult, failures: Record<string, 
     return false;
   };
   const next = { ...failures };
-  for (const key of Object.keys(next)) if (await retryable(key)) delete next[key];
+  for (const key of Object.keys(next)) {
+    // A World checkpoint before its Character successor is an ordinary
+    // recoverable review handoff only for a review-gated failure. A stale
+    // original Turn, mismatched author grant or other deterministic rejection
+    // cannot be made retryable by the unrelated fact that World committed.
+    if (key === "foundations" &&
+        !/(?:required independent (?:specialist )?review is pending|independent (?:specialist )?review (?:is )?required|await(?:s|ing) (?:an? )?independent (?:specialist )?review)/i.test(next[key]!)) continue;
+    if (await retryable(key)) delete next[key];
+  }
   return next;
 }
 /** Apply only exact verified controller review receipts. A pending/failed

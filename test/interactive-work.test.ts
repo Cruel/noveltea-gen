@@ -262,6 +262,61 @@ test("optional Puzzle can conclude with a sealed no-write receipt after a real C
   assert.equal(inspect(x).headSha, output.headSha);
 });
 
+test("adaptive Choice/Puzzle split restores the independently reviewed Choice and optional Puzzle without a fictitious Puzzle commit", { skip: !available }, async () => {
+  const x = setup("adaptive-choice-only-no-write");
+  await x.prepareWithTurn("Create a fair-play mystery with an enacted Choice and meaningfully different endings.", [
+    "Branch effects must be perceivable and consequential.",
+    "Present fair-play clues and independently review the mystery payoff and distinct endings.",
+  ]);
+  const result = await x.interactiveWithChoiceReview("puzzle-no-write");
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  const choiceSha = output.specialistUnits[0].commitSha as string;
+  assert.equal(output.headSha, choiceSha);
+  assert.equal(output.specialistUnits[1].phase, "not-applicable");
+  const previous = Object.fromEntries(Object.keys(x.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, x.env);
+  try {
+    const job = await startStoryJob({ story: x.story, job: "draft" }, false);
+    const milestone = "milestone.disclosure";
+    const makeItem = (stage: ExecutionItem["stage"], dependencies: string[]): ExecutionItem => ({
+      id: stage + ":" + milestone, stage, milestone, kind: "realization",
+      targetIds: [milestone], dependencies, plannedItems: [],
+      skills: [], checks: [], authorization: { source: "trusted-controller",
+        planVersion: 1, paths: [] }, planVersion: 1, status: "pending",
+    });
+    const original: GenerationInventory = { version: 1, planVersion: 1,
+      headSha: choiceSha, rationale: "Adaptive Choice/Puzzle split",
+      items: [makeItem("choice", []),
+        makeItem("puzzle", ["choice:" + milestone]),
+        makeItem("composition", ["puzzle:" + milestone])],
+    };
+    const evidence = [
+      { stage: "choice" as const, milestone, planVersion: 1,
+        headSha: choiceSha, status: "interactive-choice-committed" },
+      { stage: "puzzle" as const, milestone, planVersion: 1,
+        headSha: choiceSha, status: "interactive-slice-committed" },
+    ];
+    const restored = await restoreCompletedAdaptiveWork(job, structuredClone(original), evidence);
+    assert.deepEqual(restored.items.slice(0, 2).map(item => item.status), ["verified", "verified"]);
+    assert.equal(restored.items[1]?.verifiedSha, choiceSha,
+      "the no-write Puzzle is satisfied by the reviewed Choice checkpoint, not a Puzzle commit");
+    assert.equal(restored.items[2]?.status, "pending",
+      "Composition remains a real downstream writer with unchanged review obligations");
+    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), choiceSha);
+    const replay = await restoreCompletedAdaptiveWork(job, structuredClone(original), evidence);
+    assert.deepEqual(replay.items, restored.items);
+    await assert.rejects(restoreCompletedAdaptiveWork(job, structuredClone(original),
+      [evidence[0]!, { ...evidence[1]!, headSha: "0".repeat(40) }]),
+    /checkpoint|source|ancestor|evidence|commit/i);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("approved player-solving obligation blocks a no-write Puzzle report", { skip: !available }, async () => {
   const x = setup("required-puzzle-no-write");
   await x.prepareWithTurn("The player must solve the mystery using two different puzzle methods.", [

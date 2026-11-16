@@ -7,6 +7,10 @@ import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
+import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
+import { startStoryJob } from "../src/job.js";
+import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adaptive-assignments.js";
 import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
@@ -277,6 +281,129 @@ test("amended Event objective reaches the real production dispatcher and resume 
     i.id === "event:milestone.disclosure")?.status, "verified");
   assert.ok(resumed.recoveryCheckpoints.some((point: any) =>
     point.workItem === "event-disclosure" && point.commitSha === commit && point.eligible));
+});
+
+async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, workItem: string) {
+    const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, f.env);
+    try {
+      const job = await startStoryJob({ story: f.story, job: "single" }, false);
+      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+        p.eligible && p.workItem === workItem);
+      assert.ok(point?.assurance, "Missing native-validated " + workItem);
+      if (point.semanticReview === "not-required" || point.semanticReview === "passed") return;
+      assert.equal(point.semanticReview, "required-pending", workItem);
+      await reviewBoundedAssignments(job, [point], async packet => ({
+        sourceDigest: packet.sourceDigest, verdict: "pass" as const,
+        findings: [], evidence: packet.items.map(item => ({
+          commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+          path: item.assurance.changedPaths[0]!, line: 1,
+          explanation: "Deterministic fixture structural review, never a live Pi verdict.",
+        })),
+      }), "deterministic-prerequisite-fixture", true);
+    } finally {
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+}
+
+test("actual generation graph resumes Event-only Composition without Choice/Puzzle writer commits (fixture structural certification)", { skip: !available }, async () => {
+  const f = setup("generation-event-only-no-write");
+  for (const key of ["NT_ARCHITECTURE_FIXTURE_CASE", "NT_EVENT_FIXTURE_CASE",
+    "NT_INTERACTIVE_FIXTURE_CASE", "NT_COMPOSITION_FIXTURE_CASE"])
+    f.env[key] = "event-only";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const task = "An observational mystery where Ada uncovers and validates the concealed archive ledger.";
+  f.start[3] = task;
+  saveFixtureTurn(f.job, contract, task,
+    ["Carry forward the Event evidence and real conversational consequence, without fabricated mechanics."]);
+  const seal = (workItem: string) => sealFixtureGenerationCheckpoint(f, workItem);
+  const foundation = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(foundation.status, "paused", JSON.stringify(foundation));
+  await seal("foundation");
+  const architecture = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(architecture.status, "paused", JSON.stringify(architecture));
+  await seal("global-architecture");
+  const firstWorld = f.cli(["foundations", "run", "--fixture", "--skills-source", source], false);
+  assert.match(firstWorld, /review|independent/i);
+  await seal("world-foundations");
+  const foundations = f.cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(foundations.status, "foundations-committed");
+  await seal("character-foundations");
+  const first = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(first.status, "paused", JSON.stringify(first));
+  await seal("event-disclosure");
+  const eventHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const resumed = f.cli(["generate", "resume", "--pause-after", "composition"]);
+  assert.equal(resumed.status, "paused", JSON.stringify(resumed));
+  const omission = JSON.parse(readFileSync(join(f.job.stateDir,
+    "interactive-items/disclosure.json"), "utf8"));
+  assert.deepEqual(omission.units.map((unit: any) => unit.phase),
+    ["not-applicable", "not-applicable"]);
+  assert.equal(omission.worker, "fixture", "fixture proof is not independent live Pi judgment");
+  assert.equal(omission.units[0].beforeHead, eventHead);
+  assert.equal(omission.units[1].beforeHead, eventHead);
+  assert.ok(omission.units.every((unit: any) => !unit.commitSha));
+  assert.equal(resumed.inventory.items.find((item: any) =>
+    item.id === "interactive:milestone.disclosure")?.status, "verified");
+  assert.equal(resumed.inventory.items.find((item: any) =>
+    item.id === "composition:milestone.disclosure")?.status, "verified");
+  assert.equal(resumed.inventory.items.find((item: any) => item.stage === "review")?.status,
+    "pending", "omission does not waive the final Story-wide reviewer");
+  const composed = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD^"), eventHead,
+    "Composition is the next Git commit, with no Choice or Puzzle writer commit");
+  const inspected = f.cli(["generate", "inspect"]);
+  assert.equal(inspected.status, "paused");
+  assert.equal(inspected.inventory.items.find((item: any) =>
+    item.id === "interactive:milestone.disclosure")?.status, "verified");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), composed);
+  assert.deepEqual(inspected.recoveryCheckpoints.find((point: any) =>
+    point.workItem === "composition-disclosure")?.omittedWorkItems
+    ?.map((entry: any) => entry.workItem),
+  ["interactive-choice-disclosure", "interactive-puzzle-disclosure"]);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
+test("stale original Turn after a reviewed World checkpoint fails closed instead of retrying foundations forever", { skip: !available }, async () => {
+  const f = setup("stale-turn-world-checkpoint");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const task = "Create an archive mystery with a protected Story foundation.";
+  f.start[3] = task;
+  saveFixtureTurn(f.job, contract, task, ["Preserve the original authenticated Turn."]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  const firstWorld = f.cli(["foundations", "run", "--fixture", "--skills-source", source], false);
+  assert.match(firstWorld, /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  const worldHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const file = join(f.job.stateDir, "turn-plan.json");
+  const changed = JSON.parse(readFileSync(file, "utf8"));
+  changed.originalRequest = "A different, unapproved objective";
+  const { digest: _saved, ...body } = changed;
+  changed.digest = createHash("sha256").update(JSON.stringify(body)).digest("hex");
+  writeFileSync(file, JSON.stringify(changed));
+  const run = spawnSync(process.execPath, [...cliEntry(), "job", "generate", "resume",
+    "--pause-after", "event", "--story", f.story, "--job", "single"], {
+    encoding: "utf8", env: f.env, timeout: 25_000, maxBuffer: 24 * 1024 * 1024,
+  });
+  assert.equal(run.status, 0, run.stderr || run.error?.message);
+  const result = JSON.parse(run.stdout);
+  assert.equal(result.status, "blocked");
+  assert.match(result.reason, /original.*Turn|stale|corrupt|source base/i);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), worldHead,
+    "neither a Character writer nor a planner may replay after Turn drift");
+  const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
+  assert.equal(receipt.units[0].phase, "committed");
+  assert.equal(receipt.units[1].phase, "pending");
 });
 
 test("one authorized Choice assignment can certify multiple meaningful Choices within a Milestone", { skip: !available }, () => {
