@@ -103,6 +103,9 @@ export async function proposeAdaptiveWork(input: {
       "You MAY omit a still-pending interactive assignment ONLY when it appears in the " +
       "controller-authenticated Event-only omission candidate list below; that list is " +
       "reviewed source evidence, not blanket permission to erase Story-wide gameplay. " +
+      "Each listed candidate already has a sealed no-write interactive receipt; you MUST " +
+      "acknowledge each with a corresponding omit action rather than schedule a writer " +
+      "which cannot run against that receipt. If no candidates are listed, omit none. " +
       "A local omission must not erase required choices, consequential routes, formal Puzzle " +
       "promises or explicit author-targeted work. Never invent or infer a new proof. " +
       "You cannot change a completed or blocked item, add a new canonical target ID, " +

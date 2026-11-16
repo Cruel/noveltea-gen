@@ -302,6 +302,24 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
   return { ...input.inventory, items, rationale: input.proposal.reason };
 }
 
+/** An independently sealed no-write receipt is already the authoritative
+ * disposition of the original interactive work. The planner must acknowledge
+ * it as an explicit omission; otherwise its plan would imply a writer which
+ * the already sealed interactive receipt can never dispatch. */
+export function assertReviewedOmissionDisposition(
+  proposal: AdaptiveProposal, inventory: GenerationInventory,
+  proofs: readonly AdaptiveOmissionProof[],
+) {
+  for (const proof of proofs) {
+    if (inventory.items.some(item => item.id === proof.assignmentId &&
+      item.status === "pending") &&
+      !proposal.actions.some(action => action.kind === "omit" &&
+        action.item === proof.assignmentId))
+      throw Error("Independently reviewed Event-only omission must have an explicit adaptive plan disposition: " +
+        proof.assignmentId);
+  }
+}
+
 /** No-op proposals are still untrusted input. Validate the complete contract
  * before deciding whether a new plan version is necessary. */
 export function evaluateAdaptiveProposal(input: AdaptiveAdmission): AdaptiveAmendment | null {

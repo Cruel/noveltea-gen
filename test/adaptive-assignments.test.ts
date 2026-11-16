@@ -4,6 +4,7 @@ import type { Plan } from "../src/architecture.js";
 import type { ExecutionItem, GenerationInventory } from "../src/generation-plan.js";
 import { invalidateChangedVerifiedPrerequisites, adaptiveDispatchTask, authorizedInventoryComplete } from "../src/generation-plan.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
+  assertReviewedOmissionDisposition,
   removeAdaptiveOverlays, evaluateAdaptiveProposal,
   type AdaptiveProposal } from "../src/adaptive-assignments.js";
 
@@ -367,6 +368,25 @@ test("raw Choice and Puzzle record counts never authorize erasing the last Story
     "composition:milestone.discovery", "review"];
   assert.doesNotThrow(() => admitAdaptiveAssignments(src),
     "a remaining authorized interactive specialist and final review can fulfill global promises");
+});
+test("a sealed, executable omission cannot be ignored in the controller's next plan", () => {
+  const unchanged = proposal([],
+    ["interactive:milestone.discovery", "composition:milestone.discovery", "review"]);
+  const alreadyReviewed = [{
+    assignmentId: "interactive:milestone.discovery", sourceSha: head,
+    path: "milestones/discovery.md", sourceHash: hashes["milestones/discovery.md"]!,
+    evidence: "milestones/discovery.md:12 Event-only review",
+    reviewerSession: "/private/review.jsonl", reviewerSnapshot: "f".repeat(64),
+  }];
+  assert.throws(() => assertReviewedOmissionDisposition(unchanged, inventory(), alreadyReviewed),
+    /reviewed|omission|sealed/i);
+  const addressed = proposal([{ kind: "omit", item: "interactive:milestone.discovery" }],
+    ["composition:milestone.discovery", "review"]);
+  assert.doesNotThrow(() => assertReviewedOmissionDisposition(addressed, inventory(), alreadyReviewed));
+  const noPending = inventory();
+  noPending.items.find(i => i.id === "interactive:milestone.discovery")!.status = "verified";
+  assert.doesNotThrow(() => assertReviewedOmissionDisposition(unchanged, noPending, alreadyReviewed),
+    "historical reviewed work does not force a duplicate omission");
 });
 test("unchanged source-bound independently reviewed omission survives unrelated verified descendants", () => {
   const p = proposal([{ kind: "omit", item: "interactive:milestone.discovery" }],

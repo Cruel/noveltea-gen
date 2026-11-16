@@ -18,7 +18,7 @@ import { nativeStoryMetrics, reviewArchitectureMetrics } from "./story-metrics.j
 import { dependencyGit } from "./dependency-state.js";
 import { pendingDigest } from "./pending-work-amendments.js";
 import { evaluateAdaptiveProposal, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
-  removeAdaptiveOverlays,
+  removeAdaptiveOverlays, assertReviewedOmissionDisposition,
   type AdaptiveProposal, type AdaptiveAdmission, type AdaptiveAmendment } from "./adaptive-assignments.js";
 import { emptyAdaptiveState, readAdaptiveState,
   assertAdaptiveSettled, beginAdaptiveAttempt, settleAdaptiveAttempt } from "./adaptive-state.js";
@@ -384,6 +384,7 @@ export async function reconcileAdaptiveWork(input: {
         const after = await verifySource(job, validation, original);
         if (pendingDigest(after.sourceHashes) !== pendingDigest(sourceHashes))
           throw Error("Adaptive source bytes changed during planning.");
+        assertReviewedOmissionDisposition(p, effective, omissionProofs);
         amendment = evaluateAdaptiveProposal(authorized(effective, p));
       } catch (error) {
         await settleAdaptiveAttempt(job, state, signature, "rejected", undefined, session);
