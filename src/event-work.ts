@@ -10,6 +10,7 @@ import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
 import { authorEventCluster, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
+  scopedDecisionSetupConflict, eventDecisionSetupCorrection,
   observedNondecisionMilestone,
   eventMilestoneBodyRestoreFeedback, type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
@@ -450,6 +451,7 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
   const configured = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
   const variant = configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" :
     configured === "no-write-evidence-once" ? rerouted ? "fulfilled" : "no-write-evidence" :
+    configured === "no-write-accounts-once" ? rerouted ? "fulfilled" : "no-write-accounts" :
     configured === "phantom-milestone" ? "decision-pending" : configured;
   const cluster = fixtureCluster(assignment.milestoneId);
   const files: string[] = [];
@@ -461,7 +463,7 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
       `---\nschema: '0.1'\ntype: event\nid: event.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${prose}\n`, { flag: "wx" });
     files.push(local);
   };
-  if (["no-write-prerequisite", "no-write-evidence", "no-write-dirty", "no-write-empty", "no-write-protected"].includes(variant)) {
+  if (["no-write-prerequisite", "no-write-evidence", "no-write-accounts", "no-write-dirty", "no-write-empty", "no-write-protected"].includes(variant)) {
     if (variant === "no-write-dirty") {
       await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
       await writeFile(join(job.worktreeStoryRoot, "events/uncertain-draft.md"), "Unapproved draft.\n");
@@ -471,8 +473,10 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
         ? ["Protected author approval for an out-of-scope new Milestone is required."] :
         variant === "no-write-evidence"
           ? ["The selected Milestone lacks the material evidence of which spaces and people were accessible during the relevant interval; the current Event does not establish it."] :
+        variant === "no-write-accounts"
+          ? ["The assigned Milestone requires conflicting accounts and an independent observation; canonical sources establish neither."] :
         ["A distinct Choice and authored ending are needed beyond this Event writer's scope."],
-      obligations: ["no-write-empty", "no-write-evidence"].includes(variant) ? [] :
+      obligations: ["no-write-empty", "no-write-evidence", "no-write-accounts"].includes(variant) ? [] :
         ["Arrange controller-approved interactive work before concluding the resolution."] };
   }
   if (["optional", "alternative-routes", "contradiction", "failed-repair", "repair"].includes(variant)) {
@@ -837,7 +841,10 @@ export async function runEventWorkItem(input: EventOptions) {
             const falseChoiceDeferral = candidate.claimedPaths.length > 0 &&
               scopedNondecisionChoiceDeferral(candidate.conflicts, sourceChange) &&
               !currentMilestoneChoiceBinding(candidate.obligations, assign.milestoneId, sourceChange);
-            if (candidate.conflicts.length && !localEvidenceGap && !falseChoiceDeferral)
+            const laterChoiceSetup = candidate.claimedPaths.length > 0 &&
+              scopedDecisionSetupConflict(assign, sourceChange, candidate.conflicts);
+            if (candidate.conflicts.length && !localEvidenceGap && !falseChoiceDeferral &&
+                !laterChoiceSetup)
               throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
             const authoredEventIds = draft.records
               .filter(record => paths!.includes(record.path) &&
@@ -848,6 +855,8 @@ export async function runEventWorkItem(input: EventOptions) {
             if (falseChoiceDeferral)
               return [eventNondecisionChoiceCorrection(
                 assign, candidate.conflicts, sourceChange, authoredEventIds)];
+            if (laterChoiceSetup)
+              return [eventDecisionSetupCorrection(assign, sourceChange, candidate.conflicts)];
             try {
               acceptance(draft, assign, paths!, candidate.obligations);
               const proof = await consequenceProof(job, draft, assign, paths!, candidate.obligations);

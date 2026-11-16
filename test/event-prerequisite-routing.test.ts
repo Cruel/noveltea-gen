@@ -29,6 +29,33 @@ test("S14 #173: the preserved access-interval no-write symptom is owned by a bou
   assert.doesNotMatch(route.task, /create new Character|write new Fact/i);
 });
 
+test("S14 #173: saved competing-accounts no-write report stays Event-local, not an invented World Fact", () => {
+  const report = "The assigned Milestone requires conflicting accounts and an independent observation " +
+    "relevant to their conflict. Canonical sources establish neither: the existing Event shows " +
+    "only the broken seal, open latch and normal-position brake handle. No supported account " +
+    "conflicts on a consequential point, and the existing observation cannot test one without " +
+    "inventing claims or off-screen history.";
+  const route = routeEventPrerequisite({
+    ...input, milestone: "milestone.accounts-tested",
+    conflicts: [report], obligations: [],
+  });
+  assert.equal(route.kind, "event-setup", "Current on-page testimony is an Event-owned creative task");
+  if (route.kind !== "event-setup") return;
+  assert.match(route.task, /materially DIFFERENT, attributable statements/);
+  assert.match(route.task, /distinct independent observation/);
+  assert.match(route.task, /new on-page testimony/);
+  assert.match(route.task, /subjective claims do not become objective World Facts/);
+  assert.match(route.task, /native-verified reachable Event IDs/);
+  for (const unsafe of [
+    report + " A new Fact is required to establish the observation.",
+    report + " Need a new Character to supply that testimony.",
+    report + " Another Milestone must be revised first.",
+    report + " A protected decision must be retconned.",
+  ]) assert.equal(routeEventPrerequisite({
+    ...input, milestone: "milestone.accounts-tested", conflicts: [unsafe], obligations: [],
+  }).kind, "replan-required", unsafe);
+});
+
 test("S14 #173: unsafe, mixed-owner, stale and vague access reports cannot grant a retry", () => {
   const scoped = {
     ...input, milestone: "milestone.disappearance-established",

@@ -35,7 +35,7 @@ export function routeEventPrerequisite(input: EventPrerequisiteInput): EventPrer
   // Event's current controller-validated assignment remains the entire grant.
   // In particular, requests for protected changes, new Records or an upstream
   // dependency are not silently interpreted as a missing downstream Choice.
-  const otherOwner = /\b(protected|approval|consent|out.of.scope|outside.scope|(?:another|other|different|earlier|previous) milestone|new character|new fact|new milestone|new arc|upstream|prior event|previous event|cannot author|cannot create event|(?:add|create|need) (?:an? )?(?:another |new |second )?(?:character|fact|arc|milestone)|missing (?:character|fact|arc|milestone))\b/i.test(details);
+  const otherOwner = /\b(protected|approval|consent|out.of.scope|outside.scope|(?:another|other|different|earlier|previous) milestone|new character|new fact|new milestone|new arc|upstream|prior event|previous event|earlier event|cannot author|cannot create event|(?:add|create|need) (?:an? )?(?:another |new |second )?(?:character|fact|arc|milestone)|missing (?:character|fact|arc|milestone))\b/i.test(details);
   if (otherOwner) {
     return { kind: "replan-required", reason: "The reported prerequisite may require upstream, protected or out-of-scope work; propose a controller-approved typed plan amendment." };
   }
@@ -46,18 +46,28 @@ export function routeEventPrerequisite(input: EventPrerequisiteInput): EventPrer
   // fulfillment: normal authoring, native validation and independent review
   // still decide whether the new Event actually supplies the evidence.
   if (scopedEventEvidenceConflict({ milestoneId: input.milestone }, input.conflicts)) {
+    const competingAccounts = /\b(?:conflicting|contradictory) accounts?\b|\bindependent observation\b/i.test(details);
+    const inSceneEvidence = competingAccounts
+      ? "In the assigned Event, introduce materially DIFFERENT, attributable statements " +
+        "from named EXISTING participants as dialogue the player can hear, then offer " +
+        "a distinct independent observation the PLAYER can inspect to test the " +
+        "specific disagreement. The writer may author new on-page testimony within " +
+        "this Event; subjective claims do not become objective World Facts, and " +
+        "unseen off-screen history cannot be asserted as settled truth. "
+      : "Author a reachable scene where the PLAYER witnesses the relevant evidence " +
+        "or hears named, EXISTING participants describe their own firsthand, " +
+        "uncertainty-qualified observations of accessible spaces and people " +
+        "during the relevant interval. A present empty room is not proof of " +
+        "past access; testimony is not omniscient fact. ";
     return { kind: "event-setup", reportDigest: input.reportDigest,
       task: "CONTROLLER-VERIFIED IN-SCOPE EVENT EVIDENCE REASSIGNMENT for " + input.milestone +
         ". The original Event specialist finished without changes because the selected Milestone " +
-        "lacks material in-scene evidence of access, location, timing or witness observation. " +
+        "lacks material in-scene evidence for the original Milestone requirement. " +
         "Its original authorized Event grant is sufficient to TRY an Event-local correction. " +
         "Use a NEW bounded Pi session, not the settled original session. " +
         "Read the exact existing Milestone and original Character/World canon. Within ONLY the " +
-        "already authorized Event records, author a reachable scene where the PLAYER witnesses " +
-        "the relevant evidence or hears named, EXISTING participants describe their own " +
-        "firsthand, uncertainty-qualified observations of accessible spaces and people " +
-        "during the relevant interval. A present empty room is not proof of past access; " +
-        "testimony is not omniscient fact. Do not manufacture prior observations, " +
+        "already authorized Event records, " + inSceneEvidence +
+        "Do not manufacture prior observations, " +
         "new Characters, World Facts, protected retcons, or other-owner edits. " +
         "For a nondecision Milestone, bind ONLY its authorized completeness and " +
         "fulfillment.any_of fields to REAL, native-verified reachable Event IDs " +

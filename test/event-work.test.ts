@@ -13,6 +13,7 @@ import {
   canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
   eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
+  scopedDecisionSetupConflict, eventDecisionSetupCorrection,
   observedNondecisionMilestone, eventMilestoneBodyRestoreFeedback,
 } from "../src/event-specialist.js";
 
@@ -232,6 +233,40 @@ test("nondecision Milestone authority metadata does not require a formal Choice 
   assert.equal(scopedNondecisionChoiceDeferral([conflict], ""), false);
   assert.throws(() => eventNondecisionChoiceCorrection(assignment,
     ["The author expressly requires a formal Choice Point"], observed), /cannot be downgraded/);
+});
+
+test("a real Choice Milestone can commit an Event setup without falsely claiming enacted outcomes", () => {
+  const assigned = {
+    milestoneId: "milestone.choice-enacted",
+    milestonePath: "milestones/choice-enacted.md",
+  };
+  const source = "The player enacts a consequential decision with outcomes that change " +
+    "what happens aboard the stranded train and which evidence remains available.";
+  const exact = "The selected Milestone is explicitly decision-dependent: it requires " +
+    "an enacted consequential response and outcomes that change what happens aboard. " +
+    "The current Event is a setup only, so binding it as fulfillment or marking the " +
+    "Milestone complete would falsely claim the decision occurred. " +
+    "milestones/choice-enacted.md remains partial with empty fulfillment.any_of.";
+  assert.equal(scopedDecisionSetupConflict(assigned, source, [exact]), true);
+  const correction = eventDecisionSetupCorrection(assigned, source, [exact]);
+  assert.match(correction, /PRE-DECISION setup/);
+  assert.match(correction, /MUST remain partial/);
+  assert.match(correction, /laterObligations/);
+  assert.match(correction, /SAME Pi session/);
+  assert.doesNotMatch(correction, /mark .*complete.*now/i);
+  assert.equal(eventEvidenceRetryAllowed(2, [correction]), true);
+  assert.equal(eventEvidenceRetryAllowed(3, [correction]), false);
+  assert.equal(scopedDecisionSetupConflict(assigned,
+    "The player observes clues and identifies a missing passenger.", [exact]), false);
+  for (const bad of [
+    exact + " A protected author decision must change.",
+    exact + " A new Character is required to enact the outcome.",
+    exact + " An earlier Event requires revision.",
+    "Another Milestone has missing evidence and a Choice is required.",
+  ]) assert.equal(scopedDecisionSetupConflict(assigned, source, [bad]), false, bad);
+  assert.equal(scopedDecisionSetupConflict(assigned, source, []), false);
+  assert.throws(() => eventDecisionSetupCorrection(assigned, source,
+    ["We need an unrelated new World Fact"]), /cannot be reclassified/);
 });
 
 test("Event prompt distinguishes material nondecision evidence from later Choice binding", () => {

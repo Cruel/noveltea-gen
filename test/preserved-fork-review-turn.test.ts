@@ -9,8 +9,61 @@ import { startStoryJob } from "../src/job.js";
 import { collectRecoveryFork } from "../src/recovery-fork.js";
 import { readReviewTurnEvidence, projectReviewTurn } from "../src/fork-review-turn.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { verifyCertifiedRecoveryLineage } from "../src/certification-lineage.js";
 
 const root = process.env.NT_TEST_PRESERVED_FORK_REVIEW_ROOT;
+
+test(
+  "reviewed first Event can become the exact source of a second isolated historical fork",
+  { skip: !root && "Set NT_TEST_PRESERVED_FORK_REVIEW_ROOT to a saved certification root" },
+  async () => {
+    const saved = JSON.parse(readFileSync(join(root!, "certification-source.json"), "utf8")) as {
+      storyRoot: string;
+    };
+    const original = await startStoryJob(
+      { story: saved.storyRoot, job: "a4166778-a74d-4128-a283-95accc8705f1" },
+      false,
+    );
+    const parent = await startStoryJob(
+      { story: saved.storyRoot, job: "9836aacc-99ca-4f58-b101-b010c2887b72" },
+      false,
+    );
+    const lineage = await verifyCertifiedRecoveryLineage(original, parent);
+    assert.equal(lineage?.hops.length, 1);
+    assert.equal(lineage?.terminalJobId, parent.jobId);
+    const checkpoint = (await inspectRecoveryCheckpoints(parent)).find(
+      (point) => point.commitSha === "3e753836cc70144c2497add8f5662dad67e7bdea",
+    );
+    assert.ok(checkpoint?.eligible && checkpoint.assurance);
+    assert.equal(checkpoint.semanticReview, "passed");
+    const approved = await readReviewTurnEvidence(parent);
+    assert.ok(approved);
+    const nested = await collectRecoveryFork(
+      parent,
+      "bcd45d21-8669-4a36-9d96-e2c364187e77",
+      checkpoint.commitSha,
+      approved.contract,
+      process.env.NT_STUDIO_SKILLS_SOURCE,
+    );
+    assert.equal(nested.checkpoint.commitSha, checkpoint.commitSha);
+    assert.equal(nested.sourceJobId, parent.jobId);
+    assert.equal(
+      nested.reviewTurn?.source.verifiedSha,
+      original.baseSha,
+      "The original author Turn remains the canonical reviewer evidence",
+    );
+    assert.equal(
+      nested.reviewCoverage.find((entry) => entry.commitSha === checkpoint.commitSha)?.status,
+      "passed",
+    );
+    const projected = projectReviewTurn(nested.reviewTurn!, {
+      jobId: nested.childId,
+      baseSha: checkpoint.commitSha,
+    } as typeof parent);
+    assert.equal(projected.source.verifiedSha, checkpoint.commitSha);
+    assert.equal(projected.source.jobId, nested.childId);
+  },
+);
 
 test(
   "verified historical Character checkpoint admits a review-only original Turn for new Event work",

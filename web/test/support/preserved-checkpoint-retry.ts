@@ -10,6 +10,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createServer as createNetServer } from 'node:net'
 import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
+import { verifyCertifiedRecoveryLineage } from '../../../src/certification-lineage'
 import type { JobStartResult } from '../../../src/job'
 import { createStudioAuth } from '../../src/lib/auth'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../../src/lib/pi-credentials.server'
@@ -70,8 +71,14 @@ export async function inspectPreservedCheckpointRetry(args: {
   const sourceThread = await store.persistence.advancedThreads.sourceThread(source.ownerId, sourceId)
   assert.ok(sourceThread, 'Source execution has no verified Story Thread')
   const originalThread = await store.persistence.advancedThreads.sourceThread(source.ownerId, source.jobId)
-  assert.equal(sourceThread.id, originalThread?.id,
-    'Checkpoint retry must remain in the original visible Thread')
+  if (process.env.NT_TEST_WEB_PI_RETRY_ISOLATED === '1' && sourceId !== source.jobId) {
+    const lineage = await verifyCertifiedRecoveryLineage(original, parent)
+    assert.ok(lineage?.hops.length && lineage.terminalJobId === parent.jobId,
+      'Historical fork source must have a complete verified lineage to the original Story')
+  } else {
+    assert.equal(sourceThread.id, originalThread?.id,
+      'Same-Thread retry cannot silently select an unrelated descendant Thread')
+  }
   const latest = await store.persistence.advancedThreads.run(source.ownerId, sourceThread.id, 'last')
   assert.ok(latest, 'Original Thread has no execution')
   return { source, sourceId, parent, original, checkpoint, sourceThread, latest }

@@ -98,6 +98,52 @@ export function scopedNondecisionChoiceDeferral(
     !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|new character|new fact|new milestone|unreachable|impossible)\b/i.test(text));
 }
 
+/** A true decision-dependent Milestone still needs a playable Event setup
+ * BEFORE its Choice specialist enacts branches. A model must not turn that
+ * later, separately owned Choice into an Event-writing conflict. The source
+ * change must independently confirm this is actually a decision Milestone. */
+export function scopedDecisionSetupConflict(
+  assignment: Pick<EventAssignment, "milestoneId">,
+  sourceChange: string,
+  conflicts: readonly string[],
+): boolean {
+  return /\b(?:choos(?:e|es|ing)|choice|decid(?:e|es|ing)|decision|enact(?:ed|s)?|outcomes?|consequential response)\b/i.test(sourceChange) &&
+    conflicts.length > 0 && conflicts.length <= 3 && conflicts.every(text => {
+      const named = text.match(/\bmilestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*\b/g) ?? [];
+      const current = named.length
+        ? named.every(id => id === assignment.milestoneId)
+        : /\b(?:the|this|selected|assigned|current)\s+milestone\b/i.test(text);
+      return current &&
+        /\b(?:choice|decision|enact(?:ed|s)?|outcomes?|consequential response)\b/i.test(text) &&
+        /\b(?:setup|partial|unbound|not yet enacted|falsely claim|empty fulfillment)\b/i.test(text) &&
+        !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|earlier event|(?:another|other|different) milestone|new character|new fact|new milestone|cannot author|cannot create event|missing character|missing fact|unreachable|impossible)\b/i.test(text);
+    });
+}
+
+export function eventDecisionSetupCorrection(
+  assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
+  sourceChange: string, conflicts: readonly string[],
+): string {
+  if (!scopedDecisionSetupConflict(assignment, sourceChange, conflicts))
+    throw Error("An actual upstream or protected Event conflict cannot be reclassified.");
+  return "EVENT_LOCAL_CHOICE_SETUP: The authorized Event unit for " + assignment.milestoneId +
+    " must establish a reachable, player-visible PRE-DECISION setup. The source Milestone " +
+    "truly REQUIRES an enacted consequential Choice, so DO NOT mark " +
+    assignment.milestonePath + " complete or bind invented fulfillment.any_of outcomes here. " +
+    "This Milestone MUST remain partial with its unfulfilled routes empty. " +
+    "The formal Choice Point and enacted outcomes belong to the LATER interactive owner, " +
+    "not this Event assignment; their absence is NOT an architectural blocker to " +
+    "a genuinely authored Event setup. In this SAME Pi session, preserve any " +
+    "already-authored valid, authorized Event edits and improve their causal setup " +
+    "only if needed. Re-read the source change and exact Event, run story_validate, " +
+    "then report the FULL cumulative modifiedRecords and transfer formal Choice " +
+    "binding/outcome requirements to laterObligations instead of architecturalConflicts. " +
+    "Do NOT suppress a genuine other-owner dependency or invent protected edits, " +
+    "new Character/World canon, future choices or events that never occurred. " +
+    "The independent Event reviewer must still check this committed setup. " +
+    "SOURCE REPORT: " + JSON.stringify(conflicts).slice(0, 1400);
+}
+
 export function eventNondecisionChoiceCorrection(
   assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
   conflicts: readonly string[], sourceChange: string,
@@ -159,9 +205,9 @@ export function scopedEventEvidenceConflict(
       : /\b(?:the|this|selected|assigned|current)\s+milestone\b/i.test(text);
     return current &&
       /\b(?:validator|milestone|fulfillment|reachable)\b/i.test(text) &&
-      /\b(?:does not establish|lacks?|missing|not yet established|insufficient)\b/i.test(text) &&
+      /\b(?:does not establish|lacks?|missing|not yet established|insufficient|sources? establish(?:es|ed)? neither|no supported (?:account|observation|evidence))\b/i.test(text) &&
       /\b(?:evidence|observation|testimony|witness|access|time|interval|material clause|support|route)\b/i.test(text) &&
-      !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|cannot (?:author|create)|need (?:an? )?(?:new|another|second) (?:fact|character|arc|milestone|event)|(?:new|another|second) (?:fact|character|arc|milestone|event) (?:is )?(?:required|needed))\b/i.test(text);
+      !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|earlier event|(?:another|other|different) milestone|cannot (?:author|create)|need (?:an? )?(?:new|another|second) (?:fact|character|arc|milestone|event)|(?:new|another|second) (?:fact|character|arc|milestone|event) (?:is )?(?:required|needed))\b/i.test(text);
   });
 }
 
@@ -248,7 +294,8 @@ export function eventEvidenceRetryAllowed(attempt: number, diagnostics: readonly
   return Number.isInteger(attempt) && (attempt === 0 || attempt === 1 ||
     attempt === 2 && diagnostics.length > 0 &&
     diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:") ||
-      message.startsWith("EVENT_MILESTONE_BODY_RESTORE:")));
+      message.startsWith("EVENT_MILESTONE_BODY_RESTORE:") ||
+      message.startsWith("EVENT_LOCAL_CHOICE_SETUP:")));
 }
 
 /** Pure production prompt for fixture comparison and controller-contract tests. */
@@ -539,10 +586,23 @@ export async function authorEventCluster(
       const localEvidence = diagnostics.length > 0 &&
         diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:") ||
           message.startsWith("EVENT_MILESTONE_BODY_RESTORE:"));
+      const choiceSetup = diagnostics.length > 0 &&
+        diagnostics.every(message => message.startsWith("EVENT_LOCAL_CHOICE_SETUP:"));
       if (!eventEvidenceRetryAllowed(attempt, diagnostics))
         throw new Error("Event specialist exhausted bounded repair attempts: " + JSON.stringify(diagnostics));
       if (attempt === 2) extraEvidenceCorrection = true;
-      prompt = localEvidence
+      prompt = choiceSetup
+        ? "IN-SCOPE CHOICE-DEPENDENT EVENT SETUP ONLY. This original Event " +
+          "assignment owns reachable pre-decision setup, NOT enacted Choice " +
+          "outcomes. The selected decision Milestone MUST remain partial " +
+          "until its later Choice specialist has verified enactment. " +
+          "Do not change protected decisions or other-owner records; no " +
+          "new writing scope has been authorized. Correct your false " +
+          "architecturalConflict in this SAME Pi session while preserving " +
+          "actual downstream obligations and complete modifiedRecords. " +
+          "Run story_validate and return the full cumulative manifest. " +
+          "Controller findings:\n" + diagnostics.join("\n")
+        : localEvidence
         ? "IN-SCOPE EVENT EVIDENCE OR MILESTONE-BODY RESTORATION ONLY. Keep the original " +
           "Milestone, approved cast, protected facts and event-scope permissions. " +
           "Do not convert this evidence deficit into an upstream approval request, " +

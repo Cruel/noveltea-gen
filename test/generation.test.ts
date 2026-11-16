@@ -653,6 +653,33 @@ test("S14 #173: clean unmet access evidence gets one authorized Event reassignme
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
 });
 
+test("S14 #173: competing-account evidence no-write gets one Event-local retry without replay", {
+  skip: !available,
+}, () => {
+  const f = setup("event-local-competing-accounts");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-accounts-once" });
+  const result = f.cli(f.start);
+  assert.equal(result.inventory.items.find((i: any) =>
+    i.id === "event:milestone.disclosure")?.status, "verified");
+  const receiptPath = join(f.job.stateDir, "event-items/disclosure.json");
+  const saved = readFileSync(receiptPath, "utf8");
+  const receipt = JSON.parse(saved);
+  assert.equal(receipt.phase, "committed");
+  assert.match(receipt.reroutedTask, /independent observation/);
+  assert.match(receipt.reroutedTask, /new on-page testimony/);
+  const previous = JSON.parse(readFileSync(join(f.job.stateDir,
+    "event-prerequisite-history/disclosure-" + receipt.reroutedFrom + ".json"), "utf8"));
+  assert.equal(previous.phase, "prerequisite-reported");
+  assert.deepEqual(previous.claimedPaths, []);
+  assert.deepEqual(previous.obligations, []);
+  assert.match(previous.conflicts[0], /sources establish neither/);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  f.cli(["generate", "resume"]);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(receiptPath, "utf8"), saved);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
 test("rerouted Event task and original receipt remain immutable across recovery", { skip: !available }, () => {
   const f = setup("event-prerequisite-immutable");
   Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-once" });
