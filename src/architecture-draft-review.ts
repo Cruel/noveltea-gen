@@ -87,8 +87,11 @@ export async function reviewArchitectureDraft(
         skills.some(s => s.name === name && s.filePath.startsWith(join(snapshot.path, "skills") + sep))))
     throw Error("Independent Architecture draft feedback lacks pinned method resources.");
   const runtime = await createJobModelRuntime();
+  const reviewStep = "architecture:precommit-review:" + plan.version + ":" + iteration;
   const context = await preparePiContext(job, project, {
-    group: "architecture:precommit-review", step: "architecture:precommit-review:" + plan.version + ":" + iteration,
+    // A separate correction round needs a separate read-only reviewer session,
+    // even when all verdicts are recorded in the same transcript directory.
+    group: reviewStep, step: reviewStep,
     paths: [], snapshot: snapshot.id, provider, model,
     directory: join(job.stateDir, "architecture-draft-review-sessions"),
     // The writer owns the lease and has an uncommitted draft: do not wait for

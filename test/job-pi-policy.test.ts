@@ -140,6 +140,37 @@ test("completed related sessions fork the saved prefix into their own work-item 
   assert.equal(git(reopened.worktreeRoot, "rev-parse", "HEAD"), job.baseSha);
 });
 
+test("independent blueprint review rounds use fresh Pi sessions despite sharing a transcript directory", async () => {
+  const { job, project } = await fixture();
+  const directory = join(job.stateDir, "architecture-blueprint-review-sessions");
+  const review = (iteration: number) => ({
+    ...options(job, "blueprint-review:1:" + iteration, [], "blueprint-review:1:" + iteration),
+    directory,
+  });
+  const first = await preparePiContext(job, project, review(0), runtime());
+  first.manager.appendMessage({
+    role: "user", content: "Prior review confidential finding", timestamp: Date.now(),
+  });
+  const firstFile = first.manager.getSessionFile()!;
+  await first.completed(firstFile, first.manager.getSessionId());
+  const second = await preparePiContext(job, project, review(1), runtime());
+  const secondFile = second.manager.getSessionFile()!;
+  assert.notEqual(second.manager.getSessionId(), first.manager.getSessionId());
+  assert.notEqual(secondFile, firstFile);
+  assert.match(secondFile, /architecture-blueprint-review-sessions\//);
+  second.manager.appendMessage({
+    role: "user", content: "Second independent review", timestamp: Date.now(),
+  });
+  assert.doesNotMatch(readFileSync(secondFile, "utf8"), /Prior review confidential finding/,
+    "independent reviewers must not inherit another reviewer's critique");
+  assert.match(second.contextNote, /Starting a fresh scoped specialist conversation/);
+  await second.completed(secondFile, second.manager.getSessionId());
+  const third = await preparePiContext(job, project, review(2), runtime());
+  assert.notEqual(third.manager.getSessionId(), second.manager.getSessionId());
+  assert.notEqual(third.manager.getSessionFile(), secondFile);
+  assert.notEqual(third.manager.getSessionFile(), firstFile);
+});
+
 test("changed source versions supersede prior context and significant redesign restarts", async () => {
   const { job, project } = await fixture();
   const paths = ["events/test.md", "arcs/test.md"];

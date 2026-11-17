@@ -462,7 +462,25 @@ identifiers together. They do not rewrite, waive or autoapprove any patch.
 The Architecture failure receipt now distinguishes a settled
 `invalid-plan` patch rejection from genuinely `interrupted` Pi work,
 so the inspection/recovery advice can identify the correct failure class.
-Next live check must use the corrected prompt; #181 remains OPEN.
+The corrected-prompt diagnostic on `f1b38cb` then accepted patch 1
+without a finding-ID violation; the independent reviewer feedback fell
+from eight findings to three, and after patch 2 the model returned
+a `pass` verdict on the complete blueprint. **The approval is still not
+recoverable or certified:** inspection of all three reviewer receipts
+found they pointed at the same Pi session ID and JSONL file. The common
+`preparePiContext` policy reused its prior session by `group`, ignoring
+the distinct review `step`. The source-bound checkpoint verifier and
+offline replay correctly rejected this non-independent review lineage;
+the Foundation Git SHA and all private evidence remained unchanged.
+The architecture blueprint reviewer now uses a distinct
+`group=step` for each review iteration, yielding independent sessions
+without sharing previous reviewers' messages. The same group-key mistake
+in the early precommit Architecture review was corrected. A real-Git
+policy regression checks independent session IDs/files and no previous
+review content in the next round. **Neither the invalid historical
+approval pin nor its transcripts are rewritten or silently promoted.**
+A new checkpoint continuation is required to verify the corrected
+independence semantics in real Pi. #181 remains OPEN.
 
 ## Adaptive Story profile gate (#181, opt-in only)
 

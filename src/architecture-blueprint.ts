@@ -362,7 +362,11 @@ async function sessionFor(
     throw Error("Causal blueprint session lacks pinned skills.");
   const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
-    group: directory, step, paths: [], snapshot: snapshot.id, provider, model,
+    // Context reuse is keyed by group, not by step. Each independent reviewer
+    // must have a unique group, even though transcripts share a directory.
+    // Otherwise preparePiContext reopens the prior reviewer's same Pi session,
+    // violating independent critique and approved-pin provenance.
+    group: step, step, paths: [], snapshot: snapshot.id, provider, model,
     directory: join(job.stateDir, directory),
     // Planning and review happen before canonical writing: each model call
     // must honor normal job budget gates rather than the in-writer exemption.
