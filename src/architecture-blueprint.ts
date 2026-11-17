@@ -343,6 +343,22 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
   return { blueprint, pin: record };
 }
 
+/** Reserve one new independent reviewer identity before issuing ANY model call.
+ * Review independence must fail at the actual expensive boundary, not only
+ * after a passing blueprint has been persisted and reopened. */
+export function reserveIndependentBlueprintReviewer(
+  planner: { id: string; file: string },
+  reviewer: { id: string; file: string },
+  prior: Set<string>,
+) {
+  if (!reviewer.id || !reviewer.file || !planner.id || !planner.file ||
+      reviewer.id === planner.id || reviewer.file === planner.file ||
+      prior.has(reviewer.id) || prior.has(reviewer.file))
+    throw Error("Independent causal blueprint reviewer reused a prior Pi session or transcript.");
+  prior.add(reviewer.id);
+  prior.add(reviewer.file);
+}
+
 /** A reviewer must be a separate read-only Pi session. All prompts and source
  * readers use the pinned sandbox; no model has authority to write Story bytes. */
 async function sessionFor(
@@ -702,6 +718,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     };
     await immutable(stagesPath(job, plan.version), stagesReceipt);
     let previous: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined;
+    const reviewedSessions = new Set<string>();
     for (let version = 0; version <= MAX_CORRECTIONS; version++) {
       let blueprint: CausalBlueprint;
       if (version === 0) {
@@ -722,7 +739,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
             "ORIGINAL findingBeatId even when modifying one of its descendant " +
             "targetBeatIds. Do not use the target beat's own ID as the findingBeatId " +
             "unless the reviewer actually issued a finding at that beat. " +
-            ". Do not regenerate the original blueprint. Return the COMPLETE corrected " +
+            "Do not regenerate the original blueprint. Return the COMPLETE corrected " +
             "JSONL: line one an object with schema,baseDigest,reviewDigest; " +
             "following lines one complete JSON operation per line. " +
             "Use exact old text and reviewed finding IDs; preserve all prior " +
@@ -739,6 +756,11 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         "blueprint-review:" + plan.version + ":" + version, "architecture-blueprint-review-sessions");
       let verdict: BlueprintReview;
       try {
+        reserveIndependentBlueprintReviewer(
+          { id: planner.session.sessionId, file: planner.file },
+          { id: reviewer.session.sessionId, file: reviewer.file },
+          reviewedSessions,
+        );
         await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
           reviewPrompt(plan, blueprint, manifest!, task, outline));
         verifyReadSources(reviewer.session.messages, reviewer.project.root, snapshot);

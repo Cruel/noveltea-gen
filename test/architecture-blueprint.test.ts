@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyBlueprintFailure, parseBlueprintReview, parseCausalBlueprint, readApprovedBlueprint,
-  type CausalBlueprint, type BlueprintPin } from "../src/architecture-blueprint.js";
+  reserveIndependentBlueprintReviewer, type CausalBlueprint, type BlueprintPin } from "../src/architecture-blueprint.js";
 import { buildBlueprintObligations } from "../src/architecture-blueprint-obligations.js";
 import { applyBlueprintPatch } from "../src/architecture-blueprint-patch.js";
 import type { JobStartResult } from "../src/job.js";
@@ -36,6 +36,22 @@ const example: CausalBlueprint = {
 };
 const digest = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+test("blueprint rejects repeated reviewer identity before a second independent model call", () => {
+  const prior = new Set<string>();
+  const planner = { id: "planner", file: "/state/planner.jsonl" };
+  reserveIndependentBlueprintReviewer(planner,
+    { id: "review-0", file: "/state/review-0.jsonl" }, prior);
+  assert.throws(() => reserveIndependentBlueprintReviewer(planner,
+    { id: "review-0", file: "/state/review-0.jsonl" }, prior), /reused a prior Pi session/);
+  assert.throws(() => reserveIndependentBlueprintReviewer(planner,
+    { id: "review-1", file: "/state/review-0.jsonl" }, prior), /reused a prior Pi session/);
+  assert.throws(() => reserveIndependentBlueprintReviewer(planner,
+    { id: "planner", file: "/state/review-new.jsonl" }, prior), /reused a prior Pi session/);
+  reserveIndependentBlueprintReviewer(planner,
+    { id: "review-1", file: "/state/review-1.jsonl" }, prior);
+  assert.equal(prior.size, 4);
+});
 
 test("invalid reviewed patch output is distinguished from interrupted model work", () => {
   assert.equal(classifyBlueprintFailure("Blueprint patch refers to a missing reviewer finding: x."),

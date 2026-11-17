@@ -477,7 +477,10 @@ The architecture blueprint reviewer now uses a distinct
 without sharing previous reviewers' messages. The same group-key mistake
 in the early precommit Architecture review was corrected. A real-Git
 policy regression checks independent session IDs/files and no previous
-review content in the next round. **Neither the invalid historical
+review content in the next round. New blueprint approval also fails
+**before** the next expensive reviewer model call if the planner or a
+previous review identity/file recurs; this is not deferred until final
+checkpoint restoration. **Neither the invalid historical
 approval pin nor its transcripts are rewritten or silently promoted.**
 A new checkpoint continuation is required to verify the corrected
 independence semantics in real Pi. #181 remains OPEN.
