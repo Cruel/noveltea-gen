@@ -261,6 +261,30 @@ This deterministic work requires two **new, complete** real Luna profile
 runs and a recovery exercise before #181 can close. Earlier failed
 Architecture certification attempts remain negative evidence.
 
+**November 17, 2026 implementation and live findings:** The Architecture
+blueprint subgraph, immutable draft/review evidence, private source-bound
+approval pin, source/skill/session verification and committed-checkpoint
+provenance were shipped in `7d63cd2`. Additional corrections permit a beat
+to omit an empty decision list, use one global 24,000-byte blueprint ceiling
+rather than unrelated per-field prose limits, apply normal Pi budget checks
+before any private planning/review model call, and retain exact fail-closed
+planning diagnostics. Structural regression tests pass. Replay of the
+preserved real-Pi planner responses confirms that the previously rejected
+JSON is now structurally accepted; this does **not** grant semantic approval.
+
+Fresh real Luna narrative-led and choice-heavy runs reached private
+blueprint planning and separate independent reviewers. Their verified
+Foundation checkpoints were then resumed using same-Thread, source-bound
+recovery forks without repeating discovery or exact author approval.
+The continuation reviewers identified material defects: the narrative-led
+design still left unsupported causal promises after two corrections, while
+the choice-heavy corrections did not preserve enough actionable Choice
+evidence or proper causal support. Both continuations remained blocked
+before any new Architecture commit. The failed drafts, verdicts and original
+Pi sessions remain private and preserved. Neither full production-shaped
+adaptive profile, its final semantic quality gate, nor the independent
+end-to-end Story certification has passed. Keep #181 OPEN.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

@@ -65,13 +65,16 @@ test("narrative-only beats may omit decisions without weakening evidence or unkn
   assert.throws(() => parseCausalBlueprint(JSON.stringify(extraneous)), /beat relationships/);
 });
 
-test("reviewed resolution can explain several outcomes without exceeding the bounded plan", () => {
+test("a single total-size ceiling avoids arbitrary paragraph-length rejections", () => {
   const extended = clone(example);
-  extended.resolution.conclusion = "Evidence supports a finding. ".repeat(60);
+  extended.resolution.conclusion = "Evidence supports a finding. ".repeat(100);
+  extended.beats[0]!.change = "The verified evidence changes the next objective. ".repeat(34);
   assert.equal(parseCausalBlueprint(JSON.stringify(extended)).resolution.conclusion.length,
     extended.resolution.conclusion.length);
-  extended.resolution.conclusion = "Long claims are still bounded. ".repeat(100);
-  assert.throws(() => parseCausalBlueprint(JSON.stringify(extended)), /resolution/);
+  assert.equal(parseCausalBlueprint(JSON.stringify(extended)).beats[0]!.change,
+    extended.beats[0]!.change);
+  extended.resolution.conclusion = "Many claims. ".repeat(3000);
+  assert.throws(() => parseCausalBlueprint(JSON.stringify(extended)), /bounded size/);
 });
 
 test("decisions require alternatives with lasting consequences", () => {

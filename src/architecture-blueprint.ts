@@ -76,13 +76,15 @@ function parseJson(text: string): unknown {
 export function parseCausalBlueprint(text: string): CausalBlueprint {
   const value = parseJson(text);
   if (!strict(value, ["schema", "premise", "beats", "resolution"]) ||
-      value.schema !== "noveltea-causal-blueprint/v1" || !nonempty(value.premise, 1500) ||
+      value.schema !== "noveltea-causal-blueprint/v1" || !nonempty(value.premise, MAX_BLUEPRINT_BYTES) ||
       !Array.isArray(value.beats) || value.beats.length < 2 || value.beats.length > 16 ||
       !strict(value.resolution, ["question", "conclusion", "supportedBy", "uncertainty"]))
     throw Error("Invalid bounded causal blueprint structure.");
   const resolution = value.resolution;
-  if (!nonempty(resolution.question) || !nonempty(resolution.conclusion, 2400) ||
-      !nonempty(resolution.uncertainty, 1200) || !Array.isArray(resolution.supportedBy) ||
+  if (!nonempty(resolution.question, MAX_BLUEPRINT_BYTES) ||
+      !nonempty(resolution.conclusion, MAX_BLUEPRINT_BYTES) ||
+      !nonempty(resolution.uncertainty, MAX_BLUEPRINT_BYTES) ||
+      !Array.isArray(resolution.supportedBy) ||
       !resolution.supportedBy.length || resolution.supportedBy.length > 16)
     throw Error("Causal blueprint resolution requires a question, supported conclusion and explicit uncertainty.");
   const seen = new Set<string>();
@@ -91,7 +93,8 @@ export function parseCausalBlueprint(text: string): CausalBlueprint {
     const beatKeys = ["id", "purpose", "dependsOn", "observations", "change"];
     if ((!strict(beat, [...beatKeys, "decisions"]) && !strict(beat, beatKeys)) ||
         typeof beat.id !== "string" || !SLUG.test(beat.id) || seen.has(beat.id) ||
-        !nonempty(beat.purpose, 1200) || !nonempty(beat.change, 1200) ||
+        !nonempty(beat.purpose, MAX_BLUEPRINT_BYTES) ||
+        !nonempty(beat.change, MAX_BLUEPRINT_BYTES) ||
         !Array.isArray(beat.dependsOn) || beat.dependsOn.length > 8 ||
         beat.dependsOn.some((id: unknown) => typeof id !== "string" || !seen.has(id)) ||
         new Set(beat.dependsOn).size !== beat.dependsOn.length ||
@@ -105,16 +108,19 @@ export function parseCausalBlueprint(text: string): CausalBlueprint {
     const decisions = beat.decisions as unknown[];
     for (const observation of beat.observations) {
       if (!strict(observation, ["source", "observable", "supports", "limits"]) ||
-          !["source", "observable", "supports", "limits"].every(key => nonempty(observation[key], 1200)))
+          !["source", "observable", "supports", "limits"].every(key =>
+            nonempty(observation[key], MAX_BLUEPRINT_BYTES)))
         throw Error("Causal blueprint evidence must separate source, observation, support and limits.");
       observations++;
     }
     for (const decision of decisions) {
-      if (!strict(decision, ["question", "alternatives"]) || !nonempty(decision.question) ||
+      if (!strict(decision, ["question", "alternatives"]) ||
+          !nonempty(decision.question, MAX_BLUEPRINT_BYTES) ||
           !Array.isArray(decision.alternatives) || decision.alternatives.length < 2 ||
           decision.alternatives.length > 5 || decision.alternatives.some((alt: unknown) =>
             !strict(alt, ["action", "lastingEffect"]) ||
-            !nonempty(alt.action, 700) || !nonempty(alt.lastingEffect, 700)))
+            !nonempty(alt.action, MAX_BLUEPRINT_BYTES) ||
+            !nonempty(alt.lastingEffect, MAX_BLUEPRINT_BYTES)))
         throw Error("Causal blueprint decisions need distinct, lasting alternatives.");
     }
     seen.add(beat.id);
@@ -294,9 +300,9 @@ function blueprintPrompt(plan: Plan, task: string) {
     "single optional field is equivalent to [], no other fields are optional." +
     "resolution:{question:string,conclusion:string,supportedBy:[evidence beat slugs]," +
     "uncertainty:string}}. Use standard JSON double quotes. 2–16 beats. " +
-    "Keep the resolution conclusion under 2400 characters, each beat change " +
-    "and evidence explanation under 1200 characters, and the entire JSON " +
-    "under 24000 bytes; concise causal details, no filler.";
+    "Keep the entire JSON under 24000 UTF-8 bytes. Be concise; " +
+    "the one total-size ceiling, not arbitrary paragraph lengths, is enforced. " +
+    "Do not omit protected Choices or change their lasting consequences; no filler.";
 }
 function reviewPrompt(plan: Plan, blueprint: CausalBlueprint) {
   return "You are an INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER. " +
