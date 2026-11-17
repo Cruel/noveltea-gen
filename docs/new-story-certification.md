@@ -563,8 +563,32 @@ responses were replayed read-only against the preserved six-beat
 header using the corrected parser: the expected two beat IDs were
 accepted verbatim, without editing any original source/response or
 making a new Pi call. The regression suite covers whitespace and
-negative shape cases. The remaining full Story semantic/recovery
-gates have not passed. #181 stays OPEN.
+negative shape cases.
+
+**Further real-Pi evidence on `ff55dc6` (not certified):** One
+same-Thread continuation from the original verified Foundation
+checkpoint successfully persisted the full seven-beat provisional
+causal header/core, all four immutable beat-detail batches, six
+exact indexed Choice consequences, all four independent evidence
+batches, and source-quoted proof obligations. The private
+`noveltea-blueprint-stages/v3` receipt successfully bound and
+assembled these stages, and a **new independent Pi reviewer** issued
+the first semantic verdict. It returned `revise` with six concrete
+findings: insufficient independently synchronized bell/death timing;
+physical-access traces incorrectly inferring murder responsibility;
+weak corroboration that the accused read the incriminating draft;
+no-contact routes that implicitly acquire the source's identity;
+public testimony without release authorization; and an unjustified
+60–90-minute single-route target. This is an appropriate semantic
+rejection, not another JSON/schema failure. Its exact private verdict
+is saved as
+`.local/certification/replay/issue-181-v3-narrative-first-review`
+and passes deterministic replay without Pi. The source-bound original
+draft, reviewer transcript, and every intermediate stage remain
+preserved. At this evidence snapshot, the bounded first correction
+was still running and had not been accepted or independently rereviewed.
+No Architecture Story write, whole-Story completion, or certification
+pass may be inferred. #181 remains OPEN.
 
 ## Adaptive Story profile gate (#181, opt-in only)
 
