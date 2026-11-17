@@ -45,7 +45,19 @@ export function routeEventPrerequisite(input: EventPrerequisiteInput): EventPrer
   // This classification grants NO additional records, permissions or verified
   // fulfillment: normal authoring, native validation and independent review
   // still decide whether the new Event actually supplies the evidence.
-  if (scopedEventEvidenceConflict({ milestoneId: input.milestone }, input.conflicts)) {
+  // A clean no-write specialist may report BOTH the material source gap and
+  // a separate neutral status line saying it made no edits. The latter is
+  // not a second causal claim and must not prevent a bounded Event-local
+  // reassignment, provided the actual deficit is source-anchored and every
+  // line remains free of other-owner/protected scope requests. Do NOT strip
+  // a genuine second conflict or allow status prose to create authority.
+  const neutralNoWriteStatus = (text: string) =>
+    /^No (?:Event|Milestone|Story)(?: or (?:Event|Milestone|Story))? edits? were made\b/i.test(text) &&
+    /\b(?:evidence|observation|clue|source)\b/i.test(text) &&
+    /\b(?:cannot|could|does not|do not|without|unproven)\b/i.test(text);
+  const materialConflicts = input.conflicts.filter(text => !neutralNoWriteStatus(text));
+  if (materialConflicts.length > 0 &&
+      scopedEventEvidenceConflict({ milestoneId: input.milestone }, materialConflicts)) {
     const competingAccounts = /\b(?:conflicting|contradictory) accounts?\b|\bindependent observation\b/i.test(details);
     const recordDiscrepancy = /\b(?:record|ledger|alteration|changed entry|discrepancy|trace)\b/i.test(details);
     const inSceneEvidence = competingAccounts

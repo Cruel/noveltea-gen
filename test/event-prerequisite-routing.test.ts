@@ -85,6 +85,29 @@ test("S14 #173: unsafe, mixed-owner, stale and vague access reports cannot grant
   ]) assert.equal(routeEventPrerequisite({ ...scoped, ...change }).kind, "replan-required");
 });
 
+test("preserved narrative-led clue report separates source deficit from a no-edit status, without promoting reviewer prose to authority", () => {
+  const details = [
+    "The assigned Milestone requires a coherent account of both the clerk’s disappearance and a concealed alteration. The available reachable evidence establishes a scheduled shift and a dated register entry. It does not establish that an alteration occurred, or why the clerk disappeared.",
+    "No Event or Milestone edits were made. A new scene could introduce an inspectable clue, but the supplied sources do not support the material claims needed to complete this Milestone without inventing unsupported evidence or off-screen history.",
+  ];
+  const proof = routeEventPrerequisite({ ...input, milestone: "milestone.account-takes-shape",
+    conflicts: details, obligations: ["Distinguish testimony from motive."] });
+  assert.equal(proof.kind, "event-setup", "A neutral no-edit status is not a new causal prerequisite");
+  if (proof.kind === "event-setup") {
+    assert.match(proof.task, /two specific observables/);
+    assert.match(proof.task, /NOT.*grant|not a grant/i);
+  }
+  for (const unsafe of [
+    " A new Fact is required first.",
+    " An earlier Event must be revised.",
+    " A protected decision must be changed.",
+  ]) assert.equal(routeEventPrerequisite({ ...input, milestone: "milestone.account-takes-shape",
+    conflicts: [details[0]!, details[1]! + unsafe], obligations: [] }).kind, "replan-required");
+  assert.equal(routeEventPrerequisite({ ...input, milestone: "milestone.account-takes-shape",
+    conflicts: [details[1]!], obligations: [] }).kind, "replan-required",
+    "A no-edit status alone never grants an Event writer");
+});
+
 test("a missing source-visible alteration clue receives an Event-only evidence correction, not invented past canon", () => {
   const missing = "The selected Milestone lacks evidence: an altered ledger is alleged but the " +
     "Event supplies no inspectable discrepancy, record source or dated trace. " +

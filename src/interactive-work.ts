@@ -360,6 +360,23 @@ async function fileDigest(job: JobStartResult, paths: string[]) {
   return digest(JSON.stringify(await Promise.all(paths.map(async path =>
     [path, digest(await readFile(join(job.worktreeStoryRoot, path)))]))));
 }
+/** Original Event authorship is sealed at its own commit, not at a later
+ * verified successor. Independent corrections and Choice bindings can
+ * legitimately change the same Event file after its original source commit.
+ * The caller separately verifies every intervening native/Git checkpoint and
+ * independent verdict via verifiedNarrativeSuccessor. Never use an arbitrary
+ * unreviewed current version as the original Event digest. */
+export function originalEventFileDigest(job: JobStartResult, sourceSha: string, paths: string[]): string {
+  if (!/^[a-f0-9]{40}$/.test(sourceSha) || !paths.length ||
+      paths.some(path => !/^(?:events|milestones|arcs|facts|revelations|relationships)\/[a-z][a-z0-9._-]*\.md$/.test(path)))
+    throw Error("Original Event digest requires a pinned Git commit and canonical Event paths.");
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"])
+    delete env[key];
+  return digest(JSON.stringify(paths.map(path => [path, digest(execFileSync("git",
+    ["show", sourceSha + ":" + repoPath(job, path)], { cwd: job.worktreeRoot,
+      env, encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }))])));
+}
 function findEventRecords(report: Report) {
   return report.records.filter(r => r.metadata.type === "event" && r.metadata.status !== "superseded");
 }
@@ -1002,8 +1019,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       if (input.unit === "puzzle") throw new Error("A Puzzle assignment cannot start before its original Choice receipt.");
       if (dirty(job).length) throw new Error("Interactive design requires a clean verified Story worktree.");
       await verifiedNarrativeSuccessor(job, event.commitSha);
-      if (await fileDigest(job, event.paths) !== event.contentDigest)
-        throw new Error("Original Event source bytes changed before Choice binding.");
+      if (originalEventFileDigest(job, event.commitSha, event.paths) !== event.contentDigest)
+        throw new Error("The sealed original Event source does not match its authored commit.");
       // An observational Milestone may already be fulfilled by its reviewed
       // Event. The controller, not a forced Choice author, asks an independent
       // reviewer whether both interactive assignments are genuinely optional.

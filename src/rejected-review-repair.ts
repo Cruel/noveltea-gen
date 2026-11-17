@@ -3,6 +3,7 @@ import { readEventMilestoneRepairGrant } from "./event-milestone-repair.js";
 import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
 import { auditEventParticipantCorrection } from "./event-participant-correction.js";
 import { CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
+import { assertOriginalChoiceRepairEvidence } from "./choice-repair-origin.js";
 import { PUZZLE_GOAL_REPAIR } from "./puzzle-goal-fidelity.js";
 import { eventConsequenceProofDigest,
   type EventConsequenceProof } from "./event-consequence-proof.js";
@@ -574,9 +575,13 @@ export async function validateRejectedRepairDraft(job: JobStartResult, sha: stri
       units?: Array<{ id: string; phase: string; commitSha?: string;
         paths?: string[]; obligations?: string[] }> };
     const choice = source.units?.find(unit => unit.id === state.origin.workItem);
-    if (choice?.phase !== "committed" || choice.commitSha !== state.sourceCommitSha ||
-        !choice.paths?.length || !Array.isArray(choice.obligations))
-      throw Error("Repaired Choice lost its source-bound original unit and consequences.");
+    // A second bounded correction is anchored to the ORIGINAL Choice writer,
+    // not the first repair commit. inspectRejectedRepair has already sealed
+    // both negative verdicts and the exact repair-<SHA> successor chain.
+    // Comparing the original unit to sourceCommitSha incorrectly rejects a
+    // legitimate second correction, even though its rootFailureSha remains
+    // the original independently reviewed Choice commit.
+    assertOriginalChoiceRepairEvidence(choice, state.rootFailureSha);
     const { verifyRepairedChoicePayoff } = await import("./interactive-work.js");
     try {
       verifyRepairedChoicePayoff(result.report, choice.paths, choice.obligations);
