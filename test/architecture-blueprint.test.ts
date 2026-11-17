@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseBlueprintReview, parseCausalBlueprint, readApprovedBlueprint,
+import { classifyBlueprintFailure, parseBlueprintReview, parseCausalBlueprint, readApprovedBlueprint,
   type CausalBlueprint, type BlueprintPin } from "../src/architecture-blueprint.js";
 import { buildBlueprintObligations } from "../src/architecture-blueprint-obligations.js";
 import { applyBlueprintPatch } from "../src/architecture-blueprint-patch.js";
@@ -36,6 +36,20 @@ const example: CausalBlueprint = {
 };
 const digest = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+test("invalid reviewed patch output is distinguished from interrupted model work", () => {
+  assert.equal(classifyBlueprintFailure("Blueprint patch refers to a missing reviewer finding: x."),
+    "invalid-plan");
+  assert.equal(classifyBlueprintFailure("Blueprint model response exceeds its bounded size."),
+    "invalid-plan");
+  assert.equal(classifyBlueprintFailure("Causal outline has duplicate Choice-route consequences."),
+    "invalid-plan");
+  assert.equal(classifyBlueprintFailure("Independent causal blueprint review exhausted bounded corrections."),
+    "review-rejected");
+  assert.equal(classifyBlueprintFailure("Causal blueprint Pi session was interrupted; preserve transcript."),
+    "interrupted");
+  assert.equal(classifyBlueprintFailure("Provider connection ECONNRESET"), "interrupted");
+});
 
 test("the blueprint is a bounded causal chain, not a bag of unordered plot beats", () => {
   assert.deepEqual(parseCausalBlueprint(JSON.stringify(example)), example);

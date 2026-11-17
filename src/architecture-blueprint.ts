@@ -29,6 +29,20 @@ const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value
 const SLUG = /^[a-z][a-z0-9-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_CORRECTIONS = 2;
+
+/** Distinguish settled, invalid model output from ambiguous interrupted Pi work.
+ * A rejected patch may be inspected/replayed but never resumed as approval. */
+export function classifyBlueprintFailure(reason: string):
+  "invalid-plan" | "review-rejected" | "interrupted" {
+  if (reason.includes("exhausted bounded corrections")) return "review-rejected";
+  if (/\b(?:interrupted|cancelled|canceled|aborted|timed out|timeout)\b/i.test(reason))
+    return "interrupted";
+  if (/^(?:Blueprint patch |Blueprint JSONL |Blueprint model response |Causal blueprint |Causal outline |Causal evidence |Independent blueprint review |Invalid bounded causal blueprint)/.test(reason) ||
+      reason.includes("invalid beat relationships"))
+    return "invalid-plan";
+  return "interrupted";
+}
+
 // Real independent reviews add concrete evidence/route consequences to ~23 KB
 // initial drafts. Leave correction headroom without weakening causal validation.
 const MAX_BLUEPRINT_BYTES = 40000;

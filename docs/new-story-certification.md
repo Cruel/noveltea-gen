@@ -459,6 +459,9 @@ that this was a precise identifier-protocol failure, not a reason to replay
 the rest of the Story. The correction prompt and parser error now provide
 the exact reviewed finding-to-descendant map and report **all** invalid
 identifiers together. They do not rewrite, waive or autoapprove any patch.
+The Architecture failure receipt now distinguishes a settled
+`invalid-plan` patch rejection from genuinely `interrupted` Pi work,
+so the inspection/recovery advice can identify the correct failure class.
 Next live check must use the corrected prompt; #181 remains OPEN.
 
 ## Adaptive Story profile gate (#181, opt-in only)

@@ -20,7 +20,8 @@ import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence }
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { validateFocusedCreationGrants } from "./creation-grants.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
-import { createReviewedBlueprint, readApprovedBlueprint, type BlueprintPin } from "./architecture-blueprint.js";
+import { createReviewedBlueprint, readApprovedBlueprint, classifyBlueprintFailure,
+  type BlueprintPin } from "./architecture-blueprint.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics,
   type ArchitectureBudgetReview } from "./story-metrics.js";
 
@@ -702,10 +703,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           receipt.blueprintFailure = {
-            kind: reason.includes("exhausted bounded corrections") ? "review-rejected" :
-              reason.startsWith("Invalid bounded causal blueprint") ||
-              reason.startsWith("Causal blueprint ") ||
-              reason.includes("invalid beat relationships") ? "invalid-plan" : "interrupted",
+            kind: classifyBlueprintFailure(reason),
             reason: reason.split(/\. Preserve|: \[/)[0]!.slice(0, 400),
           };
           await persist(file, receipt);
