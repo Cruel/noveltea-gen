@@ -85,6 +85,8 @@ interface Receipt {
   /** Private, independently reviewed causal plan. Not a Story source or author approval. */
   blueprint?: BlueprintPin;
   blueprintTask?: string;
+  /** Durable failed-planner diagnosis. Does not authorize retry or source writes. */
+  blueprintFailure?: { kind: "invalid-plan" | "review-rejected" | "interrupted"; reason: string };
   paths?: string[];
   contentDigest?: string;
   piSessionFile?: string;
@@ -295,8 +297,11 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
         return blocked("Interrupted causal blueprint lacks its original source-bound plan.");
       const approved = await readApprovedBlueprint(job, state.plan, state.snapshot,
         state.provider, state.model, state.blueprintTask, workingHead);
-      if (!approved) return blocked("Interrupted causal blueprint has no reviewed checkpoint. " +
-        "Preserve original Pi sessions and private drafts; do not silently replay the planner.");
+      if (!approved) return blocked(state.blueprintFailure
+        ? "Causal blueprint " + state.blueprintFailure.kind + ": " + state.blueprintFailure.reason +
+          ". Original Pi sessions and private drafts preserved; no automatic retry."
+        : "Interrupted causal blueprint has no reviewed checkpoint. " +
+          "Preserve original Pi sessions and private drafts; do not silently replay the planner.");
       return { status: "ready", actualHead, changes };
     }
     if (state.worker === "pi" && ["writing", "authored"].includes(state.phase)) {
@@ -622,6 +627,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           delete state.manuallyReconciled;
           delete state.blueprint;
           delete state.blueprintTask;
+          delete state.blueprintFailure;
         }
         delete state.proposal;
       }
@@ -685,8 +691,21 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         const head = receipt.executionHead ?? receipt.expectedHead;
         receipt.phase = "blueprinting";
         await persist(file, receipt);
-        const pin = await createReviewedBlueprint(job, receipt.snapshot!, receipt.plan!,
-          receipt.provider, receipt.model, receipt.blueprintTask, head);
+        let pin: BlueprintPin;
+        try {
+          pin = await createReviewedBlueprint(job, receipt.snapshot!, receipt.plan!,
+            receipt.provider, receipt.model, receipt.blueprintTask, head);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          receipt.blueprintFailure = {
+            kind: reason.includes("exhausted bounded corrections") ? "review-rejected" :
+              reason.includes("Invalid bounded causal blueprint") ||
+              reason.includes("invalid beat relationships") ? "invalid-plan" : "interrupted",
+            reason: reason.split(/\. Preserve|: \[/)[0]!.slice(0, 400),
+          };
+          await persist(file, receipt);
+          throw error;
+        }
         const approved = await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
           receipt.provider, receipt.model, receipt.blueprintTask, head);
         if (!approved || JSON.stringify(approved.pin) !== JSON.stringify(pin))
@@ -694,6 +713,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         if (dirty(job).length) throw Error("Causal planning unexpectedly changed Story files.");
         assertHead(job, head);
         receipt.blueprint = pin;
+        delete receipt.blueprintFailure;
         receipt.phase = "ready";
         await persist(file, receipt);
         return { receipt };

@@ -51,6 +51,20 @@ test("the blueprint is a bounded causal chain, not a bag of unordered plot beats
   assert.throws(() => parseCausalBlueprint(JSON.stringify(noEvidence)), /evidence chain/);
 });
 
+test("narrative-only beats may omit decisions without weakening evidence or unknown-field checks", () => {
+  const sparse = clone(example);
+  const beat = sparse.beats[0]! as Partial<CausalBlueprint["beats"][number]>;
+  delete beat.decisions;
+  const parsed = parseCausalBlueprint(JSON.stringify(sparse));
+  assert.deepEqual(parsed, example, "omitted no-decision beat has one canonical reviewed representation");
+  const invalid = clone(sparse);
+  invalid.beats[0]!.decisions = null as unknown as CausalBlueprint["beats"][number]["decisions"];
+  assert.throws(() => parseCausalBlueprint(JSON.stringify(invalid)), /beat relationships/);
+  const extraneous = clone(sparse);
+  Object.assign(extraneous.beats[0]!, { maybeChoice: "not approved" });
+  assert.throws(() => parseCausalBlueprint(JSON.stringify(extraneous)), /beat relationships/);
+});
+
 test("decisions require alternatives with lasting consequences", () => {
   const broken = clone(example);
   broken.beats[1]!.decisions[0]!.alternatives = [{ action: "Publish", lastingEffect: "Noise" }];

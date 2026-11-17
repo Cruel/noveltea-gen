@@ -88,22 +88,28 @@ export function parseCausalBlueprint(text: string): CausalBlueprint {
   const seen = new Set<string>();
   let observations = 0;
   for (const beat of value.beats) {
-    if (!strict(beat, ["id", "purpose", "dependsOn", "observations", "change", "decisions"]) ||
+    const beatKeys = ["id", "purpose", "dependsOn", "observations", "change"];
+    if ((!strict(beat, [...beatKeys, "decisions"]) && !strict(beat, beatKeys)) ||
         typeof beat.id !== "string" || !SLUG.test(beat.id) || seen.has(beat.id) ||
         !nonempty(beat.purpose, 1200) || !nonempty(beat.change, 1200) ||
         !Array.isArray(beat.dependsOn) || beat.dependsOn.length > 8 ||
         beat.dependsOn.some((id: unknown) => typeof id !== "string" || !seen.has(id)) ||
         new Set(beat.dependsOn).size !== beat.dependsOn.length ||
         !Array.isArray(beat.observations) || beat.observations.length > 8 ||
-        !Array.isArray(beat.decisions) || beat.decisions.length > 6)
+        (beat.decisions !== undefined && (!Array.isArray(beat.decisions) || beat.decisions.length > 6)))
       throw Error("Causal blueprint has duplicate, out-of-order or invalid beat relationships.");
+    // A narrative-led beat need not contain a player decision. Omission is
+    // canonically equivalent to [], but unknown fields and malformed decisions
+    // still fail; independent review sees the normalized complete design.
+    if (beat.decisions === undefined) beat.decisions = [];
+    const decisions = beat.decisions as unknown[];
     for (const observation of beat.observations) {
       if (!strict(observation, ["source", "observable", "supports", "limits"]) ||
           !["source", "observable", "supports", "limits"].every(key => nonempty(observation[key], 1200)))
         throw Error("Causal blueprint evidence must separate source, observation, support and limits.");
       observations++;
     }
-    for (const decision of beat.decisions) {
+    for (const decision of decisions) {
       if (!strict(decision, ["question", "alternatives"]) || !nonempty(decision.question) ||
           !Array.isArray(decision.alternatives) || decision.alternatives.length < 2 ||
           decision.alternatives.length > 5 || decision.alternatives.some((alt: unknown) =>
@@ -262,7 +268,18 @@ function blueprintPrompt(plan: Plan, task: string) {
     "Protected author choices and welfare restrictions must survive each ending. " +
     "A decision needs alternatives with materially different lasting effects. " +
     "Trace the resolution backwards through named inspectable evidence and " +
-    "cause-and-effect turning points. Planned evidence is a future design obligation, " +
+    "cause-and-effect turning points. Separate the WHAT, WHEN, WHO, HOW and WHY " +
+    "questions the author actually promised. If you claim that evidence shows " +
+    "a breach or alteration, identify a direct test of that mechanism, not merely " +
+    "a person's access, an object's movement, a custody gap or a later trace. " +
+    "Do not claim a disappearance is resolved merely because someone reached " +
+    "an intermediate location. Every enabled or refused witness route must " +
+    "still support the ending's stated core conclusion using available proof. " +
+    "Carry each earlier decision's evidence access, relationships and material " +
+    "effects into later beats, including reconverged endings. Before finalizing " +
+    "the JSON, audit EACH causal conclusion backwards through the evidence " +
+    "under every alternative route; repair all unsupported leaps together. " +
+    "Planned evidence is a future design obligation, " +
     "not already-authored World facts, Events or Choices. No invented canonical IDs. " +
     "Keep the scope and approved budgets: " + JSON.stringify(plan.contract) +
     "\nAuthor task: " + JSON.stringify(task) + "\n" +
@@ -271,6 +288,8 @@ function blueprintPrompt(plan: Plan, task: string) {
     "purpose:string,dependsOn:[earlier beat slugs],observations:[{source:string," +
     "observable:string,supports:string,limits:string}],change:string," +
     "decisions:[{question:string,alternatives:[{action:string,lastingEffect:string}]}]}]," +
+    " Use decisions:[] when a beat has no player decision; omission of that " +
+    "single optional field is equivalent to [], no other fields are optional." +
     "resolution:{question:string,conclusion:string,supportedBy:[evidence beat slugs]," +
     "uncertainty:string}}. Use standard JSON double quotes. 2–16 beats; no filler.";
 }
@@ -365,6 +384,11 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           "Correct the existing high-level design without creating or editing Story files, " +
           "altering protected author decisions, or adding unauthorized scope. " +
           "Preserve all already-supported causal links as you correct these findings. " +
+          "Do a fresh whole-chain consistency audit after correcting: verify " +
+          "each conclusion under every refusal/cooperation route, preserve " +
+          "all earlier Choice consequences after reconvergence, and do not " +
+          "confuse movement through a location with evidence of how it was " +
+          "breached. Do not introduce a new unsupported claim while fixing one. " +
           "Return the COMPLETE corrected blueprint as the same strict JSON structure. " +
           "The next independent rereview will assess the full chain again. " +
           JSON.stringify(verdict.findings));
