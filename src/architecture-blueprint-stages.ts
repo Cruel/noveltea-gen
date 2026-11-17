@@ -321,7 +321,10 @@ export function assembleBlueprintOutlineCore(
 }
 
 export function parseBlueprintOutlineCore(text: string): BlueprintOutlineCore {
-  const wire = parseBlueprintWire(text, 18000);
+  // The core is assembled from many individually bounded two-beat responses.
+  // Its aggregate limit must match the 40 KB full-blueprint ceiling, not the
+  // smaller budget imposed on any one model response.
+  const wire = parseBlueprintWire(text, 40000);
   if (wire.format !== "json" ||
       !strict(wire.value, ["schema", "premise", "beats", "resolution", "causalAnswer"]) ||
       wire.value.schema !== "noveltea-causal-outline-core/v1")

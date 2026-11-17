@@ -167,6 +167,38 @@ test("new Architecture planning requires a concrete solution and route-state con
     JSON.stringify(core.beats[2]), header, 2, batch0);
   assert.deepEqual([...batch0, ...batch2], core.beats);
   assert.deepEqual(assembleBlueprintOutlineCore(header, [...batch0, ...batch2]), core);
+  // A long outline is assembled from bounded two-beat model responses, not
+  // emitted by a single model call. Do not apply a per-response size cap to
+  // that aggregate: the Sol #181 attempt demonstrated a false rejection.
+  const longBeats = Array.from({ length: 8 }, (_, i) => ({
+    ...core.beats[0],
+    id: "stage-" + i,
+    purpose: "Inspect a distinct investigative record: " + "detail ".repeat(310),
+    dependsOn: i ? ["stage-" + (i - 1)] : [],
+    change: "A supported change in the player's understanding: " + "fact ".repeat(125),
+    decisions: [],
+  }));
+  const longHeader = parseBlueprintOutlineHeader(JSON.stringify({
+    schema: "noveltea-causal-outline-header/v1",
+    premise: core.premise, beatIds: longBeats.map(beat => beat.id),
+    resolution: { ...core.resolution, supportedBy: ["stage-7"] },
+    causalAnswer: { ...core.causalAnswer,
+      proof: { ...core.causalAnswer.proof, beatIds: ["stage-7"] } },
+  }));
+  const acceptedLongBeats: typeof longBeats = [];
+  for (let first = 0; first < longBeats.length; first += BEAT_BATCH_SIZE) {
+    const response = longBeats.slice(first, first + BEAT_BATCH_SIZE)
+      .map(JSON.stringify).join("\n");
+    assert.ok(Buffer.byteLength(response) < 11000, "each model response remains bounded");
+    acceptedLongBeats.push(...parseBlueprintBeatBatch(
+      response, longHeader, first, acceptedLongBeats));
+  }
+  const longCore = assembleBlueprintOutlineCore(longHeader, acceptedLongBeats);
+  assert.ok(Buffer.byteLength(JSON.stringify(longCore)) > 18000);
+  assert.ok(Buffer.byteLength(JSON.stringify(longCore)) < 40000);
+  assert.throws(() => parseBlueprintOutlineCore(JSON.stringify({
+    ...longCore, premise: "unbounded ".repeat(5000),
+  })), /bounded size/);
   assert.match(blueprintBeatPrompt(header, batch0, 2), /EXACT REQUESTED BEAT IDS/);
   assert.throws(() => parseBlueprintBeatBatch(
     JSON.stringify(core.beats[2]), header, 0, []), /exactly the requested beat IDs/);
