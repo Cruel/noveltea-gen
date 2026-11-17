@@ -150,17 +150,26 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
       sessionId: "reviewer-id", sessionFile: reviewerFile,
       blueprintDigest: digest(example), verdictDigest: digest(review),
     }));
-    await writeFile(join(parent, "plan-2-started.json"), JSON.stringify({
+    const admission = {
       jobId: pin.jobId, threadId: pin.threadId, baseSha: pin.baseSha,
       executionHead: pin.executionHead, planVersion: pin.planVersion,
       contractDigest: pin.contractDigest, snapshotId: pin.snapshotId,
       provider: pin.provider, model: pin.model, taskDigest: pin.taskDigest,
-      plannerSessionId: pin.plannerSessionId, plannerSessionFile: pin.plannerSessionFile,
+    };
+    await writeFile(join(parent, "plan-2-admitted.json"), JSON.stringify(admission));
+    await writeFile(join(parent, "plan-2-started.json"), JSON.stringify({
+      ...admission, plannerSessionId: pin.plannerSessionId,
+      plannerSessionFile: pin.plannerSessionFile,
     }));
     await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(pin));
     const read = () => readApprovedBlueprint(job, plan, snapshot, "openai", "gpt-6-luna",
       "write a mystery", "b".repeat(40));
     assert.deepEqual((await read())?.blueprint, example);
+    await writeFile(join(parent, "plan-2-admitted.json"), JSON.stringify({
+      ...admission, model: "another-model",
+    }));
+    await assert.rejects(read, /pre-session admission/);
+    await writeFile(join(parent, "plan-2-admitted.json"), JSON.stringify(admission));
     await assert.rejects(() => readApprovedBlueprint(job, { ...plan, contract: {
       ...plan.contract, constraints: ["new objective"] } }, snapshot, "openai",
     "gpt-6-luna", "write a mystery", "b".repeat(40)), /stale/);

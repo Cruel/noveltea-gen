@@ -18,6 +18,7 @@ import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { buildBlueprintObligations, validateBlueprintObligations,
   type BlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
 import { parseBlueprintPatch, applyBlueprintPatch } from "./architecture-blueprint-patch.js";
+import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const SLUG = /^[a-z][a-z0-9-]{0,63}$/;
@@ -167,17 +168,26 @@ async function obligationSources(job: JobStartResult, plan: Plan, task: string):
   return { foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
     contract: plan.contract, task };
 }
-function initialBlueprint(text: string, sources: ObligationSources) {
-  const raw = text.trim().replace(/^```(?:json)?\\s*\\n/i, "").replace(/\\n```\\s*$/, "");
-  if (Buffer.byteLength(raw) > 32000) throw Error("Causal blueprint and proof obligations exceed their bounded size.");
-  let value: unknown;
-  try { value = JSON.parse(raw) as unknown; }
-  catch { throw Error("Causal blueprint with obligations is not valid JSON."); }
-  if (!strict(value, ["blueprint", "obligations"]))
-    throw Error("Causal blueprint must contain both its design and source-derived proof obligations.");
-  const blueprint = parseCausalBlueprint(JSON.stringify(value.blueprint));
-  return { blueprint, obligations: buildBlueprintObligations(value.obligations, blueprint, sources) };
+export function parseInitialBlueprint(text: string, sources: ObligationSources) {
+  const wire = parseBlueprintWire(text, 32000);
+  let draft: unknown;
+  let items: unknown;
+  if (wire.format === "jsonl") {
+    if (wire.values.length < 2 || wire.values.length > 21)
+      throw Error("Causal blueprint JSONL needs one draft and 1–20 source obligations.");
+    draft = wire.values[0];
+    items = wire.values.slice(1);
+  } else {
+    if (!strict(wire.value, ["blueprint", "obligations"]))
+      throw Error("Causal blueprint must contain both its design and source-derived proof obligations.");
+    draft = wire.value.blueprint;
+    items = wire.value.obligations;
+  }
+  const blueprint = parseCausalBlueprint(JSON.stringify(draft));
+  return { blueprint, obligations: buildBlueprintObligations(items, blueprint, sources) };
 }
+const admittedPath = (job: JobStartResult, version: number) =>
+  join(root(job), "plan-" + version + "-admitted.json");
 const approvedPath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-approved.json");
 async function immutable(path: string, value: unknown) {
@@ -222,6 +232,10 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
       !HASH.test(record.blueprintDigest) || !HASH.test(record.reviewDigest) ||
       !HASH.test(record.obligationsDigest))
     throw Error("Approved causal blueprint is stale, incomplete or bound to a different scope.");
+  const admission = await safeRead(admittedPath(job, plan.version), root(job));
+  if (!strict(admission, Object.keys(expected)) ||
+      Object.entries(expected).some(([key, value]) => admission[key] !== value))
+    throw Error("Causal blueprint source-bound pre-session admission is stale or absent.");
   const start = await safeRead(join(root(job), "plan-" + plan.version + "-started.json"), root(job));
   if (!start || typeof start !== "object" ||
       Object.entries(expected).some(([key, value]) =>
@@ -370,16 +384,23 @@ function blueprintPrompt(plan: Plan, task: string) {
     "For each promise state the proof the Story must make inspectable, its route " +
     "and the beat IDs tasked with fulfilling it. Do not invent author promises " +
     "or omit a protected requirement. This inventory is immutable through corrections. " +
-    "Return ONLY valid JSON with EXACT keys " +
-    "{blueprint:{schema:'noveltea-causal-blueprint/v1',premise:string,beats:[{id:slug," +
+    "Return STRICT JSON LINES (JSONL), NOT a combined object or array: " +
+    "each line is ONE independently valid, compact JSON object, with standard " +
+    "double quotes, no code fences, blank lines, headers, explanations or prose. " +
+    "LINE ONE is the complete BLUEPRINT object, with EXACT fields " +
+    "{schema:'noveltea-causal-blueprint/v1',premise:string,beats:[{id:slug," +
     "purpose:string,dependsOn:[earlier beat slugs],observations:[{source:string," +
     "observable:string,supports:string,limits:string}],change:string," +
     "decisions:[{question:string,alternatives:[{action:string,lastingEffect:string}]}]}]," +
     "resolution:{question:string,conclusion:string,supportedBy:[evidence beat slugs]," +
-    "uncertainty:string}},obligations:[{id:slug,category:'what|when|who|how|why|consequence|route|other', " +
+    "uncertainty:string}}. " +
+    "EVERY FOLLOWING LINE is ONE source obligation object with EXACT fields " +
+    "{id:slug,category:'what|when|who|how|why|consequence|route|other', " +
     "source:'foundation|task|contract',quote:string,question:string,proof:string," +
-    "route:string,beatIds:[existing beat slugs]}]}. " +
-    "Use standard JSON double quotes. 2–16 beats, 1–20 obligations. " +
+    "route:string,beatIds:[existing beat slugs]}. " +
+    "Do NOT wrap the lines in an enclosing array or add an extra closing brace. " +
+    "The controller parses and validates EVERY line; partial lines fail. " +
+    "Provide 2–16 blueprint beats and 1–20 obligation lines. " +
     "Use decisions:[] when a beat has no player decision; omission of that " +
     "single optional field is equivalent to [], no other fields are optional. " +
     "Keep blueprint JSON under 24000 bytes and the whole response under 32000 bytes. Be concise; " +
@@ -430,6 +451,10 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
       throw Error("Unfinished causal blueprint sessions/evidence exist; inspect rather than replay an ambiguous Pi plan.");
   }
   const sources = await obligationSources(job, plan, task);
+  // Durable admission precedes the Pi SDK session creation. A process crash
+  // in the sessionFor/started-receipt gap must never re-enter a new planner.
+  await immutable(admittedPath(job, plan.version),
+    sameLineage(job, plan, snapshot, provider, model, task, head));
   const planner = await sessionFor(job, snapshot, provider, model,
     "blueprint:" + plan.version, "architecture-blueprint-sessions");
   try {
@@ -445,7 +470,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     for (let version = 0; version <= MAX_CORRECTIONS; version++) {
       verifyReadSources(planner.session.messages, planner.project.root, snapshot);
       const parseResponse = () => version === 0
-        ? { ...initialBlueprint(lastText(planner.session), sources), patch: undefined }
+        ? { ...parseInitialBlueprint(lastText(planner.session), sources), patch: undefined }
         : { ...parseBlueprintPatch(lastText(planner.session), previous!.blueprint, previous!.verdict),
           obligations: undefined };
       let result: ReturnType<typeof parseResponse>;
@@ -456,20 +481,24 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         // error instead of fixing the exact source quote that was ungrounded.
         const reason = error instanceof Error ? error.message : "Unknown validation failure";
         await promptStorySpecialist(planner.session, version === 0
-          ? "Your previous {blueprint,obligations} answer was rejected for this " +
-            "EXACT controller validation defect: " + reason + ". " +
+          ? "Your previous initial blueprint/obligation JSONL was rejected for " +
+            "this EXACT controller validation defect: " + reason + ". " +
             "Make ONLY the minimum correction required. If a quoted source " +
             "substring is absent, reread that exact source and copy an actual " +
             "short 8–40-character contiguous substring; preserve all other " +
             "obligations, beats, source protections and decisions. " +
-            "Return ONE complete, valid JSON object with exactly two top-level " +
-            "keys blueprint and obligations, no leading/trailing prose or " +
-            "markdown, and no extra closing braces. Do not write Story files."
-          : "The targeted patch was rejected for this EXACT controller " +
+            "Return the FULL corrected JSONL: one complete, compact blueprint " +
+            "JSON object on line one and one complete obligation JSON object " +
+            "per following line. No enclosing wrapper, array, blank lines, " +
+            "markdown or extra closing braces. Do not write Story files."
+          : "Your JSONL patch was rejected for this EXACT controller " +
             "validation defect: " + reason + ". Do not regenerate the " +
-            "blueprint. Return ONLY a corrected patch with the SAME baseDigest " +
-            "and reviewDigest, exact old values and bounded operations for the " +
-            "reviewed findings. Do not erase or edit unrelated prior evidence, " +
+            "blueprint. Return the FULL corrected JSONL: line one a complete " +
+            "header with only schema, SAME baseDigest and SAME reviewDigest; " +
+            "subsequent lines one complete JSON object per patch operation. " +
+            "No operations array, enclosing wrapper, extra braces, markdown or " +
+            "blank lines. Use exact old text and bounded operations limited " +
+            "to reviewed findings. Do not erase or edit unrelated prior evidence, " +
             "decisions, consequences, protected commitments or ending promises.");
         verifyReadSources(planner.session.messages, planner.project.root, snapshot);
         result = parseResponse();
@@ -525,9 +554,12 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         await promptStorySpecialist(planner.session,
           "INDEPENDENT CAUSAL REVIEW. The original blueprint and immutable " +
           "source-derived proof obligation manifest remain fixed; do not rewrite them. " +
-          "Return ONLY a JSON patch object with EXACT keys " +
-          "{schema:'noveltea-blueprint-patch/v1',baseDigest:string,reviewDigest:string," +
-          "operations:array}. Each operation must name findingBeatId, an exact " +
+          "Return ONLY STRICT JSON LINES (JSONL), no enclosing array or wrapper. " +
+          "LINE ONE is a complete compact JSON header object with EXACT keys " +
+          "{schema:'noveltea-blueprint-patch/v1',baseDigest:string,reviewDigest:string}. " +
+          "EACH FOLLOWING LINE is exactly one complete JSON operation object. " +
+          "No blank lines, markdown fences, leading or trailing prose. " +
+          "Each operation must name findingBeatId, an exact " +
           "beat ID from the review; target only that beat or a causal dependent. " +
           "Kinds: replace {findingBeatId,path,expected,value} for exact old text " +
           "at beats/ID/purpose, beats/ID/change, " +
@@ -539,16 +571,15 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           "add-dependency {findingBeatId,beatId,dependsOn:earlierBeatId}; " +
           "insert-beat {findingBeatId,afterBeatId,beat:completeNewBeat}; " +
           "support-resolution {findingBeatId,beatId}. Every operation also has " +
-          "kind. Example EXACT valid one-operation syntax: " +
+          "kind. Example TWO separate JSONL lines (not a JSON array):\n" +
           JSON.stringify({ schema: "noveltea-blueprint-patch/v1",
-            baseDigest: sha(blueprint), reviewDigest: sha(verdict),
-            operations: [{ kind: "replace", findingBeatId: verdict.findings[0]!.beatId,
-              path: "beats/" + verdict.findings[0]!.beatId + "/change",
-              expected: "exact old text", value: "new corrected text" }] }) +
-          ". Replace placeholders with actual source text and use as many " +
-          "necessary operations as are required. Before replying, verify " +
-          "balanced JSON braces: after each operation object use a comma " +
-          "or a closing array bracket, NOT an extra object brace. " +
+            baseDigest: sha(blueprint), reviewDigest: sha(verdict) }) + "\n" +
+          JSON.stringify({ kind: "replace", findingBeatId: verdict.findings[0]!.beatId,
+            path: "beats/" + verdict.findings[0]!.beatId + "/change",
+            expected: "exact old text", value: "new corrected text" }) + "\n" +
+          "Replace placeholders with actual old/new source text and add one " +
+          "operation per further line. Validate that EACH line parses as " +
+          "standalone JSON; never append a second closing brace after any line. " +
           "To refine an existing Choice lastingEffect, the new text MUST " +
           "contain the entire old lastingEffect unmodified; no old decision " +
           "or alternative may be erased. New beat IDs must be unique. " +

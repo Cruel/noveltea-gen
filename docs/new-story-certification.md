@@ -262,6 +262,21 @@ also preserved and reverified at checkpoint restoration. A partial/interrupted
 planner or review is blocked without silent rerun. The original two-correction
 limit and canonical Story write boundaries are unchanged.
 
+The read-only Pi planner may supply compact **JSONL** instead of one deeply
+nested JSON envelope: its initial response is one complete blueprint JSON
+object followed by 1–20 individual source-obligation JSON objects, and a
+correction is one version/digest header object followed by 1–48 individual
+patch-operation JSON objects. Every line is parsed independently and must be
+strict JSON; malformed, partial, oversized or extra lines fail closed, with
+no implicit quote normalization or syntax auto-repair. Existing complete JSON
+envelopes remain supported for compatibility. The controller persists only
+the same normalized, schema-validated private JSON artifacts; the wire format
+never grants any writer permission. A separate immutable
+`plan-<version>-admitted.json` receipt is written **before** Pi session creation,
+closing the crash window between session creation and its started-session
+receipt. A missing or changed admission, start or reviewer receipt blocks
+checkpoint restoration without replay.
+
 Only an exact
 passing review permits immutable
 `plan-<version>-approved.json` publication. It pins the original Job,

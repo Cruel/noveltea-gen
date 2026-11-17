@@ -3,6 +3,7 @@
  * erase unrelated evidence/Choice consequences. Semantic approval is separate. */
 import { createHash } from "node:crypto";
 import { parseCausalBlueprint, type BlueprintReview, type CausalBlueprint } from "./architecture-blueprint.js";
+import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
 
 export const blueprintDigest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -29,13 +30,14 @@ const exact = (value: unknown, keys: string[]): value is Record<string, unknown>
   !!value && typeof value === "object" && !Array.isArray(value) &&
   Object.keys(value).sort().join("|") === [...keys].sort().join("|");
 function parsePatchJson(text: string): unknown {
-  const raw = text.trim().replace(/^```(?:json)?\s*\n/i, "").replace(/\n```\s*$/, "");
-  if (Buffer.byteLength(raw) > 24000) throw Error("Blueprint patch exceeds its size limit.");
-  try { return JSON.parse(raw); }
-  catch (error) {
-    const reason = error instanceof SyntaxError ? error.message : "JSON parse failed";
-    throw Error("Blueprint patch is not JSON: " + reason);
-  }
+  const wire = parseBlueprintWire(text, 24000);
+  if (wire.format === "json") return wire.value;
+  if (wire.values.length < 2 || wire.values.length > 49)
+    throw Error("Blueprint patch JSONL needs one header and 1–48 patch operations.");
+  const [header, ...operations] = wire.values;
+  if (!exact(header, ["schema", "baseDigest", "reviewDigest"]))
+    throw Error("Blueprint JSONL patch header has unexpected fields.");
+  return { ...header, operations };
 }
 function descendants(blueprint: CausalBlueprint, from: string) {
   const affected = new Set([from]);

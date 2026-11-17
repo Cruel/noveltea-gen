@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildBlueprintObligations, validateBlueprintObligations } from "../src/architecture-blueprint-obligations.js";
 import { applyBlueprintPatch, blueprintDigest, parseBlueprintPatch } from "../src/architecture-blueprint-patch.js";
+import { parseInitialBlueprint } from "../src/architecture-blueprint.js";
 import type { BlueprintReview, CausalBlueprint } from "../src/architecture-blueprint.js";
 
 const example: CausalBlueprint = {
@@ -105,6 +106,43 @@ test("targeted reviewer correction retains all seven Choices, another clue and o
     "patch application must not mutate a reviewed version");
   assert.deepEqual(applyBlueprintPatch(example, review, result.patch).blueprint, result.blueprint,
     "immutable patch deterministically reconstructs the exact reviewed draft");
+});
+
+test("strict JSONL initial blueprint and operations preserve exact normalized design and immutable review binding", () => {
+  const sources = { foundation: "The witness remains protected during the mystery.",
+    task: "Write a mystery with a protected witness", contract: {} };
+  const obligation = {
+    id: "protect-witness", category: "consequence", source: "foundation",
+    quote: "witness remains protected", question: "Can the source be protected?",
+    proof: "The final consequence names the available redaction route",
+    route: "Refusal and cooperation", beatIds: ["witness", "resolution"],
+  };
+  const initialLines = [JSON.stringify(example), JSON.stringify(obligation)].join("\n");
+  const parsed = parseInitialBlueprint(initialLines, sources);
+  assert.deepEqual(parsed.blueprint, example);
+  assert.equal(parsed.obligations.items[0]?.id, "protect-witness");
+  const legacy = parseInitialBlueprint(
+    JSON.stringify({ blueprint: example, obligations: [obligation] }), sources);
+  assert.deepEqual(parsed, legacy, "legacy strict JSON document remains exact");
+  const operation = replace("beats/witness/change",
+    example.beats[1]!.change, "Refusal still preserves the trustworthy paper trail");
+  const [header] = [patch([operation])];
+  const { operations: _, ...headerOnly } = header;
+  const result = parseBlueprintPatch([
+    JSON.stringify(headerOnly), JSON.stringify(operation),
+  ].join("\n"), example, review);
+  assert.deepEqual(result, applyBlueprintPatch(example, review, header));
+  assert.throws(() => parseInitialBlueprint(
+    [JSON.stringify(example), JSON.stringify(obligation) + "}"].join("\n"), sources),
+    /JSONL line 2 is invalid/);
+  assert.throws(() => parseBlueprintPatch([
+    JSON.stringify(headerOnly), JSON.stringify(operation) + "}",
+  ].join("\n"), example, review), /JSONL line 2 is invalid/);
+  assert.throws(() => parseBlueprintPatch(JSON.stringify(headerOnly), example, review),
+    /stale or invalid/);
+  assert.throws(() => parseInitialBlueprint(
+    [JSON.stringify(example), JSON.stringify({ ...obligation, quote: "not from source" })]
+      .join("\n"), sources), /quotes text absent/);
 });
 
 test("a Choice effect can only be extended, never erased or overwritten", () => {
