@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { assembleBlueprintStages, EVIDENCE_BATCH_SIZE, parseBlueprintEvidence,
   parseBlueprintObligationStage, parseBlueprintOutline } from "../src/architecture-blueprint-stages.js";
-import type { CausalBlueprint } from "../src/architecture-blueprint.js";
+import { blueprintEvidencePrompt, blueprintOutlinePrompt,
+  type CausalBlueprint } from "../src/architecture-blueprint.js";
+import type { Plan } from "../src/architecture.js";
 
 const blueprint: CausalBlueprint = {
   schema: "noveltea-causal-blueprint/v1", premise: "Investigate without exposing the witness",
@@ -35,6 +37,22 @@ const outlineValue = {
 };
 const outline = parseBlueprintOutline(JSON.stringify(outlineValue));
 const evidence = blueprint.beats.map(({ id, observations }) => ({ id, observations }));
+
+test("staged prompts demand concrete durable route effects, independent proof and bounded single-route pacing", () => {
+  const contract = { scope: { kind: "full-story" }, envelope: { hardLimits: ["Keep source private"] } };
+  const outlinePrompt = blueprintOutlinePrompt({ contract } as unknown as Plan, "Make a mystery");
+  assert.match(outlinePrompt, /PERSISTENT CHOICE-STATE RULE/);
+  assert.match(outlinePrompt, /specific.*knowledge.*evidence access.*relationship trust.*source exposure/s);
+  assert.match(outlinePrompt, /REFUSE, be unavailable or withdraw/);
+  assert.match(outlinePrompt, /single first-playthrough path/);
+  assert.match(outlinePrompt, /Keep source private/);
+  const evidencePrompt = blueprintEvidencePrompt(outline, 0);
+  assert.match(evidencePrompt, /independently corroborated link between the ACT and the/);
+  assert.match(evidencePrompt, /No evidence at a reconverged beat may silently restore/);
+  assert.match(evidencePrompt, /testimony NEVER guarantees cooperation/);
+  assert.match(evidencePrompt, /COMPLETE IMMUTABLE OUTLINE/);
+  assert.doesNotMatch(evidencePrompt, /approved canon already exists/);
+});
 
 test("outline freezes the causal graph and protected Choice consequences without pretending it has evidence", () => {
   assert.deepEqual(outline, outlineValue);

@@ -382,7 +382,7 @@ function lastText(session: Awaited<ReturnType<typeof sessionFor>>["session"]) {
     throw Error("Causal blueprint Pi session was interrupted; preserve original transcript.");
   return session.getLastAssistantText() ?? "";
 }
-function blueprintOutlinePrompt(plan: Plan, task: string) {
+export function blueprintOutlinePrompt(plan: Plan, task: string) {
   return "You are the NovelTea READ-ONLY CAUSAL STORY ARCHITECT. " +
     "First use read to inspect skill://nt-story-architecture/SKILL.md, " +
     "skill://nt-catalog/SKILL.md, creative-direction/foundation.md. No writing or shell. " +
@@ -398,7 +398,25 @@ function blueprintOutlinePrompt(plan: Plan, task: string) {
     "Do not claim a mechanism or motive solely from access or a changed object. " +
     "Only the outline is requested NOW: evidence observations and proof obligations " +
     "will be collected in SEPARATE smaller prompts, without changing this outline. " +
-    "Preserve protected author choices even when they cause later route divergence. " +
+    "PERSISTENT CHOICE-STATE RULE: for EVERY alternative, state the specific " +
+    "knowledge, inspectable evidence access, relationship trust or source exposure " +
+    "it gains, withholds, preserves or irreversibly loses. Use concrete named " +
+    "accounts, records and people in this story, not vague possible risks, " +
+    "generic route ledgers or promises that differences will be tracked later. " +
+    "For each Choice explicitly carry these DIFFERENT states into its downstream " +
+    "beat purposes/changes and the final supported ending AFTER route convergence. " +
+    "If a witness is asked, they can REFUSE, be unavailable or withdraw: include " +
+    "that outcome, its actual trust/exposure cost and an inspectable independent " +
+    "fallback that does not pretend their answer was given. " +
+    "If disclosure endangers a person, state the checkable threat mechanism " +
+    "and HOW this disclosure exposes them; a protected route never has to " +
+    "reveal their identity. No Choice may guarantee cooperation or magically " +
+    "restore access after refusal. Conditional events need explicit fallback. " +
+    "If the author specifies a play-duration target, account for a PLAUSIBLE " +
+    "single first-playthrough path: substantive reading and investigation load, " +
+    "approximate beat durations and exclusive alternatives, not multiplying all " +
+    "branch lengths or padding a record quota. Put that in beat purpose/change " +
+    "where relevant; do not add schema fields. " +
     "Use 2–16 beats and the full authorized objective and scope. " +
     "APPROVED CONTRACT: " + JSON.stringify(plan.contract) +
     "\\nORIGINAL AUTHOR TASK: " + JSON.stringify(task) +
@@ -414,7 +432,7 @@ function blueprintOutlinePrompt(plan: Plan, task: string) {
     "The final proof is not approved until independent review. " +
     "Check every string and closing brace before responding.";
 }
-function blueprintEvidencePrompt(outline: BlueprintOutline, first: number) {
+export function blueprintEvidencePrompt(outline: BlueprintOutline, first: number) {
   const batch = outline.beats.slice(first, first + EVIDENCE_BATCH_SIZE);
   return "READ-ONLY CAUSAL BLUEPRINT EVIDENCE STAGE. The outline below is " +
     "FIXED; do not rewrite its beats, decisions, alternatives, ending or IDs. " +
@@ -424,6 +442,20 @@ function blueprintEvidencePrompt(outline: BlueprintOutline, first: number) {
     "from undated objects, WHO from mere access, WHY from opportunity, or HOW " +
     "without a direct test. Preserve independent corroboration on any refused " +
     "witness route, and the lasting consequences of all preceding choices. " +
+    "For EVERY earlier player alternative, show what can still be inspected " +
+    "on that route and what testimony, source access or trust has been lost. " +
+    "A request for testimony NEVER guarantees cooperation; specify a refusal " +
+    "outcome and independent evidence that still permits justified conclusions. " +
+    "No evidence at a reconverged beat may silently restore withheld accounts " +
+    "or treat a suspect's reaction as independently corroborated proof. " +
+    "For WHO or HOW, distinguish source custody or opportunity from an " +
+    "inspectable causal link to the act and tested mechanism. For WHY, name " +
+    "an inspectable, independently corroborated link between the ACT and the " +
+    "INTENDED outcome, not a stake, benefit or suspect explanation alone; " +
+    "otherwise leave motive explicitly uncertain. If a person faces exposure " +
+    "from testimony, make the threat and disclosure-to-exposure link checkable " +
+    "while keeping the protected route private. Specify concrete alternate " +
+    "evidence, not merely that a dossier will cross-check it. " +
     "Empty observations are allowed for pacing beats without inspectable clues, " +
     "but the overall resolution MUST have an evidence-bearing supported beat. " +
     "These are FUTURE authoring commitments, not existing canonical facts. " +
@@ -479,6 +511,12 @@ function reviewPrompt(plan: Plan, blueprint: CausalBlueprint,
     "as a finding on the beat responsible for the missing proof, never approve " +
     "an incomplete inventory as exhaustive. Treat source-anchored obligations " +
     "as immutable during corrections, not as evidence that the fiction is true. " +
+    "Every material decision alternative must have a concrete knowledge, " +
+    "evidence-access, trust or exposure state that survives reconvergence. " +
+    "Verify who refuses testimony, what remains independently inspectable " +
+    "and whether downstream disclosure matches facts earned ON THAT ROUTE. " +
+    "If scope promises duration, require a plausible single-playthrough " +
+    "load estimate accounting for exclusive paths, not a repeated target. " +
     "Report ALL material fixable problems in one verdict (maximum 8). " +
     "Findings reference exact beat IDs and propose bounded changes within " +
     "the approved story premise. Approval only means a coherent provisional plan; " +
@@ -671,6 +709,22 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           "or alternative may be erased. New beat IDs must be unique. " +
           "Never replace the premise, original question, decision action, " +
           "protected author outcome, unrelated clue or entire list. " +
+          "PATCH COMPLETENESS CHECK: address EVERY independent finding " +
+          "with named inspectable evidence or an exact durable alternative " +
+          "state, not a statement that a ledger will later track choices. " +
+          "When review identifies unmodeled Choice consequences, extend EACH " +
+          "affected alternative's lastingEffect via exact replace without " +
+          "erasing its old text, AND amend dependent beat changes or evidence " +
+          "to consume those specific gained/lost facts, trust or access. " +
+          "Never restore refused testimony, hidden context or a damaged " +
+          "relationship at reconvergence. For motives, support intent with " +
+          "independently inspectable act-to-intended-outcome evidence rather " +
+          "than a stake alone; if no support exists, keep the claim uncertain. " +
+          "A claimed first-playthrough duration needs plausible reading and " +
+          "investigation load on one supported route, excluding alternate " +
+          "branches; no invented padding. Before returning, compare the " +
+          "entire merged design to EACH review finding, including any " +
+          "interactions between your operations. " +
           "Fix the causal findings and preserve all prior supported proof " +
           "including under refused routes. The independently reviewed FULL " +
           "merged design must still satisfy every original obligation. " +

@@ -346,6 +346,34 @@ Pi sessions remain private and preserved. Neither full production-shaped
 adaptive profile, its final semantic quality gate, nor the independent
 end-to-end Story certification has passed. Keep #181 OPEN.
 
+**November 17, 2026 staged Luna evidence (not certified):**
+`071cc6f` split initial planning into independently validated, durable outline,
+two-beat evidence and source-quoted obligation stages. Both live adaptive profile
+continuations from verified Foundation checkpoints completed these stages and
+reached independent blueprint review. Initial compact drafts consumed about
+23 KB each and could not accommodate causal repairs within the former 24 KB
+merged-design limit; `f284e04` raised that single ceiling to 40 KB without
+relaxing causal validation. On `f284e04`, choice-heavy reached two successive
+authenticated patches and three independent review verdicts, with findings
+counts 5, 3 and 6. The final verdict refused approval. It identified
+unmodeled route-specific evidence/trust outcomes after Choices converge,
+unsupported motive-as-intent inference, and a nominal 90–120-minute target
+without plausible single-route reading/investigation load. No Story writing
+was authorized. Narrative-led separately reached independent review; it
+identified unsupported assumed testimony and exposure consequences. Its
+correction was still in flight at this evidence snapshot, not passed.
+
+The ensuing planner revision requires each Choice alternative to name the
+actual knowledge, access, trust or exposure state it changes; later beats
+must consume those states even when routes reconverge. It requires reachable
+refusal paths, checkable exposure mechanisms, independent causal proof of
+motive rather than assumed benefit, and a bounded single-route duration
+account when promised. The independent reviewer checks these requirements
+and the exact, protected patch protocol remains unchanged. These prompt
+changes are deterministic-regression-tested, not certified by the older
+in-flight Luna process. Keep #181 open until both complete new-Story
+semantic and recovery gates pass.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise
