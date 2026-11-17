@@ -27,5 +27,10 @@ test("Architecture writer receives source-bound whole-Story Choice consequences 
   assert.match(prompt, /not .*sum|never .*sum/i);
   assert.match(prompt, /provisional|uncertainty/i);
   assert.match(prompt, /not by inventing later Event IDs/i);
+  assert.match(prompt, /player-inspectable independent observation/i);
+  assert.match(prompt, /claim it can test/i);
+  assert.match(prompt, /what that action accomplishes/i);
+  assert.match(prompt, /lasting practical or social consequence/i);
+  assert.match(prompt, /uncertainty about culprit or motive/i);
   assert.match(prompt, /No new user-protected|new user-protected/i);
 });

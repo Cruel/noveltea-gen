@@ -114,11 +114,20 @@ export function architectureSpecialistPrompt(
       "turning point outcomes and their causal successor (or terminal payoff). " +
       "For investigations distinguish discovery, evidence, inference, confrontation " +
       "and consequential player decision without asserting unsupported facts. " +
-      "If a Milestone promises to test conflicting accounts, name the independent observation " +
-      "and what that observation can and cannot establish. Plan the comparison, " +
+      "If a Milestone promises to test conflicting accounts, name a specific " +
+      "plausible, player-inspectable independent observation (a concrete ordinary " +
+      "trace, physical feature, or record-handling discrepancy), the witness " +
+      "claim it can test and what it can and cannot establish. A vague " +
+      "promise of a later physical feature is not a causal plan. Plan the comparison, " +
       "not a prematurely proven inference or a fabricated Event. " +
       "Stage-incomplete Milestones must keep completeness: partial and " +
       "fulfillment: {any_of: []}; no speculative Events or artificial completion. " +
+      "End the Arc with a specific, source-supported action the protagonist " +
+      "can responsibly take after the final confrontation, what that action " +
+      "accomplishes, and its lasting practical or social consequence. A vague " +
+      "\"defensible response to uncertainty\" or unnamed \"terminal payoff\" is " +
+      "not an ending. Preserve any intended uncertainty about culprit or motive " +
+      "without introducing new protected canon or speculative targets. " +
       "Bodies remain true after subsequent World/Character/Event authorship; never " +
       "describe temporary implementation status. Give each Milestone plausible " +
       "duration_minutes narrative and exploration RANGES; distinguish missing " +
@@ -333,12 +342,13 @@ export async function authorArchitecture(
     // Review the ACTUAL uncommitted draft before it becomes a source-verified
     // Architecture checkpoint. The independent read-only reviewer cannot
     // approve canon or weaken the later mandatory postcommit semantic gate.
-    const { reviewArchitectureDraft } = await import("./architecture-draft-review.js");
-    for (let iteration = 0; iteration < 2; iteration++) {
+    const { reviewArchitectureDraft, ARCHITECTURE_DRAFT_CORRECTION_LIMIT } =
+      await import("./architecture-draft-review.js");
+    for (let iteration = 0; iteration <= ARCHITECTURE_DRAFT_CORRECTION_LIMIT; iteration++) {
       const review = await reviewArchitectureDraft(job, snapshot, plan, provider, modelId,
         authoredPaths, iteration);
       if (review.status === "pass") break;
-      if (iteration === 1) throw new Error(
+      if (iteration === ARCHITECTURE_DRAFT_CORRECTION_LIMIT) throw new Error(
         "Independent Architecture draft rereview still rejected source-grounded causality/Choice/route issues: " +
         JSON.stringify(review.findings) + ". Preserve the draft and original Pi sessions for reconciliation.");
       await promptStorySpecialist(session,

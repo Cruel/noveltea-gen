@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseArchitectureDraftReview } from "../src/architecture-draft-review.js";
+import { parseArchitectureDraftReview, ARCHITECTURE_DRAFT_CORRECTION_LIMIT } from "../src/architecture-draft-review.js";
 
 const paths = ["arcs/arc-one.md", "milestones/milestone-one.md"];
+
+test("precommit Architecture correction is bounded to two original-session revisions and three independent verdicts", () => {
+  assert.equal(ARCHITECTURE_DRAFT_CORRECTION_LIMIT, 2);
+  assert.equal(ARCHITECTURE_DRAFT_CORRECTION_LIMIT + 1, 3);
+});
 
 test("precommit Architecture review accepts only explicit bounded source-anchored feedback", () => {
   assert.deepEqual(parseArchitectureDraftReview(

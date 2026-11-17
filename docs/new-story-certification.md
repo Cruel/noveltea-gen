@@ -269,14 +269,24 @@ its original, read-only Pi session, verifies successful tool-read receipts,
 and requires the complete six-field proposal again. A new independent,
 read-only precommit Architecture critique checks source-visible causal
 prerequisites, lasting Choice consequences and route estimates. Its feedback
-permits one same-original-writer-session correction of the already authorized
-Arc/Milestone draft; a separate independent rereview and the existing native,
+permits at most two same-original-writer-session corrections of the already authorized
+Arc/Milestone draft, each followed by independent rereview. The existing native,
 protected-decision and postcommit semantic gates remain mandatory. Event-local
 no-write corrections now describe source-visible ledger/trace discrepancies
 explicitly: the writer may present evidence in its original authorized Event,
 but cannot invent an authoritative off-screen alteration, a new Fact or
 another-owner grant. Cross-owner and protected changes still require a
 separate typed, authenticated amendment and cannot be inferred from prose.
+A fresh choice-heavy Luna certification at `5151ab8` exercised the new
+precommit reviewer: its first verdict identified a missing concrete testable
+observation, the original writer revised that Milestone, and a separate
+rereview then identified a missing concrete terminal Arc action/consequence.
+The original one-correction limit blocked safely before committing Architecture;
+only Foundation had a verified checkpoint. The subsequently strengthened writer
+prompt requires these concrete details up front, and the precommit gate now
+requests all source-grounded findings together and permits at most two
+corrections in the SAME original session, each independently rereviewed. The
+failed draft and private sessions remain preserved, not silently replayed.
 Deterministic coverage is necessary but the two full real-Pi scenario
 acceptance runs below remain the criterion for closing #181.
 

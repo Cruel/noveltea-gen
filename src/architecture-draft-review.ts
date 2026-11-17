@@ -15,6 +15,9 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 
+/** Two original-session corrections, each followed by independent read-only rereview. */
+export const ARCHITECTURE_DRAFT_CORRECTION_LIMIT = 2;
+
 export interface ArchitectureDraftReview {
   status: "pass" | "revise";
   findings: Array<{ path: string; reason: string; correction: string }>;
@@ -48,7 +51,7 @@ export async function reviewArchitectureDraft(
   provider: string, model: string, paths: string[], iteration: number,
 ): Promise<ArchitectureDraftReview> {
   if (!paths.length || paths.length > 32 || paths.some(p => !authorizedArchitectureRecordPath(p)) ||
-      !Number.isInteger(iteration) || iteration < 0 || iteration > 1)
+      !Number.isInteger(iteration) || iteration < 0 || iteration > ARCHITECTURE_DRAFT_CORRECTION_LIMIT)
     throw Error("Architecture draft reviewer lacks bounded authorized Arc/Milestone paths.");
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
@@ -101,6 +104,9 @@ export async function reviewArchitectureDraft(
       "a choice-heavy Story needs distributed consequential alternatives, but do not " +
       "impose per-Milestone quotas. Architecture must NOT invent Event IDs or completed " +
       "fulfillment: later specialists own those records. Do not demand later-stage files. " +
+      "Inspect ALL changed Arc/Milestone records and report ALL concrete, material " +
+      "source-grounded defects together in one verdict (up to eight), not just " +
+      "the first issue discovered. Do not invent issues to reach any quota. " +
       "Give a path-specific correction limited to the existing Arc/Milestone files. " +
       "If fixing would require protected decisions, new canonical targets or author " +
       "approval, say so in the finding; your verdict cannot grant those changes. " +
