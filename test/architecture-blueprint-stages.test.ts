@@ -6,7 +6,7 @@ import { assembleBlueprintStages, assembleBlueprintOutlineCore, assembleCurrentB
   parseBlueprintOutlineCore, parseBlueprintOutlineHeader, parseBlueprintRouteStage,
   requiredBlueprintRouteChoices } from "../src/architecture-blueprint-stages.js";
 import { blueprintBeatPrompt, blueprintEvidencePrompt, blueprintOutlinePrompt, blueprintRoutesPrompt,
-  type CausalBlueprint } from "../src/architecture-blueprint.js";
+  parseCausalBlueprint, type CausalBlueprint } from "../src/architecture-blueprint.js";
 import type { Plan } from "../src/architecture.js";
 
 const blueprint: CausalBlueprint = {
@@ -196,6 +196,28 @@ test("new Architecture planning requires a concrete solution and route-state con
   const longCore = assembleBlueprintOutlineCore(longHeader, acceptedLongBeats);
   assert.ok(Buffer.byteLength(JSON.stringify(longCore)) > 18000);
   assert.ok(Buffer.byteLength(JSON.stringify(longCore)) < 40000);
+  const longOutline = assembleCurrentBlueprintOutline(longCore, []);
+  const longEvidence = longCore.beats.map(beat => ({
+    id: beat.id, observations: [{
+      source: "independently dated record",
+      observable: "A documented finding: " + "detail ".repeat(510),
+      supports: "A bounded inference from that record",
+      limits: "Cannot establish intent from opportunity alone",
+    }],
+  }));
+  for (let first = 0; first < longEvidence.length; first += EVIDENCE_BATCH_SIZE) {
+    const response = longEvidence.slice(first, first + EVIDENCE_BATCH_SIZE)
+      .map(JSON.stringify).join("\n");
+    assert.ok(Buffer.byteLength(response) < 10000, "each evidence response remains bounded");
+    assert.deepEqual(parseBlueprintEvidence(response, longOutline, first),
+      longEvidence.slice(first, first + EVIDENCE_BATCH_SIZE));
+  }
+  const longBlueprint = assembleBlueprintStages(longOutline, longEvidence);
+  assert.ok(Buffer.byteLength(JSON.stringify(longBlueprint)) > 40000);
+  assert.ok(Buffer.byteLength(JSON.stringify(longBlueprint)) < 64000);
+  assert.throws(() => parseCausalBlueprint(JSON.stringify({
+    ...longBlueprint, premise: "unbounded ".repeat(7000),
+  })), /bounded size/);
   assert.throws(() => parseBlueprintOutlineCore(JSON.stringify({
     ...longCore, premise: "unbounded ".repeat(5000),
   })), /bounded size/);

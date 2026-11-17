@@ -184,7 +184,9 @@ function parseRouteConsequences(value: unknown, full: CausalBlueprint): Blueprin
 }
 
 export function parseBlueprintOutline(text: string): BlueprintOutline {
-  const wire = parseBlueprintWire(text, 24000);
+  // Assembled beat details and separately bounded Choice routes can exceed
+  // any individual model response; retain the full-document 64 KB ceiling.
+  const wire = parseBlueprintWire(text, 64000);
   const v2 =
     wire.format === "json" &&
     !!wire.value &&

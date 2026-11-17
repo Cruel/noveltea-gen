@@ -48,9 +48,10 @@ export function classifyBlueprintFailure(reason: string):
   return "interrupted";
 }
 
-// Real independent reviews add concrete evidence/route consequences to ~23 KB
-// initial drafts. Leave correction headroom without weakening causal validation.
-const MAX_BLUEPRINT_BYTES = 40000;
+// The complete blueprint is assembled from separately bounded beat and
+// evidence batches. Its aggregate limit must not be a single-response budget;
+// keep an independent 64 KB ceiling for the fully assembled document.
+const MAX_BLUEPRINT_BYTES = 64000;
 const REQUIRED_SKILLS = ["nt-story-architecture/SKILL.md", "nt-catalog/SKILL.md"] as const;
 
 export interface CausalBlueprint {
