@@ -546,6 +546,26 @@ deterministic-regression evidence only until a new real-Pi continuation
 passes the complete independent review and Story completion gates;
 #181 remains OPEN.
 
+**Live continuation on `9be95b4` (not certified):** Reusing the same
+verified Foundation checkpoint, real Luna successfully emitted the
+short validated `causal-outline-header/v1` (six ordered beats and a
+concrete proposed answer). The following two-beat JSONL stage initially
+blocked twice with `Blueprint JSONL line 1 must be a complete,
+unwrapped JSON object`. Inspection of both exact saved model outputs
+showed **both JSONL lines were parseable JSON objects**; the first line
+merely had a trailing ASCII space after its final brace. The wire
+codec checked `line.endsWith("}")` before JSON.parse, rejecting
+grammar-legal whitespace. The codec now trims **only whitespace**
+around each line before strict object checking/JSON.parse; it still
+rejects malformed braces, extra text, blank lines, arrays where
+objects are required, and oversized responses. Both original model
+responses were replayed read-only against the preserved six-beat
+header using the corrected parser: the expected two beat IDs were
+accepted verbatim, without editing any original source/response or
+making a new Pi call. The regression suite covers whitespace and
+negative shape cases. The remaining full Story semantic/recovery
+gates have not passed. #181 stays OPEN.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

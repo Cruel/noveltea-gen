@@ -21,11 +21,14 @@ export function parseBlueprintWire(text: string, byteLimit: number): BlueprintWi
         (singleError instanceof SyntaxError ? singleError.message : "Invalid JSON document"));
     const values: unknown[] = [];
     for (const [index, line] of lines.entries()) {
-      if (!line.startsWith("{") || !line.endsWith("}"))
+      // JSON permits whitespace before and after each complete object.
+      // Trimming only grammar-insignificant whitespace is not a syntax repair.
+      const row = line.trim();
+      if (!row.startsWith("{") || !row.endsWith("}"))
         throw Error("Blueprint JSONL line " + (index + 1) +
           " must be a complete, unwrapped JSON object.");
       try {
-        const parsed: unknown = JSON.parse(line);
+        const parsed: unknown = JSON.parse(row);
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
           throw Error("Expected object");
         values.push(parsed);
