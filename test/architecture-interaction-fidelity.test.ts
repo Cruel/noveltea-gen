@@ -32,5 +32,10 @@ test("Architecture writer receives source-bound whole-Story Choice consequences 
   assert.match(prompt, /what that action accomplishes/i);
   assert.match(prompt, /lasting practical or social consequence/i);
   assert.match(prompt, /uncertainty about culprit or motive/i);
+  assert.match(prompt, /MAY invent specific plausible FUTURE ON-PAGE clues/i);
+  assert.match(prompt, /central clue cannot be conditional/i);
+  assert.match(prompt, /last-known-presence evidence/i);
+  assert.match(prompt, /protected choice or welfare constraint/i);
+  assert.match(prompt, /audit the whole Arc backward/i);
   assert.match(prompt, /No new user-protected|new user-protected/i);
 });

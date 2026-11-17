@@ -23,6 +23,26 @@ export interface ArchitectureDraftReview {
   findings: Array<{ path: string; reason: string; correction: string }>;
 }
 
+/** Preserve the original independent reviewer session when its JSON verdict
+ * contains a typo or unbounded field. No reviewer finding is accepted by
+ * string normalization: Pi must return a new, exact typed verdict itself. */
+export function architectureDraftFormatCorrection(paths: readonly string[]): string {
+  if (!paths.length || paths.length > 32 || paths.some(path => !authorizedArchitectureRecordPath(path)))
+    throw Error("Architecture draft format correction lacks authorized record paths.");
+  return "INDEPENDENT DRAFT VERDICT FORMAT CORRECTION (same read-only session): " +
+    "Your last answer was not a valid bounded JSON verdict. It may have used " +
+    "an incorrect source path, an unsupported key or an oversized finding. " +
+    "Do not edit any files or change the standards of review. Return the COMPLETE " +
+    "independent findings for the exact source draft you already read. " +
+    "Use STRICT JSON with EXACT keys status, findings; status must be pass " +
+    "with [] or revise with 1-8 concrete findings. Each finding has EXACT keys " +
+    "path, reason, correction, and reason/correction are nonempty and at most " +
+    "750 characters. Each path must EXACTLY match one entry in this authorized " +
+    "array (use a forward slash, not a period, between folder and filename): " +
+    JSON.stringify(paths) + ". No additional keys, explanations, or code fences. " +
+    "This correction grants no write scope, approval or source change.";
+}
+
 export function parseArchitectureDraftReview(raw: string, paths: readonly string[]): ArchitectureDraftReview {
   const text = raw.trim().replace(/^```(?:json)?\s*\n/i, "").replace(/\n```\s*$/, "");
   let value: unknown;
@@ -102,7 +122,12 @@ export async function reviewArchitectureDraft(
       "mutually exclusive branch lengths summed as simultaneous playtime, " +
       "and author budget violations. A narrative-led Story need not invent Puzzles; " +
       "a choice-heavy Story needs distributed consequential alternatives, but do not " +
-      "impose per-Milestone quotas. Architecture must NOT invent Event IDs or completed " +
+      "impose per-Milestone quotas. At planning stage, a specific proposed future " +
+      "on-page clue, record or witness encounter is legitimate delegated design, " +
+      "not an already-proven World Fact. Do not require earlier Event/Fact records " +
+      "to exist yet, but DO require a specific plausible planned source and " +
+      "a causal path from what it could establish to each promised conclusion. " +
+      "Architecture must NOT invent Event IDs or completed " +
       "fulfillment: later specialists own those records. Do not demand later-stage files. " +
       "Inspect ALL changed Arc/Milestone records and report ALL concrete, material " +
       "source-grounded defects together in one verdict (up to eight), not just " +
@@ -147,7 +172,20 @@ export async function reviewArchitectureDraft(
     }
     if (!success() || missing().length)
       throw Error("Independent Architecture draft reviewer omitted required source reads; preserve the uncommitted draft.");
-    const verdict = parseArchitectureDraftReview(session.getLastAssistantText() ?? "", paths);
+    let verdict: ArchitectureDraftReview;
+    try {
+      verdict = parseArchitectureDraftReview(session.getLastAssistantText() ?? "", paths);
+    } catch {
+      // This completed, read-only Pi turn has no writer side effects. Correct
+      // ONE malformed verdict in the same original reviewer conversation;
+      // never normalize forged paths or silently interpret an invalid pass.
+      await promptStorySpecialist(session, architectureDraftFormatCorrection(paths));
+      if (!success())
+        throw Error("Architecture draft verdict format correction was interrupted; preserve original reviewer session.");
+      if (missing().length)
+        throw Error("Architecture draft verdict correction lost required source reads.");
+      verdict = parseArchitectureDraftReview(session.getLastAssistantText() ?? "", paths);
+    }
     await context.completed(sessionFile, session.sessionId);
     return verdict;
   } finally { session.dispose(); }

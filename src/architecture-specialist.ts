@@ -90,7 +90,11 @@ export function architectureSpecialistPrompt(
       "describe the causal prerequisites, alternatives, and what knowledge, access " +
       "or relationships actually differ after any route reconvergence. Explicitly " +
       "show those decisions in the Arc trajectory AND relevant Milestone prose " +
-      "at planning level, not by inventing later Event IDs, Choices or route edges.",
+      "at planning level, not by inventing later Event IDs, Choices or route edges. " +
+      "Enumerate every original author-protected choice or welfare constraint " +
+      "in the approved Creative Direction in the actual affected Milestones: " +
+      "name the supported alternatives and how the protected value survives " +
+      "the conclusion, rather than treating it as only a thematic concern.",
     sources: REQUIRED,
     sourceUse:
       "Read Creative Direction and relevant existing canonical Story records IF present. " +
@@ -118,8 +122,23 @@ export function architectureSpecialistPrompt(
       "plausible, player-inspectable independent observation (a concrete ordinary " +
       "trace, physical feature, or record-handling discrepancy), the witness " +
       "claim it can test and what it can and cannot establish. A vague " +
-      "promise of a later physical feature is not a causal plan. Plan the comparison, " +
+      "promise of a later physical feature is not a causal plan. " +
+      "As the delegated fictional story architect, you MAY invent specific " +
+      "plausible FUTURE ON-PAGE clues, witness encounters, trace provenance and " +
+      "consequences within the approved setting; they become a concrete " +
+      "Arc/Milestone design obligation for later Event specialists, not a " +
+      "claim that a historical Fact or Event is already authored. A central " +
+      "clue cannot be conditional on 'if a record exists' or 'if a witness " +
+      "is reachable': CHOOSE a credible planned source and name how the " +
+      "player will inspect or test it. Plan the comparison, " +
       "not a prematurely proven inference or a fabricated Event. " +
+      "For a disappearance mystery or suspected record alteration, separately " +
+      "plan the last-known-presence evidence, the inspectable alteration " +
+      "discrepancy, the link between them, and the limits of each inference. " +
+      "If the Story promises a resolved disappearance, its planned evidence " +
+      "must actually support a bounded account of what happened; do not " +
+      "replace that promise with unrelated disclosures or " +
+      "a purely thematic uncertainty ending. " +
       "Stage-incomplete Milestones must keep completeness: partial and " +
       "fulfillment: {any_of: []}; no speculative Events or artificial completion. " +
       "End the Arc with a specific, source-supported action the protagonist " +
@@ -128,6 +147,13 @@ export function architectureSpecialistPrompt(
       "\"defensible response to uncertainty\" or unnamed \"terminal payoff\" is " +
       "not an ending. Preserve any intended uncertainty about culprit or motive " +
       "without introducing new protected canon or speculative targets. " +
+      "Before finishing, audit the whole Arc backward from the final " +
+      "action, the actual evidence and every protected/major Choice to the " +
+      "first enabling Milestone. For each causal link ask which named " +
+      "on-page witness/trace establishes it, what remains uncertain, " +
+      "how the player encounters it, and which subsequent decision consumes it. " +
+      "Fix unsupported jumps, conditional-only evidence, and contradictions " +
+      "in ALL Arc/Milestone files now; do not leave them for Event authors. " +
       "Bodies remain true after subsequent World/Character/Event authorship; never " +
       "describe temporary implementation status. Give each Milestone plausible " +
       "duration_minutes narrative and exploration RANGES; distinguish missing " +

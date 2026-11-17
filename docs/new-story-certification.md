@@ -290,6 +290,28 @@ failed draft and private sessions remain preserved, not silently replayed.
 Deterministic coverage is necessary but the two full real-Pi scenario
 acceptance runs below remain the criterion for closing #181.
 
+**Further #181 real-Pi attempts on `844007b` (not passing):** Fresh narrative-led and
+choice-heavy Stories used independent Foundation approval and reached the
+uncommitted Architecture review. The narrative-led reviewer found that the
+planned disappearance resolution and evidence trail remained causally
+unsupported after two same-session corrections. The choice-heavy reviewer
+caught a missing independent observation and protected welfare alternative;
+its final response contained an invalid record path (a period in place of
+the folder slash), which the controller correctly refused to accept. Both
+runs blocked without an Architecture commit and without adaptive plan
+admission. No original-author objective, negative verdict or protected
+decision was waived.
+
+The subsequent Architecture prompt now explicitly distinguishes delegated
+future on-page clue *planning* from asserting already-proven canonical Facts,
+requires concrete causal links to the promised mystery outcome, and demands
+that author-protected safety/Choice requirements survive route convergence.
+The read-only draft reviewer can request ONE exact same-session correction
+for a malformed typed verdict; the controller still rejects unauthorized
+paths and preserves the complete transcript, and the mandatory review and
+two writer-correction limit remain unchanged. No full end-to-end success
+is claimed for these runs.
+
 **November 16, 2026 real-Pi observations:** The source-bound
 narrative-led Story approved `puzzle_emphasis: none` and zero formal
 Puzzles, verified Architecture and independent reviews. Its real

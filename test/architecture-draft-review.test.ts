@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseArchitectureDraftReview, ARCHITECTURE_DRAFT_CORRECTION_LIMIT } from "../src/architecture-draft-review.js";
+import { parseArchitectureDraftReview, architectureDraftFormatCorrection, ARCHITECTURE_DRAFT_CORRECTION_LIMIT } from "../src/architecture-draft-review.js";
 
 const paths = ["arcs/arc-one.md", "milestones/milestone-one.md"];
 
@@ -21,6 +21,23 @@ test("precommit Architecture review accepts only explicit bounded source-anchore
   }), paths);
   assert.equal(result.status, "revise");
   assert.equal(result.findings[0]!.path, paths[1]);
+});
+
+test("a malformed independent verdict receives bounded same-session format correction, not automatic path normalization", () => {
+  const malformed = JSON.stringify({ status: "revise", findings: [{
+    path: "milestones.milestone-one.md", reason: "Unsupported clue", correction: "Choose one",
+  }] });
+  assert.throws(() => parseArchitectureDraftReview(malformed, paths), /unauthorized findings/);
+  const guidance = architectureDraftFormatCorrection(paths);
+  assert.match(guidance, /same read-only session/);
+  assert.match(guidance, /forward slash, not a period/);
+  assert.match(guidance, /milestones\/milestone-one.md/);
+  assert.match(guidance, /grants no write scope/i);
+  assert.doesNotMatch(guidance, /milestones\.milestone-one\.md/);
+  assert.throws(() => architectureDraftFormatCorrection(["../private.md"]), /authorized record paths/);
+  const corrected = malformed.replace("milestones.milestone-one.md", "milestones/milestone-one.md");
+  assert.equal(parseArchitectureDraftReview(corrected, paths).findings[0]?.path,
+    "milestones/milestone-one.md");
 });
 
 test("precommit feedback cannot approve scope, omit evidence or smuggle paths", () => {
