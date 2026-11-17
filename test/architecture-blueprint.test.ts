@@ -165,6 +165,39 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
     const read = () => readApprovedBlueprint(job, plan, snapshot, "openai", "gpt-6-luna",
       "write a mystery", "b".repeat(40));
     assert.deepEqual((await read())?.blueprint, example);
+    const outline = {
+      schema: "noveltea-causal-outline/v1", premise: example.premise,
+      beats: example.beats.map(({ observations: _observations, ...beat }) => beat),
+      resolution: example.resolution,
+    };
+    const evidence = example.beats.map(({ id, observations }) => ({ id, observations }));
+    const receipt = {
+      schema: "noveltea-blueprint-stages/v1", outlineDigest: digest(outline),
+      evidenceDigests: [digest(evidence)],
+    };
+    const stagePin: BlueprintPin = {
+      ...pin, schema: "noveltea-approved-blueprint/v3", stagesDigest: digest(receipt),
+    };
+    const outlineFile = join(parent, "plan-2-outline.json");
+    const evidenceFile = join(parent, "plan-2-evidence-0.json");
+    const stagesFile = join(parent, "plan-2-stages.json");
+    await writeFile(outlineFile, JSON.stringify(outline));
+    await writeFile(evidenceFile, JSON.stringify(evidence));
+    await writeFile(stagesFile, JSON.stringify(receipt));
+    await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(stagePin));
+    assert.deepEqual((await read())?.blueprint, example,
+      "v3 approved design must reconstruct from independently durable stages");
+    await writeFile(evidenceFile, JSON.stringify([{ ...evidence[0], observations: [] }, evidence[1]]));
+    await assert.rejects(read, /evidence batch changed/);
+    await writeFile(evidenceFile, JSON.stringify(evidence));
+    await writeFile(outlineFile, JSON.stringify({ ...outline, premise: "rewritten" }));
+    await assert.rejects(read, /outline changed/);
+    await writeFile(outlineFile, JSON.stringify(outline));
+    await writeFile(stagesFile, JSON.stringify({ ...receipt, evidenceDigests: [] }));
+    await assert.rejects(read, /stage receipt changed/);
+    await writeFile(stagesFile, JSON.stringify(receipt));
+    assert.deepEqual((await read())?.blueprint, example);
+    await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(pin));
     await writeFile(join(parent, "plan-2-admitted.json"), JSON.stringify({
       ...admission, model: "another-model",
     }));

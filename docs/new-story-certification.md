@@ -262,16 +262,30 @@ also preserved and reverified at checkpoint restoration. A partial/interrupted
 planner or review is blocked without silent rerun. The original two-correction
 limit and canonical Story write boundaries are unchanged.
 
-The read-only Pi planner may supply compact **JSONL** instead of one deeply
-nested JSON envelope: its initial response is one complete blueprint JSON
-object followed by 1–20 individual source-obligation JSON objects, and a
-correction is one version/digest header object followed by 1–48 individual
-patch-operation JSON objects. Every line is parsed independently and must be
-strict JSON; malformed, partial, oversized or extra lines fail closed, with
-no implicit quote normalization or syntax auto-repair. Existing complete JSON
-envelopes remain supported for compatibility. The controller persists only
-the same normalized, schema-validated private JSON artifacts; the wire format
-never grants any writer permission. A separate immutable
+The first real-Pi plan is now assembled through **separately validated
+bounded model turns** in the same read-only planner session: (1) a compact
+complete causal outline, fixing ordered beat identities, dependencies,
+protected Choices, distinct lasting consequences and resolution; (2) a
+sequence of evidence batches of at most two beats each, each with explicit
+source, observation, support and limits; and (3) a separately source-quoted
+obligation inventory. The controller does not retry the whole design when an
+observation or quoted source fragment is malformed; each stage permits one
+exact-error correction in isolation. Both the complete assembled design and
+all source obligations are validated before independent review. The outline,
+each evidence batch and the stage receipt are persisted privately and
+bound by digests in new v3 approval pins; restoring an approved plan reassembles
+and validates those stages against the frozen initial draft. Previously approved
+v2 pins retain their existing strict recovery path. Missing or tampered
+intermediate stage evidence fails closed.
+
+The evidence and obligation batches use compact **JSONL** with one complete
+strict JSON object per line; the initial outline is one bounded JSON object.
+A correction patch is one version/digest header followed by independently
+parsed JSONL operations. Every line must be valid; malformed, partial,
+oversized or extra lines fail closed, without quote normalization or syntax
+auto-repair. Legacy complete JSON envelopes are still accepted by the
+separately tested original parsing helpers. No wire format grants author
+approval or canonical Story writer permissions. A separate immutable
 `plan-<version>-admitted.json` receipt is written **before** Pi session creation,
 closing the crash window between session creation and its started-session
 receipt. A missing or changed admission, start or reviewer receipt blocks

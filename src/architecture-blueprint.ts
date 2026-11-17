@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -19,6 +20,9 @@ import { buildBlueprintObligations, validateBlueprintObligations,
   type BlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
 import { parseBlueprintPatch, applyBlueprintPatch } from "./architecture-blueprint-patch.js";
 import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
+import { assembleBlueprintStages, EVIDENCE_BATCH_SIZE, parseBlueprintEvidence,
+  parseBlueprintObligationStage, parseBlueprintOutline,
+  type BlueprintEvidence, type BlueprintOutline } from "./architecture-blueprint-stages.js";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const SLUG = /^[a-z][a-z0-9-]{0,63}$/;
@@ -45,7 +49,7 @@ export interface BlueprintReview {
   findings: Array<{ beatId: string; reason: string; correction: string }>;
 }
 export interface BlueprintPin {
-  schema: "noveltea-approved-blueprint/v2";
+  schema: "noveltea-approved-blueprint/v2" | "noveltea-approved-blueprint/v3";
   jobId: string;
   threadId: string;
   baseSha: string;
@@ -60,6 +64,7 @@ export interface BlueprintPin {
   blueprintDigest: string;
   reviewDigest: string;
   obligationsDigest: string;
+  stagesDigest?: string;
   plannerSessionId: string;
   plannerSessionFile: string;
   reviewerSessionId: string;
@@ -160,6 +165,12 @@ const verdictPath = (job: JobStartResult, version: number, iteration: number) =>
   join(root(job), "plan-" + version + "-verdict-" + iteration + ".json");
 const obligationsPath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-obligations.json");
+const outlinePath = (job: JobStartResult, version: number) =>
+  join(root(job), "plan-" + version + "-outline.json");
+const evidencePath = (job: JobStartResult, version: number, first: number) =>
+  join(root(job), "plan-" + version + "-evidence-" + first + ".json");
+const stagesPath = (job: JobStartResult, version: number) =>
+  join(root(job), "plan-" + version + "-stages.json");
 const patchPath = (job: JobStartResult, version: number, iteration: number) =>
   join(root(job), "plan-" + version + "-patch-" + iteration + ".json");
 const reviewSessionPath = (job: JobStartResult, version: number, iteration: number) =>
@@ -202,7 +213,7 @@ async function safeRead(path: string, parent: string): Promise<unknown> {
 }
 function sameLineage(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
   provider: string, model: string, task: string, head: string): Omit<BlueprintPin, "schema" | "draftVersion" |
-  "blueprintDigest" | "reviewDigest" | "obligationsDigest" | "plannerSessionId" | "plannerSessionFile" |
+  "blueprintDigest" | "reviewDigest" | "obligationsDigest" | "stagesDigest" | "plannerSessionId" | "plannerSessionFile" |
   "reviewerSessionId" | "reviewerSessionFile"> {
   return { jobId: job.jobId, threadId: job.threadId, baseSha: job.baseSha,
     executionHead: head, planVersion: plan.version, contractDigest: sha(plan.contract),
@@ -225,7 +236,10 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
   if (!existsSync(path)) return null;
   const record = await safeRead(path, root(job)) as BlueprintPin;
   const expected = sameLineage(job, plan, snapshot, provider, model, task, head);
-  if (!record || record.schema !== "noveltea-approved-blueprint/v2" ||
+  if (!record || !["noveltea-approved-blueprint/v2", "noveltea-approved-blueprint/v3"].includes(record.schema) ||
+      (record.schema === "noveltea-approved-blueprint/v3"
+        ? !record.stagesDigest || !HASH.test(record.stagesDigest)
+        : record.stagesDigest !== undefined) ||
       Object.entries(expected).some(([key, value]) => record[key as keyof BlueprintPin] !== value) ||
       !Number.isInteger(record.draftVersion) || record.draftVersion < 0 ||
       record.draftVersion > MAX_CORRECTIONS ||
@@ -247,6 +261,32 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
   const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
   const initial = parseCausalBlueprint(JSON.stringify(await safeRead(
     draftPath(job, plan.version, 0), root(job))));
+  if (record.schema === "noveltea-approved-blueprint/v3") {
+    const receipt = await safeRead(stagesPath(job, plan.version), root(job));
+    if (!strict(receipt, ["schema", "outlineDigest", "evidenceDigests"]) ||
+        receipt.schema !== "noveltea-blueprint-stages/v1" ||
+        !Array.isArray(receipt.evidenceDigests) ||
+        sha(receipt) !== record.stagesDigest)
+      throw Error("Approved causal blueprint stage receipt changed or is missing.");
+    const outline = parseBlueprintOutline(JSON.stringify(
+      await safeRead(outlinePath(job, plan.version), root(job))));
+    if (sha(outline) !== receipt.outlineDigest)
+      throw Error("Approved causal outline changed after admission.");
+    const evidence: BlueprintEvidence[] = [];
+    const expectedBatches = Math.ceil(outline.beats.length / EVIDENCE_BATCH_SIZE);
+    if (receipt.evidenceDigests.length !== expectedBatches)
+      throw Error("Approved causal evidence batch count changed.");
+    for (let first = 0; first < outline.beats.length; first += EVIDENCE_BATCH_SIZE) {
+      const chunk = await safeRead(evidencePath(job, plan.version, first), root(job));
+      if (!Array.isArray(chunk) ||
+          sha(chunk) !== receipt.evidenceDigests[first / EVIDENCE_BATCH_SIZE])
+        throw Error("Approved causal evidence batch changed.");
+      evidence.push(...parseBlueprintEvidence(
+        chunk.map(line => JSON.stringify(line)).join("\n"), outline, first));
+    }
+    if (!isDeepStrictEqual(assembleBlueprintStages(outline, evidence), initial))
+      throw Error("Approved causal draft differs from its staged source-bound evidence.");
+  }
   validateBlueprintObligations(manifest, initial, sources);
   if (sha(manifest) !== record.obligationsDigest)
     throw Error("Approved causal proof obligations changed after review.");
@@ -340,72 +380,84 @@ function lastText(session: Awaited<ReturnType<typeof sessionFor>>["session"]) {
     throw Error("Causal blueprint Pi session was interrupted; preserve original transcript.");
   return session.getLastAssistantText() ?? "";
 }
-function blueprintPrompt(plan: Plan, task: string) {
-  return "You are the NovelTea ARCHITECTURE CAUSAL PLANNER, not the canonical Story writer. " +
-    "Read skill://nt-story-architecture/SKILL.md, skill://nt-catalog/SKILL.md and " +
-    "creative-direction/foundation.md using the read tool. Do not edit, write or request shell. " +
-    "Create a COMPACT source-grounded provisional causal design for a complete Arc, " +
-    "not scene prose or canonical records. This is a NEW Story with only Foundation; " +
-    "planned future fictional clues are allowed, but clearly identify what each " +
-    "clue would actually prove, what it would not, and how the player can inspect it. " +
-    "A changed object alone cannot establish when or why it changed, and reaching " +
-    "an intermediate location does not settle a promised disappearance. " +
-    "Every witness-dependent clue must have an accessible " +
-    "route or credible alternative if the player may refuse the witness. " +
-    "Protected author choices and welfare restrictions must survive each ending. " +
-    "A decision needs alternatives with materially different lasting effects. " +
-    "Trace the resolution backwards through named inspectable evidence and " +
-    "cause-and-effect turning points. Separate the WHAT, WHEN, WHO, HOW and WHY " +
-    "questions the author actually promised. If you claim that evidence shows " +
-    "a breach or alteration, identify a direct test of that mechanism, not merely " +
-    "a person's access, an object's movement, a custody gap or a later trace. " +
-    "Do not claim a disappearance is resolved merely because someone reached " +
-    "an intermediate location. Every enabled or refused witness route must " +
-    "still support the ending's stated core conclusion using available proof. " +
-    "Carry each earlier decision's evidence access, relationships and material " +
-    "effects into later beats, including reconverged endings. Before finalizing " +
-    "the JSON, audit EACH causal conclusion backwards through the evidence " +
-    "under every alternative route; repair all unsupported leaps together. " +
-    "Planned evidence is a future design obligation, " +
-    "not already-authored World facts, Events or Choices. No invented canonical IDs. " +
-    "Keep the scope and approved budgets: " + JSON.stringify(plan.contract) +
-    "\nAuthor task: " + JSON.stringify(task) + "\n" +
-    "First inventory the concrete causal promises from exact passages in " +
-    "approved Creative Direction, the author task and the scope contract. " +
-    "For each obligation, quote a SHORT 8–40-character contiguous substring " +
-    "copied EXACTLY (including punctuation, case and spaces) from the chosen " +
-    "foundation document, author task or JSON scope contract. Never paraphrase " +
-    "or extend a quote from memory. A longer sentence is not needed; " +
-    "use the shortest source fragment that identifies the promise. " +
-    "Never combine words from different lines or disjoint clauses into a " +
-    "synthetic quote, even if the combined description would be true. " +
-    "Identify story-specific WHAT, WHEN, WHO, HOW, WHY questions only when " +
-    "promised; separately track material choices, refusal paths and ending conditions. " +
-    "For each promise state the proof the Story must make inspectable, its route " +
-    "and the beat IDs tasked with fulfilling it. Do not invent author promises " +
-    "or omit a protected requirement. This inventory is immutable through corrections. " +
-    "Return STRICT JSON LINES (JSONL), NOT a combined object or array: " +
-    "each line is ONE independently valid, compact JSON object, with standard " +
-    "double quotes, no code fences, blank lines, headers, explanations or prose. " +
-    "LINE ONE is the complete BLUEPRINT object, with EXACT fields " +
-    "{schema:'noveltea-causal-blueprint/v1',premise:string,beats:[{id:slug," +
-    "purpose:string,dependsOn:[earlier beat slugs],observations:[{source:string," +
-    "observable:string,supports:string,limits:string}],change:string," +
-    "decisions:[{question:string,alternatives:[{action:string,lastingEffect:string}]}]}]," +
-    "resolution:{question:string,conclusion:string,supportedBy:[evidence beat slugs]," +
-    "uncertainty:string}}. " +
-    "EVERY FOLLOWING LINE is ONE source obligation object with EXACT fields " +
-    "{id:slug,category:'what|when|who|how|why|consequence|route|other', " +
-    "source:'foundation|task|contract',quote:string,question:string,proof:string," +
-    "route:string,beatIds:[existing beat slugs]}. " +
-    "Do NOT wrap the lines in an enclosing array or add an extra closing brace. " +
-    "The controller parses and validates EVERY line; partial lines fail. " +
-    "Provide 2–16 blueprint beats and 1–20 obligation lines. " +
-    "Use decisions:[] when a beat has no player decision; omission of that " +
-    "single optional field is equivalent to [], no other fields are optional. " +
-    "Keep blueprint JSON under 24000 bytes and the whole response under 32000 bytes. Be concise; " +
-    "the one total-size ceiling, not arbitrary paragraph lengths, is enforced. " +
-    "Do not omit protected Choices or change their lasting consequences; no filler.";
+function blueprintOutlinePrompt(plan: Plan, task: string) {
+  return "You are the NovelTea READ-ONLY CAUSAL STORY ARCHITECT. " +
+    "First use read to inspect skill://nt-story-architecture/SKILL.md, " +
+    "skill://nt-catalog/SKILL.md, creative-direction/foundation.md. No writing or shell. " +
+    "Plan the COMPLETE Arc as a COMPACT CAUSAL OUTLINE, not canonical Story records. " +
+    "This is a new Story with only Creative Direction Foundation. " +
+    "Carry all approved author promises, including the WHAT, WHEN, WHO, HOW, WHY " +
+    "questions the source actually promises, each meaningful player Choice and " +
+    "its distinct lasting alternatives, refused/cooperative paths, material " +
+    "relationships, route reconvergence and final resolution. Avoid filler. " +
+    "Trace the core resolution backward through named future inspectable " +
+    "events without claiming uncreated evidence is already canon. " +
+    "Do not confuse finding an intermediate location with resolving a disappearance. " +
+    "Do not claim a mechanism or motive solely from access or a changed object. " +
+    "Only the outline is requested NOW: evidence observations and proof obligations " +
+    "will be collected in SEPARATE smaller prompts, without changing this outline. " +
+    "Preserve protected author choices even when they cause later route divergence. " +
+    "Use 2–16 beats and the full authorized objective and scope. " +
+    "APPROVED CONTRACT: " + JSON.stringify(plan.contract) +
+    "\\nORIGINAL AUTHOR TASK: " + JSON.stringify(task) +
+    "\\nReturn ONLY ONE compact valid JSON object, no code fences or prose, " +
+    "with EXACT root keys schema,premise,beats,resolution. " +
+    "schema is noveltea-causal-outline/v1. Every beat has EXACT keys " +
+    "id (unique lowercase slug), purpose (string), dependsOn (array of " +
+    "EARLIER beat ids), change (string), decisions (array). " +
+    "Each decision has question and alternatives, each alternative has " +
+    "action and lastingEffect (at least two materially distinct outcomes). " +
+    "Use decisions:[] for narrative-only beats. DO NOT emit observations yet. " +
+    "Resolution has question,conclusion,supportedBy (beat ids),uncertainty. " +
+    "The final proof is not approved until independent review. " +
+    "Check every string and closing brace before responding.";
+}
+function blueprintEvidencePrompt(outline: BlueprintOutline, first: number) {
+  const batch = outline.beats.slice(first, first + EVIDENCE_BATCH_SIZE);
+  return "READ-ONLY CAUSAL BLUEPRINT EVIDENCE STAGE. The outline below is " +
+    "FIXED; do not rewrite its beats, decisions, alternatives, ending or IDs. " +
+    "For ONLY the listed beats, plan what future evidence the player can " +
+    "actually inspect. Separate an evidence source, directly observable fact, " +
+    "supported inference and the limits of that inference. Do not infer WHEN " +
+    "from undated objects, WHO from mere access, WHY from opportunity, or HOW " +
+    "without a direct test. Preserve independent corroboration on any refused " +
+    "witness route, and the lasting consequences of all preceding choices. " +
+    "Empty observations are allowed for pacing beats without inspectable clues, " +
+    "but the overall resolution MUST have an evidence-bearing supported beat. " +
+    "These are FUTURE authoring commitments, not existing canonical facts. " +
+    "Return exactly " + batch.length + " standalone compact JSON object" +
+    (batch.length === 1 ? "" : "s") + ", ONE PER LINE, in order. " +
+    "Each line has EXACT keys id and observations, with id from the batch. " +
+    "observations is an array (maximum 8) of objects with EXACT keys " +
+    "source,observable,supports,limits, all nonempty strings. " +
+    "No code fences, enclosing array, text, extra braces or blank lines. " +
+    "COMPLETE IMMUTABLE OUTLINE: " + JSON.stringify(outline) +
+    "\\nTHIS BATCH: " + JSON.stringify(batch.map(beat => beat.id));
+}
+function blueprintObligationsPrompt(plan: Plan, task: string, blueprint: CausalBlueprint,
+  sources: ObligationSources) {
+  return "READ-ONLY SOURCE-GROUNDED CAUSAL OBLIGATION INVENTORY. " +
+    "The causal blueprint below is already STRUCTURALLY VALIDATED, and FIXED. " +
+    "Inventory EACH concrete promise of the actual approved Creative Direction " +
+    "and author task that the eventual Story must prove, including separately " +
+    "promised WHAT, WHEN, WHO, HOW, WHY, protected Choice consequences, refusal " +
+    "routes and ending outcomes. Do not invent extra author requirements. " +
+    "Each obligation must cite an 8–40-character EXACT CONTIGUOUS substring " +
+    "of the source specified by source:foundation,task,contract. " +
+    "Copy case, punctuation and whitespace exactly from the SOURCE TEXT BELOW; " +
+    "do not combine disconnected words or write a paraphrase as a quote. " +
+    "Quote the shortest source fragment that identifies a real promise. " +
+    "Include one or more EXISTING beat IDs that must fulfill the proof. " +
+    "1–20 separate lines, each exactly ONE compact valid JSON object with " +
+    "EXACT keys id,category,source,quote,question,proof,route,beatIds. " +
+    "category is what|when|who|how|why|consequence|route|other. " +
+    "source is foundation|task|contract. Use lowercase slug IDs. " +
+    "Do not include wrapper, enclosing array, markdown, extra braces, " +
+    "blank lines, explanations or any change to the blueprint. " +
+    "\\nEXACT FOUNDATION SOURCE: " + JSON.stringify(sources.foundation) +
+    "\\nEXACT AUTHOR TASK SOURCE: " + JSON.stringify(task) +
+    "\\nEXACT CONTRACT JSON SOURCE: " + JSON.stringify(plan.contract) +
+    "\\nIMMUTABLE FULL BLUEPRINT: " + JSON.stringify(blueprint);
 }
 function reviewPrompt(plan: Plan, blueprint: CausalBlueprint,
   obligations: BlueprintObligations, task: string) {
@@ -464,54 +516,86 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
       ...sameLineage(job, plan, snapshot, provider, model, task, head),
       plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
     });
-    await promptStorySpecialist(planner.session, planner.context.contextNote + blueprintPrompt(plan, task));
-    let manifest: BlueprintObligations | undefined;
+    const validatedStage = async <T>(name: string, parse: (text: string) => T,
+      correction: string): Promise<T> => {
+      verifyReadSources(planner.session.messages, planner.project.root, snapshot);
+      try { return parse(lastText(planner.session)); }
+      catch (error) {
+        const reason = error instanceof Error ? error.message : "Invalid model output";
+        await promptStorySpecialist(planner.session,
+          "CONTROLLER REJECTED the " + name + " stage: " + reason + ". " +
+          "Correct ONLY this stage, preserve all previously validated stages. " +
+          correction + " Return the complete corrected stage, no prose or markdown. " +
+          "Do not write Story files.");
+        verifyReadSources(planner.session.messages, planner.project.root, snapshot);
+        return parse(lastText(planner.session));
+      }
+    };
+    await promptStorySpecialist(planner.session,
+      planner.context.contextNote + blueprintOutlinePrompt(plan, task));
+    const outline = await validatedStage("outline", parseBlueprintOutline,
+      "Return ONE valid JSON outline object with all exact required keys; " +
+      "no evidence observations, code fences or extra closing brace.");
+    await immutable(outlinePath(job, plan.version), outline);
+    const evidence: BlueprintEvidence[] = [];
+    const evidenceDigests: string[] = [];
+    for (let first = 0; first < outline.beats.length; first += EVIDENCE_BATCH_SIZE) {
+      await promptStorySpecialist(planner.session, blueprintEvidencePrompt(outline, first));
+      const batch = await validatedStage("evidence batch " + first,
+        text => parseBlueprintEvidence(text, outline, first),
+        "Return ONLY the " +
+        Math.min(EVIDENCE_BATCH_SIZE, outline.beats.length - first) +
+        " requested evidence objects as valid JSONL, one per line, " +
+        "with EXACT id and observations fields. " +
+        "Every observation requires source,observable,supports,limits.");
+      await immutable(evidencePath(job, plan.version, first), batch);
+      evidence.push(...batch);
+      evidenceDigests.push(sha(batch));
+    }
+    const initialBlueprint = assembleBlueprintStages(outline, evidence);
+    await promptStorySpecialist(planner.session,
+      blueprintObligationsPrompt(plan, task, initialBlueprint, sources));
+    const manifest = await validatedStage("source obligations",
+      text => parseBlueprintObligationStage(text, initialBlueprint, sources),
+      "Return ONLY 1–20 standalone valid JSON obligation lines. " +
+      "Every quote MUST be copied EXACTLY as a contiguous 8–40-character " +
+      "substring of its corresponding source text from the previous prompt; " +
+      "never fabricate or combine quotations, and reference existing beat IDs.");
+    await immutable(obligationsPath(job, plan.version), manifest);
+    await immutable(draftPath(job, plan.version, 0), initialBlueprint);
+    const stagesReceipt = {
+      schema: "noveltea-blueprint-stages/v1",
+      outlineDigest: sha(outline), evidenceDigests,
+    };
+    await immutable(stagesPath(job, plan.version), stagesReceipt);
     let previous: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined;
     for (let version = 0; version <= MAX_CORRECTIONS; version++) {
-      verifyReadSources(planner.session.messages, planner.project.root, snapshot);
-      const parseResponse = () => version === 0
-        ? { ...parseInitialBlueprint(lastText(planner.session), sources), patch: undefined }
-        : { ...parseBlueprintPatch(lastText(planner.session), previous!.blueprint, previous!.verdict),
-          obligations: undefined };
-      let result: ReturnType<typeof parseResponse>;
-      try { result = parseResponse(); }
-      catch (error) {
-        // Validation, not merely JSON syntax, can fail. A generic "invalid JSON"
-        // message caused Luna to rewrite valid content and introduce a new syntax
-        // error instead of fixing the exact source quote that was ungrounded.
-        const reason = error instanceof Error ? error.message : "Unknown validation failure";
-        await promptStorySpecialist(planner.session, version === 0
-          ? "Your previous initial blueprint/obligation JSONL was rejected for " +
-            "this EXACT controller validation defect: " + reason + ". " +
-            "Make ONLY the minimum correction required. If a quoted source " +
-            "substring is absent, reread that exact source and copy an actual " +
-            "short 8–40-character contiguous substring; preserve all other " +
-            "obligations, beats, source protections and decisions. " +
-            "Return the FULL corrected JSONL: one complete, compact blueprint " +
-            "JSON object on line one and one complete obligation JSON object " +
-            "per following line. No enclosing wrapper, array, blank lines, " +
-            "markdown or extra closing braces. Do not write Story files."
-          : "Your JSONL patch was rejected for this EXACT controller " +
-            "validation defect: " + reason + ". Do not regenerate the " +
-            "blueprint. Return the FULL corrected JSONL: line one a complete " +
-            "header with only schema, SAME baseDigest and SAME reviewDigest; " +
-            "subsequent lines one complete JSON object per patch operation. " +
-            "No operations array, enclosing wrapper, extra braces, markdown or " +
-            "blank lines. Use exact old text and bounded operations limited " +
-            "to reviewed findings. Do not erase or edit unrelated prior evidence, " +
-            "decisions, consequences, protected commitments or ending promises.");
-        verifyReadSources(planner.session.messages, planner.project.root, snapshot);
-        result = parseResponse();
-      }
-      const blueprint = result.blueprint;
+      let blueprint: CausalBlueprint;
       if (version === 0) {
-        manifest = result.obligations;
-        await immutable(obligationsPath(job, plan.version), manifest);
+        blueprint = initialBlueprint;
       } else {
-        if (!result.patch) throw Error("Blueprint correction lacks an authenticated patch.");
+        const parsePatch = () =>
+          parseBlueprintPatch(lastText(planner.session), previous!.blueprint, previous!.verdict);
+        verifyReadSources(planner.session.messages, planner.project.root, snapshot);
+        let result: ReturnType<typeof parsePatch>;
+        try { result = parsePatch(); }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : "Unknown patch failure";
+          await promptStorySpecialist(planner.session,
+            "Your JSONL patch was rejected for this EXACT controller defect: " + reason +
+            ". Do not regenerate the original blueprint. Return the COMPLETE corrected " +
+            "JSONL: line one an object with schema,baseDigest,reviewDigest; " +
+            "following lines one complete JSON operation per line. " +
+            "Use exact old text and reviewed finding IDs; preserve all prior " +
+            "observations, choices, lasting effects and immutable source obligations. " +
+            "No array, wrapper, markdown, extra braces or blank lines.");
+          verifyReadSources(planner.session.messages, planner.project.root, snapshot);
+          result = parsePatch();
+        }
         await immutable(patchPath(job, plan.version, version), result.patch);
+        blueprint = result.blueprint;
+        await immutable(draftPath(job, plan.version, version), blueprint);
       }
-      await immutable(draftPath(job, plan.version, version), blueprint);
       const reviewer = await sessionFor(job, snapshot, provider, model,
         "blueprint-review:" + plan.version + ":" + version, "architecture-blueprint-review-sessions");
       let verdict: BlueprintReview;
@@ -537,10 +621,10 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         if (verdict.status === "pass") {
           await planner.context.completed(planner.file, planner.session.sessionId);
           const pin: BlueprintPin = {
-            schema: "noveltea-approved-blueprint/v2",
+            schema: "noveltea-approved-blueprint/v3",
             ...sameLineage(job, plan, snapshot, provider, model, task, head),
             draftVersion: version, blueprintDigest: sha(blueprint), reviewDigest: sha(verdict),
-            obligationsDigest: sha(manifest),
+            obligationsDigest: sha(manifest), stagesDigest: sha(stagesReceipt),
             plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
             reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
           };
