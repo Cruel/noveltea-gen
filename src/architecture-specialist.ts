@@ -123,7 +123,7 @@ export function architectureSpecialistPrompt(
       "If a Milestone promises to test conflicting accounts, name a specific " +
       "plausible, player-inspectable independent observation (a concrete ordinary " +
       "trace, physical feature, or record-handling discrepancy), the witness " +
-      "claim it can test and what it can and cannot establish. A vague " +
+      "claim it can test, and what that observation can and cannot establish. A vague " +
       "promise of a later physical feature is not a causal plan. " +
       "As the delegated fictional story architect, you MAY invent specific " +
       "plausible FUTURE ON-PAGE clues, witness encounters, trace provenance and " +

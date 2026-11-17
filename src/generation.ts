@@ -316,11 +316,17 @@ async function reconciledFailures(job: JobStartResult, failures: Record<string, 
   };
   const next = { ...failures };
   for (const key of Object.keys(next)) {
-    // A World checkpoint before its Character successor is an ordinary
-    // recoverable review handoff only for a review-gated failure. A stale
-    // original Turn, mismatched author grant or other deterministic rejection
-    // cannot be made retryable by the unrelated fact that World committed.
-    if (key === "foundations" &&
+    // A World checkpoint before Character is normally retryable only after
+    // an independently verified review handoff. The one deterministic fixture
+    // crash injected AFTER the exact Git commit is also recoverable when the
+    // matching fixture receipt and finalized checkpoint are independently
+    // authenticated. No live Pi interruption or arbitrary failure qualifies.
+    const fixturePostCommitCrash = key === "foundations" && point.workItem === "world-foundations" &&
+      next[key] === "Injected recovery crash after Git commit and before checkpoint finalization." &&
+      await readFile(join(job.stateDir, "character-world.json"), "utf8")
+        .then(raw => (JSON.parse(raw) as { worker?: string }).worker === "fixture")
+        .catch(() => false);
+    if (key === "foundations" && !fixturePostCommitCrash &&
         !/(?:required independent (?:specialist )?review is pending|independent (?:specialist )?review (?:is )?required|await(?:s|ing) (?:an? )?independent (?:specialist )?review)/i.test(next[key]!)) continue;
     if (await retryable(key)) delete next[key];
   }

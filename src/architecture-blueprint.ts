@@ -363,6 +363,8 @@ function blueprintPrompt(plan: Plan, task: string) {
     "foundation document, author task or JSON scope contract. Never paraphrase " +
     "or extend a quote from memory. A longer sentence is not needed; " +
     "use the shortest source fragment that identifies the promise. " +
+    "Never combine words from different lines or disjoint clauses into a " +
+    "synthetic quote, even if the combined description would be true. " +
     "Identify story-specific WHAT, WHEN, WHO, HOW, WHY questions only when " +
     "promised; separately track material choices, refusal paths and ending conditions. " +
     "For each promise state the proof the Story must make inspectable, its route " +
@@ -537,7 +539,17 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           "add-dependency {findingBeatId,beatId,dependsOn:earlierBeatId}; " +
           "insert-beat {findingBeatId,afterBeatId,beat:completeNewBeat}; " +
           "support-resolution {findingBeatId,beatId}. Every operation also has " +
-          "kind. To refine an existing Choice lastingEffect, the new text MUST " +
+          "kind. Example EXACT valid one-operation syntax: " +
+          JSON.stringify({ schema: "noveltea-blueprint-patch/v1",
+            baseDigest: sha(blueprint), reviewDigest: sha(verdict),
+            operations: [{ kind: "replace", findingBeatId: verdict.findings[0]!.beatId,
+              path: "beats/" + verdict.findings[0]!.beatId + "/change",
+              expected: "exact old text", value: "new corrected text" }] }) +
+          ". Replace placeholders with actual source text and use as many " +
+          "necessary operations as are required. Before replying, verify " +
+          "balanced JSON braces: after each operation object use a comma " +
+          "or a closing array bracket, NOT an extra object brace. " +
+          "To refine an existing Choice lastingEffect, the new text MUST " +
           "contain the entire old lastingEffect unmodified; no old decision " +
           "or alternative may be erased. New beat IDs must be unique. " +
           "Never replace the premise, original question, decision action, " +

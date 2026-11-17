@@ -31,7 +31,11 @@ const exact = (value: unknown, keys: string[]): value is Record<string, unknown>
 function parsePatchJson(text: string): unknown {
   const raw = text.trim().replace(/^```(?:json)?\s*\n/i, "").replace(/\n```\s*$/, "");
   if (Buffer.byteLength(raw) > 24000) throw Error("Blueprint patch exceeds its size limit.");
-  try { return JSON.parse(raw); } catch { throw Error("Blueprint patch is not JSON."); }
+  try { return JSON.parse(raw); }
+  catch (error) {
+    const reason = error instanceof SyntaxError ? error.message : "JSON parse failed";
+    throw Error("Blueprint patch is not JSON: " + reason);
+  }
 }
 function descendants(blueprint: CausalBlueprint, from: string) {
   const affected = new Set([from]);
