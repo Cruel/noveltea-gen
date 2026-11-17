@@ -42,6 +42,16 @@ export type BlueprintOutlineCore = Omit<
   "schema" | "routeConsequences"
 > & { schema: "noveltea-causal-outline-core/v1" };
 
+export type BlueprintOutlineHeader = {
+  schema: "noveltea-causal-outline-header/v1";
+  premise: string;
+  beatIds: string[];
+  resolution: BlueprintOutlineCore["resolution"];
+  causalAnswer: BlueprintCausalAnswer;
+};
+export type BlueprintOutlineBeat = BlueprintOutlineCore["beats"][number];
+export const BEAT_BATCH_SIZE = 2;
+
 export type BlueprintChoiceKey = {
   beatId: string;
   decisionIndex: number;
@@ -242,6 +252,74 @@ export function parseCurrentBlueprintOutline(
 
 /** Freeze the causal answer and beat graph first; v1/v2 final outlines retain
  * their historical parsers and recovery compatibility. */
+function pendingOutlineBeat(id: string): BlueprintOutlineBeat {
+  return { id, purpose: "Structural placeholder awaiting a separate beat stage",
+    dependsOn: [], change: "Not authored; cannot count as evidence", decisions: [] };
+}
+
+/** First causal stage: a short proposed answer and fixed beat identities.
+ * No beat prose or Choice rows are requested from the model yet. */
+export function parseBlueprintOutlineHeader(text: string): BlueprintOutlineHeader {
+  const wire = parseBlueprintWire(text, 10000);
+  if (wire.format !== "json" ||
+      !strict(wire.value, ["schema", "premise", "beatIds", "resolution", "causalAnswer"]) ||
+      wire.value.schema !== "noveltea-causal-outline-header/v1" ||
+      !Array.isArray(wire.value.beatIds) ||
+      wire.value.beatIds.some(id => typeof id !== "string"))
+    throw Error("Causal outline header requires premise, 2–16 unique ordered beat IDs, resolution and causalAnswer.");
+  const core = parseBlueprintOutlineCore(JSON.stringify({
+    schema: "noveltea-causal-outline-core/v1",
+    premise: wire.value.premise,
+    beats: wire.value.beatIds.map(id => pendingOutlineBeat(id as string)),
+    resolution: wire.value.resolution, causalAnswer: wire.value.causalAnswer,
+  }));
+  return {
+    schema: "noveltea-causal-outline-header/v1",
+    premise: core.premise, beatIds: core.beats.map(beat => beat.id),
+    resolution: core.resolution, causalAnswer: core.causalAnswer,
+  };
+}
+
+/** Freeze each two-beat batch without rewriting earlier accepted identities,
+ * decisions or source-bound causal answer. Future beats are placeholders for
+ * structural checking only, never persisted or treated as authored content. */
+export function parseBlueprintBeatBatch(
+  text: string, header: BlueprintOutlineHeader,
+  first: number, earlier: BlueprintOutlineBeat[],
+): BlueprintOutlineBeat[] {
+  if (!Number.isInteger(first) || first < 0 || first >= header.beatIds.length ||
+      earlier.length !== first ||
+      earlier.some((beat, i) => beat.id !== header.beatIds[i]))
+    throw Error("Causal beat batch has stale earlier stages or an invalid starting index.");
+  const wire = parseBlueprintWire(text, 11000);
+  const rows = wire.format === "jsonl" ? wire.values : [wire.value];
+  const expectedIds = header.beatIds.slice(first, first + BEAT_BATCH_SIZE);
+  if (rows.length !== expectedIds.length ||
+      rows.some((beat, i) =>
+        (!strict(beat, ["id", "purpose", "dependsOn", "change", "decisions"]) &&
+         !strict(beat, ["id", "purpose", "dependsOn", "change"])) ||
+        beat.id !== expectedIds[i]))
+    throw Error("Causal beat batch must contain exactly the requested beat IDs and fields, in header order: " +
+      JSON.stringify(expectedIds) + ".");
+  const checked = assembleBlueprintOutlineCore(
+    header, [...earlier, ...(rows as BlueprintOutlineBeat[]),
+      ...header.beatIds.slice(first + expectedIds.length).map(pendingOutlineBeat)],
+  );
+  return checked.beats.slice(first, first + expectedIds.length);
+}
+
+export function assembleBlueprintOutlineCore(
+  header: BlueprintOutlineHeader, beats: BlueprintOutlineBeat[],
+): BlueprintOutlineCore {
+  if (beats.length !== header.beatIds.length ||
+      beats.some((beat, i) => beat.id !== header.beatIds[i]))
+    throw Error("Causal outline beat stages are missing, reordered or changed.");
+  return parseBlueprintOutlineCore(JSON.stringify({
+    schema: "noveltea-causal-outline-core/v1", premise: header.premise,
+    beats, resolution: header.resolution, causalAnswer: header.causalAnswer,
+  }));
+}
+
 export function parseBlueprintOutlineCore(text: string): BlueprintOutlineCore {
   const wire = parseBlueprintWire(text, 18000);
   if (wire.format !== "json" ||

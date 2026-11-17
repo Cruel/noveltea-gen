@@ -242,6 +242,41 @@ test("split core/Choice stage replay is tied to both immutable stage digests", (
     });
     captureBlueprintReplay(root, 1, 1, "blueprint-patch", join(temporary, "valid-split"));
     assert.equal(replayCase(join(temporary, "valid-split")).matched, true);
+    const header = {
+      schema: "noveltea-causal-outline-header/v1",
+      premise: core.premise,
+      beatIds: core.beats.map(beat => beat.id),
+      resolution: core.resolution, causalAnswer: core.causalAnswer,
+    };
+    const stagesV3 = {
+      schema: "noveltea-blueprint-stages/v3",
+      headerDigest: digest(header),
+      beatDigests: [digest(core.beats)],
+      coreDigest: digest(core),
+      routesDigest: digest(routes),
+      outlineDigest: digest(outlined),
+      evidenceDigests: [digest(initial.beats.map(({ id, observations }) => ({ id, observations })))],
+    };
+    save("outline-header", header);
+    save("outline-beats-0", core.beats);
+    save("stages", stagesV3);
+    captureBlueprintReplay(root, 1, 1, "blueprint-patch", join(temporary, "valid-batched"));
+    assert.equal(replayCase(join(temporary, "valid-batched")).matched, true);
+    save("outline-beats-0", core.beats.map(beat => ({ ...beat, change: beat.change + " altered" })));
+    assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
+      join(temporary, "changed-beat-batch")), /causal beat batch changed/);
+    save("outline-beats-0", core.beats);
+    save("outline-header", { ...header, causalAnswer: { ...header.causalAnswer,
+      motive: "invented explanation" } });
+    assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
+      join(temporary, "changed-header")), /causal header or beat-batch receipts changed/);
+    save("outline-header", header);
+    save("stages", {
+      schema: "noveltea-blueprint-stages/v2",
+      coreDigest: digest(core), routesDigest: digest(routes),
+      outlineDigest: digest(outlined),
+      evidenceDigests: [digest(initial.beats.map(({ id, observations }) => ({ id, observations })))],
+    });
     save("outline-routes", [{ beatId: "invented" }]);
     assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
       join(temporary, "bad-routes")), /causal core or Choice-route receipt changed/);

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assembleBlueprintStages, assembleCurrentBlueprintOutline,
-  EVIDENCE_BATCH_SIZE, parseBlueprintEvidence, parseBlueprintObligationStage,
-  parseBlueprintOutline, parseCurrentBlueprintOutline, parseBlueprintOutlineCore,
-  parseBlueprintRouteStage, requiredBlueprintRouteChoices } from "../src/architecture-blueprint-stages.js";
-import { blueprintEvidencePrompt, blueprintOutlinePrompt, blueprintRoutesPrompt,
+import { assembleBlueprintStages, assembleBlueprintOutlineCore, assembleCurrentBlueprintOutline,
+  BEAT_BATCH_SIZE, EVIDENCE_BATCH_SIZE, parseBlueprintBeatBatch, parseBlueprintEvidence,
+  parseBlueprintObligationStage, parseBlueprintOutline, parseCurrentBlueprintOutline,
+  parseBlueprintOutlineCore, parseBlueprintOutlineHeader, parseBlueprintRouteStage,
+  requiredBlueprintRouteChoices } from "../src/architecture-blueprint-stages.js";
+import { blueprintBeatPrompt, blueprintEvidencePrompt, blueprintOutlinePrompt, blueprintRoutesPrompt,
   type CausalBlueprint } from "../src/architecture-blueprint.js";
 import type { Plan } from "../src/architecture.js";
 
@@ -45,8 +46,8 @@ test("staged prompts demand concrete durable route effects, independent proof an
   const outlinePrompt = blueprintOutlinePrompt({ contract } as unknown as Plan, "Make a mystery");
   assert.match(outlinePrompt, /PERSISTENT CHOICE-STATE RULE/);
   assert.match(outlinePrompt, /PROVISIONAL DESIGN MUST ANSWER THE MYSTERY/);
-  assert.match(outlinePrompt, /noveltea-causal-outline-core\/v1/);
-  assert.match(outlinePrompt, /Do NOT include routeConsequences now/);
+  assert.match(outlinePrompt, /noveltea-causal-outline-header\/v1/);
+  assert.match(outlinePrompt, /Do NOT emit beat objects, decisions, observations or routeConsequences/);
   assert.doesNotMatch(outlinePrompt, /schema is noveltea-causal-outline\/v2/);
   assert.match(outlinePrompt, /specific.*knowledge.*evidence access.*relationship trust.*source exposure/s);
   assert.match(outlinePrompt, /REFUSE, be unavailable or withdraw/);
@@ -154,6 +155,31 @@ test("new Architecture planning requires a concrete solution and route-state con
   const core = parseBlueprintOutlineCore(JSON.stringify({
     schema: "noveltea-causal-outline-core/v1", ...coreBody,
   }));
+  const header = parseBlueprintOutlineHeader(JSON.stringify({
+    schema: "noveltea-causal-outline-header/v1",
+    premise: core.premise, beatIds: core.beats.map(beat => beat.id),
+    resolution: core.resolution, causalAnswer: core.causalAnswer,
+  }));
+  assert.equal(BEAT_BATCH_SIZE, 2);
+  const batch0 = parseBlueprintBeatBatch(
+    core.beats.slice(0, 2).map(JSON.stringify).join("\n"), header, 0, []);
+  const batch2 = parseBlueprintBeatBatch(
+    JSON.stringify(core.beats[2]), header, 2, batch0);
+  assert.deepEqual([...batch0, ...batch2], core.beats);
+  assert.deepEqual(assembleBlueprintOutlineCore(header, [...batch0, ...batch2]), core);
+  assert.match(blueprintBeatPrompt(header, batch0, 2), /EXACT REQUESTED BEAT IDS/);
+  assert.throws(() => parseBlueprintBeatBatch(
+    JSON.stringify(core.beats[2]), header, 0, []), /exactly the requested beat IDs/);
+  assert.throws(() => parseBlueprintBeatBatch(
+    JSON.stringify(core.beats[2]), header, 2, []), /stale earlier stages/);
+  assert.throws(() => parseBlueprintBeatBatch(
+    JSON.stringify({ ...core.beats[2], dependsOn: ["unknown"] }),
+    header, 2, batch0), /relationships/);
+  assert.throws(() => parseBlueprintOutlineHeader(JSON.stringify({
+    schema: "noveltea-causal-outline-header/v1",
+    premise: core.premise, beatIds: ["arrival", "arrival", "archive"],
+    resolution: core.resolution, causalAnswer: core.causalAnswer,
+  })), /relationships/);
   const required = requiredBlueprintRouteChoices(core);
   assert.deepEqual(required.map(({ beatId, decisionIndex, alternativeIndex }) =>
     [beatId, decisionIndex, alternativeIndex]), [

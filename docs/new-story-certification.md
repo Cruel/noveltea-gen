@@ -511,6 +511,41 @@ Exact restoration and offline replay check both stages separately and
 reject tampering. This is controller/test evidence only until real Pi runs
 produce independently reviewed complete Story output; #181 remains OPEN.
 
+**First live check on `b1d8226` (not passing):** Another authenticated
+continuation from the same verified Foundation checkpoint reached the
+new causal-core stage but failed before persisting it. The original Luna
+response was 12,100 characters and its one bounded correction was 9,985
+characters; both ended after the nested `causalAnswer.proof` object and
+omitted the final outer JSON closing brace. Their complete raw
+responses and rejected receipt are preserved in that child Job's
+private planner transcript, with no authored Story change or reviewed
+blueprint. This demonstrated that separating the Choice
+rows was **not sufficient**: the causal core remained a large,
+failure-prone single model response. The planner now collects a short
+`noveltea-causal-outline-header/v1` with the proposed concrete solution,
+resolution, and fixed ordered beat IDs, then requests only two beat
+objects per independently validated JSONL call, then the exact-keyed
+Choice route states, then two-beat evidence batches and source-quoted
+obligations. An accepted header and earlier beats cannot be silently
+regenerated when a later batch fails.
+
+Each stage is preserved in the original source-bound private Job:
+`plan-<version>-outline-header.json`,
+`plan-<version>-outline-beats-<first>.json`,
+`plan-<version>-outline-core.json`, and the existing route and evidence
+files. The new `noveltea-blueprint-stages/v3` receipt pins the header,
+each beat batch, core, route rows, assembled outline and evidence batch
+digests. Both exact checkpoint restore and offline replay revalidate the
+full chain. Historical v1/v2 stage receipts remain readable for
+already-approved checkpoint recovery; no private evidence is imported
+as another Thread's approval. No automatic syntactic repair or extra
+independent-review authority is granted. The failure-classifier now
+correctly labels settled malformed `Blueprint response` output as
+`invalid-plan` rather than an interrupted Pi call. This is
+deterministic-regression evidence only until a new real-Pi continuation
+passes the complete independent review and Story completion gates;
+#181 remains OPEN.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

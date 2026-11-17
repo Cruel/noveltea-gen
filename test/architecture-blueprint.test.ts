@@ -58,6 +58,9 @@ test("invalid reviewed patch output is distinguished from interrupted model work
     "invalid-plan");
   assert.equal(classifyBlueprintFailure("Blueprint model response exceeds its bounded size."),
     "invalid-plan");
+  assert.equal(classifyBlueprintFailure(
+    "Blueprint response is not JSON: Expected ',' or '}' after property value at end of response"),
+    "invalid-plan");
   assert.equal(classifyBlueprintFailure("Causal outline has duplicate Choice-route consequences."),
     "invalid-plan");
   assert.equal(classifyBlueprintFailure("Independent causal blueprint review exhausted bounded corrections."),
@@ -295,6 +298,34 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
       causalAnswer: { ...core.causalAnswer, mechanism: "tampered mechanism" } }));
     await assert.rejects(read, /core or Choice route stage changed/);
     await writeFile(coreFile, JSON.stringify(core));
+    const header = {
+      schema: "noveltea-causal-outline-header/v1", premise: outlineV2.premise,
+      beatIds: outlineV2.beats.map(beat => beat.id),
+      resolution: outlineV2.resolution, causalAnswer: outlineV2.causalAnswer,
+    };
+    const batchedReceipt = {
+      schema: "noveltea-blueprint-stages/v3",
+      headerDigest: digest(header), beatDigests: [digest(outlineV2.beats)],
+      coreDigest: digest(core), routesDigest: digest(routeConsequences),
+      outlineDigest: digest(outlineV2), evidenceDigests: [digest(evidence)],
+    };
+    const headerFile = join(parent, "plan-2-outline-header.json");
+    const beatsFile = join(parent, "plan-2-outline-beats-0.json");
+    await writeFile(headerFile, JSON.stringify(header));
+    await writeFile(beatsFile, JSON.stringify(outlineV2.beats));
+    await writeFile(stagesFile, JSON.stringify(batchedReceipt));
+    await writeFile(join(parent, "plan-2-approved.json"),
+      JSON.stringify({ ...stagePin, stagesDigest: digest(batchedReceipt) }));
+    assert.deepEqual((await read())?.blueprint, example,
+      "new header, two-beat batches and Choice routes reconstruct the original approved blueprint");
+    await writeFile(beatsFile, JSON.stringify(outlineV2.beats.map(beat =>
+      ({ ...beat, purpose: beat.purpose + " tampered" }))));
+    await assert.rejects(read, /beat batch changed/);
+    await writeFile(beatsFile, JSON.stringify(outlineV2.beats));
+    await writeFile(headerFile, JSON.stringify({ ...header,
+      causalAnswer: { ...header.causalAnswer, motive: "rewritten motive" } }));
+    await assert.rejects(read, /header or beat-batch receipt changed/);
+    await writeFile(headerFile, JSON.stringify(header));
     await writeFile(stagesFile, JSON.stringify(receiptV2));
     await writeFile(join(parent, "plan-2-approved.json"),
       JSON.stringify({ ...stagePin, stagesDigest: digest(receiptV2) }));

@@ -14,10 +14,10 @@ import {
 } from "./architecture-blueprint.js";
 import { applyBlueprintPatch, blueprintDigest, type BlueprintPatch } from "./architecture-blueprint-patch.js";
 import {
-  assembleBlueprintStages, assembleCurrentBlueprintOutline,
-  EVIDENCE_BATCH_SIZE, parseBlueprintEvidence, parseBlueprintOutline,
-  parseBlueprintOutlineCore, type BlueprintEvidence,
-  type BlueprintRouteConsequence,
+  assembleBlueprintStages, assembleBlueprintOutlineCore, assembleCurrentBlueprintOutline,
+  BEAT_BATCH_SIZE, EVIDENCE_BATCH_SIZE, parseBlueprintBeatBatch, parseBlueprintEvidence,
+  parseBlueprintOutline, parseBlueprintOutlineCore, parseBlueprintOutlineHeader,
+  type BlueprintEvidence, type BlueprintOutlineBeat, type BlueprintRouteConsequence,
 } from "./architecture-blueprint-stages.js";
 import { executeReplay, replaySha256, writeReplayCase, type ReplayInput } from "./execution-replay.js";
 
@@ -114,15 +114,20 @@ export function captureBlueprintReplay(
   const stage = json(file("stages")) as {
     schema?: string;
     outlineDigest?: string;
+    headerDigest?: string;
+    beatDigests?: string[];
     coreDigest?: string;
     routesDigest?: string;
     evidenceDigests?: string[];
   };
-  const split = stage.schema === "noveltea-blueprint-stages/v2";
+  const batched = stage.schema === "noveltea-blueprint-stages/v3";
+  const split = batched || stage.schema === "noveltea-blueprint-stages/v2";
   if (
-    !["noveltea-blueprint-stages/v1", "noveltea-blueprint-stages/v2"].includes(String(stage.schema)) ||
-    Object.keys(stage).sort().join(",") !== (split ?
-      "coreDigest,evidenceDigests,outlineDigest,routesDigest,schema" :
+    !["noveltea-blueprint-stages/v1", "noveltea-blueprint-stages/v2",
+      "noveltea-blueprint-stages/v3"].includes(String(stage.schema)) ||
+    Object.keys(stage).sort().join(",") !== (batched ?
+      "beatDigests,coreDigest,evidenceDigests,headerDigest,outlineDigest,routesDigest,schema" :
+      split ? "coreDigest,evidenceDigests,outlineDigest,routesDigest,schema" :
       "evidenceDigests,outlineDigest,schema") ||
     stage.outlineDigest !== blueprintDigest(outline) ||
     !Array.isArray(stage.evidenceDigests) ||
@@ -138,6 +143,24 @@ export function captureBlueprintReplay(
         !isDeepStrictEqual(
           assembleCurrentBlueprintOutline(core, routes as BlueprintRouteConsequence[]), outline))
       throw Error("Blueprint replay causal core or Choice-route receipt changed.");
+    if (batched) {
+      const header = parseBlueprintOutlineHeader(JSON.stringify(json(file("outline-header"))));
+      if (blueprintDigest(header) !== stage.headerDigest ||
+          !Array.isArray(stage.beatDigests) ||
+          stage.beatDigests.length !== Math.ceil(header.beatIds.length / BEAT_BATCH_SIZE))
+        throw Error("Blueprint replay causal header or beat-batch receipts changed.");
+      const beats: BlueprintOutlineBeat[] = [];
+      for (let first = 0; first < header.beatIds.length; first += BEAT_BATCH_SIZE) {
+        const rows = json(file("outline-beats-" + first));
+        if (!Array.isArray(rows) ||
+            blueprintDigest(rows) !== stage.beatDigests[first / BEAT_BATCH_SIZE])
+          throw Error("Blueprint replay causal beat batch changed after planning.");
+        beats.push(...parseBlueprintBeatBatch(
+          rows.map(row => JSON.stringify(row)).join("\n"), header, first, beats));
+      }
+      if (!isDeepStrictEqual(assembleBlueprintOutlineCore(header, beats), core))
+        throw Error("Blueprint replay causal header and beat batches differ from its core.");
+    }
   }
   const evidence: BlueprintEvidence[] = [];
   for (let first = 0; first < outline.beats.length; first += EVIDENCE_BATCH_SIZE) {

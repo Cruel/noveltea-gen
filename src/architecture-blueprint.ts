@@ -21,12 +21,14 @@ import { buildBlueprintObligations, validateBlueprintObligations,
 import { parseBlueprintPatch, applyBlueprintPatch,
   allowedBlueprintPatchTargets } from "./architecture-blueprint-patch.js";
 import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
-import { assembleBlueprintStages, assembleCurrentBlueprintOutline,
-  EVIDENCE_BATCH_SIZE, parseBlueprintEvidence, parseBlueprintObligationStage,
-  parseBlueprintOutline, parseBlueprintOutlineCore, parseBlueprintRouteStage,
-  requiredBlueprintRouteChoices,
+import { assembleBlueprintStages, assembleBlueprintOutlineCore,
+  assembleCurrentBlueprintOutline, BEAT_BATCH_SIZE, EVIDENCE_BATCH_SIZE,
+  parseBlueprintBeatBatch, parseBlueprintEvidence, parseBlueprintObligationStage,
+  parseBlueprintOutline, parseBlueprintOutlineCore, parseBlueprintOutlineHeader,
+  parseBlueprintRouteStage, requiredBlueprintRouteChoices,
   type BlueprintEvidence, type BlueprintOutline, type BlueprintOutlineCore,
-  type BlueprintRouteConsequence } from "./architecture-blueprint-stages.js";
+  type BlueprintOutlineHeader, type BlueprintOutlineBeat, type BlueprintRouteConsequence
+} from "./architecture-blueprint-stages.js";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const SLUG = /^[a-z][a-z0-9-]{0,63}$/;
@@ -40,7 +42,7 @@ export function classifyBlueprintFailure(reason: string):
   if (reason.includes("exhausted bounded corrections")) return "review-rejected";
   if (/\b(?:interrupted|cancelled|canceled|aborted|timed out|timeout)\b/i.test(reason))
     return "interrupted";
-  if (/^(?:Blueprint patch |Blueprint JSONL |Blueprint model response |Causal blueprint |Causal outline |Causal evidence |Independent blueprint review |Invalid bounded causal blueprint)/.test(reason) ||
+  if (/^(?:Blueprint patch |Blueprint JSONL |Blueprint response |Blueprint model response |Causal blueprint |Causal outline |Causal evidence |Independent blueprint review |Invalid bounded causal blueprint)/.test(reason) ||
       reason.includes("invalid beat relationships"))
     return "invalid-plan";
   return "interrupted";
@@ -189,6 +191,10 @@ const outlinePath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-outline.json");
 const outlineCorePath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-outline-core.json");
+const outlineHeaderPath = (job: JobStartResult, version: number) =>
+  join(root(job), "plan-" + version + "-outline-header.json");
+const outlineBeatPath = (job: JobStartResult, version: number, first: number) =>
+  join(root(job), "plan-" + version + "-outline-beats-" + first + ".json");
 const outlineRoutesPath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-outline-routes.json");
 const evidencePath = (job: JobStartResult, version: number, first: number) =>
@@ -287,13 +293,17 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
     draftPath(job, plan.version, 0), root(job))));
   if (record.schema === "noveltea-approved-blueprint/v3") {
     const receipt = await safeRead(stagesPath(job, plan.version), root(job));
-    const split = !!receipt && typeof receipt === "object" &&
-      "schema" in receipt && receipt.schema === "noveltea-blueprint-stages/v2";
-    if (!strict(receipt, split ?
-          ["schema", "outlineDigest", "coreDigest", "routesDigest", "evidenceDigests"] :
+    const batched = !!receipt && typeof receipt === "object" &&
+      "schema" in receipt && receipt.schema === "noveltea-blueprint-stages/v3";
+    const split = batched || (!!receipt && typeof receipt === "object" &&
+      "schema" in receipt && receipt.schema === "noveltea-blueprint-stages/v2");
+    if (!strict(receipt, batched ?
+          ["schema", "outlineDigest", "headerDigest", "beatDigests",
+            "coreDigest", "routesDigest", "evidenceDigests"] :
+          split ? ["schema", "outlineDigest", "coreDigest", "routesDigest", "evidenceDigests"] :
           ["schema", "outlineDigest", "evidenceDigests"]) ||
-        !["noveltea-blueprint-stages/v1", "noveltea-blueprint-stages/v2"].includes(
-          String(receipt.schema)) ||
+        !["noveltea-blueprint-stages/v1", "noveltea-blueprint-stages/v2",
+          "noveltea-blueprint-stages/v3"].includes(String(receipt.schema)) ||
         !Array.isArray(receipt.evidenceDigests) ||
         sha(receipt) !== record.stagesDigest)
       throw Error("Approved causal blueprint stage receipt changed or is missing.");
@@ -310,6 +320,24 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
           !isDeepStrictEqual(assembleCurrentBlueprintOutline(
             core, routes as BlueprintRouteConsequence[]), outline))
         throw Error("Approved causal outline core or Choice route stage changed.");
+      if (batched) {
+        const header = parseBlueprintOutlineHeader(JSON.stringify(
+          await safeRead(outlineHeaderPath(job, plan.version), root(job))));
+        if (sha(header) !== receipt.headerDigest || !Array.isArray(receipt.beatDigests) ||
+            receipt.beatDigests.length !== Math.ceil(header.beatIds.length / BEAT_BATCH_SIZE))
+          throw Error("Approved causal header or beat-batch receipt changed.");
+        const beats: BlueprintOutlineBeat[] = [];
+        for (let first = 0; first < header.beatIds.length; first += BEAT_BATCH_SIZE) {
+          const chunk = await safeRead(outlineBeatPath(job, plan.version, first), root(job));
+          if (!Array.isArray(chunk) ||
+              sha(chunk) !== receipt.beatDigests[first / BEAT_BATCH_SIZE])
+            throw Error("Approved causal beat batch changed after planning.");
+          beats.push(...parseBlueprintBeatBatch(
+            chunk.map(row => JSON.stringify(row)).join("\n"), header, first, beats));
+        }
+        if (!isDeepStrictEqual(assembleBlueprintOutlineCore(header, beats), core))
+          throw Error("Approved causal core differs from its verified header and beat batches.");
+      }
     }
     const evidence: BlueprintEvidence[] = [];
     const expectedBatches = Math.ceil(outline.beats.length / EVIDENCE_BATCH_SIZE);
@@ -463,9 +491,10 @@ export function blueprintOutlinePrompt(plan: Plan, task: string) {
     "events without claiming uncreated evidence is already canon. " +
     "Do not confuse finding an intermediate location with resolving a disappearance. " +
     "Do not claim a mechanism or motive solely from access or a changed object. " +
-    "Only the causal CORE outline is requested NOW: route-state rows, evidence " +
-    "observations and source proof obligations will be collected in SEPARATE " +
-    "smaller prompts, without changing this causal answer or beat graph. " +
+    "Only a SHORT causal header is requested NOW: beat prose/decisions, " +
+    "route-state rows, evidence observations and source obligations are collected " +
+    "later in SEPARATE small prompts. Fix the causal answer and ordered beat IDs " +
+    "now; no later stage can change them. " +
     "PERSISTENT CHOICE-STATE RULE: for EVERY alternative, state the specific " +
     "knowledge, inspectable evidence access, relationship trust or source exposure " +
     "it gains, withholds, preserves or irreversibly loses. Use concrete named " +
@@ -491,13 +520,13 @@ export function blueprintOutlinePrompt(plan: Plan, task: string) {
     "\\nORIGINAL AUTHOR TASK: " +
     JSON.stringify(task) +
     "\\nReturn ONLY ONE compact valid JSON object, no code fences or prose, " +
-    "with EXACT root keys schema,premise,beats,resolution,causalAnswer. " +
-    "schema is noveltea-causal-outline-core/v1. Every beat has EXACT keys " +
-    "id (unique lowercase slug), purpose (string), dependsOn (array of " +
-    "EARLIER beat ids), change (string), decisions (array). " +
-    "Each decision has question and alternatives, each alternative has " +
-    "action and lastingEffect (at least two materially distinct outcomes). " +
-    "Use decisions:[] for narrative-only beats. DO NOT emit observations yet. " +
+    "with EXACT root keys schema,premise,beatIds,resolution,causalAnswer. " +
+    "schema is noveltea-causal-outline-header/v1. beatIds is an ordered array " +
+    "of 2–16 UNIQUE lowercase beat slugs, in causal dependency order; " +
+    "resolution.supportedBy and causalAnswer.proof.beatIds refer to those IDs. " +
+    "Do NOT emit beat objects, decisions, observations or routeConsequences. " +
+    "A later stage will give every beat its purpose, dependencies, change " +
+    "and concrete decisions/alternatives (or decisions:[] for narrative beats). " +
     "Resolution has question,conclusion,supportedBy (beat ids),uncertainty. " +
     "causalAnswer has EXACT keys question,answer,mechanism,responsibility,motive," +
     "misdirection,proof. question/answer/mechanism/responsibility/motive are " +
@@ -510,14 +539,43 @@ export function blueprintOutlinePrompt(plan: Plan, task: string) {
     "the player could eventually inspect, independent cross-checks and what " +
     "REMAINS AVAILABLE when a witness refuses (or no witness is involved). " +
     "All proof beatIds must appear in resolution.supportedBy. " +
-    "Do NOT include routeConsequences now: a separate smaller JSONL stage " +
-    "will enumerate the earned/foregone state of EVERY indexed alternative. " +
-    "Make each alternative's lastingEffect specific enough to support that " +
-    "stage. Keep this core compact, ideally under 10KB. " +
+    "Do NOT include routeConsequences now: a separate JSONL stage " +
+    "will enumerate the earned/foregone state of every alternative AFTER " +
+    "the compact beat batches define them. Keep the header short, preferably " +
+    "under 4KB, with no long repetitive beat prose. " +
     "The final proof is not approved until independent review. " +
     "Check every string and closing brace before responding."
   );
 }
+export function blueprintBeatPrompt(
+  header: BlueprintOutlineHeader, earlier: BlueprintOutlineBeat[], first: number,
+) {
+  const ids = header.beatIds.slice(first, first + BEAT_BATCH_SIZE);
+  return (
+    "READ-ONLY CAUSAL BEAT DETAIL STAGE. The short causal header and all " +
+    "earlier accepted beats are FIXED and may not be rewritten. " +
+    "Define ONLY the " + ids.length + " requested beats, with one compact " +
+    "complete JSON object PER LINE (JSONL), in the EXACT requested ID order. " +
+    "Each line must have EXACT keys id,purpose,dependsOn,change,decisions. " +
+    "id is the requested slug. dependsOn is an array of only EARLIER beat IDs, " +
+    "not future or invented IDs. purpose states a concrete role in the planned " +
+    "mystery; change explains what the player gains, learns, loses or changes " +
+    "by completing the beat. decisions is [] if no Choice occurs; otherwise " +
+    "each decision has EXACT keys question,alternatives and 2 or more materially " +
+    "distinct alternatives with EXACT action,lastingEffect keys. Protect refusal " +
+    "paths and confidentiality, specify durable access/trust/exposure differences, " +
+    "and show how later beats can use independent records if a witness refuses. " +
+    "Do NOT defer the culprit, mechanism, intent, proof or promised route outcomes; " +
+    "they are proposed in the fixed causal header. Describe substantive reading " +
+    "and investigation where the approved playthrough needs it, but do not " +
+    "sum mutually exclusive routes. No evidence observations yet. " +
+    "Do not include any other beat, full outline, code fence, wrapper or prose. " +
+    "EXACT REQUESTED BEAT IDS: " + JSON.stringify(ids) +
+    "\\nFIXED CAUSAL HEADER: " + JSON.stringify(header) +
+    "\\nALREADY ACCEPTED EARLIER BEATS: " + JSON.stringify(earlier)
+  );
+}
+
 export function blueprintRoutesPrompt(core: BlueprintOutlineCore) {
   const required = requiredBlueprintRouteChoices(core);
   return (
@@ -716,13 +774,32 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     };
     await promptStorySpecialist(planner.session,
       planner.context.contextNote + blueprintOutlinePrompt(plan, task));
-    const core = await validatedStage(
-      "causal outline core",
-      parseBlueprintOutlineCore,
-      "Return ONE complete valid causal-outline-core/v1 JSON object with " +
-        "only premise, beats, resolution and a concrete causalAnswer; " +
-        "do NOT include routeConsequences or evidence observations.",
+    const header = await validatedStage(
+      "causal header",
+      parseBlueprintOutlineHeader,
+      "Return ONE short, fully closed causal-outline-header/v1 JSON object " +
+        "with premise, beatIds, resolution and concrete causalAnswer. " +
+        "Do not include full beat objects, decisions, observations or routes.",
     );
+    await immutable(outlineHeaderPath(job, plan.version), header);
+    const beats: BlueprintOutlineBeat[] = [];
+    const beatDigests: string[] = [];
+    for (let first = 0; first < header.beatIds.length; first += BEAT_BATCH_SIZE) {
+      await promptStorySpecialist(planner.session, blueprintBeatPrompt(header, beats, first));
+      const batch = await validatedStage(
+        "causal beat batch " + first,
+        text => parseBlueprintBeatBatch(text, header, first, beats),
+        "Return ONLY " +
+          Math.min(BEAT_BATCH_SIZE, header.beatIds.length - first) +
+          " valid JSONL beat objects for these exact IDs, one per line: " +
+          JSON.stringify(header.beatIds.slice(first, first + BEAT_BATCH_SIZE)) +
+          ". Do not emit the header, earlier beats, future beats or an array.",
+      );
+      await immutable(outlineBeatPath(job, plan.version, first), batch);
+      beats.push(...batch);
+      beatDigests.push(sha(batch));
+    }
+    const core = assembleBlueprintOutlineCore(header, beats);
     await immutable(outlineCorePath(job, plan.version), core);
     const requiredRoutes = requiredBlueprintRouteChoices(core);
     let routeConsequences: BlueprintRouteConsequence[] = [];
@@ -768,9 +845,10 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     await immutable(obligationsPath(job, plan.version), manifest);
     await immutable(draftPath(job, plan.version, 0), initialBlueprint);
     const stagesReceipt = {
-      schema: "noveltea-blueprint-stages/v2",
-      outlineDigest: sha(outline), coreDigest: sha(core),
-      routesDigest: sha(routeConsequences), evidenceDigests,
+      schema: "noveltea-blueprint-stages/v3",
+      headerDigest: sha(header), beatDigests,
+      coreDigest: sha(core), routesDigest: sha(routeConsequences),
+      outlineDigest: sha(outline), evidenceDigests,
     };
     await immutable(stagesPath(job, plan.version), stagesReceipt);
     let previous: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined;
