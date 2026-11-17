@@ -330,6 +330,42 @@ export async function authorArchitecture(
         c.type === 'text').map(c => c.text).join('\n'));
       if (!milestoneOrder) throw new Error('Architecture did not declare a valid source-bound causal Milestone order.');
     }
+    // Review the ACTUAL uncommitted draft before it becomes a source-verified
+    // Architecture checkpoint. The independent read-only reviewer cannot
+    // approve canon or weaken the later mandatory postcommit semantic gate.
+    const { reviewArchitectureDraft } = await import("./architecture-draft-review.js");
+    for (let iteration = 0; iteration < 2; iteration++) {
+      const review = await reviewArchitectureDraft(job, snapshot, plan, provider, modelId,
+        authoredPaths, iteration);
+      if (review.status === "pass") break;
+      if (iteration === 1) throw new Error(
+        "Independent Architecture draft rereview still rejected source-grounded causality/Choice/route issues: " +
+        JSON.stringify(review.findings) + ". Preserve the draft and original Pi sessions for reconciliation.");
+      await promptStorySpecialist(session,
+        "INDEPENDENT PRECOMMIT ARCHITECTURE REVIEW: The read-only reviewer found " +
+        "specific problems in the existing Arc/Milestone draft. Within ONLY the " +
+        "already authorized files, correct these findings in this SAME original writer " +
+        "Pi session. No new files, scope, protected author decisions or write authority " +
+        "have been granted. Do not invent Event/Choice IDs, fabricate independent " +
+        "observations, or conceal route-duration uncertainty. If a finding truly " +
+        "needs author approval or another owner, make NO unauthorized edit and " +
+        "explain the conflict. Run story_validate and finish with the exact " +
+        "CAUSAL_MILESTONE_ORDER line listing all authored Milestones. " +
+        "The subsequent independent rereview remains mandatory.\n" +
+        JSON.stringify(review.findings));
+      const corrected = [...session.messages].reverse().find(m => m.role === "assistant");
+      if (!corrected || corrected.role !== "assistant" ||
+          ["error", "aborted"].includes(corrected.stopReason))
+        throw Error("Architecture same-session review correction was interrupted; preserve draft.");
+      const stillInvalid = await authorityErrors();
+      if (stillInvalid.length)
+        throw Error("Architecture review correction invented protected decisions: " + stillInvalid.join("; "));
+      const candidateOrder = architectureMilestoneOrder(corrected.content.filter(c =>
+        c.type === "text").map(c => c.text).join("\n"));
+      if (!candidateOrder)
+        throw Error("Architecture review correction omitted the exact causal Milestone order; preserve draft.");
+      milestoneOrder = candidateOrder;
+    }
     await context.completed(sessionFile, session.sessionId);
     return { piSessionId: session.sessionId, piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
       skillReads: reads.filter(p => required.includes(p)), milestoneOrder };

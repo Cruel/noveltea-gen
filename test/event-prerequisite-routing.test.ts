@@ -85,6 +85,25 @@ test("S14 #173: unsafe, mixed-owner, stale and vague access reports cannot grant
   ]) assert.equal(routeEventPrerequisite({ ...scoped, ...change }).kind, "replan-required");
 });
 
+test("a missing source-visible alteration clue receives an Event-only evidence correction, not invented past canon", () => {
+  const missing = "The selected Milestone lacks evidence: an altered ledger is alleged but the " +
+    "Event supplies no inspectable discrepancy, record source or dated trace. " +
+    "The currently reachable observation does not establish a concealed alteration.";
+  const route = routeEventPrerequisite({ ...input, milestone: "milestone.ledger-compared",
+    conflicts: [missing], obligations: [] });
+  assert.equal(route.kind, "event-setup");
+  if (route.kind !== "event-setup") return;
+  assert.match(route.task, /two specific observables/);
+  assert.match(route.task, /not proof of a past alteration/);
+  assert.match(route.task, /ONLY the already authorized Event records/);
+  for (const suffix of [
+    " A new Fact is required to prove this.",
+    " We must revise an earlier Event first.",
+    " A protected author decision must be changed.",
+  ]) assert.equal(routeEventPrerequisite({ ...input, milestone: "milestone.ledger-compared",
+    conflicts: [missing + suffix], obligations: [] }).kind, "replan-required");
+});
+
 test("clean Choice-owner reports become one same-Event setup request, not a Choice grant", () => {
   const route = routeEventPrerequisite(input);
   assert.equal(route.kind, "event-setup");

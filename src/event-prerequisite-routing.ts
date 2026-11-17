@@ -47,6 +47,7 @@ export function routeEventPrerequisite(input: EventPrerequisiteInput): EventPrer
   // still decide whether the new Event actually supplies the evidence.
   if (scopedEventEvidenceConflict({ milestoneId: input.milestone }, input.conflicts)) {
     const competingAccounts = /\b(?:conflicting|contradictory) accounts?\b|\bindependent observation\b/i.test(details);
+    const recordDiscrepancy = /\b(?:record|ledger|alteration|changed entry|discrepancy|trace)\b/i.test(details);
     const inSceneEvidence = competingAccounts
       ? "In the assigned Event, introduce materially DIFFERENT, attributable statements " +
         "from named EXISTING participants as dialogue the player can hear, then offer " +
@@ -54,6 +55,14 @@ export function routeEventPrerequisite(input: EventPrerequisiteInput): EventPrer
         "specific disagreement. The writer may author new on-page testimony within " +
         "this Event; subjective claims do not become objective World Facts, and " +
         "unseen off-screen history cannot be asserted as settled truth. "
+      : recordDiscrepancy
+      ? "Author a reachable scene where the PLAYER inspects source-visible records, " +
+        "physical traces or attributable testimony that actually establish the " +
+        "stated discrepancy. Show the two specific observables being compared " +
+        "and their provenance and limits. A different-looking page is not proof " +
+        "of a past alteration, a concealed culprit or an off-screen investigation. " +
+        "Treat tampering as a character inference unless the current authorized " +
+        "canon and on-page evidence truly support more. "
       : "Author a reachable scene where the PLAYER witnesses the relevant evidence " +
         "or hears named, EXISTING participants describe their own firsthand, " +
         "uncertainty-qualified observations of accessible spaces and people " +

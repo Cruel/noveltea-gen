@@ -157,6 +157,24 @@ test("saved Luna Event evidence gap uses the assigned Milestone without repeatin
   ]), false, "Unanchored prose must not be treated as current-Milestone authority");
 });
 
+test("Event-local ledger discrepancy can be repaired through player-visible evidence, never a retconned Fact", () => {
+  const assignment = { milestoneId: "milestone.ledger-compared",
+    milestonePath: "milestones/ledger-compared.md" };
+  const conflict = "The selected Milestone lacks material evidence: this Event alleges " +
+    "concealed alteration of a record, but the player cannot inspect the claimed " +
+    "discrepancy. A reachable inference cannot be established by the current clue.";
+  assert.equal(scopedEventEvidenceConflict(assignment, [conflict]), true);
+  const feedback = eventEvidenceRepairFeedback(assignment, [conflict]);
+  assert.match(feedback, /show the PLAYER the actual inspectable discrepancy/);
+  assert.match(feedback, /unsupported assertion that a record was changed/i);
+  assert.match(feedback, /not.*independent observation/i);
+  for (const suffix of [
+    " A new Fact must be created by another owner.",
+    " An earlier Event is necessary.",
+    " The protected Arc decision must be retconned.",
+  ]) assert.equal(scopedEventEvidenceConflict(assignment, [conflict + suffix]), false);
+});
+
 test("only a source-exact Milestone body drift is repairable without expanding Event authority", () => {
   const baseline = [
     "---", "schema: '0.1'", "type: milestone",

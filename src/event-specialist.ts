@@ -206,8 +206,8 @@ export function scopedEventEvidenceConflict(
     return current &&
       /\b(?:validator|milestone|fulfillment|reachable)\b/i.test(text) &&
       /\b(?:does not establish|lacks?|missing|not yet established|insufficient|sources? establish(?:es|ed)? neither|no supported (?:account|observation|evidence))\b/i.test(text) &&
-      /\b(?:evidence|observation|testimony|witness|access|time|interval|material clause|support|route)\b/i.test(text) &&
-      !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|earlier event|(?:another|other|different) milestone|cannot (?:author|create)|need (?:an? )?(?:new|another|second) (?:fact|character|arc|milestone|event)|(?:new|another|second) (?:fact|character|arc|milestone|event) (?:is )?(?:required|needed))\b/i.test(text);
+      /\b(?:evidence|observation|testimony|witness|access|time|interval|material clause|support|route|clue|record|alteration|trace|discrepancy)\b/i.test(text) &&
+      !/\b(?:protected|retcon|approval|consent|unrelated|out.of.scope|outside.scope|upstream|prior event|previous event|earlier event|(?:another|other|different) milestone|cannot (?:author|create)|need (?:an? )?(?:new|another|second) (?:fact|character|arc|milestone|event)|(?:new|another|second) (?:fact|character|arc|milestone|event) (?:is )?(?:required|needed|must))\b/i.test(text);
   });
 }
 
@@ -232,7 +232,11 @@ export function eventEvidenceRepairFeedback(
     "Event (or author another causally connected Event under its already granted events/ scope) " +
     "so the player actually observes the relevant access, timing, space or source limitations, " +
     "or hears a named, existing participant provide firsthand, uncertainty-qualified testimony " +
-    "IN this Event. Specify which spaces and people the witness observed as accessible, " +
+    "IN this Event. When the Milestone promises a discrepancy, missing ledger entry or " +
+    "concealed alteration, show the PLAYER the actual inspectable discrepancy between " +
+    "specific source-visible traces, and distinguish a tampering hypothesis from proven " +
+    "past alteration. An unsupported assertion that a record was changed is NOT " +
+    "an independent observation. Specify which spaces and people the witness observed as accessible, " +
     "and which access facts remain unknown. A reported past sighting is testimony, NOT objective " +
     "truth or proof of continuous enclosure; do not invent an authoritative offscreen investigation, " +
     "time record, new Character, protected change, or unsupported certainty. " +

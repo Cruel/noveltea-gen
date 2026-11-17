@@ -263,6 +263,23 @@ change, is **not** a certification success. Keep its exact preserved
 Pi session and original native/Git receipts; do not auto-restart or
 forge approval in a test.
 
+**November 16, 2026 corrective workflow changes (not yet a live certification pass):**
+The adaptive orchestrator now requests missing pinned skill reads once inside
+its original, read-only Pi session, verifies successful tool-read receipts,
+and requires the complete six-field proposal again. A new independent,
+read-only precommit Architecture critique checks source-visible causal
+prerequisites, lasting Choice consequences and route estimates. Its feedback
+permits one same-original-writer-session correction of the already authorized
+Arc/Milestone draft; a separate independent rereview and the existing native,
+protected-decision and postcommit semantic gates remain mandatory. Event-local
+no-write corrections now describe source-visible ledger/trace discrepancies
+explicitly: the writer may present evidence in its original authorized Event,
+but cannot invent an authoritative off-screen alteration, a new Fact or
+another-owner grant. Cross-owner and protected changes still require a
+separate typed, authenticated amendment and cannot be inferred from prose.
+Deterministic coverage is necessary but the two full real-Pi scenario
+acceptance runs below remain the criterion for closing #181.
+
 **November 16, 2026 real-Pi observations:** The source-bound
 narrative-led Story approved `puzzle_emphasis: none` and zero formal
 Puzzles, verified Architecture and independent reviews. Its real

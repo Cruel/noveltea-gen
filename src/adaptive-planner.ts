@@ -14,7 +14,8 @@ import { createProjectResourceLoader } from "./pi.js";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { preparePiContext } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
-import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
+import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
+import { missingAdaptiveMethodReads, adaptiveMethodCorrectionPrompt } from "./adaptive-method-correction.js";
 import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { AdaptiveProposal } from "./adaptive-assignments.js";
@@ -150,15 +151,20 @@ export async function proposeAdaptiveWork(input: {
       "exactly once in dependency-safe order after all actions. " +
       "No omitted tasks, no extra keys, no invented milestones or quota assumptions.";
     await promptStorySpecialist(session, prompt);
-    const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-      m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-    const skillReads = session.messages.flatMap(m => m.role === "assistant"
-      ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
-        c.type === "toolCall" && c.name === "read" && completed.has(c.id) &&
-        typeof c.arguments?.path === "string") : [])
-      .map(c => canonicalPinnedReadPath(c.arguments.path as string, project.root, snapshot.path));
-    if (required.some(p => !skillReads.includes(join(snapshot.path, "skills", p))))
-      throw new InvalidAdaptiveProposalError("Adaptive orchestrator skipped required pinned methodology reads.");
+    const reads = () => completedPinnedSkillReads(session.messages, project.root, snapshot.path);
+    const missing = () => missingAdaptiveMethodReads(session.messages, project.root, snapshot.path, required);
+    // A finished read-only turn can safely perform one bounded correction in
+    // its ORIGINAL Pi session. An interrupted turn is never replayed, and a
+    // model assertion is not proof of a successful skill read tool result.
+    const first = [...session.messages].reverse().find(m => m.role === "assistant");
+    if (!first || first.role !== "assistant" || ["aborted", "error"].includes(first.stopReason))
+      throw Error("Adaptive orchestrator model turn is interrupted; preserve the exact session without replay.");
+    if (missing().length) {
+      await promptStorySpecialist(session, adaptiveMethodCorrectionPrompt(missing()));
+    }
+    const skillReads = reads();
+    if (missing().length)
+      throw new InvalidAdaptiveProposalError("Adaptive orchestrator skipped required pinned methodology reads after same-session correction.");
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["aborted", "error"].includes(last.stopReason))
       throw Error("Adaptive orchestrator model turn is interrupted; preserve the exact session without replay.");
