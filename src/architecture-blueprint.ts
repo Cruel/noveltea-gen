@@ -81,7 +81,7 @@ export function parseCausalBlueprint(text: string): CausalBlueprint {
       !strict(value.resolution, ["question", "conclusion", "supportedBy", "uncertainty"]))
     throw Error("Invalid bounded causal blueprint structure.");
   const resolution = value.resolution;
-  if (!nonempty(resolution.question) || !nonempty(resolution.conclusion, 1200) ||
+  if (!nonempty(resolution.question) || !nonempty(resolution.conclusion, 2400) ||
       !nonempty(resolution.uncertainty, 1200) || !Array.isArray(resolution.supportedBy) ||
       !resolution.supportedBy.length || resolution.supportedBy.length > 16)
     throw Error("Causal blueprint resolution requires a question, supported conclusion and explicit uncertainty.");
@@ -221,7 +221,9 @@ async function sessionFor(
   const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
     group: directory, step, paths: [], snapshot: snapshot.id, provider, model,
-    directory: join(job.stateDir, directory), insideWriter: true,
+    directory: join(job.stateDir, directory),
+    // Planning and review happen before canonical writing: each model call
+    // must honor normal job budget gates rather than the in-writer exemption.
   }, runtime);
   const safeTools = await selectSandboxPiTools(job, snapshot, skills, undefined, "read-only", "specialist");
   const { session } = await createAgentSession({
@@ -291,7 +293,10 @@ function blueprintPrompt(plan: Plan, task: string) {
     " Use decisions:[] when a beat has no player decision; omission of that " +
     "single optional field is equivalent to [], no other fields are optional." +
     "resolution:{question:string,conclusion:string,supportedBy:[evidence beat slugs]," +
-    "uncertainty:string}}. Use standard JSON double quotes. 2–16 beats; no filler.";
+    "uncertainty:string}}. Use standard JSON double quotes. 2–16 beats. " +
+    "Keep the resolution conclusion under 2400 characters, each beat change " +
+    "and evidence explanation under 1200 characters, and the entire JSON " +
+    "under 24000 bytes; concise causal details, no filler.";
 }
 function reviewPrompt(plan: Plan, blueprint: CausalBlueprint) {
   return "You are an INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER. " +

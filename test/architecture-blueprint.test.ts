@@ -65,6 +65,15 @@ test("narrative-only beats may omit decisions without weakening evidence or unkn
   assert.throws(() => parseCausalBlueprint(JSON.stringify(extraneous)), /beat relationships/);
 });
 
+test("reviewed resolution can explain several outcomes without exceeding the bounded plan", () => {
+  const extended = clone(example);
+  extended.resolution.conclusion = "Evidence supports a finding. ".repeat(60);
+  assert.equal(parseCausalBlueprint(JSON.stringify(extended)).resolution.conclusion.length,
+    extended.resolution.conclusion.length);
+  extended.resolution.conclusion = "Long claims are still bounded. ".repeat(100);
+  assert.throws(() => parseCausalBlueprint(JSON.stringify(extended)), /resolution/);
+});
+
 test("decisions require alternatives with lasting consequences", () => {
   const broken = clone(example);
   broken.beats[1]!.decisions[0]!.alternatives = [{ action: "Publish", lastingEffect: "Noise" }];

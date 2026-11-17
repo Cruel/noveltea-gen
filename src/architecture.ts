@@ -689,6 +689,10 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         if (input.task !== undefined && input.task !== receipt.blueprintTask)
           throw Error("Architecture author task differs from pinned causal plan.");
         const head = receipt.executionHead ?? receipt.expectedHead;
+        const existingBlueprint = await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
+          receipt.provider, receipt.model, receipt.blueprintTask, head);
+        if (!existingBlueprint) await preflightPiAssignment(job,
+          "architecture-blueprint:" + receipt.plan!.version, { provider: receipt.provider, model: receipt.model });
         receipt.phase = "blueprinting";
         await persist(file, receipt);
         let pin: BlueprintPin;
@@ -699,7 +703,8 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           const reason = error instanceof Error ? error.message : String(error);
           receipt.blueprintFailure = {
             kind: reason.includes("exhausted bounded corrections") ? "review-rejected" :
-              reason.includes("Invalid bounded causal blueprint") ||
+              reason.startsWith("Invalid bounded causal blueprint") ||
+              reason.startsWith("Causal blueprint ") ||
               reason.includes("invalid beat relationships") ? "invalid-plan" : "interrupted",
             reason: reason.split(/\. Preserve|: \[/)[0]!.slice(0, 400),
           };
