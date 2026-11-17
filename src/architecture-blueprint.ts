@@ -358,8 +358,11 @@ function blueprintPrompt(plan: Plan, task: string) {
     "\nAuthor task: " + JSON.stringify(task) + "\n" +
     "First inventory the concrete causal promises from exact passages in " +
     "approved Creative Direction, the author task and the scope contract. " +
-    "Quote at least 8 contiguous characters VERBATIM from the chosen source " +
-    "(foundation document, author task, or JSON scope contract). " +
+    "For each obligation, quote a SHORT 8–40-character contiguous substring " +
+    "copied EXACTLY (including punctuation, case and spaces) from the chosen " +
+    "foundation document, author task or JSON scope contract. Never paraphrase " +
+    "or extend a quote from memory. A longer sentence is not needed; " +
+    "use the shortest source fragment that identifies the promise. " +
     "Identify story-specific WHAT, WHEN, WHO, HOW, WHY questions only when " +
     "promised; separately track material choices, refusal paths and ending conditions. " +
     "For each promise state the proof the Story must make inspectable, its route " +
@@ -445,12 +448,23 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           obligations: undefined };
       let result: ReturnType<typeof parseResponse>;
       try { result = parseResponse(); }
-      catch {
+      catch (error) {
+        // Validation, not merely JSON syntax, can fail. A generic "invalid JSON"
+        // message caused Luna to rewrite valid content and introduce a new syntax
+        // error instead of fixing the exact source quote that was ungrounded.
+        const reason = error instanceof Error ? error.message : "Unknown validation failure";
         await promptStorySpecialist(planner.session, version === 0
-          ? "The initial JSON is invalid. Return ONE complete {blueprint,obligations} " +
-            "object with exact quoted source passages and all original required fields; " +
-            "do not write Story files, use double quotes and no markdown fences."
-          : "The targeted patch is malformed or unsafe. Do not regenerate the " +
+          ? "Your previous {blueprint,obligations} answer was rejected for this " +
+            "EXACT controller validation defect: " + reason + ". " +
+            "Make ONLY the minimum correction required. If a quoted source " +
+            "substring is absent, reread that exact source and copy an actual " +
+            "short 8–40-character contiguous substring; preserve all other " +
+            "obligations, beats, source protections and decisions. " +
+            "Return ONE complete, valid JSON object with exactly two top-level " +
+            "keys blueprint and obligations, no leading/trailing prose or " +
+            "markdown, and no extra closing braces. Do not write Story files."
+          : "The targeted patch was rejected for this EXACT controller " +
+            "validation defect: " + reason + ". Do not regenerate the " +
             "blueprint. Return ONLY a corrected patch with the SAME baseDigest " +
             "and reviewDigest, exact old values and bounded operations for the " +
             "reviewed findings. Do not erase or edit unrelated prior evidence, " +

@@ -45,6 +45,14 @@ export function buildBlueprintObligations(raw: unknown, blueprint: CausalBluepri
     foundation: sources.foundation, task: sources.task, contract: JSON.stringify(sources.contract),
   };
   for (const item of raw) {
+    if (record(item, ["id", "category", "source", "quote", "question", "proof", "route", "beatIds"]) &&
+        typeof item.id === "string" &&
+        ["foundation", "task", "contract"].includes(String(item.source)) &&
+        filled(item.quote) && item.quote.trim().length >= 8 &&
+        !texts[item.source as Source].includes(item.quote))
+      throw Error("Causal proof obligation " + JSON.stringify(item.id) +
+        " quotes text absent from its claimed " + item.source +
+        " source. Copy a short exact source substring; do not paraphrase.");
     if (!record(item, ["id", "category", "source", "quote", "question", "proof", "route", "beatIds"]) ||
         typeof item.id !== "string" || !SLUG.test(item.id) || seen.has(item.id) ||
         !CATEGORIES.includes(item.category as Category) ||

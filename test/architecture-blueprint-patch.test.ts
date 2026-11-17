@@ -76,9 +76,9 @@ test("source-quoted proof obligations bind to original task, foundation, contrac
   const manifest = buildBlueprintObligations(items, example, sources);
   assert.deepEqual(validateBlueprintObligations(manifest, example, sources), manifest);
   assert.throws(() => validateBlueprintObligations(manifest, example,
-    { ...sources, foundation: "a different protected choice" }), /ungrounded|approved sources/);
+    { ...sources, foundation: "a different protected choice" }), /quotes text absent/);
   assert.throws(() => buildBlueprintObligations([{ ...items[0], quote: "invented promise" }],
-    example, sources), /ungrounded/);
+    example, sources), /resolve-mystery.*quotes text absent.*foundation source/);
   assert.throws(() => buildBlueprintObligations([{ ...items[0], beatIds: ["invented-beat"] }],
     example, sources), /unknown beat/);
   assert.throws(() => buildBlueprintObligations([items[0], items[0]], example, sources),
