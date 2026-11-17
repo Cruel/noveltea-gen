@@ -590,6 +590,79 @@ was still running and had not been accepted or independently rereviewed.
 No Architecture Story write, whole-Story completion, or certification
 pass may be inferred. #181 remains OPEN.
 
+### Temporary gpt-6.1-sol diagnosis: semantic closure, not more prose
+
+On November 17, `gpt-6.1-sol` was used **only** for two isolated,
+read-only, ephemeral Pi diagnostics (no tools, no session, no Story
+writes), while the production default and acceptance target remained
+`gpt-6-luna`. The first diagnostic inspected the **preserved final
+second-correction Luna draft** and its final independent verdict; the
+second read the current stage, source-obligation, patch, and Choice-payoff
+implementations. The full reviewed draft and private reviewer evidence
+were not promoted to another Job, copied into canon, or accepted as
+passing certification.
+
+The final narrative-led verdict had **five** findings, after six on
+the first review and two after correction one. The final review again
+rejected unsupported fatal-act responsibility, premature knowledge of
+imminent disclosure, an inadequately grounded death/timing interval,
+missing withdrawal/release-consent execution, and no-contact routes
+offering source-identity disclosure. Sol judged the concerns
+substantially justified, with two useful qualifications: circumstantial
+evidence can support culpability without eliminating every theoretical
+alternative; and an authenticated quotation could support having read
+a document, but **not automatically** knowledge of a publication
+deadline. It also identified a mechanical contradiction in the draft:
+a **21:19** entry was described as being within a **21:24–21:38** death
+interval. These findings are diagnostic advice, not another
+independently authorized review verdict.
+
+The systemic failure is **schema compliance without causal-obligation
+closure**: stages accept textual promises to perform a test or
+authenticate a record, and later prose treats those unperformed tests
+as already establishing responsibility, knowledge, or timing.
+`architecture-blueprint-obligations.ts` currently authenticates
+source-quoted author requirements; it does **not** prove that a
+fictional clue supports a causal conclusion. The route validator
+authenticates alternative coverage, target references, and distinct
+descriptions; it does **not** enforce whether a protected-source choice
+is executable in every reachable state. Patch provenance is
+correctly scoped but cannot adjudicate those semantic dependencies.
+
+Proposed next implementation, bounded and separately testable:
+
+1. Add a compact, explicitly versioned private **claim/evidence
+   availability sidecar** after evidence assembly and before independent
+   review: unique claim IDs, producing beat, named observation
+   references, planned-vs-established status, prerequisite claims, and
+   optional explicit time intervals with documented units and clock
+   provenance. Fail closed on missing/cyclic references, unavailable
+   prerequisites, premature conclusions, and arithmetic contradictions.
+   Do not parse prose timestamps automatically or declare fictional
+   evidence semantically sufficient merely because IDs line up.
+2. Add a minimal **route-state transition sidecar** driven by the
+   existing indexed alternatives, with explicit initial state,
+   reachability guards, and effects for contact, source identity
+   knowledge, private testimony, and separately authorized public
+   release. Check each reachable incoming state at reconvergence;
+   reject a displayed action when its prerequisites or promised
+   effects are unavailable on that route. Keep the source-identity
+   and testimony-disclosure decisions distinct.
+3. First run deterministic checks and a bounded Luna experiment using
+   the **same saved rejected draft and review**, with no recreated
+   Foundation or blanket regeneration: compare direct prose repair
+   against short validated claim/state corrections, then independently
+   assess the affected beats. Report correction success, new
+   contradictions, token cost and repair rounds. Real-Pi Story
+   acceptance is separate and must still pass both profiles.
+
+Implement these as explicit new receipt-version contracts, preserving
+all v1/v2/v3 readers and offline replay behavior for historical
+approved snapshots. Never silently synthesize sidecars for older
+receipts, reinterpret hashes as author consent, automatically repair
+model outputs, or weaken independent semantic review. Avoid an
+unbounded general narrative rule engine. #181 stays OPEN.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise
