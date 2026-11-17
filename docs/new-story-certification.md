@@ -417,6 +417,28 @@ The choice-heavy final verdict still rejected unsupported persistent
 branch states and causal proof. These are reproducible diagnostic
 cases, **not** passing #181 acceptance evidence.
 
+**November 17 causal-answer follow-up:** Inspection of the saved initial
+outlines revealed an upstream error: both deferred selecting a concrete
+solution, mechanism, and motive because those facts were not yet in the
+canonical Story. That confuses provisional planning with proven canon;
+no evidence batch or late correction can reliably prove a mechanism the
+outline never specified. New planning now requires
+`noveltea-causal-outline/v2`, including a *provisional* but explicit
+answer/mechanism/responsibility/motive/misdirection explanation, separately
+named direct and independent proof, and a usable witness-refusal fallback.
+Every indexed Choice alternative must carry distinct earned/foregone
+state into a named later causal beat or resolution. The controller checks
+coverage, identity, supported proof-beat IDs, reachable downstream beat
+references, and rejects obviously deferred solution placeholders before
+costly evidence collection. The existing independent review sees the
+frozen proposal and tests the eventual full design against it; it does
+not treat the provisional answer as already verified or author-approved
+canon. Existing v1 outlines remain valid for exact historical approved
+checkpoint restoration; **new** Pi planning cannot emit v1. Stage
+digests/pins continue to bind the full outline byte-for-byte.
+Offline deterministic tests and stored replay cases exercise this,
+but a new real Pi completion is still required.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

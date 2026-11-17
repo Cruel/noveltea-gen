@@ -21,7 +21,7 @@ import { buildBlueprintObligations, validateBlueprintObligations,
 import { parseBlueprintPatch, applyBlueprintPatch } from "./architecture-blueprint-patch.js";
 import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
 import { assembleBlueprintStages, EVIDENCE_BATCH_SIZE, parseBlueprintEvidence,
-  parseBlueprintObligationStage, parseBlueprintOutline,
+  parseBlueprintObligationStage, parseBlueprintOutline, parseCurrentBlueprintOutline,
   type BlueprintEvidence, type BlueprintOutline } from "./architecture-blueprint-stages.js";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -383,10 +383,20 @@ function lastText(session: Awaited<ReturnType<typeof sessionFor>>["session"]) {
   return session.getLastAssistantText() ?? "";
 }
 export function blueprintOutlinePrompt(plan: Plan, task: string) {
-  return "You are the NovelTea READ-ONLY CAUSAL STORY ARCHITECT. " +
+  return (
+    "You are the NovelTea READ-ONLY CAUSAL STORY ARCHITECT. " +
     "First use read to inspect skill://nt-story-architecture/SKILL.md, " +
     "skill://nt-catalog/SKILL.md, creative-direction/foundation.md. No writing or shell. " +
     "Plan the COMPLETE Arc as a COMPACT CAUSAL OUTLINE, not canonical Story records. " +
+    "A PROVISIONAL DESIGN MUST ANSWER THE MYSTERY: name who did what, the " +
+    "specific mechanism, why that act advanced the motive, any deception's " +
+    "actual false inference, and how independent future inspectable facts " +
+    "would test each conclusion. The original Creative Direction does NOT " +
+    "need to name the culprit first: invent a coherent possible answer as " +
+    "proposed FICTION, not as already-authored or canonically verified Fact. " +
+    "Never defer the culprit, act, mechanism, motive or answer to later " +
+    "Events, later authorship or independent review. Review will test your " +
+    "provisional solution, not supply it. " +
     "This is a new Story with only Creative Direction Foundation. " +
     "Carry all approved author promises, including the WHAT, WHEN, WHO, HOW, WHY " +
     "questions the source actually promises, each meaningful player Choice and " +
@@ -418,23 +428,51 @@ export function blueprintOutlinePrompt(plan: Plan, task: string) {
     "branch lengths or padding a record quota. Put that in beat purpose/change " +
     "where relevant; do not add schema fields. " +
     "Use 2–16 beats and the full authorized objective and scope. " +
-    "APPROVED CONTRACT: " + JSON.stringify(plan.contract) +
-    "\\nORIGINAL AUTHOR TASK: " + JSON.stringify(task) +
+    "APPROVED CONTRACT: " +
+    JSON.stringify(plan.contract) +
+    "\\nORIGINAL AUTHOR TASK: " +
+    JSON.stringify(task) +
     "\\nReturn ONLY ONE compact valid JSON object, no code fences or prose, " +
     "with EXACT root keys schema,premise,beats,resolution. " +
-    "schema is noveltea-causal-outline/v1. Every beat has EXACT keys " +
+    "schema is noveltea-causal-outline/v2. Every beat has EXACT keys " +
     "id (unique lowercase slug), purpose (string), dependsOn (array of " +
     "EARLIER beat ids), change (string), decisions (array). " +
     "Each decision has question and alternatives, each alternative has " +
     "action and lastingEffect (at least two materially distinct outcomes). " +
     "Use decisions:[] for narrative-only beats. DO NOT emit observations yet. " +
     "Resolution has question,conclusion,supportedBy (beat ids),uncertainty. " +
+    "Use EXACT additional root keys " +
+    "causalAnswer and routeConsequences (NO other root fields). " +
+    "causalAnswer has EXACT keys question,answer,mechanism,responsibility,motive," +
+    "misdirection,proof. question/answer/mechanism/responsibility/motive are " +
+    "nonempty concrete strings; do not describe an unresolved placeholder. " +
+    "misdirection has EXACT keys signal,falseInference,actualExplanation; " +
+    "say 'none' for all three when no misdirection is promised. If there " +
+    "IS misdirection, name the exact signal, the WRONG belief it creates " +
+    "and the actual explanation. proof has EXACT keys directTest,corroboration," +
+    "refusalFallback,beatIds; identify physical/documents/source observations " +
+    "the player could eventually inspect, independent cross-checks and what " +
+    "REMAINS AVAILABLE when a witness refuses (or no witness is involved). " +
+    "All proof beatIds must appear in resolution.supportedBy. " +
+    "routeConsequences is an array with EXACTLY ONE entry for EVERY " +
+    "decision alternative, including all alternatives at ending beats. " +
+    "Each entry has EXACT keys beatId,decisionIndex,alternativeIndex," +
+    "laterBeatId,preserved,foregone,persistentEffect. Indexes are zero based, " +
+    "laterBeatId is an actual LATER beat ID or 'resolution'; preserved and " +
+    "foregone name SPECIFIC earned/withheld facts, access, trust or identity " +
+    "protection ('none: reason' where genuinely none), and persistentEffect " +
+    "names what the named later beat or ending MUST acknowledge. Entries " +
+    "for two alternatives cannot describe identical states. Avoid generic " +
+    "'may affect relationships' or 'will track outcomes' statements. " +
+    "Keep complete compact JSON under 24KB. " +
     "The final proof is not approved until independent review. " +
-    "Check every string and closing brace before responding.";
+    "Check every string and closing brace before responding."
+  );
 }
 export function blueprintEvidencePrompt(outline: BlueprintOutline, first: number) {
   const batch = outline.beats.slice(first, first + EVIDENCE_BATCH_SIZE);
-  return "READ-ONLY CAUSAL BLUEPRINT EVIDENCE STAGE. The outline below is " +
+  return (
+    "READ-ONLY CAUSAL BLUEPRINT EVIDENCE STAGE. The outline below is " +
     "FIXED; do not rewrite its beats, decisions, alternatives, ending or IDs. " +
     "For ONLY the listed beats, plan what future evidence the player can " +
     "actually inspect. Separate an evidence source, directly observable fact, " +
@@ -459,14 +497,25 @@ export function blueprintEvidencePrompt(outline: BlueprintOutline, first: number
     "Empty observations are allowed for pacing beats without inspectable clues, " +
     "but the overall resolution MUST have an evidence-bearing supported beat. " +
     "These are FUTURE authoring commitments, not existing canonical facts. " +
-    "Return exactly " + batch.length + " standalone compact JSON object" +
-    (batch.length === 1 ? "" : "s") + ", ONE PER LINE, in order. " +
+    "Return exactly " +
+    batch.length +
+    " standalone compact JSON object" +
+    (batch.length === 1 ? "" : "s") +
+    ", ONE PER LINE, in order. " +
     "Each line has EXACT keys id and observations, with id from the batch. " +
     "observations is an array (maximum 8) of objects with EXACT keys " +
     "source,observable,supports,limits, all nonempty strings. " +
     "No code fences, enclosing array, text, extra braces or blank lines. " +
-    "COMPLETE IMMUTABLE OUTLINE: " + JSON.stringify(outline) +
-    "\\nTHIS BATCH: " + JSON.stringify(batch.map(beat => beat.id));
+    "Do not weaken or contradict the outlined concrete causalAnswer or " +
+    "any indexed routeConsequences. If the proposed mechanism is a physical " +
+    "act, an independent observation must actually distinguish its method " +
+    "from accidental coincidence. Do not substitute a generic promise of " +
+    "a later clue or confession for the specified evidence. " +
+    "COMPLETE IMMUTABLE OUTLINE: " +
+    JSON.stringify(outline) +
+    "\\nTHIS BATCH: " +
+    JSON.stringify(batch.map((beat) => beat.id))
+  );
 }
 function blueprintObligationsPrompt(plan: Plan, task: string, blueprint: CausalBlueprint,
   sources: ObligationSources) {
@@ -493,9 +542,15 @@ function blueprintObligationsPrompt(plan: Plan, task: string, blueprint: CausalB
     "\\nEXACT CONTRACT JSON SOURCE: " + JSON.stringify(plan.contract) +
     "\\nIMMUTABLE FULL BLUEPRINT: " + JSON.stringify(blueprint);
 }
-function reviewPrompt(plan: Plan, blueprint: CausalBlueprint,
-  obligations: BlueprintObligations, task: string) {
-  return "You are an INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER. " +
+function reviewPrompt(
+  plan: Plan,
+  blueprint: CausalBlueprint,
+  obligations: BlueprintObligations,
+  task: string,
+  outline: BlueprintOutline,
+) {
+  return (
+    "You are an INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER. " +
     "Read skill://nt-story-architecture/SKILL.md, skill://nt-catalog/SKILL.md, " +
     "creative-direction/foundation.md. No writing, shell, approval or expansion of scope. " +
     "Compare the proposed plan with approved author objective and hard constraints. " +
@@ -505,6 +560,13 @@ function reviewPrompt(plan: Plan, blueprint: CausalBlueprint,
     "decisions with unmodeled alternative consequences, and inconsistencies " +
     "after reconvergence. Planned plausible future evidence need not already " +
     "exist in canonical Event/Fact files. Do not impose generic plot preferences. " +
+    "If a concrete causal answer was proposed in the outline, test whether " +
+    "the final resolution and actual evidence now support THAT named mechanism, " +
+    "responsibility, motive and any signal's specific false inference. " +
+    "Do not permit a generic promise to fill those facts later. Check each " +
+    "indexed Choice-route state against the actual downstream beat and ending, " +
+    "including earned and forever unavailable evidence after convergence. " +
+    "The provisional outline is not author canon or independent proof. " +
     "Check every source-quoted obligation against the actual approved Creative " +
     "Direction, author task, the scope and all supported/refused routes. " +
     "An obligation inventory can itself omit a promised outcome: report that " +
@@ -521,13 +583,21 @@ function reviewPrompt(plan: Plan, blueprint: CausalBlueprint,
     "Findings reference exact beat IDs and propose bounded changes within " +
     "the approved story premise. Approval only means a coherent provisional plan; " +
     "later authored Story content must pass independent checks separately. " +
-    "Source contract: " + JSON.stringify(plan.contract) +
-    "\nOriginal author task: " + JSON.stringify(task) +
-    "\nIMMUTABLE SOURCE-GROUNDED PROOF OBLIGATIONS:\n" + JSON.stringify(obligations) +
-    "\nFULL MERGED BLUEPRINT JSON:\n" + JSON.stringify(blueprint) + "\n" +
-    "Return ONLY strict JSON {\"status\":\"pass\",\"findings\":[]} or " +
-    "{\"status\":\"revise\",\"findings\":[{\"beatId\":\"exact beat slug\"," +
-    "\"reason\":\"concrete causal defect\",\"correction\":\"bounded remedy\"}]}.";
+    "Source contract: " +
+    JSON.stringify(plan.contract) +
+    "\nOriginal author task: " +
+    JSON.stringify(task) +
+    "\nIMMUTABLE SOURCE-GROUNDED PROOF OBLIGATIONS:\n" +
+    JSON.stringify(obligations) +
+    "\nPROVISIONAL SOURCE-BOUND OUTLINE AND ROUTE STATES:\n" +
+    JSON.stringify(outline) +
+    "\nFULL MERGED BLUEPRINT JSON:\n" +
+    JSON.stringify(blueprint) +
+    "\n" +
+    'Return ONLY strict JSON {"status":"pass","findings":[]} or ' +
+    '{"status":"revise","findings":[{"beatId":"exact beat slug",' +
+    '"reason":"concrete causal defect","correction":"bounded remedy"}]}.'
+  );
 }
 
 /** A fail-closed, checkpointed original planner session, with independently
@@ -573,9 +643,13 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     };
     await promptStorySpecialist(planner.session,
       planner.context.contextNote + blueprintOutlinePrompt(plan, task));
-    const outline = await validatedStage("outline", parseBlueprintOutline,
-      "Return ONE valid JSON outline object with all exact required keys; " +
-      "no evidence observations, code fences or extra closing brace.");
+    const outline = await validatedStage(
+      "outline",
+      parseCurrentBlueprintOutline,
+      "Return ONE valid v2 JSON outline object with the concrete causalAnswer " +
+        "and every indexed routeConsequences entry; no evidence observations, " +
+        "code fences or extra closing brace.",
+    );
     await immutable(outlinePath(job, plan.version), outline);
     const evidence: BlueprintEvidence[] = [];
     const evidenceDigests: string[] = [];
@@ -641,7 +715,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
       let verdict: BlueprintReview;
       try {
         await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
-          reviewPrompt(plan, blueprint, manifest!, task));
+          reviewPrompt(plan, blueprint, manifest!, task, outline));
         verifyReadSources(reviewer.session.messages, reviewer.project.root, snapshot);
         try { verdict = parseBlueprintReview(lastText(reviewer.session), blueprint); }
         catch {
@@ -728,7 +802,13 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           "Fix the causal findings and preserve all prior supported proof " +
           "including under refused routes. The independently reviewed FULL " +
           "merged design must still satisfy every original obligation. " +
-          "BASE DIGEST: " + sha(blueprint) + " REVIEW DIGEST: " + sha(verdict) +
+          "The original proposed causalAnswer and indexed routeConsequences " +
+          "must remain accounted for in the merged Story design; do not replace " +
+          "an omitted cause with a vague promise to decide it later. " +
+          "PROVISIONAL CAUSAL ANSWER: " +
+          JSON.stringify(outline.schema === "noveltea-causal-outline/v2" ?
+            outline.causalAnswer : null) +
+          " BASE DIGEST: " + sha(blueprint) + " REVIEW DIGEST: " + sha(verdict) +
           " FINDINGS: " + JSON.stringify(verdict.findings));
       } finally { reviewer.session.dispose(); }
     }

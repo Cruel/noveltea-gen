@@ -187,6 +187,68 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
     await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(stagePin));
     assert.deepEqual((await read())?.blueprint, example,
       "v3 approved design must reconstruct from independently durable stages");
+    const outlineV2 = {
+      ...outline,
+      schema: "noveltea-causal-outline/v2",
+      causalAnswer: {
+        question: example.resolution.question,
+        answer: "The clerk voluntarily took refuge at the lighthouse.",
+        mechanism: "The clerk left the registry behind and entered the shelter by the rear gate.",
+        responsibility: "The clerk chose to hide and the shelter guardian let them enter.",
+        motive: "A protected witness would face discovery if the registrar disclosed the page.",
+        misdirection: {
+          signal: "The ledger has a torn page",
+          falseInference: "The missing page proves the clerk fled the town",
+          actualExplanation: "The clerk removed the page to protect the lighthouse's location",
+        },
+        proof: {
+          directTest: "The lighthouse's signed entry establishes the clerk's presence.",
+          corroboration: "The contemporaneous dated letter independently places the clerk there.",
+          refusalFallback: "The documents remain legible without testimony from the witness.",
+          beatIds: ["lighthouse"],
+        },
+      },
+      routeConsequences: [
+        {
+          beatId: "lighthouse",
+          decisionIndex: 0,
+          alternativeIndex: 0,
+          laterBeatId: "resolution",
+          preserved: "Witness identity stays sheltered",
+          foregone: "Public accountability is delayed",
+          persistentEffect: "The ending identifies refuge without disclosing the witness",
+        },
+        {
+          beatId: "lighthouse",
+          decisionIndex: 0,
+          alternativeIndex: 1,
+          laterBeatId: "resolution",
+          preserved: "The archive publishes a full record",
+          foregone: "Witness privacy and trust are irreversibly lost",
+          persistentEffect: "The ending exposes the cost of publishing the records",
+        },
+      ],
+    };
+    const receiptV2 = { ...receipt, outlineDigest: digest(outlineV2) };
+    await writeFile(outlineFile, JSON.stringify(outlineV2));
+    await writeFile(stagesFile, JSON.stringify(receiptV2));
+    await writeFile(
+      join(parent, "plan-2-approved.json"),
+      JSON.stringify({ ...stagePin, stagesDigest: digest(receiptV2) }),
+    );
+    assert.deepEqual(
+      (await read())?.blueprint,
+      example,
+      "v3 pins also restore the new source-bound v2 causal-answer outline",
+    );
+    await writeFile(
+      outlineFile,
+      JSON.stringify({ ...outlineV2, causalAnswer: { ...outlineV2.causalAnswer, mechanism: "substituted" } }),
+    );
+    await assert.rejects(read, /outline changed/);
+    await writeFile(outlineFile, JSON.stringify(outline));
+    await writeFile(stagesFile, JSON.stringify(receipt));
+    await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(stagePin));
     await writeFile(evidenceFile, JSON.stringify([{ ...evidence[0], observations: [] }, evidence[1]]));
     await assert.rejects(read, /evidence batch changed/);
     await writeFile(evidenceFile, JSON.stringify(evidence));
