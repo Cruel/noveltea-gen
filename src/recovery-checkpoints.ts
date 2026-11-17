@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { trustedHead } from "./revision.js";
+import { readApprovedBlueprint } from "./architecture-blueprint.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 import { readPuzzleNoWrite, type PuzzleNoWriteRef } from "./puzzle-obligation.js";
@@ -70,7 +71,11 @@ function proofOf(id: string, receipt: Receipt, sha: string) {
   const item = id === "global-architecture"
     ? { phase: receipt.phase, plan: receipt.plan ? { version: receipt.plan.version,
       architecture: receipt.plan.items?.find((i: Receipt) => i.id === "global-architecture") } : null,
-      paths: receipt.paths, contentDigest: receipt.contentDigest, snapshot: receipt.snapshot?.id }
+      paths: receipt.paths, contentDigest: receipt.contentDigest, snapshot: receipt.snapshot?.id,
+      ...(receipt.blueprint ? { blueprint: { schema: receipt.blueprint.schema,
+        executionHead: receipt.blueprint.executionHead, draftVersion: receipt.blueprint.draftVersion,
+        blueprintDigest: receipt.blueprint.blueprintDigest,
+        reviewDigest: receipt.blueprint.reviewDigest } } : {}) }
     : id === "foundation"
       ? { phase: receipt.stage, commitSha: receipt.commitSha,
         validation: receipt.validation, authoredSha256: receipt.authoredSha256,
@@ -127,6 +132,14 @@ async function receiptProof(job: JobStartResult, id: string, sha: string, archiv
   // it, the per-commit proof captured before that replan remains authoritative.
   const proof = id === "global-architecture" && archivedArchitecture
     ? archivedArchitecture : proofOf(id, receipt, sha);
+  if (id === "global-architecture" && !archivedArchitecture && receipt.blueprint) {
+    if (!receipt.plan || !receipt.snapshot || receipt.blueprintTask === undefined)
+      throw Error("Architecture checkpoint has no causal blueprint source evidence.");
+    const approved = await readApprovedBlueprint(job, receipt.plan, receipt.snapshot,
+      receipt.provider, receipt.model, receipt.blueprintTask, receipt.blueprint.executionHead);
+    if (!approved || JSON.stringify(approved.pin) !== JSON.stringify(receipt.blueprint))
+      throw Error("Architecture checkpoint is not bound to the original approved causal blueprint.");
+  }
   if (id === "global-architecture" && archivedArchitecture &&
       (proof.phase !== "committed" || proof.plan?.architecture?.status !== "verified" ||
         proof.plan.architecture.verifiedSha !== sha))

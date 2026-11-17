@@ -221,6 +221,46 @@ a passing certification: inspect the final status and real source-bound
 findings, including blockers, independent quality and recovery evidence.
 Do not publish transcripts, access tokens or local Story roots in Git.
 
+## Reviewed causal Architecture blueprint (#181)
+
+New, non-focused real-Pi Architecture assignments establish a provisional causal
+blueprint **before** any Arc/Milestone Story writer receives write tools. The
+read-only planner reads the approved Creative Direction and pinned Architecture
+skills, proposes an ordered chain of concrete inspectable evidence, bounded
+inferences, dependent turning points, consequential alternatives and a
+supported resolution. A separate read-only Pi reviewer assesses the entire
+chain against protected author intent. At most two same-original-planner-session
+corrections are admitted, each followed by an independent complete rereview.
+Malformed answers, missing required skill/source reads, unauthorized scope
+changes, absent reviews and exhausted corrections block without writing Story
+bytes. A pass is *not* an author approval, a native validation or a literary
+certification.
+
+The controller stores immutable private
+`stateDir/architecture-blueprints/plan-<version>-draft-<iteration>.json`
+and matching independent `verdict-<iteration>.json` files. Only an exact
+passing review permits immutable
+`plan-<version>-approved.json` publication. It pins the original Job,
+Thread, base/head SHAs, plan/contract, model/provider, task digest, skill
+snapshot, blueprint and verdict digests, and both original Pi sessions.
+The Architecture receipt records the pin as a durable **pre-authoring
+recovery boundary**; parent LangGraph resume reopens it and re-verifies
+the private evidence instead of rerunning a completed blueprint review.
+An interrupted unapproved plan is preserved for manual inspection, not
+silently replayed. The canonical Arc/Milestone author receives only the
+reviewed blueprint and continues through existing native validation and
+the mandatory source-specific independent Architecture review. The
+verified Architecture Git checkpoint incorporates the blueprint/verdict
+digests as provenance, while the blueprint itself is **not** added to the
+Story repository or treated as a transferable author grant. Recovery
+forks carry committed Story and independently verified evidence only:
+private blueprint sessions and approval pins are never transplanted to
+another Job.
+
+This deterministic work requires two **new, complete** real Luna profile
+runs and a recovery exercise before #181 can close. Earlier failed
+Architecture certification attempts remain negative evidence.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

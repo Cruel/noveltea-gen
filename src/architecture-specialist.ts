@@ -14,6 +14,7 @@ import { preparePiContext } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
+import type { CausalBlueprint } from "./architecture-blueprint.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
@@ -71,6 +72,7 @@ export function architectureSpecialistPrompt(
   plan: Plan,
   sandboxed: boolean,
   authorTask?: string,
+  blueprint?: CausalBlueprint,
 ): string {
   return renderBoundedPrompt(snapshot, {
     goal:
@@ -172,7 +174,12 @@ export function architectureSpecialistPrompt(
       "If the brief requires more hard-budget art or a MATERIAL soft scope expansion, " +
       "report the conflict rather than silently relaxing protected requirements. " +
       "Validate with story_validate and repair errors before reporting. " +
-      "Preserve the plan's depth, targets and protections.",
+      "Preserve the plan's depth, targets and protections. " +
+      (blueprint ? "The independently reviewed PROVISIONAL causal blueprint " +
+        "appears below. Implement its inspectable evidence, causal links, route " +
+        "alternatives, consequences and bounded resolution in Arc/Milestone records. " +
+        "Beat slugs are NOT canonical IDs and future clues are NOT established facts. " +
+        "Do not silently weaken the reviewed conclusion or protected alternatives." : ""),
     laterObligations:
       "World and Character Foundations, Event prerequisites and " +
       "fulfillment routes, Choice/Puzzle and final prose are later owners. " +
@@ -184,7 +191,9 @@ export function architectureSpecialistPrompt(
       "The controller verifies source, writes and approval separately.",
     assignmentLabel: "AUTHORIZED PLAN AND SCOPE",
     assignment: plan,
-    authorInstruction: specialistAuthorInstruction(authorTask),
+    authorInstruction: specialistAuthorInstruction(authorTask) +
+      (blueprint ? "\nINDEPENDENTLY REVIEWED CAUSAL BLUEPRINT (provisional, not canon):\n" +
+        JSON.stringify(blueprint) : ""),
   });
 }
 
@@ -221,6 +230,7 @@ export async function authorArchitecture(
   modelId: string,
   onSession: (sessionId: string, path: string) => Promise<void>,
   authorTask?: string,
+  blueprint?: CausalBlueprint,
 ): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[]; milestoneOrder: string[] }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = {
@@ -261,7 +271,7 @@ export async function authorArchitecture(
     await onSession(session.sessionId, sessionFile);
     await context.beforeTurn(sessionFile);
     await promptStorySpecialist(session, context.contextNote +
-      architectureSpecialistPrompt(snapshot, plan, Boolean(sandboxTools), authorTask));
+      architectureSpecialistPrompt(snapshot, plan, Boolean(sandboxTools), authorTask, blueprint));
     let assistant = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!assistant || assistant.role !== "assistant" ||
         ["error", "aborted"].includes(assistant.stopReason)) {
@@ -372,7 +382,7 @@ export async function authorArchitecture(
       await import("./architecture-draft-review.js");
     for (let iteration = 0; iteration <= ARCHITECTURE_DRAFT_CORRECTION_LIMIT; iteration++) {
       const review = await reviewArchitectureDraft(job, snapshot, plan, provider, modelId,
-        authoredPaths, iteration);
+        authoredPaths, iteration, blueprint);
       if (review.status === "pass") break;
       if (iteration === ARCHITECTURE_DRAFT_CORRECTION_LIMIT) throw new Error(
         "Independent Architecture draft rereview still rejected source-grounded causality/Choice/route issues: " +

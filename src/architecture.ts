@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { parseCarryForward, verifyCarryForwardCandidates } from "./plan-continuity.js";
@@ -19,6 +20,7 @@ import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence }
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { validateFocusedCreationGrants } from "./creation-grants.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
+import { createReviewedBlueprint, readApprovedBlueprint, type BlueprintPin } from "./architecture-blueprint.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics,
   type ArchitectureBudgetReview } from "./story-metrics.js";
 
@@ -79,7 +81,10 @@ interface Receipt {
     verifiedHead: string; carryForward?: string[]; reason: string; source: "trusted-controller"; signed: AuthorApprovalEvidence }>;
   proposal?: { digest: string; contract: CompletionContract; version: number; baselineHead?: string; carryForward?: string[] };
   manuallyReconciled?: { paths: string[]; digest: string };
-  phase: "awaiting-author" | "ready" | "writing" | "authored" | "committed";
+  phase: "awaiting-author" | "ready" | "blueprinting" | "writing" | "authored" | "committed";
+  /** Private, independently reviewed causal plan. Not a Story source or author approval. */
+  blueprint?: BlueprintPin;
+  blueprintTask?: string;
   paths?: string[];
   contentDigest?: string;
   piSessionFile?: string;
@@ -275,6 +280,25 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
     ({ status: "blocked", actualHead, changes, reason });
   try {
     assertHead(job, actualHead);
+    if (state.blueprint) {
+      if (!state.plan || !state.snapshot || state.blueprintTask === undefined) return blocked(
+        "Approved causal blueprint lacks its pinned Plan, snapshot or original task.");
+      const approved = await readApprovedBlueprint(job, state.plan, state.snapshot,
+        state.provider, state.model, state.blueprintTask, state.blueprint.executionHead);
+      if (!approved || JSON.stringify(approved.pin) !== JSON.stringify(state.blueprint)) return blocked(
+        "Saved causal blueprint does not match its independently reviewed private evidence.");
+    }
+    if (state.phase === "blueprinting") {
+      if (actualHead !== workingHead || changes.length)
+        return blocked("Causal blueprint planning must not alter Story bytes or Git HEAD.");
+      if (!state.plan || !state.snapshot || state.blueprintTask === undefined)
+        return blocked("Interrupted causal blueprint lacks its original source-bound plan.");
+      const approved = await readApprovedBlueprint(job, state.plan, state.snapshot,
+        state.provider, state.model, state.blueprintTask, workingHead);
+      if (!approved) return blocked("Interrupted causal blueprint has no reviewed checkpoint. " +
+        "Preserve original Pi sessions and private drafts; do not silently replay the planner.");
+      return { status: "ready", actualHead, changes };
+    }
     if (state.worker === "pi" && ["writing", "authored"].includes(state.phase)) {
       await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
     }
@@ -596,6 +620,8 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           delete state.paths;
           delete state.contentDigest;
           delete state.manuallyReconciled;
+          delete state.blueprint;
+          delete state.blueprintTask;
         }
         delete state.proposal;
       }
@@ -637,11 +663,47 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       return output(job, state);
     }
     const Channels = Annotation.Root({ receipt: Annotation<Receipt>() });
+    const saver = SqliteSaver.fromConnString(join(job.stateDir, "architecture-workflow.sqlite"));
     const graph = new StateGraph(Channels)
+      .addNode("review_causal_blueprint", async ({ receipt }) => {
+        if (receipt.phase === "authored" || receipt.worker === "fixture" ||
+            isFocusedScope(receipt.plan!.contract)) return {};
+        assertHead(job, receipt.executionHead ?? receipt.expectedHead);
+        if (dirty(job).length || receipt.phase === "writing")
+          throw Error("Causal planning cannot restart an interrupted Architecture writer.");
+        const before = reportOf(await validate(source, { ...job,
+          baseSha: receipt.executionHead ?? receipt.expectedHead }));
+        if (before.readiness.design.stages.foundation?.minimum !== "passed")
+          throw Error("Causal blueprint requires a canonical ready Creative Direction.");
+        if (receipt.plan!.items[0]?.status === "verified") {
+          try { checkArchitecture(before, receipt.plan!.contract); return {}; }
+          catch { /* A newly approved scope requires a new causal blueprint. */ }
+        }
+        if (receipt.blueprintTask === undefined) receipt.blueprintTask = input.task ?? "";
+        if (input.task !== undefined && input.task !== receipt.blueprintTask)
+          throw Error("Architecture author task differs from pinned causal plan.");
+        const head = receipt.executionHead ?? receipt.expectedHead;
+        receipt.phase = "blueprinting";
+        await persist(file, receipt);
+        const pin = await createReviewedBlueprint(job, receipt.snapshot!, receipt.plan!,
+          receipt.provider, receipt.model, receipt.blueprintTask, head);
+        const approved = await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
+          receipt.provider, receipt.model, receipt.blueprintTask, head);
+        if (!approved || JSON.stringify(approved.pin) !== JSON.stringify(pin))
+          throw Error("Reviewed causal blueprint changed before graph checkpoint publication.");
+        if (dirty(job).length) throw Error("Causal planning unexpectedly changed Story files.");
+        assertHead(job, head);
+        receipt.blueprint = pin;
+        receipt.phase = "ready";
+        await persist(file, receipt);
+        return { receipt };
+      })
       .addNode("architecture_specialist", async ({ receipt }) => {
         if (receipt.phase === "authored") return {};
         assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         if (dirty(job).length || receipt.phase === "writing") throw new Error("Interrupted architecture edits/session require inspection; never blindly rerun a writer.");
+        if (receipt.phase === "blueprinting" && receipt.blueprintTask === undefined)
+          throw Error("Interrupted Architecture blueprint lost its pinned original task.");
         const before = reportOf(await validate(source, { ...job, baseSha: receipt.executionHead ?? receipt.expectedHead }));
         if (before.readiness.design.stages.foundation?.minimum !== "passed") throw new Error("Architecture requires a canonical ready Creative Direction.");
         // A focused existing-record request adopts only verified canonical context;
@@ -665,6 +727,12 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         }
         await preflightPiAssignment(job, "architecture:" + receipt.plan!.version, receipt.worker === "pi"
           ? { provider: receipt.provider, model: receipt.model } : undefined);
+        const blueprint = receipt.worker === "pi" ? await readApprovedBlueprint(job,
+          receipt.plan!, receipt.snapshot!, receipt.provider, receipt.model,
+          receipt.blueprintTask ?? "", receipt.executionHead ?? receipt.expectedHead) : null;
+        if (receipt.worker === "pi" && (!blueprint ||
+            JSON.stringify(blueprint.pin) !== JSON.stringify(receipt.blueprint)))
+          throw Error("Architecture writer has no graph-checkpointed independently reviewed blueprint.");
         receipt.phase = "writing"; receipt.plan!.items[0]!.status = "writing";
         await persist(file, receipt);
         if (receipt.worker === "fixture") await fixtureAuthor(job, receipt);
@@ -675,7 +743,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
               receipt.piSessionId = piSessionId;
               receipt.piSessionFile = piSessionFile;
               await persist(file, receipt);
-            }, input.task));
+            }, receipt.blueprintTask, blueprint?.blueprint));
         }
         assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         receipt.paths = await changedPaths(job);
@@ -755,9 +823,17 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         }
         return { receipt };
       })
-      .addEdge(START, "architecture_specialist").addEdge("architecture_specialist", "validate_and_commit_architecture")
-      .addEdge("validate_and_commit_architecture", END).compile();
-    const result = await graph.invoke({ receipt: state });
+      .addEdge(START, "review_causal_blueprint")
+      .addEdge("review_causal_blueprint", "architecture_specialist")
+      .addEdge("architecture_specialist", "validate_and_commit_architecture")
+      .addEdge("validate_and_commit_architecture", END).compile({ checkpointer: saver });
+    let result: { receipt: Receipt };
+    try {
+      result = await graph.invoke({ receipt: state }, { configurable: {
+        thread_id: job.threadId + ":architecture:" + state.plan!.version + ":" +
+          (state.executionHead ?? state.expectedHead),
+      } });
+    } finally { saver.db.close(); }
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "architecture");

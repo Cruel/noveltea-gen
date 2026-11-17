@@ -135,6 +135,8 @@ test("public job builds planning-stage architecture and exposes its dependent re
   assert.match(readFileSync(join(job.worktreeStoryRoot, "milestones/disclosure.md"), "utf8"), /completeness: partial/);
   assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+  assert.ok(existsSync(join(job.stateDir, "architecture-workflow.sqlite")),
+    "Architecture subgraph persists its own LangGraph checkpoint independently of Git commits");
   const inspect = cli("architecture", "inspect");
   assert.equal(inspect.status, 0, inspect.stderr);
   assert.deepEqual(JSON.parse(inspect.stdout).plan, data.plan);

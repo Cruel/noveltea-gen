@@ -23,7 +23,7 @@ function git(job: JobStartResult, ...args: string[]) {
 function cleanEvidence(value: any): any {
   if (Array.isArray(value)) return value.map(cleanEvidence);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !/session|authorChoice|approval|signed|proposal|handoff|discovery/i.test(key))
+    .filter(([key]) => !/session|authorChoice|approval|signed|proposal|handoff|discovery|^blueprint(?:Task)?$/i.test(key))
     .map(([key, item]) => [key, cleanEvidence(item)]));
   return value;
 }

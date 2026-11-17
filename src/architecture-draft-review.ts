@@ -6,6 +6,7 @@ import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
+import type { CausalBlueprint } from "./architecture-blueprint.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -69,6 +70,7 @@ export function parseArchitectureDraftReview(raw: string, paths: readonly string
 export async function reviewArchitectureDraft(
   job: JobStartResult, snapshot: SkillSnapshot, plan: Plan,
   provider: string, model: string, paths: string[], iteration: number,
+  blueprint?: CausalBlueprint,
 ): Promise<ArchitectureDraftReview> {
   if (!paths.length || paths.length > 32 || paths.some(p => !authorizedArchitectureRecordPath(p)) ||
       !Number.isInteger(iteration) || iteration < 0 || iteration > ARCHITECTURE_DRAFT_CORRECTION_LIMIT)
@@ -137,6 +139,12 @@ export async function reviewArchitectureDraft(
       "approval, say so in the finding; your verdict cannot grant those changes. " +
       "This feedback is EARLY ONLY: the mandatory postcommit independent " +
       "semantic review still makes the authoritative decision.\n" +
+      (blueprint ? "INDEPENDENTLY REVIEWED PROVISIONAL BLUEPRINT: " +
+        JSON.stringify(blueprint) + "\nCheck that actual authored Arc/Milestone prose " +
+        "implements the concrete proposed clue chains, supported resolution " +
+        "and meaningful route consequences; report any material omission " +
+        "as a bounded finding against an actual changed file. Beat slugs are " +
+        "not canonical record identifiers.\n" : "") +
       "Contract: " + JSON.stringify(plan.contract) + "\n" +
       "Changed authorized paths: " + JSON.stringify(paths) + "\n" +
       "Return STRICT JSON only: {\"status\":\"pass\",\"findings\":[]} " +
