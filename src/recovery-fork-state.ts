@@ -7,6 +7,7 @@ import type { SemanticReviewStatus } from "./checkpoint-assurance.js";
 import type { GenerationEvidence } from "./generation-plan.js";
 import type { CompletionContract } from "./architecture.js";
 import type { TurnEvidence } from "./turn-plan-evidence.js";
+import type { ReviewedOmissionBatch } from "./recovery-review-batch.js";
 import { openSkillSnapshot } from "./snapshot.js";
 import { assertNativeVersion } from "./native-cli-version.js";
 import { RecoveryCompatibilityError, type RecoveryToolchain } from "./recovery-compatibility.js";
@@ -32,6 +33,8 @@ export interface RecoveryForkBundle {
   receipts: Record<string, SpecialistReceipt>;
   commits: Record<string, { sha: string; jobId: string; planVersion: number | null }>;
   completedStages: GenerationEvidence[];
+  /** Source-verified, same-Thread no-write decisions; no Git commits or author grants. */
+  reviewBatch?: ReviewedOmissionBatch;
 }
 export const forkDigest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function regular(path: string) {
@@ -111,6 +114,15 @@ export function readRecoveryFork(job: JobStartResult, requireReady = true): Reco
       bundle.sourceJobId !== pin.sourceJobId || bundle.sourceBaseSha !== pin.sourceBaseSha ||
       bundle.checkpoint.commitSha !== job.baseSha || pin.commitSha !== job.baseSha ||
       forkDigest(bundle) !== pin.bundleSha256 ||
+      (bundle.reviewBatch !== undefined && (
+        bundle.reviewBatch.version !== 1 ||
+        bundle.reviewBatch.sourceJobId !== bundle.sourceJobId ||
+        bundle.reviewBatch.sourceHead !== bundle.checkpoint.commitSha ||
+        bundle.reviewBatch.planDigest !== bundle.checkpoint.planDigest ||
+        !Array.isArray(bundle.reviewBatch.entries) ||
+        !bundle.reviewBatch.entries.length || bundle.reviewBatch.entries.length > 64 ||
+        new Set(bundle.reviewBatch.entries.map(entry => entry.milestoneId)).size !==
+          bundle.reviewBatch.entries.length)) ||
       !validRecoveryReviewCoverage(bundle.reviewCoverage, bundle.checkpoint.completedWorkItems,
         bundle.checkpoint.assurance ? { commitSha: bundle.checkpoint.commitSha,
           workItem: bundle.checkpoint.workItem } : undefined) ||
@@ -163,9 +175,20 @@ export function commitOrigin(job: JobStartResult, workItem: string, sha: string)
 }
 export function forkSourceSummary(job: JobStartResult) {
   const fork = readRecoveryFork(job);
-  return fork ? { jobId: fork.sourceJobId, commitSha: fork.checkpoint.commitSha,
-    completedWorkItems: fork.checkpoint.completedWorkItems,
-    remainingWorkItems: fork.checkpoint.remainingWorkItems, nextWorkItem: fork.checkpoint.nextWorkItem,
-    dependencies: Object.fromEntries(fork.checkpoint.remainingWorkItems.map(id =>
-      [id, fork.checkpoint.dependencies[id] ?? []])) } : null;
+  if (!fork) return null;
+  const omitted = new Set(fork.reviewBatch?.entries.flatMap(entry => {
+    const slug = entry.milestoneId.slice(10);
+    return ["interactive-choice-" + slug, "interactive-puzzle-" + slug];
+  }) ?? []);
+  const completed = new Set([...fork.checkpoint.completedWorkItems, ...omitted]);
+  // An author-supplied Foundation is an accepted prerequisite of an already
+  // verified Architecture, even when it has no generator-owned Git commit.
+  if (completed.has("global-architecture")) completed.add("foundation");
+  const remainingWorkItems = fork.checkpoint.remainingWorkItems.filter(id => !completed.has(id));
+  const nextWorkItem = remainingWorkItems.find(id =>
+    (fork.checkpoint.dependencies[id] ?? []).every(dep => completed.has(dep))) ?? null;
+  return { jobId: fork.sourceJobId, commitSha: fork.checkpoint.commitSha,
+    completedWorkItems: fork.checkpoint.completedWorkItems, remainingWorkItems, nextWorkItem,
+    dependencies: Object.fromEntries(remainingWorkItems.map(id =>
+      [id, fork.checkpoint.dependencies[id] ?? []])) };
 }

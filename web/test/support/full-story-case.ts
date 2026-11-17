@@ -21,6 +21,7 @@ import { readAdaptiveState } from '../../../src/adaptive-state'
 import { inspectJobReport } from '../../../src/job-report'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
+import { fullStoryTimeouts } from '../../../scripts/live-new-story-timeout.mjs'
 
 type Mode = 'autonomous' | 'collaborative'
 type Discovery = {
@@ -167,7 +168,7 @@ export async function verifyLiveNewStory(
   },
 ) {
   const { auth, store, headers, baseURL, ownerId, jobId, mode, job, sourceSha, root, skills } = args
-  const deadline = Date.now() + 40 * 60_000
+  const deadline = Date.now() + fullStoryTimeouts(process.env.NT_TEST_WEB_PI_TIMEOUT_MINUTES).monitorMs
   let terminal = '',
     finishedCount = 0,
     authorChoices = 0,

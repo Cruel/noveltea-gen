@@ -72,14 +72,17 @@ export interface CompositionOptions {
 }
 const milestonePattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
-function git(job: JobStartResult, ...args: string[]) {
+function rawGit(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[key];
   return execFileSync("git", args, { cwd: job.worktreeRoot, env, encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
 }
+const git = (job: JobStartResult, ...args: string[]) => rawGit(job, ...args).trim();
+// Porcelain XY status is position-sensitive: trimming would turn " M" into "M"
+// and misclassify an authorized unstaged edit as a staged change.
 const changes = (job: JobStartResult) =>
-  git(job, "status", "--porcelain=v1", "--untracked-files=all", "-z").split("\0").filter(Boolean);
+  rawGit(job, "status", "--porcelain=v1", "--untracked-files=all", "-z").split("\0").filter(Boolean);
 const repoPath = (job: JobStartResult, path: string) =>
   job.storyRelativePath ? job.storyRelativePath + "/" + path : path;
 async function save(file: string, data: unknown) {
@@ -102,6 +105,35 @@ function verified(result: ValidationResult, base: string): Report {
     throw new Error("Composition validator/protection/coverage failed against verified " + base + ": " +
       JSON.stringify(result).slice(0, 7500));
   return r;
+}
+/** A model's claim that optional testimony needs a new Event is not itself
+ * an architectural blocker to an already independently reviewed Event-only
+ * Milestone. Keep the writer in the same bounded repair loop, and let the
+ * independent editorial reviewer audit what was actually written. This never
+ * accepts unearned dialogue, waives validation, or authorizes an Event edit.
+ */
+export function optionalDialogueDeferralFeedback(
+  assignment: Pick<CompositionAssignment, "eventOnly">,
+  conflicts: readonly string[],
+): string | null {
+  if (!assignment.eventOnly || !conflicts.length || conflicts.length > 2 ||
+      conflicts.some(text => !/\b(?:optional|voluntary|willing|testimony|conversation|refus\w*|withdraw\w*)\b/i.test(text) ||
+        !/\b(?:branch\w*|routes?|effects?|unwritten|unbound|not (?:implemented|declared)|missing)\b/i.test(text) ||
+        /\b(?:author.protected|protected canon|unreachable|impossible|retcon|contradiction|required testimony|mandatory testimony|required witness account|mandatory witness account)\b/i.test(text)))
+    return null;
+  return "EVENT_ONLY_OPTIONAL_DIALOGUE: This is a reviewed Event-only Milestone. " +
+    "A merely POSSIBLE witness account, consent, refusal or withdrawal mentioned in " +
+    "the Event body is not a typed, enacted local outcome. Re-read the verified " +
+    "Event steps and the selected Milestone. Complete only the mandatory playable " +
+    "action, independent evidence, and unpressured dialogue OFFER in this Event. " +
+    "Do not impersonate consent, testimony, trust, refusal, withdrawal or publication. " +
+    "If the OPTIONAL account requires a separately authorized conditional Event, " +
+    "put the exact missing routing/effects in laterObligations, NOT architecturalConflicts. " +
+    "Do not erase an actual local required or protected narrative conflict: if " +
+    "this Milestone cannot be fulfilled without the missing branch, keep the " +
+    "architecturalConflict. Native structural checks and independent editorial " +
+    "review will reject any unearned prose. SOURCE CONCERNS: " +
+    JSON.stringify(conflicts).slice(0, 2200);
 }
 export function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt,
   eventSource: EventSourceReceipt, milestoneId: string): CompositionAssignment {
@@ -204,7 +236,8 @@ export function selectAssignment(plan: Plan, r: Report, source: InteractiveRecei
     x.metadata.type === "narrative-position" && eventIds.includes(x.metadata.event) ||
     x.metadata.type === "world-entity");
   return { milestoneId, workItemId: "composition-" + milestoneId.slice(10),
-    authorContract: plan.contract, eventIds, composeTargets, choicePoints, puzzleSolutions,
+    authorContract: plan.contract, eventOnly: !!source.units[0]?.eventOnly,
+    eventIds, composeTargets, choicePoints, puzzleSolutions,
     branchWitnesses, requiredSources, allowedExistingContent,
     sourcePaths: [...new Set(selected.map(x => x.path))].sort(),
     mandatoryReads: [...new Set(selected.filter(x => ["creative-direction", "arc", "milestone",
@@ -678,7 +711,11 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
               manifestFeedback = message;
             }
             assertHead(job, base);
-            if (evidence.conflicts.length) throw new Error("Unresolved source conflict: " + evidence.conflicts.join("; "));
+            if (evidence.conflicts.length) {
+              const optional = optionalDialogueDeferralFeedback(assign, evidence.conflicts);
+              if (optional) return [optional];
+              throw new Error("Unresolved source conflict: " + evidence.conflicts.join("; "));
+            }
             const result = await validate(base);
             const report = result.report as unknown as Report | undefined;
             if (report?.protection?.status !== "checked" || report.protection.base !== base ||

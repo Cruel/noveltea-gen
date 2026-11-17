@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { createControllerServer, SandboxController, type ControllerConfig } from "../web/src/sandbox-controller.js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -12,17 +12,20 @@ import { removeTestTree } from "./helpers.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { startStoryJob } from "../src/job.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
-import { collectRecoveryFork } from "../src/recovery-fork.js";
+import { collectRecoveryFork, prepareRecoveryFork } from "../src/recovery-fork.js";
+import { forkSourceSummary } from "../src/recovery-fork-state.js";
+import { sealReviewedOmissionBatch } from "../src/recovery-review-batch.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
-import { parseSpecialistJson } from "../src/composition-specialist.js";
+import { compositionOptionalDialoguePolicy, parseSpecialistJson } from "../src/composition-specialist.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
 import { runInteractiveWorkItem } from "../src/interactive-work.js";
 import { reviewedAdaptiveOmissions } from "../src/adaptive-omission.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments,
   revalidateAdaptiveAmendment } from "../src/adaptive-assignments.js";
-import { reconcileInventory, nextExecutionItem } from "../src/generation-plan.js";
+import { reconcileInventory, nextExecutionItem, type GenerationInventory } from "../src/generation-plan.js";
 import { validateStoryJob } from "../src/validator.js";
-import { selectAssignment, verifyCompositionProse } from "../src/composition-work.js";
+import { auditCompositionPaths, optionalDialogueDeferralFeedback, selectAssignment,
+  verifyCompositionProse, runCompositionWorkItem } from "../src/composition-work.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-composition-"));
 after(() => {
@@ -249,6 +252,31 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
   return { repo, original, job, cli, cliAsync, prepare, prepareWithOptionalPuzzle,
     prepareEventOnly, run, inspect, seal, recovery };
 }
+
+test("Event-only Composition defers optional testimony instead of fabricating Mara's response", () => {
+  const conflict = "events/mara-brought-out.md describes optional accepted, refused and withdrawn " +
+    "recovery conversations but declares no corresponding branches or account-receipt effects. " +
+    "Authored the mandatory rescue and quiet recovery offer only; Mara's voucher-pretext and " +
+    "reconciliation-demand testimony remains unwritten pending authorized routing.";
+  const corrected = optionalDialogueDeferralFeedback({ eventOnly: true }, [conflict]);
+  assert.match(corrected ?? "", /EVENT_ONLY_OPTIONAL_DIALOGUE/);
+  assert.match(corrected ?? "", /laterObligations/);
+  assert.match(corrected ?? "", /Do not impersonate consent/);
+  assert.equal(optionalDialogueDeferralFeedback({ eventOnly: false }, [conflict]), null,
+    "A required Choice branch may not be silently deferred");
+  for (const blocker of [
+    "Required testimony cannot be enacted: no corresponding branch or effect.",
+    "A protected canon contradiction prevents the optional witness route.",
+    "The rescue itself is unreachable, with missing necessary Event effects.",
+  ]) {
+    assert.equal(optionalDialogueDeferralFeedback({ eventOnly: true }, [blocker]), null, blocker);
+  }
+  const policy = compositionOptionalDialoguePolicy(true);
+  assert.match(policy, /EVENT-ONLY SOURCE CONTRACT/);
+  assert.match(policy, /unpressured offer ONLY/);
+  assert.match(policy, /laterObligations/);
+  assert.equal(compositionOptionalDialoguePolicy(false), "");
+});
 
 test("parses a complete nested manifest despite commentary or fenced JSON", () => {
   const manifest = JSON.stringify({ modifiedRecords: ["authored-content/disclosure.md"],
@@ -767,6 +795,124 @@ test("Event-only fork admission fails before child allocation rather than losing
   assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
+test("a reviewed no-write batch survives a same-Thread fork without a Git commit or reviewer replay",
+  { skip: !available, timeout: 160_000 }, async () => {
+    const x = setup("review-batch-handoff");
+    const { before } = await x.prepareEventOnly();
+    const env = { NT_STATE_DIR: join(root, "review-batch-handoff-state"),
+      NT_CONFIG_FILE: join(root, "missing-config.json"), NT_SKILL_CACHE_DIR: join(root, "skills") };
+    const prior = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    try {
+      const parent = await startStoryJob({ story: x.job.storyRoot, job: x.job.jobId }, false);
+      const checkpoint = (await inspectRecoveryCheckpoints(parent))
+        .find(point => point.eligible && point.workItem === "event-disclosure");
+      assert.ok(checkpoint?.eligible);
+      assert.equal(checkpoint.commitSha, before);
+      const branchBefore = git(parent.worktreeRoot, "rev-parse", "HEAD");
+      await sealReviewedOmissionBatch(parent, checkpoint, {
+        items: [{ stage: "interactive", milestone: "milestone.disclosure",
+          status: "verified", omission: { reason: "Source-bound observational milestone",
+            evidence: "reviewed", reviewerSession: "fixture" } }],
+      } as GenerationInventory);
+      assert.equal(git(parent.worktreeRoot, "rev-parse", "HEAD"), branchBefore,
+        "The review batch must not manufacture a Git commit");
+      const plan = JSON.parse(readFileSync(join(parent.stateDir, "architecture.json"), "utf8")).plan;
+      const markers = join(parent.stateDir, "recovery-review-batches");
+      const markerPath = join(markers, readdirSync(markers)[0]!);
+      const marker = readFileSync(markerPath, "utf8");
+      const tampered = JSON.parse(marker);
+      tampered.milestones = [];
+      writeFileSync(markerPath, JSON.stringify(tampered));
+      await assert.rejects(collectRecoveryFork(parent,
+        "6575baa6-f069-4bfb-9ea1-a8d88f344c0f", checkpoint.commitSha,
+        plan.contract, source, "same-thread"),
+        /Saved review-batch boundary was tampered/,
+        "A mutated review-batch marker cannot authorize a continuation");
+      writeFileSync(markerPath, marker);
+      const startedReviewPath = join(parent.stateDir, "interactive-event-only", "interrupted.json");
+      writeFileSync(startedReviewPath, JSON.stringify({
+        phase: "reviewing", eventHead: before, milestone: "milestone.interrupted",
+      }));
+      await assert.rejects(collectRecoveryFork(parent,
+        "a824c819-6fc6-4945-89c1-82c67e5eab73", checkpoint.commitSha,
+        plan.contract, source, "same-thread"),
+        /Interrupted independent Event-only review must be reconciled/,
+        "A half-finished independent reviewer may never be silently repeated");
+      unlinkSync(startedReviewPath);
+      const childId = "116d1c99-1498-4f9b-a9f6-c800d080b7ba";
+      const bundle = await collectRecoveryFork(parent, childId, checkpoint.commitSha,
+        plan.contract, source, "same-thread");
+      assert.deepEqual(bundle.reviewBatch?.entries.map(entry => entry.milestoneId),
+        ["milestone.disclosure"]);
+      assert.ok(bundle.completedStages.some(entry => entry.stage === "interactive" &&
+        entry.milestone === "milestone.disclosure" &&
+        entry.status === "interactive-slice-committed"));
+      const child = await prepareRecoveryFork(parent, bundle);
+      const saved = JSON.parse(readFileSync(join(child.stateDir, "interactive-items/disclosure.json"), "utf8"));
+      assert.equal(saved.units[0].phase, "not-applicable");
+      assert.deepEqual(saved.units[0].eventOnly, saved.units[1].eventOnly);
+      const original = await readEventOnlyOmission(child,
+        "milestone.disclosure", saved.units[0].eventOnly);
+      assert.equal(original.reviewHead, before);
+      assert.equal(original.jobId, childId);
+      const summary = forkSourceSummary(child);
+      assert.ok(summary && !summary.remainingWorkItems.includes("interactive-choice-disclosure"));
+      assert.equal(summary?.nextWorkItem, "composition-disclosure", JSON.stringify({
+        completed: bundle.checkpoint.completedWorkItems,
+        remaining: summary?.remainingWorkItems,
+        dependencies: bundle.checkpoint.dependencies,
+      }));
+      // The incoming Git anchor must also be eligible when this child has
+      // completed only no-write reviews (zero native checkpoints of its own).
+      const nested = await collectRecoveryFork(child,
+        "8123d504-ad46-4a7e-8677-f79ec1cc7647", before,
+        plan.contract, source, "same-thread");
+      assert.deepEqual(nested.reviewBatch?.entries.map(entry => entry.milestoneId),
+        ["milestone.disclosure"]);
+      const composed = await runCompositionWorkItem({
+        story: child.storyRoot, job: child.jobId, action: "run",
+        milestone: "milestone.disclosure", fixture: true, skillsSource: source,
+      });
+      assert.equal(composed.status, "composition-committed");
+      const composedPoint = (await inspectRecoveryCheckpoints(child)).find(point =>
+        point.eligible && point.workItem === "composition-disclosure" &&
+        point.omittedWorkItems?.some(entry => entry.workItem === "interactive-choice-disclosure"));
+      assert.ok(composedPoint);
+      const afterComposition = await collectRecoveryFork(child,
+        "0b87445f-184c-46be-a987-ddf22c526018", composedPoint.commitSha,
+        plan.contract, source, "same-thread");
+      assert.deepEqual(afterComposition.reviewBatch?.entries.map(entry => entry.milestoneId),
+        ["milestone.disclosure"],
+        "A later Git checkpoint must retain the earlier reviewed omission");
+      const grandchild = await prepareRecoveryFork(child, afterComposition);
+      const grandchildReceipt = JSON.parse(readFileSync(join(grandchild.stateDir,
+        "interactive-items/disclosure.json"), "utf8"));
+      assert.equal((await readEventOnlyOmission(grandchild,
+        "milestone.disclosure", grandchildReceipt.units[0].eventOnly)).eventHead,
+        original.eventHead, "Multi-hop continuation must preserve original Event provenance");
+      await assert.rejects(collectRecoveryFork(child,
+        "cfcc4427-0b2c-45b0-9c5c-488e2103b1e4", composedPoint.commitSha,
+        plan.contract, source, "isolated"), /Event-only omissions|isolated fork/,
+        "An isolated historical Thread must not inherit source-bound no-write reviews");
+
+      const proofPath = join(child.stateDir, "interactive-event-only/disclosure.json");
+      const sealed = readFileSync(proofPath, "utf8");
+      const corrupt = JSON.parse(sealed);
+      corrupt.inherited.sourcePayloadDigest = "0".repeat(64);
+      writeFileSync(proofPath, JSON.stringify(corrupt));
+      await assert.rejects(readEventOnlyOmission(child,
+        "milestone.disclosure", saved.units[0].eventOnly),
+        /Inherited Event-only review/, "Tampered provenance cannot be reused");
+      writeFileSync(proofPath, sealed);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
 test("a newly linked formal Choice invalidates the Event-only Composition exemption", { skip: !available }, async () => {
   const x = setup("event-only-late-choice");
   await x.prepareEventOnly();
@@ -782,6 +928,37 @@ test("a newly linked formal Choice invalidates the Event-only Composition exempt
   assert.throws(() => selectAssignment(architecture.plan, altered, source, event, "milestone.disclosure"),
     /stale: a linked Choice or Puzzle/);
 });
+
+test("composition audit accepts unstaged edits to assigned prose but rejects staged or canonical changes",
+  { skip: !available }, async () => {
+    const x = setup("existing-prose-audit");
+    x.prepare();
+    const run = x.run();
+    assert.equal(run.status, 0, run.stderr);
+    const validation = x.cli(["validate"]);
+    assert.equal(validation.status, 0, validation.stderr);
+    const report = JSON.parse(validation.stdout).report;
+    const architecture = JSON.parse(x.cli(["architecture", "inspect"]).stdout);
+    const dir = x.job.stateDir;
+    const interactive = JSON.parse(readFileSync(join(dir, "interactive-items/disclosure.json"), "utf8"));
+    const event = JSON.parse(readFileSync(join(dir, "event-items/disclosure.json"), "utf8"));
+    const assignment = selectAssignment(architecture.plan, report, interactive, event, "milestone.disclosure");
+    const path = "authored-content/disclosure-scene.md";
+    assert.ok(assignment.allowedExistingContent.includes(path));
+
+    // The first Git porcelain entry begins with a meaningful space: " M".
+    const full = join(x.job.worktreeStoryRoot, path);
+    writeFileSync(full, readFileSync(full, "utf8") + "\nA later quiet exchange.\n");
+    assert.deepEqual(await auditCompositionPaths(x.job, assignment, [path]), [path]);
+    git(x.job.worktreeRoot, "add", "story/" + path);
+    await assert.rejects(auditCompositionPaths(x.job, assignment, [path]),
+      /staged\/removed\/renamed/, "A staged modification must still fail closed");
+    git(x.job.worktreeRoot, "reset", "--", "story/" + path);
+    const canon = join(x.job.worktreeStoryRoot, "creative-direction/foundation.md");
+    writeFileSync(canon, readFileSync(canon, "utf8") + "\nUnauthorized change.\n");
+    await assert.rejects(auditCompositionPaths(x.job, assignment, [path]),
+      /Unauthorized composition edit/, "Non-prose canon must stay read-only");
+  });
 
 test("scoped prose revision may reuse other fully composed Event content", { skip: !available }, async () => {
   const x = setup("existing-composition");

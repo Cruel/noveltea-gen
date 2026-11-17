@@ -62,13 +62,19 @@ export function parseInteractiveManifest(text: string, domain: InteractiveDomain
   if (
     !obj ||
     !strings(obj.modifiedRecords) ||
-    (domain === "choice" && !obj.modifiedRecords.length) ||
     !strings(obj.architecturalConflicts) ||
     !strings(obj.laterObligations)
   ) {
     throw new Error(
       "Interactive specialist must return complete modifiedRecords, architecturalConflicts and laterObligations JSON.",
     );
+  }
+  if (domain === "choice" && obj.modifiedRecords.length === 0) {
+    if (obj.architecturalConflicts.length) {
+      throw new Error("Interactive Choice source conflict (no Story edits): " +
+        obj.architecturalConflicts.join("; "));
+    }
+    throw new Error("Interactive Choice cannot report no Story edits without a verified Event-only omission.");
   }
   return {
     paths: obj.modifiedRecords,

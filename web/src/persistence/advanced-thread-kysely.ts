@@ -400,8 +400,16 @@ export function createKyselyAdvancedThreads(db: SharedDatabase<StudioDb>): Advan
           .orderBy('storyThreadRuns.runOrder', 'desc').executeTakeFirst()
         const expectedCurrent = data.expectedLatestJobId ?? data.sourceJobId
         let reusedGuidance = false
-        if (!current || current.jobId !== expectedCurrent || current.status !== 'blocked' ||
-          !['finished', 'interrupted'].includes(current.queuePhase ?? ''))
+        // A worker killed during certification can be fenced to 'interrupted'
+        // while its session remains 'running'. That is not a live writer: the
+        // queue fence is the authority. Allow a NEW checkpoint continuation,
+        // never replay the interrupted writer or inherit its dirty worktree.
+        const settledFailure = current?.status === 'blocked' &&
+          ['finished', 'interrupted'].includes(current.queuePhase ?? '')
+        const fencedInterruption = current?.status === 'running' &&
+          current.queuePhase === 'interrupted'
+        if (!current || current.jobId !== expectedCurrent ||
+          !(settledFailure || fencedInterruption))
           conflict('The Thread has advanced or its failure is not safely recoverable.')
         if (expectedCurrent !== data.sourceJobId) {
           const failedIntent = await forkIntent(tx, expectedCurrent)

@@ -21,6 +21,8 @@ export interface CompositionAssignment {
   workItemId: string;
   authorTask?: string;
   authorContract: unknown;
+  /** True only after the independent controller sealed BOTH Event-only omissions. */
+  eventOnly: boolean;
   sourcePaths: string[];
   mandatoryReads: string[];
   allowedExistingContent: string[];
@@ -30,6 +32,23 @@ export interface CompositionAssignment {
   puzzleSolutions: Array<{ id: string; eventIds: string[] }>;
   branchWitnesses: Array<{ event: string; step: string; branch: string; witness: string[] }>;
   requiredSources: string[];
+}
+/** Verbatim policy shared by the live writer prompt and deterministic tests.
+ * Do not turn a contingent account in an Event body into a performed route. */
+export function compositionOptionalDialoguePolicy(eventOnly: boolean): string {
+  if (!eventOnly) return "";
+  return "EVENT-ONLY SOURCE CONTRACT: The independently approved Event-only Milestone needs " +
+    "playable prose for its enacted, typed Event steps, not a fabricated formal Choice. " +
+    "If the Event narrative mentions possible OPTIONAL future witness testimony, voluntary " +
+    "cooperation, refusal or withdrawal without typed routes/effects that enact them, " +
+    "compose the unconditional actions, safety, independently earned evidence and " +
+    "unpressured offer ONLY. Do NOT write the witness's account, agreement, trust, " +
+    "publication consent or refusal as an accomplished fact in shared text. " +
+    "Put unimplemented OPTIONAL testimony or its needed follow-up conditional Event " +
+    "in laterObligations for separately authorized design; it is NOT a reason to " +
+    "block the already-verified mandatory Event. If the original author really " +
+    "requires that dialogue to fulfill THIS Milestone, report architecturalConflicts " +
+    "instead and do not invent its branches. ";
 }
 export interface CompositionEvidence {
   modifiedRecords: string[];
@@ -188,6 +207,7 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "typed records; no fixture-specific characters, props, or secrets. " +
       "Do not write editorial directions as playable prose. " +
       "If a source lacks a needed route, report a conflict; NEVER manufacture new Event effects or bypass gates. " +
+      compositionOptionalDialoguePolicy(assignment.eventOnly) +
       (sandboxed ?
         "Call story_validate with no arguments; Git and host shell access are unavailable in the sandbox. " :
         "Call story_validate with no arguments and inspect Git diff. Do not git add, reset, checkout or commit. ") +
@@ -261,6 +281,11 @@ export async function reviewComposition(job: JobStartResult, snapshot: SkillSnap
       "Block actual authored prose defects: leaked branch-only truth in shared/menu text, " +
       "unearned optional evidence, missing outcome-conditioned aftermath, missing Event ownership, " +
       "summaries instead of playable lines, author-protected rewordings or incoherent consequences. " +
+      "When assignment.eventOnly is true, verify that any voluntary testimony/withdrawal " +
+      "mentioned in the Event narrative body is NOT treated as enacted unless typed branches " +
+      "and effects independently license it; a consent-bounded offer is playable without " +
+      "inventing a positive or negative response. A deferred optional account is a " +
+      "laterObligation, not a defect in a complete unconditional rescue scene. " +
       "One Authored Content record per composeTargets Event is required; existing clue content " +
       "covers its discovery Event. An Event's narrative body is planning context, NOT proof of " +
       "player knowledge or a physically present object. Review the actual saved prose ONLY for " +

@@ -692,7 +692,21 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     throw new Error("Work item does not belong to the authorized continuation plan.");
   const completed = [...new Set([...baseline,
     ...previous.flatMap(p => p.completedWorkItems).filter(id => work.order.includes(id)), workItem])];
-  const omissions = previous.flatMap(p => p.omittedWorkItems ?? []);
+  // Inherited Event-only decisions have no Git commits. Their source-bound
+  // omission pair must be explicitly carried into the first new commit's
+  // checkpoint; otherwise a later retry would repeat the reviewers.
+  const inherited: Array<{ workItem: string; seal: EventOnlyRef }> = [];
+  for (const entry of readRecoveryFork(job)?.reviewBatch?.entries ?? []) {
+    const slug = entry.milestoneId.slice(10);
+    const source = JSON.parse(await readFile(join(job.stateDir, "interactive-items",
+      slug + ".json"), "utf8")) as { units: Array<{ eventOnly?: EventOnlyRef }> };
+    const seal = source.units[0]?.eventOnly;
+    if (!seal || JSON.stringify(seal) !== JSON.stringify(source.units[1]?.eventOnly))
+      throw Error("Inherited Event-only review no longer has an intact no-write pair.");
+    inherited.push({ workItem: "interactive-choice-" + slug, seal },
+      { workItem: "interactive-puzzle-" + slug, seal });
+  }
+  const omissions = [...previous.flatMap(p => p.omittedWorkItems ?? []), ...inherited];
   if (workItem.startsWith("composition-")) {
     const slug = workItem.slice("composition-".length);
     const source = JSON.parse(await readFile(
@@ -703,8 +717,12 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
       if (!seal || source.units[1]?.phase !== "not-applicable" ||
           JSON.stringify(seal) !== JSON.stringify(source.units[1].eventOnly))
         throw Error("Composition omitted Choice without a matched controller Event-only review.");
-      omissions.push({ workItem: "interactive-choice-" + slug, seal },
-        { workItem: "interactive-puzzle-" + slug, seal });
+      for (const workItem of ["interactive-choice-" + slug, "interactive-puzzle-" + slug]) {
+        const prior = omissions.find(entry => entry.workItem === workItem);
+        if (prior && JSON.stringify(prior.seal) !== JSON.stringify(seal))
+          throw Error("Composition omission differs from inherited independent review.");
+        if (!prior) omissions.push({ workItem, seal });
+      }
     } else if (source.units?.[1]?.phase === "not-applicable") {
       if (!source.units[1].noWrite) throw new Error("Composition omitted Puzzle without a controller seal.");
       omissions.push({ workItem: "interactive-puzzle-" + slug, seal: source.units[1].noWrite });

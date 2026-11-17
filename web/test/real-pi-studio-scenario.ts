@@ -34,6 +34,7 @@ import { SandboxController, createControllerServer, type ControllerConfig } from
 import { beginLiveNewStoryChat, approveLiveNewStoryChat, verifyLiveNewStory } from './support/full-story-case'
 import { runPreservedCheckpointRetry } from './support/preserved-checkpoint-retry'
 import { createLiveCertificationIpc } from './support/live-certification-ipc'
+import { fullStoryTimeouts } from '../../scripts/live-new-story-timeout.mjs'
 
 const subscriptionTest = process.env.NT_TEST_WEB_PI_AUTH === 'device-code'
 const isolatedLocalOAuth = process.env.NT_TEST_WEB_PI_LOCAL_OAUTH === '1'
@@ -58,7 +59,7 @@ test(fullStory
   ? 'opt-in complete new Story Chat via authenticated real Pi and rootless Studio sandbox'
   : 'opt-in authenticated real Pi writes native-validated Story foundation inside rootless sandbox', {
   skip: !enabled ? 'Set NT_TEST_WEB_REAL_PI=1 (or NT_TEST_WEB_PI_NEW_STORY=1) with Pi/native CLI/rootless Docker.' : false,
-  timeout: fullStory ? 2_700_000 : 300_000,
+  timeout: fullStory ? fullStoryTimeouts(process.env.NT_TEST_WEB_PI_TIMEOUT_MINUTES).testMs : 300_000,
 }, async () => {
   for (const variable of required) assert.ok(process.env[variable], variable + ' is required')
   const skills = resolve(process.env.NT_STUDIO_SKILLS_SOURCE!)

@@ -1,12 +1,15 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints, type RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { validateStoryJob } from "./validator.js";
-import { readReviewTurnEvidence } from "./fork-review-turn.js";
+import { projectReviewTurn, readReviewTurnEvidence } from "./fork-review-turn.js";
+import { collectReviewedOmissionBatch, verifySavedReviewBatch } from "./recovery-review-batch.js";
 import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
 import { assertRecoveryCompatibility, assertRecoveryReceiptCompatibility,
@@ -76,11 +79,23 @@ export async function assertAdaptiveForkBoundary(parent: JobStartResult, commitS
 /** Read-only preflight. Call before acquiring/allocating any child resources.
  * Mutable parent SQLite, unfinished receipts, sessions and grants are excluded. */
 export async function collectRecoveryFork(parent: JobStartResult, childId: string,
-  commitSha: string, contract: CompletionContract, skillsSource?: string): Promise<RecoveryForkBundle> {
+  commitSha: string, contract: CompletionContract, skillsSource?: string,
+  mode: "isolated" | "same-thread" = "isolated"): Promise<RecoveryForkBundle> {
   if (!/^[a-f0-9]{40}$/.test(commitSha) || childId === parent.jobId)
     throw new Error("Select a finalized checkpoint and a different child job identity.");
   const points = await inspectRecoveryCheckpoints(parent);
-  const selected = points.find(p => p.commitSha === commitSha && p.eligible);
+  const inherited = readRecoveryFork(parent);
+  // A valid prior continuation can finish multiple independent no-write
+  // reviews without producing its own Git commit. The incoming checkpoint is
+  // still the authenticated Git anchor, but ONLY while this execution's
+  // verified HEAD and immutable fork pin remain exactly at that commit.
+  const inheritedAnchor = inherited?.checkpoint.commitSha === commitSha &&
+    parent.baseSha === commitSha && git(parent, "rev-parse", "HEAD") === commitSha &&
+    await trustedHead(parent) === commitSha;
+  const selected = points.find(p => p.commitSha === commitSha && p.eligible) ??
+    (inheritedAnchor ? { ...inherited!.checkpoint, eligible: true, reason: null,
+      semanticReview: inherited!.reviewCoverage?.find(entry =>
+        entry.commitSha === commitSha)?.status ?? "untracked" } : null);
   if (!selected) throw new RecoveryCompatibilityError("invalid-evidence",
     "Checkpoint is not finalized and independently verified.");
   // A fork is an independent Thread, not a restart of the original adaptive
@@ -91,27 +106,32 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   // Architecture inventory in the child. Pre-amendment checkpoints remain
   // independently reusable without inheriting unpublished plan changes.
   await assertAdaptiveForkBoundary(parent, commitSha);
-  // An Event-only omission is bound to the original job, Thread, validator,
-  // reviewed Event sources and independent reviewer session. A fork copies
-  // authored commits but cannot inherit that no-write authorization as a
-  // completed Git work item, nor silently rebind the parent's review proof.
-  // Reject before allocating a child until a separately reviewed fork
-  // handoff for optional units exists. Same-Thread restart remains supported.
-  if (selected.omittedWorkItems?.some(entry =>
+  // Commitless Event-only reviews can cross ONLY a same-Thread execution
+  // boundary, after independent source, transcript and plan authentication.
+  // Isolated diagnostic forks must not inherit the other Thread's review.
+  const reviewBatch = mode === "same-thread"
+    ? await collectReviewedOmissionBatch(parent, selected) : null;
+  if (reviewBatch) await verifySavedReviewBatch(parent, reviewBatch);
+  if (mode !== "same-thread" && selected.omittedWorkItems?.some(entry =>
       entry.workItem.startsWith("interactive-choice-")))
     throw new RecoveryCompatibilityError("invalid-evidence",
-      "Event-only omissions are source-bound to the original Thread; this checkpoint " +
-      "cannot be forked without a separately reviewed no-write handoff.");
+      "Event-only omissions are source-bound to the original Thread; " +
+      "an isolated fork cannot inherit them.");
+  if (mode === "same-thread" && selected.omittedWorkItems?.some(entry =>
+      entry.workItem.startsWith("interactive-choice-") &&
+      !reviewBatch?.entries.some(review =>
+        entry.workItem === "interactive-choice-" + review.milestoneId.slice(10))))
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "The source checkpoint has an Event-only omission without a transferable reviewed handoff.");
   assertRecoveryCompatibility(selected);
   const { eligible: _eligible, reason: _reason, semanticReview: _semanticReview, ...checkpoint } = selected;
-  const inherited = readRecoveryFork(parent);
   const parentReviewTurn = await readReviewTurnEvidence(parent);
   // The same original, controller-verified Turn may supply review criteria in
   // a successor Thread; it is NOT transplanted into child turn-plan.json and
   // never conveys approvals or authoring grants. Every parent checkpoint with
   // assurance must match that review-only Turn before a fork is admitted.
   if (selected.assurance && (!parentReviewTurn ||
-      parentReviewTurn.digest !== selected.assurance.turnDigest))
+      !inherited && parentReviewTurn.digest !== selected.assurance.turnDigest))
     throw new RecoveryCompatibilityError("invalid-evidence",
       "Historical independent review has lost its original authorized Turn evidence.");
   const reviewTurn = inherited?.reviewTurn ?? parentReviewTurn;
@@ -195,11 +215,19 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
     if (item) completedStages.push({ ...item, headSha: commits[id]?.sha ?? parent.baseSha,
       status: "committed", planVersion: plan?.version });
   }
+  // An omitted Choice/Puzzle pair is a satisfied dependency but never a
+  // fabricated specialist Git commit. Its new child receipt is separately
+  // projected and reauthenticated against the immutable bundle at admission.
+  for (const reviewed of reviewBatch?.entries ?? [])
+    completedStages.push({ stage: "interactive", milestone: reviewed.milestoneId,
+      headSha: reviewed.sourcePayload.reviewHead, status: "interactive-slice-committed",
+      planVersion: reviewed.sourcePayload.planVersion });
   const toolchain = await selectCurrentRecoveryToolchain(parent, checkpoint, skillsSource);
   return { version: 2, toolchain, sourceJobId: parent.jobId, sourceBaseSha: parent.baseSha,
     storyRoot: parent.storyRoot, childId, checkpoint: checkpoint as RecoveryCheckpoint,
     reviewCoverage, contract: plan?.contract ?? contract,
-    ...(reviewTurn ? { reviewTurn } : {}), receipts, commits, completedStages };
+    ...(reviewTurn ? { reviewTurn } : {}), receipts, commits, completedStages,
+    ...(reviewBatch ? { reviewBatch } : {}) };
 }
 async function writeOnce(path: string, value: string) {
   if (existsSync(path)) {
@@ -229,6 +257,43 @@ export async function prepareRecoveryFork(parent: JobStartResult, bundle: Recove
         branch: child.branch, worktreeRoot: child.worktreeRoot, threadId: child.threadId,
         ...(original.snapshot ? { snapshot: bundle.toolchain.skills } : {}) };
       await writeOnce(join(child.stateDir, path), JSON.stringify(receipt, null, 2) + "\n");
+    }
+    if (bundle.reviewBatch) {
+      if (!bundle.reviewTurn) throw Error("Review batch has no original authorized Turn.");
+      const reviewTurn = projectReviewTurn(bundle.reviewTurn, child);
+      const hash = (value: unknown) => createHash("sha256")
+        .update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
+      for (const entry of bundle.reviewBatch.entries) {
+        const slug = entry.milestoneId.slice("milestone.".length);
+        const old = entry.sourcePayload;
+        const originalSession = old.reviewerSession;
+        const destination = originalSession
+          ? join(child.stateDir, "review-sessions", "review", "inherited-" + slug + ".jsonl") : null;
+        if (originalSession && destination) {
+          const transcript = await readFile(originalSession, "utf8");
+          if (hash(transcript) !== old.reviewerSessionSha256)
+            throw Error("Original Event-only independent reviewer transcript has changed.");
+          await writeOnce(destination, transcript);
+        }
+        const payload = { ...old, jobId: child.jobId, threadId: child.threadId,
+          branch: child.branch, baseSha: child.baseSha, turnDigest: reviewTurn.digest,
+          eventSnapshotId: bundle.toolchain.skills.id, reviewerSession: destination };
+        const ref = { nonce: entry.sourceSeal.nonce, digest: hash(payload) };
+        const seal = { phase: "sealed", ...ref, payload, inherited: {
+          sourceJobId: bundle.sourceJobId, sourceSeal: entry.sourceSeal,
+          sourcePayloadDigest: hash(old) } };
+        await writeOnce(join(child.stateDir, "interactive-event-only", slug + ".json"),
+          JSON.stringify(seal, null, 2) + "\n");
+        const source = entry.sourceReceipt;
+        const receipt = { ...source, jobId: child.jobId, baseSha: child.baseSha,
+          branch: child.branch, threadId: child.threadId, worktreeRoot: child.worktreeRoot,
+          eventSource: source.eventSource ? { ...source.eventSource,
+            snapshotId: bundle.toolchain.skills.id } : undefined,
+          units: source.units.map((unit: Record<string, any>) => ({
+            ...unit, eventOnly: ref })) };
+        await writeOnce(join(child.stateDir, "interactive-items", slug + ".json"),
+          JSON.stringify(receipt, null, 2) + "\n");
+      }
     }
     await writeOnce(join(child.stateDir, "revisions/verified-head.json"), JSON.stringify({
       version: 1, jobId: child.jobId, headSha: child.baseSha, workItemId: "inherited-checkpoint",

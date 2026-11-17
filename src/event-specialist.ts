@@ -76,9 +76,11 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
 export function observedNondecisionMilestone(change: string): boolean {
   return !/\b(?:choice|chooses?|choosing|decision|decides?|deciding|branch|alternate outcomes?|either\b.{0,90}\bor\b)\b/i
     .test(change) &&
-    /\b(?:knows?|learns?|recogniz(?:e|es|ed|ing)|identif(?:y|ies|ied|ying)|observ(?:e|es|ed|ing)|encounter(?:s|ed|ing)?|becomes aware)\b/i
+    // Non-Choice milestones may deliver a physical rescue, evidence discovery,
+    // or verified inference without the protagonist literally "learning".
+    /\b(?:knows?|learns?|recogniz(?:e|es|ed|ing)|identif(?:y|ies|ied|ying)|observ(?:e|es|ed|ing)|encounter(?:s|ed|ing)?|becomes aware|locat(?:e|es|ed|ing)|finds?|discover(?:s|ed|ing)?|establish(?:es|ed|ing)?|verif(?:y|ies|ied|ying)|tests?|releases?|rescues?)\b/i
       .test(change) &&
-    /\b(?:investigat(?:ion|e|ing)|inquir(?:y|e)|missing|disappearance|absence|subject|evidence|situation)\b/i
+    /\b(?:investigat(?:ion|e|ing)|inquir(?:y|e)|missing|disappearance|absence|subject|evidence|situation|claim|allegation|signal|record|proof|audit|trace|confinement|restraint|rescue|release)\b/i
       .test(change);
 }
 
@@ -344,7 +346,16 @@ export function eventSpecialistPrompt(
       "may establish evidence without a pre-existing Fact or earlier Event; do not invent " +
       "off-screen history or promote uncertain claims to truth. Show evidence before " +
       "justified inferences/effects. " +
-      "A nondecision Event needs no artificial typed effect. If the authored Milestone requires " +
+      "A nondecision Event needs no artificial typed effect. A scene may OFFER " +
+      "optional witness testimony or voluntary cooperation without requiring either " +
+      "for unconditional rescue or observational Milestone fulfillment. However, " +
+      "accepted, refused or withdrawn witness responses are NOT enacted unless actual " +
+      "typed Event branches and effects support them. If the approved Story needs " +
+      "those alternatives later, describe them as separately authorized conditional " +
+      "Event work in laterObligations, not as accomplished source facts, required " +
+      "current Composition dialogue or an excuse to leave the mandatory rescue unfinished. " +
+      "Do not claim testimony, consent, trust or forgiveness from an unbound offer. " +
+      "If the authored Milestone requires " +
       "an enacted player decision, produce a reachable setup, preserve partial Milestone " +
       "completeness with empty fulfillment.any_of, and leave formal outcome binding for Choice. " +
       "A setup Event is complete unless its own text claims the decision enacted. " +
@@ -388,7 +399,11 @@ export function eventSpecialistPrompt(
       "independent controller checks remain authoritative.",
     laterObligations:
       "Include a concrete laterObligations entry naming formal Choice binding, " +
-      "missing outcome effects and later consumers; defer Puzzle and final prose. Missing Choice, Puzzle, " +
+      "missing outcome effects and later consumers; defer Puzzle and final prose. " +
+      "When optional testimony, consent, refusal or withdrawal is mentioned but not " +
+      "enacted by this Event, specify the needed later conditional Event routing " +
+      "and effects rather than promising playable testimony in the current scene. " +
+      "Missing Choice, Puzzle, " +
       "clue, or composed scene records are NOT blockers for this Event setup; write the " +
       "bounded Event now rather than requesting those later units first. Never invent " +
       "a Choice Point ID or unrelated effects to claim completion. For truly impossible out-of-scope or " +

@@ -15,6 +15,7 @@ import { declaredCanonicalReferences } from "./focused-scope.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { createSkillSnapshot, openSkillSnapshot } from "./snapshot.js";
 import { loadSkillConfig } from "./skills.js";
+import { readRecoveryFork } from "./recovery-fork-state.js";
 import { reviewNarrative, type ReviewAssignment } from "./narrative-review-specialist.js";
 
 const sha256 = (value: string | Buffer | unknown) =>
@@ -39,7 +40,8 @@ export interface EventOnlyPayload {
   reviewMode: "pi" | "fixture"; reviewerSession: string | null; reviewerSessionSha256: string | null;
   evidence: string[]; sourceHashes: Record<string, string>;
 }
-interface Seal { phase: "sealed"; nonce: string; digest: string; payload: EventOnlyPayload }
+interface Seal { phase: "sealed"; nonce: string; digest: string; payload: EventOnlyPayload;
+  inherited?: { sourceJobId: string; sourceSeal: EventOnlyRef; sourcePayloadDigest: string } }
 const pathFor = (job: JobStartResult, milestone: string) => {
   if (!MILESTONE.test(milestone)) throw Error("Invalid Event-only Milestone ID.");
   return join(job.stateDir, "interactive-event-only", milestone.slice(10) + ".json");
@@ -165,6 +167,34 @@ export async function readEventOnlyOmission(job: JobStartResult, milestone: stri
         p.eventSnapshotId !== expected.eventSnapshotId ||
         p.validatorVersion !== expected.validatorVersion))
     throw Error("Event-only omission identity/source/validator evidence differs.");
+  // A same-Thread continuation receives a new job-bound seal but never a
+  // newly invented independent verdict. Its origin must match the original
+  // source reviewer and no-write receipts in the immutable fork bundle.
+  if (seal.inherited) {
+    const fork = readRecoveryFork(job);
+    const original = fork?.reviewBatch?.entries.find(entry => entry.milestoneId === milestone);
+    if (!original || seal.inherited.sourceJobId !== fork?.sourceJobId ||
+        JSON.stringify(seal.inherited.sourceSeal) !== JSON.stringify(original.sourceSeal) ||
+        seal.inherited.sourcePayloadDigest !== sha256(original.sourcePayload) ||
+        p.eventHead !== original.sourcePayload.eventHead ||
+        p.reviewHead !== original.sourcePayload.reviewHead ||
+        p.planDigest !== original.sourcePayload.planDigest ||
+        p.planVersion !== original.sourcePayload.planVersion ||
+        p.eventSnapshotId !== fork?.toolchain.skills.id ||
+        p.reviewerSnapshotId !== original.sourcePayload.reviewerSnapshotId ||
+        p.reviewerSessionSha256 !== original.sourcePayload.reviewerSessionSha256 ||
+        JSON.stringify(p.sourceHashes) !== JSON.stringify(original.sourcePayload.sourceHashes) ||
+        JSON.stringify(p.eventIds) !== JSON.stringify(original.sourcePayload.eventIds) ||
+        JSON.stringify(p.evidence) !== JSON.stringify(original.sourcePayload.evidence) ||
+        p.reviewMode !== original.sourcePayload.reviewMode ||
+        p.reviewerSession !== (original.sourcePayload.reviewerSession
+          ? join(job.stateDir, "review-sessions", "review",
+              "inherited-" + milestone.slice(10) + ".jsonl") : null))
+      throw Error("Inherited Event-only review differs from its original sealed source.");
+  } else if (readRecoveryFork(job)?.reviewBatch?.entries.some(entry =>
+      entry.milestoneId === milestone)) {
+    throw Error("A transferred Event-only decision lost its inherited source proof.");
+  }
   const turn = await readReviewTurnEvidence(job);
   if (!turn || turn.digest !== p.turnDigest)
     throw Error("Event-only omission lost its original authenticated Turn.");

@@ -40,6 +40,7 @@ import { readJobControl } from "./job-control.js";
 import { inspectJobReport, type JobReport } from "./job-report.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints, reconcileRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { sealReviewedOmissionBatch } from "./recovery-review-batch.js";
 import { blockedByRequiredReview, executionId, resolvedCheckpointReviews,
   IndependentReviewGateError, assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { assessTurnFulfillment } from "./turn-fulfillment.js";
@@ -889,6 +890,17 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           const boundary = await applyLiveSteeringAtBoundary(job, s.request, next.inventory ?? null);
           if (boundary) return { ...next, ...boundary, ideaTask: null, escalation: null };
           const head = await trustedHead(job);
+          // A single logical boundary after independently reviewed, commitless
+          // omissions. No fabricated Git commit, no repeated Pi calls, and no
+          // unrelated writer draft may be included in the handoff.
+          if (next.active?.stage === "composition" && next.inventory) {
+            const inherited = readRecoveryFork(job);
+            const checkpoint = (await inspectRecoveryCheckpoints(job))
+              .find(point => point.eligible && point.commitSha === head) ??
+              (inherited?.checkpoint.commitSha === head && job.baseSha === head
+                ? inherited.checkpoint : null);
+            if (checkpoint) await sealReviewedOmissionBatch(job, checkpoint, next.inventory);
+          }
           // An independently approved focused revision grants only its listed
           // existing files. Do not dispatch unrelated deferred idea integrations
           // merely because their work is pending at this Story boundary.

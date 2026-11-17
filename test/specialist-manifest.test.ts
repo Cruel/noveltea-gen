@@ -37,6 +37,25 @@ test("Choice/Puzzle manifest rejects Luna id/path objects but accepts cumulative
   });
 });
 
+test("a deliberate empty Choice report names its source conflict instead of requesting JSON reformat", () => {
+  const conflict = JSON.stringify({
+    modifiedRecords: [],
+    architecturalConflicts: ["Verified source is an Event-only observation with no missing Choice."],
+    laterObligations: ["Author a consequential Choice at a separate decision Milestone."],
+  });
+  assert.throws(() => parseInteractiveManifest(conflict, "choice"),
+    /Interactive Choice source conflict.*Event-only observation/,
+    "The controller must not disguise a truthful no-write conflict as malformed JSON");
+  assert.deepEqual(parseInteractiveManifest(conflict, "puzzle"), {
+    paths: [],
+    conflicts: ["Verified source is an Event-only observation with no missing Choice."],
+    obligations: ["Author a consequential Choice at a separate decision Milestone."],
+  });
+  assert.throws(() => parseInteractiveManifest(JSON.stringify({
+    modifiedRecords: [], architecturalConflicts: [], laterObligations: [],
+  }), "choice"), /verified Event-only omission/);
+});
+
 test("manifest scanning selects the last complete manifest, without accepting malformed JSON or absent fields", () => {
   const valid = {
     modifiedRecords: ["events/disclosure-conversation.md"],

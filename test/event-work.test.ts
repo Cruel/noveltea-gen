@@ -211,6 +211,23 @@ test("only a source-exact Milestone body drift is repairable without expanding E
     "milestones/absence-recognized.md", "x".repeat(16_001)), /unbounded/);
 });
 
+test("non-Choice Event-only preflight recognizes observation, inference, and unconditional rescue wording", () => {
+  const valid = [
+    "Alex immediately releases Mara, tests the operative restraint and brings her to safety without conditioning rescue on testimony.",
+    "Alex learns of the apparent boarding allegation and identifies an unproven link between separate signals.",
+    "Independent audit and camera comparisons establish the staged crossing and defeat the signals as proof.",
+    "Alex locates the missing witness alive and links her confinement to the physical restraint.",
+  ];
+  for (const change of valid) assert.equal(observedNondecisionMilestone(change), true, change);
+  const invalid = [
+    "Alex chooses whether to expose the identifying record or conceal the evidence.",
+    "Alex learns about the situation, then decides which witness to protect.",
+    "Alex chooses a branch after observing the signals.",
+    "Alex acquires supplier details and commits to protecting the copy or revealing it to the culprit.",
+  ];
+  for (const change of invalid) assert.equal(observedNondecisionMilestone(change), false, change);
+});
+
 test("only one additional evidence-only correction fits the bounded Event retry budget", () => {
   const local = "EVENT_LOCAL_EVIDENCE: Missing player-observed access during the interval.";
   assert.equal(eventEvidenceRetryAllowed(0, ["ordinary native diagnostic"]), true);
@@ -334,6 +351,9 @@ test("Event prompt distinguishes material nondecision evidence from later Choice
   assert.match(prompt, /in this Event/i);
   assert.match(prompt, /witness|testimony/i);
   assert.match(prompt, /partial.*Choice/i);
+  assert.match(prompt, /optional witness testimony/i);
+  assert.match(prompt, /conditional Event routing/i);
+  assert.match(prompt, /Do not claim testimony, consent, trust or forgiveness/i);
   assert.match(prompt, /do not.*(?:invent|assert)/i);
 });
 

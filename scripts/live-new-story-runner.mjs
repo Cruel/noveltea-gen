@@ -15,6 +15,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, openSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fullStoryTimeouts } from "./live-new-story-timeout.mjs";
 
 const cwd = resolve(import.meta.dirname, "..");
 const directory = join(cwd, ".local", "certification", "live-new-story");
@@ -64,6 +65,9 @@ if (action === "status") {
 }
 if (action === "start" || action === "retry" || action === "fork" || action === "resume") {
   const previous = state();
+  const rawTimeout = process.env.NT_TEST_WEB_PI_TIMEOUT_MINUTES ??
+    (action !== "start" ? previous?.timeoutMinutes?.toString() : undefined);
+  const timeoutMinutes = fullStoryTimeouts(rawTimeout).minutes;
   if (previous && action !== "start" && previous.model &&
       previous.model !== requestedModel)
     throw Error("Cannot switch the model of a pinned certification continuation.");
@@ -115,7 +119,7 @@ if (action === "start" || action === "retry" || action === "fork" || action === 
     cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   }).trim();
   save({ status: "running", pid: child.pid, startedAt: new Date().toISOString(), mode,
-    model: requestedModel, runLabel, gitHead, log, root, kind: action,
+    model: requestedModel, runLabel, gitHead, log, root, kind: action, timeoutMinutes,
     ...(adaptiveShape ? { adaptiveShape } : {}),
     ...(["retry", "fork"].includes(action) ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}),
     ...(prepared ? { checkpointSha: prepared.checkpointSha, sourceJobId: prepared.sourceJobId,
@@ -141,6 +145,7 @@ const env = {
   ...process.env,
   NT_TEST_WEB_PI_NEW_STORY: "1",
   NT_TEST_WEB_PI_STORY_MODE: mode,
+  NT_TEST_WEB_PI_TIMEOUT_MINUTES: String(initial.timeoutMinutes ?? fullStoryTimeouts().minutes),
   ...(initial.adaptiveShape ? { NT_TEST_WEB_PI_ADAPTIVE_SHAPE: initial.adaptiveShape,
     NT_ADAPTIVE_PLANNING: '1' } : {}),
   ...(["retry", "fork", "resume"].includes(initial.kind) ? {

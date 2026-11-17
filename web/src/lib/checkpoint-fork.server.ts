@@ -115,7 +115,7 @@ async function checkpointRecoveryRequest(auth: StudioAuth, store: StudioDatabase
       const original = pinnedRequest(row, parent)
       if (!original) throw new GitCacheError(409, 'Source has no pinned generation request.')
       const bundle = await collectRecoveryFork(parent, input.childId, input.commitSha,
-        original.contract, original.skillsSource)
+        original.contract, original.skillsSource, sameThread ? 'same-thread' : 'isolated')
       if (bundle.checkpoint.proofDigest !== input.proofDigest)
         return reply({ error: 'Checkpoint proof changed; refresh the timeline.' }, 409)
       const task = guidance ? original.task + '\n\nCorrective guidance for this ' +

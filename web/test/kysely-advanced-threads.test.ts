@@ -265,6 +265,43 @@ for (const backend of ['sqlite', 'postgres'] as const) {
     })
   })
 
+  test(backend + ': a fenced timeout permits a new verified checkpoint continuation', {
+    skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
+    timeout: 90_000,
+  }, async t => {
+    const fixture = await openKyselyFeatureFixture(backend)
+    t.after(() => fixture.close())
+    const f = await setup(fixture)
+    const { advancedThreads: a, records: data } = fixture
+    const d = fork(f)
+    await a.reserveFork(d)
+    const recovery: RecoveryContinuationRegistration = {
+      owner: f.owner, sourceJobId: f.job, sourceThreadId: f.thread,
+      childId: d.childId, storyId: f.story, title: 'Fenced timeout recovery',
+      baseSha: checked, checkpointSha: checked, draft: d.draft,
+      guidance: d.guidance, at,
+    }
+    await data.update('studio_sessions', { id: f.job }, { status: 'running' })
+    await data.update('generation_run_queue', { jobId: f.job }, { phase: 'running' })
+    await assert.rejects(a.registerRecoveryContinuation(recovery), /not safely recoverable/,
+      'An actively running worker must not be forked into the same Thread')
+    await data.update('generation_run_queue', { jobId: f.job }, { phase: 'finished' })
+    await assert.rejects(a.registerRecoveryContinuation(recovery), /not safely recoverable/,
+      'A running session with no interruption fence must not be recovered')
+    assert.equal(await a.jobClaimed(d.childId), false)
+    await data.update('generation_run_queue', { jobId: f.job }, { phase: 'interrupted' })
+    assert.equal((await a.registerRecoveryContinuation(recovery)).inserted, true)
+    assert.equal((await a.registerRecoveryContinuation(recovery)).inserted, false)
+    assert.equal(await a.runOrder(f.owner, f.thread, d.childId), 1)
+    assert.equal((await a.inspectJob(f.owner, d.childId)).threadId, f.thread)
+    const rival = fork(f)
+    await a.reserveFork(rival)
+    await assert.rejects(a.registerRecoveryContinuation({
+      ...recovery, childId: rival.childId, draft: rival.draft, guidance: rival.guidance,
+    }), /Thread has advanced/, 'Only one continuation may advance a fenced Thread')
+    assert.equal(await a.jobClaimed(rival.childId), false)
+  })
+
   test(backend + ': source membership, stale execution, archival and deletion fail closed', {
     skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
     timeout: 90_000,

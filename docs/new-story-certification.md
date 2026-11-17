@@ -152,7 +152,20 @@ NT_TEST_WEB_PI_NEW_STORY=1 NT_TEST_WEB_PI_STORY_MODE=autonomous \
 ```
 
 Repeat with `NT_TEST_WEB_PI_STORY_MODE=collaborative` against a separate
-fresh Job. `NT_TEST_WEB_PI_PRESERVE=1` retains private evidence under the durable,
+fresh Job. Complete-Story certification normally monitors for **40 minutes**,
+with a **45-minute** Node test ceiling that reserves five minutes for evidence
+collection and cleanup. For unusually large generation, opt in to a longer
+wall-clock limit by setting `NT_TEST_WEB_PI_TIMEOUT_MINUTES=180` (three hours)
+on that test or launcher invocation. Only positive whole minutes up to 1440
+(24 hours) are accepted; ordinary runs and the Foundation smoke test retain
+their defaults. The launcher records the selected duration in its status file
+and carries it into subsequent checkpoint retries unless explicitly overridden.
+This affects only certification monitoring and its Node test timeout; it does
+not relax model, sandbox, writer, or independent-review limits. If the harness
+expires while a specialist is writing, preserve its transcript and dirty
+worktree and use an eligible verified checkpoint rather than replaying it.
+
+`NT_TEST_WEB_PI_PRESERVE=1` retains private evidence under the durable,
 Git-ignored `.local/certification/live-new-story/runs/` directory (or an
 explicit new `NT_TEST_WEB_PI_ROOT`). It does not relocate generated jobs:
 Git worktrees, the Studio database, receipts, immutable skill snapshots and
@@ -182,6 +195,8 @@ Studio test, use the same existing test through the bounded local launcher:
 ```sh
 node scripts/live-new-story-runner.mjs start autonomous
 node scripts/live-new-story-runner.mjs status autonomous
+# Opt-in long test (also works with retry/fork/resume):
+NT_TEST_WEB_PI_TIMEOUT_MINUTES=180 node scripts/live-new-story-runner.mjs start autonomous
 node scripts/live-new-story-runner.mjs start collaborative
 node scripts/live-new-story-runner.mjs status collaborative
 
@@ -220,6 +235,39 @@ Only the explicitly selected real Luna model runs. A launched run is **not**
 a passing certification: inspect the final status and real source-bound
 findings, including blockers, independent quality and recovery evidence.
 Do not publish transcripts, access tokens or local Story roots in Git.
+
+### Commitless independent-review recovery
+
+A complete Event-only Milestone requires an independent, source-bound reviewer
+pass and two sealed interactive no-write dispositions (Choice and Puzzle). Those
+reviews do not change canonical Story bytes and therefore **must not create a
+Git commit**. After a reviewed omission batch, the coordinator saves one
+logical boundary under `recovery-review-batches/`, referencing the original
+seals, reviewed Git HEAD, plan and authenticated Turn. Repeating the boundary
+on unchanged evidence is idempotent. A later Composition failure cannot
+retroactively revoke a review that was already independently sealed.
+
+The same-Thread continuation preflight can carry the reviewed no-write pairs
+from a source Job with **no newly finalized Git checkpoint of its own**. It
+reauthenticates the original pinned Git source, reviewed Story files, reviewer
+transcript and snapshot, validator version, and job-bound receipts, then seals
+a source-linked projection for the new execution. A later Git checkpoint
+continues to carry the omission identities. Missing, tampered or stale
+evidence blocks; a new linked formal Choice/Puzzle invalidates the local
+no-write premise. An isolated new Thread does not inherit these reviews.
+Interrupted writers, mutable graph state, approval grants and speculative
+completion are never carried.
+
+Composition of a reviewed Event-only Milestone realizes the unconditional,
+typed Event actions. Possible **optional** witness testimony, refusal,
+withdrawal or publication consent mentioned in narrative notes does not
+become an enacted route or a required local dialogue outcome without typed
+branch/effect evidence. The writer may finish the mandatory playable rescue
+and unpressured offer, carrying unimplemented optional testimony as a
+precise `laterObligations` item for separately authorized Event design.
+If the optional response is genuinely required to fulfill the original
+Milestone, it remains an architectural blocker. Native source/protection
+validation and independent editorial review are unchanged.
 
 ## Reviewed causal Architecture blueprint (#181)
 
