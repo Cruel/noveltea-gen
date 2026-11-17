@@ -238,7 +238,31 @@ certification.
 
 The controller stores immutable private
 `stateDir/architecture-blueprints/plan-<version>-draft-<iteration>.json`
-and matching independent `verdict-<iteration>.json` files. Only an exact
+and matching independent `verdict-<iteration>.json` files. The source-derived
+`plan-<version>-obligations.json` also pins exact quotes and SHA-256 source
+identities for the approved Creative Direction, the original author task and
+the authorized scope. Each obligation identifies an applicable causal question,
+required proof, reachable route and responsible beat IDs; the independent
+reviewer must additionally detect omitted promises rather than treating this
+model-proposed inventory as exhaustive by fiat. The source manifest is frozen
+through correction and cannot rewrite protected author requirements. A missing
+promise requires an explicit fresh source-bound plan, not silent authorization.
+
+Corrections now use `plan-<version>-patch-<iteration>.json` instead of
+regenerating the complete blueprint. Each read-only patch is bound to the
+exact previous draft and independent revise-verdict digests. Operations must
+reference an actual finding and affect only that beat, its causal dependents
+or the related conclusion. Exact old-text replacement, append-only evidence
+and choices, bounded beat insertion and additional resolution support preserve
+unmentioned clues and all previous Choice actions and lasting consequences.
+The controller reconstructs and revalidates each merged full draft, including
+ordering, dependencies, evidence, size and continuity, then requires an entirely
+new independent review. All intermediate reviewer transcript identities are
+also preserved and reverified at checkpoint restoration. A partial/interrupted
+planner or review is blocked without silent rerun. The original two-correction
+limit and canonical Story write boundaries are unchanged.
+
+Only an exact
 passing review permits immutable
 `plan-<version>-approved.json` publication. It pins the original Job,
 Thread, base/head SHAs, plan/contract, model/provider, task digest, skill
@@ -258,7 +282,10 @@ private blueprint sessions and approval pins are never transplanted to
 another Job.
 
 This deterministic work requires two **new, complete** real Luna profile
-runs and a recovery exercise before #181 can close. Earlier failed
+runs and a recovery exercise before #181 can close. Fixture tests of
+manifest/patch provenance and structural preservation are not evidence that a
+real Luna reviewer approved the full merged story. Existing failed real-Pi
+transcripts use the former complete-regeneration protocol and remain unchanged. Earlier failed
 Architecture certification attempts remain negative evidence.
 
 **November 17, 2026 implementation and live findings:** The Architecture

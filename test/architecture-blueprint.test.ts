@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseBlueprintReview, parseCausalBlueprint, readApprovedBlueprint,
   type CausalBlueprint, type BlueprintPin } from "../src/architecture-blueprint.js";
+import { buildBlueprintObligations } from "../src/architecture-blueprint-obligations.js";
+import { applyBlueprintPatch } from "../src/architecture-blueprint-patch.js";
 import type { JobStartResult } from "../src/job.js";
 import type { Plan } from "../src/architecture.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
@@ -104,7 +106,12 @@ test("independent blueprint review must tie findings to existing beats", () => {
 test("checkpointed blueprint only restores exact reviewed version, plan, head, session and source", async () => {
   const base = await mkdtemp(join(tmpdir(), "noveltea-blueprint-"));
   try {
-    const job = { stateDir: base, jobId: "job-one", threadId: "thread-one",
+    const foundation = "The approved mystery protects its vulnerable witness.";
+    const story = join(base, "story");
+    await mkdir(join(story, "creative-direction"), { recursive: true });
+    await writeFile(join(story, "creative-direction/foundation.md"), foundation);
+    const job = { stateDir: base, worktreeStoryRoot: story,
+      jobId: "job-one", threadId: "thread-one",
       baseSha: "a".repeat(40) } as JobStartResult;
     const plan = { version: 2, contract: { scope: { kind: "full-story", depth: "composition",
       targets: [], branches: [] }, constraints: [], envelope: { presentation: "text",
@@ -118,20 +125,38 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
       await mkdir(join(path, ".."), { recursive: true });
       await writeFile(path, JSON.stringify({ type: "session", id }) + "\n", { mode: 0o600 });
     }
-    const review = { status: "pass", findings: [] };
+    const review = { status: "pass" as const, findings: [] };
+    const manifest = buildBlueprintObligations([{
+      id: "identify-clerk", category: "what", source: "task", quote: "write a mystery",
+      question: "What happened to the clerk?", proof: "Inspect shelter and archive records",
+      route: "Available even if a source refuses", beatIds: ["ledger", "lighthouse"],
+    }], example, { foundation, contract: plan.contract, task: "write a mystery" });
     const pin: BlueprintPin = {
-      schema: "noveltea-approved-blueprint/v1", jobId: job.jobId, threadId: job.threadId,
+      schema: "noveltea-approved-blueprint/v2", jobId: job.jobId, threadId: job.threadId,
       baseSha: job.baseSha, executionHead: "b".repeat(40), planVersion: plan.version,
       contractDigest: digest(plan.contract), snapshotId: snapshot.id, provider: "openai",
       model: "gpt-6-luna", taskDigest: digest("write a mystery"),
-      draftVersion: 1, blueprintDigest: digest(example), reviewDigest: digest(review),
+      draftVersion: 0, blueprintDigest: digest(example), reviewDigest: digest(review),
+      obligationsDigest: digest(manifest),
       plannerSessionFile: plannerFile, plannerSessionId: "planner-id",
       reviewerSessionFile: reviewerFile, reviewerSessionId: "reviewer-id",
     };
-    const draftFile = join(parent, "plan-2-draft-1.json");
-    const reviewFile = join(parent, "plan-2-verdict-1.json");
+    const draftFile = join(parent, "plan-2-draft-0.json");
+    const reviewFile = join(parent, "plan-2-verdict-0.json");
     await writeFile(draftFile, JSON.stringify(example));
     await writeFile(reviewFile, JSON.stringify(review));
+    await writeFile(join(parent, "plan-2-obligations.json"), JSON.stringify(manifest));
+    await writeFile(join(parent, "plan-2-review-session-0.json"), JSON.stringify({
+      sessionId: "reviewer-id", sessionFile: reviewerFile,
+      blueprintDigest: digest(example), verdictDigest: digest(review),
+    }));
+    await writeFile(join(parent, "plan-2-started.json"), JSON.stringify({
+      jobId: pin.jobId, threadId: pin.threadId, baseSha: pin.baseSha,
+      executionHead: pin.executionHead, planVersion: pin.planVersion,
+      contractDigest: pin.contractDigest, snapshotId: pin.snapshotId,
+      provider: pin.provider, model: pin.model, taskDigest: pin.taskDigest,
+      plannerSessionId: pin.plannerSessionId, plannerSessionFile: pin.plannerSessionFile,
+    }));
     await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(pin));
     const read = () => readApprovedBlueprint(job, plan, snapshot, "openai", "gpt-6-luna",
       "write a mystery", "b".repeat(40));
@@ -142,10 +167,57 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
     await assert.rejects(() => readApprovedBlueprint(job, plan, snapshot, "openai",
       "gpt-6-luna", "write a mystery", "c".repeat(40)), /stale/);
     await writeFile(draftFile, JSON.stringify({ ...example, premise: "tampered" }));
-    await assert.rejects(read, /changed after review/);
+    await assert.rejects(read, /changed after review|patch history|provenance changed/);
     await writeFile(draftFile, JSON.stringify(example));
     await writeFile(reviewerFile, JSON.stringify({ type: "session", id: "imposter" }) + "\n");
     await assert.rejects(read, /identity mismatch/);
-    assert.equal(JSON.parse(await readFile(join(parent, "plan-2-approved.json"), "utf8")).draftVersion, 1);
+    assert.equal(JSON.parse(await readFile(join(parent, "plan-2-approved.json"), "utf8")).draftVersion, 0);
+    await writeFile(reviewerFile, JSON.stringify({ type: "session", id: "reviewer-id" }) + "\n");
+    const tampered = { ...manifest, items: [{ ...manifest.items[0]!, proof: "a different ending" }] };
+    await writeFile(join(parent, "plan-2-obligations.json"), JSON.stringify(tampered));
+    await assert.rejects(read, /obligations changed/);
+    await writeFile(join(parent, "plan-2-obligations.json"), JSON.stringify(manifest));
+
+    const revise = { status: "revise" as const, findings: [{
+      beatId: "lighthouse", reason: "Arrival does not establish why the clerk hid",
+      correction: "Add an independently dated letter",
+    }] };
+    const patch = {
+      schema: "noveltea-blueprint-patch/v1" as const,
+      baseDigest: digest(example), reviewDigest: digest(revise),
+      operations: [{ kind: "append-observation", findingBeatId: "lighthouse",
+        beatId: "lighthouse", value: { source: "authenticated dated letter",
+          observable: "The clerk explicitly requests refuge",
+          supports: "Clerk voluntarily entered shelter",
+          limits: "The letter does not resolve wider conspiracy" } }],
+    };
+    const merged = applyBlueprintPatch(example, revise, patch).blueprint;
+    await writeFile(reviewFile, JSON.stringify(revise));
+    await writeFile(join(parent, "plan-2-review-session-0.json"), JSON.stringify({
+      sessionId: "reviewer-id", sessionFile: reviewerFile,
+      blueprintDigest: digest(example), verdictDigest: digest(revise),
+    }));
+    const reviewerFile1 = join(base, "architecture-blueprint-review-sessions", "reviewer1.jsonl");
+    await writeFile(reviewerFile1, JSON.stringify({ type: "session", id: "reviewer-id-1" }) + "\n");
+    await writeFile(join(parent, "plan-2-patch-1.json"), JSON.stringify(patch));
+    await writeFile(join(parent, "plan-2-draft-1.json"), JSON.stringify(merged));
+    await writeFile(join(parent, "plan-2-verdict-1.json"), JSON.stringify(review));
+    await writeFile(join(parent, "plan-2-review-session-1.json"), JSON.stringify({
+      sessionId: "reviewer-id-1", sessionFile: reviewerFile1,
+      blueprintDigest: digest(merged), verdictDigest: digest(review),
+    }));
+    const finalPin = { ...pin, draftVersion: 1, blueprintDigest: digest(merged),
+      reviewDigest: digest(review), reviewerSessionId: "reviewer-id-1",
+      reviewerSessionFile: reviewerFile1 };
+    await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(finalPin));
+    assert.deepEqual((await read())?.blueprint, merged,
+      "recovery must apply only the recorded patch against the originally reviewed base");
+    await writeFile(join(parent, "plan-2-patch-1.json"), JSON.stringify({
+      ...patch, baseDigest: "c".repeat(64),
+    }));
+    await assert.rejects(read, /stale/);
+    await writeFile(join(parent, "plan-2-patch-1.json"), JSON.stringify(patch));
+    await writeFile(reviewFile, JSON.stringify({ ...revise, findings: [] }));
+    await assert.rejects(read, /review|provenance/);
   } finally { await rm(base, { recursive: true, force: true }); }
 });

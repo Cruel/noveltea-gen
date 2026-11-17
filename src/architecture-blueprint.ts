@@ -15,6 +15,9 @@ import { preparePiContext } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
+import { buildBlueprintObligations, validateBlueprintObligations,
+  type BlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
+import { parseBlueprintPatch, applyBlueprintPatch } from "./architecture-blueprint-patch.js";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const SLUG = /^[a-z][a-z0-9-]{0,63}$/;
@@ -41,7 +44,7 @@ export interface BlueprintReview {
   findings: Array<{ beatId: string; reason: string; correction: string }>;
 }
 export interface BlueprintPin {
-  schema: "noveltea-approved-blueprint/v1";
+  schema: "noveltea-approved-blueprint/v2";
   jobId: string;
   threadId: string;
   baseSha: string;
@@ -55,6 +58,7 @@ export interface BlueprintPin {
   draftVersion: number;
   blueprintDigest: string;
   reviewDigest: string;
+  obligationsDigest: string;
   plannerSessionId: string;
   plannerSessionFile: string;
   reviewerSessionId: string;
@@ -153,6 +157,27 @@ const draftPath = (job: JobStartResult, version: number, iteration: number) =>
   join(root(job), "plan-" + version + "-draft-" + iteration + ".json");
 const verdictPath = (job: JobStartResult, version: number, iteration: number) =>
   join(root(job), "plan-" + version + "-verdict-" + iteration + ".json");
+const obligationsPath = (job: JobStartResult, version: number) =>
+  join(root(job), "plan-" + version + "-obligations.json");
+const patchPath = (job: JobStartResult, version: number, iteration: number) =>
+  join(root(job), "plan-" + version + "-patch-" + iteration + ".json");
+const reviewSessionPath = (job: JobStartResult, version: number, iteration: number) =>
+  join(root(job), "plan-" + version + "-review-session-" + iteration + ".json");
+async function obligationSources(job: JobStartResult, plan: Plan, task: string): Promise<ObligationSources> {
+  return { foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
+    contract: plan.contract, task };
+}
+function initialBlueprint(text: string, sources: ObligationSources) {
+  const raw = text.trim().replace(/^```(?:json)?\\s*\\n/i, "").replace(/\\n```\\s*$/, "");
+  if (Buffer.byteLength(raw) > 32000) throw Error("Causal blueprint and proof obligations exceed their bounded size.");
+  let value: unknown;
+  try { value = JSON.parse(raw) as unknown; }
+  catch { throw Error("Causal blueprint with obligations is not valid JSON."); }
+  if (!strict(value, ["blueprint", "obligations"]))
+    throw Error("Causal blueprint must contain both its design and source-derived proof obligations.");
+  const blueprint = parseCausalBlueprint(JSON.stringify(value.blueprint));
+  return { blueprint, obligations: buildBlueprintObligations(value.obligations, blueprint, sources) };
+}
 const approvedPath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-approved.json");
 async function immutable(path: string, value: unknown) {
@@ -167,7 +192,7 @@ async function safeRead(path: string, parent: string): Promise<unknown> {
 }
 function sameLineage(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
   provider: string, model: string, task: string, head: string): Omit<BlueprintPin, "schema" | "draftVersion" |
-  "blueprintDigest" | "reviewDigest" | "plannerSessionId" | "plannerSessionFile" |
+  "blueprintDigest" | "reviewDigest" | "obligationsDigest" | "plannerSessionId" | "plannerSessionFile" |
   "reviewerSessionId" | "reviewerSessionFile"> {
   return { jobId: job.jobId, threadId: job.threadId, baseSha: job.baseSha,
     executionHead: head, planVersion: plan.version, contractDigest: sha(plan.contract),
@@ -190,18 +215,58 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
   if (!existsSync(path)) return null;
   const record = await safeRead(path, root(job)) as BlueprintPin;
   const expected = sameLineage(job, plan, snapshot, provider, model, task, head);
-  if (!record || record.schema !== "noveltea-approved-blueprint/v1" ||
+  if (!record || record.schema !== "noveltea-approved-blueprint/v2" ||
       Object.entries(expected).some(([key, value]) => record[key as keyof BlueprintPin] !== value) ||
       !Number.isInteger(record.draftVersion) || record.draftVersion < 0 ||
       record.draftVersion > MAX_CORRECTIONS ||
-      !HASH.test(record.blueprintDigest) || !HASH.test(record.reviewDigest))
+      !HASH.test(record.blueprintDigest) || !HASH.test(record.reviewDigest) ||
+      !HASH.test(record.obligationsDigest))
     throw Error("Approved causal blueprint is stale, incomplete or bound to a different scope.");
-  const draft = await safeRead(draftPath(job, plan.version, record.draftVersion), root(job));
-  const blueprint = parseCausalBlueprint(JSON.stringify(draft));
-  const verdict = await safeRead(verdictPath(job, plan.version, record.draftVersion), root(job));
-  if (sha(blueprint) !== record.blueprintDigest || sha(verdict) !== record.reviewDigest ||
-      parseBlueprintReview(JSON.stringify(verdict), blueprint).status !== "pass")
-    throw Error("Approved causal blueprint or independent verdict changed after review.");
+  const start = await safeRead(join(root(job), "plan-" + plan.version + "-started.json"), root(job));
+  if (!start || typeof start !== "object" ||
+      Object.entries(expected).some(([key, value]) =>
+        (start as Record<string, unknown>)[key] !== value) ||
+      (start as Record<string, unknown>).plannerSessionId !== record.plannerSessionId ||
+      (start as Record<string, unknown>).plannerSessionFile !== record.plannerSessionFile)
+    throw Error("Causal blueprint source-bound planner start receipt is stale or absent.");
+  const sources = await obligationSources(job, plan, task);
+  const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
+  const initial = parseCausalBlueprint(JSON.stringify(await safeRead(
+    draftPath(job, plan.version, 0), root(job))));
+  validateBlueprintObligations(manifest, initial, sources);
+  if (sha(manifest) !== record.obligationsDigest)
+    throw Error("Approved causal proof obligations changed after review.");
+  let blueprint = initial;
+  const reviewers = new Set<string>();
+  for (let i = 0; i <= record.draftVersion; i++) {
+    const stored = await safeRead(draftPath(job, plan.version, i), root(job));
+    if (sha(blueprint) !== sha(stored))
+      throw Error("Causal blueprint patch history is stale or was rewritten.");
+    const verdict = await safeRead(verdictPath(job, plan.version, i), root(job));
+    const review = parseBlueprintReview(JSON.stringify(verdict), blueprint);
+    const reviewSession = await safeRead(reviewSessionPath(job, plan.version, i), root(job)) as {
+      sessionId: string; sessionFile: string; verdictDigest: string; blueprintDigest: string };
+    if (!strict(reviewSession, ["sessionId", "sessionFile", "verdictDigest", "blueprintDigest"]) ||
+        reviewSession.verdictDigest !== sha(verdict) ||
+        reviewSession.blueprintDigest !== sha(blueprint) ||
+        reviewSession.sessionId === record.plannerSessionId ||
+        reviewers.has(reviewSession.sessionId) || reviewers.has(reviewSession.sessionFile))
+      throw Error("Causal blueprint independent review provenance changed.");
+    reviewers.add(reviewSession.sessionId);
+    reviewers.add(reviewSession.sessionFile);
+    await transcript(job, reviewSession.sessionFile, reviewSession.sessionId,
+      "architecture-blueprint-review-sessions");
+    if (i === record.draftVersion) {
+      if (review.status !== "pass" || sha(blueprint) !== record.blueprintDigest ||
+          sha(verdict) !== record.reviewDigest ||
+          reviewSession.sessionId !== record.reviewerSessionId ||
+          reviewSession.sessionFile !== record.reviewerSessionFile)
+        throw Error("Approved causal blueprint or independent verdict changed after review.");
+    } else {
+      const patch = await safeRead(patchPath(job, plan.version, i + 1), root(job));
+      blueprint = applyBlueprintPatch(blueprint, review, patch).blueprint;
+    }
+  }
   await transcript(job, record.plannerSessionFile, record.plannerSessionId, "architecture-blueprint-sessions");
   await transcript(job, record.reviewerSessionFile, record.reviewerSessionId, "architecture-blueprint-review-sessions");
   return { blueprint, pin: record };
@@ -269,9 +334,9 @@ function blueprintPrompt(plan: Plan, task: string) {
     "not scene prose or canonical records. This is a NEW Story with only Foundation; " +
     "planned future fictional clues are allowed, but clearly identify what each " +
     "clue would actually prove, what it would not, and how the player can inspect it. " +
-    "An altered ledger alone cannot prove when it was changed; the disappearance " +
-    "must be resolved by evidence that supports the actual conclusion, not another " +
-    "unrelated disclosure. Every witness-dependent clue must have an accessible " +
+    "A changed object alone cannot establish when or why it changed, and reaching " +
+    "an intermediate location does not settle a promised disappearance. " +
+    "Every witness-dependent clue must have an accessible " +
     "route or credible alternative if the player may refuse the witness. " +
     "Protected author choices and welfare restrictions must survive each ending. " +
     "A decision needs alternatives with materially different lasting effects. " +
@@ -291,20 +356,33 @@ function blueprintPrompt(plan: Plan, task: string) {
     "not already-authored World facts, Events or Choices. No invented canonical IDs. " +
     "Keep the scope and approved budgets: " + JSON.stringify(plan.contract) +
     "\nAuthor task: " + JSON.stringify(task) + "\n" +
+    "First inventory the concrete causal promises from exact passages in " +
+    "approved Creative Direction, the author task and the scope contract. " +
+    "Quote at least 8 contiguous characters VERBATIM from the chosen source " +
+    "(foundation document, author task, or JSON scope contract). " +
+    "Identify story-specific WHAT, WHEN, WHO, HOW, WHY questions only when " +
+    "promised; separately track material choices, refusal paths and ending conditions. " +
+    "For each promise state the proof the Story must make inspectable, its route " +
+    "and the beat IDs tasked with fulfilling it. Do not invent author promises " +
+    "or omit a protected requirement. This inventory is immutable through corrections. " +
     "Return ONLY valid JSON with EXACT keys " +
-    "{schema:'noveltea-causal-blueprint/v1',premise:string,beats:[{id:slug," +
+    "{blueprint:{schema:'noveltea-causal-blueprint/v1',premise:string,beats:[{id:slug," +
     "purpose:string,dependsOn:[earlier beat slugs],observations:[{source:string," +
     "observable:string,supports:string,limits:string}],change:string," +
     "decisions:[{question:string,alternatives:[{action:string,lastingEffect:string}]}]}]," +
-    " Use decisions:[] when a beat has no player decision; omission of that " +
-    "single optional field is equivalent to [], no other fields are optional." +
     "resolution:{question:string,conclusion:string,supportedBy:[evidence beat slugs]," +
-    "uncertainty:string}}. Use standard JSON double quotes. 2–16 beats. " +
-    "Keep the entire JSON under 24000 UTF-8 bytes. Be concise; " +
+    "uncertainty:string}},obligations:[{id:slug,category:'what|when|who|how|why|consequence|route|other', " +
+    "source:'foundation|task|contract',quote:string,question:string,proof:string," +
+    "route:string,beatIds:[existing beat slugs]}]}. " +
+    "Use standard JSON double quotes. 2–16 beats, 1–20 obligations. " +
+    "Use decisions:[] when a beat has no player decision; omission of that " +
+    "single optional field is equivalent to [], no other fields are optional. " +
+    "Keep blueprint JSON under 24000 bytes and the whole response under 32000 bytes. Be concise; " +
     "the one total-size ceiling, not arbitrary paragraph lengths, is enforced. " +
     "Do not omit protected Choices or change their lasting consequences; no filler.";
 }
-function reviewPrompt(plan: Plan, blueprint: CausalBlueprint) {
+function reviewPrompt(plan: Plan, blueprint: CausalBlueprint,
+  obligations: BlueprintObligations, task: string) {
   return "You are an INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER. " +
     "Read skill://nt-story-architecture/SKILL.md, skill://nt-catalog/SKILL.md, " +
     "creative-direction/foundation.md. No writing, shell, approval or expansion of scope. " +
@@ -315,12 +393,20 @@ function reviewPrompt(plan: Plan, blueprint: CausalBlueprint) {
     "decisions with unmodeled alternative consequences, and inconsistencies " +
     "after reconvergence. Planned plausible future evidence need not already " +
     "exist in canonical Event/Fact files. Do not impose generic plot preferences. " +
+    "Check every source-quoted obligation against the actual approved Creative " +
+    "Direction, author task, the scope and all supported/refused routes. " +
+    "An obligation inventory can itself omit a promised outcome: report that " +
+    "as a finding on the beat responsible for the missing proof, never approve " +
+    "an incomplete inventory as exhaustive. Treat source-anchored obligations " +
+    "as immutable during corrections, not as evidence that the fiction is true. " +
     "Report ALL material fixable problems in one verdict (maximum 8). " +
     "Findings reference exact beat IDs and propose bounded changes within " +
     "the approved story premise. Approval only means a coherent provisional plan; " +
     "later authored Story content must pass independent checks separately. " +
     "Source contract: " + JSON.stringify(plan.contract) +
-    "\nBLUEPRINT JSON:\n" + JSON.stringify(blueprint) + "\n" +
+    "\nOriginal author task: " + JSON.stringify(task) +
+    "\nIMMUTABLE SOURCE-GROUNDED PROOF OBLIGATIONS:\n" + JSON.stringify(obligations) +
+    "\nFULL MERGED BLUEPRINT JSON:\n" + JSON.stringify(blueprint) + "\n" +
     "Return ONLY strict JSON {\"status\":\"pass\",\"findings\":[]} or " +
     "{\"status\":\"revise\",\"findings\":[{\"beatId\":\"exact beat slug\"," +
     "\"reason\":\"concrete causal defect\",\"correction\":\"bounded remedy\"}]}.";
@@ -338,31 +424,55 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     if ((await readdir(root(job))).some(name => name.startsWith("plan-" + plan.version + "-")))
       throw Error("Unfinished causal blueprint sessions/evidence exist; inspect rather than replay an ambiguous Pi plan.");
   }
+  const sources = await obligationSources(job, plan, task);
   const planner = await sessionFor(job, snapshot, provider, model,
     "blueprint:" + plan.version, "architecture-blueprint-sessions");
   try {
+    // Even a crash before the first successful JSON result leaves durable evidence
+    // of the begun Pi writer. Its session must not be silently replayed.
+    await immutable(join(root(job), "plan-" + plan.version + "-started.json"), {
+      ...sameLineage(job, plan, snapshot, provider, model, task, head),
+      plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
+    });
     await promptStorySpecialist(planner.session, planner.context.contextNote + blueprintPrompt(plan, task));
+    let manifest: BlueprintObligations | undefined;
+    let previous: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined;
     for (let version = 0; version <= MAX_CORRECTIONS; version++) {
       verifyReadSources(planner.session.messages, planner.project.root, snapshot);
-      let blueprint: CausalBlueprint;
-      try { blueprint = parseCausalBlueprint(lastText(planner.session)); }
+      const parseResponse = () => version === 0
+        ? { ...initialBlueprint(lastText(planner.session), sources), patch: undefined }
+        : { ...parseBlueprintPatch(lastText(planner.session), previous!.blueprint, previous!.verdict),
+          obligations: undefined };
+      let result: ReturnType<typeof parseResponse>;
+      try { result = parseResponse(); }
       catch {
-        await promptStorySpecialist(planner.session,
-          "Your last read-only causal blueprint response did not match the required " +
-          "bounded JSON schema. Keep all source and protected Story constraints " +
-          "unchanged, write NO Story files and return the COMPLETE corrected " +
-          "causal blueprint with EXACT schema, premise, beats and resolution " +
-          "keys, concrete observations, dependent turning points and supported " +
-          "resolution. Use standard JSON with no prose, markdown or code fence.");
+        await promptStorySpecialist(planner.session, version === 0
+          ? "The initial JSON is invalid. Return ONE complete {blueprint,obligations} " +
+            "object with exact quoted source passages and all original required fields; " +
+            "do not write Story files, use double quotes and no markdown fences."
+          : "The targeted patch is malformed or unsafe. Do not regenerate the " +
+            "blueprint. Return ONLY a corrected patch with the SAME baseDigest " +
+            "and reviewDigest, exact old values and bounded operations for the " +
+            "reviewed findings. Do not erase or edit unrelated prior evidence, " +
+            "decisions, consequences, protected commitments or ending promises.");
         verifyReadSources(planner.session.messages, planner.project.root, snapshot);
-        blueprint = parseCausalBlueprint(lastText(planner.session));
+        result = parseResponse();
+      }
+      const blueprint = result.blueprint;
+      if (version === 0) {
+        manifest = result.obligations;
+        await immutable(obligationsPath(job, plan.version), manifest);
+      } else {
+        if (!result.patch) throw Error("Blueprint correction lacks an authenticated patch.");
+        await immutable(patchPath(job, plan.version, version), result.patch);
       }
       await immutable(draftPath(job, plan.version, version), blueprint);
       const reviewer = await sessionFor(job, snapshot, provider, model,
         "blueprint-review:" + plan.version + ":" + version, "architecture-blueprint-review-sessions");
       let verdict: BlueprintReview;
       try {
-        await promptStorySpecialist(reviewer.session, reviewer.context.contextNote + reviewPrompt(plan, blueprint));
+        await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
+          reviewPrompt(plan, blueprint, manifest!, task));
         verifyReadSources(reviewer.session.messages, reviewer.project.root, snapshot);
         try { verdict = parseBlueprintReview(lastText(reviewer.session), blueprint); }
         catch {
@@ -375,12 +485,17 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         }
         await reviewer.context.completed(reviewer.file, reviewer.session.sessionId);
         await immutable(verdictPath(job, plan.version, version), verdict);
+        await immutable(reviewSessionPath(job, plan.version, version), {
+          sessionId: reviewer.session.sessionId, sessionFile: reviewer.file,
+          blueprintDigest: sha(blueprint), verdictDigest: sha(verdict),
+        });
         if (verdict.status === "pass") {
           await planner.context.completed(planner.file, planner.session.sessionId);
           const pin: BlueprintPin = {
-            schema: "noveltea-approved-blueprint/v1",
+            schema: "noveltea-approved-blueprint/v2",
             ...sameLineage(job, plan, snapshot, provider, model, task, head),
             draftVersion: version, blueprintDigest: sha(blueprint), reviewDigest: sha(verdict),
+            obligationsDigest: sha(manifest),
             plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
             reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
           };
@@ -390,19 +505,34 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         if (version === MAX_CORRECTIONS)
           throw Error("Independent causal blueprint review exhausted bounded corrections: " +
             JSON.stringify(verdict.findings) + ". Preserve original private evidence.");
+        previous = { blueprint, verdict };
         await promptStorySpecialist(planner.session,
-          "INDEPENDENT CAUSAL BLUEPRINT REVIEW (same original read-only planner): " +
-          "Correct the existing high-level design without creating or editing Story files, " +
-          "altering protected author decisions, or adding unauthorized scope. " +
-          "Preserve all already-supported causal links as you correct these findings. " +
-          "Do a fresh whole-chain consistency audit after correcting: verify " +
-          "each conclusion under every refusal/cooperation route, preserve " +
-          "all earlier Choice consequences after reconvergence, and do not " +
-          "confuse movement through a location with evidence of how it was " +
-          "breached. Do not introduce a new unsupported claim while fixing one. " +
-          "Return the COMPLETE corrected blueprint as the same strict JSON structure. " +
-          "The next independent rereview will assess the full chain again. " +
-          JSON.stringify(verdict.findings));
+          "INDEPENDENT CAUSAL REVIEW. The original blueprint and immutable " +
+          "source-derived proof obligation manifest remain fixed; do not rewrite them. " +
+          "Return ONLY a JSON patch object with EXACT keys " +
+          "{schema:'noveltea-blueprint-patch/v1',baseDigest:string,reviewDigest:string," +
+          "operations:array}. Each operation must name findingBeatId, an exact " +
+          "beat ID from the review; target only that beat or a causal dependent. " +
+          "Kinds: replace {findingBeatId,path,expected,value} for exact old text " +
+          "at beats/ID/purpose, beats/ID/change, " +
+          "beats/ID/observations/INDEX/source|observable|supports|limits, " +
+          "beats/ID/decisions/INDEX/alternatives/INDEX/lastingEffect, or " +
+          "resolution/conclusion|uncertainty; append-observation " +
+          "{findingBeatId,beatId,value:{source,observable,supports,limits}}; " +
+          "append-decision {findingBeatId,beatId,value:{question,alternatives}}; " +
+          "add-dependency {findingBeatId,beatId,dependsOn:earlierBeatId}; " +
+          "insert-beat {findingBeatId,afterBeatId,beat:completeNewBeat}; " +
+          "support-resolution {findingBeatId,beatId}. Every operation also has " +
+          "kind. To refine an existing Choice lastingEffect, the new text MUST " +
+          "contain the entire old lastingEffect unmodified; no old decision " +
+          "or alternative may be erased. New beat IDs must be unique. " +
+          "Never replace the premise, original question, decision action, " +
+          "protected author outcome, unrelated clue or entire list. " +
+          "Fix the causal findings and preserve all prior supported proof " +
+          "including under refused routes. The independently reviewed FULL " +
+          "merged design must still satisfy every original obligation. " +
+          "BASE DIGEST: " + sha(blueprint) + " REVIEW DIGEST: " + sha(verdict) +
+          " FINDINGS: " + JSON.stringify(verdict.findings));
       } finally { reviewer.session.dispose(); }
     }
     throw Error("Causal blueprint did not receive independent approval.");
