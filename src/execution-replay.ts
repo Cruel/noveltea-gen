@@ -10,6 +10,13 @@
 import { createHash } from "node:crypto";
 import { replayNativeValidation, type NativeReplayInput } from "./execution-replay-native.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
+import {
+  parseCausalBlueprint,
+  parseBlueprintReview,
+  type CausalBlueprint,
+  type BlueprintReview,
+} from "./architecture-blueprint.js";
+import { applyBlueprintPatch, blueprintDigest, type BlueprintPatch } from "./architecture-blueprint-patch.js";
 import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -28,6 +35,8 @@ import type { CheckpointAssurance, IndependentReviewResult } from "./checkpoint-
 import type { TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 
 export type ReplayInput =
+  | { kind: "blueprint-review-verdict"; blueprint: CausalBlueprint; response: unknown }
+  | { kind: "blueprint-patch"; base: CausalBlueprint; review: BlueprintReview; patch: BlueprintPatch }
   | { kind: "review-verdict"; packet: SemanticReviewPacket; response: unknown; reviewer: string }
   | { kind: "reviewer-model-turn"; packet: SemanticReviewPacket; responseText: string; reviewer: string }
   | {
@@ -98,6 +107,8 @@ function checkInput(value: ReplayInput) {
     ![
       "review-verdict",
       "reviewer-model-turn",
+      "blueprint-review-verdict",
+      "blueprint-patch",
       "review-repair-plan",
       "review-dependency-gate",
       "native-validation",
@@ -111,6 +122,20 @@ function checkInput(value: ReplayInput) {
 export function executeReplay(input: ReplayInput): ReplayOutcome {
   try {
     checkInput(input);
+    if (input.kind === "blueprint-review-verdict") {
+      const blueprint = parseCausalBlueprint(JSON.stringify(input.blueprint));
+      const verdict = parseBlueprintReview(JSON.stringify(input.response), blueprint);
+      return { status: "returned", value: { verdict, digest: blueprintDigest(verdict) } };
+    }
+    if (input.kind === "blueprint-patch") {
+      const base = parseCausalBlueprint(JSON.stringify(input.base));
+      const review = parseBlueprintReview(JSON.stringify(input.review), base);
+      const { blueprint } = applyBlueprintPatch(base, review, input.patch);
+      return {
+        status: "returned",
+        value: { digest: blueprintDigest(blueprint), beatCount: blueprint.beats.length },
+      };
+    }
     if (input.kind === "review-verdict" || input.kind === "reviewer-model-turn") {
       const response =
         input.kind === "reviewer-model-turn"

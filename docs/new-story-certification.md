@@ -374,6 +374,49 @@ changes are deterministic-regression-tested, not certified by the older
 in-flight Luna process. Keep #181 open until both complete new-Story
 semantic and recovery gates pass.
 
+### Isolating failed Architecture boundaries without regenerating a Story
+
+The production recovery unit remains the **verified Git work-item
+checkpoint**. Use the existing `live-new-story-runner.mjs retry` or `fork`
+against an eligible Foundation/Architecture SHA only when actually continuing
+Story work. An interrupted or semantically rejected **private** blueprint
+is not an approved Story checkpoint and cannot be silently reused as one.
+
+For debugging, the existing `replay:step` implementation now supports
+the preserved Architecture planning evidence. Given a Job's *private*
+`architecture-blueprints` state directory (not a Story root), capture
+the exact independently recorded review or bounded correction:
+
+```sh
+pnpm replay:step capture-blueprint-review <private-architecture-blueprints-dir> <plan-version> <review-iteration> .local/certification/replay/architecture-review
+pnpm replay:step capture-blueprint-patch <private-architecture-blueprints-dir> <plan-version> <patch-iteration> .local/certification/replay/architecture-patch
+pnpm replay:step replay .local/certification/replay/architecture-review
+pnpm replay:step replay .local/certification/replay/architecture-patch
+```
+
+For example, review iteration 0 is the first independent verdict; patch
+iteration 1 applies the first correction to that exact review. The
+capture verifier checks the immutable source/session lineage, staged
+outline/evidence digests, sequential review-session identities and
+digests, and all prior exact patches/drafts. Captures and expected
+outcomes are private write-once hashes of the observed controller
+boundary. A replay is strictly offline and deterministic: no Pi,
+credential resolution, Story write, model regrading, author approval
+or scope grant. It can reproduce the **same rejection and patch outcome**
+while the controller implementation changes; it cannot establish that a
+revised narrative is semantically sound. Use a new independent real-Pi
+review for that judgment, then finally run production Story certification.
+
+On November 17, the two saved final Luna review failures and the
+choice-heavy second patch from the verified Foundation continuation
+were successfully captured under
+`.local/certification/replay/issue-181-*` and replayed without a Pi
+request. The narrative-led final verdict still identified an
+unspecified death mechanism and ineffective bell misdirection.
+The choice-heavy final verdict still rejected unsupported persistent
+branch states and causal proof. These are reproducible diagnostic
+cases, **not** passing #181 acceptance evidence.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

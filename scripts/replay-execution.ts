@@ -8,6 +8,7 @@
  * Source Jobs, sealed reviews and JSONL histories are never modified.
  */
 import { startStoryJob } from "../src/job.js";
+import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
 import {
   captureSealedReview,
   captureRecordedReviewerTurn,
@@ -38,6 +39,24 @@ async function main() {
       ),
     );
     if (!result.matched) process.exitCode = 1;
+    return;
+  }
+  if ((action === "capture-blueprint-review" || action === "capture-blueprint-patch") && args.length === 4) {
+    const [privateDirectory, planVersion, iteration, destination] = args as [string, string, string, string];
+    const manifest = captureBlueprintReplay(
+      privateDirectory,
+      Number(planVersion),
+      Number(iteration),
+      action === "capture-blueprint-review" ? "blueprint-review-verdict" : "blueprint-patch",
+      destination,
+    );
+    console.log(
+      JSON.stringify(
+        { captured: true, kind: manifest.kind, source: manifest.source, caseDirectory: destination },
+        null,
+        2,
+      ),
+    );
     return;
   }
   if (action === "list-review-turns" && args.length === 3) {
@@ -112,7 +131,7 @@ async function main() {
     return;
   }
   console.error(
-    "Usage: replay-execution.ts replay <case-dir> | capture-review|capture-native <Story-root> <Job-ID> <checkpoint-SHA> <new-case-dir> | list-review-turns <Story-root> <Job-ID> <checkpoint-SHA> | capture-review-turn <Story-root> <Job-ID> <checkpoint-SHA> <index> <new-case-dir>",
+    "Usage: replay-execution.ts replay <case-dir> | capture-blueprint-review|capture-blueprint-patch <private-architecture-blueprints-dir> <plan-version> <review-or-patch-iteration> <new-case-dir> | capture-review|capture-native <Story-root> <Job-ID> <checkpoint-SHA> <new-case-dir> | list-review-turns <Story-root> <Job-ID> <checkpoint-SHA> | capture-review-turn <Story-root> <Job-ID> <checkpoint-SHA> <index> <new-case-dir>",
   );
   process.exitCode = 2;
 }
