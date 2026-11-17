@@ -28,7 +28,9 @@ const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value
 const SLUG = /^[a-z][a-z0-9-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_CORRECTIONS = 2;
-const MAX_BLUEPRINT_BYTES = 24000;
+// Real independent reviews add concrete evidence/route consequences to ~23 KB
+// initial drafts. Leave correction headroom without weakening causal validation.
+const MAX_BLUEPRINT_BYTES = 40000;
 const REQUIRED_SKILLS = ["nt-story-architecture/SKILL.md", "nt-catalog/SKILL.md"] as const;
 
 export interface CausalBlueprint {
@@ -180,7 +182,7 @@ async function obligationSources(job: JobStartResult, plan: Plan, task: string):
     contract: plan.contract, task };
 }
 export function parseInitialBlueprint(text: string, sources: ObligationSources) {
-  const wire = parseBlueprintWire(text, 32000);
+  const wire = parseBlueprintWire(text, 60000);
   let draft: unknown;
   let items: unknown;
   if (wire.format === "jsonl") {

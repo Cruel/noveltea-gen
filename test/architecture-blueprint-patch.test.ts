@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildBlueprintObligations, validateBlueprintObligations } from "../src/architecture-blueprint-obligations.js";
 import { applyBlueprintPatch, blueprintDigest, parseBlueprintPatch } from "../src/architecture-blueprint-patch.js";
-import { parseInitialBlueprint } from "../src/architecture-blueprint.js";
+import { parseCausalBlueprint, parseInitialBlueprint } from "../src/architecture-blueprint.js";
 import type { BlueprintReview, CausalBlueprint } from "../src/architecture-blueprint.js";
 
 const example: CausalBlueprint = {
@@ -143,6 +143,24 @@ test("strict JSONL initial blueprint and operations preserve exact normalized de
   assert.throws(() => parseInitialBlueprint(
     [JSON.stringify(example), JSON.stringify({ ...obligation, quote: "not from source" })]
       .join("\n"), sources), /quotes text absent/);
+});
+
+test("reviewed causal additions have real bounded headroom beyond a valid large initial design", () => {
+  const large = clone(example);
+  large.beats[0]!.purpose = "Inspect the independently reachable archive evidence. ".repeat(410);
+  assert.ok(Buffer.byteLength(JSON.stringify(large)) > 20_000);
+  const admitted = parseCausalBlueprint(JSON.stringify(large));
+  const expanded = applyBlueprintPatch(admitted, review, patch([{
+    kind: "append-observation", findingBeatId: "witness", beatId: "witness",
+    value: { source: "corroborated route evidence", observable: "An independently dated trace",
+      supports: "Specific mechanism supported. ".repeat(160),
+      limits: "Identity and motive remain separate unanswered questions." },
+  }], admitted));
+  assert.ok(Buffer.byteLength(JSON.stringify(expanded.blueprint)) > 24_000);
+  assert.equal(expanded.blueprint.beats[1]!.decisions.length, 4);
+  const tooBig = clone(admitted);
+  tooBig.resolution.conclusion = "Unsupported fabricated filler. ".repeat(1800);
+  assert.throws(() => parseCausalBlueprint(JSON.stringify(tooBig)), /bounded size/);
 });
 
 test("a Choice effect can only be extended, never erased or overwritten", () => {

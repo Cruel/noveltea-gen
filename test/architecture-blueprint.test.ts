@@ -75,7 +75,7 @@ test("a single total-size ceiling avoids arbitrary paragraph-length rejections",
     extended.resolution.conclusion.length);
   assert.equal(parseCausalBlueprint(JSON.stringify(extended)).beats[0]!.change,
     extended.beats[0]!.change);
-  extended.resolution.conclusion = "Many claims. ".repeat(3000);
+  extended.resolution.conclusion = "Many claims. ".repeat(4000);
   assert.throws(() => parseCausalBlueprint(JSON.stringify(extended)), /bounded size/);
 });
 

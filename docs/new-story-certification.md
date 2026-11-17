@@ -278,7 +278,12 @@ and validates those stages against the frozen initial draft. Previously approved
 v2 pins retain their existing strict recovery path. Missing or tampered
 intermediate stage evidence fails closed.
 
-The evidence and obligation batches use compact **JSONL** with one complete
+The accepted initial drafts were approximately 23 KB of compact JSON each,
+leaving almost no space for independently requested causal repairs under the
+old 24 KB ceiling. The merged-blueprint ceiling is now 40 KB (still one total
+validated size bound, with no arbitrary per-paragraph limit), preserving room
+for corrections while leaving all structural, causal and source requirements
+unchanged. The evidence and obligation batches use compact **JSONL** with one complete
 strict JSON object per line; the initial outline is one bounded JSON object.
 A correction patch is one version/digest header followed by independently
 parsed JSONL operations. Every line must be valid; malformed, partial,
@@ -321,7 +326,7 @@ Architecture certification attempts remain negative evidence.
 blueprint subgraph, immutable draft/review evidence, private source-bound
 approval pin, source/skill/session verification and committed-checkpoint
 provenance were shipped in `7d63cd2`. Additional corrections permit a beat
-to omit an empty decision list, use one global 24,000-byte blueprint ceiling
+to omit an empty decision list, use one global blueprint-size ceiling
 rather than unrelated per-field prose limits, apply normal Pi budget checks
 before any private planning/review model call, and retain exact fail-closed
 planning diagnostics. Structural regression tests pass. Replay of the
