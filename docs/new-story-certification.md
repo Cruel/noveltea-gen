@@ -485,6 +485,32 @@ approval pin nor its transcripts are rewritten or silently promoted.**
 A new checkpoint continuation is required to verify the corrected
 independence semantics in real Pi. #181 remains OPEN.
 
+**November 17 isolated outline-stage failure and correction:** A new same-Thread
+continuation on `b3a49b0` reused the exact Foundation checkpoint but blocked
+before any evidence or review: its first 13.8 KB complete outline response
+was malformed JSON, while its one bounded correction duplicated both
+alternatives of the same Choice in the route-consequences array. Both raw
+responses and the rejection receipt remain in the private Pi transcript;
+the controller correctly rejected the second as `invalid-plan`, without
+promoting any unapproved Story work. The bottleneck was the oversized
+single model response combining causal core, beat graph and all branch states.
+
+The planner now emits a separately validated
+`noveltea-causal-outline-core/v1` (proposed solution, beat dependencies,
+decisions and resolution), followed by an exact-keyed JSONL route-state
+stage enumerated from that **frozen** core. The controller demands
+exactly one entry per [beatId, decisionIndex, alternativeIndex], rejects
+duplicates/missing alternatives with the specific keys, and assembles the
+same full `noveltea-causal-outline/v2` before subsequent evidence and
+independent review. There is no relaxation of causal proof or protected
+Choice requirements. Private immutable `plan-<version>-outline-core.json`
+and `plan-<version>-outline-routes.json` are included in the new
+`noveltea-blueprint-stages/v2` receipt alongside outline and evidence
+digests; original v1 receipts and approved v2 outlines remain readable.
+Exact restoration and offline replay check both stages separately and
+reject tampering. This is controller/test evidence only until real Pi runs
+produce independently reviewed complete Story output; #181 remains OPEN.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

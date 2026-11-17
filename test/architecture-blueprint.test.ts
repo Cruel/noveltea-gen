@@ -271,6 +271,33 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
       example,
       "v3 pins also restore the new source-bound v2 causal-answer outline",
     );
+    const { schema: _schema, routeConsequences, ...outlineCoreBody } = outlineV2;
+    const core = { schema: "noveltea-causal-outline-core/v1", ...outlineCoreBody };
+    const coreFile = join(parent, "plan-2-outline-core.json");
+    const routesFile = join(parent, "plan-2-outline-routes.json");
+    const splitReceipt = {
+      schema: "noveltea-blueprint-stages/v2", outlineDigest: digest(outlineV2),
+      coreDigest: digest(core), routesDigest: digest(routeConsequences),
+      evidenceDigests: [digest(evidence)],
+    };
+    await writeFile(coreFile, JSON.stringify(core));
+    await writeFile(routesFile, JSON.stringify(routeConsequences));
+    await writeFile(stagesFile, JSON.stringify(splitReceipt));
+    await writeFile(join(parent, "plan-2-approved.json"),
+      JSON.stringify({ ...stagePin, stagesDigest: digest(splitReceipt) }));
+    assert.deepEqual((await read())?.blueprint, example,
+      "new split core/Choice stages must reconstruct and authenticate the same approved outline");
+    await writeFile(routesFile, JSON.stringify(routeConsequences.map(route =>
+      ({ ...route, persistentEffect: route.persistentEffect + " tampered" }))));
+    await assert.rejects(read, /core or Choice route stage changed/);
+    await writeFile(routesFile, JSON.stringify(routeConsequences));
+    await writeFile(coreFile, JSON.stringify({ ...core,
+      causalAnswer: { ...core.causalAnswer, mechanism: "tampered mechanism" } }));
+    await assert.rejects(read, /core or Choice route stage changed/);
+    await writeFile(coreFile, JSON.stringify(core));
+    await writeFile(stagesFile, JSON.stringify(receiptV2));
+    await writeFile(join(parent, "plan-2-approved.json"),
+      JSON.stringify({ ...stagePin, stagesDigest: digest(receiptV2) }));
     await writeFile(
       outlineFile,
       JSON.stringify({ ...outlineV2, causalAnswer: { ...outlineV2.causalAnswer, mechanism: "substituted" } }),

@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { parseCausalBlueprint, type CausalBlueprint } from "../src/architecture-blueprint.js";
 import { applyBlueprintPatch, blueprintDigest } from "../src/architecture-blueprint-patch.js";
 import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
+import { assembleCurrentBlueprintOutline, parseBlueprintOutlineCore } from "../src/architecture-blueprint-stages.js";
 import { replayCase } from "../src/execution-replay.js";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -199,6 +200,56 @@ test("existing replay framework reproduces exact saved blueprint review and boun
     } finally {
       globalThis.fetch = fetchBefore;
     }
+  }));
+
+test("split core/Choice stage replay is tied to both immutable stage digests", () =>
+  withFixture(({ root, temporary, save, file }) => {
+    const oldOutline = JSON.parse(readFileSync(file("outline"), "utf8"));
+    const core = parseBlueprintOutlineCore(JSON.stringify({
+      schema: "noveltea-causal-outline-core/v1",
+      premise: oldOutline.premise,
+      beats: oldOutline.beats,
+      resolution: oldOutline.resolution,
+      causalAnswer: {
+        question: "Why was the clerk missing?",
+        answer: "The clerk hid voluntarily in the shelter after receiving a direct threat.",
+        mechanism: "The caretaker admitted the clerk through the locked rear gate.",
+        responsibility: "The caretaker sheltered the clerk and concealed the entry.",
+        motive: "The threat made a public register entry dangerous to the clerk's safety.",
+        misdirection: {
+          signal: "The front entry book shows no arrival",
+          falseInference: "The clerk never entered the shelter",
+          actualExplanation: "The caretaker used a private service gate instead",
+        },
+        proof: {
+          directTest: "An entry from the service-gate log identifies the arrival.",
+          corroboration: "A separately dated guard sheet corroborates its timing.",
+          refusalFallback: "The two records remain inspectable without the clerk's testimony.",
+          beatIds: ["proof"],
+        },
+      },
+    }));
+    const routes: never[] = [];
+    const outlined = assembleCurrentBlueprintOutline(core, routes);
+    save("outline-core", core);
+    save("outline-routes", routes);
+    save("outline", outlined);
+    save("stages", {
+      schema: "noveltea-blueprint-stages/v2",
+      coreDigest: digest(core), routesDigest: digest(routes),
+      outlineDigest: digest(outlined),
+      evidenceDigests: [digest(initial.beats.map(({ id, observations }) => ({ id, observations })))],
+    });
+    captureBlueprintReplay(root, 1, 1, "blueprint-patch", join(temporary, "valid-split"));
+    assert.equal(replayCase(join(temporary, "valid-split")).matched, true);
+    save("outline-routes", [{ beatId: "invented" }]);
+    assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
+      join(temporary, "bad-routes")), /causal core or Choice-route receipt changed/);
+    save("outline-routes", routes);
+    save("outline-core", { ...core, causalAnswer: { ...core.causalAnswer,
+      mechanism: "rewritten without review" } });
+    assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
+      join(temporary, "bad-core")), /causal core or Choice-route receipt changed/);
   }));
 
 test("capture rejects stale patch, changed review provenance and altered planning stage", () =>

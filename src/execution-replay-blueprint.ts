@@ -14,11 +14,10 @@ import {
 } from "./architecture-blueprint.js";
 import { applyBlueprintPatch, blueprintDigest, type BlueprintPatch } from "./architecture-blueprint-patch.js";
 import {
-  assembleBlueprintStages,
-  EVIDENCE_BATCH_SIZE,
-  parseBlueprintEvidence,
-  parseBlueprintOutline,
-  type BlueprintEvidence,
+  assembleBlueprintStages, assembleCurrentBlueprintOutline,
+  EVIDENCE_BATCH_SIZE, parseBlueprintEvidence, parseBlueprintOutline,
+  parseBlueprintOutlineCore, type BlueprintEvidence,
+  type BlueprintRouteConsequence,
 } from "./architecture-blueprint-stages.js";
 import { executeReplay, replaySha256, writeReplayCase, type ReplayInput } from "./execution-replay.js";
 
@@ -115,16 +114,31 @@ export function captureBlueprintReplay(
   const stage = json(file("stages")) as {
     schema?: string;
     outlineDigest?: string;
+    coreDigest?: string;
+    routesDigest?: string;
     evidenceDigests?: string[];
   };
+  const split = stage.schema === "noveltea-blueprint-stages/v2";
   if (
-    stage.schema !== "noveltea-blueprint-stages/v1" ||
-    Object.keys(stage).sort().join(",") !== "evidenceDigests,outlineDigest,schema" ||
+    !["noveltea-blueprint-stages/v1", "noveltea-blueprint-stages/v2"].includes(String(stage.schema)) ||
+    Object.keys(stage).sort().join(",") !== (split ?
+      "coreDigest,evidenceDigests,outlineDigest,routesDigest,schema" :
+      "evidenceDigests,outlineDigest,schema") ||
     stage.outlineDigest !== blueprintDigest(outline) ||
     !Array.isArray(stage.evidenceDigests) ||
     stage.evidenceDigests.length !== Math.ceil(outline.beats.length / EVIDENCE_BATCH_SIZE)
   )
     throw Error("Blueprint replay has missing or mismatched stage receipts.");
+  if (split) {
+    const core = parseBlueprintOutlineCore(JSON.stringify(json(file("outline-core"))));
+    const routes = json(file("outline-routes"));
+    if (!Array.isArray(routes) ||
+        blueprintDigest(core) !== stage.coreDigest ||
+        blueprintDigest(routes) !== stage.routesDigest ||
+        !isDeepStrictEqual(
+          assembleCurrentBlueprintOutline(core, routes as BlueprintRouteConsequence[]), outline))
+      throw Error("Blueprint replay causal core or Choice-route receipt changed.");
+  }
   const evidence: BlueprintEvidence[] = [];
   for (let first = 0; first < outline.beats.length; first += EVIDENCE_BATCH_SIZE) {
     const rows = json(file("evidence-" + first));

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assembleBlueprintStages, EVIDENCE_BATCH_SIZE, parseBlueprintEvidence,
-  parseBlueprintObligationStage, parseBlueprintOutline, parseCurrentBlueprintOutline } from "../src/architecture-blueprint-stages.js";
-import { blueprintEvidencePrompt, blueprintOutlinePrompt,
+import { assembleBlueprintStages, assembleCurrentBlueprintOutline,
+  EVIDENCE_BATCH_SIZE, parseBlueprintEvidence, parseBlueprintObligationStage,
+  parseBlueprintOutline, parseCurrentBlueprintOutline, parseBlueprintOutlineCore,
+  parseBlueprintRouteStage, requiredBlueprintRouteChoices } from "../src/architecture-blueprint-stages.js";
+import { blueprintEvidencePrompt, blueprintOutlinePrompt, blueprintRoutesPrompt,
   type CausalBlueprint } from "../src/architecture-blueprint.js";
 import type { Plan } from "../src/architecture.js";
 
@@ -43,9 +45,9 @@ test("staged prompts demand concrete durable route effects, independent proof an
   const outlinePrompt = blueprintOutlinePrompt({ contract } as unknown as Plan, "Make a mystery");
   assert.match(outlinePrompt, /PERSISTENT CHOICE-STATE RULE/);
   assert.match(outlinePrompt, /PROVISIONAL DESIGN MUST ANSWER THE MYSTERY/);
-  assert.match(outlinePrompt, /noveltea-causal-outline\/v2/);
-  assert.match(outlinePrompt, /routeConsequences/);
-  assert.doesNotMatch(outlinePrompt, /schema is noveltea-causal-outline\/v1/);
+  assert.match(outlinePrompt, /noveltea-causal-outline-core\/v1/);
+  assert.match(outlinePrompt, /Do NOT include routeConsequences now/);
+  assert.doesNotMatch(outlinePrompt, /schema is noveltea-causal-outline\/v2/);
   assert.match(outlinePrompt, /specific.*knowledge.*evidence access.*relationship trust.*source exposure/s);
   assert.match(outlinePrompt, /REFUSE, be unavailable or withdraw/);
   assert.match(outlinePrompt, /single first-playthrough path/);
@@ -148,6 +150,29 @@ test("new Architecture planning requires a concrete solution and route-state con
   assert.throws(() => parseCurrentBlueprintOutline(JSON.stringify(outlineValue)), /complete v2 answer/);
   const parsed = parseCurrentBlueprintOutline(JSON.stringify(proposed));
   assert.deepEqual(parsed, proposed);
+  const { schema: _schema, routeConsequences: expectedRoutes, ...coreBody } = parsed;
+  const core = parseBlueprintOutlineCore(JSON.stringify({
+    schema: "noveltea-causal-outline-core/v1", ...coreBody,
+  }));
+  const required = requiredBlueprintRouteChoices(core);
+  assert.deepEqual(required.map(({ beatId, decisionIndex, alternativeIndex }) =>
+    [beatId, decisionIndex, alternativeIndex]), [
+    ["refusal", 0, 0], ["refusal", 0, 1],
+  ]);
+  const routes = parseBlueprintRouteStage(expectedRoutes.map(row =>
+    JSON.stringify(row)).join("\n"), core);
+  assert.deepEqual(routes, expectedRoutes);
+  assert.deepEqual(assembleCurrentBlueprintOutline(core, routes), parsed,
+    "the split stages must reconstruct the identical reviewed full v2 outline");
+  assert.match(blueprintRoutesPrompt(core), /EXACT REQUIRED ALTERNATIVES/);
+  assert.match(blueprintRoutesPrompt(core), /No code fences, enclosing array/);
+  assert.throws(() => parseBlueprintRouteStage(
+    JSON.stringify(expectedRoutes[0]), core), /exactly 2 distinct alternative/);
+  assert.throws(() => parseBlueprintRouteStage(
+    [expectedRoutes[0], expectedRoutes[0]].map(JSON.stringify).join("\n"), core),
+  /duplicate Choice-route/);
+  assert.throws(() => parseBlueprintOutlineCore(JSON.stringify(outlineValue)),
+    /outline core must have exact/);
   assert.deepEqual(
     assembleBlueprintStages(parsed, evidence),
     blueprint,

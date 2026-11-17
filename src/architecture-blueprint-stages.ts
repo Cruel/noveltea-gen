@@ -35,6 +35,20 @@ export type BlueprintOutline = OutlineBody &
         routeConsequences: BlueprintRouteConsequence[];
       }
   );
+/** Bounded first outline stage: fixes the causal solution and decision graph,
+ * without asking the model to also serialize every route consequence. */
+export type BlueprintOutlineCore = Omit<
+  Extract<BlueprintOutline, { schema: "noveltea-causal-outline/v2" }>,
+  "schema" | "routeConsequences"
+> & { schema: "noveltea-causal-outline-core/v1" };
+
+export type BlueprintChoiceKey = {
+  beatId: string;
+  decisionIndex: number;
+  alternativeIndex: number;
+  action: string;
+};
+
 export type BlueprintEvidence = {
   id: string;
   observations: CausalBlueprint["beats"][number]["observations"];
@@ -127,7 +141,9 @@ function parseRouteConsequences(value: unknown, full: CausalBlueprint): Blueprin
     )
       throw Error("Causal outline Choice-route entry must name a reachable later beat or the resolution.");
     const key = consequence.beatId + "/" + consequence.decisionIndex + "/" + consequence.alternativeIndex;
-    if (keys.has(key)) throw Error("Causal outline has duplicate Choice-route consequences.");
+    if (keys.has(key))
+      throw Error("Causal outline has duplicate Choice-route consequences for " + key +
+        "; each decision alternative must appear EXACTLY once.");
     keys.add(key);
     const decisionKey = consequence.beatId + "/" + consequence.decisionIndex;
     const normalized = JSON.stringify([
@@ -145,8 +161,15 @@ function parseRouteConsequences(value: unknown, full: CausalBlueprint): Blueprin
     (sum, beat) => sum + beat.decisions.reduce((n, d) => n + d.alternatives.length, 0),
     0,
   );
-  if (keys.size !== expected)
-    throw Error("Causal outline must specify lasting state for EVERY Choice alternative.");
+  if (keys.size !== expected) {
+    const missing = full.beats.flatMap(beat => beat.decisions.flatMap((decision, decisionIndex) =>
+      decision.alternatives.flatMap((_alternative, alternativeIndex) => {
+        const key = beat.id + "/" + decisionIndex + "/" + alternativeIndex;
+        return keys.has(key) ? [] : [key];
+      })));
+    throw Error("Causal outline must specify lasting state for EVERY Choice alternative. " +
+      "Missing exact beat/decision/alternative keys: " + JSON.stringify(missing) + ".");
+  }
   return value as BlueprintRouteConsequence[];
 }
 
@@ -215,6 +238,64 @@ export function parseCurrentBlueprintOutline(
   if (outline.schema !== "noveltea-causal-outline/v2")
     throw Error("New causal plans require the complete v2 answer and per-Choice route-state contract.");
   return outline;
+}
+
+/** Freeze the causal answer and beat graph first; v1/v2 final outlines retain
+ * their historical parsers and recovery compatibility. */
+export function parseBlueprintOutlineCore(text: string): BlueprintOutlineCore {
+  const wire = parseBlueprintWire(text, 18000);
+  if (wire.format !== "json" ||
+      !strict(wire.value, ["schema", "premise", "beats", "resolution", "causalAnswer"]) ||
+      wire.value.schema !== "noveltea-causal-outline-core/v1")
+    throw Error("Causal outline core must have exact schema,premise,beats,resolution,causalAnswer fields.");
+  const base = parseBlueprintOutline(JSON.stringify({
+    schema: "noveltea-causal-outline/v1",
+    premise: wire.value.premise, beats: wire.value.beats, resolution: wire.value.resolution,
+  }));
+  const full = parseCausalBlueprint(JSON.stringify({
+    schema: "noveltea-causal-blueprint/v1",
+    premise: base.premise, resolution: base.resolution,
+    beats: base.beats.map(beat => ({ ...beat, observations: [PLACEHOLDER] })),
+  }));
+  return {
+    schema: "noveltea-causal-outline-core/v1",
+    premise: base.premise, beats: base.beats, resolution: base.resolution,
+    causalAnswer: parseCausalAnswer(wire.value.causalAnswer, full),
+  };
+}
+
+/** Enumerate exact keys so the route stage cannot accidentally duplicate a
+ * decision while omitting another. Also used in controller error feedback. */
+export function requiredBlueprintRouteChoices(core: BlueprintOutlineCore): BlueprintChoiceKey[] {
+  return core.beats.flatMap(beat => beat.decisions.flatMap((decision, decisionIndex) =>
+    decision.alternatives.map((alternative, alternativeIndex) => ({
+      beatId: beat.id, decisionIndex, alternativeIndex, action: alternative.action,
+    }))));
+}
+
+export function assembleCurrentBlueprintOutline(
+  core: BlueprintOutlineCore, routeConsequences: BlueprintRouteConsequence[],
+): Extract<BlueprintOutline, { schema: "noveltea-causal-outline/v2" }> {
+  const { schema: _schema, ...body } = core;
+  return parseCurrentBlueprintOutline(JSON.stringify({
+    schema: "noveltea-causal-outline/v2", ...body, routeConsequences,
+  }));
+}
+
+export function parseBlueprintRouteStage(text: string, core: BlueprintOutlineCore): BlueprintRouteConsequence[] {
+  const required = requiredBlueprintRouteChoices(core);
+  if (!required.length) {
+    if (text.trim()) throw Error("Causal outline has no Choices; route stage must be empty.");
+    return assembleCurrentBlueprintOutline(core, []).routeConsequences;
+  }
+  const wire = parseBlueprintWire(text, 12000);
+  const rows = wire.format === "jsonl" ? wire.values : [wire.value];
+  if (rows.length !== required.length)
+    throw Error("Causal route stage requires exactly " + required.length +
+      " distinct alternative rows; received " + rows.length +
+      ". Required beat/decision/alternative keys: " +
+      JSON.stringify(required.map(v => [v.beatId, v.decisionIndex, v.alternativeIndex])) + ".");
+  return assembleCurrentBlueprintOutline(core, rows as BlueprintRouteConsequence[]).routeConsequences;
 }
 
 export function parseBlueprintEvidence(text: string, outline: BlueprintOutline,
