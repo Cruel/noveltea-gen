@@ -215,3 +215,57 @@ test("adaptive controller history is Thread-bound, durable, source-ancestral and
     await assert.rejects(readAdaptiveState(f.job, turn, 1), /digest|altered/);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test("real read-only adaptive Pi transcript can include committed canonical Story reads, but not foreign or untracked sources", async () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.root, "skills", "test"), { recursive: true });
+    mkdirSync(join(f.root, "milestones"), { recursive: true });
+    writeFileSync(join(f.root, "skills/test/SKILL.md"), "---\nname: test\n---\nPinned method.");
+    writeFileSync(join(f.root, "milestones/discovery.md"), "Canonical causal premise\n");
+    f.git("add", "."); f.git("commit", "-qm", "Pinned methodology and Story");
+    f.sha = f.git("rev-parse", "HEAD");
+    f.job.baseSha = f.sha;
+    f.job.worktreeStoryRoot = f.root;
+    f.job.storyRelativePath = "";
+    const snapshot = await createSkillSnapshot({ discovery: "explicit-only",
+      novelteaSkills: f.root, skillDirs: [], requiredSkills: [] });
+    assert.ok(snapshot);
+    const state = emptyAdaptiveState(f.job, turn, 1);
+    const signature = pendingDigest({ head: f.sha, action: "read-only" });
+    await beginAdaptiveAttempt(f.job, state, f.sha, signature);
+    mkdirSync(join(f.root, "adaptive-planning-sessions"), { recursive: true });
+    const sessionFile = join(f.root, "adaptive-planning-sessions", "real-style.jsonl");
+    writeFileSync(sessionFile, '{"role":"assistant","content":"valid no-op"}\n');
+    const session = {
+      sessionFile,
+      sessionSha256: createHash("sha256").update(readFileSync(sessionFile)).digest("hex"),
+      snapshotId: snapshot.id, provider: "openai", model: "gpt-6-luna",
+      skillReads: [join(snapshot.path, "skills/test/SKILL.md"),
+        join(f.root, "milestones/discovery.md")],
+      proposalDigest: pendingDigest({ sourceSha: f.sha, turnDigest: turn, actions: [] }),
+    };
+    await settleAdaptiveAttempt(f.job, state, signature, "unchanged", undefined, session);
+    assert.equal((await readAdaptiveState(f.job, turn, 1))?.attempts[0]?.phase, "unchanged",
+      "an original verified Story read is not a corrupt skill transcript");
+    writeFileSync(join(f.root, "milestones/after.md"), "Unrelated later approved content\n");
+    f.git("add", "milestones/after.md"); f.git("commit", "-qm", "Other verified specialist");
+    assert.equal((await readAdaptiveState(f.job, turn, 1))?.attempts[0]?.phase, "unchanged",
+      "a later committed Story descendant must not invalidate the original read transcript");
+    const file = join(f.root, "adaptive-plan.json");
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    const modifyReads = async (reads: string[], pattern: RegExp) => {
+      saved.attempts[0].session.skillReads = reads;
+      const { digest: _digest, ...body } = saved;
+      saved.digest = pendingDigest(body);
+      writeFileSync(file, JSON.stringify(saved));
+      await assert.rejects(readAdaptiveState(f.job, turn, 1), pattern);
+    };
+    await modifyReads([join(snapshot.path, "skills/test/missing.md"),
+      session.skillReads[1]], /missing|unsafe pinned/i);
+    await modifyReads([session.skillReads[0], join(f.root, "milestones/missing.md")], /absent|verified Git/i);
+    await modifyReads([session.skillReads[0], join(f.root, "private/other.md")], /absent|verified Git/i);
+    await modifyReads([session.skillReads[0], "/tmp/other-job/story/milestones/discovery.md"],
+      /outside.*roots/i);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});

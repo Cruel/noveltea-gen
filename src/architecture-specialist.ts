@@ -85,7 +85,12 @@ export function architectureSpecialistPrompt(
       "distribute consequential choices and Puzzle work based on its Choice/branching " +
       "profile, target first-playthrough length, Narrative/Exploration pacing, " +
       "and hard/soft illustration and Character artwork limits. " +
-      "Do not impose per-Milestone Choice/Puzzle quotas or a fixed three-Act shape.",
+      "Do not impose per-Milestone Choice/Puzzle quotas or a fixed three-Act shape. " +
+      "For each major decision under a Choice-heavy or lasting-impact profile, " +
+      "describe the causal prerequisites, alternatives, and what knowledge, access " +
+      "or relationships actually differ after any route reconvergence. Explicitly " +
+      "show those decisions in the Arc trajectory AND relevant Milestone prose " +
+      "at planning level, not by inventing later Event IDs, Choices or route edges.",
     sources: REQUIRED,
     sourceUse:
       "Read Creative Direction and relevant existing canonical Story records IF present. " +
@@ -117,7 +122,12 @@ export function architectureSpecialistPrompt(
       "Bodies remain true after subsequent World/Character/Event authorship; never " +
       "describe temporary implementation status. Give each Milestone plausible " +
       "duration_minutes narrative and exploration RANGES; distinguish missing " +
-      "evidence from known zero. A dialogue-led Story with puzzle_emphasis: none " +
+      "evidence from known zero. Arc-wide and first-playthrough durations are " +
+      "route estimates, not a sum of mutually exclusive alternatives. Never sum " +
+      "all branch routes or claim unsupported precise totals; reconcile shared " +
+      "segments and selected alternatives against the approved first-playthrough " +
+      "range, and mark uncertainty or provisional coverage explicitly. " +
+      "A dialogue-led Story with puzzle_emphasis: none " +
       "must not gain a gratuitous Puzzle; a choice-heavy or substantially divergent " +
       "Story needs meaningful decisions throughout the planned routes, not a " +
       "token ending switch. Stage-only estimates are provisional until native " +

@@ -8,6 +8,7 @@ import type { JobStartResult } from "../src/job.js";
 import type { TurnEvidence } from "../src/turn-plan-evidence.js";
 import { forkDigest, readRecoveryFork } from "../src/recovery-fork-state.js";
 import { projectReviewTurn, readReviewTurnEvidence } from "../src/fork-review-turn.js";
+import { readReportTurnEvidence } from "../src/job-report.js";
 import { selectCheckpointReview } from "../src/checkpoint-assurance.js";
 import { sealPuzzleNoWrite, readPuzzleNoWrite, readPuzzleNoWriteSync } from "../src/puzzle-obligation.js";
 
@@ -112,6 +113,11 @@ test("fork retains authenticated original Turn for independent review only, not 
     assert.equal(plan.source.jobId, job.jobId);
     assert.equal(plan.originalRequest, original.originalRequest);
     assert.deepEqual(plan.assignments, original.assignments);
+    const finalReview = await readReportTurnEvidence(job);
+    assert.equal(finalReview?.kind, "full-story",
+      "a checkpoint fork retains original author-goal fulfillment obligations");
+    assert.equal(finalReview?.digest, plan.digest);
+    assert.equal(finalReview?.goal, original.goal);
     assert.notEqual(plan.digest, original.digest, "Review is attributed to new Job/source");
     assert.equal(
       existsSync(join(job.stateDir, "turn-plan.json")),
@@ -208,5 +214,7 @@ test("missing, altered, and misbound fork review criteria cannot be laundered in
     seal(legacy);
     const legacyJob = { ...job, recoveryFork: { ...job.recoveryFork!, bundleSha256: legacyPin } };
     assert.equal(await readReviewTurnEvidence(legacyJob), null);
+    assert.equal(await readReportTurnEvidence(legacyJob), null,
+      "legacy forks cannot fabricate author-goal criteria");
     assert.ok(readRecoveryFork(legacyJob));
   }));

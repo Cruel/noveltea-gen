@@ -221,6 +221,75 @@ a passing certification: inspect the final status and real source-bound
 findings, including blockers, independent quality and recovery evidence.
 Do not publish transcripts, access tokens or local Story roots in Git.
 
+## Adaptive Story profile gate (#181, opt-in only)
+
+Issue #181 additionally requires **two** complete real-Pi runs that exercise
+actual controller-admitted adaptive assignments, not merely the original
+fixed Architecture inventory. The existing Studio test/runner accepts a
+distinct, intentionally author-proposed profile per fresh Story:
+
+```sh
+NT_TEST_WEB_PI_ADAPTIVE_SHAPE=narrative-led node scripts/live-new-story-runner.mjs start autonomous
+node scripts/live-new-story-runner.mjs status autonomous
+NT_TEST_WEB_PI_ADAPTIVE_SHAPE=choice-heavy node scripts/live-new-story-runner.mjs start collaborative
+node scripts/live-new-story-runner.mjs status collaborative
+```
+
+The launcher pins `NT_ADAPTIVE_PLANNING=1` **only** for this explicit
+certification. Each successful run must show a genuine admitted read-only
+Pi plan amendment, independent final `turn-completeness/v1` semantic pass
+against the original request and canonical Interaction profile, and a
+verified Story including actual authored Events, interactions and
+player-facing content. Narrative-led must additionally show a reviewed
+no-write omission; choice-heavy must show a real add/split/narrow/depend
+amendment. The reviewer must assess causal branch consequences through
+reconvergence, not record counts or uniform Milestone quotas.
+
+The saved local observation includes `adaptiveShape`, `adaptiveEvidence`,
+`finalGoal`, `recoveryCheckpoints` and source-bound receipt digests;
+missing, interrupted and malformed evidence fails closed. The
+`NT_TEST_WEB_PI_DIAGNOSTIC=1` option, for a trusted isolated run, logs
+a **category only** for a failed discovery turn; no raw model/provider
+message or OAuth credential is printed.
+
+For checkpoint recovery, pass the preserved verified commit to
+`node scripts/live-new-story-runner.mjs retry <mode> <sha>`. The retry
+in a separately allocated Job retains the original Author Turn as
+read-only review criteria and completed specialist commits but cannot
+inherit an amended writer grant. The observation explicitly marks it as
+`recoveryOnly`, not a fresh adaptive amendment admission. A blocked
+specialist or original reviewer, including a required protected author
+change, is **not** a certification success. Keep its exact preserved
+Pi session and original native/Git receipts; do not auto-restart or
+forge approval in a test.
+
+**November 16, 2026 real-Pi observations:** The source-bound
+narrative-led Story approved `puzzle_emphasis: none` and zero formal
+Puzzles, verified Architecture and independent reviews. Its real
+adaptive planning attempt was correctly read-only but initially
+blocked at restart because the controller rejected canonical Story
+reads inside a legitimate pinned Pi transcript. That verifier defect
+was corrected and the original transcript successfully reopened.
+A later authenticated same-Thread checkpoint continuation reused the
+verified original Architecture and progressed through multiple
+native-validated Event commits and independent reviews. The Story
+ultimately remained blocked by a genuinely missing causal
+prerequisite and exhausted bounded correction reviews: it did not
+pass whole-Story completion.
+
+Two separate choice-heavy live runs produced native-valid Architecture
+commits, but independent semantic reviewers rejected them for
+insufficient source-backed decision consequences and/or inconsistent
+route-duration estimates. The controller correctly required an
+author-approved Architecture change and did not escalate a writer's
+scope. Architecture prompts now request explicit causal decision
+and post-reconvergence planning and warn against summing mutually
+exclusive route estimates. These are **negative production evidence**,
+not a live end-to-end pass. Keep #181 and parent #177 open until
+new full live runs pass; neither the recovery-only child nor the
+deterministic fixture suite satisfies the remaining Story acceptance
+criteria. The separate #158/#159/#160 release requirements still apply.
+
 ## Automation and current evidence
 
 Controller and safety checks (no real provider requests):

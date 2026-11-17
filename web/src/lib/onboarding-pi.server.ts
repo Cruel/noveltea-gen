@@ -400,7 +400,22 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       }
       await save(store, actor.id, repo, workspace, next, session.revision)
       return reply({ session: scope(next) })
-    } catch {
+    } catch (error) {
+      // Explicit trusted local certification may classify a failing provider
+      // turn without revealing error messages, transcript text or credentials.
+      // The public response and durable ambiguity fence remain unchanged.
+      if (process.env.NT_TEST_WEB_PI_DIAGNOSTIC === '1') {
+        const name = error instanceof Error ? error.name : 'unknown'
+        const message = error instanceof Error ? error.message : ''
+        const cause = /429|rate.limit|quota/i.test(message) ? 'rate-limit'
+          : /401|403|auth|token|refresh|credential/i.test(message) ? 'authentication'
+          : /aborted|timeout/i.test(message) ? 'aborted'
+          : /Pi specialist did not finish/i.test(message) ? 'incomplete-model-turn'
+          : /JSON|proposal|discovery reply|questions|foundation/i.test(message) ? 'invalid-model-output'
+          : /model|provider|api/i.test(message) ? 'provider'
+          : 'other'
+        console.error('Trusted local Story discovery failure:', JSON.stringify({ name, cause }))
+      }
       // Never repeat an uncertain provider turn automatically or expose raw
       // model errors/credentials. Saved author input survives for inspection.
       const blocked = { ...session, phase: 'blocked' as const, revision: session.revision + 1 }

@@ -9,6 +9,7 @@ import { auditIdeasUnderJobLock } from "./idea-placement.js";
 import { runAuthorAction } from "./author-updates.js";
 import { previewStoryMerge } from "./merge-preview.js";
 import { prepareTurnFulfillment, readTurnFulfillment } from "./turn-fulfillment.js";
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
 
 type Outcome = "completed" | "paused" | "blocked" | "failed";
 type IntegrationStatus = "mergeable" | "conflicts" | "not assessed";
@@ -151,6 +152,13 @@ function statusOf(review: Json | undefined, audit: ScopeAudit | undefined, plan:
   if (!plan || review?.phase === undefined) return "paused";
   return blockers.length ? "blocked" : "paused";
 }
+/** The report may inherit an authenticated original Turn solely for final
+ * review. Rebinding criteria is not an authoring or protected-canon grant. */
+export async function readReportTurnEvidence(job: JobStartResult) {
+  const local = await receipt(join(job.stateDir, "turn-plan.json"), job);
+  return local ?? (job.recoveryFork ? readReviewTurnEvidence(job) : null);
+}
+
 /** Author-facing read-only view. Never copy the private author inbox or raw message payloads. */
 export async function inspectJobReport(input: JobReportOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
@@ -214,7 +222,7 @@ export async function inspectJobReport(input: JobReportOptions) {
   // The narrative scope reviewer and native validator are not a verdict on
   // whether the original author request and the approved overall plan were met.
   // A source-bound Turn plan requires its own independent final decision.
-  const turn = await receipt(join(root, "turn-plan.json"), job);
+  const turn = await readReportTurnEvidence(job);
   const planFulfillment: {
     policy: "turn-completeness/v1"; status: "not-applicable" | "required" | "reviewing" | "passed" | "incomplete";
     headSha: string | null; planVersion: number | null;

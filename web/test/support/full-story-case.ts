@@ -16,6 +16,9 @@ import type { JobStartResult } from '../../../src/job'
 import { validateStoryJob } from '../../../src/validator'
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from '../../../src/recovery-checkpoints'
 import { readRecoveryFork } from '../../../src/recovery-fork-state'
+import { readReviewTurnEvidence } from '../../../src/fork-review-turn'
+import { readAdaptiveState } from '../../../src/adaptive-state'
+import { inspectJobReport } from '../../../src/job-report'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
 
@@ -40,6 +43,12 @@ type ChatCase = {
   mode: Mode
 }
 const prompt = 'Make me a mystery game'
+const adaptiveShape = process.env.NT_TEST_WEB_PI_ADAPTIVE_SHAPE
+const adaptiveBrief = adaptiveShape === 'narrative-led'
+  ? 'Make this a compact, dialogue-led mystery with observational exploration, credible clues, and at least one consequential choice. Some Milestones should be Event-only: do not invent a formal Puzzle or force a Choice at every Milestone. The ending must honor the original mystery promise and the effects of the actual player decisions. I delegate all unprotected creative details; propose the complete playable baseline.'
+  : adaptiveShape === 'choice-heavy'
+    ? 'Make a compact, Choice-heavy mystery with several justified player decisions distributed nonuniformly across Milestones, including a decision-rich confrontation and an observation-only Event. The Architecture Arc trajectory must explicitly name each major player decision, its causal prerequisites, and how knowledge or relationships remain different after routes reconverge. Include independent causal support for extra Events, and only a genuinely warranted formal Puzzle. Avoid uniform Milestone quotas. I delegate unprotected creative details; propose a complete playable baseline with these constraints.'
+    : null
 
 /** The only #158-specific preparation. Reuses normal Studio's real Chat and
  * discovery handlers; the common live runner owns auth, Docker and agent. */
@@ -77,8 +86,10 @@ export async function beginLiveNewStoryChat(args: ChatCase) {
   for (let i = 0; i < 4 && discovery.phase === 'questions'; i++) {
     const answer =
       i === 0
-        ? 'A compact atmospheric mystery on a stranded overnight train. Include fair-play clues, an enacted player choice and meaningfully different endings. I delegate unprotected creative details; propose the baseline.'
-        : 'I delegate the rest of the unprotected choices. Propose the complete playable mystery baseline.'
+        ? adaptiveBrief ?? 'A compact atmospheric mystery on a stranded overnight train. Include fair-play clues, an enacted player choice and meaningfully different endings. I delegate unprotected creative details; propose the baseline.'
+        : adaptiveBrief
+          ? 'I delegate the remaining unprotected decisions while retaining the requested Story-wide Interaction profile and causal consequences. Propose the complete playable mystery baseline.'
+          : 'I delegate the rest of the unprotected choices. Propose the complete playable mystery baseline.'
     discovery = await request('POST', { action: 'answer', revision: discovery.revision, text: answer })
   }
   assert.equal(discovery.phase, 'proposed')
@@ -283,10 +294,39 @@ export async function verifyLiveNewStory(
   let fork: ReturnType<typeof readRecoveryFork> = null
   try { fork = readRecoveryFork(job) }
   catch (error) { recoveryError = error instanceof Error ? error.message : 'Recovery bundle unreadable' }
+  // This is an opt-in production graph certification, NOT the fixture admission
+  // tests. Authenticate the original Turn, current Architecture, private Pi
+  // planning ledger and separate final independent review before counting any
+  // authored Story as certified. Keep model transcripts in their original
+  // private paths and summarize only receipt identities here.
+  const recoveryOnly = Boolean(process.env.NT_TEST_WEB_PI_RETRY_ROOT)
+  let adaptiveEvidence: { version: number; digest: string; amendments: Array<{
+    digest: string; actions: string[]; omissions: number }> } | null = null
+  let adaptiveFailure: string | null = null
+  let finalGoal: { status: string; assurance: string } | null = null
+  if (adaptiveShape) {
+    try {
+      const turn = await readReviewTurnEvidence(job)
+      assert.ok(turn, 'The independent review must retain the authenticated original Author Turn')
+      assert.equal(turn.originalRequest, prompt)
+      const architecture = JSON.parse(readFileSync(join(job.stateDir, 'architecture.json'), 'utf8')) as {
+        plan: { version: number } }
+      const adaptive = await readAdaptiveState(job, turn.digest, architecture.plan.version)
+      if (adaptive) adaptiveEvidence = { version: adaptive.version, digest: adaptive.digest,
+        amendments: adaptive.entries.map(entry => ({ digest: entry.digest,
+          actions: entry.actions.map(action => action.kind), omissions: entry.omissions.length })) }
+      const report = await inspectJobReport({ story: job.storyRoot, job: job.jobId })
+      finalGoal = { status: report.generation.planFulfillment.status,
+        assurance: report.generation.planFulfillment.assurance }
+    } catch (error) {
+      adaptiveFailure = error instanceof Error ? error.message : 'Adaptive source identity could not be authenticated'
+    }
+  }
   // Store a content-addressed inventory of exact saved controller receipts.
   // No Pi transcripts or credential-bearing files are duplicated into this index.
   const receiptPaths = ['foundation.json', 'architecture.json', 'character-world.json',
-    'turn-plan.json', 'objective-planning.json', 'orchestrator-selection.json']
+    'turn-plan.json', 'objective-planning.json', 'orchestrator-selection.json',
+    'adaptive-plan.json']
   for (const folder of ['event-items', 'interactive-items', 'composition-items',
     'review-repairs', 'review-repairs/proofs', 'assignment-reviews', 'review-items']) {
     const dir = join(job.stateDir, folder)
@@ -312,6 +352,7 @@ export async function verifyLiveNewStory(
     validationError,
     recoveryError,
     authorChoices,
+    ...(adaptiveShape ? { adaptiveShape, recoveryOnly, adaptiveEvidence, adaptiveFailure, finalGoal } : {}),
     finished: events.filter((event) => event.kind === 'finished').map((event) => event.status),
     checkpointState,
     selectedFork: fork ? { sourceJobId: fork.sourceJobId,
@@ -335,6 +376,27 @@ export async function verifyLiveNewStory(
   }))
   assert.equal(terminal, 'completed', 'The complete Story is required; Foundation alone is insufficient')
   assert.equal(validationStatus, 'passed')
+  if (adaptiveShape) {
+    assert.equal(process.env.NT_ADAPTIVE_PLANNING, '1', 'Adaptive certification must run the enabled production scheduler')
+    assert.equal(adaptiveFailure, null, 'Adaptive inspection and final author-goal evidence must be independently readable')
+    assert.equal(finalGoal?.status, 'passed', 'Original Author goal must pass final independent Turn review')
+    assert.equal(finalGoal.assurance, 'semantic', 'Fixture checks cannot substitute for real-Pi final review')
+    if (recoveryOnly) {
+      console.log('The original approved Story goal survived an independent checkpoint continuation; ' +
+        'this is recovery evidence, not fresh amended-plan admission certification.')
+    } else {
+      assert.ok(adaptiveEvidence && adaptiveEvidence.amendments.length > 0,
+        'A fixed Architecture inventory without a real admitted adaptive Pi amendment is not certification')
+      if (adaptiveShape === 'narrative-led') {
+        assert.ok(adaptiveEvidence.amendments.some(entry => entry.omissions > 0),
+          'Event-only no-Puzzle path requires independently reviewed omission provenance')
+      } else if (adaptiveShape === 'choice-heavy') {
+        assert.ok(adaptiveEvidence.amendments.some(entry => entry.actions.some(action =>
+          ['add', 'split', 'narrow', 'depend'].includes(action))),
+        'Choice-heavy Story must exercise genuine adaptive executable assignment changes')
+      }
+    }
+  }
   assert.ok(changed.some((path) => path.startsWith('story/authored-content/')))
   assert.ok(changed.some((path) => path.startsWith('story/events/')))
   assert.ok(

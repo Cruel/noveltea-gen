@@ -61,6 +61,9 @@ if (action === "start" || action === "retry" || action === "fork" || action === 
     throw Error("Missing native CLI or portable skills.");
   let root;
   let prepared = null;
+  const adaptiveShape = action === 'start' ? process.env.NT_TEST_WEB_PI_ADAPTIVE_SHAPE ?? null : previous?.adaptiveShape ?? null;
+  if (adaptiveShape !== null && !['narrative-led', 'choice-heavy'].includes(adaptiveShape))
+    throw Error('Unknown adaptive Story profile: expected narrative-led or choice-heavy.');
   if (action === "start") {
     const runs = join(directory, "runs");
     mkdirSync(runs, { recursive: true, mode: 0o700 });
@@ -101,6 +104,7 @@ if (action === "start" || action === "retry" || action === "fork" || action === 
   }).trim();
   save({ status: "running", pid: child.pid, startedAt: new Date().toISOString(), mode,
     gitHead, log, root, kind: action,
+    ...(adaptiveShape ? { adaptiveShape } : {}),
     ...(["retry", "fork"].includes(action) ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}),
     ...(prepared ? { checkpointSha: prepared.checkpointSha, sourceJobId: prepared.sourceJobId,
       guidance: prepared.guidance, retryChildId: prepared.childId, forkMode: prepared.forkMode ?? null } : {}) });
@@ -125,6 +129,8 @@ const env = {
   ...process.env,
   NT_TEST_WEB_PI_NEW_STORY: "1",
   NT_TEST_WEB_PI_STORY_MODE: mode,
+  ...(initial.adaptiveShape ? { NT_TEST_WEB_PI_ADAPTIVE_SHAPE: initial.adaptiveShape,
+    NT_ADAPTIVE_PLANNING: '1' } : {}),
   ...(["retry", "fork", "resume"].includes(initial.kind) ? {
     NT_TEST_WEB_PI_RETRY_ROOT: initial.root,
     NT_TEST_WEB_PI_RETRY_CHECKPOINT: initial.checkpointSha,

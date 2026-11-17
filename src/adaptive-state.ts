@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import { openSkillSnapshot } from "./snapshot.js";
 import type { JobStartResult } from "./job.js";
 import { persist } from "./ideas.js";
@@ -13,6 +13,7 @@ import type { AdaptiveAmendment } from "./adaptive-assignments.js";
 
 export interface AdaptiveSessionEvidence {
   sessionFile: string; sessionSha256: string; snapshotId: string;
+  /** Successful read-tool paths: pinned skills and source-Git canonical Story files. */
   provider: string; model: string; skillReads: string[]; proposalDigest: string;
 }
 export interface AdaptiveAttempt {
@@ -86,13 +87,48 @@ export async function readAdaptiveState(job: JobStartResult, turnDigest: string,
     if (attempt.session) {
       const proof = attempt.session;
       const dir = join(job.stateDir, "adaptive-planning-sessions") + sep;
+      const snapshotRoot = await openSkillSnapshot(proof.snapshotId);
       if (!proof.sessionFile.startsWith(dir) || !proof.sessionFile.endsWith(".jsonl") ||
           !HASH.test(proof.sessionSha256) || !HASH.test(proof.snapshotId) ||
           !HASH.test(proof.proposalDigest) || !proof.provider || !proof.model ||
           !Array.isArray(proof.skillReads) || !proof.skillReads.length ||
-          proof.skillReads.some(p => !p.startsWith("skills/") && !p.includes("/skills/")) ||
-          !(await openSkillSnapshot(proof.snapshotId)))
+          proof.skillReads.length > 1024 || !snapshotRoot)
         throw Error("Adaptive Pi transcript or pinned skill evidence was altered.");
+      // Real read-only Pi transcripts include BOTH pinned skill instructions
+      // and canonical Story reads. Requiring every path to contain /skills/
+      // incorrectly blocks a valid settled planner on restart. Authenticate
+      // each source at its original Git SHA instead of accepting a substring
+      // match against an unrelated filesystem path.
+      const skillsDir = join(snapshotRoot, "skills") + sep;
+      const storyDir = job.worktreeStoryRoot ? job.worktreeStoryRoot + sep : "";
+      if (!proof.skillReads.some(path => typeof path === "string" && path.startsWith(skillsDir)))
+        throw Error("Adaptive Pi transcript lacks pinned methodology reads.");
+      for (const path of proof.skillReads) {
+        if (typeof path !== "string" || path.length > 4096)
+          throw Error("Adaptive Pi transcript contains an invalid source read.");
+        if (path.startsWith(skillsDir)) {
+          const skillRelative = relative(skillsDir, path);
+          if (!skillRelative || skillRelative === ".." ||
+              skillRelative.startsWith(".." + sep) || !skillRelative.endsWith(".md"))
+            throw Error("Adaptive Pi transcript references an unsafe pinned skill path.");
+          try {
+            const pinned = await lstat(path);
+            if (!pinned.isFile() || pinned.isSymbolicLink() || await realpath(path) !== path)
+              throw Error("unsafe");
+          } catch {
+            throw Error("Adaptive Pi transcript references a missing or unsafe pinned skill file.");
+          }
+          continue;
+        }
+        if (!storyDir || !path.startsWith(storyDir))
+          throw Error("Adaptive Pi transcript read outside its pinned skill and canonical Story roots.");
+        const rel = relative(job.worktreeStoryRoot, path);
+        if (!/^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/.test(rel))
+          throw Error("Adaptive Pi transcript read an unsupported canonical Story path.");
+        const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+        try { dependencyGit(job, "cat-file", "-e", attempt.sourceSha + ":" + prefix + rel); }
+        catch { throw Error("Adaptive Pi transcript references a Story file absent from its original verified Git commit."); }
+      }
       const stat = await lstat(proof.sessionFile);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024 ||
           await realpath(proof.sessionFile) !== proof.sessionFile ||
