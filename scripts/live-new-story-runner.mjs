@@ -21,6 +21,12 @@ const directory = join(cwd, ".local", "certification", "live-new-story");
 const nativeCli = join(process.env.HOME ?? "/home/thomas", "dev/nt/build/cli/linux/noveltea");
 const skills = join(process.env.HOME ?? "/home/thomas", "dev/noveltea-skills");
 const [action, mode, checkpointSha, sourceJobId, guidance = ""] = process.argv.slice(2);
+const runLabel = process.env.NT_TEST_WEB_PI_RUN_LABEL ?? "";
+const requestedModel = process.env.NT_TEST_WEB_PI_MODEL ?? "gpt-6-luna";
+if (runLabel && !/^[a-z0-9][a-z0-9-]{0,30}$/.test(runLabel))
+  throw Error("Certification run label must be a short lowercase identifier.");
+if (!["gpt-6-luna", "gpt-6.1-sol"].includes(requestedModel))
+  throw Error("Unrecognized opt-in certification model.");
 if (
   !["autonomous", "collaborative"].includes(mode ?? "") ||
   !["start", "status", "retry", "fork", "resume", "worker"].includes(action ?? "")
@@ -29,8 +35,11 @@ if (
   process.exit(2);
 }
 mkdirSync(directory, { recursive: true, mode: 0o700 });
-const file = join(directory, mode + ".json");
-const log = join(directory, mode + ".log");
+// A model comparison must not overwrite the canonical Luna run's
+// status, log, or private source. Fresh sources preserve pinned model authority.
+const runName = mode + (runLabel ? "-" + runLabel : "");
+const file = join(directory, runName + ".json");
+const log = join(directory, runName + ".log");
 function state() {
   return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
 }
@@ -55,6 +64,9 @@ if (action === "status") {
 }
 if (action === "start" || action === "retry" || action === "fork" || action === "resume") {
   const previous = state();
+  if (previous && action !== "start" && previous.model &&
+      previous.model !== requestedModel)
+    throw Error("Cannot switch the model of a pinned certification continuation.");
   if (previous && previous.status === "running" && alive(previous.pid))
     throw Error("Existing " + mode + " certification is already running: " + previous.pid);
   if (!existsSync(nativeCli) || !existsSync(join(skills, "skills/nt-story-orchestrate/SKILL.md")))
@@ -67,7 +79,7 @@ if (action === "start" || action === "retry" || action === "fork" || action === 
   if (action === "start") {
     const runs = join(directory, "runs");
     mkdirSync(runs, { recursive: true, mode: 0o700 });
-    root = mkdtempSync(join(runs, mode + "-"));
+    root = mkdtempSync(join(runs, runName + "-"));
   } else {
     root = previous?.root;
     if (!root || !root.startsWith(join(directory, "runs") + "/") ||
@@ -103,7 +115,7 @@ if (action === "start" || action === "retry" || action === "fork" || action === 
     cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   }).trim();
   save({ status: "running", pid: child.pid, startedAt: new Date().toISOString(), mode,
-    gitHead, log, root, kind: action,
+    model: requestedModel, runLabel, gitHead, log, root, kind: action,
     ...(adaptiveShape ? { adaptiveShape } : {}),
     ...(["retry", "fork"].includes(action) ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}),
     ...(prepared ? { checkpointSha: prepared.checkpointSha, sourceJobId: prepared.sourceJobId,
@@ -143,13 +155,14 @@ const env = {
   NT_TEST_WEB_PI_AUTH: "device-code",
   NT_TEST_WEB_PI_LOCAL_OAUTH: "1",
   NT_TEST_WEB_PI_PROVIDER: "openai",
-  NT_TEST_WEB_PI_MODEL: "gpt-6-luna",
+  NT_TEST_WEB_PI_MODEL: initial.model ?? "gpt-6-luna",
   NT_TEST_WEB_PI_PRESERVE: "1",
   NT_TEST_WEB_PI_DIAGNOSTIC: "1",
   NT_NATIVE_CLI: nativeCli,
   NT_STUDIO_SKILLS_SOURCE: skills,
 };
-console.log("BEGIN " + mode + " live Luna certification on " + new Date().toISOString());
+console.log("BEGIN " + mode + " live " + (initial.model ?? "gpt-6-luna") +
+  " certification on " + new Date().toISOString());
 const child = spawn(
   process.execPath,
   ["--import", "tsx", "--test", "test/real-pi-new-story-certification.test.ts"],
@@ -163,7 +176,8 @@ const code = await new Promise((finish) => {
   child.once("exit", (code, signal) => finish(code ?? (signal ? 128 : 1)));
 });
 closeSync(output);
-console.log("END " + mode + " live Luna certification status=" + code);
+console.log("END " + mode + " live " + (initial.model ?? "gpt-6-luna") +
+  " certification status=" + code);
 save({
   ...initial,
   status: code === 0 ? "passed" : "failed",
