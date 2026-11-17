@@ -439,6 +439,28 @@ digests/pins continue to bind the full outline byte-for-byte.
 Offline deterministic tests and stored replay cases exercise this,
 but a new real Pi completion is still required.
 
+**November 17 v2 live checkpoint evidence (not certified):** An authenticated
+same-Thread continuation on `1edd2c9` reused the previous verified
+Foundation checkpoint, generated a concrete 4-beat, 4-Choice-alternative v2
+outline, completed bounded evidence/obligation batches, and reached a fresh
+independent review. The reviewer found three remaining fixable gaps:
+source-specific proof tying the actor to the bell/weapon/service passage,
+dated bell/death timing, and a plausible 60–90-minute single-route load.
+The original planner proposed eight patch operations, six with permitted
+reviewer provenance. Two descendant pacing edits incorrectly used the
+**edited beat** as `findingBeatId` instead of the existing early-beat reviewer
+finding. The controller correctly refused both original and formatting-retry
+responses without authoring canon or issuing a passing verdict. Replay
+of the source-bound saved review is captured in the private
+`.local/certification/replay/issue-181-v2-narrative-first-review`.
+A diagnostic **in-memory only** remap of those two finding references
+passed the unchanged full deterministic patch validator, establishing
+that this was a precise identifier-protocol failure, not a reason to replay
+the rest of the Story. The correction prompt and parser error now provide
+the exact reviewed finding-to-descendant map and report **all** invalid
+identifiers together. They do not rewrite, waive or autoapprove any patch.
+Next live check must use the corrected prompt; #181 remains OPEN.
+
 ## Adaptive Story profile gate (#181, opt-in only)
 
 Issue #181 additionally requires **two** complete real-Pi runs that exercise

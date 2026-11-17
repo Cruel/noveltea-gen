@@ -18,7 +18,8 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { buildBlueprintObligations, validateBlueprintObligations,
   type BlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
-import { parseBlueprintPatch, applyBlueprintPatch } from "./architecture-blueprint-patch.js";
+import { parseBlueprintPatch, applyBlueprintPatch,
+  allowedBlueprintPatchTargets } from "./architecture-blueprint-patch.js";
 import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
 import { assembleBlueprintStages, EVIDENCE_BATCH_SIZE, parseBlueprintEvidence,
   parseBlueprintObligationStage, parseBlueprintOutline, parseCurrentBlueprintOutline,
@@ -697,6 +698,12 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           const reason = error instanceof Error ? error.message : "Unknown patch failure";
           await promptStorySpecialist(planner.session,
             "Your JSONL patch was rejected for this EXACT controller defect: " + reason +
+            " EXACT permitted original reviewer finding-to-target mapping: " +
+            JSON.stringify(allowedBlueprintPatchTargets(previous!.blueprint, previous!.verdict)) +
+            ". Every findingBeatId MUST equal an ID in this mapping; use the " +
+            "ORIGINAL findingBeatId even when modifying one of its descendant " +
+            "targetBeatIds. Do not use the target beat's own ID as the findingBeatId " +
+            "unless the reviewer actually issued a finding at that beat. " +
             ". Do not regenerate the original blueprint. Return the COMPLETE corrected " +
             "JSONL: line one an object with schema,baseDigest,reviewDigest; " +
             "following lines one complete JSON operation per line. " +
@@ -759,6 +766,12 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           "No blank lines, markdown fences, leading or trailing prose. " +
           "Each operation must name findingBeatId, an exact " +
           "beat ID from the review; target only that beat or a causal dependent. " +
+          "findingBeatId is the REVIEWER'S SOURCE finding ID, NOT the target's " +
+          "beatId. E.g. when a pacing finding at first beat A requires edits " +
+          "at descendant beat B, use findingBeatId:A with beatId:B; NEVER " +
+          "invent findingBeatId:B unless B appears among the verdict findings. " +
+          "EXACT permitted finding-to-target mapping: " +
+          JSON.stringify(allowedBlueprintPatchTargets(blueprint, verdict)) + ". " +
           "Kinds: replace {findingBeatId,path,expected,value} for exact old text " +
           "at beats/ID/purpose, beats/ID/change, " +
           "beats/ID/observations/INDEX/source|observable|supports|limits, " +

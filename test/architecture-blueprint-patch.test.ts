@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildBlueprintObligations, validateBlueprintObligations } from "../src/architecture-blueprint-obligations.js";
-import { applyBlueprintPatch, blueprintDigest, parseBlueprintPatch } from "../src/architecture-blueprint-patch.js";
+import { applyBlueprintPatch, allowedBlueprintPatchTargets, blueprintDigest,
+  parseBlueprintPatch } from "../src/architecture-blueprint-patch.js";
 import { parseCausalBlueprint, parseInitialBlueprint } from "../src/architecture-blueprint.js";
 import type { BlueprintReview, CausalBlueprint } from "../src/architecture-blueprint.js";
 
@@ -175,6 +176,36 @@ test("a Choice effect can only be extended, never erased or overwritten", () => 
   assert.throws(() => applyBlueprintPatch(example, review, patch([
     replace("beats/witness/decisions/0/alternatives/0/action", "Protect 0", "Abandon"),
   ])), /cannot replace/);
+});
+
+test("cross-beat corrections retain the REVIEW finding ID, not the edited target ID", () => {
+  const verdict: BlueprintReview = { status: "revise", findings: [
+    { beatId: "catalog", reason: "The whole route is too short",
+      correction: "Develop the narrative load across the dependent beats" },
+    { beatId: "resolution", reason: "Final evidence is weak",
+      correction: "Add corroborating physical evidence" },
+  ] };
+  assert.deepEqual(allowedBlueprintPatchTargets(example, verdict), [
+    { findingBeatId: "catalog", targetBeatIds: ["catalog", "witness", "resolution"] },
+    { findingBeatId: "resolution", targetBeatIds: ["resolution"] },
+  ]);
+  const old = example.beats[1]!.purpose;
+  const invalid = replace("beats/witness/purpose", old,
+    "Give the interview actual dialogue and evidence exchanges", "witness");
+  const invalid2 = replace("beats/resolution/purpose", example.beats[2]!.purpose,
+    "Develop the final inquiry evidence", "forged");
+  assert.throws(() => applyBlueprintPatch(example, verdict,
+    patch([invalid, invalid2], example, verdict)),
+    error => error instanceof Error &&
+      /missing reviewer finding/.test(error.message) &&
+      /"index":0,"findingBeatId":"witness"/.test(error.message) &&
+      /"index":1,"findingBeatId":"forged"/.test(error.message) &&
+      /"findingBeatId":"catalog","targetBeatIds":\["catalog","witness","resolution"\]/.test(error.message) &&
+      /reviewer concern, NOT the edited target beat/.test(error.message));
+  const valid = { ...invalid, findingBeatId: "catalog" };
+  const corrected = applyBlueprintPatch(example, verdict, patch([valid], example, verdict));
+  assert.equal(corrected.blueprint.beats[1]!.purpose, valid.value,
+    "a source-bound earlier finding can authorize its causal descendant");
 });
 
 test("stale, unrelated, duplicate, invented and partially valid patches fail closed", () => {

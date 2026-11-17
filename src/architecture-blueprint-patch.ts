@@ -46,6 +46,14 @@ function descendants(blueprint: CausalBlueprint, from: string) {
   return affected;
 }
 
+/** Explain exact reviewer-finding authority without granting any new patch scope. */
+export function allowedBlueprintPatchTargets(base: CausalBlueprint, review: BlueprintReview) {
+  const ids = [...new Set(review.findings.map(f => f.beatId))];
+  return ids.map(findingBeatId => ({
+    findingBeatId, targetBeatIds: [...descendants(base, findingBeatId)],
+  }));
+}
+
 /** Parse then apply to a clone; only the resolved full blueprint is reviewed.
  * Every op must reference an actual finding from the immediately prior verdict. */
 export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintReview,
@@ -61,12 +69,19 @@ export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintRevi
   const patch = raw as unknown as BlueprintPatch;
   const next: CausalBlueprint = structuredClone(base);
   const findings = new Set(review.findings.map(f => f.beatId));
+  const invalid = patch.operations.map((op, index) => ({
+    index, findingBeatId: op && typeof op === "object" && "findingBeatId" in op
+      ? op.findingBeatId : "(missing)",
+  })).filter(op => !findings.has(op.findingBeatId));
+  if (invalid.length)
+    throw Error("Blueprint patch refers to a missing reviewer finding: " +
+      JSON.stringify(invalid) + ". Only the ORIGINAL reviewer findingBeatId " +
+      "values and their descendant targetBeatIds are permitted: " +
+      JSON.stringify(allowedBlueprintPatchTargets(base, review)) +
+      ". The findingBeatId names the reviewer concern, NOT the edited target beat.");
   const touched = new Set<string>();
   const inserted = new Map<string, string>();
   for (const op of patch.operations) {
-    if (!op || typeof op !== "object" || !("findingBeatId" in op) ||
-        !findings.has(op.findingBeatId))
-      throw Error("Blueprint patch refers to a missing reviewer finding.");
     const permitted = descendants(base, op.findingBeatId);
     const target = "beatId" in op ? op.beatId :
       "afterBeatId" in op ? op.afterBeatId : undefined;
