@@ -1,3 +1,5 @@
+import type { AuthorQuestion, AuthorQuestionAnswer } from '../../../src/author-question'
+
 export type Approval = {
   id: string; nonce: string; proposalSha256: string; verifiedHead: string
   phase: 'awaiting-controller' | 'recorded'; review: unknown
@@ -25,12 +27,8 @@ export type RecoveryDecision = {
 export type SpecialistChoice = {
   id: string; workItem: string; phase: 'awaiting-author' | 'answered'
   proposalSha256: string
-  question: { kind?: 'free-text' | 'yes-no' | 'alternatives'; question: string;
-    recommendedId?: string; recommendationReason?: string;
-    context?: Array<{ path: string; line: number; description: string }>
-    options?: Array<{ id: string; title: string; approach: string;
-      benefits: string; tradeoffs: string }> }
-  answer?: { kind: 'option' | 'custom'; optionId?: string; text?: string; note: string }
+  question: AuthorQuestion
+  answer?: AuthorQuestionAnswer
 }
 export type AuthorState = { status: string; items: AuthorItem[];
   decisions: RecoveryDecision[]; choice: SpecialistChoice | null }

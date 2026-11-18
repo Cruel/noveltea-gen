@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { startStoryJob } from "../src/job.js";
 import { parseSpecialistChoice, extractSpecialistChoice, recordSpecialistChoice, inspectSpecialistChoice,
   activeSpecialistChoice, answerSpecialistChoice, verifySpecialistChoice,
-  claimSpecialistChoice, completeSpecialistChoice } from "../src/specialist-choice.js";
+  claimSpecialistChoice, completeSpecialistChoice, authorChoiceDirection } from "../src/specialist-choice.js";
 import { removeTestTree } from "./helpers.js";
 
 const candidate = {
@@ -27,7 +27,7 @@ function git(cwd: string, ...args: string[]) {
   assert.equal(r.status, 0, r.stderr);
   return r.stdout.trim();
 }
-test("choice parser enforces 2–4 complete options and exactly one recommended ID", () => {
+test("specialist parser bounds options while accepting concise unendorsed alternatives", () => {
   assert.deepEqual(parseSpecialistChoice(candidate), candidate);
   assert.deepEqual(extractSpecialistChoice('A pause is needed.\n\u0060\u0060\u0060json\n' +
     JSON.stringify({ authorDecisionRequest: candidate, modifiedRecords: [] }, null, 2) +
@@ -38,14 +38,16 @@ test("choice parser enforces 2–4 complete options and exactly one recommended 
     id: "third", title: "A third option", approach: "Different approach", benefits: "Distinct benefit",
     tradeoffs: "Distinct risk",
   }] }).options.length, 3);
-  assert.throws(() => parseSpecialistChoice({ ...candidate, options: [candidate.options[0]] }), /2–4/);
+  assert.throws(() => parseSpecialistChoice({ ...candidate, options: [candidate.options[0]] }), /2–8/);
+  assert.equal(parseSpecialistChoice({ question: candidate.question,
+    options: candidate.options.map(o => ({ id: o.id, title: o.title })) }).recommendedId, undefined);
   assert.throws(() => parseSpecialistChoice({ ...candidate, options: [candidate.options[0], ...candidate.options,
-    candidate.options[1], candidate.options[0]] }), /2–4/);
+    candidate.options[1], candidate.options[0]] }), /unique/);
   assert.throws(() => parseSpecialistChoice({ ...candidate, recommendedId: "invented" }), /Recommended/);
   assert.throws(() => parseSpecialistChoice({ ...candidate, options: [candidate.options[0], candidate.options[0]] }), /unique/);
   assert.throws(() => parseSpecialistChoice({ ...candidate, options: [
     candidate.options[0], { ...candidate.options[1], tradeoffs: "" },
-  ] }), /trade-offs/);
+  ] }), /bounded optional detail/);
 });
 
 
@@ -117,6 +119,9 @@ test("focused conversation choice binds one exact original session and supports 
       "Answering a question must never write Story files or grant scope");
     const resumed = await claimSpecialistChoice(job, receipt.id);
     assert.equal(resumed.sessionFile, sessionFile);
+    assert.equal(authorChoiceDirection(resumed.question, resumed.answer!),
+      "Use the systemic clues. Delegate the dialogue phrasing and pacing.\n" +
+      "Additional guidance: Preserve the protected foundation.");
     await assert.rejects(claimSpecialistChoice(job, receipt.id), /required author boundary/);
     await completeSpecialistChoice(job, receipt.id);
     assert.equal((await inspectSpecialistChoice(job, receipt.id)).phase, "consumed");

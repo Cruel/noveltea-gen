@@ -5,6 +5,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { sendAuthorCommand } from '../../../lib/author.functions'
 import { authorInteractionsQuery } from '../../../lib/author.queries'
+import { jobQuery } from '../../../lib/jobs.queries'
 import { isAuthorState, type SpecialistChoice, type RecoveryDecision } from '../../../lib/author-state'
 
 export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: {
@@ -13,6 +14,8 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
   const queryClient = useQueryClient()
   const authorQuery = useQuery(authorInteractionsQuery(jobId))
   const state = isAuthorState(authorQuery.data) ? authorQuery.data : null
+  const contextJob = useQuery({ ...jobQuery(jobId),
+    enabled: !!state?.choice?.question.context?.length })
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({})
   const [choiceSelections, setChoiceSelections] = useState<Record<string, string>>({})
@@ -37,9 +40,9 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
     finally { setBusy(null) }
   }
   const submitChoice = async (item: SpecialistChoice) => {
-    const selected = choiceSelections[item.id] ?? item.question.recommendedId ?? ''
+    const selected = choiceSelections[item.id] ?? ''
     const custom = item.question.kind === 'free-text' || selected === '__custom__'
-    const text = (customAnswers[item.id] ?? '').trim()
+    const text = customAnswers[item.id] ?? ''
     if (!selected && !custom || custom && !text) return
     setBusy(item.id); setError(null)
     try {
@@ -47,7 +50,7 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
         action: 'choice', id: item.id,
         proposalSha256: item.proposalSha256, kind: custom ? 'custom' : 'option',
         ...(custom ? { text } : { optionId: selected }),
-        ...(choiceNotes[item.id]?.trim() ? { note: choiceNotes[item.id]?.trim() ?? '' } : {}),
+        ...(choiceNotes[item.id]?.trim() ? { note: choiceNotes[item.id] } : {}),
       }) } })
       await refresh()
       onChanged()
@@ -107,6 +110,13 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
       selection={choiceSelections[state.choice.id] ?? ''}
       customAnswer={customAnswers[state.choice.id] ?? ''}
       note={choiceNotes[state.choice.id] ?? ''}
+      contextHref={path => {
+        const job = contextJob.data
+        if (!job?.storyId) return undefined
+        const query = new URLSearchParams({ context: path })
+        if (job.storyThreadId) query.set('thread', job.storyThreadId)
+        return '/stories/' + encodeURIComponent(job.storyId) + '/?' + query.toString()
+      }}
       onSelect={value => setChoiceSelections(old => ({ ...old, [state.choice!.id]: value }))}
       onCustomAnswer={value => setCustomAnswers(old => ({ ...old, [state.choice!.id]: value }))}
       onNote={value => setChoiceNotes(old => ({ ...old, [state.choice!.id]: value }))}

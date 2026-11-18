@@ -6,13 +6,13 @@ import { AuthorChoicePanel } from '../src/components/author-choice-panel'
 import type { SpecialistChoice } from '../src/lib/author-state'
 
 function render(question: SpecialistChoice['question'], selected = '',
-  answer?: SpecialistChoice['answer']) {
+  answer?: SpecialistChoice['answer'], contextHref?: (path: string) => string) {
   return renderToStaticMarkup(createElement(AuthorChoicePanel, {
     choice: { id: 'answer-123', workItem: 'event-disclosure',
       phase: answer ? 'answered' : 'awaiting-author',
       proposalSha256: 'a'.repeat(64), question, ...(answer ? { answer } : {}) },
     presentation: 'chat', busy: false, selection: selected, customAnswer: '', note: '',
-    onSelect: () => {}, onCustomAnswer: () => {}, onNote: () => {}, onSubmit: () => {},
+    contextHref, onSelect: () => {}, onCustomAnswer: () => {}, onNote: () => {}, onSubmit: () => {},
   }))
 }
 test('free-text questions render an accessible required input without forcing radio options', () => {
@@ -48,7 +48,7 @@ test('refresh shows the exact saved answer and optional note without resubmissio
   assert.doesNotMatch(html, /Submit answer/)
 })
 
-test('multi-choice questions display recommendations and relevant context, retaining Other', () => {
+test('alternatives display recommendations and relevant context, retaining Other', () => {
   const html = render({ kind: 'alternatives',
     question: 'Which consequence suits the scene?',
     options: [
@@ -67,4 +67,40 @@ test('multi-choice questions display recommendations and relevant context, retai
   assert.match(html, /Relevant Story context/)
   assert.match(html, /characters\/nia.md:3/)
   assert.match(html, /My own direction/)
+  const linked = render({ kind: 'alternatives', question: 'Which consequence suits the scene?',
+    options: [{ id: 'trust', title: 'Trust' }, { id: 'conflict', title: 'Conflict' }],
+    context: [{ path: 'characters/nia.md', line: 3, description: 'Original motivation' }],
+  }, '', undefined, path => '/stories/example/?context=' + encodeURIComponent(path))
+  assert.match(linked, /href="\/stories\/example\/\?context=characters%2Fnia.md"/)
+  const answered = render({ kind: 'alternatives', question: 'Which consequence suits the scene?',
+    options: [{ id: 'trust', title: 'Trust' }, { id: 'conflict', title: 'Conflict' }],
+    context: [{ path: 'characters/nia.md', line: 3, description: 'Original motivation' }],
+  }, '', { kind: 'option', optionId: 'trust', note: '' },
+  path => '/stories/example/?context=' + encodeURIComponent(path))
+  assert.match(answered, /Relevant Story context/)
+  assert.match(answered, /href="\/stories\/example\/\?context=characters%2Fnia.md"/)
+})
+
+test('recommendation is never preselected; concise options remain usable without essays', () => {
+  const question = { kind: 'alternatives' as const,
+    question: 'What should Nia do when the ledger is found?',
+    options: [{ id: 'keep', title: 'Keep it' }, { id: 'share', title: 'Share it' }],
+    recommendedId: 'share', recommendationReason: 'Provides a clear next clue',
+  }
+  const pending = render(question)
+  assert.match(pending, /Recommended/)
+  assert.doesNotMatch(pending, /data-checked=""/)
+  assert.match(pending, /disabled=""/)
+  assert.doesNotMatch(pending, /Benefits:<\/strong>\s*<\/p>/)
+  const explicit = render(question, 'keep')
+  assert.match(explicit, /data-checked=""/)
+  assert.doesNotMatch(explicit, /Submit answer<\/button>.*disabled/)
+})
+
+test('free-text placeholders are hints rather than submitted answers', () => {
+  const html = render({ kind: 'free-text', question: 'How should Nia explain the missing page?',
+    placeholder: 'For example, a quiet confession' })
+  assert.match(html, /placeholder="For example, a quiet confession"/)
+  assert.match(html, /disabled=""/)
+  assert.doesNotMatch(html, /value="For example, a quiet confession"/)
 })

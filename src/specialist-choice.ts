@@ -5,43 +5,24 @@ import { lstat, mkdir, readFile, readdir, realpath, rename, writeFile } from "no
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { JobStartResult } from "./job.js";
 import { verifyJobPiSession } from "./job-session.js";
+import { parseAuthorQuestion, parseAuthorAnswer, authorQuestionDirection, authorQuestionKind,
+  authorQuestionOptions, type AuthorQuestion, type AuthorQuestionAnswer,
+  type AuthorQuestionOption } from "./author-question.js";
 
-export interface SpecialistChoiceOption {
-  id: string;
-  title: string;
-  approach: string;
-  benefits: string;
-  tradeoffs: string;
-}
-export interface SpecialistChoiceQuestion {
-  /** Omitted in existing persisted multi-alternative receipts. */
-  kind?: "free-text" | "yes-no" | "alternatives";
-  question: string;
-  options?: SpecialistChoiceOption[];
-  recommendedId?: string;
-  recommendationReason?: string;
-  context?: Array<{ path: string; line: number; description: string }>;
-}
-export function specialistChoiceKind(q: SpecialistChoiceQuestion) {
-  return q.kind ?? "alternatives";
-}
-export function specialistChoiceOptions(q: SpecialistChoiceQuestion): SpecialistChoiceOption[] {
-  if (specialistChoiceKind(q) === "yes-no") return [
-    { id: "yes", title: "Yes", approach: "", benefits: "", tradeoffs: "" },
-    { id: "no", title: "No", approach: "", benefits: "", tradeoffs: "" },
-  ];
-  return q.options ?? [];
-}
+export type SpecialistChoiceOption = AuthorQuestionOption;
+export type SpecialistChoiceQuestion = AuthorQuestion;
+export type SpecialistChoiceAnswer = AuthorQuestionAnswer;
+export const specialistChoiceKind = authorQuestionKind;
+export const specialistChoiceOptions = authorQuestionOptions;
+/** Project a persisted, authenticated receipt answer for its original specialist.
+ * Provenance fields stay on the receipt; only the validated response is projected. */
 export function authorChoiceDirection(q: SpecialistChoiceQuestion, answer: SpecialistChoiceAnswer): string {
-  if (answer.kind === "custom") return answer.text + (answer.note ? "\nAdditional guidance: " + answer.note : "");
-  const selected = specialistChoiceOptions(q).find(o => o.id === answer.optionId);
-  if (!selected) throw Error("Stored author answer no longer matches the exact options.");
-  return JSON.stringify({ id: selected.id, title: selected.title, approach: selected.approach }) +
-    (answer.note ? "\nAdditional guidance: " + answer.note : "");
+  if (answer.kind === "option")
+    return authorQuestionDirection(q, { kind: "option", optionId: answer.optionId, note: answer.note });
+  if (answer.kind === "custom")
+    return authorQuestionDirection(q, { kind: "custom", text: answer.text, note: answer.note });
+  throw Error("Unsupported persisted author answer.");
 }
-export type SpecialistChoiceAnswer =
-  | { kind: "option"; optionId: string; note: string }
-  | { kind: "custom"; text: string; note: string };
 export interface SpecialistChoiceReceipt {
   version: 1;
   id: string; jobId: string; threadId: string; workItem: string;
@@ -69,61 +50,12 @@ function git(job: JobStartResult, ...args: string[]) {
 /** Only allow self-contained, meaningful alternatives, not a generic failure
  * converted into a fake author question. Enforced for every specialist. */
 export function parseSpecialistChoice(value: unknown): SpecialistChoiceQuestion {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid author-choice request.");
-  const q = value as Record<string, unknown>;
-  const kind = q.kind ?? "alternatives";
-  if (!["free-text", "yes-no", "alternatives"].includes(String(kind)) ||
-      typeof q.question !== "string" || q.question.trim().length < 10 || q.question.length > 1500 ||
-      Object.keys(q).some(key => !["kind", "question", "options", "recommendedId",
-        "recommendationReason", "context"].includes(key)))
-    throw Error("Invalid bounded author question.");
-  if (q.context !== undefined && (!Array.isArray(q.context) || q.context.length > 8 ||
-      q.context.some(ref => !ref || typeof ref !== "object" ||
-        Object.keys(ref).sort().join(",") !== "description,line,path" ||
-        typeof ref.path !== "string" ||
-        !/^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/.test(ref.path) ||
-        !Number.isSafeInteger(ref.line) || ref.line < 1 || ref.line > 100000 ||
-        typeof ref.description !== "string" || !ref.description.trim() || ref.description.length > 400)))
-    throw Error("Author choice context references must be bounded canonical Story locations.");
-  if (kind === "free-text" && (q.options !== undefined ||
-      q.recommendedId !== undefined || q.recommendationReason !== undefined))
-    throw Error("A free-text question cannot force suggested alternatives.");
-  if (kind === "yes-no" && (q.options !== undefined ||
-      q.recommendedId !== undefined && !["yes", "no"].includes(String(q.recommendedId))))
-    throw Error("A Yes/No question has fixed Yes/No/Other choices.");
-  if (kind !== "alternatives") {
-    if (q.recommendationReason !== undefined &&
-        (typeof q.recommendationReason !== "string" ||
-          !q.recommendationReason.trim() || q.recommendationReason.length > 1200))
-      throw Error("Invalid author-choice recommendation.");
-    return { kind: kind as "free-text" | "yes-no", question: q.question,
-      ...(q.recommendedId !== undefined ? { recommendedId: q.recommendedId as string } : {}),
-      ...(q.recommendationReason !== undefined ? { recommendationReason: q.recommendationReason as string } : {}),
-      ...(q.context !== undefined ? { context: q.context as SpecialistChoiceQuestion["context"] } : {}) };
-  }
-  if (typeof q.recommendationReason !== "string" || q.recommendationReason.trim().length < 15 ||
-      q.recommendationReason.length > 1200 || typeof q.recommendedId !== "string" ||
-      !Array.isArray(q.options) || q.options.length < 2 || q.options.length > 4)
-    throw Error("An author choice requires 2–4 explained alternatives and one reasoned recommendation.");
-  const ids = new Set<string>();
-  const options: SpecialistChoiceOption[] = q.options.map((raw: unknown) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw Error("Invalid author-choice alternative.");
-    const o = raw as Record<string, unknown>;
-    if (Object.keys(o).sort().join(",") !== "approach,benefits,id,title,tradeoffs" ||
-        typeof o.id !== "string" || !ID.test(o.id) || o.id.length > 40 || ids.has(o.id) ||
-        ["title", "approach", "benefits", "tradeoffs"].some(k =>
-          typeof o[k] !== "string" || !(o[k] as string).trim() ||
-          (o[k] as string).length > (k === "title" ? 160 : 700)))
-      throw Error("Author alternatives need unique IDs, an approach, benefits and trade-offs.");
-    ids.add(o.id);
-    return { id: o.id, title: o.title as string, approach: o.approach as string,
-      benefits: o.benefits as string, tradeoffs: o.tradeoffs as string };
-  });
-  if (!ids.has(q.recommendedId)) throw Error("Recommended solution must be one of the offered alternatives.");
-  return { ...(q.kind !== undefined ? { kind: "alternatives" as const } : {}),
-    question: q.question, options, recommendedId: q.recommendedId as string,
-    recommendationReason: q.recommendationReason as string,
-    ...(q.context !== undefined ? { context: q.context as SpecialistChoiceQuestion["context"] } : {}) };
+  const question = parseAuthorQuestion(value);
+  // The existing specialist has a bounded single response with up to four
+  // alternatives. The shared contract allows concise, optional detail.
+  if (specialistChoiceKind(question) === "alternatives" && question.options!.length > 4)
+    throw Error("Specialist author choice requires 2–4 alternatives.");
+  return question;
 }
 /** Recover a structured author request even when Pi formats the final JSON
  * across lines or in a Markdown code fence. Never parse tool output or allow
@@ -281,17 +213,15 @@ async function safeRead(job: JobStartResult, id: string) {
     throw Error("Specialist-choice receipt is inconsistent or modified.");
   if (r.phase === "awaiting-author" && r.answer)
     throw Error("A pending author question cannot contain a prefilled answer.");
-  if (r.phase !== "awaiting-author" && (!r.answer ||
-      !/^user:[A-Za-z0-9_-]{1,128}$/.test(r.answer.principal) ||
-      typeof r.answer.submittedAt !== "string" ||
-      !/^\d{4}-\d\d-\d\dT/.test(r.answer.submittedAt) ||
-      typeof r.answer.note !== "string" || r.answer.note.length > 1000 ||
-      (r.answer.kind === "option"
-        ? specialistChoiceKind(r.question) === "free-text" ||
-          !specialistChoiceOptions(r.question).some(o =>
-            o.id === (r.answer as { optionId: string }).optionId)
-        : r.answer.kind !== "custom" || !r.answer.text?.trim() || r.answer.text.length > 4000)))
-    throw Error("A resolved choice has no valid authenticated, source-bound answer.");
+  if (r.phase !== "awaiting-author") {
+    if (!r.answer ||
+        !/^user:[A-Za-z0-9_-]{1,128}$/.test(r.answer.principal) ||
+        typeof r.answer.submittedAt !== "string" ||
+        !/^\d{4}-\d\d-\d\dT/.test(r.answer.submittedAt))
+      throw Error("A resolved choice has no valid authenticated, source-bound answer.");
+    const { principal: _principal, submittedAt: _submittedAt, ...authorAnswer } = r.answer;
+    parseAuthorAnswer(r.question, authorAnswer);
+  }
   return r;
 }
 async function save(job: JobStartResult, r: SpecialistChoiceReceipt) {
@@ -383,17 +313,10 @@ export async function answerSpecialistChoice(job: JobStartResult, id: string, pr
   answer: SpecialistChoiceAnswer, principal: string) {
   if (!/^user:[A-Za-z0-9_-]{1,128}$/.test(principal)) throw Error("Author identity required.");
   const r = await verifySpecialistChoice(job, id, "awaiting-author");
-  if (r.proposalSha256 !== proposalSha256 || !answer || !["option", "custom"].includes(answer.kind) ||
-      typeof answer.note !== "string" || answer.note.length > 1000 ||
-      (answer.kind === "option" && (specialistChoiceKind(r.question) === "free-text" ||
-        !specialistChoiceOptions(r.question).some(o => o.id === answer.optionId) ||
-        Object.keys(answer).sort().join(",") !== "kind,note,optionId")) ||
-      (answer.kind === "custom" && (typeof answer.text !== "string" ||
-        !answer.text.trim() || answer.text.length > 4000 ||
-        Object.keys(answer).sort().join(",") !== "kind,note,text")))
-    throw Error("Invalid or stale author choice.");
+  if (r.proposalSha256 !== proposalSha256) throw Error("Invalid or stale author choice.");
+  const validAnswer = parseAuthorAnswer(r.question, answer);
   const updated: SpecialistChoiceReceipt = { ...r, phase: "answered",
-    answer: { ...answer, principal, submittedAt: new Date().toISOString() } };
+    answer: { ...validAnswer, principal, submittedAt: new Date().toISOString() } };
   await save(job, updated);
   return updated;
 }

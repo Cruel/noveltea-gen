@@ -152,12 +152,9 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     // A specialist-initiated creative decision uses the same owner-scoped
     // /author endpoint, but never serves as a protected-edit approval.
     const options = [
-      { id: 'known-canon', title: 'Follow established characterization',
-        approach: 'Expand the existing arc without changing its protagonist.',
-        benefits: 'Preserves narrative continuity', tradeoffs: 'Fewer dramatic changes' },
+      { id: 'known-canon', title: 'Follow established characterization' },
       { id: 'new-conflict', title: 'Propose additional conflict',
-        approach: 'Introduce a conflict that needs separate canonical review.',
-        benefits: 'Adds dramatic potential', tradeoffs: 'Requires more editorial review' },
+        description: 'Requires a separate protected-canon review.' },
     ]
     const question = {
       question: 'Should the character follow established canon or introduce a consequential new conflict?',
@@ -192,6 +189,9 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await api('POST', { ...payload, optionId: 'invalid' })).status, 409)
     assert.equal((await api('POST', { ...payload, principal: 'user:forged' })).status, 409)
     assert.equal((await api('POST', { ...payload, proposalSha256: 'f'.repeat(64) })).status, 409)
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).phase, 'awaiting-author',
+      'Malformed and foreign submissions cannot advance or alter the durable question')
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).answer, undefined)
     const answered = await api('POST', payload)
     assert.equal(answered.status, 200, answered.data.error)
     assert.equal(answered.data.choice?.phase, 'answered')
@@ -210,9 +210,12 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     }))
     const custom = await api('POST', { action: 'choice', id: choice.id,
       proposalSha256: choice.proposalSha256, kind: 'custom',
-      text: 'Follow existing canon but include a distinct consequence for both investigation paths.' })
+      text: '  Follow existing canon but include a distinct consequence for both investigation paths.  ' })
     assert.equal(custom.status, 200, custom.data.error)
-    assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'custom')
+    const savedCustom = (await inspectSpecialistChoice(job, choice.id)).answer
+    assert.equal(savedCustom?.kind, 'custom')
+    assert.equal(savedCustom?.kind === 'custom' && savedCustom.text,
+      '  Follow existing canon but include a distinct consequence for both investigation paths.  ')
 
     // The same authenticated endpoint accepts free-text questions from a
     // different specialist without a synthetic 2–4-choice requirement.

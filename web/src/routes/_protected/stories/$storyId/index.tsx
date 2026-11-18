@@ -38,9 +38,12 @@ import type { StoryThread } from '@/lib/threads.server'
 import type { StoryCollection } from '@/persistence/collection-contracts'
 
 export const Route = createFileRoute('/_protected/stories/$storyId/')({
-  validateSearch: (search: Record<string, unknown>): { thread?: string; archived?: boolean } => ({
+  validateSearch: (search: Record<string, unknown>): { thread?: string; archived?: boolean; context?: string } => ({
     ...(typeof search.thread === 'string' ? { thread: search.thread } : {}),
     ...(search.archived === true || search.archived === 'true' ? { archived: true } : {}),
+    ...(typeof search.context === 'string' &&
+      /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/.test(search.context)
+      ? { context: search.context } : {}),
   }),
   loader: ({ context, params }) =>
     context.queryClient.ensureQueryData(storyNavigationQuery(params.storyId)),
@@ -71,7 +74,7 @@ function TitleEditor({ title, label, onSubmit, onCancel }: {
 
 function StoryWorkspace() {
   const { storyId } = Route.useParams()
-  const { thread: selectedThreadId, archived } = Route.useSearch()
+  const { thread: selectedThreadId, archived, context: contextPath } = Route.useSearch()
   const archivedView = archived === true
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -238,6 +241,18 @@ function StoryWorkspace() {
       explorerIndex.records.find(record => record.type === 'creative-direction')?.id ??
       explorerIndex.records[0]?.id ?? null)
   }, [explorerIndex, explorerThreadId, storyId])
+  useEffect(() => {
+    if (!contextPath || !explorerIndex) return
+    const target = explorerIndex.records.find(record => record.path === contextPath)
+    if (!target) return
+    setSelectedRecordId(target.id)
+    setInspectorOpen(true)
+    changeMobileView('outline')
+    // Consume the navigation hint so later manual record selection is not reset.
+    void navigate({ to: '/stories/$storyId', params: { storyId },
+      search: { ...(selectedThreadId ? { thread: selectedThreadId } : {}),
+        ...(archived ? { archived: true } : {}) }, replace: true })
+  }, [contextPath, explorerIndex, storyId, selectedThreadId, archived, navigate])
   useEffect(() => {
     if (explorerThreadId && selectedRecordId && explorerIndex?.records.some(
       record => record.id === selectedRecordId))
