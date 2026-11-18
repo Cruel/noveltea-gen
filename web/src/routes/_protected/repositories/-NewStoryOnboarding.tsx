@@ -4,10 +4,11 @@ import { Input } from '@/components/ui/input'
 import { useEffect, useState } from 'react'
 import type { OnboardingDraft } from '../../../lib/onboarding.server'
 import { PiStoryDiscovery, type PiProposal, type PiApproval, type PiModel } from './-PiStoryDiscovery'
-import { inspectRepositoryInitialization, initializeRepositoryStory,
+import { inspectRepositoryInitialization, tryInitializeRepositoryStory,
   prepareRepositoryJob, loadOnboardingWorkspace, saveOnboardingWorkspace,
   reviewOnboardingWorkspace } from '../../../lib/story-workflows.functions'
 import { saveGenerationConfiguration } from '../../../lib/generation.functions'
+import { titleForInitialization } from '../../../lib/story-initialization-contract'
 
 const rounds = [
   { title: '1. Story concept', fields: [
@@ -150,24 +151,34 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       }
       setApproved(proposal)
       const foundation = proposal.foundation
+      const title = titleForInitialization(discoveryMode === 'pi' ? 'guided' : 'manual',
+        draft.title, foundation.title)
       const discoveryApproval = discoveryMode === 'pi' ? { discoveryApproval: piReference } : {}
       const jobId = crypto.randomUUID()
       let record: Created
-      if (provider === 'github') {
+      const initialize = async (input: object) => {
         remoteAttempted = true
-        const result = JSON.parse(await initializeRepositoryStory({ data: { provider: 'github',
-          json: JSON.stringify({ repositoryId, directory: workspace, title: draft.title.trim(), jobId,
-            commit: verified.commit, foundation, ...discoveryApproval }),
-        } })) as { story: Created['story']; job: { id: string; headSha: string; branch: string }; mode: string }
+        const result = await tryInitializeRepositoryStory({ data: { provider,
+          json: JSON.stringify(input),
+        } })
+        if (!result.ok) {
+          remoteAttempted = result.writeOutcome === 'unknown'
+          throw new Error(result.message)
+        }
+        return JSON.parse(result.body)
+      }
+      if (provider === 'github') {
+        const result = await initialize({ repositoryId, directory: workspace, title, jobId,
+          commit: verified.commit, foundation, ...discoveryApproval }) as {
+            story: Created['story']; job: { id: string; headSha: string; branch: string }; mode: string }
         record = { story: result.story, jobId: result.job.id, headSha: result.job.headSha,
           branch: result.job.branch, commit: result.job.headSha, mode: result.mode }
         setJobReady(true)
       } else {
-        remoteAttempted = true
-        const result = JSON.parse(await initializeRepositoryStory({ data: { provider: 'gitlab',
-          json: JSON.stringify({ repositoryId, directory: workspace, expectedCommit: verified.commit,
-            ...(verified.empty ? { initialBranch } : {}), foundation, ...discoveryApproval }),
-        } })) as { story: Created['story']; commit: string; branch: string; mode: string }
+        const result = await initialize({ repositoryId, directory: workspace,
+          expectedCommit: verified.commit,
+          ...(verified.empty ? { initialBranch } : {}), foundation, ...discoveryApproval }) as {
+            story: Created['story']; commit: string; branch: string; mode: string }
         record = { story: result.story, jobId, headSha: result.commit,
           branch: result.branch, commit: result.commit, mode: result.mode }
       }

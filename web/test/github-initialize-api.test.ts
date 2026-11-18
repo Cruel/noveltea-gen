@@ -129,7 +129,10 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
     assert.equal((await post({ ...base, directory: '.private' })).status, 400)
     assert.equal((await post({ ...base, directory: 'invalid,name' })).status, 400)
     assert.equal((await post({ ...base, directory: 'invalid=name' })).status, 400)
-    assert.equal((await post({ ...base, title: '' })).status, 400)
+    const invalidTitle = await post({ ...base, title: '' })
+    assert.equal(invalidTitle.status, 400)
+    assert.equal(invalidTitle.headers.get('x-noveltea-write-outcome'), 'not-attempted',
+      'a rejected title must never latch the wizard into an unknown-write state')
     moved = true
     assert.equal((await post(base)).status, 409)
     moved = false

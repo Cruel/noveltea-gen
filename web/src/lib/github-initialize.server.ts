@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { markWriteOutcome, validStoryTitle } from './story-initialization-contract'
 import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
@@ -18,8 +19,9 @@ export async function githubInitializationRequest(
 ): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL) {
-    return json({ error: 'Cross-origin write refused' }, 403)
+    return markWriteOutcome(json({ error: 'Cross-origin write refused' }, 403), false)
   }
+  let mutationStarted = false
   try {
     const candidateRepositoryId = request.method === 'GET' ? new URL(request.url).searchParams.get('repositoryId') :
       (await request.clone().json().catch(() => null))?.repositoryId
@@ -50,8 +52,7 @@ export async function githubInitializationRequest(
 
     await store.assertReady()
     const title = input?.title
-    if (typeof title !== 'string' || !title.trim() || title.trim().length > 120 ||
-        /[\x00-\x1f\x7f]/.test(title)) {
+    if (!validStoryTitle(title)) {
       throw new GithubError(400, 'Story title must be 1–120 printable characters.')
     }
     if (typeof input.jobId !== 'string' || !UUID.test(input.jobId)) {
@@ -111,6 +112,7 @@ export async function githubInitializationRequest(
     let headSha: string
     let branch: string | null = null
     if (inspected.mode === 'bootstrap') {
+      mutationStarted = true
       const created = await bootstrapEmptyGithubRepository({
         ...common, defaultBranch: inspected.defaultBranch, foundationMarkdown: content,
       })
@@ -123,6 +125,7 @@ export async function githubInitializationRequest(
       headSha = result.headSha
       branch = result.branch
     } else {
+      mutationStarted = true
       const created = await initializeStoryBranch({
         ...common, commit: inspected.commit, jobId: input.jobId, foundationMarkdown: content,
         verifiedSizeBytes: inspected.sizeBytes, verifiedBlobCount: inspected.blobCount,
@@ -142,7 +145,7 @@ export async function githubInitializationRequest(
       job: { id: input.jobId, baseSha, headSha, branch, status: 'paused' },
       mode: inspected.mode, published: inspected.mode === 'bootstrap' })
   } catch (error) {
-    return errorResponse(error instanceof GitCacheError || error instanceof StoryBootstrapError
-      ? new GithubError(error.status, error.message) : error)
+    return markWriteOutcome(errorResponse(error instanceof GitCacheError || error instanceof StoryBootstrapError
+      ? new GithubError(error.status, error.message) : error), mutationStarted)
   }
 }

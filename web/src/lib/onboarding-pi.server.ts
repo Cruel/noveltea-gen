@@ -9,6 +9,7 @@ import { onboardingWorkspace } from './onboarding.server'
 import { createUserPiRuntime, assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
 import { createSkillSnapshot, openSkillSnapshot } from '../../../src/snapshot'
 import { candidate, validateNewStory } from './story-foundation.server'
+import { validStoryTitle } from './story-initialization-contract'
 import { parseGenerationContract } from '../../../src/generation'
 import { parseStoryPlanning, type StoryPlanning } from '../../../src/story-planning'
 import { authorQuestionDirection, authorQuestionOptions } from '../../../src/author-question'
@@ -87,6 +88,7 @@ function expectedProposal(value: unknown, authorMessages: string[], newStoryChat
     throw new Error('Missing proposed foundation or task')
   }
   const input = output.foundation as Record<string, unknown>
+  if (!validStoryTitle(input.title)) throw new Error('Invalid proposed Story title')
   const fields = ['id', 'title', 'premise', 'central_conflict', 'genre', 'tone', 'player_experience', 'scope', 'body']
   if (fields.some(field => typeof input[field] !== 'string' || !(input[field] as string).trim() ||
       (input[field] as string).length > (field === 'body' ? 12000 : field === 'title' ? 120 : 4000)) ||

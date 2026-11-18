@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { markWriteOutcome, validStoryTitle } from './story-initialization-contract'
 import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { StudioSchemaError } from '../db/schema-error'
@@ -83,8 +84,9 @@ export async function gitlabInitializeRequest(
 ): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'POST') return reply({ error: 'Method not allowed' }, 405)
   if (request.method === 'POST' && request.headers.get('origin') !== origin) {
-    return reply({ error: 'Cross-origin write refused' }, 403)
+    return markWriteOutcome(reply({ error: 'Cross-origin write refused' }, 403), false)
   }
+  let mutationStarted = false
   try {
     const candidateRepositoryId = request.method === 'GET' ? new URL(request.url).searchParams.get('repositoryId') :
       (await request.clone().json().catch(() => null))?.repositoryId
@@ -137,6 +139,8 @@ export async function gitlabInitializeRequest(
       }
     }
     const { file, title } = candidate(input.foundation)
+    if (!validStoryTitle(title))
+      throw new ProviderFailure(400, 'Story title must be 1–120 printable characters.')
     // Validate *before* any GitLab mutation. If unavailable, reject safely.
     await validateNewStory(file)
     let baseSha: string | null = null
@@ -179,6 +183,7 @@ export async function gitlabInitializeRequest(
     }
     const filePath = path ? path + '/creative-direction/foundation.md' : 'creative-direction/foundation.md'
     const action = { action: 'create', file_path: filePath, content: file }
+    mutationStarted = true
     const created = await createCommit(current.token, projectId, {
       branch, ...(baseSha ? { start_sha: baseSha } : {}),
       commit_message: 'Initialize NovelTea Story: ' + title.slice(0, 100),
@@ -215,7 +220,8 @@ export async function gitlabInitializeRequest(
     return reply({ story, branch, mode: empty ? 'initial-default' : 'review-branch',
       baseSha, commit: created.id })
   } catch (error) {
-    if (error instanceof StudioSchemaError) return reply({ error: error.message }, 503)
-    return failure(error instanceof StoryBootstrapError ? new ProviderFailure(error.status, error.message) : error)
+    const response = error instanceof StudioSchemaError ? reply({ error: error.message }, 503)
+      : failure(error instanceof StoryBootstrapError ? new ProviderFailure(error.status, error.message) : error)
+    return markWriteOutcome(response, mutationStarted)
   }
 }

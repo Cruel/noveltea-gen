@@ -11,6 +11,7 @@ import { gitlabJobRequest } from './gitlab-jobs.server'
 import { onboardingRequest } from './onboarding.server'
 import { onboardingPiRequest } from './onboarding-pi.server'
 import { onboardingQuery } from './onboarding-query'
+import { providerWriteOutcome } from './story-initialization-contract'
 
 type Provider = 'github' | 'gitlab'
 type StoryRead = {
@@ -82,6 +83,23 @@ export const initializeRepositoryStory = createServerFn({ method: 'POST' })
   .validator((data: Submission) => data)
   .handler(async ({ data }) => unwrap(await providerInitialization(data.provider,
     request('/api/' + data.provider + '/initialize', 'POST', data.json))))
+
+/** Unlike ordinary RPCs this preserves an authoritative no-write rejection.
+ * An exception without a provider reply remains an unknown remote outcome. */
+export const tryInitializeRepositoryStory = createServerFn({ method: 'POST' })
+  .validator((data: Submission) => data)
+  .handler(async ({ data }) => {
+    const response = await providerInitialization(data.provider,
+      request('/api/' + data.provider + '/initialize', 'POST', data.json))
+    const body = await response.text()
+    if (response.ok) return { ok: true as const, body }
+    let message = 'Story initialization failed.'
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown }
+      if (typeof parsed.error === 'string') message = parsed.error
+    } catch { /* Keep generic message */ }
+    return { ok: false as const, message, writeOutcome: providerWriteOutcome(response) }
+  })
 
 export const prepareRepositoryJob = createServerFn({ method: 'POST' })
   .validator((data: Submission) => data)

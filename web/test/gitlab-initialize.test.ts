@@ -165,6 +165,10 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
       revision: 1, digest: 'f'.repeat(64),
     } })).status, 409, 'GitLab must reject an unbound model proposal before any commit')
     assert.equal((await post({ ...payload(), foundation: { ...foundation, id: 'BAD' } })).status, 400)
+    const invalidTitle = await post({ ...payload(), foundation: { ...foundation, title: '' } })
+    assert.equal(invalidTitle.status, 400)
+    assert.equal(invalidTitle.headers.get('x-noveltea-write-outcome'), 'not-attempted',
+      'a rejected proposed title cannot indicate an unknown GitLab write')
     assert.equal((await post(payload(sha('f')))).status, 409)
     filesAlreadyExist = true
     assert.equal((await post(payload())).status, 409)
