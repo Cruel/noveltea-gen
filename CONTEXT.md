@@ -85,8 +85,23 @@ A recoverable Story revision that passed mandatory deterministic verification. I
 **Reviewed checkpoint**:
 A validated Story revision whose relevant changes and assignments have passed the required independent semantic review. Review may be selectively triggered or grouped under the controller's review policy.
 
+**Author Question**:
+A bounded request for an author's direction, with defined response options or an open-ended answer and optional recommendations. It can arise during Story discovery or ongoing Story work; answering it is distinct from granting protected-decision approval.
+
+**Question Set**:
+One or more related Author Questions presented for a single author response round. It is completed only when each question has an explicit answer or authorized Studio delegation; unfinished responses remain drafts until then.
+
 **Author choice**:
-A durable question proposed by an agent and answered through binary options, multiple alternatives, or free text; structured options always permit a custom Other response. The trusted controller binds the answer to the exact waiting work, without bypassing protected-decision authorization.
+An Author Question raised by a specialist during Story work and bound to the exact waiting assignment. Its answer can guide that work but cannot bypass protected-decision authorization.
+
+**Studio delegation**:
+An author-submitted response permitting NovelTea Studio to decide a bounded Author Question on the author's behalf, only where the workflow allows it. A recommendation, a provisional default, or delegation is never approval to change protected canon.
+
+**Studio decision**:
+A choice made by NovelTea Studio under an authorized delegation, recorded separately from that delegation and subject to the applicable Story validation and review rules.
+
+**Planning interpretation**:
+A structured Story planning value inferred from an author's exact response or an authorized Studio delegation. Its source remains identifiable, and author approval of the resulting Creative Direction confirms the proposed interpretation without rewriting the original words.
 
 **Author review**:
 An author's inspection of changes made in a Thread, including Story diffs and affected records. It is distinct from automatic specialist review and from external publication.

@@ -1,0 +1,7 @@
+# Shared author questioning with workflow-specific authority
+
+Status: accepted; incorporated into the published Author Question infrastructure specification (#182).
+
+NovelTea Studio will use one bounded, structured **Author Question / Question Set** contract and shared input controls for baseline Story discovery, collaborative generation, and future clarification workflows. One-question specialist pauses are Question Sets of size one. The shared layer owns supported response types, option/recommendation presentation, provisional default delegation, draft and answer semantics, and strict validation; trusted workflow controllers decide whether Studio delegation is allowed. Submitting an answer or delegation is **not** approval to alter protected Creative Decisions. Reuse existing specialist question controls and parsers rather than building a separate discovery questionnaire engine.
+
+The shared lifecycle does **not** replace specialist Job/checkpoint receipts, source-bound verification, writer locks, or the exact Foundation approval gate. Workflow-specific adapters preserve those authorities, accepted answers, and safe continuation/recovery. This separates a reusable author-interaction contract from execution authorization: making the specialist receipt schema universally authoritative would entangle discovery with Jobs, while building independent discovery controls would duplicate UI, validation, and answer semantics. Detailed behavior and acceptance cases are in [the shared questioning design](../author-question-infrastructure-design.md).
