@@ -120,18 +120,18 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
     <p>Describe your idea. Studio will ask relevant questions and suggest a Creative Direction
       for your review. No Story files are written until you approve it.</p>
     {!session && <>
-      <label>Your Story idea
+      <label className="story-onboarding-field">Your Story idea
         <Textarea rows={5} maxLength={4000} disabled={busy} value={brief}
           onChange={e => setBrief(e.target.value)} placeholder="A one-sentence premise is enough." />
       </label>
-      <label>Model
+      <label className="story-onboarding-field">Model
         <StudioSelect aria-label="Connected model" value={selection} disabled={busy}
           onValueChange={value => { setSelection(value); setThinking('') }}
           options={[{ value: '', label: 'Select model' },
             ...models.map(m => ({ value: m.provider + '/' + m.id,
               label: m.provider + ' / ' + m.id }))]} />
       </label>
-      {selected?.reasoning && <label>Reasoning effort
+      {selected?.reasoning && <label className="story-onboarding-field">Reasoning effort
         <StudioSelect aria-label="Reasoning effort" value={thinking} disabled={busy}
           onValueChange={value => setThinking(value as typeof thinking)}
           options={[{ value: '', label: 'Default' }, { value: 'low', label: 'Low' },
@@ -196,7 +196,7 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
         <p><strong>Next generation task:</strong> {session.proposal.task}</p>
         {session.phase === 'proposed'
           ? <>
-            <label>Corrections or additional creative direction
+            <label className="story-onboarding-field">Corrections or additional creative direction
               <Textarea rows={4} maxLength={4000} value={answer} disabled={disabled}
                 onChange={e => setAnswer(e.target.value)} />
             </label>

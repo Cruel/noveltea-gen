@@ -85,7 +85,8 @@ li.thread-chat-message > p { margin: 0; color: var(--foreground); }
 .generation-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1rem; }
 .story-onboarding { margin-top: 1rem; }
 .story-onboarding h3 { font-size: .95rem; margin: 1rem 0; }
-.story-onboarding label { display: grid; gap: .35rem; margin: .7rem 0; }
+/* Only onboarding field labels are stacked; question choices must remain inline. */
+.story-onboarding .story-onboarding-field { display: grid; gap: .35rem; margin: .7rem 0; }
 .story-onboarding [data-slot=input], .story-onboarding [data-slot=textarea] { display: block; width: 100%; }
 .story-onboarding textarea { resize: vertical; }
 .story-onboarding .actions { justify-content: flex-start; margin: .9rem 0; }

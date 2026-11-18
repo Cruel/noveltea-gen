@@ -193,7 +193,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   return <section aria-label="New Story onboarding" className="story-onboarding">
     <h2>Create a new Story</h2>
     <p>Choose a folder inside this repository, then develop and review its Creative Direction.</p>
-    <label>Folder in this repository
+    <label className="story-onboarding-field">Folder in this repository
       <Input value={workspaceInput} disabled={busy || workspace !== null}
         onChange={e => setWorkspaceInput(e.target.value)} placeholder="e.g. new-test" />
     </label>
@@ -223,7 +223,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
             setPiApproved(proposal); setPiApproval(reference); setPiModel(model)
           }} />
         {piApproved && piApproval && <div className="actions">
-          {provider === 'gitlab' && verified?.empty && <label>Initial default branch
+          {provider === 'gitlab' && verified?.empty && <label className="story-onboarding-field">Initial default branch
             <Input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} />
           </label>}
           <Button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create(piApproved, piApproval)}>
@@ -233,7 +233,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       </>}
       {!created && discoveryMode === 'structured' && step < rounds.length && <div>
         <h3>{rounds[step]!.title}</h3>
-        {rounds[step]!.fields.map(([name, question]) => <label key={name}>{question}
+        {rounds[step]!.fields.map(([name, question]) => <label key={name} className="story-onboarding-field">{question}
           {name === 'body' || name === 'constraints' || name === 'premise' ||
           name === 'central_conflict' || name === 'scope' || name === 'player_experience' ||
           name === 'task' || name === 'decision'
@@ -261,7 +261,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         <p>Initial contract: entire Story, composition depth; {initialContract().constraints.length} constraints.
           Subsequent Story revisions can be requested directly in Chat.</p>
         <p>Commit target: <code>/{target}/creative-direction/foundation.md</code></p>
-        {provider === 'gitlab' && verified?.empty && <label>Initial default branch
+        {provider === 'gitlab' && verified?.empty && <label className="story-onboarding-field">Initial default branch
           <Input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} /></label>}
         <div className="actions">
           <Button type="button" disabled={busy} onClick={() => setStep(2)}>Revise answers</Button>

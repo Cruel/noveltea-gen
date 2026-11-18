@@ -10,7 +10,7 @@ export function AuthorQuestionContext({ context, contextHref }: {
 }) {
   if (!context?.length) return null
   return <details className="text-xs text-muted-foreground">
-    <summary>Relevant Story context</summary>
+    <summary className="cursor-pointer">Relevant Story context</summary>
     {context.map(ref => {
       const href = contextHref?.(ref.path)
       return <p key={ref.path + ':' + ref.line}>
@@ -25,20 +25,24 @@ export function AuthorQuestionContext({ context, contextHref }: {
 function OptionDetails({ option, question }: {
   option: AuthorQuestionOption; question: AuthorQuestion
 }) {
-  return <>
-    {(option.description || option.approach) &&
-      <p className="mt-1 text-sm">{option.description ?? option.approach}</p>}
-    {!!(option.benefits || option.tradeoffs ||
-      option.id === question.recommendedId && question.recommendationReason) &&
-      <details className="mt-1 text-xs text-muted-foreground">
-        <summary>Benefits and trade-offs</summary>
-        {option.benefits && <p><strong>Benefits:</strong> {option.benefits}</p>}
-        {option.tradeoffs && <p><strong>Trade-offs:</strong> {option.tradeoffs}</p>}
-        {option.id === question.recommendedId && question.recommendationReason &&
-          <p><strong>Why recommended:</strong> {question.recommendationReason}</p>}
-      </details>}
-  </>
+  const description = option.description ?? option.approach
+  const rationale = option.id === question.recommendedId && question.recommendationReason
+  if (!description && !option.benefits && !option.tradeoffs && !rationale) return null
+  return <details className="ml-6 text-xs text-muted-foreground">
+    <summary className="w-fit cursor-pointer select-none">
+      {option.benefits || option.tradeoffs || rationale ? 'Benefits and trade-offs' : 'Details'}
+    </summary>
+    <div className="grid gap-1 pt-1">
+      {description && <p className="m-0">{description}</p>}
+      {option.benefits && <p className="m-0"><strong>Benefits:</strong> {option.benefits}</p>}
+      {option.tradeoffs && <p className="m-0"><strong>Trade-offs:</strong> {option.tradeoffs}</p>}
+      {rationale && <p className="m-0"><strong>Why recommended:</strong> {question.recommendationReason}</p>}
+    </div>
+  </details>
 }
+
+const choiceLabel = 'flex min-h-9 min-w-0 cursor-pointer items-center gap-2 rounded-md border border-border/40 px-2 py-1.5 text-sm hover:bg-muted/30'
+const choiceGrid = 'grid grid-cols-1 gap-1 sm:grid-cols-2'
 
 /** Pure controlled inputs. Delegation permission is provided by the controller,
  * not taken from the question's agent-supplied allowStudioDecision request. */
@@ -61,95 +65,98 @@ export function AuthorQuestionControls({ question, questionId, disabled, delegat
   const delegated = delegationAllowed && selection === '__delegate__'
   const custom = selection === '__custom__'
   const id = 'choice-' + questionId
-  return <div className="space-y-2" aria-label="Author question">
-    <p id={id + '-prompt'}>{question.question}</p>
+  return <div className="grid min-w-0 gap-1.5 text-sm" aria-label="Author question">
+    <p id={id + '-prompt'} className="m-0 font-medium text-foreground">{question.question}</p>
     <AuthorQuestionContext context={question.context} contextHref={contextHref} />
-    {kind === 'free-text' ? <fieldset disabled={disabled} className="space-y-2">
-      {delegationAllowed && <div className="space-y-2" role="group" aria-label="Who decides">
-        <label className="flex items-center gap-2 rounded-md border border-border/50 p-2">
+    {kind === 'free-text' ? <fieldset disabled={disabled} className="grid min-w-0 gap-1.5">
+      {delegationAllowed && <div className={choiceGrid} role="group" aria-label="Who decides">
+        <label data-compact-choice="" className={choiceLabel}>
           <input type="radio" name={id + '-delegation'} checked={!!delegated}
             onChange={() => onSelect('__delegate__')} />
-          <strong>Let NovelTea Studio decide</strong>
+          <span>Let NovelTea Studio decide</span>
         </label>
-        <label className="flex items-center gap-2">
+        <label data-compact-choice="" className={choiceLabel}>
           <input type="radio" name={id + '-delegation'} checked={!delegated}
             onChange={() => onSelect('__answer__')} />
-          <strong>I'll answer</strong>
+          <span>I'll answer</span>
         </label>
       </div>}
-      {!delegated && <div>
-        <label htmlFor={'choice-free-text-' + questionId}>Your answer</label>
-        <Textarea id={'choice-free-text-' + questionId} rows={4} maxLength={4000}
+      {!delegated && <div className="grid gap-1">
+        <label htmlFor={'choice-free-text-' + questionId} className="text-xs">Your answer</label>
+        <Textarea id={'choice-free-text-' + questionId} rows={2} maxLength={4000}
           required value={customAnswer} placeholder={question.placeholder}
           onChange={e => onCustomAnswer(e.target.value)} />
       </div>}
-    </fieldset> : multiple ? <fieldset disabled={disabled} className="space-y-2">
-      <legend>Choose one or more compatible options, or provide your own</legend>
-      {delegationAllowed && <label className="flex items-center gap-2 rounded-md border border-border/50 p-2">
-        <input type="checkbox" checked={!!delegated}
-          onChange={e => onSelect(e.target.checked ? '__delegate__' : '')} />
-        <strong>Let NovelTea Studio decide</strong>
-      </label>}
-      {options.map(option => <div key={option.id}
-        className="rounded-md border border-border/50 p-2">
-        <label className="flex items-center gap-2">
-          <input type="checkbox" checked={!!selectedIds?.includes(option.id)}
-            onChange={e => onSelectedIds?.(e.target.checked
-              ? [...(selectedIds ?? []), option.id]
-              : (selectedIds ?? []).filter(id => id !== option.id))} />
-          <strong>{option.title}</strong>
-          {option.id === question.recommendedId &&
-            <span className="text-xs text-muted-foreground">Recommended</span>}
-        </label>
-        <OptionDetails option={option} question={question} />
-      </div>)}
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={!!multiCustom}
-          onChange={e => onMultiCustom?.(e.target.checked)} />
-        <strong>Other — my own direction</strong>
-      </label>
-      {!!multiCustom && <div>
-        <label htmlFor={'choice-custom-' + questionId}>Your own direction (required)</label>
-        <Textarea id={'choice-custom-' + questionId} rows={4} maxLength={4000}
-          required value={customAnswer} onChange={e => onCustomAnswer(e.target.value)}
-          placeholder="Describe your preferred answer." />
-      </div>}
-    </fieldset> : <fieldset disabled={disabled}>
-      <legend>{kind === 'yes-no' ? 'Choose Yes, No, or Other' :
-        'Choose an approach or provide your own'}</legend>
-      <RadioGroup disabled={disabled} aria-label="Author response options" value={selection}
-        onValueChange={onSelect}>
-        {delegationAllowed && <label className="flex items-center gap-2 rounded-md border border-border/50 p-2">
-          <RadioGroupItem value="__delegate__" aria-label="Let NovelTea Studio decide" />
-          <strong>Let NovelTea Studio decide</strong>
+    </fieldset> : multiple ? <fieldset disabled={disabled} className="min-w-0">
+      <legend className="sr-only">Choose one or more compatible options, or provide your own</legend>
+      <div className={choiceGrid}>
+        {delegationAllowed && <label data-compact-choice="" className={choiceLabel}>
+          <input type="checkbox" checked={!!delegated}
+            onChange={e => onSelect(e.target.checked ? '__delegate__' : '')} />
+          <span>Let NovelTea Studio decide</span>
         </label>}
-        {options.map(option => <div key={option.id}
-          className="mb-2 rounded-md border border-border/50 p-2">
-          <label className="flex items-center gap-2">
-            <RadioGroupItem value={option.id} aria-label={option.title} />
-            <strong>{option.title}</strong>
+        {options.map(option => <div key={option.id} data-compact-choice=""
+          className="min-w-0 rounded-md border border-border/40">
+          <label className="flex min-h-9 cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/30">
+            <input type="checkbox" checked={!!selectedIds?.includes(option.id)}
+              onChange={e => onSelectedIds?.(e.target.checked
+                ? [...(selectedIds ?? []), option.id]
+                : (selectedIds ?? []).filter(id => id !== option.id))} />
+            <span className="min-w-0">{option.title}</span>
             {option.id === question.recommendedId &&
-              <span className="text-xs text-muted-foreground">Recommended</span>}
+              <span className="ml-auto shrink-0 text-xs text-muted-foreground">Recommended</span>}
           </label>
           <OptionDetails option={option} question={question} />
         </div>)}
-        <label className="flex items-center gap-2">
+        <label data-compact-choice="" className={choiceLabel}>
+          <input type="checkbox" checked={!!multiCustom}
+            onChange={e => onMultiCustom?.(e.target.checked)} />
+          <span>Other — my own direction</span>
+        </label>
+      </div>
+      {!!multiCustom && <div className="mt-1 grid gap-1">
+        <label htmlFor={'choice-custom-' + questionId} className="text-xs">Your own direction (required)</label>
+        <Textarea id={'choice-custom-' + questionId} rows={2} maxLength={4000}
+          required value={customAnswer} onChange={e => onCustomAnswer(e.target.value)}
+          placeholder="Describe your preferred answer." />
+      </div>}
+    </fieldset> : <fieldset disabled={disabled} className="min-w-0">
+      <legend className="sr-only">{kind === 'yes-no' ? 'Choose Yes, No, or Other' :
+        'Choose an approach or provide your own'}</legend>
+      <RadioGroup disabled={disabled} aria-label="Author response options" value={selection}
+        onValueChange={onSelect} className={choiceGrid}>
+        {delegationAllowed && <label data-compact-choice="" className={choiceLabel}>
+          <RadioGroupItem value="__delegate__" aria-label="Let NovelTea Studio decide" />
+          <span>Let NovelTea Studio decide</span>
+        </label>}
+        {options.map(option => <div key={option.id} data-compact-choice=""
+          className="min-w-0 rounded-md border border-border/40">
+          <label className="flex min-h-9 cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/30">
+            <RadioGroupItem value={option.id} aria-label={option.title} />
+            <span className="min-w-0">{option.title}</span>
+            {option.id === question.recommendedId &&
+              <span className="ml-auto shrink-0 text-xs text-muted-foreground">Recommended</span>}
+          </label>
+          <OptionDetails option={option} question={question} />
+        </div>)}
+        <label data-compact-choice="" className={choiceLabel}>
           <RadioGroupItem value="__custom__" aria-label="My own direction" />
-          <strong>Other — my own direction</strong>
+          <span>Other — my own direction</span>
         </label>
       </RadioGroup>
-      {custom && <div>
-        <label htmlFor={'choice-custom-' + questionId}>Your own direction (required)</label>
-        <Textarea id={'choice-custom-' + questionId} rows={4} maxLength={4000}
+      {custom && <div className="mt-1 grid gap-1">
+        <label htmlFor={'choice-custom-' + questionId} className="text-xs">Your own direction (required)</label>
+        <Textarea id={'choice-custom-' + questionId} rows={2} maxLength={4000}
           disabled={disabled} required value={customAnswer}
           onChange={e => onCustomAnswer(e.target.value)}
           placeholder="Describe your preferred answer." />
       </div>}
     </fieldset>}
-    <div>
-      <label htmlFor={'choice-note-' + questionId}>Additional instructions (optional)</label>
+    <details className="text-xs text-muted-foreground">
+      <summary className="w-fit cursor-pointer select-none">Additional instructions (optional){note.trim() ? ' · added' : ''}</summary>
+      <label htmlFor={'choice-note-' + questionId} className="sr-only">Additional instructions</label>
       <Textarea id={'choice-note-' + questionId} rows={2} maxLength={1000}
-        disabled={disabled} value={note} onChange={e => onNote(e.target.value)} />
-    </div>
+        className="mt-1" disabled={disabled} value={note} onChange={e => onNote(e.target.value)} />
+    </details>
   </div>
 }

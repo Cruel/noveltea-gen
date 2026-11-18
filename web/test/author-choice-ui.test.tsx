@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { AuthorChoicePanel } from '../src/components/author-choice-panel'
 import type { SpecialistChoice } from '../src/lib/author-state'
@@ -141,6 +142,34 @@ test('free-text and Yes/No delegation remain distinct from explicit answers', ()
   assert.match(binary, /Let NovelTea Studio decide/)
   assert.match(binary, /aria-label="Yes"/)
   assert.match(binary, /aria-label="No"/)
+})
+
+test('question options are compact rows in a responsive grid with collapsed optional detail', () => {
+  const html = render({ kind: 'alternatives', question: 'What tone should shape the story?',
+    options: [
+      { id: 'eerie', title: 'Eerie and unsettling',
+        description: 'A slow-burn mystery', benefits: 'Intrigue', tradeoffs: 'Less levity' },
+      { id: 'hopeful', title: 'Hopeful', approach: 'Warm discoveries' },
+    ],
+    recommendedId: 'eerie', recommendationReason: 'Fits the slow reveal',
+  }, '__delegate__', undefined, undefined, { delegationAllowed: true })
+  assert.match(html, /grid-cols-1 gap-1 sm:grid-cols-2/, 'choices fit side by side on desktop')
+  assert.match(html, /data-compact-choice=""/)
+  assert.match(html, /cursor-pointer items-center gap-2/)
+  assert.match(html, /Recommended/)
+  assert.match(html, /Benefits and trade-offs/)
+  assert.match(html, /Additional instructions \(optional\)/)
+  assert.match(html, /<details[^>]*><summary[^>]*>Additional instructions \(optional\)<\/summary>/,
+    'the note editor is hidden until explicitly expanded')
+  assert.doesNotMatch(html, /<details open=""[^>]*><summary[^>]*>Additional instructions/,
+    'blank notes do not keep a textarea visible')
+})
+
+test('onboarding form styles do not override nested inline radio labels', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
+  assert.doesNotMatch(css, /\.story-onboarding label\s*\{/,
+    'blanket grid/margin styling caused the screenshot’s radio and label to stack')
+  assert.match(css, /\.story-onboarding \.story-onboarding-field\s*\{/)
 })
 
 test('multi-selection supports independent checkboxes plus optional original custom input', () => {

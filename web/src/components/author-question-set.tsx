@@ -48,13 +48,15 @@ export function AuthorQuestionSetView({ set, drafts, disabled, onDraftChange, on
       ...(drafts[id] ?? initialQuestionDraft(question)), ...update,
     } })
   }
-  return <div className="grid gap-3" aria-label="Story discovery questions">
+  return <div className="grid gap-1" aria-label="Story discovery questions">
     <p className="m-0 text-xs text-muted-foreground">
-      Answer together or let NovelTea Studio decide where offered. Recommendations are suggestions, not selections.
+      Answer or delegate each question. Recommendations are suggestions, not selections.
     </p>
     {choices.map(({ question, draft }, index) => <div key={question.id}
-      className="grid gap-1 rounded-md bg-muted/20 p-3">
-      <p className="m-0 text-xs font-medium text-muted-foreground">Question {index + 1} of {choices.length}</p>
+      className="grid min-w-0 grid-cols-[2.5rem_minmax(0,1fr)] gap-2 border-b border-border/40 py-2 last:border-b-0">
+      <span className="pt-0.5 text-xs tabular-nums text-muted-foreground" aria-label={'Question ' + (index + 1) + ' of ' + choices.length}>
+        {index + 1}/{choices.length}
+      </span>
       <AuthorQuestionControls question={question} questionId={set.id + '-' + question.id}
         disabled={disabled} delegationAllowed={question.delegationAllowed === true}
         selection={draft.selection} selectedIds={draft.selectedIds} multiCustom={draft.multiCustom}
