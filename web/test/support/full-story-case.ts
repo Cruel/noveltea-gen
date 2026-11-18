@@ -219,7 +219,7 @@ export async function verifyLiveNewStory(
               action: 'choice',
               id: choice.id,
               proposalSha256: choice.proposalSha256,
-              kind: 'custom',
+              draftRevision: 1, kind: 'custom',
               text: 'Use the recommended dramatic approach while preserving fair clues, choices, and distinct consequences. I delegate wording, not protected canon.',
             }),
           }),

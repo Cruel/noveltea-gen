@@ -6,20 +6,21 @@ type DraftSession = {
   drafts?: Record<string, QuestionDraft>
 }
 
-/** Shared, owner-bound draft lifecycle for both first-Thread and repository discovery.
- * Draft writes use the session revision CAS; neither autosave nor default selections
- * constitute a submitted answer or any authority to write Story canon. */
+/** Debounced, deduplicated owner-scoped drafts. Local input always wins over
+ * our own save acknowledgement; a *foreign* newer revision fences edits and
+ * submission rather than silently replacing the author's pending keystrokes. */
 export function useQuestionSetDrafts<S extends DraftSession>({ session, identity, save, onSaved }: {
   session: S | null | undefined; identity: string
   save: (current: S, drafts: Record<string, QuestionDraft>) => Promise<S>
   onSaved: (saved: S) => void
 }) {
-  const [drafts, setDrafts] = useState<Record<string, QuestionDraft>>({})
+  const [drafts, setDrafts] = useState<Record<string, QuestionDraft>>(
+    () => session?.phase === 'questions' ? session.drafts ?? {} : {})
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const draftsRef = useRef(drafts)
   const sessionRef = useRef<S | null>(null)
-  const setRef = useRef<string | null>(null)
+  const keyRef = useRef<string | null>(null)
   const revisionRef = useRef(0)
   const dirtyRef = useRef(false)
   const savingRef = useRef<Promise<boolean> | null>(null)
@@ -30,59 +31,70 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
   const onSavedRef = useRef(onSaved)
   saveRef.current = save
   onSavedRef.current = onSaved
-  if (session && (!sessionRef.current || session.revision >= sessionRef.current.revision))
-    sessionRef.current = session
+  const key = session?.phase === 'questions' && session.questions
+    ? identity + ':' + session.questions.id : null
 
   useEffect(() => {
-    const set = session?.phase === 'questions' ? session.questions : null
-    const id = set?.id ?? null
-    if (id === setRef.current) {
-      if (id && session && session.revision > revisionRef.current) {
-        if (dirtyRef.current || savingRef.current) {
-          conflictRef.current = true
-          setConflict(true)
-          setError('This Question Set changed in another tab. Copy your unsaved input and reload.')
-        } else {
-          revisionRef.current = session.revision
-          draftsRef.current = session.drafts ?? {}
-          setDrafts(draftsRef.current)
-        }
-      }
+    if (key !== keyRef.current) {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      keyRef.current = key
+      sessionRef.current = session ?? null
+      revisionRef.current = session?.revision ?? 0
+      draftsRef.current = session?.drafts ?? {}
+      setDrafts(draftsRef.current)
+      dirtyRef.current = false
+      savingRef.current = null
+      conflictRef.current = false
+      setConflict(false)
+      setError(null)
       return
     }
-    if (timerRef.current) clearTimeout(timerRef.current)
-    setRef.current = id
-    revisionRef.current = session?.revision ?? 0
-    draftsRef.current = session?.drafts ?? {}
-    setDrafts(draftsRef.current)
-    dirtyRef.current = false
-    conflictRef.current = false
-    setConflict(false)
-    setError(null)
-  }, [identity, session?.phase, session?.questions, session?.revision])
+    if (!key || !session) return
+    if (session.revision > revisionRef.current) {
+      if (dirtyRef.current || savingRef.current) {
+        conflictRef.current = true
+        setConflict(true)
+        setError('This Question Set changed in another tab. Copy your unsaved input and reload.')
+      } else {
+        revisionRef.current = session.revision
+        sessionRef.current = session
+        draftsRef.current = session.drafts ?? {}
+        setDrafts(draftsRef.current)
+      }
+    }
+  }, [key, session?.revision, session?.drafts])
 
   const flush = async (): Promise<boolean> => {
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = null
     if (conflictRef.current) return false
     if (savingRef.current) {
-      if (!await savingRef.current) return false
-      if (!dirtyRef.current) return true
+      const inFlight = savingRef.current
+      if (!await inFlight) return false
+      if (savingRef.current === inFlight) savingRef.current = null
+      // Another caller may already have started the next queued write.
+      // Never let Submit overtake an in-flight follow-up autosave.
+      return flushRef.current()
     }
     if (!dirtyRef.current) return true
     const current = sessionRef.current
     const set = current?.phase === 'questions' ? current.questions : null
-    if (!current || !set || set.id !== setRef.current) return false
+    const currentKey = keyRef.current
+    if (!current || !set || !currentKey) return false
     dirtyRef.current = false
     const snapshot = draftsRef.current
     const promise = (async () => {
       try {
         const saved = await saveRef.current(current, snapshot)
-        sessionRef.current = saved
+        if (keyRef.current !== currentKey) return false
         revisionRef.current = saved.revision
+        sessionRef.current = saved
+        // Set the revision *before* notifying React Query: this is our own
+        // CAS acknowledgement, not a concurrent-tab conflict.
         onSavedRef.current(saved)
         return true
       } catch (cause) {
+        if (keyRef.current !== currentKey) return false
         conflictRef.current = true
         setConflict(true)
         setError(cause instanceof Error ? cause.message : 'Question drafts could not be saved.')
@@ -92,7 +104,7 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
     savingRef.current = promise
     const saved = await promise
     if (savingRef.current === promise) savingRef.current = null
-    return saved && (dirtyRef.current ? flush() : true)
+    return saved && (dirtyRef.current ? flushRef.current() : true)
   }
   flushRef.current = flush
   useEffect(() => () => {
@@ -100,7 +112,8 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
     if (dirtyRef.current && !conflictRef.current) void flushRef.current()
   }, [])
   const change = (next: Record<string, QuestionDraft>) => {
-    if (conflictRef.current || JSON.stringify(next) === JSON.stringify(draftsRef.current)) return
+    if (conflictRef.current || !keyRef.current ||
+        JSON.stringify(next) === JSON.stringify(draftsRef.current)) return
     draftsRef.current = next
     setDrafts(next)
     dirtyRef.current = true

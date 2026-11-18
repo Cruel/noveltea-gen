@@ -31,10 +31,10 @@ export function StoryChatBaseline({ storyId, threadId }: {
         storyId, firstTurnId, action: 'draft', revision: current.revision,
         setId: set.id, setRevision: set.revision, drafts,
       } })
-      client.setQueryData(key, response)
       return response.session as StoryChatBaselineSession
     },
-    onSaved: () => {},
+    onSaved: saved => client.setQueryData(key, (previous: typeof query.data) =>
+      previous ? { ...previous, session: saved } : { session: saved }),
   })
   const act = async (action: BaselineAction) => {
     if (!draftState.sessionRef.current || busy || draftState.conflict) return

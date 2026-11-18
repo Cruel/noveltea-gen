@@ -32,10 +32,13 @@ export function AuthorQuestionHistory({ accepted }: { accepted?: AcceptedQuestio
 
 /** Shared controls render a whole immutable batch; no individual question
  * can be submitted as an approval or advance the waiting workflow. */
-export function AuthorQuestionSetView({ set, drafts, disabled, onDraftChange, onSubmit }: {
+export function AuthorQuestionSetView({ set, drafts, disabled, onDraftChange, onSubmit,
+  contextHref, label = 'Story discovery questions' }: {
   set: QuestionSet; drafts: Record<string, QuestionDraft>; disabled: boolean
   onDraftChange: (drafts: Record<string, QuestionDraft>) => void
   onSubmit: () => void
+  contextHref?: (path: string) => string | undefined
+  label?: string
 }) {
   const choices = set.questions.map(question => ({ question,
     draft: drafts[question.id] ?? initialQuestionDraft(question) }))
@@ -48,7 +51,7 @@ export function AuthorQuestionSetView({ set, drafts, disabled, onDraftChange, on
       ...(drafts[id] ?? initialQuestionDraft(question)), ...update,
     } })
   }
-  return <div className="grid gap-1" aria-label="Story discovery questions">
+  return <div className="grid gap-1" aria-label={label}>
     <p className="m-0 text-xs text-muted-foreground">
       Answer or delegate each question. Recommendations are suggestions, not selections.
     </p>
@@ -58,19 +61,20 @@ export function AuthorQuestionSetView({ set, drafts, disabled, onDraftChange, on
         {index + 1}/{choices.length}
       </span>
       <AuthorQuestionControls question={question} questionId={set.id + '-' + question.id}
-        disabled={disabled} delegationAllowed={question.delegationAllowed === true}
+        disabled={disabled} contextHref={contextHref} delegationAllowed={question.delegationAllowed === true}
         selection={draft.selection} selectedIds={draft.selectedIds} multiCustom={draft.multiCustom}
         customAnswer={draft.customAnswer} note={draft.note}
-        onSelect={selection => change(question.id, {
-          selection, ...(selection === '__delegate__' ? { selectedIds: [],
-            multiCustom: false, customAnswer: '' } : {}),
-        })}
+        onSelect={selection => change(question.id, { selection })}
         onSelectedIds={selectedIds => change(question.id, { selectedIds, selection: '' })}
         onMultiCustom={multiCustom => change(question.id, { multiCustom, selection: '' })}
         onCustomAnswer={customAnswer => change(question.id, {
           customAnswer, ...(draft.selection === '__delegate__' ? { selection: '__answer__' } : {}),
         })}
         onNote={note => change(question.id, { note })} />
+      {drafts[question.id] && !responses[index] && <p role="status"
+        className="col-start-2 m-0 text-xs text-destructive">
+        Choose a valid response or complete the custom answer.
+      </p>}
     </div>)}
     <div className="flex flex-wrap items-center gap-2">
       <Button type="button" size="sm" disabled={disabled || !complete} onClick={onSubmit}>

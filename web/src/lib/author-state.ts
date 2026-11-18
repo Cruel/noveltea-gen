@@ -1,4 +1,5 @@
 import type { AuthorQuestion, AuthorQuestionAnswer } from '../../../src/author-question'
+import type { QuestionDraft } from '../../../src/author-question-set'
 
 export type Approval = {
   id: string; nonce: string; proposalSha256: string; verifiedHead: string
@@ -29,6 +30,7 @@ export type SpecialistChoice = {
   proposalSha256: string
   delegationAllowed?: boolean
   question: AuthorQuestion
+  draft?: { revision: number; drafts: Record<string, QuestionDraft> }
   answer?: AuthorQuestionAnswer
 }
 export type AuthorState = { status: string; items: AuthorItem[];

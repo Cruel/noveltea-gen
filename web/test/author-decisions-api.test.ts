@@ -118,7 +118,9 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       return { status: response.status, data: await response.json() as {
         decisions?: Array<{ id: string; proposalSha256: string; phase: string; decision?: string }>;
         decision?: { phase: string; decision: string };
-        choice?: { id: string; phase: string; proposalSha256: string; delegationAllowed?: boolean } | null;
+        choice?: { id: string; phase: string; proposalSha256: string; delegationAllowed?: boolean;
+          draft?: { revision: number; drafts: unknown } } | null;
+        draft?: { revision: number; drafts: unknown };
         continuation?: 'queued' | 'manual';
         error?: string;
       } }
@@ -183,8 +185,32 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     const list = await api('GET')
     assert.equal(list.status, 200)
     assert.equal(list.data.choice?.id, choice.id)
+    assert.equal(list.data.choice?.draft?.revision, 1)
+    const typed = { answer: { selection: 'known-canon', selectedIds: [], multiCustom: false,
+      customAnswer: '線索'.repeat(1500), note: 'Never change protected canon.' } }
+    const draftInput = { action: 'choice-draft', id: choice.id,
+      proposalSha256: choice.proposalSha256, draftRevision: 1, drafts: typed }
+    assert.equal((await api('POST', draftInput, owners[1]!.cookie)).status, 404)
+    assert.equal((await api('POST', { ...draftInput,
+      proposalSha256: 'f'.repeat(64) })).status, 409)
+    assert.ok(Buffer.byteLength(JSON.stringify(draftInput), 'utf8') > 8192,
+      'a valid multilingual draft may exceed the older short command budget')
+    const savedDraft = await api('POST', draftInput)
+    assert.equal(savedDraft.status, 200, savedDraft.data.error)
+    assert.equal(savedDraft.data.draft?.revision, 2)
+    assert.deepEqual(savedDraft.data.draft?.drafts, typed)
+    assert.deepEqual((await api('GET')).data.choice?.draft?.drafts, typed,
+      'a new request reloads the exact unsubmitted choice, text and note')
+    assert.equal((await api('POST', draftInput)).status, 409,
+      'another browser cannot overwrite a newer draft')
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).answer, undefined,
+      'autosave is never a submitted answer or delegation')
+    assert.equal((await api('POST', { action: 'choice', id: choice.id,
+      proposalSha256: choice.proposalSha256, draftRevision: 1,
+      kind: 'option', optionId: 'known-canon' })).status, 409,
+      'submission must reject a stale draft revision')
     const payload = { action: 'choice', id: choice.id, proposalSha256: choice.proposalSha256,
-      kind: 'option', optionId: 'known-canon' }
+      draftRevision: 2, kind: 'option', optionId: 'known-canon' }
     assert.equal((await api('POST', payload, owners[1]!.cookie)).status, 404)
     assert.equal((await api('POST', payload, owner.cookie, 'https://evil.example')).status, 403)
     assert.equal((await api('POST', { ...payload, optionId: 'invalid' })).status, 409)
@@ -213,7 +239,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       ],
     }))
     const custom = await api('POST', { action: 'choice', id: choice.id,
-      proposalSha256: choice.proposalSha256, kind: 'custom',
+      proposalSha256: choice.proposalSha256, draftRevision: 1, kind: 'custom',
       text: '  Follow existing canon but include a distinct consequence for both investigation paths.  ' })
     assert.equal(custom.status, 200, custom.data.error)
     const savedCustom = (await inspectSpecialistChoice(job, choice.id)).answer
@@ -237,7 +263,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await inspectSpecialistChoice(job, choice.id)).answer, undefined,
       'A provisional UI default never creates delegated authorization')
     const delegatePayload = { action: 'choice', id: choice.id,
-      proposalSha256: choice.proposalSha256, kind: 'delegate', note: ' Keep established canon. ' }
+      proposalSha256: choice.proposalSha256, draftRevision: 1, kind: 'delegate', note: ' Keep established canon. ' }
     assert.equal((await api('POST', { ...delegatePayload, optionId: 'known-canon' })).status, 409)
     assert.equal((await api('POST', { ...delegatePayload, approved: true })).status, 409)
     assert.equal((await api('POST', { ...delegatePayload, proposalSha256: 'f'.repeat(64) })).status, 409)
@@ -265,7 +291,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       ],
     }))
     const multiPayload = { action: 'choice', id: choice.id,
-      proposalSha256: choice.proposalSha256, kind: 'multiple',
+      proposalSha256: choice.proposalSha256, draftRevision: 1, kind: 'multiple',
       optionIds: ['trust', 'history'],
       text: '  Preserve an optional investigation path.  ', note: ' Do not retcon canon. ' }
     assert.equal((await api('POST', { ...multiPayload, optionIds: ['trust', 'trust'] })).status, 409)
@@ -303,7 +329,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await api('POST', { action: 'choice', id: plain.id,
       proposalSha256: plain.proposalSha256, kind: 'option', optionId: 'yes' })).status, 409)
     const plainAnswer = await api('POST', { action: 'choice', id: plain.id,
-      proposalSha256: plain.proposalSha256, kind: 'custom',
+      proposalSha256: plain.proposalSha256, draftRevision: 1, kind: 'custom',
       text: 'It should represent lost community trust.', note: 'Preserve the uncertainty.' })
     assert.equal(plainAnswer.status, 200, plainAnswer.data.error)
     assert.equal((await inspectSpecialistChoice(job, plain.id)).answer?.note, 'Preserve the uncertainty.')
@@ -333,7 +359,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await api('POST', { action: 'choice', id: binary.id,
       proposalSha256: binary.proposalSha256, kind: 'option', optionId: 'maybe' })).status, 409)
     const eventAnswer = await api('POST', { action: 'choice', id: binary.id,
-      proposalSha256: binary.proposalSha256, kind: 'option', optionId: 'yes',
+      proposalSha256: binary.proposalSha256, draftRevision: 1, kind: 'option', optionId: 'yes',
       note: 'Reveal it only after the event.' })
     assert.equal(eventAnswer.status, 200, eventAnswer.data.error)
     assert.equal((await inspectSpecialistChoice(job, binary.id)).answer?.kind, 'option')
@@ -372,7 +398,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await api('POST', { action: 'choice', id: conversation.id,
       proposalSha256: conversation.proposalSha256, kind: 'delegate' })).status, 409)
     const delegated = { action: 'choice', id: conversation.id,
-      proposalSha256: conversation.proposalSha256, kind: 'custom',
+      proposalSha256: conversation.proposalSha256, draftRevision: 1, kind: 'custom',
       text: 'Use the established characterization. Delegate the exact playable dialogue to the writer.' }
     assert.equal((await api('POST', delegated, owners[1]!.cookie)).status, 404)
     assert.equal((await api('POST', { ...delegated, proposalSha256: 'f'.repeat(64) })).status, 409)

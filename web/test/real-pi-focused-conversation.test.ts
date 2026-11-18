@@ -379,7 +379,7 @@ test('opt-in live Pi: authenticated focused creation, dependency repair, or coll
       assert.equal((await readThreadChat(store, owner.id, threadId)).creativePolicy.mode, 'autonomous')
       assert.equal((await readJobTurnPlan(child))?.creativePolicy?.mode, 'collaborative')
       const answer = { action: 'choice', id: choice.id, proposalSha256: choice.proposalSha256,
-        kind: 'custom', text: "Choose the candid admission of uncertainty. Delegate the exact dialogue and staging to the writer. Preserve Ada's lack of knowledge of the forgery." }
+        draftRevision: 1, kind: 'custom', text: "Choose the candid admission of uncertainty. Delegate the exact dialogue and staging to the writer. Preserve Ada's lack of knowledge of the forgery." }
       assert.equal((await api('POST', { ...answer, proposalSha256: 'f'.repeat(64) })).status, 409)
       assert.equal((await api('POST', answer, otherCookie)).status, 404)
       const submitted = await api('POST', answer)

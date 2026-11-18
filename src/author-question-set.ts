@@ -6,6 +6,14 @@ export type QuestionItem = AuthorQuestion & { id: string;
   /** Trusted workflow permission; never accepted from a model proposal. */
   delegationAllowed?: true };
 export type QuestionSet = { id: string; revision: number; questions: QuestionItem[] };
+/** A paused specialist owns one immutable receipt-backed question rather than
+ * inventing a separate frontend answer or approval contract. */
+export function specialistQuestionSet(choice: { id: string; question: AuthorQuestion;
+  delegationAllowed?: boolean }): QuestionSet {
+  return { id: choice.id, revision: 1, questions: [{ id: 'answer', ...choice.question,
+    ...(choice.delegationAllowed === true ? { delegationAllowed: true as const } : {}),
+  }] };
+}
 export type QuestionResponse = { questionId: string; answer: AuthorQuestionAnswer };
 export type QuestionDraft = {
   selection: string; selectedIds: string[]; multiCustom: boolean;

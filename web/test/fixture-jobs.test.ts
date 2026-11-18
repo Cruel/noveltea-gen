@@ -450,7 +450,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
         method: 'POST', headers: { cookie: aliceCookie, origin: config.baseURL,
           'content-type': 'application/json' },
         body: JSON.stringify({ action: 'choice', id: pendingChoice.id,
-          proposalSha256: pendingChoice.proposalSha256,
+          proposalSha256: pendingChoice.proposalSha256, draftRevision: 1,
           kind: 'delegate', note: 'Choose only within the authorized Character assignment.' }),
       }), jobId, config.baseURL)
     assert.equal(accepted.status, 200, await accepted.clone().text())

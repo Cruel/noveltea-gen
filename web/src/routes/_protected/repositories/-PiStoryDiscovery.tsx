@@ -67,10 +67,9 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
           setRevision: set.revision, drafts: value,
         }),
       } })) as { session: Session }
-      queryClient.setQueryData(sessionKey, result)
       return result.session
     },
-    onSaved: () => {},
+    onSaved: saved => queryClient.setQueryData(sessionKey, { session: saved }),
   })
   useEffect(() => {
     setBrief(initialBrief); setError(null)

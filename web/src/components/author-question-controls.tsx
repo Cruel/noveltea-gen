@@ -81,6 +81,7 @@ export function AuthorQuestionControls({ question, questionId, disabled, delegat
   const delegated = delegationAllowed && selection === '__delegate__'
   const custom = selection === '__custom__'
   const id = 'choice-' + questionId
+  const activeIds = delegated ? [] : selectedIds ?? []
   return <div className="grid min-w-0 gap-1.5 text-sm" aria-label="Author question">
     <p id={id + '-prompt'} className="m-0 font-medium text-foreground">{question.question}</p>
     <AuthorQuestionContext context={question.context} contextHref={contextHref} />
@@ -114,21 +115,21 @@ export function AuthorQuestionControls({ question, questionId, disabled, delegat
         {options.map(option => <div key={option.id} data-compact-choice=""
           className="flex min-w-0 items-center rounded-md border border-border/40">
           <label className="flex min-h-9 min-w-0 flex-1 cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/30">
-            <input type="checkbox" checked={!!selectedIds?.includes(option.id)}
+            <input type="checkbox" checked={activeIds.includes(option.id)}
               onChange={e => onSelectedIds?.(e.target.checked
-                ? [...(selectedIds ?? []), option.id]
-                : (selectedIds ?? []).filter(id => id !== option.id))} />
+                ? [...activeIds, option.id]
+                : activeIds.filter(id => id !== option.id))} />
             <span className="min-w-0">{option.title}</span>
           </label>
           <OptionIndicators option={option} question={question} />
         </div>)}
         <label data-compact-choice="" className={choiceLabel}>
-          <input type="checkbox" checked={!!multiCustom}
+          <input type="checkbox" checked={!delegated && !!multiCustom}
             onChange={e => onMultiCustom?.(e.target.checked)} />
           <span>Other — my own direction</span>
         </label>
       </div>
-      {!!multiCustom && <div className="mt-1 grid gap-1">
+      {!delegated && !!multiCustom && <div className="mt-1 grid gap-1">
         <label htmlFor={'choice-custom-' + questionId} className="text-xs">Your own direction (required)</label>
         <Textarea id={'choice-custom-' + questionId} rows={2} maxLength={4000}
           required value={customAnswer} onChange={e => onCustomAnswer(e.target.value)}

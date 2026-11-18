@@ -11,6 +11,7 @@ import { withStoryJobLock } from '../../../src/job-lock'
 import { queueRecord } from './generation-queue.server'
 import { activeSpecialistChoice, answerSpecialistChoice } from '../../../src/specialist-choice'
 import { parseAuthorAnswer } from '../../../src/author-question'
+import { readSpecialistQuestionDraft, saveSpecialistQuestionDraft } from './specialist-question-drafts.server'
 import { enqueueAnsweredSpecialistContinuation } from './generation-controls.server'
 import type { JobStartResult } from '../../../src/job'
 import { postAgentAuthorCommand } from './agent-rpc.server'
@@ -22,6 +23,8 @@ const json = (value: unknown, status = 200) => Response.json(value, {
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 const SHA = /^[a-f0-9]{64}$/
 const NONCE = /^[0-9a-f-]{36}$/
+const MAX_AUTHOR_COMMAND_BYTES = 8192
+const MAX_DRAFT_COMMAND_BYTES = 20_000
 const approvalId = (jobId: string, messageId: string) =>
   'author-' + createHash('sha256').update(jobId + ':' + messageId).digest('hex').slice(0, 40)
 
@@ -39,7 +42,7 @@ async function readCommand(request: Request): Promise<string> {
       const { value, done } = await reader.read()
       if (done) break
       bytes += value.byteLength
-      if (bytes > 8192) throw new CommandError(413, 'Author command is too large')
+      if (bytes > MAX_DRAFT_COMMAND_BYTES) throw new CommandError(413, 'Author command is too large')
       text += decoder.decode(value, { stream: true })
     }
     text += decoder.decode()
@@ -50,11 +53,11 @@ async function readCommand(request: Request): Promise<string> {
   return text
 }
 
-async function getRecords(job: JobStartResult, recoverable: boolean) {
+async function getRecords(job: JobStartResult, recoverable: boolean, owner: string) {
   const updates = await inspectAuthorUpdates(job)
   const decisions = recoverable ? await inspectAuthorDecisions(job) : []
   const choice = recoverable ? await activeSpecialistChoice(job) : null
-  return Promise.all(updates.records.map(async ({ message, acknowledgement }) => {
+  const items = await Promise.all(updates.records.map(async ({ message, acknowledgement }) => {
     if (message.kind !== 'question' && message.kind !== 'approval') return null
     const payload = message.payload as Record<string, unknown>
     let approval: Awaited<ReturnType<typeof inspectTrustedApproval>> | null = null
@@ -75,11 +78,15 @@ async function getRecords(job: JobStartResult, recoverable: boolean) {
         ? { answer: (acknowledgement.result as { answer?: string } | undefined)?.answer ?? null } : {}),
       approval,
     }
-  })).then(items => ({ status: updates.status, items: items.filter(item => item !== null), decisions,
+  }))
+  const draft = choice?.phase === 'awaiting-author'
+    ? await readSpecialistQuestionDraft(job, choice, owner) : null
+  return { status: updates.status, items: items.filter(item => item !== null), decisions,
     choice: choice ? { id: choice.id, workItem: choice.workItem, phase: choice.phase,
       proposalSha256: choice.proposalSha256, delegationAllowed: choice.delegationAllowed === true,
       question: choice.question,
-      ...(choice.answer ? { answer: choice.answer } : {}) } : null }))
+      ...(draft ? { draft } : {}),
+      ...(choice.answer ? { answer: choice.answer } : {}) } : null }
 }
 
 /** Authenticated owner-only interaction with persisted author-update interrupts.
@@ -99,25 +106,56 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const queue = (await queueRecord(store, jobId))
     const recoverable = !!row?.request && ['paused', 'blocked'].includes(row.status) &&
       queue?.phase === 'finished'
-    if (request.method === 'GET') return json(await getRecords(job, recoverable))
+    if (request.method === 'GET') return json(await getRecords(job, recoverable, user.id))
 
     // Strict, bounded typed commands. Do not accept a caller-provided identity
     // or approval payload, and do not consume arbitrary controller references.
     const size = Number(request.headers.get('content-length') ?? 0)
-    if (size > 8192) return json({ error: 'Author command is too large' }, 413)
+    if (size > MAX_DRAFT_COMMAND_BYTES) return json({ error: 'Author command is too large' }, 413)
     const raw = await readCommand(request)
     let input: Record<string, unknown>
-    try { input = JSON.parse(raw) } catch { return json({ error: 'Invalid JSON' }, 400) }
+    try { input = JSON.parse(raw) } catch {
+      return Buffer.byteLength(raw, 'utf8') > MAX_AUTHOR_COMMAND_BYTES
+        ? json({ error: 'Author command is too large' }, 413)
+        : json({ error: 'Invalid JSON' }, 400)
+    }
+    // Existing author commands retain their smaller byte budget. The draft
+    // transport must fit its validated 4,000-character Unicode text field.
+    if (input?.action !== 'choice-draft' && Buffer.byteLength(raw, 'utf8') > MAX_AUTHOR_COMMAND_BYTES)
+      return json({ error: 'Author command is too large' }, 413)
+    if (input?.action === 'choice-draft') {
+      if (!recoverable || row?.status !== 'paused' ||
+          typeof input.id !== 'string' || !NONCE.test(input.id) ||
+          typeof input.proposalSha256 !== 'string' || !SHA.test(input.proposalSha256) ||
+          !Number.isSafeInteger(input.draftRevision) || (input.draftRevision as number) < 1 ||
+          Object.keys(input).sort().join(',') !==
+            'action,draftRevision,drafts,id,proposalSha256')
+        return json({ error: 'Expected an exact, revisioned Question Set draft.' }, 409)
+      const draft = await withStoryJobLock(job, 'specialist-question-draft', async () => {
+        const active = await activeSpecialistChoice(job)
+        if (!active || active.id !== input.id || active.phase !== 'awaiting-author' ||
+            active.proposalSha256 !== input.proposalSha256)
+          throw new Error('Specialist Question Set has changed.')
+        return saveSpecialistQuestionDraft(job, active, user.id,
+          input.draftRevision as number, input.drafts)
+      })
+      return json({ draft })
+    }
     if (input?.action === 'choice') {
       if (!recoverable || row?.status !== 'paused' ||
           typeof input.id !== 'string' || !/^[a-f0-9-]{36}$/.test(input.id) ||
-          typeof input.proposalSha256 !== 'string' || !SHA.test(input.proposalSha256))
+          typeof input.proposalSha256 !== 'string' || !SHA.test(input.proposalSha256) ||
+          !Number.isSafeInteger(input.draftRevision) || (input.draftRevision as number) < 1)
         return json({ error: 'Expected one exact pending author choice.' }, 409)
-      const { action: _action, id: _id, proposalSha256: _hash, ...response } = input
+      const { action: _action, id: _id, proposalSha256: _hash,
+        draftRevision: _revision, ...response } = input
       const completed = await withStoryJobLock(job, 'specialist-author-choice', async () => {
         const active = await activeSpecialistChoice(job)
         if (!active || active.id !== input.id || active.phase !== 'awaiting-author')
           throw new Error('Author choice has changed or was already answered.')
+        const draft = await readSpecialistQuestionDraft(job, active, user.id)
+        if (draft.revision !== input.draftRevision)
+          throw new Error('Question Set draft changed in another browser.')
         const answer = parseAuthorAnswer(active.question, {
           ...response, ...(response.note === undefined ? { note: '' } : {}),
         }, active.delegationAllowed === true)

@@ -1,13 +1,13 @@
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { AuthorChoicePanel } from '@/components/author-choice-panel'
+import { SpecialistQuestionEditor } from '@/components/specialist-question-editor'
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { sendAuthorCommand } from '../../../lib/author.functions'
 import { authorInteractionsQuery } from '../../../lib/author.queries'
 import { jobQuery } from '../../../lib/jobs.queries'
-import { authorQuestionKind } from '../../../../../src/author-question'
-import { isAuthorState, type SpecialistChoice, type RecoveryDecision } from '../../../lib/author-state'
+import { isAuthorState, type RecoveryDecision } from '../../../lib/author-state'
 
 export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: {
   jobId: string; onChanged: () => void; presentation?: 'page' | 'chat'
@@ -19,11 +19,6 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
     enabled: !!state?.choice?.question.context?.length })
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({})
-  const [choiceSelections, setChoiceSelections] = useState<Record<string, string>>({})
-  const [choiceMultiSelections, setChoiceMultiSelections] = useState<Record<string, string[]>>({})
-  const [choiceMultiCustom, setChoiceMultiCustom] = useState<Record<string, boolean>>({})
-  const [choiceNotes, setChoiceNotes] = useState<Record<string, string>>({})
-  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
   const [idea, setIdea] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -40,35 +35,6 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
       await refresh()
       onChanged()
     } catch (e) { setError(e instanceof Error ? e.message : 'Author response failed') }
-    finally { setBusy(null) }
-  }
-  const submitChoice = async (item: SpecialistChoice) => {
-    const selected = choiceSelections[item.id] ?? (item.delegationAllowed ? '__delegate__' : '')
-    const kind = authorQuestionKind(item.question)
-    const text = customAnswers[item.id] ?? ''
-    const delegated = selected === '__delegate__' && item.delegationAllowed === true
-    const multi = kind === 'multiple-choice'
-    const custom = kind === 'free-text' || selected === '__custom__'
-    const customMulti = choiceMultiCustom[item.id] === true
-    const optionIds = choiceMultiSelections[item.id] ?? []
-    if (!delegated && (multi ? (!optionIds.length && !customMulti || customMulti && !text.trim()) :
-      !selected && !custom || custom && !text.trim())) return
-    const note = choiceNotes[item.id] ?? ''
-    const answer = delegated ? { kind: 'delegate' } : multi ? {
-      kind: 'multiple', optionIds, ...(customMulti ? { text } : {}),
-    } : custom ? { kind: 'custom', text } : { kind: 'option', optionId: selected }
-    setBusy(item.id); setError(null); setNotice(null)
-    try {
-      const accepted = await sendAuthorCommand({ data: { jobId, commandJson: JSON.stringify({
-        action: 'choice', id: item.id, proposalSha256: item.proposalSha256,
-        ...answer, ...(note.trim() ? { note } : {}),
-      }) } })
-      const result = JSON.parse(accepted) as { continuation?: 'queued' | 'manual' }
-      if (result.continuation === 'manual')
-        setNotice('Your answer is saved. Automatic continuation was unavailable; inspect the saved checkpoint before using Continue generation.')
-      await refresh()
-      onChanged()
-    } catch (e) { setError(e instanceof Error ? e.message : 'Author choice was not accepted') }
     finally { setBusy(null) }
   }
   const decideRecovery = async (item: RecoveryDecision, decision: 'approved' | 'rejected') => {
@@ -108,6 +74,13 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
   // The chat shows only actionable author handoffs; the Job page retains the
   // complete audit/history and standalone idea submission interface.
   if (presentation === 'chat' && !pendingCount && state?.choice?.phase !== 'answered') return null
+  const contextHref = (path: string) => {
+    const job = contextJob.data
+    if (!job?.storyId) return undefined
+    const query = new URLSearchParams({ context: path })
+    if (job.storyThreadId) query.set('thread', job.storyThreadId)
+    return '/stories/' + encodeURIComponent(job.storyId) + '/?' + query.toString()
+  }
   return <section aria-label="Author questions and approvals"
     className={presentation === 'chat' ? 'min-w-0 space-y-3 rounded-lg border border-border/60 bg-muted/20 p-3 text-sm' : 'job-author-review'}>
     {presentation === 'page' && <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -119,38 +92,14 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
     {notice && <p role="status">{notice}</p>}
     {!state && !error && presentation === 'page' && <p>Checking saved author interrupts…</p>}
     {presentation === 'page' && state && items.length === 0 && (state.decisions ?? []).length === 0 && !state.choice && <p>No author responses are awaiting review.</p>}
-    {state?.choice && <AuthorChoicePanel key={state.choice.id}
+    {state?.choice?.phase === 'awaiting-author' && <SpecialistQuestionEditor
+      key={state.choice.id} jobId={jobId} choice={state.choice}
+      contextHref={contextHref} onChanged={onChanged} />}
+    {state?.choice?.phase === 'answered' && <AuthorChoicePanel
       choice={state.choice} presentation={presentation} busy={busy !== null}
-      selection={choiceSelections[state.choice.id] ?? (state.choice.delegationAllowed ? '__delegate__' : '')}
-      selectedIds={choiceMultiSelections[state.choice.id] ?? []}
-      multiCustom={choiceMultiCustom[state.choice.id] ?? false}
-      customAnswer={customAnswers[state.choice.id] ?? ''}
-      note={choiceNotes[state.choice.id] ?? ''}
-      contextHref={path => {
-        const job = contextJob.data
-        if (!job?.storyId) return undefined
-        const query = new URLSearchParams({ context: path })
-        if (job.storyThreadId) query.set('thread', job.storyThreadId)
-        return '/stories/' + encodeURIComponent(job.storyId) + '/?' + query.toString()
-      }}
-      onSelect={value => {
-        setChoiceSelections(old => ({ ...old, [state.choice!.id]: value }))
-        if (value === '__delegate__') {
-          setChoiceMultiSelections(old => ({ ...old, [state.choice!.id]: [] }))
-          setChoiceMultiCustom(old => ({ ...old, [state.choice!.id]: false }))
-        }
-      }}
-      onSelectedIds={ids => {
-        setChoiceMultiSelections(old => ({ ...old, [state.choice!.id]: ids }))
-        setChoiceSelections(old => ({ ...old, [state.choice!.id]: '' }))
-      }}
-      onMultiCustom={enabled => {
-        setChoiceMultiCustom(old => ({ ...old, [state.choice!.id]: enabled }))
-        setChoiceSelections(old => ({ ...old, [state.choice!.id]: '' }))
-      }}
-      onCustomAnswer={value => setCustomAnswers(old => ({ ...old, [state.choice!.id]: value }))}
-      onNote={value => setChoiceNotes(old => ({ ...old, [state.choice!.id]: value }))}
-      onSubmit={() => void submitChoice(state.choice!)} />}
+      selection="" customAnswer="" note="" contextHref={contextHref}
+      onSelect={() => {}} onCustomAnswer={() => {}} onNote={() => {}}
+      onSubmit={() => {}} />}
     {(state?.decisions ?? []).map(item => <article key={'recovery-' + item.id}
       aria-label={item.title} className="job-review-item">
       <details open={item.phase !== 'recorded' ? true : undefined}>
