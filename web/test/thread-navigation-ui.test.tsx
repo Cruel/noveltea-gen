@@ -14,30 +14,32 @@ const thread = (id: string, parentThreadId: string | null, status: StoryThread['
   jobId: id + '-job',
 })
 
-test('Thread navigation renders job links, progress and accessible reduced-motion expansion', () => {
+test('Thread navigation opens Chat, shows progress and supports accessible reduced-motion expansion', () => {
   const threads = [
     thread('first', null, 'paused', '2026-11-01T00:00:00Z'),
     thread('second', null, 'completed', '2026-11-03T00:00:00Z'),
     thread('child', 'first', 'running', '2026-11-04T00:00:00Z'),
   ]
   const props = { threads, onExpand: (_id: string) => {}, onRename: (_thread: StoryThread) => {},
-    onArchiveChange: (_thread: StoryThread, _archived: boolean) => {} }
+    onArchiveChange: (_thread: StoryThread, _archived: boolean) => {},
+    onOpen: (_thread: StoryThread) => {} }
   const collapsed = renderToStaticMarkup(createElement(ThreadList, {
     ...props, view: 'tree', expandedIds: [],
   }))
   assert.match(collapsed, /role="tree"/)
   assert.match(collapsed, /aria-expanded="false"/)
   assert.match(collapsed, /Expand first/)
-  assert.doesNotMatch(collapsed, /child-job/)
+  assert.doesNotMatch(collapsed, /title="Open chat for child"/)
   const selectedChild = renderToStaticMarkup(createElement(ThreadList, {
     ...props, view: 'tree', expandedIds: [], selectedThreadId: 'child',
   }))
-  assert.match(selectedChild, /child-job/, 'the selected child is visible even if its parent was collapsed')
+  assert.match(selectedChild, /title="Open chat for child"/,
+    'the selected child is visible even if its parent was collapsed')
   assert.match(selectedChild, /aria-current="page"/)
   const expanded = renderToStaticMarkup(createElement(ThreadList, {
     ...props, view: 'tree', expandedIds: ['first'],
   }))
-  assert.match(expanded, /child-job/)
+  assert.match(expanded, /title="Open chat for child"/)
   assert.match(expanded, /Event · arc.one/)
   assert.match(expanded, /motion-reduce:animate-none/)
   assert.match(expanded, /Restart Thread/,
@@ -47,14 +49,15 @@ test('Thread navigation renders job links, progress and accessible reduced-motio
     'Thread actions are accessible through a portaled menu instead of an inline toolbar')
   assert.doesNotMatch(expanded, /Branch from here/,
     'checkpoint actions require an authenticated run inspection')
-  assert.ok(expanded.indexOf('first-job') < expanded.indexOf('second-job'),
+  assert.ok(expanded.indexOf('title="Open chat for first"') < expanded.indexOf('title="Open chat for second"'),
     'the active child promotes the parent above a newer sibling root')
   const flat = renderToStaticMarkup(createElement(ThreadList, {
     ...props, view: 'flat', expandedIds: [],
   }))
   assert.match(flat, /role="list"/)
-  assert.ok(flat.indexOf('child-job') < flat.indexOf('second-job'))
-  assert.ok(flat.indexOf('second-job') < flat.indexOf('first-job'))
+  assert.ok(flat.indexOf('title="Open chat for child"') < flat.indexOf('title="Open chat for second"'))
+  assert.ok(flat.indexOf('title="Open chat for second"') < flat.indexOf('title="Open chat for first"'))
+  assert.doesNotMatch(flat, /href="\/jobs\//)
 })
 
 test('long Thread titles and ancestry labels fit the sidebar in Tree and Flat views', () => {
@@ -89,17 +92,18 @@ test('archive navigation shows only active Threads by default and retains an arc
     view: 'tree' as const, expandedIds: [], onExpand: (_id: string) => {},
     onRename: (_thread: StoryThread) => {},
     onArchiveChange: (_thread: StoryThread, _archived: boolean) => {},
+    onOpen: (_thread: StoryThread) => {},
   }
   const active = renderToStaticMarkup(createElement(ThreadList, {
     ...props, threads: activeThreads, archivedView: false,
   }))
   assert.match(active, /Actions for parent/)
-  assert.doesNotMatch(active, /child-job/)
+  assert.doesNotMatch(active, /title="Open chat for child"/)
   const archived = renderToStaticMarkup(createElement(ThreadList, {
     ...props, threads: archivedThreads, archivedView: true,
   }))
-  assert.match(archived, /parent-job/)
-  assert.match(archived, /child-job/)
+  assert.match(archived, /title="Open chat for parent"/)
+  assert.match(archived, /title="Open chat for child"/)
   assert.match(archived, /aria-level="2"/)
   assert.match(archived, /Actions for child/)
   assert.match(archived, /Archived/)
@@ -114,9 +118,9 @@ test('archive navigation shows only active Threads by default and retains an arc
   const activeAfterParentArchive = renderToStaticMarkup(createElement(ThreadList, {
     ...props, threads: selectNavigationThreads([parent, unarchivedChild], 'active'),
   }))
-  assert.match(activeAfterParentArchive, /visible-job/)
+  assert.match(activeAfterParentArchive, /title="Open chat for visible"/)
   assert.match(activeAfterParentArchive, /Parent archived/)
-  assert.doesNotMatch(activeAfterParentArchive, /parent-job/)
+  assert.doesNotMatch(activeAfterParentArchive, /title="Open chat for parent"/)
 })
 
 test('deleted parent remains a noninteractive lineage placeholder but a deleted leaf is hidden', () => {
@@ -128,11 +132,11 @@ test('deleted parent remains a noninteractive lineage placeholder but a deleted 
   assert.deepEqual(threads.map(item => item.id), ['parent', 'child'])
   const view = renderToStaticMarkup(createElement(ThreadList, {
     threads, view: 'tree', expandedIds: [], onExpand: () => {},
-    onRename: () => {}, onArchiveChange: () => {}, onDelete: () => {},
+    onRename: () => {}, onArchiveChange: () => {}, onDelete: () => {}, onOpen: () => {},
   }))
   assert.match(view, /Deleted ancestor/)
-  assert.match(view, /child-job/)
-  assert.doesNotMatch(view, /parent-job/)
+  assert.match(view, /title="Open chat for child"/)
+  assert.doesNotMatch(view, /title="Open chat for parent"/)
   assert.doesNotMatch(view, /Actions for parent/,
     'fully deleted ancestors have no available action menu')
   assert.match(view, /Actions for child/)

@@ -34,7 +34,7 @@ export function ThreadList({ threads, view, expandedIds, selectedThreadId, archi
   onExpand: (id: string) => void; onRename: (thread: StoryThread) => void
   onArchiveChange: (thread: StoryThread, archived: boolean) => void
   onDelete?: (thread: StoryThread) => void
-  onOpen?: (thread: StoryThread) => void
+  onOpen: (thread: StoryThread) => void
   collections?: StoryCollection[]; allThreads?: StoryThread[]
   onMoveCollection?: (thread: StoryThread, id: string | null) => void
 }) {
@@ -88,14 +88,11 @@ export function ThreadList({ threads, view, expandedIds, selectedThreadId, archi
             </button>
           : <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
         <div className="min-w-0 flex-1">
-          {onOpen && !thread.deletedAt ? <button type="button" onClick={() => onOpen(thread)}
+          {!thread.deletedAt ? <button type="button" onClick={() => onOpen(thread)}
             className="block w-full min-w-0 truncate text-left text-sm font-medium hover:underline"
             aria-current={thread.id === selectedThreadId ? 'page' : undefined}
             title={'Open chat for ' + thread.title}>{thread.title}</button>
-            : thread.jobId && !thread.deletedAt ? <a href={'/jobs/' + encodeURIComponent(thread.jobId)}
-              aria-current={thread.id === selectedThreadId ? 'page' : undefined}
-              className="block w-full min-w-0 truncate text-sm font-medium" title={thread.title}>{thread.title}</a>
-              : <span className="block truncate text-sm font-medium">{thread.title}</span>}
+            : <span className="block truncate text-sm font-medium">{thread.title}</span>}
           <div className="flex min-w-0 items-center gap-x-1.5 overflow-hidden text-[11px] text-muted-foreground">
             <span className={'shrink-0 ' + (thread.status === 'needs-author' ? 'text-amber-400' : '')}>
               <span className="inline-flex items-center gap-1"><StatusIcon status={thread.status} />

@@ -20,6 +20,14 @@ test('opening a verified repository Story does not require preparing an executio
   assert.match(browser, /Open Story/)
 })
 
+test('Thread navigation never falls back to the legacy execution page', () => {
+  const list = source('components/thread-list.tsx')
+  const collections = source('components/story-collections-panel.tsx')
+  assert.doesNotMatch(list, /href=\{'\/jobs\/|to="\/jobs\/\$jobId"/)
+  assert.match(collections, /onOpen=\{props\.onOpen\}/)
+  assert.match(list, /onOpen: \(thread: StoryThread\) => void/)
+})
+
 test('Thread fork and restart return to the Story workspace', () => {
   for (const path of ['components/thread-message-edit.tsx', 'components/thread-restart-preview.tsx']) {
     const component = source(path)

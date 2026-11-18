@@ -1,19 +1,22 @@
-# NovelTea Story Studio — authentication/bootstrap (#40)
+# NovelTea Story Studio
 
-For rootless Compose deployment, the trusted host sandbox controller and its
-storage/security boundary, see [deploy/README.md](../deploy/README.md) (#51).
-Jobs prepared through this UI remain paused until authenticated execution
-admission (#59). All implemented narrative Pi specialists now use sandboxed
-file/search/shell tools; independent reviewers receive read/search tools only.
+The authenticated Story workspace is the primary authoring interface. Select or
+import a Story, open a Thread and send requests in Chat. The trusted LangGraph
+agent service handles independently verified work, source-bound review,
+approvals, recovery and explicit draft publication. An author never needs to
+prepare a Job or enter a fixed file scope before starting a Thread. Internal
+executions remain available in Advanced Execution Details for inspection and
+legacy prepared-run operations, not as an alternative authoring journey.
 
-The web application is a separate pnpm workspace package; the existing Story
-generator now runs in a dedicated LangGraph agent service instead of Skein. The Studio implements an authenticated
-TanStack Start dashboard, Better Auth GitHub and GitLab.com sign-in and explicit
-login-method linking, independent multi-account Git repository connections under
-Settings, encrypted OAuth credentials, and tenant-scoped Story/repository/session
-catalog tables. #41 adds GitHub App installation-
-aware repository discovery, Add by URL, and catalog connection without cloning.
-Fixture generation (#59) and reconnectable high-level status (#64) are now implemented; publication remains a separate ticket. #43 adds GitHub Story discovery and bounded selection; #44 adds GitLab Story discovery and bounded selection.
+Studio runs in a separate pnpm workspace with TanStack Start, Better Auth
+GitHub/GitLab sign-in, linked Git accounts, encrypted OAuth credentials and
+owner-scoped Story and Thread persistence. GitHub App and GitLab repository
+browsing discover and size-check Story content before registration; the same
+Story-first workspace handles GitHub draft PR and GitLab draft MR publication.
+All narrative Pi file and shell tools run inside job-scoped rootless sandboxes;
+independent reviewers have read-only tools. For the host sandbox controller,
+Compose deployment and storage boundaries, see
+[deploy/README.md](../deploy/README.md).
 
 ## Frontend architecture (#38)
 
@@ -654,12 +657,14 @@ ordered persisted events, owner isolation, SSE cursor replay, restart,
 path filtering, and independent verified Git diffs. The same endpoints will
 serve the later sandboxed Pi executor without exposing raw worker output.
 
-## Generation scope editor and saved drafts (#62, #56)
+## Legacy saved execution configuration (#62, #56)
 
-Before fixture generation, the authenticated job page offers **Entire Story**
-or **Bounded selection**, generation depth, explicit writable targets,
-separately authorized supporting targets, branches, constraints and production
-envelope. The advanced JSON editor remains available for exact contract review.
+Normal Story authoring interprets scope from each Chat Turn; there is no
+mandatory Job scope editor. The historical **Entire Story** / **Bounded
+selection** editor remains available only under the collapsed Advanced
+generation configuration section of saved, prepared executions. It permits
+exact contract review and administrative/legacy recovery without providing a
+second primary authoring workflow.
 `GET /api/jobs/:jobId/configuration` resolves the current, pinned canonical
 catalog. `PUT` requires the same origin and the job owner, an exact current
 HEAD, and a prepared, not-yet-executing job. It checks record membership and
@@ -695,11 +700,11 @@ Disconnecting or losing authorization removes availability and blocks any new
 selection or fixture start pinned to that model; the existing draft and worktree
 remain intact for recovery. The job cannot silently switch to a host model.
 
-**Shared author decisions:** The job's **Author questions and approvals** panel
-is the sole active browser interface for questions, exact protected proposals,
-Foundation no-write conflicts and validator replacement reviews. All browser
-interactions use the authenticated, same-origin `/api/jobs/:jobId/author`
-endpoint. Exact recovery approvals use one typed `action: "decision"` contract:
+**Shared author decisions:** Thread Chat is the primary author interface for
+questions, exact protected proposals, Foundation no-write conflicts and
+validator replacement reviews. Saved execution details retain the advanced
+author-interaction panel for inspection and recovery. Both paths use the
+authenticated, same-origin `/api/jobs/:jobId/author` endpoint. Exact recovery approvals use one typed `action: "decision"` contract:
 `id`, `proposalSha256`, `decision: "approved" | "rejected"` and an **optional**
 `note` (at most 1,000 characters). No author-written reason is required;
 notes on narrative conflicts can guide later specialists, whereas validator
