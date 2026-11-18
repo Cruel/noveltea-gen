@@ -77,6 +77,8 @@ test('shared GitHub job controller reopens only the saved unpublished initializa
     }
     const initialized = await initializeStoryBranch(sourceInput)
     assert.notEqual(initialized.headSha, pinned)
+    await assert.rejects(() => trustedHead(initialized), /advanced without a trusted revision/,
+      'a new Story commit is intentionally untrusted until the exact job is independently reopened')
     const now = new Date().toISOString()
     await store.persistence.repositories.upsert(owner.id, 'github', '123',
       'Acme/Repo', null, repositoryId, now)
@@ -103,6 +105,13 @@ test('shared GitHub job controller reopens only the saved unpublished initializa
     assert.equal(reopen.headSha, initialized.headSha)
     assert.equal(await trustedHead(initialized), initialized.headSha)
     assert.equal(await isVerifiedInitializedDraft(initialized), true)
+    // Retrying preparation after a later configuration failure is idempotent:
+    // no additional Git commit, job replacement or receipt overwrite is permitted.
+    const safeRetry = await prepareCachedJob(store, owner.id, sourceInput.token, 'github',
+      request(jobId), async () => ({ remoteUrl: sourceInput.remoteUrl, reopenDraft: true as const }))
+    assert.equal(safeRetry.headSha, initialized.headSha)
+    assert.equal(await trustedHead(initialized), initialized.headSha)
+    assert.equal(git(initialized.worktreeRoot, 'rev-list', '--count', pinned + '..HEAD'), '1')
     assert.equal(git(remote, 'rev-parse', 'main'), pinned)
 
     // A newly submitted first Chat Turn has its own UUID. The controller

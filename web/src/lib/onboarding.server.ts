@@ -4,6 +4,7 @@ import { StudioSchemaError } from '../db/schema-error'
 import { requireUser } from './access.server'
 import { storyContentDirectory } from './story-discovery.shared'
 import { parseGenerationContract } from '../../../src/generation'
+import { authorizedStoryJob } from './fixture-jobs.server'
 
 export const questionRounds = [
   ['id', 'title', 'premise', 'central_conflict'],
@@ -104,9 +105,33 @@ export async function onboardingRequest(auth: StudioAuth, store: StudioDatabase,
     if (!owner) throw new OnboardingError(404, 'Repository is not connected to this account.')
     const saved = await store.persistence.onboarding.draft(user.id, repositoryId, workspace)
     if (request.method === 'GET') {
-      return response({ repositoryId, provider: owner.provider, workspace,
-        target: storyContentDirectory(workspace), revision: saved?.revision ?? 0,
-        draft: saved ? validateOnboardingDraft(JSON.parse(saved.draftJson)) : blankOnboardingDraft() })
+      const target = storyContentDirectory(workspace)
+      const initial = owner.provider === 'github'
+        ? await store.persistence.onboarding.githubInitialization(user.id, repositoryId, target)
+        : null
+      let initialized: { kind: 'recoverable'; created: {
+        jobId: string; headSha: string; branch: string; commit: string; baseSha: string;
+        story: { id: string; directory: string; title: string }; mode: string
+      }; configured: boolean } | { kind: 'unavailable'; storyId: string } | undefined
+      if (initial) {
+        try {
+          const job = await authorizedStoryJob(store, user.id, initial.jobId)
+          if (job.jobId !== initial.jobId || job.baseSha !== initial.baseSha ||
+              job.storyRelativePath !== target) throw new Error('Saved Story job identity changed')
+          initialized = { kind: 'recoverable', configured: initial.configured, created: {
+            jobId: job.jobId, headSha: job.headSha, branch: job.branch,
+            commit: job.headSha, baseSha: job.baseSha,
+            story: { id: initial.storyId, directory: target, title: initial.title },
+            mode: job.headSha === job.baseSha ? 'bootstrap' : 'branch',
+          } }
+        } catch {
+          initialized = { kind: 'unavailable', storyId: initial.storyId }
+        }
+      }
+      return response({ repositoryId, provider: owner.provider, workspace, target,
+        revision: saved?.revision ?? 0,
+        draft: saved ? validateOnboardingDraft(JSON.parse(saved.draftJson)) : blankOnboardingDraft(),
+        ...(initialized ? { initialized } : {}) })
     }
     const reader = request.body?.getReader()
     if (!reader) throw new OnboardingError(400, 'Missing discovery draft.')

@@ -353,6 +353,11 @@ for (const backend of ['sqlite', 'postgres'] as const) {
             storyId,
             commitSha: sha,
           })
+          assert.deepEqual(await onboarding.githubInitialization(alice, repositoryId, 'path/story'), {
+            storyId, jobId, title: 'First', baseSha: sha, configured: false,
+          })
+          assert.equal(await onboarding.githubInitialization(bob, repositoryId, 'path/story'), null)
+          assert.equal(await onboarding.githubInitialization(alice, repositoryId, 'other/story'), null)
           assert.equal(await repos.repositoryForStory(alice, storyId, 'github'), repositoryId)
           assert.equal(await repos.repositoryForStory(bob, storyId, 'github'), null)
           assert.equal(await repos.repositoryForStory(alice, storyId, 'gitlab'), null)
@@ -427,6 +432,7 @@ for (const backend of ['sqlite', 'postgres'] as const) {
             digest,
           )
           assert.equal((await after.onboarding.initializationJob(jobId))?.storyId, storyId)
+          assert.equal((await after.onboarding.githubInitialization(alice, repositoryId, 'path/story'))?.jobId, jobId)
           assert.equal((await after.piCredentials.read(alice, 'openai'))?.revision, 3)
           assert.equal(await after.piCredentials.read(bob, 'openai'), null)
           await after.piCredentials.delete(alice, 'openai')

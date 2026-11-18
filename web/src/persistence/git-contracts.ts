@@ -73,6 +73,10 @@ export interface StoryOnboarding {
     id: string; contentSha256: string | null
   } | null>
   initializationJob(jobId: string): Promise<{ storyId: string; ownerId: string; commitSha: string | null } | null>
+  /** Only the original GitHub creation session, source-bound to this owner and workspace. */
+  githubInitialization(owner: string, repositoryId: string, directory: string): Promise<{
+    storyId: string; title: string; jobId: string; baseSha: string; configured: boolean
+  } | null>
   /** Story and its initialization session are committed atomically, synchronously in SQLite. */
   commitGithubInitialization(story: StoryInput, jobId: string): Promise<void>
   /** Preserve the existing import upsert, including the unique repository/directory identity. */

@@ -595,6 +595,25 @@ export function createKyselyGitPersistence(db: SharedDatabase<StudioDb>): Ports 
         .executeTakeFirst()
       return row ? { storyId: row.storyId, ownerId: row.ownerUserId, commitSha: row.sourceCommitSha } : null
     },
+    async githubInitialization(owner, repositoryId, directory) {
+      required(owner)
+      const row = await db.read
+        .selectFrom('stories as story')
+        .innerJoin('studioSessions as job', 'job.storyId', 'story.id')
+        .select(['story.id as storyId', 'story.title', 'story.sourceCommitSha as baseSha',
+          'job.id as jobId', 'job.generationConfigJson as configJson'])
+        .where('story.ownerUserId', '=', owner)
+        .where('story.repositoryId', '=', repositoryId)
+        .where('story.directory', '=', directory)
+        .where('story.initialContentSha256', 'is not', null)
+        .where('job.ownerUserId', '=', owner)
+        .whereRef('job.sourceCommitSha', '=', 'story.sourceCommitSha')
+        .whereRef('job.createdAt', '=', 'story.createdAt')
+        .where('job.generationRequestJson', 'is', null)
+        .executeTakeFirst()
+      return row?.baseSha ? { storyId: row.storyId, title: row.title,
+        jobId: row.jobId, baseSha: row.baseSha, configured: row.configJson !== null } : null
+    },
     async commitGithubInitialization(story, jobId) {
       required(story.owner)
       await db.withWriteTransaction([], async (tx) => {
