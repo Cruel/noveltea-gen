@@ -413,10 +413,13 @@ export function eventSpecialistPrompt(
       "Return one unfenced JSON object with cumulative Story-relative " +
       "modifiedRecords, architecturalConflicts and laterObligations arrays. Include all " +
       "changed records. An optional authorDecisionRequest for consequential ambiguity " +
-      "MUST use field kind, never type, with value free-text, yes-no or " +
-      "alternatives. Free-text needs only question; yes-no needs question; " +
-      "alternatives require " +
-      "(question, 2–4 options and recommendation); structured choices include Other. " +
+      "MUST use field kind, never type, with value free-text, yes-no, " +
+      "alternatives or multiple-choice. Free-text needs question and optionally " +
+      "placeholder; yes-no needs question; alternatives and multiple-choice need " +
+      "question and 2–4 options with concise {id,title}, optionally description, " +
+      "benefits/tradeoffs and recommendation. Choices include Other. For routine " +
+      "creative questions, allowStudioDecision:true requests optional Studio " +
+      "delegation; only controller policy can permit it. " +
       "Do not request author permission for a discovery Event already in this " +
       "authorized work item. No choice authorizes protected changes. " +
       "No-write prerequisite reports have modifiedRecords:[] and must precede " +
@@ -442,7 +445,7 @@ export function eventQuestionCorrectionFeedback(error: unknown): string {
     "Keep protected and other-owner records unchanged. If a genuine " +
     "consequential question remains outside your grant, use EXACT " +
     "authorDecisionRequest field kind (never type), with value " +
-    "free-text, yes-no, or alternatives and the supported option fields. " +
+    "free-text, yes-no, alternatives, or multiple-choice and the supported option fields. " +
     "Otherwise author the Event, run story_validate, and return the " +
     "complete cumulative modifiedRecords, architecturalConflicts and " +
     "laterObligations JSON arrays. This is one bounded correction in " +
@@ -506,7 +509,7 @@ export async function authorEventCluster(
         throw new Error("Event specialist correction exceeded its original bounded budget.");
       if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
       const direction = resume?.answer
-        ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer) +
+        ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer, resume.delegationAllowed === true) +
           "\nContinue in this exact session without changing protected decisions.\n" : "";
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + direction + prompt : prompt);
       const last = [...session.messages].reverse().find(m => m.role === "assistant");

@@ -118,7 +118,8 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       return { status: response.status, data: await response.json() as {
         decisions?: Array<{ id: string; proposalSha256: string; phase: string; decision?: string }>;
         decision?: { phase: string; decision: string };
-        choice?: { id: string; phase: string; proposalSha256: string } | null;
+        choice?: { id: string; phase: string; proposalSha256: string; delegationAllowed?: boolean } | null;
+        continuation?: 'queued' | 'manual';
         error?: string;
       } }
     }
@@ -195,10 +196,13 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     const answered = await api('POST', payload)
     assert.equal(answered.status, 200, answered.data.error)
     assert.equal(answered.data.choice?.phase, 'answered')
+    assert.equal(answered.data.continuation, 'manual',
+      'No verified graph checkpoint exists: accepted answer persists for explicit recovery')
     assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'option')
     assert.equal((await api('POST', payload)).status, 409, 'A submitted choice cannot be rewritten')
     assert.equal((await api('GET')).data.choice?.phase, 'answered')
-    assert.equal((await store.persistence.generation.jobs.state(owner.user.id, jobId))?.status, 'paused', 'Author answer does not automatically resume Pi')
+    assert.equal((await store.persistence.generation.jobs.state(owner.user.id, jobId))?.status, 'paused',
+      'Unsafe automatic continuation is refused; the answer remains durable')
 
     choice = await recordSpecialistChoice(job, 'character-foundations', question,
       choiceSessionId, choiceFile)
@@ -216,6 +220,68 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal(savedCustom?.kind, 'custom')
     assert.equal(savedCustom?.kind === 'custom' && savedCustom.text,
       '  Follow existing canon but include a distinct consequence for both investigation paths.  ')
+
+    // The model can request delegation, but the controller independently
+    // authorizes it only for an ordinary non-protected specialist assignment.
+    const delegableQuestion = { ...question, allowStudioDecision: true }
+    choice = await recordSpecialistChoice(job, 'character-foundations',
+      delegableQuestion, choiceSessionId, choiceFile)
+    writeFileSync(join(job.stateDir, 'character-world.json'), JSON.stringify({
+      jobId, threadId: job.threadId, units: [
+        { id: 'world-foundations', phase: 'committed' },
+        { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
+      ],
+    }))
+    const delegateView = await api('GET')
+    assert.equal(delegateView.data.choice?.delegationAllowed, true)
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).answer, undefined,
+      'A provisional UI default never creates delegated authorization')
+    const delegatePayload = { action: 'choice', id: choice.id,
+      proposalSha256: choice.proposalSha256, kind: 'delegate', note: ' Keep established canon. ' }
+    assert.equal((await api('POST', { ...delegatePayload, optionId: 'known-canon' })).status, 409)
+    assert.equal((await api('POST', { ...delegatePayload, approved: true })).status, 409)
+    assert.equal((await api('POST', { ...delegatePayload, proposalSha256: 'f'.repeat(64) })).status, 409)
+    assert.equal((await api('POST', delegatePayload, owners[1]!.cookie)).status, 404)
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).phase, 'awaiting-author')
+    const allowedDelegate = await api('POST', delegatePayload)
+    assert.equal(allowedDelegate.status, 200, allowedDelegate.data.error)
+    assert.equal(allowedDelegate.data.continuation, 'manual')
+    const persistedDelegate = await inspectSpecialistChoice(job, choice.id)
+    assert.equal(persistedDelegate.answer?.kind, 'delegate')
+    assert.equal(persistedDelegate.answer?.note, ' Keep established canon. ')
+    assert.equal(persistedDelegate.answer?.principal, 'user:' + owner.user.id)
+    assert.equal((await api('POST', delegatePayload)).status, 409)
+
+    const multiQuestion = { kind: 'multiple-choice' as const,
+      question: 'Which compatible consequences should the next chapter retain?',
+      options: [{ id: 'history', title: 'Historical clue' }, { id: 'trust', title: 'Rebuild trust' }],
+      recommendedId: 'history', allowStudioDecision: true }
+    choice = await recordSpecialistChoice(job, 'character-foundations',
+      multiQuestion, choiceSessionId, choiceFile)
+    writeFileSync(join(job.stateDir, 'character-world.json'), JSON.stringify({
+      jobId, threadId: job.threadId, units: [
+        { id: 'world-foundations', phase: 'committed' },
+        { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
+      ],
+    }))
+    const multiPayload = { action: 'choice', id: choice.id,
+      proposalSha256: choice.proposalSha256, kind: 'multiple',
+      optionIds: ['trust', 'history'],
+      text: '  Preserve an optional investigation path.  ', note: ' Do not retcon canon. ' }
+    assert.equal((await api('POST', { ...multiPayload, optionIds: ['trust', 'trust'] })).status, 409)
+    assert.equal((await api('POST', { ...multiPayload, optionIds: ['invented'] })).status, 409)
+    assert.equal((await api('POST', { ...multiPayload, kind: 'delegate' })).status, 409)
+    assert.equal((await api('POST', { ...multiPayload, principal: 'user:fake' })).status, 409)
+    assert.equal((await inspectSpecialistChoice(job, choice.id)).answer, undefined)
+    const multiResponse = await api('POST', multiPayload)
+    assert.equal(multiResponse.status, 200, multiResponse.data.error)
+    assert.equal(multiResponse.data.continuation, 'manual')
+    const persistedMulti = (await inspectSpecialistChoice(job, choice.id)).answer
+    assert.equal(persistedMulti?.kind, 'multiple')
+    assert.deepEqual(persistedMulti?.kind === 'multiple' && persistedMulti.optionIds, ['trust', 'history'])
+    assert.equal(persistedMulti?.kind === 'multiple' && persistedMulti.text,
+      '  Preserve an optional investigation path.  ')
+    assert.equal(persistedMulti?.principal, 'user:' + owner.user.id)
 
     // The same authenticated endpoint accepts free-text questions from a
     // different specialist without a synthetic 2–4-choice requirement.
@@ -294,11 +360,17 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       choiceWorkItem: workItem, piSessionFile: focusedFile,
       piSessionId: focusedSession, phase: 'writing' }
     writeFileSync(stateFile, JSON.stringify(state))
-    const conversation = await recordSpecialistChoice(job, workItem, question, focusedSession, focusedFile)
+    const conversation = await recordSpecialistChoice(job, workItem,
+      { ...question, allowStudioDecision: true }, focusedSession, focusedFile)
+    assert.equal(conversation.delegationAllowed, undefined,
+      'An author-gated focus assignment cannot be delegated by an agent request')
     writeFileSync(stateFile, JSON.stringify({ ...state, phase: 'awaiting-author',
       authorChoiceId: conversation.id }))
     const focusedListed = await api('GET')
     assert.equal(focusedListed.data.choice?.id, conversation.id)
+    assert.equal(focusedListed.data.choice?.delegationAllowed, false)
+    assert.equal((await api('POST', { action: 'choice', id: conversation.id,
+      proposalSha256: conversation.proposalSha256, kind: 'delegate' })).status, 409)
     const delegated = { action: 'choice', id: conversation.id,
       proposalSha256: conversation.proposalSha256, kind: 'custom',
       text: 'Use the established characterization. Delegate the exact playable dialogue to the writer.' }

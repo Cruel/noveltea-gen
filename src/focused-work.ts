@@ -335,14 +335,16 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       "The parent independently checks your precise Git diff and protected canonical validation.\n" +
       creativePolicyInstruction(policy) +
       (resume?.answer ? "\nAUTHENTICATED AUTHOR ANSWER (exact waiting assignment): " +
-        authorChoiceDirection(resume.question, resume.answer) +
+        authorChoiceDirection(resume.question, resume.answer, resume.delegationAllowed === true) +
         "\nContinue this original Pi session; keep the controller's existing write scope. " : "") +
       "\nIf the currently authorized edit requires an unresolved CONSEQUENTIALLY different " +
       "artistic direction not specified or delegated by the author, ask before editing. " +
       "Return JSON {authorDecisionRequest:{kind:'alternatives',question,options:[2–3 " +
       "{id,title,approach,benefits,tradeoffs}],recommendedId,recommendationReason},modifiedRecords:[]}. " +
-      "You may instead use kind:'free-text' or kind:'yes-no'; Other/free text and " +
-      "delegation are always allowed. Give meaningful alternatives, an explicit reasoned " +
+      "You may instead use kind:'free-text', kind:'yes-no' or kind:'multiple-choice'; " +
+      "Other/free text are always allowed. This explicitly author-gated focused " +
+      "assignment does not permit Studio delegation through a question. " +
+      "Give meaningful alternatives, an explicit reasoned " +
       "recommendation and concrete consequences. Never ask for routine phrasing, minor " +
       "staging, validator errors or already delegated details; do not request protected " +
       "canon approval via this mechanism. If asking, leave the Story and Git entirely " +

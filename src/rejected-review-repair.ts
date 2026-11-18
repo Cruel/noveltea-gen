@@ -698,7 +698,7 @@ export async function consumeRejectedRepairChoice(job: JobStartResult, sha: stri
     const assignment = { ...state.assignment, outcome: revisionText.trim() };
     const revision = { version: 2, assignment, choiceId: choice.id,
       proposalSha256: choice.proposalSha256, principal: choice.answer.principal,
-      direction: authorChoiceDirection(choice.question, choice.answer) };
+      direction: authorChoiceDirection(choice.question, choice.answer, choice.delegationAllowed === true) };
     state.revision = { ...revision, digest: hash(revision) };
   }
   state.phase = state.attempts >= MAX_ATTEMPTS ? "blocked" : "ready";

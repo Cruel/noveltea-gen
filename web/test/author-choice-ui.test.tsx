@@ -6,13 +6,19 @@ import { AuthorChoicePanel } from '../src/components/author-choice-panel'
 import type { SpecialistChoice } from '../src/lib/author-state'
 
 function render(question: SpecialistChoice['question'], selected = '',
-  answer?: SpecialistChoice['answer'], contextHref?: (path: string) => string) {
+  answer?: SpecialistChoice['answer'], contextHref?: (path: string) => string,
+  extra?: { delegationAllowed?: boolean; selectedIds?: string[];
+    multiCustom?: boolean; customAnswer?: string }) {
   return renderToStaticMarkup(createElement(AuthorChoicePanel, {
     choice: { id: 'answer-123', workItem: 'event-disclosure',
       phase: answer ? 'answered' : 'awaiting-author',
-      proposalSha256: 'a'.repeat(64), question, ...(answer ? { answer } : {}) },
-    presentation: 'chat', busy: false, selection: selected, customAnswer: '', note: '',
-    contextHref, onSelect: () => {}, onCustomAnswer: () => {}, onNote: () => {}, onSubmit: () => {},
+      proposalSha256: 'a'.repeat(64), question, ...(answer ? { answer } : {}),
+      delegationAllowed: extra?.delegationAllowed ?? false },
+    presentation: 'chat', busy: false, selection: selected,
+    selectedIds: extra?.selectedIds, multiCustom: extra?.multiCustom,
+    customAnswer: extra?.customAnswer ?? '', note: '',
+    contextHref, onSelect: () => {}, onSelectedIds: () => {}, onMultiCustom: () => {},
+    onCustomAnswer: () => {}, onNote: () => {}, onSubmit: () => {},
   }))
 }
 test('free-text questions render an accessible required input without forcing radio options', () => {
@@ -95,6 +101,71 @@ test('recommendation is never preselected; concise options remain usable without
   const explicit = render(question, 'keep')
   assert.match(explicit, /data-checked=""/)
   assert.doesNotMatch(explicit, /Submit answer<\/button>.*disabled/)
+})
+
+test('trusted delegation is provisionally selected, never an accepted response', () => {
+  const question = { kind: 'alternatives' as const,
+    question: 'How should the witness respond?',
+    options: [{ id: 'trust', title: 'Build trust' }, { id: 'conflict', title: 'Challenge' }],
+    recommendedId: 'trust', allowStudioDecision: true,
+  }
+  const allowed = render(question, '__delegate__', undefined, undefined,
+    { delegationAllowed: true })
+  assert.match(allowed, /Let NovelTea Studio decide/)
+  assert.match(allowed, /checked=""/)
+  assert.match(allowed, /Recommended/)
+  assert.match(allowed, /data-unchecked=""[^>]*aria-label="Build trust"/,
+    'The recommended approach is not the selected radio option')
+  assert.doesNotMatch(allowed, /Your answer is saved/)
+  assert.doesNotMatch(allowed, /disabled=""[^>]*>Submit answer/)
+  const forbidden = render(question, '', undefined, undefined, { delegationAllowed: false })
+  assert.doesNotMatch(forbidden, /Let NovelTea Studio decide/)
+  assert.match(forbidden, /disabled=""/)
+  const saved = render(question, '', { kind: 'delegate', note: 'Preserve canon' })
+  assert.match(saved, /Delegated to NovelTea Studio/)
+  assert.match(saved, /Preserve canon/)
+})
+
+test('free-text and Yes/No delegation remain distinct from explicit answers', () => {
+  const text = render({ kind: 'free-text', question: 'What should the witness confess?',
+    allowStudioDecision: true }, '__delegate__', undefined, undefined, { delegationAllowed: true })
+  assert.match(text, /Let NovelTea Studio decide/)
+  assert.doesNotMatch(text, /for="choice-free-text-answer-123"/)
+  assert.doesNotMatch(text, /disabled=""[^>]*>Submit answer/)
+  const explicit = render({ kind: 'free-text', question: 'What should the witness confess?',
+    allowStudioDecision: true }, '__answer__', undefined, undefined, { delegationAllowed: true })
+  assert.match(explicit, /Your answer/)
+  assert.match(explicit, /disabled=""/)
+  const binary = render({ kind: 'yes-no', question: 'Should the witness reveal the truth?',
+    allowStudioDecision: true }, '__delegate__', undefined, undefined, { delegationAllowed: true })
+  assert.match(binary, /Let NovelTea Studio decide/)
+  assert.match(binary, /aria-label="Yes"/)
+  assert.match(binary, /aria-label="No"/)
+})
+
+test('multi-selection supports independent checkboxes plus optional original custom input', () => {
+  const q = { kind: 'multiple-choice' as const,
+    question: 'Which compatible clues matter?',
+    options: [{ id: 'history', title: 'Archive history' }, { id: 'witness', title: 'Witness testimony' }],
+    recommendedId: 'history', allowStudioDecision: true }
+  const delegated = render(q, '__delegate__', undefined, undefined, { delegationAllowed: true })
+  assert.match(delegated, /Let NovelTea Studio decide/)
+  assert.match(delegated, /type="checkbox"/)
+  assert.doesNotMatch(delegated, /disabled=""[^>]*>Submit answer/)
+  const combined = render(q, '', undefined, undefined, { delegationAllowed: true,
+    selectedIds: ['witness', 'history'], multiCustom: true,
+    customAnswer: '  A third optional perspective.  ' })
+  assert.match(combined, /Archive history/)
+  assert.match(combined, /Witness testimony/)
+  assert.match(combined, /Your own direction \(required\)/)
+  assert.match(combined, /A third optional perspective/)
+  assert.match(combined, /checked=""/)
+  const incomplete = render(q, '', undefined, undefined, { delegationAllowed: true,
+    selectedIds: ['history'], multiCustom: true })
+  assert.match(incomplete, /disabled=""/)
+  const saved = render(q, '', { kind: 'multiple', optionIds: ['history', 'witness'],
+    text: '  Keep the original wording.  ', note: 'Avoid retcons' })
+  assert.match(saved, /Archive history; Witness testimony;   Keep the original wording/)
 })
 
 test('free-text placeholders are hints rather than submitted answers', () => {

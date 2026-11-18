@@ -16,12 +16,18 @@ export const specialistChoiceKind = authorQuestionKind;
 export const specialistChoiceOptions = authorQuestionOptions;
 /** Project a persisted, authenticated receipt answer for its original specialist.
  * Provenance fields stay on the receipt; only the validated response is projected. */
-export function authorChoiceDirection(q: SpecialistChoiceQuestion, answer: SpecialistChoiceAnswer): string {
-  if (answer.kind === "option")
-    return authorQuestionDirection(q, { kind: "option", optionId: answer.optionId, note: answer.note });
-  if (answer.kind === "custom")
-    return authorQuestionDirection(q, { kind: "custom", text: answer.text, note: answer.note });
-  throw Error("Unsupported persisted author answer.");
+export function authorChoiceDirection(q: SpecialistChoiceQuestion, answer: SpecialistChoiceAnswer,
+  delegationAllowed = false): string {
+  // A persisted receipt carries immutable principal/time evidence. Project only
+  // the accepted response fields; never pass receipt metadata into the parser.
+  const clean: SpecialistChoiceAnswer = answer.kind === "option"
+    ? { kind: "option", optionId: answer.optionId, note: answer.note }
+    : answer.kind === "multiple"
+      ? { kind: "multiple", optionIds: answer.optionIds,
+        ...(answer.text !== undefined ? { text: answer.text } : {}), note: answer.note }
+      : answer.kind === "custom" ? { kind: "custom", text: answer.text, note: answer.note }
+        : { kind: "delegate", note: answer.note };
+  return authorQuestionDirection(q, clean, delegationAllowed);
 }
 export interface SpecialistChoiceReceipt {
   version: 1;
@@ -29,6 +35,8 @@ export interface SpecialistChoiceReceipt {
   phase: "awaiting-author" | "answered" | "resuming" | "consumed";
   headSha: string; worktreeDigest: string; sessionId: string; sessionFile: string;
   sessionSha256: string; question: SpecialistChoiceQuestion; proposalSha256: string;
+  /** Controller-issued permission, included in the immutable proposal digest. */
+  delegationAllowed?: true;
   answer?: SpecialistChoiceAnswer & { principal: string; submittedAt: string };
 }
 export class SpecialistChoiceRequiredError extends Error {
@@ -53,7 +61,7 @@ export function parseSpecialistChoice(value: unknown): SpecialistChoiceQuestion 
   const question = parseAuthorQuestion(value);
   // The existing specialist has a bounded single response with up to four
   // alternatives. The shared contract allows concise, optional detail.
-  if (specialistChoiceKind(question) === "alternatives" && question.options!.length > 4)
+  if (["alternatives", "multiple-choice"].includes(specialistChoiceKind(question)) && question.options!.length > 4)
     throw Error("Specialist author choice requires 2–4 alternatives.");
   return question;
 }
@@ -209,7 +217,11 @@ async function safeRead(job: JobStartResult, id: string) {
       !/^[a-f0-9]{64}$/.test(r.proposalSha256) ||
       sha(JSON.stringify({ jobId: r.jobId, workItem: r.workItem, headSha: r.headSha,
         worktreeDigest: r.worktreeDigest, sessionId: r.sessionId,
-        sessionSha256: r.sessionSha256, question: parseSpecialistChoice(r.question) })) !== r.proposalSha256)
+        sessionSha256: r.sessionSha256, question: parseSpecialistChoice(r.question),
+        ...(r.delegationAllowed === true ? { delegationAllowed: true } : {}) })) !== r.proposalSha256 ||
+      (r.delegationAllowed !== undefined &&
+        (r.delegationAllowed !== true || r.question.allowStudioDecision !== true ||
+          !specialistDelegationPolicy(r.workItem))))
     throw Error("Specialist-choice receipt is inconsistent or modified.");
   if (r.phase === "awaiting-author" && r.answer)
     throw Error("A pending author question cannot contain a prefilled answer.");
@@ -220,7 +232,7 @@ async function safeRead(job: JobStartResult, id: string) {
         !/^\d{4}-\d\d-\d\dT/.test(r.answer.submittedAt))
       throw Error("A resolved choice has no valid authenticated, source-bound answer.");
     const { principal: _principal, submittedAt: _submittedAt, ...authorAnswer } = r.answer;
-    parseAuthorAnswer(r.question, authorAnswer);
+    parseAuthorAnswer(r.question, authorAnswer, r.delegationAllowed === true);
   }
   return r;
 }
@@ -231,6 +243,12 @@ async function save(job: JobStartResult, r: SpecialistChoiceReceipt) {
   await writeFile(temp, JSON.stringify(r, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   await rename(temp, target);
 }
+/** An ordinary foundations/Event question may be delegated, never an explicitly
+ * author-gated focus assignment or a disputed independent-review repair. */
+export function specialistDelegationPolicy(workItem: string): boolean {
+  return workItem === "world-foundations" || workItem === "character-foundations" ||
+    /^event-[a-z][a-z0-9-]*$/.test(workItem);
+}
 export async function recordSpecialistChoice(job: JobStartResult, workItem: string,
   question: SpecialistChoiceQuestion, sessionId: string, sessionFile: string) {
   const q = parseSpecialistChoice(question);
@@ -239,7 +257,9 @@ export async function recordSpecialistChoice(job: JobStartResult, workItem: stri
   const { head, digest } = await evidence(job);
   const transcriptHash = sha(await readFile(sessionFile));
   const immutable = { jobId: job.jobId, workItem, headSha: head, worktreeDigest: digest,
-    sessionId, sessionSha256: transcriptHash, question: q };
+    sessionId, sessionSha256: transcriptHash, question: q,
+    ...(q.allowStudioDecision === true && specialistDelegationPolicy(workItem)
+      ? { delegationAllowed: true as const } : {}) };
   const r: SpecialistChoiceReceipt = {
     version: 1, id: randomUUID(), threadId: job.threadId, ...immutable,
     sessionFile, phase: "awaiting-author", proposalSha256: sha(JSON.stringify(immutable)),
@@ -314,7 +334,7 @@ export async function answerSpecialistChoice(job: JobStartResult, id: string, pr
   if (!/^user:[A-Za-z0-9_-]{1,128}$/.test(principal)) throw Error("Author identity required.");
   const r = await verifySpecialistChoice(job, id, "awaiting-author");
   if (r.proposalSha256 !== proposalSha256) throw Error("Invalid or stale author choice.");
-  const validAnswer = parseAuthorAnswer(r.question, answer);
+  const validAnswer = parseAuthorAnswer(r.question, answer, r.delegationAllowed === true);
   const updated: SpecialistChoiceReceipt = { ...r, phase: "answered",
     answer: { ...validAnswer, principal, submittedAt: new Date().toISOString() } };
   await save(job, updated);

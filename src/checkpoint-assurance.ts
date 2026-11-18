@@ -311,7 +311,7 @@ export async function repairReviewAssignment(job: JobStartResult,
   }
   const revision = proof.assignmentRevision;
   const choice = await inspectSpecialistChoice(job, revision.choiceId);
-  const direction = choice.answer && authorChoiceDirection(choice.question, choice.answer);
+  const direction = choice.answer && authorChoiceDirection(choice.question, choice.answer, choice.delegationAllowed === true);
   const expected = { version: revision.version, assignment: revision.assignment,
     choiceId: revision.choiceId, proposalSha256: revision.proposalSha256,
     principal: revision.principal, direction: revision.direction };

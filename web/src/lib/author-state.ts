@@ -27,6 +27,7 @@ export type RecoveryDecision = {
 export type SpecialistChoice = {
   id: string; workItem: string; phase: 'awaiting-author' | 'answered'
   proposalSha256: string
+  delegationAllowed?: boolean
   question: AuthorQuestion
   answer?: AuthorQuestionAnswer
 }

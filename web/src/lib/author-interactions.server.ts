@@ -10,6 +10,8 @@ import { inspectAuthorDecisions, decideAuthorDecision, isRecoveryDecisionKind, s
 import { withStoryJobLock } from '../../../src/job-lock'
 import { queueRecord } from './generation-queue.server'
 import { activeSpecialistChoice, answerSpecialistChoice } from '../../../src/specialist-choice'
+import { parseAuthorAnswer } from '../../../src/author-question'
+import { enqueueAnsweredSpecialistContinuation } from './generation-controls.server'
 import type { JobStartResult } from '../../../src/job'
 import { postAgentAuthorCommand } from './agent-rpc.server'
 import { validAuthorCommand } from './agent-author-validation'
@@ -75,7 +77,8 @@ async function getRecords(job: JobStartResult, recoverable: boolean) {
     }
   })).then(items => ({ status: updates.status, items: items.filter(item => item !== null), decisions,
     choice: choice ? { id: choice.id, workItem: choice.workItem, phase: choice.phase,
-      proposalSha256: choice.proposalSha256, question: choice.question,
+      proposalSha256: choice.proposalSha256, delegationAllowed: choice.delegationAllowed === true,
+      question: choice.question,
       ...(choice.answer ? { answer: choice.answer } : {}) } : null }))
 }
 
@@ -106,32 +109,30 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     let input: Record<string, unknown>
     try { input = JSON.parse(raw) } catch { return json({ error: 'Invalid JSON' }, 400) }
     if (input?.action === 'choice') {
-      const keys = Object.keys(input).sort().join(',')
       if (!recoverable || row?.status !== 'paused' ||
-          !['action,id,kind,optionId,proposalSha256', 'action,id,kind,note,optionId,proposalSha256',
-            'action,id,kind,proposalSha256,text', 'action,id,kind,note,proposalSha256,text']
-            .includes(keys) ||
           typeof input.id !== 'string' || !/^[a-f0-9-]{36}$/.test(input.id) ||
-          typeof input.proposalSha256 !== 'string' || !SHA.test(input.proposalSha256) ||
-          !['option', 'custom'].includes(String(input.kind)) ||
-          (input.note !== undefined && (typeof input.note !== 'string' || input.note.length > 1000)) ||
-          (input.kind === 'option' && (typeof input.optionId !== 'string' ||
-            input.optionId.length > 40 || 'text' in input)) ||
-          (input.kind === 'custom' && (typeof input.text !== 'string' ||
-            !input.text.trim() || input.text.length > 4000 || 'optionId' in input)))
-        return json({ error: 'Expected one exact pending author choice and an optional note.' }, 409)
+          typeof input.proposalSha256 !== 'string' || !SHA.test(input.proposalSha256))
+        return json({ error: 'Expected one exact pending author choice.' }, 409)
+      const { action: _action, id: _id, proposalSha256: _hash, ...response } = input
       const completed = await withStoryJobLock(job, 'specialist-author-choice', async () => {
         const active = await activeSpecialistChoice(job)
         if (!active || active.id !== input.id || active.phase !== 'awaiting-author')
           throw new Error('Author choice has changed or was already answered.')
-        const answer = input.kind === 'option'
-          ? { kind: 'option' as const, optionId: input.optionId as string, note: input.note as string ?? '' }
-          : { kind: 'custom' as const, text: input.text as string, note: input.note as string ?? '' }
+        const answer = parseAuthorAnswer(active.question, {
+          ...response, ...(response.note === undefined ? { note: '' } : {}),
+        }, active.delegationAllowed === true)
         return answerSpecialistChoice(job, active.id, input.proposalSha256 as string,
           answer, 'user:' + user.id)
       })
+      // The answer is already durable. A rejected checkpoint/queue transition
+      // cannot undo it or implicitly retry an uncertain specialist model call.
+      let continuation: 'queued' | 'manual' = 'manual'
+      try {
+        await enqueueAnsweredSpecialistContinuation(store, user.id, job, jobId)
+        continuation = 'queued'
+      } catch { /* Keep the saved answer and the existing explicit Continue/recovery path. */ }
       return json({ choice: { id: completed.id, phase: completed.phase,
-        proposalSha256: completed.proposalSha256 } })
+        proposalSha256: completed.proposalSha256 }, continuation })
     }
     if (input?.action === 'decision') {
       const fields = Object.keys(input).sort().join(',')

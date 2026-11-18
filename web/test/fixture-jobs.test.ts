@@ -20,7 +20,9 @@ import { jobChangesRequest } from '../src/lib/job-changes.server'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { parseGenerationContract } from '../../src/generation'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
-import { recordSpecialistChoice, answerSpecialistChoice } from '../../src/specialist-choice'
+import { recordSpecialistChoice, inspectSpecialistChoice } from '../../src/specialist-choice'
+import { authorInteractionRequest } from '../src/lib/author-interactions.server'
+import { setJobControl } from '../../src/job-control'
 import { safeToResume } from '../src/lib/generation-controls.server'
 import { randomUUID } from 'node:crypto'
 import { interpretNaturalStoryPrompt } from '../src/lib/natural-story-plan'
@@ -413,7 +415,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     ].join('\n') + '\n')
     const question = {
       question: 'Which established narrative interpretation should this character develop under this story contract?',
-      recommendedId: 'existing-canon',
+      recommendedId: 'existing-canon', allowStudioDecision: true,
       recommendationReason: 'The existing Character record provides a coherent, approved foundation to extend.',
       options: [
         { id: 'existing-canon', title: 'Preserve canon', approach: 'Expand existing characterization.',
@@ -442,8 +444,29 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(pause.revisionVerified, false)
     assert.equal(pause.recovery, null, 'Answered question is not an unsafe-writer repair prompt')
     assert.match(pause.reason, /waiting for your answer/)
-    await answerSpecialistChoice(acquired, pendingChoice.id, pendingChoice.proposalSha256,
-      { kind: 'option', optionId: 'existing-canon', note: '' }, 'user:author')
+    assert.equal(pendingChoice.delegationAllowed, true);
+    const accepted = await authorInteractionRequest(restoredAuth, store,
+      new Request(config.baseURL + '/api/jobs/' + jobId + '/author', {
+        method: 'POST', headers: { cookie: aliceCookie, origin: config.baseURL,
+          'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'choice', id: pendingChoice.id,
+          proposalSha256: pendingChoice.proposalSha256,
+          kind: 'delegate', note: 'Choose only within the authorized Character assignment.' }),
+      }), jobId, config.baseURL)
+    assert.equal(accepted.status, 200, await accepted.clone().text())
+    const acceptedBody = await accepted.json() as { choice: { phase: string }; continuation: string }
+    assert.equal(acceptedBody.choice.phase, 'answered')
+    assert.equal(acceptedBody.continuation, 'queued',
+      'A durable authenticated delegation automatically re-enters the verified original checkpoint')
+    assert.equal((await inspectSpecialistChoice(acquired, pendingChoice.id)).answer?.kind, 'delegate')
+    assert.equal((await queueRecord(store, jobId))?.phase, 'queued')
+    // The test does not launch another model call. Simulate finishing only the
+    // queued transition so later independent recovery assertions stay isolated.
+    const queueWorker = 'fixture:accepted-choice'
+    const now = '2026-11-18T00:00:00.000Z'
+    assert.equal((await store.persistence.generation.queue.claim(queueWorker, 1, now))?.jobId, jobId)
+    assert.equal(await store.persistence.generation.queue.finish(jobId, queueWorker, true, now), true)
+    await setJobControl(acquired, 'paused')
     assert.equal(await safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),
       'resume', 'Only an exact settled, answered specialist may continue on preserved draft bytes')
     writeFileSync(pendingDraft, 'tampered while the author was answering')

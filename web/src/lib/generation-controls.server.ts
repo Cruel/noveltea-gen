@@ -170,6 +170,27 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
   })
 }
 
+/** Resume an answered specialist only through the same pinned checkpoint gates as
+ * the explicit Resume control. Never dispatch a model call from this request. */
+export async function enqueueAnsweredSpecialistContinuation(store: StudioDatabase,
+  owner: string, job: Awaited<ReturnType<typeof authorizedStoryJob>>, id: string) {
+  const current = await store.persistence.generation.jobs.state(owner, id)
+  const queued = await queueRecord(store, id)
+  if (current?.status !== 'paused' || !current.requestJson || !current.threadId ||
+      queued?.phase !== 'finished')
+    throw Error('The accepted answer is saved; generation requires manual recovery inspection.')
+  const choice = await activeSpecialistChoice(job)
+  if (choice?.phase !== 'answered')
+    throw Error('An exact answered specialist receipt is required before continuation.')
+  const intent = await safeToResume(job, current.threadId, current.requestJson, false)
+  if (intent !== 'resume') throw Error('Original specialist checkpoint is unavailable.')
+  await setJobControl(job, 'running')
+  await store.persistence.generation.queue.reconcileAndEnqueue(owner, id, intent, {
+    status: current.status, request: current.requestJson, thread: current.threadId,
+  }, false, new Date().toISOString())
+  return { control: 'running' as const, queue: 'queued' as const, intent }
+}
+
 /** Authenticated, controller-only job controls. A request never carries a path,
  * approval, graph state, or alternate thread identifier. */
 export async function generationControlRequest(auth: StudioAuth, store: StudioDatabase,

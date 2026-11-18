@@ -72,7 +72,7 @@ test("shared Author Choices accept text, binary/Other and meaningful multi-alter
     options: [candidate.options[0], candidate.options[0]] }), /unique/);
 });
 
-test("focused conversation choice binds one exact original session and supports Other/delegation", async () => {
+test("focused conversation choice binds one original session and rejects agent-requested delegation", async () => {
   const root = mkdtempSync(join(tmpdir(), "nt-focused-choice-"));
   const old = { state: process.env.NT_STATE_DIR, cache: process.env.NT_GIT_CACHE_DIR };
   process.env.NT_STATE_DIR = join(root, "state");
@@ -100,13 +100,17 @@ test("focused conversation choice binds one exact original session and supports 
     const originalState = { jobId: job.jobId, workItemId: "focus:" + target,
       target, choiceWorkItem: workItem, phase: "writing", piSessionFile: sessionFile, piSessionId: sessionId };
     writeFileSync(stateFile, JSON.stringify(originalState));
-    const question = parseSpecialistChoice(candidate);
+    const question = parseSpecialistChoice({ ...candidate, allowStudioDecision: true });
     await assert.rejects(recordSpecialistChoice(job, "focus-" + "f".repeat(24), question,
       sessionId, sessionFile), /matching assigned/);
     const receipt = await recordSpecialistChoice(job, workItem, question, sessionId, sessionFile);
+    assert.equal(receipt.delegationAllowed, undefined,
+      'An untrusted delegation request cannot override a mandatory focused author boundary');
     writeFileSync(stateFile, JSON.stringify({ ...originalState, phase: "awaiting-author",
       authorChoiceId: receipt.id }));
     assert.equal((await activeSpecialistChoice(job))?.id, receipt.id);
+    await assert.rejects(answerSpecialistChoice(job, receipt.id, receipt.proposalSha256,
+      { kind: "delegate", note: "" }, "user:owner"), /Invalid/);
     await assert.rejects(answerSpecialistChoice(job, receipt.id, "f".repeat(64),
       { kind: "option", optionId: "systemic", note: "" }, "user:owner"), /stale/);
     const reply = await answerSpecialistChoice(job, receipt.id, receipt.proposalSha256,
@@ -242,6 +246,64 @@ test("author answer survives restart; only the original session, HEAD and draft 
     await claimSpecialistChoice(job, event.id);
     await assert.rejects(() => claimSpecialistChoice(job, event.id), /required author boundary/);
     await completeSpecialistChoice(job, event.id);
+
+    // An ordinary Event can request delegation, but only the controller's
+    // permitted work-item policy creates signed delegation authority.
+    const requested = parseSpecialistChoice({ kind: "yes-no",
+      question: "Should the witness conceal the chronology until the final reveal?",
+      allowStudioDecision: true });
+    const delegated = await recordSpecialistChoice(job, "event-disclosure",
+      requested, eventSession, eventFile);
+    assert.equal(delegated.delegationAllowed, true);
+    writeFileSync(join(eventItems, "disclosure.json"), JSON.stringify({
+      jobId: job.jobId, workItemId: "event-disclosure",
+      phase: "awaiting-author", authorChoiceId: delegated.id,
+    }));
+    const delegateFile = join(job.stateDir, "specialist-choices", delegated.id + ".json");
+    const originalDelegate = readFileSync(delegateFile, "utf8");
+    writeFileSync(delegateFile, JSON.stringify({
+      ...JSON.parse(originalDelegate), delegationAllowed: false,
+    }));
+    await assert.rejects(() => inspectSpecialistChoice(job, delegated.id), /inconsistent|modified/);
+    writeFileSync(delegateFile, originalDelegate);
+    const resolved = await answerSpecialistChoice(job, delegated.id, delegated.proposalSha256,
+      { kind: "delegate", note: " Keep the trusted chronology. " }, "user:owner");
+    assert.equal(resolved.answer?.kind, "delegate");
+    assert.equal(resolved.answer?.principal, "user:owner");
+    assert.match(authorChoiceDirection(resolved.question, resolved.answer!, true),
+      /original assignment and existing canon/);
+    assert.equal(git(job.worktreeRoot, "status", "--porcelain").includes("creative-direction"), false);
+    await assert.rejects(() => answerSpecialistChoice(job, delegated.id,
+      delegated.proposalSha256, { kind: "option", optionId: "yes", note: "" }, "user:owner"),
+      /required author boundary/);
+    await claimSpecialistChoice(job, delegated.id);
+    await completeSpecialistChoice(job, delegated.id);
+
+    // Multiple answers may combine distinct option IDs and the author's exact
+    // additional text without turning it into a delegation or changing canon.
+    const multiQuestion = parseSpecialistChoice({ kind: "multiple-choice",
+      question: "Which two investigative threads should the next Event preserve?",
+      options: [{ id: "history", title: "History" }, { id: "witness", title: "Witness" }],
+      allowStudioDecision: true });
+    const multi = await recordSpecialistChoice(job, "event-disclosure",
+      multiQuestion, eventSession, eventFile);
+    writeFileSync(join(eventItems, "disclosure.json"), JSON.stringify({
+      jobId: job.jobId, workItemId: "event-disclosure",
+      phase: "awaiting-author", authorChoiceId: multi.id,
+    }));
+    await assert.rejects(() => answerSpecialistChoice(job, multi.id,
+      multi.proposalSha256, { kind: "multiple", optionIds: ["history", "history"],
+        note: "" }, "user:owner"), /Invalid/);
+    const combined = await answerSpecialistChoice(job, multi.id, multi.proposalSha256,
+      { kind: "multiple", optionIds: ["witness", "history"],
+        text: "  Keep the mayor's confession private.  ", note: " Two separate clues. " }, "user:owner");
+    assert.deepEqual(combined.answer?.kind === "multiple" && combined.answer.optionIds,
+      ["witness", "history"]);
+    assert.match(authorChoiceDirection(combined.question, combined.answer!, true),
+      /"custom":"  Keep the mayor's confession private.  "/);
+    assert.equal((await inspectSpecialistChoice(job, multi.id)).answer?.principal, "user:owner");
+    await claimSpecialistChoice(job, multi.id);
+    await completeSpecialistChoice(job, multi.id);
 
     // Plain-text questions also use the same bounded authenticated receipt.
     writeFileSync(join(eventItems, "disclosure.json"), JSON.stringify({
