@@ -131,6 +131,37 @@ test('forged or incomplete source references and fabricated consent fail closed'
     p, sources, true))
 })
 
+test('negated category words in an option cannot masquerade as an explicit author selection', () => {
+  const negative = sources.map(source => source.decisionId === 'author-answer-1'
+    ? { ...source, selectedOption: true,
+      authorText: 'No deep branching — just a short detour.',
+      statement: 'Branching preference — Author selected/wrote: No deep branching — just a short detour.' }
+    : source)
+  const deepPlan: StoryPlanning = { ...p, branching: { ...p.branching!, depth: 'deep' } }
+  assert.throws(() => parsePlanningInterpretations(
+    claims.map(claim => claim.path === 'branching.depth' ? { ...claim, basis: 'explicit' } : claim),
+    deepPlan, negative, true), PlanningClarificationRequired)
+  const falselyAffirmed = negative.map(source => source.decisionId === 'author-answer-1'
+    ? { ...source, authorText: 'Deep branching? Absolutely not.' } : source)
+  assert.throws(() => parsePlanningInterpretations(
+    claims.map(claim => claim.path === 'branching.depth' ? { ...claim, basis: 'explicit' } : claim),
+    deepPlan, falselyAffirmed, true), /impersonate an explicit author choice/)
+  assert.equal(parsePlanningInterpretations(claims, p, negative, true).find(entry =>
+    entry.path === 'branching.depth')?.basis, 'inferred')
+})
+
+test('an exact hyphenated categorical label remains an explicit author choice', () => {
+  const pacedSources: PlanningEvidence[] = [...sources, {
+    source: at('pacing'), decisionId: 'author-answer-4',
+    statement: 'Preferred pacing? — Author selected/wrote: narrative-led',
+    authorText: 'narrative-led', selectedOption: true, delegated: false,
+  }]
+  const result = parsePlanningInterpretations(claims.map(item => item.path === 'pacing'
+    ? { ...item, source: at('pacing'), basis: 'explicit' } : item),
+  { ...p, pacing: 'narrative-led' }, pacedSources, true)
+  assert.equal(result.find(item => item.path === 'pacing')?.basis, 'explicit')
+})
+
 test('materially conflicting explicit author preferences demand a new question', () => {
   const base = { ...p, branching: { depth: 'deep' as const, route_exclusivity: 'substantial' as const } }
   assert.throws(() => parsePlanningInterpretations(claims, base, sources, true),

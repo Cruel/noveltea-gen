@@ -328,11 +328,17 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal((await inspectSpecialistChoice(job, plain.id)).question.kind, 'free-text')
     assert.equal((await api('POST', { action: 'choice', id: plain.id,
       proposalSha256: plain.proposalSha256, kind: 'option', optionId: 'yes' })).status, 409)
-    const plainAnswer = await api('POST', { action: 'choice', id: plain.id,
+    const unicodeAnswer = '界'.repeat(4000)
+    const longPayload = { action: 'choice', id: plain.id,
       proposalSha256: plain.proposalSha256, draftRevision: 1, kind: 'custom',
-      text: 'It should represent lost community trust.', note: 'Preserve the uncertainty.' })
+      text: unicodeAnswer, note: 'Preserve the uncertainty.' }
+    assert.ok(Buffer.byteLength(JSON.stringify(longPayload), 'utf8') > 8192)
+    assert.ok(Buffer.byteLength(JSON.stringify(longPayload), 'utf8') < 20_000)
+    const plainAnswer = await api('POST', longPayload)
     assert.equal(plainAnswer.status, 200, plainAnswer.data.error)
-    assert.equal((await inspectSpecialistChoice(job, plain.id)).answer?.note, 'Preserve the uncertainty.')
+    const unicodeSaved = (await inspectSpecialistChoice(job, plain.id)).answer
+    assert.equal(unicodeSaved?.note, 'Preserve the uncertainty.')
+    assert.equal(unicodeSaved?.kind === 'custom' && unicodeSaved.text, unicodeAnswer)
 
     // Event-design questions are not tied to Character/World state or a
     // different authorization endpoint. Yes/No and Other remain distinct.

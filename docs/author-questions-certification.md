@@ -21,7 +21,10 @@ and the existing source-bound Job/approval controls.
   fields, debounced/deduplicated CAS persistence, flush-before-submit, and
   concurrent-tab conflict handling. Discovery persists to owner-scoped Studio
   storage; specialists persist to the owner/receipt-scoped Job sidecar.
-  Drafts are never author approval or canonical Story writes.
+  An unexpected revision/Question Set transition preserves unsent words in a
+  copyable, read-only recovery view, never as an accepted response to a new set.
+  Recovery is scoped to the same Story or Job identity. Drafts are never author
+  approval or canonical Story writes.
 - Discovery binds repository, Story, immutable first Turn and source SHA;
   question rounds bind set ID and revision; approval uses the exact proposed
   digest and native validation before the original Turn may continue.
@@ -45,15 +48,20 @@ and the existing source-bound Job/approval controls.
 | Generic validation: unknown/duplicate question IDs, recommendation targets, arbitrary model-defined fields, missing/duplicate replies, invalid choice IDs, forbidden delegation and invalid drafts | `test/author-question-set.test.ts`, `test/author-question.test.ts` |
 | Source-backed planning: exact author wording, interpretation vs explicit choice vs delegation, meaningful ambiguity and conflict, Git-only rationale, no unapproved Story edits | `web/test/story-chat-discovery.test.ts`, `test/planning-interpretation.test.ts` |
 | Pre-v1 unsupported textual questions: no old renderer, no conversion, explicit restart and no approval of an unconverted proposal | `web/test/story-chat-discovery.test.ts`, `web/test/pi-story-discovery-ui.test.tsx`, `web/test/story-chat-baseline-ui.test.tsx` |
+| Genuine browser controls: fresh proposed/blocked/approved/legacy reload and button actions, keyboard input, separate tabs, in-flight draft preservation, specialist answer and receipt reload, new specialist Question Set without dropping prior unsent words | `web/test/browser-author-questions.test.ts`, with `NT_BROWSER_TEST=1` in headless Chromium |
+| Large multibyte specialist answer accepted at the same limit as its draft; negated category never gains explicit provenance; mandatory clarification rejects model-proposed delegation | `web/test/author-decisions-api.test.ts`, `test/planning-interpretation.test.ts`, `web/test/story-chat-discovery.test.ts` |
 
-These tests are deterministic fixtures, native validation, local persistence and
-checkpoint/queue assertions. Some are unit or server-rendered UI tests and
-are **not** substitutes for a human browser interaction test. The normal
-first-Story test's negative controller branch verifies that exact approval
-cannot silently create a Job when the execution controller is unavailable;
-the approved-Story continuation fixture verifies one original-Turn queue, while
-an independent Job fixture verifies the positive automatic specialist-requeue
-branch.
+The headless-browser test mounts the actual Story Chat and Author Interactions
+React components in Chromium, with a shared simulated transport to create
+controlled reload/two-tab races. It exercises real DOM event handlers, keyboard
+text entry and autosave transitions. It does **not** authenticate against a
+running Studio server or execute a real specialist model; those boundaries
+are covered separately by authenticated API, native validation, queue and
+checkpoint fixtures. The normal first-Story test's negative controller branch
+verifies that exact approval cannot silently create a Job when the execution
+controller is unavailable; the approved-Story continuation fixture verifies
+one original-Turn queue. An independent Job fixture verifies automatic
+specialist requeue, **not** the resumed writer's successful completion.
 
 ## Limits and separate gates
 
@@ -64,36 +72,42 @@ questions in the Studio Chat flow, and remains reachable for existing
 CLI workflows/tests. It must not be mistaken for certified shared Question Set
 behavior or deleted while those explicit callers remain supported.
 
-No paid authenticated real-Pi certification and no interactive browser
-keyboard/reload walkthrough are claimed here. The full two-mode real-Pi Story
-quality and recovery gate is separately specified in
+No paid authenticated real-Pi certification or full authenticated Studio
+browser walkthrough is claimed here. The controlled browser regression runs
+with `cd web && NT_BROWSER_TEST=1 pnpm exec tsx --test test/browser-author-questions.test.ts`;
+its browser is found in the local Puppeteer cache or explicitly configured via
+`NT_BROWSER_CHROME=/path/to/chrome`. The full two-mode real-Pi Story quality
+and recovery gate is separately specified in
 [new-Story certification](new-story-certification.md); do not represent
-fixture success as a completed live Story. UI operators should still verify
-typing, reload, multiple tabs, keyboard focus, and post-approval continued
-generation with a configured native CLI, model and rootless controller.
+fixture success as a completed live Story.
 
-## Observed checkout verification
+For final authenticated end-to-end signoff, create an actual first Story with a
+sparse Turn; answer two rounds of mixed typed/delegated questions; reload before
+and after proposal approval; observe native validation and a single original
+Turn completion. In a separate real Collaborative Job, answer a paused
+specialist question, confirm the exact receipt, safe automatic requeue and
+successful completion of that original assignment. Deliberately interrupt a
+checkpoint and verify explicit recovery rather than writer replay. Inspect
+multiple tabs, keyboard focus, and protected-decision boundaries in the
+configured rootless environment. These complete live sequences remain pending.
 
-- Shared core, specialist and provenance fixtures: 15/15 passing.
-- Discovery, authenticated author decision, specialist drafts, and UI: 20/20
-  passing; the revised keyboard/control/attribution UI checks: 19/19 passing.
-- Authenticated recovery/queue tests: 8/8 passing; verified approved
-  original-Turn admission/restart tests: 5/5 passing.
-- Planning/provenance, native foundation commit, and certification gate
-  fixtures: 19/19 passing.
-- Repository lint, root TypeScript, Studio TypeScript and Studio app build/
-  typecheck pass; repository `format:check` and `git diff --check` pass.
+## Observed checkout verification (November 18, 2026)
+
+- Focused root Question Set/provenance/specialist/protected-approval tests:
+  **30/30 passed**.
+- Focused Studio discovery, author decision, saved-draft, UI, original-Turn
+  continuation, and opt-in headless Chromium scenarios: **27/27 passed**.
+  Chromium covers clicked recovery/approval controls after reload, typed input,
+  separate tabs and unsent-copy behavior in both workflows; the transport is
+  controlled by the test, not a running authenticated Studio server.
+- Root source-hygiene lint and Studio persistence boundary, root and Studio
+  TypeScript, configured `format:check`, and `git diff --check`: **passed**.
 - A broad root test shard exposed the pre-existing, reproducible
   `test/architecture-blueprint.test.ts` failure, where the assertion expects
   a total-size rejection for an input now accepted by the unrelated
   `src/architecture-blueprint.ts` bound. Neither file was changed by #188.
-  The previous aggregate `pnpm test` attempt also exceeded the remote
-  execution window; no full-suite pass is claimed.
-- A subsequent focused rerun of Story Chat and repository discovery, including
-  the legacy blocked-session retry guard, passed (3/3). The final focused UI,
-  authenticated author decision, specialist drafts and original-Turn
-  continuation regression run passed (24/24); Studio TypeScript and configured
-  formatting checks passed again.
-- No paid real-model certification run or interactive browser walkthrough was
-  executed for this ticket, so the full literary quality/recovery gate has
-  not been independently satisfied.
+  No aggregate full-suite pass is claimed.
+- Full authenticated browser-to-Job Story completion, successful resumed
+  specialist writing, and paid real-model literary certification remain
+  **unverified**; #188 should remain open until those gates are explicitly
+  dispositioned.

@@ -2002,10 +2002,13 @@ receipt with the exact job, Thread, specialist, session transcript SHA-256,
 Git HEAD, modified draft fingerprint, option identity, and authenticated
 author response. The existing author-facing `/author` endpoint verifies
 owner, origin, paused execution and original proposal digest before recording
-the answer; a repeated answer or rewritten question is rejected. A separate
-**Continue generation** action resumes only the original paused specialist.
-The original session is claimed before further Pi calls; an uncertain crash
-is fenced rather than replayed. A normal answer does not authorize changes
+the answer; a repeated answer or rewritten question is rejected. The controller
+**automatically queues the original paused specialist** when its saved graph
+checkpoint and source bindings are verified. If the checkpoint cannot safely
+be resumed, the answer remains durable and **Continue generation** is an
+explicit recovery action, not a second required submission step. The original
+session is claimed before further Pi calls; an uncertain crash is fenced
+rather than replayed. A normal answer does not authorize changes
 to user-protected decisions, which still require an exact trusted approval.
 Native validation and source-bound edit authority remain mandatory.
 

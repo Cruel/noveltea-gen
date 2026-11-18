@@ -534,7 +534,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     try {
       const instructions = await skillInstructions(session.skillId)
       const invoke = infer ?? ((s: Session, i: string) => realInference(store, actor.id, s, i))
-      const interpret = (raw: string) => {
+      const interpret = (raw: string, mandatoryClarification = false) => {
         const delegationAuthorized = explicitFullDelegation(session.brief) ||
           !!session.accepted?.some(batch => batch.responses.some(r => r.answer.kind === 'delegate'))
         const result = parseResponse(raw, authorEvidence(session), Boolean(chat), delegationAuthorized)
@@ -550,7 +550,8 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
             .test([q.question, ...(q.options ?? []).map(o => o.title)].join(' '))))
             throw new Error('Discovery questions cannot request protected authority')
           return { questions: { ...set, questions: set.questions.map(q => ({ ...q,
-            ...(q.allowStudioDecision === true ? { delegationAllowed: true as const } : {}),
+            ...(q.allowStudioDecision === true && !mandatoryClarification
+              ? { delegationAllowed: true as const } : {}),
           })) } }
         }
         return { proposal: result.proposal! }
@@ -573,7 +574,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
             'validation, including source-grounded planning. Return one complete valid ' +
             'structured Question Set or Creative Direction proposal with all source-backed ' +
             'interpretations. Do not invent approvals or substitute prose questions.'))
-        outcome = interpret(raw)
+        outcome = interpret(raw, clarification)
         if (clarification && outcome.proposal)
           throw Error('A material planning contradiction requires a new author question.')
       }

@@ -4,6 +4,7 @@ import { actStoryChatDiscovery, readStoryChatDiscovery } from '@/lib/story-chat-
 import { storyNavigationKey } from '@/lib/threads.queries'
 import { initialQuestionDraft, questionDraftAnswer } from '../../../src/author-question-set'
 import { useQuestionSetDrafts } from './use-question-set-drafts'
+import { RecoverableQuestionDraftsView } from './author-question-set'
 import { StoryChatBaselineView, type BaselineAction, type BaselineContinuation,
   type StoryChatBaselineSession } from './story-chat-baseline-view'
 
@@ -37,11 +38,15 @@ export function StoryChatBaseline({ storyId, threadId }: {
       previous ? { ...previous, session: saved } : { session: saved }),
   })
   const act = async (action: BaselineAction) => {
-    if (!draftState.sessionRef.current || busy || draftState.conflict) return
+    // Recovery and exact approval are session actions, not Question Set draft
+    // actions. A ref maintained only during questions can be null or stale
+    // after reload, polling, and a proposed/blocked/approved transition.
+    if (!session || busy || (action === 'answer' && draftState.conflict)) return
     setBusy(true); setError(null)
     try {
       if (action === 'answer' && !await draftState.flush()) return
-      const current = draftState.sessionRef.current!
+      const current = action === 'answer' ? draftState.sessionRef.current : session
+      if (!current) throw new Error('Discovery changed. Reload before submitting.')
       const set = current.phase === 'questions' ? current.questions : null
       const responses = action === 'answer' && set ? set.questions.map(question => {
         const value = questionDraftAnswer(question,
@@ -69,11 +74,14 @@ export function StoryChatBaseline({ storyId, threadId }: {
       setError(cause instanceof Error ? cause.message : 'Discovery could not continue.')
     } finally { setBusy(false) }
   }
-  return <StoryChatBaselineView session={session}
+  return <><StoryChatBaselineView session={session}
     continuation={query.data?.continuation as BaselineContinuation | undefined} answer={answer}
     onAnswerChange={setAnswer} drafts={draftState.drafts}
     onDraftChange={drafts => { if (!busy) draftState.change(drafts) }}
     busy={busy || draftState.conflict}
     error={error ?? draftState.error ?? (query.error instanceof Error ? query.error.message : null)}
     onAction={action => void act(action)} />
+    <RecoverableQuestionDraftsView recovery={draftState.recovery}
+      onDismiss={draftState.dismissRecovery} />
+  </>
 }

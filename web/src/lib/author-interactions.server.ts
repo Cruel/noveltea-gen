@@ -24,7 +24,7 @@ const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 const SHA = /^[a-f0-9]{64}$/
 const NONCE = /^[0-9a-f-]{36}$/
 const MAX_AUTHOR_COMMAND_BYTES = 8192
-const MAX_DRAFT_COMMAND_BYTES = 20_000
+const MAX_QUESTION_COMMAND_BYTES = 20_000
 const approvalId = (jobId: string, messageId: string) =>
   'author-' + createHash('sha256').update(jobId + ':' + messageId).digest('hex').slice(0, 40)
 
@@ -42,7 +42,7 @@ async function readCommand(request: Request): Promise<string> {
       const { value, done } = await reader.read()
       if (done) break
       bytes += value.byteLength
-      if (bytes > MAX_DRAFT_COMMAND_BYTES) throw new CommandError(413, 'Author command is too large')
+      if (bytes > MAX_QUESTION_COMMAND_BYTES) throw new CommandError(413, 'Author command is too large')
       text += decoder.decode(value, { stream: true })
     }
     text += decoder.decode()
@@ -111,7 +111,7 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     // Strict, bounded typed commands. Do not accept a caller-provided identity
     // or approval payload, and do not consume arbitrary controller references.
     const size = Number(request.headers.get('content-length') ?? 0)
-    if (size > MAX_DRAFT_COMMAND_BYTES) return json({ error: 'Author command is too large' }, 413)
+    if (size > MAX_QUESTION_COMMAND_BYTES) return json({ error: 'Author command is too large' }, 413)
     const raw = await readCommand(request)
     let input: Record<string, unknown>
     try { input = JSON.parse(raw) } catch {
@@ -119,9 +119,11 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
         ? json({ error: 'Author command is too large' }, 413)
         : json({ error: 'Invalid JSON' }, 400)
     }
-    // Existing author commands retain their smaller byte budget. The draft
-    // transport must fit its validated 4,000-character Unicode text field.
-    if (input?.action !== 'choice-draft' && Buffer.byteLength(raw, 'utf8') > MAX_AUTHOR_COMMAND_BYTES)
+    // Both a specialist draft and its final typed answer must fit the same
+    // validated 4,000-character Unicode payload. Keep the smaller bound for
+    // unrelated control/approval commands.
+    if (input?.action !== 'choice-draft' && input?.action !== 'choice' &&
+        Buffer.byteLength(raw, 'utf8') > MAX_AUTHOR_COMMAND_BYTES)
       return json({ error: 'Author command is too large' }, 413)
     if (input?.action === 'choice-draft') {
       if (!recoverable || row?.status !== 'paused' ||

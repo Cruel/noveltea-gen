@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { test } from 'node:test'
-import { AuthorQuestionSetView } from '../src/components/author-question-set'
+import { AuthorQuestionSetView, RecoverableQuestionDraftsView } from '../src/components/author-question-set'
 import { AuthorQuestionControls } from '../src/components/author-question-controls'
 import { initialQuestionDraft, type QuestionDraft, type QuestionSet } from '../../src/author-question-set'
 
@@ -50,6 +50,24 @@ test('delegating multi-select conceals previous selections without discarding dr
   assert.doesNotMatch(html, /Keep the earlier witness quote/)
   assert.equal((html.match(/checked=""/g) ?? []).length, 1,
     'only delegation appears selected; previous choices stay in the controlled draft')
+})
+
+test('superseded unsent Question Set remains copyable without a stale submission action', () => {
+  const html = renderToStaticMarkup(createElement(RecoverableQuestionDraftsView, {
+    recovery: { set: questions, drafts: {
+      tone: { ...initialQuestionDraft(questions.questions[0]!), selection: 'warm' },
+      branching: { ...initialQuestionDraft(questions.questions[1]!),
+        customAnswer: 'Keep the branching shallow even when another tab advances.',
+        note: 'Protect the ending.' },
+    } }, onDismiss: () => {},
+  }))
+  assert.match(html, /Unsaved Question Set recovery/)
+  assert.match(html, /copying/)
+  assert.match(html, /Warm/)
+  assert.match(html, /Keep the branching shallow even when another tab advances/)
+  assert.match(html, /Protect the ending/)
+  assert.match(html, /readOnly=""/)
+  assert.doesNotMatch(html, /type="submit"|Submit [0-9]+ answers/)
 })
 
 test('incomplete custom answers stay in the controlled Question Set and block all submission', () => {

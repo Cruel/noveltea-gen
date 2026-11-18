@@ -5,6 +5,9 @@ type DraftSession = {
   phase: string; revision: number; questions: QuestionSet | null
   drafts?: Record<string, QuestionDraft>
 }
+export type RecoverableQuestionDrafts = {
+  set: QuestionSet; drafts: Record<string, QuestionDraft>
+}
 
 /** Debounced, deduplicated owner-scoped drafts. Local input always wins over
  * our own save acknowledgement; a *foreign* newer revision fences edits and
@@ -18,9 +21,11 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
     () => session?.phase === 'questions' ? session.drafts ?? {} : {})
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [recovery, setRecovery] = useState<RecoverableQuestionDrafts | null>(null)
   const draftsRef = useRef(drafts)
   const sessionRef = useRef<S | null>(null)
   const keyRef = useRef<string | null>(null)
+  const identityRef = useRef(identity)
   const revisionRef = useRef(0)
   const dirtyRef = useRef(false)
   const savingRef = useRef<Promise<boolean> | null>(null)
@@ -35,7 +40,20 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
     ? identity + ':' + session.questions.id : null
 
   useEffect(() => {
+    const sameOwner = identityRef.current === identity
+    if (!sameOwner) {
+      identityRef.current = identity
+      setRecovery(null) // Never show another Story/Job's private unsent input.
+    }
     if (key !== keyRef.current) {
+      // Another tab may submit/revise the original set while input is still
+      // pending locally. Retain a copy for the author, but never submit it to
+      // a different set or replay it as an accepted answer.
+      const previousSet = sessionRef.current?.phase === 'questions'
+        ? sessionRef.current.questions : null
+      if (sameOwner && keyRef.current && previousSet &&
+          (dirtyRef.current || savingRef.current || conflictRef.current))
+        setRecovery({ set: previousSet, drafts: draftsRef.current })
       if (timerRef.current) clearTimeout(timerRef.current)
       keyRef.current = key
       sessionRef.current = session ?? null
@@ -54,6 +72,8 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
       if (dirtyRef.current || savingRef.current) {
         conflictRef.current = true
         setConflict(true)
+        if (sessionRef.current?.questions)
+          setRecovery({ set: sessionRef.current.questions, drafts: draftsRef.current })
         setError('This Question Set changed in another tab. Copy your unsaved input and reload.')
       } else {
         revisionRef.current = session.revision
@@ -62,7 +82,7 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
         setDrafts(draftsRef.current)
       }
     }
-  }, [key, session?.revision, session?.drafts])
+  }, [identity, key, session?.revision, session?.drafts])
 
   const flush = async (): Promise<boolean> => {
     if (timerRef.current) clearTimeout(timerRef.current)
@@ -97,6 +117,8 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
         if (keyRef.current !== currentKey) return false
         conflictRef.current = true
         setConflict(true)
+        if (sessionRef.current?.questions)
+          setRecovery({ set: sessionRef.current.questions, drafts: draftsRef.current })
         setError(cause instanceof Error ? cause.message : 'Question drafts could not be saved.')
         return false
       }
@@ -120,5 +142,6 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => { void flushRef.current() }, 650)
   }
-  return { drafts, change, flush, conflict, error, sessionRef, draftsRef }
+  return { drafts, change, flush, conflict, error, sessionRef, draftsRef,
+    recovery, dismissRecovery: () => setRecovery(null) }
 }

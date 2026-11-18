@@ -503,6 +503,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
         assert.match(instructions, /clarification required/i)
         return questionsReply([{ id: 'puzzle-clarification', kind: 'alternatives',
           question: 'Clarify conflicting Puzzle requirements: which outcome should prevail?',
+          allowStudioDecision: true,
           options: [{ id: 'no-puzzles', title: 'No Puzzles' },
             { id: 'custom', title: 'Include custom Puzzles' }] }])
       })
@@ -511,6 +512,14 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(correctionCalls, 2)
     assert.equal(clarified.phase, 'questions')
     assert.equal(clarified.accepted.length, 1)
+    assert.equal(clarified.questions.questions[0].delegationAllowed, undefined,
+      'a trusted mandatory clarification must refuse model-requested delegation')
+    const rejectedDelegation = await req(storyIds[4]!, conflictId, 'POST', {
+      action: 'answer', revision: clarified.revision,
+      setId: clarified.questions.id, setRevision: clarified.questions.revision,
+      responses: [{ questionId: 'puzzle-clarification', answer: { kind: 'delegate', note: '' } }],
+    })
+    assert.equal(rejectedDelegation.status, 422)
     const resolvedConflict = await storyChatDiscoveryRequest(auth, store,
       new Request(url + '/api/story-chat-discovery', { method: 'POST',
         headers: { cookie: aliceCookie, origin: url },

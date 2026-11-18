@@ -107,7 +107,9 @@ export function assertPlanningConsistency(planning: StoryPlanning, evidence: Pla
     details(evidence, dimension).some(text => regex.test(text))
   const somewhatLinear = has('branch', /\b(?:somewhat|mostly|fairly|relatively|kind of|kinda) linear\b|\blinear,? but not too much\b/)
   const strictLinear = has('branch', /\b(?:strictly|completely|entirely|fully|only) linear\b|\bno branching\b|\bwithout branches\b/)
-  const deepBranch = has('branch', /\b(?:deep|extensive|heavily) branching\b|\bmany exclusive routes\b/)
+  const noDeepBranch = has('branch', /\b(?:no|without|avoid|not|never)\s+(?:deep|extensive|heavy) branching\b/)
+  const deepBranch = !noDeepBranch &&
+    has('branch', /\b(?:deep|extensive|heavily) branching\b|\bmany exclusive routes\b/)
   const noPuzzles = has('puzzle', /\b(?:no|zero|without) puzzles?\b|\bpuzzle[- ]free\b/)
   const wantsPuzzles = has('puzzle', /\b(?:(?:must|definitely)\s+(?:include|have)\s+|(?:require|include)\s+)(?:(?:some|custom|several|many|interactive)\s+)?puzzles?\b/)
   if ((strictLinear && deepBranch) || (noPuzzles && wantsPuzzles) ||
@@ -116,6 +118,8 @@ export function assertPlanningConsistency(planning: StoryPlanning, evidence: Pla
   if (somewhatLinear && (planning.branching?.depth !== 'shallow' ||
       planning.branching?.route_exclusivity !== 'limited'))
     throw new PlanningClarificationRequired('A somewhat-linear preference needs shallow branching and limited route-exclusive content; ask for clarification if a different design is intended.')
+  if (noDeepBranch && planning.branching?.depth === 'deep')
+    throw new PlanningClarificationRequired('The author rejected deep branching; ask before proposing it.')
   if (strictLinear && planning.branching?.depth !== 'linear')
     throw new PlanningClarificationRequired('The author explicitly requested linear structure; ask before proposing branching.')
   if (deepBranch && planning.branching?.depth !== 'deep')
@@ -164,14 +168,14 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
         !(bound.delegated && (bound.source.kind === 'turn' ||
           delegationForBaseline.test(bound.statement))))
       throw Error('Planning interpretation source does not concern this dimension.')
-    // Never claim that a model's normalization was literally chosen by the author.
-    // An exact categorical selection is explicit only when the original words
-    // actually contain that category; other author inputs require 'inferred'.
+    // An arbitrary option label may contain the category while denying it
+    // (e.g. 'No deep branching'). Only a complete categorical label is a
+    // literally explicit value; all qualified wording needs inference.
     const value = values.get(item.path)
     if (item.basis === 'explicit' &&
         (!bound.selectedOption || typeof value !== 'string' ||
-          !bound.authorText.toLowerCase().includes(value.replace(/-/g, ' ')) &&
-          !bound.authorText.toLowerCase().includes(value)))
+          bound.authorText.trim().toLowerCase().replace(/-/g, ' ') !==
+          value.toLowerCase().replace(/-/g, ' ')))
       throw Error('Model-derived planning cannot impersonate an explicit author choice.')
     if (item.basis === 'inferred' && bound.delegated)
       throw Error('Delegation cannot masquerade as an author inference.')

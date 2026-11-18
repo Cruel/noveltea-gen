@@ -2,6 +2,7 @@ import { AuthorQuestionControls } from './author-question-controls'
 import { initialQuestionDraft, questionDraftAnswer,
   type QuestionDraft, type QuestionSet, type QuestionResponse } from '../../../src/author-question-set'
 import { authorQuestionOptions, type AuthorQuestion, type AuthorQuestionAnswer } from '../../../src/author-question'
+import type { RecoverableQuestionDrafts } from './use-question-set-drafts'
 import { Button } from '@/components/ui/button'
 
 export type AcceptedQuestionRound = { setId: string; setRevision: number; principal: string;
@@ -19,6 +20,38 @@ export function AuthorQuestionAnswerSummary({ question, answer }: {
         ...(answer.text ? [answer.text] : [])].join('; ')
         : title(answer.optionId)
   return <>{value}{answer.note && <> (Note: {answer.note})</>}</>
+}
+
+/** A replaced set cannot receive stale input, but its unsent words remain
+ * selectable for copying instead of vanishing on a poll from another tab. */
+export function RecoverableQuestionDraftsView({ recovery, onDismiss }: {
+  recovery: RecoverableQuestionDrafts | null; onDismiss: () => void
+}) {
+  if (!recovery) return null
+  const transcript = recovery.set.questions.map(question => {
+    const draft = recovery.drafts[question.id]
+    if (!draft) return null
+    const options = authorQuestionOptions(question)
+    const choices = draft.selectedIds.length ? draft.selectedIds :
+      draft.selection && !draft.selection.startsWith('__') ? [draft.selection] : []
+    const labels = choices.map(id => options.find(option => option.id === id)?.title ?? id)
+    if (draft.selection === '__delegate__') labels.push('Decide for me (not submitted)')
+    if (draft.customAnswer) labels.push(draft.customAnswer)
+    if (draft.note) labels.push('Additional instructions: ' + draft.note)
+    return question.question + '\n' + (labels.join('; ') || '(No completed answer)')
+  }).filter(Boolean).join('\n\n')
+  return <section role="status" aria-label="Unsaved Question Set recovery"
+    className="grid gap-2 rounded-md border border-border/60 p-3 text-sm">
+    <p className="m-0">The questions changed in another tab before your edits could be saved.
+      Your unsent input is preserved below for copying, but it cannot be applied
+      automatically to the new questions.</p>
+    <label className="grid gap-1">Previous unsent answers
+      <textarea readOnly rows={Math.min(10, Math.max(3, transcript.split('\n').length))}
+        className="w-full rounded-md border border-input bg-background px-3 py-2"
+        value={transcript} /></label>
+    <div><Button size="sm" type="button" variant="outline" onClick={onDismiss}>
+      Dismiss unsent copy</Button></div>
+  </section>
 }
 
 export function AuthorQuestionHistory({ accepted }: { accepted?: AcceptedQuestionRound[] }) {

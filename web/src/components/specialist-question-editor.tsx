@@ -4,7 +4,7 @@ import { sendAuthorCommand } from '@/lib/author.functions'
 import { authorInteractionsKey, type AuthorState, type SpecialistChoice } from '@/lib/author-state'
 import { initialQuestionDraft, questionDraftAnswer, specialistQuestionSet,
   type QuestionSet } from '../../../src/author-question-set'
-import { AuthorQuestionSetView } from './author-question-set'
+import { AuthorQuestionSetView, RecoverableQuestionDraftsView } from './author-question-set'
 import { useQuestionSetDrafts } from './use-question-set-drafts'
 
 type DraftSession = { phase: 'questions'; revision: number; questions: QuestionSet;
@@ -21,14 +21,16 @@ export function SpecialistQuestionEditor({ jobId, choice, contextHref, onChanged
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const session = useMemo<DraftSession>(() => ({
+  const session = useMemo<DraftSession | null>(() => choice.phase === 'awaiting-author' ? ({
     phase: 'questions',
     revision: choice.draft?.revision ?? 1,
     drafts: choice.draft?.drafts ?? {},
     questions: specialistQuestionSet(choice),
-  }), [choice])
+  }) : null, [choice])
   const lifecycle = useQuestionSetDrafts({
-    session, identity: jobId + ':' + choice.id + ':' + choice.proposalSha256,
+    // The Job owns this lifecycle; changing its Question Set must preserve
+    // unsent input from the previous specialist assignment for copying.
+    session, identity: jobId,
     save: async (current, drafts) => {
       const response = JSON.parse(await sendAuthorCommand({ data: {
         jobId, commandJson: JSON.stringify({
@@ -40,13 +42,14 @@ export function SpecialistQuestionEditor({ jobId, choice, contextHref, onChanged
     },
     onSaved: saved => client.setQueryData<AuthorState>(authorInteractionsKey(jobId), previous => {
       if (!previous?.choice || previous.choice.id !== choice.id ||
+          previous.choice.phase !== 'awaiting-author' ||
           (previous.choice.draft?.revision ?? 1) > saved.revision) return previous
       return { ...previous, choice: { ...previous.choice,
         draft: { revision: saved.revision, drafts: saved.drafts } } }
     }),
   })
   const submit = async () => {
-    if (busy || lifecycle.conflict) return
+    if (choice.phase !== 'awaiting-author' || busy || lifecycle.conflict) return
     setBusy(true)
     setError(null)
     setNotice(null)
@@ -73,8 +76,9 @@ export function SpecialistQuestionEditor({ jobId, choice, contextHref, onChanged
       setError(cause instanceof Error ? cause.message : 'Author answer was not accepted.')
     } finally { setBusy(false) }
   }
+  if (!session && !lifecycle.recovery) return null
   return <article aria-label="Specialist creative choice" className="grid gap-2">
-    <h3 className="m-0 text-sm font-semibold">Your answer is needed</h3>
+    {session && <><h3 className="m-0 text-sm font-semibold">Your answer is needed</h3>
     <AuthorQuestionSetView set={session.questions} drafts={lifecycle.drafts}
       label="Specialist author question" disabled={busy || lifecycle.conflict}
       contextHref={contextHref}
@@ -83,6 +87,8 @@ export function SpecialistQuestionEditor({ jobId, choice, contextHref, onChanged
     {(error || lifecycle.error) && <p className="m-0 text-xs text-destructive" role="alert">
       {error ?? lifecycle.error}
     </p>}
-    {notice && <p role="status" className="m-0 text-xs">{notice}</p>}
+    {notice && <p role="status" className="m-0 text-xs">{notice}</p>}</>}
+    <RecoverableQuestionDraftsView recovery={lifecycle.recovery}
+      onDismiss={lifecycle.dismissRecovery} />
   </article>
 }

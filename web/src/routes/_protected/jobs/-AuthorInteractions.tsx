@@ -92,8 +92,8 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
     {notice && <p role="status">{notice}</p>}
     {!state && !error && presentation === 'page' && <p>Checking saved author interrupts…</p>}
     {presentation === 'page' && state && items.length === 0 && (state.decisions ?? []).length === 0 && !state.choice && <p>No author responses are awaiting review.</p>}
-    {state?.choice?.phase === 'awaiting-author' && <SpecialistQuestionEditor
-      key={state.choice.id} jobId={jobId} choice={state.choice}
+    {state?.choice && <SpecialistQuestionEditor
+      jobId={jobId} choice={state.choice}
       contextHref={contextHref} onChanged={onChanged} />}
     {state?.choice?.phase === 'answered' && <AuthorChoicePanel
       choice={state.choice} contextHref={contextHref} />}
