@@ -6,7 +6,7 @@ import { StoryChatBaselineView, type StoryChatBaselineSession } from '../src/com
 
 const storyId = '11111111-1111-4111-8111-111111111111'
 const turnId = '22222222-2222-4222-8222-222222222222'
-function render(phase: 'questions' | 'proposed' | 'approved') {
+function render(phase: 'questions' | 'proposed' | 'approved', legacyQuestions = false) {
   const foundation = {
     id: 'foundation', title: 'The Last Bell', premise: 'A missing bell',
     central_conflict: 'A town conceals the truth', genre: 'Mystery', tone: 'Uneasy',
@@ -23,7 +23,7 @@ function render(phase: 'questions' | 'proposed' | 'approved') {
       origin: 'agent', authority: 'delegated' }],
   }
   const session = {
-    phase, revision: 4, skillId: 'a'.repeat(64), startedAt: null,
+    phase, revision: 4, legacyQuestions, skillId: 'a'.repeat(64), startedAt: null,
     chat: { storyId, firstTurnId: turnId, sourceSha: 'b'.repeat(40), directory: 'story' },
     turns: [{ role: 'user', text: 'Make me a mystery game' }],
     questions: phase === 'questions' ? { id: 'd'.repeat(64), revision: 4, questions: [
@@ -74,12 +74,20 @@ test('exact proposed foundation and author-decision provenance are reviewable be
   assert.match(markup, /Single-route playthrough/)
   assert.match(markup, /Studio interpretation of author wording/)
   assert.match(markup, /Hard production limits/)
-  assert.match(markup, /user · user-protected/)
-  assert.match(markup, /agent · delegated/)
+  assert.match(markup, /Your direction/)
+  assert.match(markup, /Studio choice \(delegated\)/)
+  assert.doesNotMatch(markup, /agent ·|user-protected/)
   assert.match(markup, /Keep player choices meaningful/)
   assert.match(markup, /Approve baseline/)
   assert.match(markup, /Request revision/)
   assert.doesNotMatch(markup, /Publish|Initialize Story/)
+})
+
+test('old proposed textual interviews cannot expose Creative Direction approval', () => {
+  const markup = render('proposed', true)
+  assert.match(markup, /unsupported question format/)
+  assert.match(markup, /Restart discovery questions/)
+  assert.doesNotMatch(markup, /Approve baseline|Request revision|Planning interpretations/)
 })
 
 test('approved baseline preserves the exact review while its original Turn continues', () => {

@@ -96,10 +96,7 @@ export function AuthorInteractions({ jobId, onChanged, presentation = 'page' }: 
       key={state.choice.id} jobId={jobId} choice={state.choice}
       contextHref={contextHref} onChanged={onChanged} />}
     {state?.choice?.phase === 'answered' && <AuthorChoicePanel
-      choice={state.choice} presentation={presentation} busy={busy !== null}
-      selection="" customAnswer="" note="" contextHref={contextHref}
-      onSelect={() => {}} onCustomAnswer={() => {}} onNote={() => {}}
-      onSubmit={() => {}} />}
+      choice={state.choice} contextHref={contextHref} />}
     {(state?.decisions ?? []).map(item => <article key={'recovery-' + item.id}
       aria-label={item.title} className="job-review-item">
       <details open={item.phase !== 'recorded' ? true : undefined}>

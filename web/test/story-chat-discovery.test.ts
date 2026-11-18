@@ -420,10 +420,43 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal((await req(storyIds[3]!, prematureId, 'POST', {
       action: 'answer', revision: legacy.revision, text: 'Old unstructured answer',
     })).status, 409)
+    const oldBlocked = { ...oldSession, phase: 'blocked',
+      revision: oldSession.revision + 1 }
+    assert.equal(await store.persistence.onboarding.saveConversation(alice,
+      repositoryId, legacyKey, oldBlocked.revision, JSON.stringify(oldBlocked),
+      oldSession.revision, new Date().toISOString()), true)
+    let illegalRetryCalled = false
+    const rejectedRetry = await storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url },
+        body: JSON.stringify({ action: 'retry', revision: oldBlocked.revision }),
+      }), url, storyIds[3]!, prematureId, async () => {
+        illegalRetryCalled = true
+        throw new Error('Never invoke the model for unsupported old sessions')
+      })
+    assert.equal(rejectedRetry.status, 409)
+    assert.equal(illegalRetryCalled, false)
+    // A pre-v1 session that already reached a proposal cannot quietly use
+    // the new exact-approval path either. Require explicit reset in both UIs.
+    const oldProposed = { ...oldSession, phase: 'proposed',
+      revision: oldBlocked.revision + 1, proposal: proposed.proposal,
+      digest: proposed.digest }
+    assert.equal(await store.persistence.onboarding.saveConversation(alice,
+      repositoryId, legacyKey, oldProposed.revision, JSON.stringify(oldProposed),
+      oldBlocked.revision, new Date().toISOString()), true)
+    const unsupported = (await req(storyIds[3]!, prematureId, 'GET')).body.session
+    assert.equal(unsupported.legacyQuestions, true)
+    assert.equal(unsupported.questions, null)
+    assert.equal((await req(storyIds[3]!, prematureId, 'POST', {
+      action: 'approve', revision: unsupported.revision, digest: unsupported.digest,
+    })).status, 409)
+    assert.equal((await req(storyIds[3]!, prematureId, 'POST', {
+      action: 'revise', revision: unsupported.revision, text: 'Convert my old answers',
+    })).status, 409)
     const restarted = await storyChatDiscoveryRequest(auth, store,
       new Request(url + '/api/story-chat-discovery', { method: 'POST',
         headers: { cookie: aliceCookie, origin: url },
-        body: JSON.stringify({ action: 'restart', revision: legacy.revision }),
+        body: JSON.stringify({ action: 'restart', revision: unsupported.revision }),
       }), url, storyIds[3]!, prematureId, async state => {
         assert.equal(state.turns.length, 1)
         assert.equal(state.turns[0]?.text, initial)

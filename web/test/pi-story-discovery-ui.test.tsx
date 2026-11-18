@@ -61,6 +61,33 @@ test('repository Guided Story creation renders shared structured Question Set co
   assert.doesNotMatch(html, /Your answers \(partial answers and delegation are allowed\)/)
 })
 
+test('Creative Direction proposals are not labelled as author-approved before exact approval', () => {
+  const foundation = { id: 'foundation', title: 'The Last Bell',
+    premise: 'The bell is missing', central_conflict: 'Concealed truth',
+    genre: 'Mystery', tone: 'Uneasy', player_experience: 'Follow clues',
+    scope: 'One town', body: 'The investigator has one night.',
+    decisions: [{ id: 'suggestion', statement: 'Trust the archivist',
+      origin: 'agent', authority: 'user-protected' }] }
+  const session = { phase: 'proposed', revision: 5,
+    model: { provider: 'test', id: 'mock' }, turns: [{ role: 'user', text: 'A mystery' }],
+    questions: null, proposal: { foundation, task: 'Make a mystery', interpretations: [] },
+    digest: 'c'.repeat(64), skillId: 'b'.repeat(64), startedAt: null }
+  const proposed = renderSession(session)
+  assert.match(proposed, /Studio proposal \(awaiting approval\)/)
+  assert.doesNotMatch(proposed, /Studio proposal \(approved\)/)
+  const approved = renderSession({ ...session, phase: 'approved' })
+  assert.match(approved, /Studio proposal \(approved\)/)
+})
+
+test('pre-v1 proposed discovery must restart instead of presenting obsolete approval controls', () => {
+  const html = renderSession({ phase: 'proposed', revision: 5,
+    model: { provider: 'test', id: 'mock' }, turns: [{ role: 'user', text: 'A mystery' }],
+    legacyQuestions: true, questions: null, proposal: { foundation: { title: 'Old result' } },
+    digest: 'c'.repeat(64), skillId: 'b'.repeat(64), startedAt: null })
+  assert.match(html, /Restart discovery questions/)
+  assert.doesNotMatch(html, /Approve exact Creative Direction|Review the proposed Creative Direction/)
+})
+
 test('pre-v1 repository discovery shows an explicit restart path without rendering old text questions', () => {
   const html = renderSession({ phase: 'questions', revision: 4,
     model: { provider: 'test', id: 'mock' }, turns: [{ role: 'user', text: 'A mystery' }],

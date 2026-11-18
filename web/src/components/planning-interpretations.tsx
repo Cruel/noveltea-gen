@@ -38,6 +38,15 @@ function displayValue(entry: PlanningInterpretation): string {
     return value.length + ' illustration concepts'
   return entry.value
 }
+/** A proposed creative choice is never described as author-approved before exact review. */
+export function creativeDecisionAttribution(decision: {
+  origin: 'user' | 'agent'; authority: 'user-protected' | 'delegated'
+}, approved: boolean): string {
+  if (decision.origin === 'user') return 'Your direction'
+  if (decision.authority === 'delegated') return 'Studio choice (delegated)'
+  return approved ? 'Studio proposal (approved)' : 'Studio proposal (awaiting approval)'
+}
+
 const basisName: Record<PlanningInterpretation['basis'], string> = {
   explicit: 'Author selection',
   inferred: 'Studio interpretation of author wording',

@@ -1,5 +1,5 @@
 import { Button } from '@/components/ui/button'
-import { PlanningInterpretationsView } from '@/components/planning-interpretations'
+import { PlanningInterpretationsView, creativeDecisionAttribution } from '@/components/planning-interpretations'
 import { creativeDirectionNarrativeBody,
   type PlanningInterpretation } from '../../../../../src/planning-interpretation'
 import type { StoryPlanning } from '../../../../../src/story-planning'
@@ -155,14 +155,14 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
         <p key={i}><strong>Author {i + 1}:</strong> {turn.text}</p>)}
       <AuthorQuestionHistory accepted={session.accepted} />
       {session.phase === 'running' && <div role="status">
-        <p>A model turn was reserved. Reload to inspect its outcome. If interrupted,
-          reconcile the turn before retrying.</p>
+        <p>Discovery is processing. Reload to inspect its outcome. If interrupted,
+          reconcile the step before retrying.</p>
         <Button type="button" disabled={disabled || !session.startedAt || Date.now() - session.startedAt < 600_000}
           onClick={() => void perform({ action: 'reconcile', revision: session.revision })}>
           Reconcile interrupted turn
         </Button>
       </div>}
-      {session.legacyQuestions && ['questions', 'blocked'].includes(session.phase) ? <div role="status">
+      {session.legacyQuestions && ['questions', 'blocked', 'proposed'].includes(session.phase) ? <div role="status">
         <p>This session uses the previous textual question format. Restart from the saved
           original Story idea and pinned method to use structured Question Sets.
           Unapproved textual answers cannot be converted.</p>
@@ -172,7 +172,7 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
         </Button>
       </div> : <>
         {session.phase === 'blocked' && <div role="alert">
-          <p>The model turn was interrupted. The accepted answers remain saved;
+          <p>Discovery was interrupted. The accepted answers remain saved;
             explicitly retry only after checking the interrupted work.</p>
           <Button type="button" disabled={disabled}
             onClick={() => void perform({ action: 'retry', revision: session.revision })}>
@@ -186,7 +186,8 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
             onSubmit={() => void submitAnswers()} />
         </>}
       </>}
-      {(session.phase === 'proposed' || session.phase === 'approved') && session.proposal && <>
+      {(session.phase === 'proposed' || session.phase === 'approved') && session.proposal &&
+          !session.legacyQuestions && <>
         <h3>Review the proposed Creative Direction</h3>
         <p><strong>{session.proposal.foundation.title}</strong> (<code>{session.proposal.foundation.id}</code>)</p>
         <p>{session.proposal.foundation.premise}</p>
@@ -199,7 +200,7 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
         <p className="whitespace-pre-wrap break-words">{creativeDirectionNarrativeBody(session.proposal.foundation.body)}</p>
         <h3>Creative decision authority</h3>
         {session.proposal.foundation.decisions.map(d => <p key={d.id}>
-          <strong>{d.origin} / {d.authority}:</strong> {d.statement}</p>)}
+          <strong>{creativeDecisionAttribution(d, session.phase === 'approved')}:</strong> {d.statement}</p>)}
         <p><strong>Next generation task:</strong> {session.proposal.task}</p>
         {session.phase === 'proposed'
           ? <>

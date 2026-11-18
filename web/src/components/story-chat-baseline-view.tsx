@@ -5,7 +5,7 @@ import type { QuestionSet, QuestionDraft } from '../../../src/author-question-se
 import type { StoryPlanning } from '../../../src/story-planning'
 import { creativeDirectionNarrativeBody,
   type PlanningInterpretation } from '../../../src/planning-interpretation'
-import { PlanningInterpretationsView } from './planning-interpretations'
+import { PlanningInterpretationsView, creativeDecisionAttribution } from './planning-interpretations'
 
 type Decision = { id: string; origin: 'user' | 'agent'
   authority: 'user-protected' | 'delegated'; statement: string }
@@ -80,7 +80,8 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
       <div className="grid gap-1">
         <strong>Creative choices</strong>
         {foundation.decisions.map(decision => <p key={decision.id} className="m-0">
-          <span className="text-muted-foreground">{decision.origin} · {decision.authority}: </span>
+          <span className="text-muted-foreground">{creativeDecisionAttribution(decision,
+            session?.phase === 'approved')}: </span>
           {decision.statement}
         </p>)}
       </div>
@@ -115,7 +116,7 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
       </div>}
     </>}
     {session?.phase === 'running' && <p role="status" className="m-0">
-      A model turn is reserved. Reload to inspect its result. If interrupted, reconcile
+      Discovery is processing. Reload to inspect its result. If interrupted, reconcile
       the stale reservation before explicitly retrying.
     </p>}
     {session?.phase === 'running' && <div><Button size="sm" variant="outline"

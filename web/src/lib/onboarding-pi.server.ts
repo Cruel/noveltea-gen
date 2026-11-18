@@ -74,10 +74,9 @@ class DiscoveryError extends Error {
 }
 function scope(input: Session) {
   return { phase: input.phase, revision: input.revision, model: input.model,
-    turns: input.turns, questions: input.questionContract !== 'structured-v1' &&
-      typeof input.questions === 'string' ? null : input.questions ?? null,
-    legacyQuestions: input.questionContract !== 'structured-v1' &&
-      (input.phase === 'questions' || input.phase === 'blocked'),
+    turns: input.turns, questions: input.questionContract === 'structured-v1' &&
+      input.questions && typeof input.questions !== 'string' ? input.questions : null,
+    legacyQuestions: input.questionContract !== 'structured-v1' && input.phase !== 'approved',
     drafts: input.drafts ?? {}, accepted: input.accepted ?? [], proposal: input.proposal ?? null,
     digest: input.digest ?? null, skillId: input.skillId, startedAt: input.startedAt ?? null,
     ...(input.chat ? { chat: input.chat } : {}) }
@@ -399,8 +398,8 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     const data = await input(request)
     const action = data.action
     if (action === 'draft') {
-      if (!saved || saved.phase !== 'questions' ||
-          !saved.questions || typeof saved.questions === 'string' ||
+      if (!saved || saved.questionContract !== 'structured-v1' ||
+          saved.phase !== 'questions' || !saved.questions || typeof saved.questions === 'string' ||
           data.revision !== saved.revision || data.setId !== saved.questions.id ||
           data.setRevision !== saved.questions.revision)
         throw new DiscoveryError(409, 'Question draft is stale. Reload before updating.')
@@ -426,7 +425,8 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       return reply({ session: scope(blocked) })
     }
     if (action === 'approve') {
-      if (!saved || saved.phase !== 'proposed' || data.revision !== saved.revision ||
+      if (!saved || saved.questionContract !== 'structured-v1' ||
+          saved.phase !== 'proposed' || data.revision !== saved.revision ||
           data.digest !== saved.digest) throw new DiscoveryError(409, 'Proposal is stale or unavailable')
       const approved: Session = { ...saved, phase: 'approved', revision: saved.revision + 1,
         proposal: { ...saved.proposal!, foundation: {
@@ -463,10 +463,12 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     if (action === 'start' && saved) throw new DiscoveryError(409, 'Discovery already exists. Resume it.')
     if (action === 'answer' && (!saved || saved.phase !== 'questions' ||
         data.revision !== saved.revision)) throw new DiscoveryError(409, 'Question round is stale or unavailable')
-    if (action === 'revise' && (!saved || saved.phase !== 'proposed' ||
-        data.revision !== saved.revision)) throw new DiscoveryError(409, 'Proposal is stale or unavailable')
-    if (action === 'retry' && (!saved || saved.phase !== 'blocked' ||
-        data.revision !== saved.revision)) throw new DiscoveryError(409, 'Blocked discovery revision has changed')
+    if (action === 'revise' && (!saved || saved.questionContract !== 'structured-v1' ||
+        saved.phase !== 'proposed' || data.revision !== saved.revision))
+      throw new DiscoveryError(409, 'Proposal is stale or unavailable')
+    if (action === 'retry' && (!saved || saved.questionContract !== 'structured-v1' ||
+        saved.phase !== 'blocked' || data.revision !== saved.revision))
+      throw new DiscoveryError(409, 'Blocked discovery revision changed or requires explicit restart')
     if (action === 'answer' && saved?.questionContract !== 'structured-v1')
       throw new DiscoveryError(409, 'Unsupported old question format. Restart discovery explicitly.')
     if (action !== 'retry' && action !== 'restart' && action !== 'answer' &&

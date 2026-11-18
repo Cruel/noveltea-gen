@@ -1,10 +1,25 @@
 import { AuthorQuestionControls } from './author-question-controls'
 import { initialQuestionDraft, questionDraftAnswer,
   type QuestionDraft, type QuestionSet, type QuestionResponse } from '../../../src/author-question-set'
+import { authorQuestionOptions, type AuthorQuestion, type AuthorQuestionAnswer } from '../../../src/author-question'
 import { Button } from '@/components/ui/button'
 
 export type AcceptedQuestionRound = { setId: string; setRevision: number; principal: string;
   submittedAt: string; questions: QuestionSet['questions']; responses: QuestionResponse[] }
+
+/** One read-only answer presentation for discovery history and paused-specialist receipts. */
+export function AuthorQuestionAnswerSummary({ question, answer }: {
+  question: AuthorQuestion; answer: AuthorQuestionAnswer
+}) {
+  const options = authorQuestionOptions(question)
+  const title = (id: string) => options.find(option => option.id === id)?.title ?? id
+  const value = answer.kind === 'delegate' ? 'Delegated to NovelTea Studio'
+    : answer.kind === 'custom' ? answer.text
+      : answer.kind === 'multiple' ? [...answer.optionIds.map(title),
+        ...(answer.text ? [answer.text] : [])].join('; ')
+        : title(answer.optionId)
+  return <>{value}{answer.note && <> (Note: {answer.note})</>}</>
+}
 
 export function AuthorQuestionHistory({ accepted }: { accepted?: AcceptedQuestionRound[] }) {
   if (!accepted?.length) return null
@@ -13,17 +28,9 @@ export function AuthorQuestionHistory({ accepted }: { accepted?: AcceptedQuestio
     {accepted.map(batch => <div key={batch.setId} className="grid gap-1 p-2">
       {batch.responses.map(response => {
         const question = batch.questions.find(q => q.id === response.questionId)!
-        const answer = response.answer
-        const value = answer.kind === 'delegate' ? 'Delegated to NovelTea Studio'
-          : answer.kind === 'custom' ? answer.text
-            : answer.kind === 'multiple' ? [
-              ...answer.optionIds.map(id => question.options?.find(o => o.id === id)?.title ?? id),
-              ...(answer.text ? [answer.text] : []),
-            ].join('; ') : question.options?.find(o => o.id === answer.optionId)?.title ??
-              (answer.optionId === 'yes' ? 'Yes' : 'No')
         return <p key={response.questionId} className="m-0">
-          <strong>{question.question}</strong> — {value}
-          {answer.note && <> (Note: {answer.note})</>}
+          <strong>{question.question}</strong> — <AuthorQuestionAnswerSummary
+            question={question} answer={response.answer} />
         </p>
       })}
     </div>)}
