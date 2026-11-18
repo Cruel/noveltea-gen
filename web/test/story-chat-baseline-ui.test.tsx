@@ -49,7 +49,7 @@ test('first Thread discovery renders shared structured options, default delegati
   assert.match(markup, /What tone should shape the mystery/)
   assert.match(markup, /Uneasy/)
   assert.match(markup, /Recommended/)
-  assert.match(markup, /Let NovelTea Studio decide/)
+  assert.match(markup, /Decide for me/)
   assert.match(markup, /checked=""/)
   assert.match(markup, /placeholder="Somewhat linear is fine"/)
   assert.match(markup, /Complete every question or delegate/)

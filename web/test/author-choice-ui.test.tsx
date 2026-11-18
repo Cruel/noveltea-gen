@@ -70,7 +70,8 @@ test('alternatives display recommendations and relevant context, retaining Other
   assert.match(html, /Restore trust/)
   assert.match(html, /Escalate conflict/)
   assert.match(html, /Recommended/)
-  assert.match(html, /Preserves established canon/)
+  assert.match(html, /aria-label="More information about Restore trust"/)
+  assert.match(html, /aria-label="More information about Escalate conflict"/)
   assert.match(html, /Relevant Story context/)
   assert.match(html, /characters\/nia.md:3/)
   assert.match(html, /My own direction/)
@@ -95,7 +96,8 @@ test('recommendation is never preselected; concise options remain usable without
     recommendedId: 'share', recommendationReason: 'Provides a clear next clue',
   }
   const pending = render(question)
-  assert.match(pending, /Recommended/)
+  assert.match(pending, /aria-label="Recommended"/)
+  assert.match(pending, /lucide-star/)
   assert.doesNotMatch(pending, /data-checked=""/)
   assert.match(pending, /disabled=""/)
   assert.doesNotMatch(pending, /Benefits:<\/strong>\s*<\/p>/)
@@ -112,15 +114,15 @@ test('trusted delegation is provisionally selected, never an accepted response',
   }
   const allowed = render(question, '__delegate__', undefined, undefined,
     { delegationAllowed: true })
-  assert.match(allowed, /Let NovelTea Studio decide/)
+  assert.match(allowed, /Decide for me/)
   assert.match(allowed, /checked=""/)
-  assert.match(allowed, /Recommended/)
+  assert.match(allowed, /aria-label="Recommended"/)
   assert.match(allowed, /data-unchecked=""[^>]*aria-label="Build trust"/,
     'The recommended approach is not the selected radio option')
   assert.doesNotMatch(allowed, /Your answer is saved/)
   assert.doesNotMatch(allowed, /disabled=""[^>]*>Submit answer/)
   const forbidden = render(question, '', undefined, undefined, { delegationAllowed: false })
-  assert.doesNotMatch(forbidden, /Let NovelTea Studio decide/)
+  assert.doesNotMatch(forbidden, /Decide for me/)
   assert.match(forbidden, /disabled=""/)
   const saved = render(question, '', { kind: 'delegate', note: 'Preserve canon' })
   assert.match(saved, /Delegated to NovelTea Studio/)
@@ -130,7 +132,7 @@ test('trusted delegation is provisionally selected, never an accepted response',
 test('free-text and Yes/No delegation remain distinct from explicit answers', () => {
   const text = render({ kind: 'free-text', question: 'What should the witness confess?',
     allowStudioDecision: true }, '__delegate__', undefined, undefined, { delegationAllowed: true })
-  assert.match(text, /Let NovelTea Studio decide/)
+  assert.match(text, /Decide for me/)
   assert.doesNotMatch(text, /for="choice-free-text-answer-123"/)
   assert.doesNotMatch(text, /disabled=""[^>]*>Submit answer/)
   const explicit = render({ kind: 'free-text', question: 'What should the witness confess?',
@@ -139,7 +141,7 @@ test('free-text and Yes/No delegation remain distinct from explicit answers', ()
   assert.match(explicit, /disabled=""/)
   const binary = render({ kind: 'yes-no', question: 'Should the witness reveal the truth?',
     allowStudioDecision: true }, '__delegate__', undefined, undefined, { delegationAllowed: true })
-  assert.match(binary, /Let NovelTea Studio decide/)
+  assert.match(binary, /Decide for me/)
   assert.match(binary, /aria-label="Yes"/)
   assert.match(binary, /aria-label="No"/)
 })
@@ -157,7 +159,9 @@ test('question options are compact rows in a responsive grid with collapsed opti
   assert.match(html, /data-compact-choice=""/)
   assert.match(html, /cursor-pointer items-center gap-2/)
   assert.match(html, /Recommended/)
-  assert.match(html, /Benefits and trade-offs/)
+  assert.match(html, /aria-label="More information about Eerie and unsettling"/)
+  assert.match(html, /lucide-info/)
+  assert.doesNotMatch(html, /<summary[^>]*>Benefits and trade-offs/)
   assert.match(html, /Additional instructions \(optional\)/)
   assert.match(html, /<details[^>]*><summary[^>]*>Additional instructions \(optional\)<\/summary>/,
     'the note editor is hidden until explicitly expanded')
@@ -178,7 +182,7 @@ test('multi-selection supports independent checkboxes plus optional original cus
     options: [{ id: 'history', title: 'Archive history' }, { id: 'witness', title: 'Witness testimony' }],
     recommendedId: 'history', allowStudioDecision: true }
   const delegated = render(q, '__delegate__', undefined, undefined, { delegationAllowed: true })
-  assert.match(delegated, /Let NovelTea Studio decide/)
+  assert.match(delegated, /Decide for me/)
   assert.match(delegated, /type="checkbox"/)
   assert.doesNotMatch(delegated, /disabled=""[^>]*>Submit answer/)
   const combined = render(q, '', undefined, undefined, { delegationAllowed: true,

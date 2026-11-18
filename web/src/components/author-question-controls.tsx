@@ -2,6 +2,8 @@ import type { AuthorQuestion, AuthorQuestionOption } from '../../../src/author-q
 import { authorQuestionKind, authorQuestionOptions } from '../../../src/author-question'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Info, Star } from 'lucide-react'
 
 /** Context remains inspectable even after the answer has been accepted. */
 export function AuthorQuestionContext({ context, contextHref }: {
@@ -22,23 +24,37 @@ export function AuthorQuestionContext({ context, contextHref }: {
   </details>
 }
 
-function OptionDetails({ option, question }: {
+/** Icons are siblings of the option's label: focusing the info icon
+ * must never select that option. The star is a separate recommendation marker. */
+function OptionIndicators({ option, question }: {
   option: AuthorQuestionOption; question: AuthorQuestion
 }) {
+  const recommended = option.id === question.recommendedId
   const description = option.description ?? option.approach
-  const rationale = option.id === question.recommendedId && question.recommendationReason
-  if (!description && !option.benefits && !option.tradeoffs && !rationale) return null
-  return <details className="ml-6 text-xs text-muted-foreground">
-    <summary className="w-fit cursor-pointer select-none">
-      {option.benefits || option.tradeoffs || rationale ? 'Benefits and trade-offs' : 'Details'}
-    </summary>
-    <div className="grid gap-1 pt-1">
-      {description && <p className="m-0">{description}</p>}
-      {option.benefits && <p className="m-0"><strong>Benefits:</strong> {option.benefits}</p>}
-      {option.tradeoffs && <p className="m-0"><strong>Trade-offs:</strong> {option.tradeoffs}</p>}
-      {rationale && <p className="m-0"><strong>Why recommended:</strong> {question.recommendationReason}</p>}
-    </div>
-  </details>
+  const rationale = recommended ? question.recommendationReason : undefined
+  const hasInfo = !!(description || option.benefits || option.tradeoffs || rationale)
+  if (!recommended && !hasInfo) return null
+  return <div className="flex shrink-0 items-center gap-0.5 pr-1">
+    {recommended && <span role="img" aria-label="Recommended" title="Recommended"
+      className="inline-flex size-6 items-center justify-center">
+      <Star aria-hidden="true" className="size-4 fill-amber-400/30 text-amber-400" />
+    </span>}
+    {hasInfo && <Tooltip>
+      <TooltipTrigger render={<button type="button"
+        aria-label={'More information about ' + option.title}
+        className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring" />}>
+        <Info aria-hidden="true" className="size-3.5" />
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm items-start text-left">
+        <div className="grid gap-1">
+          {description && <p className="m-0">{description}</p>}
+          {option.benefits && <p className="m-0"><strong>Benefits:</strong> {option.benefits}</p>}
+          {option.tradeoffs && <p className="m-0"><strong>Trade-offs:</strong> {option.tradeoffs}</p>}
+          {rationale && <p className="m-0"><strong>Why recommended:</strong> {rationale}</p>}
+        </div>
+      </TooltipContent>
+    </Tooltip>}
+  </div>
 }
 
 const choiceLabel = 'flex min-h-9 min-w-0 cursor-pointer items-center gap-2 rounded-md border border-border/40 px-2 py-1.5 text-sm hover:bg-muted/30'
@@ -73,7 +89,7 @@ export function AuthorQuestionControls({ question, questionId, disabled, delegat
         <label data-compact-choice="" className={choiceLabel}>
           <input type="radio" name={id + '-delegation'} checked={!!delegated}
             onChange={() => onSelect('__delegate__')} />
-          <span>Let NovelTea Studio decide</span>
+          <span>Decide for me</span>
         </label>
         <label data-compact-choice="" className={choiceLabel}>
           <input type="radio" name={id + '-delegation'} checked={!delegated}
@@ -93,20 +109,18 @@ export function AuthorQuestionControls({ question, questionId, disabled, delegat
         {delegationAllowed && <label data-compact-choice="" className={choiceLabel}>
           <input type="checkbox" checked={!!delegated}
             onChange={e => onSelect(e.target.checked ? '__delegate__' : '')} />
-          <span>Let NovelTea Studio decide</span>
+          <span>Decide for me</span>
         </label>}
         {options.map(option => <div key={option.id} data-compact-choice=""
-          className="min-w-0 rounded-md border border-border/40">
-          <label className="flex min-h-9 cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/30">
+          className="flex min-w-0 items-center rounded-md border border-border/40">
+          <label className="flex min-h-9 min-w-0 flex-1 cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/30">
             <input type="checkbox" checked={!!selectedIds?.includes(option.id)}
               onChange={e => onSelectedIds?.(e.target.checked
                 ? [...(selectedIds ?? []), option.id]
                 : (selectedIds ?? []).filter(id => id !== option.id))} />
             <span className="min-w-0">{option.title}</span>
-            {option.id === question.recommendedId &&
-              <span className="ml-auto shrink-0 text-xs text-muted-foreground">Recommended</span>}
           </label>
-          <OptionDetails option={option} question={question} />
+          <OptionIndicators option={option} question={question} />
         </div>)}
         <label data-compact-choice="" className={choiceLabel}>
           <input type="checkbox" checked={!!multiCustom}
@@ -126,18 +140,16 @@ export function AuthorQuestionControls({ question, questionId, disabled, delegat
       <RadioGroup disabled={disabled} aria-label="Author response options" value={selection}
         onValueChange={onSelect} className={choiceGrid}>
         {delegationAllowed && <label data-compact-choice="" className={choiceLabel}>
-          <RadioGroupItem value="__delegate__" aria-label="Let NovelTea Studio decide" />
-          <span>Let NovelTea Studio decide</span>
+          <RadioGroupItem value="__delegate__" aria-label="Decide for me" />
+          <span>Decide for me</span>
         </label>}
         {options.map(option => <div key={option.id} data-compact-choice=""
-          className="min-w-0 rounded-md border border-border/40">
-          <label className="flex min-h-9 cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/30">
+          className="flex min-w-0 items-center rounded-md border border-border/40">
+          <label className="flex min-h-9 min-w-0 flex-1 cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/30">
             <RadioGroupItem value={option.id} aria-label={option.title} />
             <span className="min-w-0">{option.title}</span>
-            {option.id === question.recommendedId &&
-              <span className="ml-auto shrink-0 text-xs text-muted-foreground">Recommended</span>}
           </label>
-          <OptionDetails option={option} question={question} />
+          <OptionIndicators option={option} question={question} />
         </div>)}
         <label data-compact-choice="" className={choiceLabel}>
           <RadioGroupItem value="__custom__" aria-label="My own direction" />

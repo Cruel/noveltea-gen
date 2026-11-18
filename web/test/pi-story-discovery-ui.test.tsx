@@ -55,7 +55,7 @@ test('repository Guided Story creation renders shared structured Question Set co
   assert.match(html, /Story discovery questions/)
   assert.match(html, /Which tone should the story have\?/)
   assert.match(html, /Recommended/)
-  assert.match(html, /Let NovelTea Studio decide/)
+  assert.match(html, /Decide for me/)
   assert.match(html, /placeholder="About two hours"/)
   assert.doesNotMatch(html, /<pre[^>]*>.*Which tone/)
   assert.doesNotMatch(html, /Your answers \(partial answers and delegation are allowed\)/)
