@@ -17,6 +17,8 @@ export const sendFirstStoryTurn = createServerFn({ method: 'POST' })
       typeof data.prompt !== 'string' ||
       data.prompt.length > 4000 ||
       (data.confirmFullStory !== undefined && typeof data.confirmFullStory !== 'boolean') ||
+      (data.approvedDigest !== undefined &&
+        (typeof data.approvedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(data.approvedDigest))) ||
       (data.creativeMode !== undefined && !validCreativeMode(data.creativeMode))
     )
       throw new Error('Invalid Story message.')

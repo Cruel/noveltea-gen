@@ -35,3 +35,21 @@ test('an empty Story opens ordinary Chat and truthful Outline/Graph placeholders
   assert.match(markup, />Send</)
   assert.doesNotMatch(markup, /Approve full-Story plan and run|Configure generation|Job wizard/)
 })
+
+test('scope approval leaves the original Chat message editable but disables duplicate sends', () => {
+  const markup = renderToStaticMarkup(createElement(StoryChatPrompt, {
+    value: 'I want a conversation between two parties added.',
+    creativeMode: 'autonomous',
+    busy: false,
+    sending: false,
+    sendDisabled: true,
+    onCreativeModeChange: () => {},
+    onChange: () => {},
+    onSend: () => {},
+  }))
+  assert.match(markup, /<textarea[^>]+aria-label="Story message"[^>]*>/)
+  assert.doesNotMatch(markup.match(/<textarea[^>]+>/)?.[0] ?? '', /\sdisabled(?:\s|=|>)/,
+    'The author must be able to supply the missing speaker names')
+  assert.match(markup.match(/<button[^>]+>/)?.[0] ?? '', /\sdisabled=""/,
+    'A reviewed or incomplete scope must not be submitted by pressing Send again')
+})

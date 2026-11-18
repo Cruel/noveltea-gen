@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button'
 import { EmptyStoryContext, EmptyStoryWelcome, StoryChatPrompt } from './story-first-chat-view'
 import { getThreadChat } from '@/lib/thread-chat.functions'
 import { sendFirstStoryTurn } from '@/lib/story-first-chat.functions'
+import { previewStoryPrompt } from '@/lib/natural-story.functions'
+import type { NaturalStoryPlan } from '@/lib/natural-story-plan'
 import { readStoryChatDiscovery } from '@/lib/story-chat-discovery.functions'
 import { StoryChatBaseline } from './story-chat-baseline'
 
@@ -23,6 +25,9 @@ export function StoryFirstChat({
   const [requestId, setRequestId] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [scopePreview, setScopePreview] = useState<{
+    prompt: string; headSha: string; plan: NaturalStoryPlan
+  } | null>(null)
   const { data: chat, error: readError } = useQuery({
     queryKey: ['thread-chat', threadId],
     queryFn: () => getThreadChat({ data: threadId! }),
@@ -39,21 +44,32 @@ export function StoryFirstChat({
     refetchInterval: threadId ? 5000 : false,
   })
   const busy = sending || (!!threadId && !chat)
-  const send = async () => {
+  const send = async (approveScope = false) => {
     const prompt = saved?.content ?? input.trim()
     if (!prompt || busy || (saved && saved.phase !== 'blocked')) return
-    // Stable across transport errors and duplicate clicks. The server
-    // serializes this ID before opening any provider/sandbox resources.
+    // Stable across transport errors and duplicate clicks. No Chat request
+    // or Pi writer is reserved before a required reviewed scope is approved.
     const id = saved?.id ?? requestId ?? crypto.randomUUID()
     setRequestId(id)
     setSending(true)
     setError(null)
     try {
+      let current = scopePreview?.prompt === prompt ? scopePreview : null
+      if (!saved && !current) {
+        const result = await previewStoryPrompt({ data: { storyId, jobId: id, prompt } })
+        current = { prompt, headSha: result.headSha, plan: result.plan }
+        setScopePreview(current)
+        if (current.plan.clarification || current.plan.reviewRequired) return
+      }
+      if (!saved && current?.plan.clarification) return
+      if (!saved && current?.plan.reviewRequired && !approveScope) return
       const result = await sendFirstStoryTurn({
         data: {
           storyId,
           jobId: id,
           prompt,
+          ...(!saved && approveScope && current?.plan.reviewRequired
+            ? { approvedDigest: current.plan.digest } : {}),
           ...(saved ? saved.creativeModeOverride ? { creativeMode: saved.creativeModeOverride } : {}
             : { creativeMode }),
         },
@@ -63,6 +79,7 @@ export function StoryFirstChat({
       if (result.state === 'admitted' || result.state === 'discovery' || result.state === 'completed') {
         setRequestId(null)
         setInput('')
+        setScopePreview(null)
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to send the saved Story message.')
@@ -89,6 +106,30 @@ export function StoryFirstChat({
             <EmptyStoryWelcome />
           )}
           {threadId && saved && <StoryChatBaseline storyId={storyId} threadId={threadId} />}
+          {!saved && scopePreview && <section aria-label="First Turn scope review"
+            className="space-y-2 rounded-md bg-muted/30 p-3 text-sm">
+            {scopePreview.plan.clarification ? (
+              <p role="alert" className="m-0">{scopePreview.plan.clarification}
+                {' '}Edit the message below to specify the missing details.</p>
+            ) : <>
+              <p className="m-0 font-medium">Review the proposed scope before starting</p>
+              <p className="m-0">
+                {scopePreview.plan.contract.scope.kind === 'partial'
+                  ? 'Focused Story addition'
+                  : 'Whole Story generation'}
+                {' · '}{scopePreview.plan.stages.length} stages
+              </p>
+              {scopePreview.plan.contract.scope.kind === 'partial' && <p className="m-0 text-xs text-muted-foreground">
+                Authorized records: {scopePreview.plan.contract.scope.targets.join(', ')}
+              </p>}
+              <p className="m-0 text-xs text-muted-foreground">
+                Source revision: {scopePreview.headSha.slice(0, 12)}. A preview does not grant write authority.
+              </p>
+              {scopePreview.plan.reviewRequired &&
+                <Button size="sm" type="button" disabled={busy}
+                  onClick={() => void send(true)}>Approve scope and start</Button>}
+            </>}
+          </section>}
           {saved?.phase === 'blocked' && discovery?.session == null && (
             <div className="space-y-2 text-sm" role="status">
               <p className="m-0 text-muted-foreground">
@@ -119,13 +160,20 @@ export function StoryFirstChat({
         <StoryChatPrompt
           value={input}
           creativeMode={creativeMode}
-          onCreativeModeChange={setCreativeMode}
+          onCreativeModeChange={mode => {
+            setCreativeMode(mode)
+            setScopePreview(null)
+            setRequestId(null)
+          }}
           busy={busy}
           sending={sending}
+          sendDisabled={!!scopePreview && scopePreview.prompt === input.trim() &&
+            (!!scopePreview.plan.clarification || scopePreview.plan.reviewRequired)}
           onChange={(value) => {
             setInput(value)
             setError(null)
             setRequestId(null)
+            setScopePreview(null)
           }}
           onSend={() => void send()}
         />

@@ -52,6 +52,11 @@ const contentWords = (text: string): Set<string> => new Set(text.toLowerCase()
 const includesName = (text: string, name: string) => name.length >= 2 &&
   new RegExp('(^|[^a-z0-9])' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-z0-9])', 'i').test(text)
 const conversationWords = /\b(?:conversation|conversations|dialogue|dialog|exchange)\b/i
+/** An additive conversation request is still an existing-Story edit when the
+ * author puts the verb at the end ("I want a conversation ... added").
+ * Neither phrasing grants a writer: the controller needs native source scope
+ * and explicit speakers before a canonical new-record assignment exists. */
+const conversationCreation = /\b(?:write|create|draft|generate|make)\b.{0,140}\b(?:a|an|new|another|fresh)\s+(?:conversation|dialogue|scene|exchange)\b|\b(?:add|insert|include|introduce)\b.{0,140}\b(?:(?:a|an|new|another|fresh)\s+)?(?:conversation|dialogue|scene|exchange)\b|\b(?:a|an|new|another|fresh)\s+(?:conversation|dialogue|scene|exchange)\b.{0,160}\b(?:added|inserted|included|introduced)\b/i
 // Creation must name a NEW Story artifact, not an existing definite 'the story'
 // followed by a modification. Unknown broad edits must go through canon scope
 // inference and reviewed target selection, never a global stage grant.
@@ -59,6 +64,7 @@ const wholeStoryRequest = /^(?:please\s+)?(?:make|create|write|generate|build|de
 export const isWholeStoryCreationRequest = (prompt: string) => wholeStoryRequest.test(prompt.trim())
 export const isExistingStoryModificationRequest = (prompt: string) =>
   !isWholeStoryCreationRequest(prompt) && (
+    conversationCreation.test(prompt) ||
     /^(?:please\s+)?(?:make|write|create|generate|build|develop|revise|edit|fix|improve|tighten|polish|adjust|change|rewrite|update|rework)\b/i.test(prompt.trim()) ||
     /\b(?:change|revise|edit|improve|tighten)\b.*\b(?:character|event|authored-content|choice-point|puzzle)\.[a-z][a-z0-9-]*\b/i.test(prompt))
 const depthFor = (targets: string[]): CompletionContract['scope']['depth'] =>
@@ -335,7 +341,7 @@ export function inferStoryRevision(prompt: string, catalog: CanonicalScopeRecord
  * come from verified canon and explicit named speakers only. */
 function inferFocusedConversation(prompt: string, catalog: CanonicalScopeRecord[],
   headSha: string, previous: CompletionContract, selectedTargets?: string[]): RevisionPreview | null {
-  if (!/\b(?:write|create|add|draft|generate|make)\b.{0,140}\b(?:a|an|new|another|fresh)\s+(?:conversation|dialogue|scene|exchange)\b/i.test(prompt)) return null
+  if (!conversationCreation.test(prompt)) return null
   if (!prompt.trim() || prompt.length > 4000 || unsafe.test(prompt) || !SHA.test(headSha))
     throw new Error('Invalid focused conversation objective or verified Story source.')
   const request = prompt.trim()

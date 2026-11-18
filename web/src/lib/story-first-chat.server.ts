@@ -25,6 +25,8 @@ export type FirstStoryTurnInput = {
   prompt: string
   /** Explicit author confirmation of full-Story execution after clarification. */
   confirmFullStory?: boolean
+  /** Exact server-recomputed reviewed scope, never a client write grant. */
+  approvedDigest?: string
   creativeMode?: CreativeMode
 }
 export type FirstStoryTurnResult = {
@@ -56,6 +58,7 @@ export async function submitFirstStoryTurn(
     !UUID.test(input.storyId) ||
     !UUID.test(input.jobId) ||
     (input.confirmFullStory !== undefined && typeof input.confirmFullStory !== 'boolean') ||
+    (input.approvedDigest !== undefined && !/^[a-f0-9]{64}$/.test(input.approvedDigest)) ||
     (input.creativeMode !== undefined && !validCreativeMode(input.creativeMode))
   )
     throw new Error('Invalid first Story Turn.')
@@ -93,17 +96,23 @@ export async function submitFirstStoryTurn(
       await launchNaturalStory(auth, store, headers, baseURL, {
         storyId: input.storyId, jobId: input.jobId,
         headSha: story.headSha, prompt, creativeMode: input.creativeMode,
+        approvedDigest: input.approvedDigest,
       })
       await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
       return { ...result, state: 'admitted' }
-    } catch {
+    } catch (error) {
       if (await store.persistence.generation.queue.record(input.jobId)) {
         await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
         return { ...result, state: 'admitted' }
       }
       await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, false)
+      // Share only a known, bounded clarification category. Provider/remote
+      // errors may expose private paths or credentials and stay sanitized.
+      const detail = error instanceof Error ? error.message : ''
       return { ...result, state: 'attention', message:
-        'Review the focused target against the existing native-verified Story and confirm model access. No whole-Story generation or new Foundation was authorized.' }
+        /^Name the two speakers explicitly\b/.test(detail)
+          ? 'Specify both speakers by name (for example, Nia and Ivo) so a new conversation can be scoped to the existing Story. No generation was started.'
+          : 'Review the focused target against the existing native-verified Story and confirm model access. No whole-Story generation or new Foundation was authorized.' }
     }
   }
   try {
@@ -157,6 +166,7 @@ export async function submitFirstStoryTurn(
             storyId: input.storyId, jobId: input.jobId,
             headSha: (await store.persistence.naturalStory.story(actor.id, input.storyId))!.headSha!,
             prompt, creativeMode: input.creativeMode,
+            approvedDigest: input.approvedDigest,
           })
           await store.persistence.naturalStory.finishFirstTurn(actor.id, input.storyId, input.jobId, true)
           return { ...result, state: 'admitted' }

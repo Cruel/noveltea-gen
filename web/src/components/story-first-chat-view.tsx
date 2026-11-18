@@ -37,6 +37,7 @@ export function StoryChatPrompt({
   onCreativeModeChange,
   busy,
   sending,
+  sendDisabled = false,
   onChange,
   onSend,
 }: {
@@ -45,6 +46,7 @@ export function StoryChatPrompt({
   onCreativeModeChange: (mode: 'autonomous' | 'collaborative') => void
   busy: boolean
   sending: boolean
+  sendDisabled?: boolean
   onChange: (next: string) => void
   onSend: () => void
 }) {
@@ -81,11 +83,11 @@ export function StoryChatPrompt({
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault()
-              onSend()
+              if (!sendDisabled) onSend()
             }
           }}
         />
-        <Button type="submit" size="sm" disabled={busy || !value.trim()}>
+        <Button type="submit" size="sm" disabled={busy || sendDisabled || !value.trim()}>
           {sending ? (
             <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" />
           ) : (

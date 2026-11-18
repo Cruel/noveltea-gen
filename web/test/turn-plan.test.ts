@@ -138,6 +138,31 @@ test('new Story intent differs from edits to an existing Story', () => {
   assert.equal(suspense.reviewRequired, true)
 })
 
+test('postposed additive dialogue objective is never misclassified as an entire new Story', () => {
+  const vague = 'I want a conversation between two parties added.'
+  const named = 'I want a conversation between Nia and Sol added.'
+  for (const request of [vague, named,
+    'Please add a new conversation between Nia and Sol.',
+    'Include a dialogue exchange between Nia and Sol.']) {
+    assert.equal(isWholeStoryCreationRequest(request), false, request)
+    assert.equal(isExistingStoryModificationRequest(request), true, request)
+  }
+  assert.equal(isExistingStoryModificationRequest('Make me a mystery game'), false)
+  assert.equal(isExistingStoryModificationRequest(
+    'Create a new mystery story with a conversation between two people'), false)
+  const blocked = inferStoryObjective(vague, catalog, a, contract)
+  assert.match(blocked.clarification ?? '', /Name the two speakers explicitly/)
+  assert.deepEqual(blocked.targets, [])
+  assert.deepEqual(blocked.writePaths, [])
+  assert.equal(blocked.reviewRequired, true)
+  const focused = inferStoryObjective(named, catalog, a, contract)
+  assert.equal(focused.clarification, null)
+  assert.equal(focused.contract.scope.kind, 'partial')
+  assert.ok(focused.targets.includes('authored-content.conversation-nia-sol'))
+  assert.ok(!focused.targets.includes('creative-direction.direction'))
+  assert.ok(!focused.targets.includes('arc.trust'))
+})
+
 test('protected amendment retains its exact controller assignment despite a historical full Story contract', () => {
   const canon = catalog.map(item => item.metadata.id === 'creative-direction.direction'
     ? { ...item, metadata: { ...item.metadata, decisions: [{ id: 'tone',
