@@ -176,6 +176,14 @@ test('onboarding form styles do not override nested inline radio labels', () => 
   assert.match(css, /\.story-onboarding \.story-onboarding-field\s*\{/)
 })
 
+test('legacy paragraph styles do not override portaled shadcn tooltip text colors', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
+  assert.doesNotMatch(css, /(?:^|[;}]\s*)p\s*,\s*\.muted\s*\{/,
+    'global paragraph color overrides the shadcn tooltip text-background utility')
+  assert.match(css, /\.page\s*>\s*p\s*,\s*\.muted\s*\{/,
+    'preserve the legacy top-level paragraph appearance without styling tooltip paragraphs')
+})
+
 test('multi-selection supports independent checkboxes plus optional original custom input', () => {
   const q = { kind: 'multiple-choice' as const,
     question: 'Which compatible clues matter?',
