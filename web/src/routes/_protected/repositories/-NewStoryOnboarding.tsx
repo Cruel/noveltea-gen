@@ -191,24 +191,29 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
   }
   const existing = provider === 'github' ? verified?.mode === 'branch' : verified?.empty === false
   return <section aria-label="New Story onboarding" className="story-onboarding">
-    <h2>New Story discovery and onboarding</h2>
-    <p>Collaborate with the pinned NovelTea discovery specialist or supply a fully
-      structured author brief. In either mode, review the Creative Direction before Git initialization.</p>
-    {verified && <p>{existing
-      ? 'Existing repository: the initialization is isolated from the default branch.'
-      : 'Genuinely empty repository: the first commit establishes the default branch.'}</p>}
-    <label>Workspace (blank = repository root; a story/ child is created)
+    <h2>Create a new Story</h2>
+    <p>Choose a folder inside this repository, then develop and review its Creative Direction.</p>
+    <label>Folder in this repository
       <Input value={workspaceInput} disabled={busy || workspace !== null}
-        onChange={e => setWorkspaceInput(e.target.value)} placeholder="projects/demo" />
+        onChange={e => setWorkspaceInput(e.target.value)} placeholder="e.g. new-test" />
     </label>
+    <p className="text-sm text-muted-foreground">
+      Enter <code>new-test</code> to create <code>new-test/story/</code>, or leave blank for
+      the repository root (<code>story/</code>). This does not create another Git repository.
+    </p>
     {workspace === null ? <Button type="button" disabled={busy} onClick={() => void open()}>
-      Open or resume discovery
+      Continue
     </Button> : <>
-      <p>Resolved canonical Story root: <code>/{target}</code>.
-        The private <code>.story-inbox/</code> remains outside this content root.</p>
-      {!created && <div className="actions">
-        <Button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('pi')}>Collaborate with Pi</Button>
-        <Button type="button" disabled={busy || piApproval !== null} onClick={() => setDiscoveryMode('structured')}>Structured questionnaire</Button>
+      <p>New Story location: <code>/{target}/</code>.{' '}{existing
+        ? 'Studio will commit it to a separate branch without changing the default branch.'
+        : 'Studio will create the initial commit in this empty repository.'}</p>
+      {!created && <div role="group" aria-label="Story creation method" className="actions">
+        <Button type="button" variant={discoveryMode === 'pi' ? 'secondary' : 'outline'}
+          aria-pressed={discoveryMode === 'pi'} disabled={busy || piApproval !== null}
+          onClick={() => setDiscoveryMode('pi')}>Guided with Pi</Button>
+        <Button type="button" variant={discoveryMode === 'structured' ? 'secondary' : 'outline'}
+          aria-pressed={discoveryMode === 'structured'} disabled={busy || piApproval !== null}
+          onClick={() => setDiscoveryMode('structured')}>Enter details manually</Button>
       </div>}
       {!created && discoveryMode === 'pi' && <>
         <PiStoryDiscovery repositoryId={repositoryId} workspace={workspace}
@@ -284,7 +289,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
         This wizard will not submit another commit automatically.</p>}
       {!created && !unconfirmedWrite && <Button type="button" disabled={busy} onClick={() => {
         setWorkspace(null); setVerified(null); setError(null); setStep(0)
-      }}>Choose another workspace</Button>}
+      }}>Change folder</Button>}
     </>}
     {error && <p role="alert" className="error">{error}</p>}
   </section>

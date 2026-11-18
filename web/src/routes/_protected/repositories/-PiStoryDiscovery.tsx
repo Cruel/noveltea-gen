@@ -73,16 +73,15 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
   }
   const selected = models.find(m => m.provider + '/' + m.id === selection)
   return <section aria-label="Pi collaborative discovery" className="story-onboarding">
-    <h3>Collaborative discovery with nt-story-discovery</h3>
-    <p>Pi asks adaptive creative questions based on your brief, offers recommendations,
-      and only proposes a foundation after your decisions are settled. No Story file
-      is written until you review and explicitly approve the result.</p>
+    <h3>Develop your Story with Pi</h3>
+    <p>Describe your idea. Pi will ask follow-up questions and suggest a Creative Direction
+      for your review. No Story files are written until you approve it.</p>
     {!session && <>
-      <label>Starting brief (your structured answers may be included)
+      <label>Your Story idea
         <Textarea rows={5} maxLength={4000} disabled={busy} value={brief}
           onChange={e => setBrief(e.target.value)} placeholder="A one-sentence premise is enough." />
       </label>
-      <label>Connected Pi model
+      <label>Pi model
         <StudioSelect aria-label="Connected Pi model" value={selection} disabled={busy}
           onValueChange={value => { setSelection(value); setThinking('') }}
           options={[{ value: '', label: 'Select model' },
@@ -98,9 +97,9 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
       <Button type="button" disabled={busy || !brief.trim() || !selected}
         onClick={() => { if (selected) void perform({ action: 'start', text: brief,
           model: { provider: selected.provider, id: selected.id, ...(thinking ? {thinking} : {}) } }) }}>
-        {busy ? 'Consulting Pi…' : 'Start collaborative discovery'}
+        {busy ? 'Consulting Pi…' : 'Start with Pi'}
       </Button>
-      {!models.length && <p>Connect a Pi provider in the job model settings first.</p>}
+      {!models.length && <p>Connect a Pi model in Settings before continuing.</p>}
     </>}
     {session && <>
       <p>Discovery: <strong>{session.phase}</strong>. Pinned skill snapshot: <code>{session.skillId.slice(0, 12)}</code>.</p>

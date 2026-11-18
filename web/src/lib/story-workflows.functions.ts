@@ -10,6 +10,7 @@ import { githubJobRequest } from './github-jobs.server'
 import { gitlabJobRequest } from './gitlab-jobs.server'
 import { onboardingRequest } from './onboarding.server'
 import { onboardingPiRequest } from './onboarding-pi.server'
+import { onboardingQuery } from './onboarding-query'
 
 type Provider = 'github' | 'gitlab'
 type StoryRead = {
@@ -90,24 +91,24 @@ export const prepareRepositoryJob = createServerFn({ method: 'POST' })
 export const loadOnboardingWorkspace = createServerFn({ method: 'GET' })
   .validator((data: Workspace) => data)
   .handler(async ({ data }) => unwrap(await onboardingRequest(auth, database,
-    request('/api/onboarding?' + params(data), 'GET'), readAuthConfig().baseURL)))
+    request('/api/onboarding?' + onboardingQuery(data), 'GET'), readAuthConfig().baseURL)))
 
 export const saveOnboardingWorkspace = createServerFn({ method: 'POST' })
   .validator((data: WorkspaceSubmission) => data)
   .handler(async ({ data }) => unwrap(await onboardingRequest(auth, database,
-    request('/api/onboarding?' + params(data), 'PUT', data.json), readAuthConfig().baseURL)))
+    request('/api/onboarding?' + onboardingQuery(data), 'PUT', data.json), readAuthConfig().baseURL)))
 
 export const reviewOnboardingWorkspace = createServerFn({ method: 'POST' })
   .validator((data: WorkspaceSubmission) => data)
   .handler(async ({ data }) => unwrap(await onboardingRequest(auth, database,
-    request('/api/onboarding?' + params(data), 'POST', data.json), readAuthConfig().baseURL)))
+    request('/api/onboarding?' + onboardingQuery(data), 'POST', data.json), readAuthConfig().baseURL)))
 
 export const loadPiDiscovery = createServerFn({ method: 'GET' })
   .validator((data: Workspace) => data)
   .handler(async ({ data }) => unwrap(await onboardingPiRequest(auth, database,
-    request('/api/onboarding/pi?' + params(data), 'GET'), readAuthConfig().baseURL)))
+    request('/api/onboarding/pi?' + onboardingQuery(data), 'GET'), readAuthConfig().baseURL)))
 
 export const actPiDiscovery = createServerFn({ method: 'POST' })
   .validator((data: WorkspaceSubmission) => data)
   .handler(async ({ data }) => unwrap(await onboardingPiRequest(auth, database,
-    request('/api/onboarding/pi?' + params(data), 'POST', data.json), readAuthConfig().baseURL)))
+    request('/api/onboarding/pi?' + onboardingQuery(data), 'POST', data.json), readAuthConfig().baseURL)))
