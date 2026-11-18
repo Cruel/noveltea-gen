@@ -3,6 +3,9 @@ import { AuthorQuestionSetView, AuthorQuestionHistory,
   type AcceptedQuestionRound } from './author-question-set'
 import type { QuestionSet, QuestionDraft } from '../../../src/author-question-set'
 import type { StoryPlanning } from '../../../src/story-planning'
+import { creativeDirectionNarrativeBody,
+  type PlanningInterpretation } from '../../../src/planning-interpretation'
+import { PlanningInterpretationsView } from './planning-interpretations'
 
 type Decision = { id: string; origin: 'user' | 'agent'
   authority: 'user-protected' | 'delegated'; statement: string }
@@ -16,7 +19,7 @@ export type StoryChatBaselineSession = {
   revision: number; questions: QuestionSet | null; legacyQuestions?: boolean
   drafts?: Record<string, QuestionDraft>
   accepted?: AcceptedQuestionRound[]
-  proposal: { foundation: Foundation; task: string } | null
+  proposal: { foundation: Foundation; task: string; interpretations?: PlanningInterpretation[] } | null
   digest: string | null; skillId: string; startedAt: number | null
   turns: Array<{ role: 'user' | 'assistant'; text: string }>
   chat: { storyId: string; firstTurnId: string; sourceSha: string; directory: string }
@@ -67,13 +70,12 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
         <p className="m-0"><strong>Genre and tone:</strong> {foundation.genre} · {foundation.tone}</p>
         <p className="m-0"><strong>Player experience:</strong> {foundation.player_experience}</p>
         <p className="m-0"><strong>Scope:</strong> {foundation.scope}</p>
-        {foundation.planning && <div className="grid gap-1">
-          <strong>Proposed interaction, playthrough and production contract</strong>
-          <pre className="m-0 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-xs"
-            aria-label="Exact proposed planning metadata">{JSON.stringify(foundation.planning, null, 2)}</pre>
-          <p className="m-0 text-xs text-muted-foreground">Hard limits and soft preferences remain distinct. Estimates describe one playthrough, not all branches combined.</p>
-        </div>}
-        <p className="m-0 whitespace-pre-wrap">{foundation.body}</p>
+        {session.proposal?.interpretations && <PlanningInterpretationsView
+          interpretations={session.proposal.interpretations} decisions={foundation.decisions} />}
+        {foundation.planning && <p className="m-0 text-xs text-muted-foreground">
+          Hard production limits and soft preferences remain distinct. Duration describes one playthrough, not all routes combined.
+        </p>}
+        <p className="m-0 whitespace-pre-wrap">{creativeDirectionNarrativeBody(foundation.body)}</p>
       </div>
       <div className="grid gap-1">
         <strong>Creative choices</strong>

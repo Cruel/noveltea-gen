@@ -34,7 +34,15 @@ function render(phase: 'questions' | 'proposed' | 'approved') {
       { id: 'branching', kind: 'free-text', question: 'How linear should it be?',
         placeholder: 'Somewhat linear is fine', allowStudioDecision: false },
     ] } : null,
-    proposal: phase === 'questions' ? null : { foundation, task: 'Make me a mystery game' },
+    proposal: phase === 'questions' ? null : { foundation, task: 'Make me a mystery game',
+      interpretations: [
+        { path: 'branching.depth', value: '"shallow"',
+          source: { kind: 'turn', index: 0 }, sourceDecisionId: 'author-brief',
+          basis: 'inferred', rationale: 'The wording suggests limited branches.' },
+        { path: 'first_playthrough', value: '{"min_minutes":60,"max_minutes":90}',
+          source: { kind: 'turn', index: 0 }, sourceDecisionId: 'author-brief',
+          basis: 'delegated', rationale: 'Studio selected a bounded route duration.' },
+      ] },
     digest: phase === 'proposed' ? 'c'.repeat(64) : null,
   } as StoryChatBaselineSession
   return renderToStaticMarkup(createElement(StoryChatBaselineView, {
@@ -61,10 +69,11 @@ test('exact proposed foundation and author-decision provenance are reviewable be
   const markup = render('proposed')
   assert.match(markup, /The Last Bell/)
   assert.match(markup, /player experience|Player experience/i)
-  assert.match(markup, /Exact proposed planning metadata/)
-  assert.match(markup, /first_playthrough/)
-  assert.match(markup, /narrative-led/)
-  assert.match(markup, /hard/)
+  assert.match(markup, /How your direction was interpreted/)
+  assert.match(markup, /Branching depth/)
+  assert.match(markup, /Single-route playthrough/)
+  assert.match(markup, /Studio interpretation of author wording/)
+  assert.match(markup, /Hard production limits/)
   assert.match(markup, /user · user-protected/)
   assert.match(markup, /agent · delegated/)
   assert.match(markup, /Keep player choices meaningful/)

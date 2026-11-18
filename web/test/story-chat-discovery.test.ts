@@ -13,6 +13,7 @@ import { openStudioDatabase, migrateStudio } from './support/studio-database'
 import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { listStoryThreads } from '../src/lib/story-threads.server'
 import type { DiscoveryInference } from '../src/lib/onboarding-pi.server'
+import { planningDimensions } from '../../src/planning-interpretation'
 
 const url = 'http://localhost:3000'
 const questionsReply = (questions: unknown[]) => JSON.stringify({ phase: 'questions',
@@ -34,6 +35,38 @@ const proposal = JSON.stringify({ phase: 'proposal', task: 'Model-suggested obje
         character_artwork: { main: { count: { max: 3 }, firmness: 'soft' } } } },
     body: 'A disappearance brings the inhabitants of a coastal town together. The investigator must navigate competing testimony and decide which loyalties are worth keeping.',
     decisions: [{statement: 'A branching resolution', authority: 'delegated'}] } })
+
+const proposalFor = (session: { brief: string; accepted?: Array<{
+  setId: string; responses: Array<{ questionId: string; answer: { kind: string } }> }> }) => {
+  const value = JSON.parse(proposal)
+  const accepted = session.accepted ?? []
+  const baseline = accepted.find(batch => batch.responses.some(response =>
+    response.questionId === 'baseline'))
+  const branching = accepted.find(batch => batch.responses.some(response =>
+    response.questionId === 'branching'))
+  const puzzleClarification = accepted.find(batch => batch.responses.some(response =>
+    response.questionId === 'puzzle-clarification'))
+  if (puzzleClarification) value.foundation.planning.puzzle_emphasis = 'none'
+  const delegatedAll = /decide everything/i.test(session.brief)
+  value.foundation.decisions[0].source = delegatedAll
+    ? { kind: 'turn', index: 0 }
+    : { kind: 'answer', setId: baseline!.setId, questionId: 'baseline' }
+  value.interpretations = planningDimensions(value.foundation.planning).map(({ path }) => {
+    const fromBranching = path.startsWith('branching.') && branching
+    const fromClarification = path === 'puzzle_emphasis' && puzzleClarification
+    const source = fromClarification
+      ? { kind: 'answer', setId: puzzleClarification.setId, questionId: 'puzzle-clarification' }
+      : fromBranching
+      ? { kind: 'answer', setId: branching.setId, questionId: 'branching' }
+      : delegatedAll ? { kind: 'turn', index: 0 }
+        : { kind: 'answer', setId: baseline!.setId, questionId: 'baseline' }
+    return { path, source, basis: fromBranching || fromClarification ? 'inferred' : 'delegated',
+      rationale: fromClarification ? 'The later explicit author clarification supersedes conflicting Puzzle requests.'
+        : fromBranching ? 'The author requested modest branching without fully linear play.'
+        : 'The author expressly delegated remaining baseline decisions to Studio.' }
+  })
+  return JSON.stringify(value)
+}
 
 function skills(root: string) {
   const source = join(root, 'skills-source')
@@ -89,7 +122,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     const selected = (await availableUserPiModels(store, alice))[0]!
     const model = { provider: selected.provider, id: selected.id }
     await store.persistence.settings.putDefaultModel(alice, model, 'now')
-    const storyIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID()]
+    const storyIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()]
     const sourceSha = 'b'.repeat(40)
     for (const [i, storyId] of storyIds.entries()) {
       await store.persistence.onboarding.importStory({
@@ -122,6 +155,9 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
           placeholder: 'Describe your preference', allowStudioDecision: false },
         { id: 'ending', kind: 'yes-no', question: 'Should multiple endings be available?',
           recommendedId: 'yes', allowStudioDecision: true },
+        { id: 'baseline', kind: 'free-text',
+          question: 'May Studio decide the remaining Story baseline requirements, including Choices, Puzzles, pacing, duration and production budget?',
+          allowStudioDecision: true },
       ])
     }
     const first = await submitFirstStoryTurn(auth, store, headers, url, {
@@ -132,7 +168,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(calls, 1)
     const questions = await req(storyIds[0]!, firstId, 'GET')
     assert.equal(questions.body.session.phase, 'questions')
-    assert.equal(questions.body.session.questions.questions.length, 3)
+    assert.equal(questions.body.session.questions.questions.length, 4)
     assert.equal(questions.body.session.questions.questions[0].recommendedId, 'coast')
     assert.deepEqual(questions.body.session.drafts, {}, 'default delegation is not saved consent')
     assert.equal(questions.body.session.chat.originalObjective, initial)
@@ -150,6 +186,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
       { questionId: 'branching', answer: { kind: 'custom',
         text: 'somewhat linear, but not too much', note: '' } },
       { questionId: 'ending', answer: { kind: 'delegate', note: '' } },
+      { questionId: 'baseline', answer: { kind: 'delegate', note: '' } },
     ]
     const drafts = {
       setting: { selection: 'coast', selectedIds: [], multiCustom: false,
@@ -201,17 +238,22 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
         headers: { cookie: aliceCookie, origin: url },
         body: JSON.stringify({ action: 'retry', revision: partial.body.session?.revision ??
           (await req(storyIds[0]!, firstId, 'GET')).body.session.revision }),
-      }), url, storyIds[0]!, firstId, async () => proposal)
+      }), url, storyIds[0]!, firstId, async state => proposalFor(state))
     assert.equal(recovery.status, 200)
     const proposed = (await recovery.json() as any).session
     assert.equal(proposed.phase, 'proposed')
     assert.equal(proposed.proposal.task, initial, 'model task cannot replace the original objective')
     assert.deepEqual(proposed.proposal.foundation.decisions.map((d: any) => d.origin),
-      ['user', 'user', 'user', 'agent'])
+      ['user', 'user', 'user', 'user', 'user', 'agent'])
     assert.match(proposed.proposal.foundation.decisions[2].statement,
       /somewhat linear, but not too much/)
     assert.equal(proposed.proposal.foundation.decisions[0].authority, 'user-protected')
-    assert.equal(proposed.proposal.foundation.decisions[3].authority, 'delegated')
+    assert.equal(proposed.proposal.foundation.decisions[5].authority, 'delegated')
+    assert.equal(proposed.proposal.interpretations.find((i: any) =>
+      i.path === 'branching.depth').value, '"shallow"')
+    assert.equal(proposed.proposal.interpretations.find((i: any) =>
+      i.path === 'branching.depth').basis, 'inferred')
+    assert.match(proposed.proposal.foundation.body, /source: Creative Decision `author-answer-2`/)
     assert.equal(proposed.proposal.foundation.planning.production.illustrated_backgrounds.firmness, 'hard')
     assert.deepEqual(proposed.proposal.foundation.planning.first_playthrough,
       { min_minutes: 90, max_minutes: 120 })
@@ -238,7 +280,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(approve.body.session.phase, 'approved')
     assert.equal(approve.body.continuation.state, 'blocked',
       'without a real controller the exact approval persists but no writer starts')
-    assert.equal(approve.body.session.proposal.foundation.decisions.length, 4)
+    assert.equal(approve.body.session.proposal.foundation.decisions.length, 6)
     assert.deepEqual(approve.body.session.proposal.foundation.planning,
       proposed.proposal.foundation.planning)
     const blockedContinuation = await req(storyIds[0]!, firstId, 'POST', {
@@ -277,7 +319,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     const delegated = await submitFirstStoryTurn(auth, store, headers, url, {
       storyId: storyIds[1]!, jobId: delegatedId, prompt: delegatedPrompt,
       creativeMode: 'collaborative',
-    }, async () => proposal)
+    }, async state => proposalFor(state))
     assert.equal(delegated.state, 'discovery')
     const delegatedSession = (await req(storyIds[1]!, delegatedId, 'GET')).body.session
     assert.equal(delegatedSession.phase, 'proposed')
@@ -312,7 +354,10 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
         assert.match(state.turns.at(-1)!.text, /Investigate a missing person/)
         return questionsReply([{ id: 'ending', kind: 'yes-no',
           question: 'Should the missing person return by the ending?',
-          allowStudioDecision: true }])
+          allowStudioDecision: true },
+          { id: 'baseline', kind: 'free-text',
+            question: 'May Studio decide all remaining Story baseline creative requirements?',
+            allowStudioDecision: true }])
       })
     assert.equal(followup.status, 200)
     const roundTwo = (await followup.json() as any).session
@@ -324,9 +369,10 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
         headers: { cookie: aliceCookie, origin: url },
         body: JSON.stringify({ action: 'answer', revision: roundTwo.revision,
           setId: roundTwo.questions.id, setRevision: roundTwo.questions.revision,
-          responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+          responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } },
+            { questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
         }),
-      }), url, storyIds[2]!, collaborativeId, async () => proposal)
+      }), url, storyIds[2]!, collaborativeId, async state => proposalFor(state))
     assert.equal(resolved.status, 200)
     const resolvedSession = (await resolved.json() as any).session
     assert.equal(resolvedSession.phase, 'proposed')
@@ -349,7 +395,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
         premature.foundation.decisions[0].authority = 'user-protected'
         return JSON.stringify(premature)
       }
-      assert.match(instructions, /required first baseline discovery questions/)
+      assert.match(instructions, /required first baseline discovery questions|source-grounded planning/)
       return questionsReply([{ id: 'main-conflict', kind: 'free-text',
         question: 'What mystery matters to the protagonist?', allowStudioDecision: true }])
     })
@@ -391,6 +437,63 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(restartState.legacyQuestions, false)
     assert.equal(restartState.questions.questions[0].id, 'fresh-plot')
     assert.equal(restartState.chat.originalObjective, initial)
+    // A contradictory answer requires a later clarification. The model cannot
+    // choose its preferred interpretation or infer approval from the author.
+    const conflictId = randomUUID()
+    const conflict = await submitFirstStoryTurn(auth, store, headers, url, {
+      storyId: storyIds[4]!, jobId: conflictId, prompt: initial,
+      creativeMode: 'collaborative',
+    }, async () => questionsReply([
+      { id: 'puzzle-guidance', kind: 'free-text',
+        question: 'What Puzzle emphasis should the Story use?' },
+      { id: 'baseline', kind: 'free-text',
+        question: 'May Studio decide the remaining Story baseline creative requirements?',
+        allowStudioDecision: true },
+    ]))
+    assert.equal(conflict.state, 'discovery')
+    const openQuestions = (await req(storyIds[4]!, conflictId, 'GET')).body.session
+    let correctionCalls = 0
+    const conflicted = await storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url },
+        body: JSON.stringify({ action: 'answer', revision: openQuestions.revision,
+          setId: openQuestions.questions.id, setRevision: openQuestions.questions.revision,
+          responses: [
+            { questionId: 'puzzle-guidance', answer: { kind: 'custom',
+              text: 'No puzzles, but I must include custom puzzles.', note: '' } },
+            { questionId: 'baseline', answer: { kind: 'delegate', note: '' } },
+          ],
+        }),
+      }), url, storyIds[4]!, conflictId, async (state, instructions) => {
+        correctionCalls++
+        if (correctionCalls === 1) return proposalFor(state)
+        assert.match(instructions, /clarification required/i)
+        return questionsReply([{ id: 'puzzle-clarification', kind: 'alternatives',
+          question: 'Clarify conflicting Puzzle requirements: which outcome should prevail?',
+          options: [{ id: 'no-puzzles', title: 'No Puzzles' },
+            { id: 'custom', title: 'Include custom Puzzles' }] }])
+      })
+    assert.equal(conflicted.status, 200)
+    const clarified = (await conflicted.json() as any).session
+    assert.equal(correctionCalls, 2)
+    assert.equal(clarified.phase, 'questions')
+    assert.equal(clarified.accepted.length, 1)
+    const resolvedConflict = await storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url },
+        body: JSON.stringify({ action: 'answer', revision: clarified.revision,
+          setId: clarified.questions.id, setRevision: clarified.questions.revision,
+          responses: [{ questionId: 'puzzle-clarification', answer: {
+            kind: 'option', optionId: 'no-puzzles', note: '' } }],
+        }),
+      }), url, storyIds[4]!, conflictId, async state => proposalFor(state))
+    assert.equal(resolvedConflict.status, 200)
+    const resolvedProposal = (await resolvedConflict.json() as any).session
+    assert.equal(resolvedProposal.phase, 'proposed')
+    assert.equal(resolvedProposal.proposal.foundation.planning.puzzle_emphasis, 'none')
+    assert.equal(resolvedProposal.proposal.interpretations.find((i: any) =>
+      i.path === 'puzzle_emphasis').source.questionId, 'puzzle-clarification')
+    assert.match(resolvedProposal.proposal.foundation.body, /Planning interpretations/)
     assert.deepEqual(await store.testing.foreignKeyViolations(), [])
   } finally {
     store.close()

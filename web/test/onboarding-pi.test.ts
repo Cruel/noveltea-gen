@@ -97,7 +97,12 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
             { id: 'direction', kind: 'free-text',
               question: 'What creative guidance should shape the ending?',
               allowStudioDecision: false }])
-          : proposed
+          : JSON.stringify({ ...JSON.parse(proposed), foundation: {
+            ...JSON.parse(proposed).foundation, decisions: [
+              { statement: 'No fixed heroic ending', authority: 'delegated',
+                source: { kind: 'answer', setId: state.accepted![1]!.setId, questionId: 'ending' } },
+            ],
+          } })
     }
     const request = async (method: 'GET' | 'POST', value?: unknown, who = own, origin = url,
       inferStep = infer) => {
@@ -174,12 +179,12 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     })
     assert.equal(third.status, 200, JSON.stringify(third.body))
     assert.equal(third.body.session.phase, 'proposed')
-    assert.equal(third.body.session.proposal.foundation.decisions.length, 4)
+    assert.equal(third.body.session.proposal.foundation.decisions.length, 5)
     assert.equal(third.body.session.proposal.foundation.decisions[0].origin, 'user')
     assert.equal(third.body.session.proposal.foundation.decisions[2].origin, 'user')
-    assert.equal(third.body.session.proposal.foundation.decisions[3].origin, 'agent')
-    assert.equal(third.body.session.proposal.foundation.decisions[3].authority, 'delegated')
-    assert.match(third.body.session.proposal.foundation.decisions[2].statement, /Please choose/)
+    assert.equal(third.body.session.proposal.foundation.decisions[4].origin, 'agent')
+    assert.equal(third.body.session.proposal.foundation.decisions[4].authority, 'delegated')
+    assert.match(third.body.session.proposal.foundation.decisions[3].statement, /Please choose/)
     const foundation = third.body.session.proposal.foundation
     assert.equal((await request('POST', {action: 'approve', revision: 6, digest: 'f'.repeat(64)})).status, 409)
     assert.equal((await request('POST', {action: 'approve', revision: 4,

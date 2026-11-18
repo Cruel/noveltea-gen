@@ -1,4 +1,8 @@
 import { Button } from '@/components/ui/button'
+import { PlanningInterpretationsView } from '@/components/planning-interpretations'
+import { creativeDirectionNarrativeBody,
+  type PlanningInterpretation } from '../../../../../src/planning-interpretation'
+import type { StoryPlanning } from '../../../../../src/story-planning'
 import { Textarea } from '@/components/ui/textarea'
 import { StudioSelect } from '@/components/studio-select'
 import { AuthorQuestionHistory, AuthorQuestionSetView,
@@ -15,9 +19,11 @@ export type PiModel = { provider: string; id: string; thinking?: 'low' | 'medium
 export type PiFoundation = {
   id: string; title: string; premise: string; central_conflict: string
   genre: string; tone: string; player_experience: string; scope: string; body: string
+  planning?: StoryPlanning
   decisions: Array<{id: string; statement: string; origin: 'user' | 'agent'; authority: 'delegated' | 'user-protected'}>
 }
-export type PiProposal = { foundation: PiFoundation; task: string; contract: {
+export type PiProposal = { foundation: PiFoundation; task: string;
+  interpretations: PlanningInterpretation[]; contract: {
   scope: { kind: 'full-story'; depth: 'composition'; targets: string[]; branches: string[] }
   constraints: string[]; envelope: { presentation: string; hardLimits: string[]; preferences: string[] }
 } }
@@ -188,7 +194,9 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
         <p><strong>Genre/tone:</strong> {session.proposal.foundation.genre} / {session.proposal.foundation.tone}</p>
         <p><strong>Player experience:</strong> {session.proposal.foundation.player_experience}</p>
         <p><strong>Scope:</strong> {session.proposal.foundation.scope}</p>
-        <p className="whitespace-pre-wrap break-words">{session.proposal.foundation.body}</p>
+        <PlanningInterpretationsView interpretations={session.proposal.interpretations ?? []}
+          decisions={session.proposal.foundation.decisions} />
+        <p className="whitespace-pre-wrap break-words">{creativeDirectionNarrativeBody(session.proposal.foundation.body)}</p>
         <h3>Creative decision authority</h3>
         {session.proposal.foundation.decisions.map(d => <p key={d.id}>
           <strong>{d.origin} / {d.authority}:</strong> {d.statement}</p>)}

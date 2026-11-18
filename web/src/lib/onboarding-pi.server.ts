@@ -12,6 +12,9 @@ import { candidate, validateNewStory } from './story-foundation.server'
 import { validStoryTitle } from './story-initialization-contract'
 import { parseGenerationContract } from '../../../src/generation'
 import { parseStoryPlanning, type StoryPlanning } from '../../../src/story-planning'
+import { parsePlanningInterpretations, renderPlanningInterpretations,
+  PlanningClarificationRequired, resolveDelegatedDecision,
+  type PlanningEvidence, type PlanningInterpretation } from '../../../src/planning-interpretation'
 import { authorQuestionDirection, authorQuestionOptions } from '../../../src/author-question'
 import { parseProposedQuestionSet, parseQuestionDrafts, parseQuestionResponses,
   type QuestionSet, type QuestionResponse, type QuestionDraft } from '../../../src/author-question-set'
@@ -24,7 +27,8 @@ type Foundation = {
   planning?: StoryPlanning
   decisions: Array<{ id: string; statement: string; origin: 'user' | 'agent'; authority: 'user-protected' | 'delegated' }>
 }
-type Proposal = { foundation: Foundation; task: string; contract: ReturnType<typeof parseGenerationContract> }
+type Proposal = { foundation: Foundation; task: string; contract: ReturnType<typeof parseGenerationContract>;
+  interpretations: PlanningInterpretation[] }
 /** A sparse objective is not an authorization to invent all of its missing
  * foundations. Even Autonomous mode must ask before advancing to a proposal.
  * A deliberate instruction to choose everything without questions is different. */
@@ -79,7 +83,7 @@ function scope(input: Session) {
     ...(input.chat ? { chat: input.chat } : {}) }
 }
 export type DiscoverySessionView = ReturnType<typeof scope>
-function expectedProposal(value: unknown, authorMessages: string[], newStoryChat: boolean,
+function expectedProposal(value: unknown, evidence: PlanningEvidence[], newStoryChat: boolean,
   delegationAuthorized: boolean): Proposal {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Malformed discovery reply')
   const output = value as Record<string, unknown>
@@ -104,27 +108,39 @@ function expectedProposal(value: unknown, authorMessages: string[], newStoryChat
   // Never rely on the model to label the author's words correctly. Preserve
   // the exact supplied brief/answers as protected canon, separately from the
   // model's own recommendations and delegated creative selections.
-  const origin: Foundation['decisions'] = authorMessages.map((statement, index) => ({
-    id: index === 0 ? 'author-brief' : 'author-answer-' + index,
-    statement, origin: 'user', authority: 'user-protected',
+  const origin: Foundation['decisions'] = evidence.map(item => ({
+    id: item.decisionId, statement: item.statement,
+    origin: 'user', authority: 'user-protected',
   }))
-  const selections: Foundation['decisions'] = input.decisions.map((d, i) => ({
-    id: 'discovery-' + (i + 1), statement: d.statement.trim(), origin: 'agent',
-    authority: d.authority === 'delegated' ? 'delegated' : 'user-protected',
-  }))
-  const planning = input.planning === undefined
-    ? (newStoryChat ? parseStoryPlanning(undefined, true) : undefined)
-    : parseStoryPlanning(input.planning, newStoryChat)
+  const selections: Foundation['decisions'] = input.decisions.map((d, i) => {
+    if (d.authority !== 'delegated' && d.source !== undefined)
+      throw Error('An un-delegated Studio suggestion cannot claim author-source authority.')
+    const source = d.authority === 'delegated'
+      ? resolveDelegatedDecision(d.source, evidence, d.statement) : null
+    return { id: 'discovery-' + (i + 1),
+      statement: d.statement.trim() + (source
+        ? ' (Studio choice authorized by Creative Decision ' + source.decisionId + ')' : ''),
+      origin: 'agent', authority: d.authority === 'delegated' ? 'delegated' : 'user-protected' }
+  })
+  if (newStoryChat && input.planning === undefined)
+    throw Error('New Story discovery requires a complete, source-backed planning baseline.')
+  const planning = input.planning === undefined ? undefined : parseStoryPlanning(input.planning, newStoryChat)
+  const interpretations = planning ? parsePlanningInterpretations(output.interpretations,
+    planning, evidence, newStoryChat) : []
+  if (!planning && output.interpretations !== undefined)
+    throw Error('Planning interpretations require actual Story planning metadata.')
   const foundation = { ...Object.fromEntries(fields.map(field => [field, (input[field] as string).trim()])),
-    ...(planning ? { planning } : {}), decisions: [...origin, ...selections] } as Foundation
+    ...(planning ? { planning } : {}),
+    body: (input.body as string).trim() + renderPlanningInterpretations(interpretations, evidence),
+    decisions: [...origin, ...selections] } as Foundation
   candidate(foundation)
   const contract = parseGenerationContract({
     scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
     constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] },
   })
-  return { foundation, task: output.task.trim(), contract }
+  return { foundation, task: output.task.trim(), contract, interpretations }
 }
-function parseResponse(text: string, authorMessages: string[], newStoryChat: boolean,
+function parseResponse(text: string, evidence: PlanningEvidence[], newStoryChat: boolean,
   delegationAuthorized = false):
   { questions: { questions: unknown }; proposal?: never } | { questions?: never; proposal: Proposal } {
   if (text.length > 24_000) throw new Error('Discovery reply exceeds the bounded conversation size')
@@ -136,7 +152,7 @@ function parseResponse(text: string, authorMessages: string[], newStoryChat: boo
     if (output.questions && typeof output.questions === 'object' &&
         !Array.isArray(output.questions)) return { questions: output.questions as { questions: unknown } }
   }
-  if (output.phase === 'proposal') return { proposal: expectedProposal(output, authorMessages,
+  if (output.phase === 'proposal') return { proposal: expectedProposal(output, evidence,
     newStoryChat, delegationAuthorized) }
   throw new Error('Story discovery did not produce questions or a valid proposal')
 }
@@ -161,7 +177,9 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
     noTools: 'all', tools: [] })
   const timer = setTimeout(() => { void agent.abort().catch(() => {}) }, 4 * 60_000)
   try {
-    await agent.prompt(JSON.stringify({ conversation: session.turns }), { expandPromptTemplates: false })
+    await agent.prompt(JSON.stringify({ conversation: session.turns,
+      planningSources: authorEvidence(session).map(({ source, decisionId, statement, authorText, selectedOption, delegated }) =>
+        ({ source, decisionId, statement, authorText, selectedOption, delegated })) }), { expandPromptTemplates: false })
     const last = [...agent.messages].reverse().find(item => item.role === 'assistant')
     if (!last || last.role !== 'assistant' || last.stopReason !== 'stop')
       throw new Error('Pi specialist did not finish')
@@ -195,13 +213,19 @@ and reasons. Questions in one batch MUST be independently answerable; ask depend
 questions only in a subsequent round. Both Autonomous and Collaborative authors need a coherent
 initial baseline. If (and ONLY if) the author explicitly delegates all remaining
 choices and asks not to be questioned, propose the minimum baseline immediately.
+Interpret natural preferences using the existing categorical StoryPlanning fields, not invented
+numeric preferences: for example 'somewhat linear, but not too much' implies shallow
+branching and limited route exclusivity, not a choice frequency. Preserve the exact
+wording as an author source. If author requirements contradict, or credible competing
+interpretations would materially change the Story, return a focused follow-up Question
+Set rather than proposing an arbitrary resolution. Do not invent author hard budgets.
 Respect partially answered questions and explicit delegations; never ask for facts already provided. Do not invent user approvals.
 Use the user's full conversation to decide missing prerequisites.
 When decisions are ready, return a proposed foundation and task for explicit
 human review, not an approval. Never assume user approval in your output.
 Respond ONLY as valid JSON, either:
 {"phase":"questions","questions":{"questions":[{"id":"story-tone","kind":"alternatives","question":"Which tone should shape the story?","options":[{"id":"uneasy","title":"Uneasy"},{"id":"hopeful","title":"Hopeful"}],"recommendedId":"uneasy","recommendationReason":"Supports the mystery","allowStudioDecision":true},{"id":"duration","kind":"free-text","question":"How long should one playthrough take?","placeholder":"For example, 90–120 minutes","allowStudioDecision":true}]}}
-or {"phase":"proposal","task":"brief generation objective","foundation":{
+or {"phase":"proposal","task":"brief generation objective","interpretations":[{"path":"branching.depth","source":{"kind":"answer","setId":"the trusted set id from planningSources","questionId":"branching"},"basis":"inferred","rationale":"A modest branch structure reflects the stated preference"}],"foundation":{
 "id":"lowercase-slug","title":"...","premise":"...","central_conflict":"...",
 "genre":"...","tone":"...","player_experience":"...","scope":"...",
 "planning":{"choice_frequency":"occasional","choice_impact":"lasting",
@@ -212,11 +236,30 @@ or {"phase":"proposal","task":"brief generation objective","foundation":{
 "background_variants":{"count":{"max":2},"firmness":"soft"},
 "character_artwork":{"main":{"count":{"max":3},"firmness":"soft"}}}},
 "body":"meaningful coherent narrative and production prose",
-"decisions":[{"statement":"significant creative choice","authority":"user-protected"}]}}
+"decisions":[{"statement":"significant creative choice","authority":"delegated","source":{"kind":"answer","setId":"exact trusted set id","questionId":"exact delegated question id"}}]}}
+The interpretations array above is also ILLUSTRATIVE: include EXACTLY ONE entry for EVERY
+populated planning dimension (choice_frequency, choice_impact, branching.depth,
+branching.route_exclusivity, puzzle_emphasis, pacing, first_playthrough, each
+production budget, and any optional counts/concepts). A dimension's numeric/range
+value comes exclusively from foundation.planning, not an extra value field in
+interpretations. Each entry has ONLY path, source, basis ('explicit' only for a selected option with the literal
+category value, 'inferred' for a normalized author preference, 'delegated' for an
+explicitly delegated question), and a short concrete rationale. Source must be an
+EXACT kind/index or kind/setId/questionId from the trusted planningSources input.
+Never cite a sibling answer, missing question, or unsubmitted default. If the brief
+explicitly delegated everything, its 'turn' source can support delegated values;
+otherwise solicit missing baseline requirements instead of fabricating sources.
+Store the final interpretation in the proposed Creative Direction for author review;
+a model inference is not a verbatim protected instruction, and approval is separate.
 The planning block is an ILLUSTRATIVE JSON SHAPE, not default numbers: use source-specific
 approved/delegated values; new-Story proposals MUST include the complete planning core
 and at least one hard/soft production bound. Optional counts/illustration concepts may
 be omitted, but missing author requirements cannot be silently filled as protected facts.
+For model-origin decisions with authority 'delegated', source is REQUIRED and must
+identify the exact trusted delegated turn or Question Set answer. An ordinary
+Studio proposal not based on delegation has authority 'user-protected' and NO
+source; it remains visibly agent-origin until the author approves the exact proposal.
+A narrowly delegated ending question cannot authorize unrelated Story details.
 Use authority 'delegated' ONLY for choices the author explicitly delegated.
 All model-origin proposals remain subject to author approval; the controller
 will preserve the author's exact messages as a separate protected decision.
@@ -249,11 +292,17 @@ async function save(store: StudioDatabase, owner: string, repo: string, workspac
     owner, repo, workspace, state.revision, JSON.stringify(state), previous, new Date().toISOString())
   if (!changed) throw new DiscoveryError(409, 'Discovery changed concurrently. Reload the conversation.')
 }
-function authorMessages(state: Session) {
-  const words = state.turns.filter(turn => turn.role === 'user' &&
-    turn.source !== 'question-set').map(turn => turn.text)
+/** The controller, not the model, owns stable source identities and verbatim
+ * submitted author evidence (including explicit, authorized delegations). */
+function authorEvidence(state: Session): PlanningEvidence[] {
+  const messages = state.turns.filter(turn => turn.role === 'user' && turn.source !== 'question-set')
+  const sources: PlanningEvidence[] = messages.map((turn, index) => ({
+    source: { kind: 'turn', index }, decisionId: index === 0 ? 'author-brief' : 'author-answer-' + index,
+    statement: turn.text, authorText: turn.text, selectedOption: false,
+    delegated: index === 0 && explicitFullDelegation(turn.text),
+  }))
+  let index = sources.length
   for (const batch of state.accepted ?? []) for (const response of batch.responses) {
-    if (response.answer.kind === 'delegate') continue
     const question = batch.questions.find(q => q.id === response.questionId)!
     const answer = response.answer
     const options = authorQuestionOptions(question)
@@ -261,12 +310,17 @@ function authorMessages(state: Session) {
       ? options.find(o => o.id === answer.optionId)?.title
       : answer.kind === 'multiple'
         ? [...answer.optionIds.map(id => options.find(o => o.id === id)?.title ?? id),
-          ...(answer.text ? [answer.text] : [])].join('; ')
-        : answer.text
-    words.push(question.question + ' — Author selected/wrote: ' + selected +
-      (answer.note ? ' — Additional instructions: ' + answer.note : ''))
+          ...(answer.text !== undefined ? [answer.text] : [])].join('; ')
+        : answer.kind === 'custom' ? answer.text : 'Delegated to NovelTea Studio'
+    sources.push({ source: { kind: 'answer', setId: batch.setId, questionId: response.questionId },
+      decisionId: 'author-answer-' + index++, delegated: answer.kind === 'delegate',
+      selectedOption: answer.kind === 'option', authorText: answer.kind === 'delegate' ? '' : selected + (answer.note ? ' — ' + answer.note : ''),
+      statement: question.question + ' — Author ' + (answer.kind === 'delegate'
+        ? 'explicitly delegated this question' : 'selected/wrote: ' + selected) +
+        (answer.note ? ' — Additional instructions: ' + answer.note : ''),
+    })
   }
-  return words
+  return sources
 }
 async function input(request: Request): Promise<Record<string, unknown>> {
   const reader = request.body?.getReader()
@@ -481,7 +535,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const interpret = (raw: string) => {
         const delegationAuthorized = explicitFullDelegation(session.brief) ||
           !!session.accepted?.some(batch => batch.responses.some(r => r.answer.kind === 'delegate'))
-        const result = parseResponse(raw, authorMessages(session), Boolean(chat), delegationAuthorized)
+        const result = parseResponse(raw, authorEvidence(session), Boolean(chat), delegationAuthorized)
         if (result.questions) {
           const set = parseProposedQuestionSet(result.questions,
             sha({ binding: chat ? chat.firstTurnId : { repo, workspace },
@@ -503,15 +557,23 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       let corrected = false
       let outcome: ReturnType<typeof interpret>
       try { outcome = interpret(raw) }
-      catch {
-        // Exactly one bounded corrective model pass is permitted, before any set
-        // is accepted. Invalid output does not become an invented question.
+      catch (error) {
         corrected = true
-        raw = await invoke(session, instructions + '\nController correction: the previous ' +
-          'question/proposal JSON failed trusted validation. Return one complete valid ' +
-          'structured Question Set or complete Creative Direction proposal. Do not ' +
-          'invent approvals or substitute prose questions.')
+        const clarification = error instanceof PlanningClarificationRequired
+        // Exactly one bounded correction. If the author has contradictory or
+        // materially incompatible requirements, demand an actual new question,
+        // not another unsupported proposal or an invented decision.
+        raw = await invoke(session, instructions + (clarification
+          ? '\nController clarification required: ' + error.message +
+            ' Return ONLY a focused structured Question Set requesting author direction. ' +
+            'Do not choose for the author.'
+          : '\nController correction: the previous question/proposal JSON failed trusted ' +
+            'validation, including source-grounded planning. Return one complete valid ' +
+            'structured Question Set or Creative Direction proposal with all source-backed ' +
+            'interpretations. Do not invent approvals or substitute prose questions.'))
         outcome = interpret(raw)
+        if (clarification && outcome.proposal)
+          throw Error('A material planning contradiction requires a new author question.')
       }
       // A sparse initial author objective must solicit baseline questions even
       // in Autonomous mode. Give one bounded corrective model pass if it skipped
