@@ -51,7 +51,7 @@ export async function beginStoryChatDiscovery(
   const connected = await availableUserPiModels(store, actor.id)
   if (!model || !connected.some(candidate => candidate.provider === model.provider &&
       candidate.id === model.id && (!model.thinking || candidate.reasoning)))
-    throw new Error('Connect a Pi model and set a default in Settings before starting Story discovery.')
+    throw new Error('Connect an AI model and set a default in Settings before starting Story discovery.')
   const response = await storyChatDiscoveryRequest(auth, store,
     new Request(baseURL + '/api/story-chat-discovery', {
       method: 'POST', headers: new Headers({ ...Object.fromEntries(headers), origin: baseURL }),

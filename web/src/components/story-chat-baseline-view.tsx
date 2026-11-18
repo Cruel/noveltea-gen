@@ -1,4 +1,6 @@
 import { Button } from '@/components/ui/button'
+import { AuthorQuestionSetView } from './author-question-set'
+import type { QuestionSet, QuestionDraft, QuestionResponse } from '../../../src/author-question-set'
 import type { StoryPlanning } from '../../../src/story-planning'
 
 type Decision = { id: string; origin: 'user' | 'agent'
@@ -10,41 +12,72 @@ type Foundation = {
 }
 export type StoryChatBaselineSession = {
   phase: 'running' | 'questions' | 'proposed' | 'approved' | 'blocked'
-  revision: number; questions: string | null
+  revision: number; questions: QuestionSet | null; legacyQuestions?: boolean
+  drafts?: Record<string, QuestionDraft>
+  accepted?: Array<{ setId: string; setRevision: number; principal: string;
+    submittedAt: string; questions: QuestionSet['questions']; responses: QuestionResponse[] }>
   proposal: { foundation: Foundation; task: string } | null
   digest: string | null; skillId: string; startedAt: number | null
   turns: Array<{ role: 'user' | 'assistant'; text: string }>
   chat: { storyId: string; firstTurnId: string; sourceSha: string; directory: string }
 }
-export type BaselineAction = 'answer' | 'revise' | 'approve' | 'retry' | 'reconcile' | 'continue'
+export type BaselineAction = 'answer' | 'revise' | 'approve' | 'retry' | 'reconcile' | 'continue' | 'restart'
 export type BaselineContinuation = { state: 'queued' | 'pending' | 'blocked' | 'completed'; message?: string }
 
 /** Presentational Chat disclosure; no server runtime is needed to render it. */
-export function StoryChatBaselineView({ session, continuation, answer, onAnswerChange, busy, error, onAction }: {
+export function StoryChatBaselineView({ session, continuation, answer, onAnswerChange,
+  drafts, onDraftChange, busy, error, onAction }: {
   session: StoryChatBaselineSession | null | undefined
   continuation?: BaselineContinuation | null
   answer: string; onAnswerChange: (text: string) => void
+  drafts: Record<string, QuestionDraft>
+  onDraftChange: (drafts: Record<string, QuestionDraft>) => void
   busy: boolean; error: string | null
   onAction: (action: BaselineAction) => void
 }) {
   if (!session && !error) return null
+  if (session?.legacyQuestions) return <section aria-label="Story baseline discovery"
+    className="grid gap-3 rounded-lg bg-muted/20 p-3 text-sm">
+    <h3 className="m-0 text-sm font-semibold">Creative Direction</h3>
+    <p>This pre-v1 discovery session uses an unsupported question format. Restart explicitly
+      from the original first request and pinned discovery method; previous unapproved
+      questions and answers will not be converted.</p>
+    {session.phase === 'running' ? <Button size="sm" variant="outline"
+      disabled={busy || !session.startedAt || Date.now() - session.startedAt < 600_000}
+      onClick={() => onAction('reconcile')}>Reconcile interrupted turn</Button>
+      : <div><Button size="sm" variant="outline" disabled={busy}
+        onClick={() => onAction('restart')}>Restart discovery questions</Button></div>}
+    {error && <p role="alert" className="m-0 text-destructive">{error}</p>}
+  </section>
   const foundation = session?.proposal?.foundation
   return <section aria-label="Story baseline discovery" className="grid gap-3 rounded-lg bg-muted/20 p-3 text-sm">
     <h3 className="m-0 text-sm font-semibold">Creative Direction</h3>
     {session && <p className="m-0 text-xs text-muted-foreground">
-      Discovery {session.phase} · Skill {session.skillId.slice(0, 12)} · Source {session.chat.sourceSha.slice(0, 12)}
+      Discovery {session.phase}
     </p>}
-    {session?.phase === 'questions' && <>
-      <p className="m-0 whitespace-pre-wrap">{session.questions}</p>
-      <label className="grid gap-1">Your answers (partial answers or delegation are fine)
-        <textarea aria-label="Discovery answers" rows={4} maxLength={4000}
-          className="w-full resize-y rounded-md border border-input bg-background px-3 py-2"
-          value={answer} disabled={busy} onChange={event => onAnswerChange(event.target.value)} />
-      </label>
-      <div><Button size="sm" disabled={busy || !answer.trim()} onClick={() => onAction('answer')}>
-        Send answers
-      </Button></div>
-    </>}
+    {session?.phase === 'questions' && session.questions && !session.legacyQuestions &&
+      <AuthorQuestionSetView set={session.questions} drafts={drafts} disabled={busy}
+        onDraftChange={onDraftChange} onSubmit={() => onAction('answer')} />}
+    {!!session?.accepted?.length && <details className="text-xs">
+      <summary>Submitted question history ({session.accepted.length} rounds)</summary>
+      {session.accepted.map(batch => <div key={batch.setId} className="grid gap-1 p-2">
+        {batch.responses.map(response => {
+          const question = batch.questions.find(q => q.id === response.questionId)!
+          const answer = response.answer
+          const value = answer.kind === 'delegate' ? 'Delegated to NovelTea Studio'
+            : answer.kind === 'custom' ? answer.text
+              : answer.kind === 'multiple' ? [
+                ...answer.optionIds.map(id => question.options?.find(o => o.id === id)?.title ?? id),
+                ...(answer.text ? [answer.text] : []),
+              ].join('; ') : question.options?.find(o => o.id === answer.optionId)?.title ??
+                (answer.optionId === 'yes' ? 'Yes' : 'No')
+          return <p key={response.questionId} className="m-0">
+            <strong>{question.question}</strong> — {value}
+            {answer.note && <> (Note: {answer.note})</>}
+          </p>
+        })}
+      </div>)}
+    </details>}
     {foundation && (session?.phase === 'proposed' || session?.phase === 'approved') && <>
       <div className="grid gap-1">
         <strong>{foundation.title}</strong>

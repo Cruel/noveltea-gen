@@ -15,6 +15,8 @@ import { listStoryThreads } from '../src/lib/story-threads.server'
 import type { DiscoveryInference } from '../src/lib/onboarding-pi.server'
 
 const url = 'http://localhost:3000'
+const questionsReply = (questions: unknown[]) => JSON.stringify({ phase: 'questions',
+  questions: { questions } })
 const config = {
   baseURL: url, secret: 'chat-discovery-test-secret-0123456789abcdefghijklmnop',
   github: { clientId: 'test', clientSecret: 'test-secret' },
@@ -111,9 +113,16 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
       calls++
       assert.match(instructions, /nt-story-discovery\/SKILL.md/)
       assert.match(instructions, /initial baseline/)
-      return JSON.stringify({ phase: 'questions',
-        questions: '1. Where is the mystery set? Recommendation: a small coastal town.\n' +
-          '2. How should it end? Recommendation: meaningful branches.' })
+      return questionsReply([
+        { id: 'setting', kind: 'alternatives', question: 'Where should the mystery be set?',
+          options: [{ id: 'coast', title: 'Coastal town' }, { id: 'mountains', title: 'Mountain village' }],
+          recommendedId: 'coast', recommendationReason: 'Supports the investigation',
+          allowStudioDecision: true },
+        { id: 'branching', kind: 'free-text', question: 'How linear should the story be?',
+          placeholder: 'Describe your preference', allowStudioDecision: false },
+        { id: 'ending', kind: 'yes-no', question: 'Should multiple endings be available?',
+          recommendedId: 'yes', allowStudioDecision: true },
+      ])
     }
     const first = await submitFirstStoryTurn(auth, store, headers, url, {
       storyId: storyIds[0]!, jobId: firstId, prompt: initial, creativeMode: 'autonomous',
@@ -123,7 +132,9 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(calls, 1)
     const questions = await req(storyIds[0]!, firstId, 'GET')
     assert.equal(questions.body.session.phase, 'questions')
-    assert.match(questions.body.session.questions, /Recommendation/)
+    assert.equal(questions.body.session.questions.questions.length, 3)
+    assert.equal(questions.body.session.questions.questions[0].recommendedId, 'coast')
+    assert.deepEqual(questions.body.session.drafts, {}, 'default delegation is not saved consent')
     assert.equal(questions.body.session.chat.originalObjective, initial)
     assert.equal(questions.body.session.chat.sourceSha, sourceSha)
     assert.equal(questions.body.session.model.provider, model.provider)
@@ -133,15 +144,55 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     }, async () => { throw new Error('Never call the model again on transport retry') })
     assert.equal(replay.state, 'discovery')
     assert.equal(calls, 1)
+    const set = questions.body.session.questions
+    const answers = [
+      { questionId: 'setting', answer: { kind: 'option', optionId: 'coast', note: '' } },
+      { questionId: 'branching', answer: { kind: 'custom',
+        text: 'somewhat linear, but not too much', note: '' } },
+      { questionId: 'ending', answer: { kind: 'delegate', note: '' } },
+    ]
+    const drafts = {
+      setting: { selection: 'coast', selectedIds: [], multiCustom: false,
+        customAnswer: '', note: '' },
+      branching: { selection: '__answer__', selectedIds: [], multiCustom: false,
+        customAnswer: 'somewhat linear, but not too much', note: '' },
+    }
+    assert.equal((await req(storyIds[0]!, firstId, 'POST', {
+      action: 'answer', revision: questions.body.session.revision, setId: set.id,
+      setRevision: set.revision, responses: answers.slice(0, 2),
+    })).status, 422, 'incomplete batch cannot advance')
+    assert.equal((await req(storyIds[0]!, firstId, 'POST', {
+      action: 'answer', revision: questions.body.session.revision, setId: set.id,
+      setRevision: set.revision, responses: [answers[0],
+        { questionId: 'branching', answer: { kind: 'delegate', note: '' } }, answers[2]],
+    })).status, 422, 'model delegation request cannot override explicit-only policy')
+    const savedDraft = await req(storyIds[0]!, firstId, 'POST', {
+      action: 'draft', revision: questions.body.session.revision, setId: set.id,
+      setRevision: set.revision, drafts,
+    })
+    assert.equal(savedDraft.status, 200)
+    assert.equal(savedDraft.body.session.drafts.branching.customAnswer, 'somewhat linear, but not too much')
+    assert.equal((await req(storyIds[0]!, firstId, 'POST', {
+      action: 'draft', revision: questions.body.session.revision, setId: set.id,
+      setRevision: set.revision, drafts: {},
+    })).status, 409, 'stale second tab cannot overwrite newer draft')
+    assert.equal((await req(storyIds[0]!, firstId, 'POST', {
+      action: 'answer', revision: savedDraft.body.session.revision, setId: set.id,
+      setRevision: set.revision, responses: answers,
+    }, bobCookie)).status, 404, 'foreign user cannot submit another owner’s set')
     const interrupted = await storyChatDiscoveryRequest(auth, store,
       new Request(url + '/api/story-chat-discovery', { method: 'POST',
         headers: { cookie: aliceCookie, origin: url },
-        body: JSON.stringify({ action: 'answer', revision: questions.body.session.revision,
-          text: 'Set it in a coastal town. Please choose the ending for me.' }),
+        body: JSON.stringify({ action: 'answer', revision: savedDraft.body.session.revision,
+          setId: set.id, setRevision: set.revision, responses: answers }),
       }), url, storyIds[0]!, firstId, async () => { throw new Error('synthetic provider interruption') })
     const partial = { status: interrupted.status, body: await interrupted.json() as any }
     assert.equal(partial.status, 503)
-    assert.equal((await req(storyIds[0]!, firstId, 'GET')).body.session.phase, 'blocked')
+    const afterFailure = (await req(storyIds[0]!, firstId, 'GET')).body.session
+    assert.equal(afterFailure.phase, 'blocked')
+    assert.equal(afterFailure.accepted.length, 1)
+    assert.deepEqual(afterFailure.accepted[0].responses, answers)
+    assert.equal(afterFailure.turns[0].text, initial)
     assert.equal((await req(storyIds[0]!, firstId, 'POST', {
       action: 'answer', revision: questions.body.session.revision, text: 'Stale',
     })).status, 409)
@@ -156,9 +207,11 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(proposed.phase, 'proposed')
     assert.equal(proposed.proposal.task, initial, 'model task cannot replace the original objective')
     assert.deepEqual(proposed.proposal.foundation.decisions.map((d: any) => d.origin),
-      ['user', 'user', 'agent'])
+      ['user', 'user', 'user', 'agent'])
+    assert.match(proposed.proposal.foundation.decisions[2].statement,
+      /somewhat linear, but not too much/)
     assert.equal(proposed.proposal.foundation.decisions[0].authority, 'user-protected')
-    assert.equal(proposed.proposal.foundation.decisions[2].authority, 'delegated')
+    assert.equal(proposed.proposal.foundation.decisions[3].authority, 'delegated')
     assert.equal(proposed.proposal.foundation.planning.production.illustrated_backgrounds.firmness, 'hard')
     assert.deepEqual(proposed.proposal.foundation.planning.first_playthrough,
       { min_minutes: 90, max_minutes: 120 })
@@ -185,7 +238,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(approve.body.session.phase, 'approved')
     assert.equal(approve.body.continuation.state, 'blocked',
       'without a real controller the exact approval persists but no writer starts')
-    assert.equal(approve.body.session.proposal.foundation.decisions.length, 3)
+    assert.equal(approve.body.session.proposal.foundation.decisions.length, 4)
     assert.deepEqual(approve.body.session.proposal.foundation.planning,
       proposed.proposal.foundation.planning)
     const blockedContinuation = await req(storyIds[0]!, firstId, 'POST', {
@@ -239,12 +292,47 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
       prompt: 'Help me make a mystery game', creativeMode: 'collaborative',
     }, async state => {
       assert.equal(state.turns[0]?.text, 'Help me make a mystery game')
-      return JSON.stringify({ phase: 'questions', questions:
-        '1. What should the player investigate? Recommendation: a missing person. ' +
-        '2. Which emotional tone? Recommendation: uneasy but hopeful.' })
+      return questionsReply([{ id: 'mystery', kind: 'free-text',
+        question: 'What should the player investigate?', placeholder: 'For example, a disappearance',
+        allowStudioDecision: true }])
     })
     assert.equal(collaborative.state, 'discovery')
-    assert.equal((await req(storyIds[2]!, collaborativeId, 'GET')).body.session.phase, 'questions')
+    const roundOne = (await req(storyIds[2]!, collaborativeId, 'GET')).body.session
+    assert.equal(roundOne.phase, 'questions')
+    const followup = await storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url },
+        body: JSON.stringify({ action: 'answer', revision: roundOne.revision,
+          setId: roundOne.questions.id, setRevision: roundOne.questions.revision,
+          responses: [{ questionId: 'mystery', answer: { kind: 'custom',
+            text: 'Investigate a missing person', note: '' } }],
+        }),
+      }), url, storyIds[2]!, collaborativeId, async state => {
+        assert.equal(state.accepted?.length, 1)
+        assert.match(state.turns.at(-1)!.text, /Investigate a missing person/)
+        return questionsReply([{ id: 'ending', kind: 'yes-no',
+          question: 'Should the missing person return by the ending?',
+          allowStudioDecision: true }])
+      })
+    assert.equal(followup.status, 200)
+    const roundTwo = (await followup.json() as any).session
+    assert.equal(roundTwo.phase, 'questions')
+    assert.notEqual(roundTwo.questions.id, roundOne.questions.id)
+    assert.equal(roundTwo.accepted.length, 1)
+    const resolved = await storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url },
+        body: JSON.stringify({ action: 'answer', revision: roundTwo.revision,
+          setId: roundTwo.questions.id, setRevision: roundTwo.questions.revision,
+          responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+        }),
+      }), url, storyIds[2]!, collaborativeId, async () => proposal)
+    assert.equal(resolved.status, 200)
+    const resolvedSession = (await resolved.json() as any).session
+    assert.equal(resolvedSession.phase, 'proposed')
+    assert.equal(resolvedSession.accepted.length, 2)
+    assert.match(resolvedSession.proposal.foundation.decisions[1].statement, /Investigate a missing person/)
+    assert.equal(resolvedSession.proposal.task, 'Help me make a mystery game')
     assert.equal((await listStoryThreads(store, alice, storyIds[2]!)).threads.length, 1)
     // An insufficiently constrained model cannot treat Autonomous as implied
     // permission to skip baseline questions. Correct it once within the same
@@ -256,15 +344,53 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
       creativeMode: 'autonomous',
     }, async (_state, instructions) => {
       prematureCalls++
-      if (prematureCalls === 1) return proposal
+      if (prematureCalls === 1) {
+        const premature = JSON.parse(proposal)
+        premature.foundation.decisions[0].authority = 'user-protected'
+        return JSON.stringify(premature)
+      }
       assert.match(instructions, /required first baseline discovery questions/)
-      return JSON.stringify({ phase: 'questions', questions:
-        '1. What mystery matters to the protagonist? Recommendation: a family disappearance.' })
+      return questionsReply([{ id: 'main-conflict', kind: 'free-text',
+        question: 'What mystery matters to the protagonist?', allowStudioDecision: true }])
     })
     assert.equal(corrected.state, 'discovery')
     assert.equal(prematureCalls, 2)
     assert.equal((await req(storyIds[3]!, prematureId, 'GET')).body.session.phase, 'questions')
     assert.equal((await listStoryThreads(store, alice, storyIds[3]!)).threads.length, 1)
+    // A pre-v1 textual questionnaire is explicitly restarted, never adapted
+    // or replayed through a hidden compatibility reader/model call.
+    const legacyKey = 'story-chat,' + storyIds[3] + ',' + prematureId
+    const beforeLegacy = (await store.persistence.onboarding.conversation(alice,
+      repositoryId, legacyKey))!
+    const existingLegacy = JSON.parse(beforeLegacy.state)
+    const oldSession = { ...existingLegacy, revision: beforeLegacy.revision + 1,
+      questionContract: undefined, questions: '1. Old numbered question; answer in prose.' }
+    assert.equal(await store.persistence.onboarding.saveConversation(alice,
+      repositoryId, legacyKey, oldSession.revision, JSON.stringify(oldSession),
+      beforeLegacy.revision, new Date().toISOString()), true)
+    const legacy = (await req(storyIds[3]!, prematureId, 'GET')).body.session
+    assert.equal(legacy.legacyQuestions, true)
+    assert.equal(legacy.questions, null)
+    assert.equal((await req(storyIds[3]!, prematureId, 'POST', {
+      action: 'answer', revision: legacy.revision, text: 'Old unstructured answer',
+    })).status, 409)
+    const restarted = await storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url },
+        body: JSON.stringify({ action: 'restart', revision: legacy.revision }),
+      }), url, storyIds[3]!, prematureId, async state => {
+        assert.equal(state.turns.length, 1)
+        assert.equal(state.turns[0]?.text, initial)
+        assert.equal(state.skillId, existingLegacy.skillId)
+        return questionsReply([{ id: 'fresh-plot', kind: 'free-text',
+          question: 'What mystery should the story revolve around?',
+          allowStudioDecision: true }])
+      })
+    assert.equal(restarted.status, 200)
+    const restartState = (await restarted.json() as any).session
+    assert.equal(restartState.legacyQuestions, false)
+    assert.equal(restartState.questions.questions[0].id, 'fresh-plot')
+    assert.equal(restartState.chat.originalObjective, initial)
     assert.deepEqual(await store.testing.foreignKeyViolations(), [])
   } finally {
     store.close()

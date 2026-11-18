@@ -26,23 +26,35 @@ function render(phase: 'questions' | 'proposed' | 'approved') {
     phase, revision: 4, skillId: 'a'.repeat(64), startedAt: null,
     chat: { storyId, firstTurnId: turnId, sourceSha: 'b'.repeat(40), directory: 'story' },
     turns: [{ role: 'user', text: 'Make me a mystery game' }],
-    questions: phase === 'questions' ? 'What tone? Recommendation: uneasy.' : null,
+    questions: phase === 'questions' ? { id: 'd'.repeat(64), revision: 4, questions: [
+      { id: 'tone', kind: 'alternatives', question: 'What tone should shape the mystery?',
+        options: [{ id: 'uneasy', title: 'Uneasy' }, { id: 'hopeful', title: 'Hopeful' }],
+        recommendedId: 'uneasy', recommendationReason: 'Supports the mystery',
+        allowStudioDecision: true, delegationAllowed: true },
+      { id: 'branching', kind: 'free-text', question: 'How linear should it be?',
+        placeholder: 'Somewhat linear is fine', allowStudioDecision: false },
+    ] } : null,
     proposal: phase === 'questions' ? null : { foundation, task: 'Make me a mystery game' },
     digest: phase === 'proposed' ? 'c'.repeat(64) : null,
   } as StoryChatBaselineSession
   return renderToStaticMarkup(createElement(StoryChatBaselineView, {
-    session, answer: '', onAnswerChange: () => {}, busy: false,
+    session, answer: '', onAnswerChange: () => {}, drafts: {}, onDraftChange: () => {}, busy: false,
     error: null, onAction: () => {},
   }))
 }
 
-test('first Thread discovery stays in Chat with recommended questions and partial-answer control', () => {
+test('first Thread discovery renders shared structured options, default delegation and bounded free text', () => {
   const markup = render('questions')
   assert.match(markup, /Creative Direction/)
-  assert.match(markup, /What tone\? Recommendation: uneasy/)
-  assert.match(markup, /aria-label="Discovery answers"/)
-  assert.match(markup, />Send answers</)
-  assert.doesNotMatch(markup, /Approve baseline|Initialize Story/)
+  assert.match(markup, /What tone should shape the mystery/)
+  assert.match(markup, /Uneasy/)
+  assert.match(markup, /Recommended/)
+  assert.match(markup, /Let NovelTea Studio decide/)
+  assert.match(markup, /checked=""/)
+  assert.match(markup, /placeholder="Somewhat linear is fine"/)
+  assert.match(markup, /Complete every question or delegate/)
+  assert.match(markup, /disabled=""[^>]*>Submit 1 answer and delegate 1 decision/)
+  assert.doesNotMatch(markup, /Discovery answers|Send answers|Approve baseline|Initialize Story/)
 })
 
 test('exact proposed foundation and author-decision provenance are reviewable before approval', () => {

@@ -6,8 +6,9 @@ import { storyChatDiscoveryRequest } from './story-chat-discovery.server'
 import type { DiscoverySessionView } from './onboarding-pi.server'
 
 type Identity = { storyId: string; firstTurnId: string }
-type Action = Identity & { action: 'answer' | 'revise' | 'approve' | 'retry' | 'reconcile' | 'continue';
-  revision: number; text?: string; digest?: string }
+type Action = Identity & { action: 'answer' | 'draft' | 'restart' | 'revise' | 'approve' | 'retry' | 'reconcile' | 'continue';
+  revision: number; text?: string; digest?: string; setId?: string; setRevision?: number;
+  drafts?: unknown; responses?: unknown }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 function valid(input: Identity) {
   if (!input || !uuid.test(input.storyId) || !uuid.test(input.firstTurnId))
@@ -31,10 +32,12 @@ export const readStoryChatDiscovery = createServerFn({ method: 'GET' })
 export const actStoryChatDiscovery = createServerFn({ method: 'POST' })
   .validator((data: Action) => {
     valid(data)
-    if (!['answer', 'revise', 'approve', 'retry', 'reconcile', 'continue'].includes(data.action) ||
+    if (!['answer', 'draft', 'restart', 'revise', 'approve', 'retry', 'reconcile', 'continue'].includes(data.action) ||
         !Number.isSafeInteger(data.revision) || data.revision < 1 ||
         (data.text !== undefined && (typeof data.text !== 'string' || data.text.length > 4000)) ||
-        (data.digest !== undefined && (typeof data.digest !== 'string' || !/^[a-f0-9]{64}$/.test(data.digest))))
+        (data.digest !== undefined && (typeof data.digest !== 'string' || !/^[a-f0-9]{64}$/.test(data.digest))) ||
+        (data.setId !== undefined && (typeof data.setId !== 'string' || !/^[a-f0-9]{64}$/.test(data.setId))) ||
+        (data.setRevision !== undefined && (!Number.isSafeInteger(data.setRevision) || data.setRevision < 1)))
       throw new Error('Invalid discovery action.')
     return data
   })
