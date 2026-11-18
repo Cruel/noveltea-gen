@@ -150,6 +150,19 @@ test('negated category words in an option cannot masquerade as an explicit autho
     entry.path === 'branching.depth')?.basis, 'inferred')
 })
 
+test('negation in one answer must not suppress an affirmative choice from another answer', () => {
+  const conflicting: PlanningEvidence[] = [...sources,
+    { source: at('no-deep'), decisionId: 'author-answer-4', delegated: false,
+      statement: 'Branching preference — Author selected/wrote: No deep branching',
+      authorText: 'No deep branching', selectedOption: true },
+    { source: at('yes-deep'), decisionId: 'author-answer-5', delegated: false,
+      statement: 'Branching preference — Author selected/wrote: Deep branching',
+      authorText: 'Deep branching', selectedOption: true }]
+  assert.throws(() => parsePlanningInterpretations(claims, p, conflicting, true),
+    PlanningClarificationRequired,
+    'contradictory answers must require author clarification, not select shallow');
+})
+
 test('an exact hyphenated categorical label remains an explicit author choice', () => {
   const pacedSources: PlanningEvidence[] = [...sources, {
     source: at('pacing'), decisionId: 'author-answer-4',

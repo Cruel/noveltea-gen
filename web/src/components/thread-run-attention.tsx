@@ -13,6 +13,7 @@ import { CheckpointContinueAction } from './checkpoint-timeline'
 import { startConfiguredGeneration } from '@/lib/generation.functions'
 import { AuthorInteractions } from '../routes/_protected/jobs/-AuthorInteractions'
 import { ThreadExecutionDetails } from './thread-execution-details'
+import { SpecialistUnsentRecovery } from './specialist-unsent-recovery'
 
 type Run = { jobId: string; status: string; queuePhase: string | null }
 
@@ -72,6 +73,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
       <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
       {run.status === 'queued' ? 'Waiting for a generation slot…' : 'NovelTea is working…'}
     </div>
+    <SpecialistUnsentRecovery jobId={run.jobId} />
     <ThreadExecutionDetails jobId={run.jobId} />
   </div>
 
@@ -206,6 +208,8 @@ export function ThreadRunAttention({ run }: { run: Run }) {
       </button>}
     </div>
     {showEvidence && job.reason && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs text-muted-foreground">{publicRuntimeText(job.reason)}</pre>}
+    {(job.status !== 'paused' && !blocked || !authorState?.choice) &&
+      <SpecialistUnsentRecovery jobId={run.jobId} />}
     <ThreadExecutionDetails jobId={run.jobId} />
   </section>
 }

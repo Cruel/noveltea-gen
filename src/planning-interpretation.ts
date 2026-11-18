@@ -107,9 +107,14 @@ export function assertPlanningConsistency(planning: StoryPlanning, evidence: Pla
     details(evidence, dimension).some(text => regex.test(text))
   const somewhatLinear = has('branch', /\b(?:somewhat|mostly|fairly|relatively|kind of|kinda) linear\b|\blinear,? but not too much\b/)
   const strictLinear = has('branch', /\b(?:strictly|completely|entirely|fully|only) linear\b|\bno branching\b|\bwithout branches\b/)
-  const noDeepBranch = has('branch', /\b(?:no|without|avoid|not|never)\s+(?:deep|extensive|heavy) branching\b/)
-  const deepBranch = !noDeepBranch &&
-    has('branch', /\b(?:deep|extensive|heavily) branching\b|\bmany exclusive routes\b/)
+  const noDeepPattern = /\b(?:no|without|avoid|not|never)\s+(?:deep|extensive|heavy) branching\b/g
+  const branchTexts = details(evidence, 'branch')
+  // Match each statement independently. A negated category in one submitted
+  // answer must not hide a separately expressed positive preference.
+  const noDeepBranch = branchTexts.some(text => text.match(noDeepPattern) !== null)
+  const deepBranch = branchTexts.some(text =>
+    /\b(?:deep|extensive|heavily) branching\b|\bmany exclusive routes\b/.test(
+      text.replace(noDeepPattern, '')))
   const noPuzzles = has('puzzle', /\b(?:no|zero|without) puzzles?\b|\bpuzzle[- ]free\b/)
   const wantsPuzzles = has('puzzle', /\b(?:(?:must|definitely)\s+(?:include|have)\s+|(?:require|include)\s+)(?:(?:some|custom|several|many|interactive)\s+)?puzzles?\b/)
   if ((strictLinear && deepBranch) || (noPuzzles && wantsPuzzles) ||

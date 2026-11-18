@@ -140,6 +140,58 @@ test("focused conversation choice binds one original session and rejects agent-r
   }
 });
 
+test("a valid large Unicode question plus answer survives receipt reading and resumption", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nt-large-specialist-choice-"));
+  const old = { state: process.env.NT_STATE_DIR, cache: process.env.NT_GIT_CACHE_DIR };
+  process.env.NT_STATE_DIR = join(root, "state");
+  process.env.NT_GIT_CACHE_DIR = join(root, "cache");
+  try {
+    const repo = join(root, "repo"), story = join(repo, "story");
+    mkdirSync(join(story, "creative-direction"), { recursive: true });
+    writeFileSync(join(story, "creative-direction", "foundation.md"), "# Existing canon\n");
+    git(repo, "init", "-q");
+    git(repo, "config", "user.name", "Test");
+    git(repo, "config", "user.email", "test@example.invalid");
+    git(repo, "add", ".");
+    git(repo, "commit", "-qm", "Source");
+    const job = await startStoryJob({ story, job: randomUUID() });
+    const dir = join(job.stateDir, "character-world-sessions", "character");
+    mkdirSync(dir, { recursive: true });
+    const sessionId = randomUUID(), sessionFile = join(dir, "original.jsonl");
+    writeFileSync(sessionFile, JSON.stringify({ type: "session", id: sessionId,
+      cwd: job.worktreeStoryRoot }) + "\n");
+    const question = {
+      question: "Which evidence should this character uncover in the next investigation?",
+      options: ["a", "b", "c", "d"].map((id, index) => ({
+        id, title: "Lead " + index,
+        description: "界".repeat(650), benefits: "界".repeat(650),
+        tradeoffs: "界".repeat(650), approach: "界".repeat(650),
+      })),
+    };
+    const receipt = await recordSpecialistChoice(job, "character-foundations",
+      question, sessionId, sessionFile);
+    const pending = await inspectSpecialistChoice(job, receipt.id);
+    assert.equal(pending.phase, "awaiting-author");
+    const text = "界".repeat(4000);
+    const answered = await answerSpecialistChoice(job, receipt.id, receipt.proposalSha256,
+      { kind: "custom", text, note: "Preserve the exact original Story canon." }, "user:owner");
+    assert.equal(answered.answer?.kind, "custom");
+    assert.ok(Buffer.byteLength(JSON.stringify(answered, null, 2), "utf8") > 24_000,
+      "the prior 24 KB reader would reject this valid combined receipt");
+    assert.equal((await inspectSpecialistChoice(job, receipt.id)).answer?.kind, "custom");
+    assert.equal((await verifySpecialistChoice(job, receipt.id, "answered")).answer?.kind, "custom");
+    assert.equal((await claimSpecialistChoice(job, receipt.id)).answer?.kind, "custom");
+    await completeSpecialistChoice(job, receipt.id);
+    assert.equal((await inspectSpecialistChoice(job, receipt.id)).phase, "consumed");
+  } finally {
+    if (old.state === undefined) delete process.env.NT_STATE_DIR;
+    else process.env.NT_STATE_DIR = old.state;
+    if (old.cache === undefined) delete process.env.NT_GIT_CACHE_DIR;
+    else process.env.NT_GIT_CACHE_DIR = old.cache;
+    removeTestTree(root);
+  }
+});
+
 test("author answer survives restart; only the original session, HEAD and draft bytes can resume", {
   timeout: 35_000,
 }, async () => {

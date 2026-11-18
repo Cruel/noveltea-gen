@@ -6,6 +6,7 @@ import { initialQuestionDraft, questionDraftAnswer, specialistQuestionSet,
   type QuestionSet } from '../../../src/author-question-set'
 import { AuthorQuestionSetView, RecoverableQuestionDraftsView } from './author-question-set'
 import { useQuestionSetDrafts } from './use-question-set-drafts'
+import { specialistUnsentKey } from './specialist-unsent-recovery'
 
 type DraftSession = { phase: 'questions'; revision: number; questions: QuestionSet;
   drafts: NonNullable<SpecialistChoice['draft']>['drafts'] }
@@ -31,6 +32,7 @@ export function SpecialistQuestionEditor({ jobId, choice, contextHref, onChanged
     // The Job owns this lifecycle; changing its Question Set must preserve
     // unsent input from the previous specialist assignment for copying.
     session, identity: jobId,
+    onUnsentChange: copy => client.setQueryData(specialistUnsentKey(jobId), copy),
     save: async (current, drafts) => {
       const response = JSON.parse(await sendAuthorCommand({ data: {
         jobId, commandJson: JSON.stringify({

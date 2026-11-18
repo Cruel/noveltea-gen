@@ -97,11 +97,12 @@ async function evaluate(page: CDP, script: string): Promise<any> {
 }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 async function until(page: CDP, script: string, label: string) {
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 200; i++) {
     if (await evaluate(page, script)) return
     await delay(100)
   }
-  throw Error('Timed out waiting for ' + label)
+  const state = await evaluate(page, '({url:location.href, ready:document.readyState, body:document.body?.innerText?.slice(0,300)})')
+  throw Error('Timed out waiting for ' + label + ': ' + JSON.stringify(state))
 }
 async function untilRecorded(check: () => boolean, label: string) {
   for (let i = 0; i < 100; i++) {
@@ -139,6 +140,18 @@ test('browser: reloaded Story Chat actions and two-tab unsent answers remain ope
       '}',
     ].join('\n')],
     ['@/lib/threads.queries', 'export const storyNavigationKey = id => ["story-nav", id];'],
+    ['@/lib/story-workflows.functions', [
+      'export async function loadPiDiscovery() {',
+      '  return JSON.stringify(await (await fetch("/__test/state")).json());',
+      '}',
+      'export async function actPiDiscovery({data}) {',
+      '  const r = await fetch("/__test/action", {method:"POST",',
+      '    headers:{"content-type":"application/json"}, body:data.json});',
+      '  const body = await r.json(); if(!r.ok) throw Error(body.error);',
+      '  return JSON.stringify(body);',
+      '}',
+    ].join('\n')],
+    ['@/lib/pi.functions', 'export async function getPiCatalog() { return JSON.stringify({models:[]}); }'],
     ['@/lib/author.functions', [
       'export async function sendAuthorCommand({data}) {',
       '  const r = await fetch("/__test/specialist-command", {method:"POST",',
@@ -166,7 +179,7 @@ test('browser: reloaded Story Chat actions and two-tab unsent answers remain ope
     plugins: [{
       name: 'author-question-browser-boundary',
       setup(plugin) {
-        plugin.onResolve({ filter: /(?:^@\/lib\/|\/)(?:story-chat-discovery\.functions|threads\.queries|author\.functions|author\.queries|jobs\.queries)$/ },
+        plugin.onResolve({ filter: /(?:^@\/lib\/|\/)(?:story-chat-discovery\.functions|story-workflows\.functions|pi\.functions|threads\.queries|author\.functions|author\.queries|jobs\.queries)$/ },
           args => ({ path: '@/lib/' + args.path.split('/').at(-1),
             namespace: 'author-question-test' }))
         plugin.onLoad({ filter: /.*/, namespace: 'author-question-test' },
@@ -291,6 +304,11 @@ test('browser: reloaded Story Chat actions and two-tab unsent answers remain ope
       pages.push(page)
       await page.send('Page.enable')
       await page.send('Runtime.enable')
+      // Chrome can return a target still on about:blank even when /json/new
+      // was given a URL. Navigate explicitly and wait for the real origin.
+      const navigation = await page.send('Page.navigate', { url: url + suffix })
+      assert.equal(navigation.errorText, undefined, 'Chrome navigation failed')
+      await until(page, 'location.origin === ' + JSON.stringify(url), 'browser navigation')
       return page
     }
     const first = await tab()
@@ -348,6 +366,28 @@ test('browser: reloaded Story Chat actions and two-tab unsent answers remain ope
     assert.equal(actions.filter(action => action.action === 'answer').length, 1,
       'stale first-tab input must never be submitted to the new set')
 
+    session = makeSession('questions', 40)
+    const guidedFirst = await tab('?mode=guided')
+    const guidedSecond = await tab('?mode=guided')
+    await until(guidedFirst, buttonScript('Submit 1 answer'), 'repository discovery questions')
+    await until(guidedSecond, buttonScript('Submit 1 answer'), 'second repository tab')
+    await evaluate(guidedFirst, '(()=>{const t=document.querySelector("textarea");' +
+      't.focus();t.setSelectionRange(t.value.length,t.value.length);return true})()')
+    await guidedFirst.send('Input.insertText', { text: ' — repository unsent change' })
+    await until(guidedFirst,
+      'document.querySelector("textarea")?.value.includes("repository unsent change")',
+      'repository unsent input')
+    await click(guidedSecond, 'Submit 1 answer')
+    await until(guidedSecond, buttonScript('Approve exact Creative Direction'),
+      'repository proposal in another tab')
+    await evaluate(guidedFirst, 'window.refreshGuided()')
+    await until(guidedFirst,
+      '!!document.querySelector("[aria-label=\\"Unsaved Question Set recovery\\"]")',
+      'repository discovery unsent recovery copy')
+    const repositoryCopies = await evaluate(guidedFirst,
+      'Array.from(document.querySelectorAll("textarea[readonly]")).map(t=>t.value)')
+    assert.ok(repositoryCopies.some((value: string) => value.includes('repository unsent change')))
+
     const specialist = await tab('?mode=specialist')
     await until(specialist, buttonScript('Submit 1 answer'), 'paused specialist question')
     await click(specialist, 'Submit 1 answer')
@@ -390,6 +430,25 @@ test('browser: reloaded Story Chat actions and two-tab unsent answers remain ope
       'new Question Set remains usable while the previous unsent words are visible')
     assert.equal(specialistActions.filter(action => action.action === 'choice').length, 2,
       'one accepted specialist answer per fresh question; no stale replay')
+
+    // The real Thread removes its interactive panel when the Job becomes
+    // queued/running. The emergency copy must survive that unmount too.
+    specialistState = freshSpecialist()
+    await specialist.send('Page.reload', { ignoreCache: true })
+    await until(specialist, buttonScript('Submit 1 answer'), 'pending specialist before Job transition')
+    await evaluate(specialist, '(()=>{const t=document.querySelector("textarea");' +
+      't.focus();t.setSelectionRange(t.value.length,t.value.length);return true})()')
+    await specialist.send('Input.insertText', { text: ' — lost if Job panel unmounts' })
+    await until(specialist, 'document.querySelector("textarea")?.value.includes("lost if Job")',
+      'unsent typed specialist input')
+    await evaluate(specialist, 'window.setSpecialistRunStatus("running")')
+    await until(specialist, '!!document.querySelector("[aria-label=\\"Unsaved Question Set recovery\\"]")',
+      'copyable specialist input after interactive panel unmount')
+    const unmountedCopy = await evaluate(specialist,
+      'Array.from(document.querySelectorAll("textarea[readonly]")).map(t=>t.value)')
+    assert.ok(unmountedCopy.some((value: string) => value.includes('lost if Job panel unmounts')))
+    assert.equal(await evaluate(specialist, buttonScript('Submit 1 answer')), false,
+      'no stale specialist submission action is retained in the running Job')
   } finally {
     for (const page of pages) page.close()
     if (chrome && chrome.exitCode === null) {

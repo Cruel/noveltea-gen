@@ -12,10 +12,13 @@ export type RecoverableQuestionDrafts = {
 /** Debounced, deduplicated owner-scoped drafts. Local input always wins over
  * our own save acknowledgement; a *foreign* newer revision fences edits and
  * submission rather than silently replacing the author's pending keystrokes. */
-export function useQuestionSetDrafts<S extends DraftSession>({ session, identity, save, onSaved }: {
+export function useQuestionSetDrafts<S extends DraftSession>({ session, identity, save, onSaved,
+  onUnsentChange }: {
   session: S | null | undefined; identity: string
   save: (current: S, drafts: Record<string, QuestionDraft>) => Promise<S>
   onSaved: (saved: S) => void
+  /** Optional owner-scoped emergency copy outside this editor's mount lifetime. */
+  onUnsentChange?: (recovery: RecoverableQuestionDrafts | null) => void
 }) {
   const [drafts, setDrafts] = useState<Record<string, QuestionDraft>>(
     () => session?.phase === 'questions' ? session.drafts ?? {} : {})
@@ -34,8 +37,10 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
   const flushRef = useRef<() => Promise<boolean>>(async () => true)
   const saveRef = useRef(save)
   const onSavedRef = useRef(onSaved)
+  const onUnsentChangeRef = useRef(onUnsentChange)
   saveRef.current = save
   onSavedRef.current = onSaved
+  onUnsentChangeRef.current = onUnsentChange
   const key = session?.phase === 'questions' && session.questions
     ? identity + ':' + session.questions.id : null
 
@@ -112,6 +117,7 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
         // Set the revision *before* notifying React Query: this is our own
         // CAS acknowledgement, not a concurrent-tab conflict.
         onSavedRef.current(saved)
+        if (!dirtyRef.current) onUnsentChangeRef.current?.(null)
         return true
       } catch (cause) {
         if (keyRef.current !== currentKey) return false
@@ -139,6 +145,9 @@ export function useQuestionSetDrafts<S extends DraftSession>({ session, identity
     draftsRef.current = next
     setDrafts(next)
     dirtyRef.current = true
+    const active = sessionRef.current?.phase === 'questions'
+      ? sessionRef.current.questions : null
+    if (active) onUnsentChangeRef.current?.({ set: active, drafts: next })
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => { void flushRef.current() }, 650)
   }

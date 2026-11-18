@@ -5,7 +5,7 @@ import { creativeDirectionNarrativeBody,
 import type { StoryPlanning } from '../../../../../src/story-planning'
 import { Textarea } from '@/components/ui/textarea'
 import { StudioSelect } from '@/components/studio-select'
-import { AuthorQuestionHistory, AuthorQuestionSetView,
+import { AuthorQuestionHistory, AuthorQuestionSetView, RecoverableQuestionDraftsView,
   type AcceptedQuestionRound } from '@/components/author-question-set'
 import { useQuestionSetDrafts } from '@/components/use-question-set-drafts'
 import { initialQuestionDraft, questionDraftAnswer,
@@ -222,6 +222,8 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
           : <p role="status">This exact proposal is approved. Initialize it on the selected Story branch below.</p>}
       </>}
     </>}
+    <RecoverableQuestionDraftsView recovery={drafts.recovery}
+      onDismiss={drafts.dismissRecovery} />
     {(error || drafts.error || sessionQuery.error || modelQuery.error) &&
       <p role="alert" className="error">{error || drafts.error || sessionQuery.error?.message || modelQuery.error?.message}</p>}
   </section>

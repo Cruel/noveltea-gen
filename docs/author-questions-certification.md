@@ -23,8 +23,12 @@ and the existing source-bound Job/approval controls.
   storage; specialists persist to the owner/receipt-scoped Job sidecar.
   An unexpected revision/Question Set transition preserves unsent words in a
   copyable, read-only recovery view, never as an accepted response to a new set.
-  Recovery is scoped to the same Story or Job identity. Drafts are never author
-  approval or canonical Story writes.
+  Guided repository discovery exposes the same recovery view. Specialist edits
+  also retain a Job-keyed, tab-local emergency copy outside the editor's
+  component mount lifetime so the Thread can display it if a paused Job becomes
+  queued/running and unmounts the author panel. The emergency copy is cleared
+  when the exact draft saves successfully; it is not another author submission
+  or a Story write. Recovery is scoped to the same Story or Job identity.
 - Discovery binds repository, Story, immutable first Turn and source SHA;
   question rounds bind set ID and revision; approval uses the exact proposed
   digest and native validation before the original Turn may continue.
@@ -48,12 +52,16 @@ and the existing source-bound Job/approval controls.
 | Generic validation: unknown/duplicate question IDs, recommendation targets, arbitrary model-defined fields, missing/duplicate replies, invalid choice IDs, forbidden delegation and invalid drafts | `test/author-question-set.test.ts`, `test/author-question.test.ts` |
 | Source-backed planning: exact author wording, interpretation vs explicit choice vs delegation, meaningful ambiguity and conflict, Git-only rationale, no unapproved Story edits | `web/test/story-chat-discovery.test.ts`, `test/planning-interpretation.test.ts` |
 | Pre-v1 unsupported textual questions: no old renderer, no conversion, explicit restart and no approval of an unconverted proposal | `web/test/story-chat-discovery.test.ts`, `web/test/pi-story-discovery-ui.test.tsx`, `web/test/story-chat-baseline-ui.test.tsx` |
-| Genuine browser controls: fresh proposed/blocked/approved/legacy reload and button actions, keyboard input, separate tabs, in-flight draft preservation, specialist answer and receipt reload, new specialist Question Set without dropping prior unsent words | `web/test/browser-author-questions.test.ts`, with `NT_BROWSER_TEST=1` in headless Chromium |
-| Large multibyte specialist answer accepted at the same limit as its draft; negated category never gains explicit provenance; mandatory clarification rejects model-proposed delegation | `web/test/author-decisions-api.test.ts`, `test/planning-interpretation.test.ts`, `web/test/story-chat-discovery.test.ts` |
+| Genuine browser controls: fresh proposed/blocked/approved/legacy reload and button actions, keyboard input, separate tabs in Story Chat and repository Guided Story, in-flight draft preservation, specialist answer and receipt reload, new specialist Question Set, and recovery after the specialist author panel unmounts | `web/test/browser-author-questions.test.ts`, with `NT_BROWSER_TEST=1` in headless Chromium |
+| Large multibyte specialist answer accepted at the same limit as its draft; combined large valid question-plus-answer receipt remains readable through claim and consumption; separated contradictory branching answers require clarification; mandatory clarification rejects model-proposed delegation | `web/test/author-decisions-api.test.ts`, `test/specialist-choice.test.ts`, `test/planning-interpretation.test.ts`, `web/test/story-chat-discovery.test.ts` |
 
-The headless-browser test mounts the actual Story Chat and Author Interactions
-React components in Chromium, with a shared simulated transport to create
-controlled reload/two-tab races. It exercises real DOM event handlers, keyboard
+The headless-browser test mounts the actual Story Chat, repository Guided Story
+and Author Interactions React components in Chromium, with a shared simulated
+transport to create controlled reload/two-tab races. Its specialist harness
+unmounts the author-interaction panel on a simulated Job status change and
+renders the same independent unsent-recovery component as the real Thread.
+Chrome targets are explicitly navigated rather than trusting `/json/new` to
+leave `about:blank`; navigation is verified before making UI assertions. It exercises real DOM event handlers, keyboard
 text entry and autosave transitions. It does **not** authenticate against a
 running Studio server or execute a real specialist model; those boundaries
 are covered separately by authenticated API, native validation, queue and
@@ -94,12 +102,15 @@ configured rootless environment. These complete live sequences remain pending.
 ## Observed checkout verification (November 18, 2026)
 
 - Focused root Question Set/provenance/specialist/protected-approval tests:
-  **30/30 passed**.
+  **32/32 passed**, including combined Unicode receipt reading through
+  specialist claim/consumption and contradictory branching answers.
 - Focused Studio discovery, author decision, saved-draft, UI, original-Turn
   continuation, and opt-in headless Chromium scenarios: **27/27 passed**.
   Chromium covers clicked recovery/approval controls after reload, typed input,
-  separate tabs and unsent-copy behavior in both workflows; the transport is
-  controlled by the test, not a running authenticated Studio server.
+  separate tabs and unsent-copy behavior in all three author-question surfaces,
+  including specialist panel unmount on a running Job. The Chromium run passed
+  three consecutive standalone executions following explicit navigation.
+  Its transport is controlled by the test, not a running authenticated Studio server.
 - Root source-hygiene lint and Studio persistence boundary, root and Studio
   TypeScript, configured `format:check`, and `git diff --check`: **passed**.
 - A broad root test shard exposed the pre-existing, reproducible

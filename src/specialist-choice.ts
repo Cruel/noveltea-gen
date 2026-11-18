@@ -49,6 +49,11 @@ const sha = (value: string | Buffer) => createHash("sha256").update(value).diges
 /** Deterministic, safe work-item identity for focused record IDs containing a dot. */
 export const focusedChoiceWorkItem = (target: string) => "focus-" + sha(target).slice(0, 24);
 const ID = /^[a-z][a-z0-9]*(?:[a-z0-9-]*[a-z0-9])?$/;
+// The shared schema bounds every question/answer string by characters, not
+// UTF-8 bytes. Up to four detailed options, context and a 4,000-character
+// Unicode answer can exceed the old 24 KB cap after JSON escaping. Keep an
+// independent conservative byte ceiling above every valid bounded receipt.
+const MAX_SPECIALIST_RECEIPT_BYTES = 256_000;
 const file = (job: JobStartResult, id: string) => join(job.stateDir, "specialist-choices", id + ".json");
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
@@ -207,7 +212,7 @@ async function safeRead(job: JobStartResult, id: string) {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("Invalid specialist-choice ID.");
   const path = file(job, id);
   const stat = await lstat(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 24000)
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_SPECIALIST_RECEIPT_BYTES)
     throw Error("Unsafe specialist-choice receipt.");
   const r = JSON.parse(await readFile(path, "utf8")) as SpecialistChoiceReceipt;
   if (r.version !== 1 || r.id !== id || r.jobId !== job.jobId || r.threadId !== job.threadId ||
