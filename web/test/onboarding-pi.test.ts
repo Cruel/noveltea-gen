@@ -105,10 +105,10 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
           } })
     }
     const request = async (method: 'GET' | 'POST', value?: unknown, who = own, origin = url,
-      inferStep = infer) => {
+      inferStep = infer, workspace = 'projects/demo') => {
       const response = await onboardingPiRequest(auth, store,
         new Request(url + '/api/onboarding/pi?' + new URLSearchParams({
-          repositoryId: repo, workspace: 'projects/demo',
+          repositoryId: repo, workspace,
         }), { method, headers: {cookie: who, origin},
           ...(method === 'POST' ? {body: JSON.stringify(value)} : {}) }), url, inferStep)
       return { status: response.status, body: await response.json() as any }
@@ -208,6 +208,64 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal((await request('POST', {action: 'answer', revision: ref.revision, text: 'Late'})).status, 409)
     assert.equal((await request('GET', undefined, foreign)).status, 404)
     assert.equal(calls.length, 3)
+
+    // The shared contract permits 16 typed questions, each with 4,000 custom
+    // text and 1,000 note characters. Both the autosave and final-answer
+    // transport must accept every validated combination, including CJK UTF-8.
+    const bulkRequest = (body: unknown, inferStep: DiscoveryInference = async () =>
+      structuredQuestions([{ id: 'follow-up', kind: 'free-text',
+        question: 'What should happen next after the accepted answers?' }])) =>
+      request('POST', body, own, url, inferStep, 'projects/bulk')
+    const bulkStart = await bulkRequest({ action: 'start', model,
+      text: 'A mystery about a vanished bell' }, async () => structuredQuestions(
+      Array.from({ length: 16 }, (_, i) => ({ id: 'direction-' + i,
+        kind: 'free-text', question: 'What should the author decide for part ' + (i + 1) + '?' }))))
+    assert.equal(bulkStart.status, 200, JSON.stringify(bulkStart.body))
+    assert.equal(bulkStart.body.session.questions.questions.length, 16)
+    const set = bulkStart.body.session.questions
+    const text = '界'.repeat(4000), note = '界'.repeat(1000)
+    const drafts = Object.fromEntries(set.questions.map((q: { id: string }) =>
+      [q.id, { selection: '__answer__', selectedIds: [], multiCustom: false,
+        customAnswer: text, note }]))
+    const responses = set.questions.map((q: { id: string }) => ({
+      questionId: q.id, answer: { kind: 'custom', text, note },
+    }))
+    // Nine full CJK answers already breached the previous 100 KB cap.
+    const nine = Object.fromEntries(Object.entries(drafts).slice(0, 9))
+    const ninePayload = { action: 'draft', revision: bulkStart.body.session.revision,
+      setId: set.id, setRevision: set.revision, drafts: nine }
+    assert.ok(Buffer.byteLength(JSON.stringify(ninePayload), 'utf8') > 100_000)
+    const nineSaved = await bulkRequest(ninePayload)
+    assert.equal(nineSaved.status, 200, JSON.stringify(nineSaved.body))
+    assert.equal(Object.keys(nineSaved.body.session.drafts).length, 9)
+    const fullPayload = { ...ninePayload, revision: nineSaved.body.session.revision, drafts }
+    const fullBytes = Buffer.byteLength(JSON.stringify(fullPayload), 'utf8')
+    assert.ok(fullBytes > 200_000 && fullBytes < 512_000, String(fullBytes))
+    const fullSaved = await bulkRequest(fullPayload)
+    assert.equal(fullSaved.status, 200, JSON.stringify(fullSaved.body))
+    assert.equal(Object.keys(fullSaved.body.session.drafts).length, 16)
+    const control = String.fromCharCode(0)
+    const escapedDrafts = Object.fromEntries(set.questions.map((q: { id: string }) =>
+      [q.id, { selection: '__answer__', selectedIds: [], multiCustom: false,
+        customAnswer: control.repeat(4000), note: control.repeat(1000) }]))
+    const escapedPayload = { ...fullPayload, revision: fullSaved.body.session.revision,
+      drafts: escapedDrafts }
+    const escapedBytes = Buffer.byteLength(JSON.stringify(escapedPayload), 'utf8')
+    assert.ok(escapedBytes > 480_000 && escapedBytes < 512_000, String(escapedBytes))
+    const escapedSaved = await bulkRequest(escapedPayload)
+    assert.equal(escapedSaved.status, 200, JSON.stringify(escapedSaved.body))
+    const oversized = await bulkRequest({ action: 'draft',
+      revision: escapedSaved.body.session.revision, setId: set.id,
+      setRevision: set.revision, drafts, padding: 'a'.repeat(512_000) })
+    assert.equal(oversized.status, 413, 'request reader must remain bounded')
+    const acceptedBatch = { action: 'answer', revision: escapedSaved.body.session.revision,
+      setId: set.id, setRevision: set.revision, responses }
+    assert.ok(Buffer.byteLength(JSON.stringify(acceptedBatch), 'utf8') > 200_000)
+    const acceptedBulk = await bulkRequest(acceptedBatch)
+    assert.equal(acceptedBulk.status, 200, JSON.stringify(acceptedBulk.body))
+    assert.equal(acceptedBulk.body.session.accepted[0].responses.length, 16)
+    assert.equal(acceptedBulk.body.session.accepted[0].responses[0].answer.text, text)
+    assert.equal(acceptedBulk.body.session.phase, 'questions')
     assert.equal((await store.persistence.dashboard.forOwner(alice.id)).stories.length, 0,
       'discovery and approval cannot write canonical Story before provider initialization')
   } finally {

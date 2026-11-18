@@ -321,6 +321,13 @@ function authorEvidence(state: Session): PlanningEvidence[] {
   }
   return sources
 }
+// A discovery Question Set accepts up to 16 independently bounded answers.
+// Each answer may contain 4,000 UTF-16 code units of text and 1,000 of notes.
+// JSON-escaped controls can consume six bytes per code unit: 16 * 5,000 * 6
+// = 480,000 bytes before bounded identifiers and JSON metadata. Accommodate
+// the maximum valid draft or response batch while rejecting excessive input
+// before decoding, parsing or loading the entire request into memory.
+const MAX_DISCOVERY_REQUEST_BYTES = 512_000
 async function input(request: Request): Promise<Record<string, unknown>> {
   const reader = request.body?.getReader()
   if (!reader) throw new DiscoveryError(400, 'Missing discovery input')
@@ -331,7 +338,8 @@ async function input(request: Request): Promise<Record<string, unknown>> {
       const { value, done } = await reader.read()
       if (done) break
       bytes += value.byteLength
-      if (bytes > 100_000) throw new DiscoveryError(413, 'Discovery input too long')
+      if (bytes > MAX_DISCOVERY_REQUEST_BYTES)
+        throw new DiscoveryError(413, 'Discovery input too long')
       chunks.push(value)
     }
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }

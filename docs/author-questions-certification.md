@@ -54,6 +54,7 @@ and the existing source-bound Job/approval controls.
 | Pre-v1 unsupported textual questions: no old renderer, no conversion, explicit restart and no approval of an unconverted proposal | `web/test/story-chat-discovery.test.ts`, `web/test/pi-story-discovery-ui.test.tsx`, `web/test/story-chat-baseline-ui.test.tsx` |
 | Genuine browser controls: fresh proposed/blocked/approved/legacy reload and button actions, keyboard input, separate tabs in Story Chat and repository Guided Story, in-flight draft preservation, specialist answer and receipt reload, new specialist Question Set, and recovery after the specialist author panel unmounts | `web/test/browser-author-questions.test.ts`, with `NT_BROWSER_TEST=1` in headless Chromium |
 | Large multibyte specialist answer accepted at the same limit as its draft; combined large valid question-plus-answer receipt remains readable through claim and consumption; separated contradictory branching answers require clarification; mandatory clarification rejects model-proposed delegation | `web/test/author-decisions-api.test.ts`, `test/specialist-choice.test.ts`, `test/planning-interpretation.test.ts`, `web/test/story-chat-discovery.test.ts` |
+| Discovery transport accepts valid nine-question CJK drafts, maximum 16-question CJK draft and answer batches, and JSON-escaped maximum drafts; rejects oversized bodies with 413 before parsing | `web/test/onboarding-pi.test.ts` |
 
 The headless-browser test mounts the actual Story Chat, repository Guided Story
 and Author Interactions React components in Chromium, with a shared simulated
@@ -105,7 +106,10 @@ configured rootless environment. These complete live sequences remain pending.
   **32/32 passed**, including combined Unicode receipt reading through
   specialist claim/consumption and contradictory branching answers.
 - Focused Studio discovery, author decision, saved-draft, UI, original-Turn
-  continuation, and opt-in headless Chromium scenarios: **27/27 passed**.
+  continuation, and opt-in headless Chromium scenarios: **27/27 passed** in
+  the prior certification. The authenticated discovery request-budget test
+  additionally passed with valid nine- and sixteen-question submissions and
+  boundary-sized JSON-escaped drafts in this follow-up.
   Chromium covers clicked recovery/approval controls after reload, typed input,
   separate tabs and unsent-copy behavior in all three author-question surfaces,
   including specialist panel unmount on a running Job. The Chromium run passed
