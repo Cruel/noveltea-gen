@@ -40,7 +40,7 @@ test('Pi status remains distinct from controller working and verified checkpoint
   assert.deepEqual(before.map(step => step.state), ['working', 'proposed'])
   assert.deepEqual(before[1]?.files, [])
   assert.equal(before[1]?.detail?.proposedPaths?.[0], 'events/conversation.md')
-  assert.match(activityTitle(before[1]!), /Pi status/)
+  assert.match(activityTitle(before[1]!), /Model status/)
   const after = projectActivity([working, pi, verified], 'completed')
   assert.deepEqual(after.map(step => step.state), ['verified', 'proposed'])
   assert.deepEqual(after[0]?.files, ['events/conversation.md'])

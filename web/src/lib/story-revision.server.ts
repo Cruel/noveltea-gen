@@ -119,7 +119,7 @@ export async function submitThreadRevision(store: StudioDatabase, owner: string,
   id: string, content: string, selectedTargets?: string[], approvalDigest?: string,
   liveMode?: 'steer' | 'follow-up', creativeMode?: CreativeMode): Promise<ThreadMessage> {
   if (liveMode === 'steer' && (selectedTargets || approvalDigest))
-    throw new ThreadChatError(409, 'Live Pi instructions cannot grant a new Story write scope.')
+    throw new ThreadChatError(409, 'Live model instructions cannot grant a new Story write scope.')
   // Reserve the UUID and its exact place in the queue *synchronously* before
   // any native validation, Git access or other asynchronous scope inference.
   // The second concurrent request therefore always has its own durable slot.

@@ -383,7 +383,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     await assert.rejects(() => appendGenerationEvent(store, alice.id, jobId, {
       kind: 'verified', stage: 'foundation',
       piStatus: { summary: 'I validated everything', proposedPaths: ['events/test.md'] },
-    }), /Pi status cannot claim controller evidence/)
+    }), /Model status cannot claim controller evidence/)
     const pinnedRequest = JSON.parse((await store.testing.records.first<{ generationRequestJson: string }>(
       'studio_sessions', { id: jobId }))!.generationRequestJson)
     assert.equal(pinnedRequest.fixture, true)

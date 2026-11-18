@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button'
-import { AuthorQuestionSetView } from './author-question-set'
-import type { QuestionSet, QuestionDraft, QuestionResponse } from '../../../src/author-question-set'
+import { AuthorQuestionSetView, AuthorQuestionHistory,
+  type AcceptedQuestionRound } from './author-question-set'
+import type { QuestionSet, QuestionDraft } from '../../../src/author-question-set'
 import type { StoryPlanning } from '../../../src/story-planning'
 
 type Decision = { id: string; origin: 'user' | 'agent'
@@ -14,8 +15,7 @@ export type StoryChatBaselineSession = {
   phase: 'running' | 'questions' | 'proposed' | 'approved' | 'blocked'
   revision: number; questions: QuestionSet | null; legacyQuestions?: boolean
   drafts?: Record<string, QuestionDraft>
-  accepted?: Array<{ setId: string; setRevision: number; principal: string;
-    submittedAt: string; questions: QuestionSet['questions']; responses: QuestionResponse[] }>
+  accepted?: AcceptedQuestionRound[]
   proposal: { foundation: Foundation; task: string } | null
   digest: string | null; skillId: string; startedAt: number | null
   turns: Array<{ role: 'user' | 'assistant'; text: string }>
@@ -58,26 +58,7 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
     {session?.phase === 'questions' && session.questions && !session.legacyQuestions &&
       <AuthorQuestionSetView set={session.questions} drafts={drafts} disabled={busy}
         onDraftChange={onDraftChange} onSubmit={() => onAction('answer')} />}
-    {!!session?.accepted?.length && <details className="text-xs">
-      <summary>Submitted question history ({session.accepted.length} rounds)</summary>
-      {session.accepted.map(batch => <div key={batch.setId} className="grid gap-1 p-2">
-        {batch.responses.map(response => {
-          const question = batch.questions.find(q => q.id === response.questionId)!
-          const answer = response.answer
-          const value = answer.kind === 'delegate' ? 'Delegated to NovelTea Studio'
-            : answer.kind === 'custom' ? answer.text
-              : answer.kind === 'multiple' ? [
-                ...answer.optionIds.map(id => question.options?.find(o => o.id === id)?.title ?? id),
-                ...(answer.text ? [answer.text] : []),
-              ].join('; ') : question.options?.find(o => o.id === answer.optionId)?.title ??
-                (answer.optionId === 'yes' ? 'Yes' : 'No')
-          return <p key={response.questionId} className="m-0">
-            <strong>{question.question}</strong> — {value}
-            {answer.note && <> (Note: {answer.note})</>}
-          </p>
-        })}
-      </div>)}
-    </details>}
+    <AuthorQuestionHistory accepted={session?.accepted} />
     {foundation && (session?.phase === 'proposed' || session?.phase === 'approved') && <>
       <div className="grid gap-1">
         <strong>{foundation.title}</strong>

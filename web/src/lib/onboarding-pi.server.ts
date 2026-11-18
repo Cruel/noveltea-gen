@@ -69,10 +69,10 @@ class DiscoveryError extends Error {
 }
 function scope(input: Session) {
   return { phase: input.phase, revision: input.revision, model: input.model,
-    turns: input.turns, questions: input.chat && input.questionContract !== 'structured-v1'
-      ? null : input.questions ?? null,
-    legacyQuestions: !!input.chat && input.questionContract !== 'structured-v1' &&
-      input.phase !== 'approved',
+    turns: input.turns, questions: input.questionContract !== 'structured-v1' &&
+      typeof input.questions === 'string' ? null : input.questions ?? null,
+    legacyQuestions: input.questionContract !== 'structured-v1' &&
+      (input.phase === 'questions' || input.phase === 'blocked'),
     drafts: input.drafts ?? {}, accepted: input.accepted ?? [], proposal: input.proposal ?? null,
     digest: input.digest ?? null, skillId: input.skillId, startedAt: input.startedAt ?? null,
     ...(input.chat ? { chat: input.chat } : {}) }
@@ -96,7 +96,7 @@ function expectedProposal(value: unknown, authorMessages: string[], newStoryChat
         !['user-protected', 'delegated'].includes(String(d.authority)))) {
     throw new Error('Invalid Creative Direction proposal')
   }
-  if (newStoryChat && !delegationAuthorized &&
+  if (!delegationAuthorized &&
       input.decisions.some(d => d.authority === 'delegated'))
     throw new Error('Proposed Studio decisions lack an author delegation')
   // Never rely on the model to label the author's words correctly. Preserve
@@ -124,22 +124,19 @@ function expectedProposal(value: unknown, authorMessages: string[], newStoryChat
 }
 function parseResponse(text: string, authorMessages: string[], newStoryChat: boolean,
   delegationAuthorized = false):
-  { questions: string | { questions: unknown }; proposal?: never } | { questions?: never; proposal: Proposal } {
+  { questions: { questions: unknown }; proposal?: never } | { questions?: never; proposal: Proposal } {
   if (text.length > 24_000) throw new Error('Discovery reply exceeds the bounded conversation size')
   const clean = text.trim().replace(/^\x60\x60\x60(?:json)?\s*/i, '').replace(/\s*\x60\x60\x60$/, '')
   const output = JSON.parse(clean) as Record<string, unknown>
   if (output.phase === 'questions') {
-    if (newStoryChat && Object.keys(output).some(key => !['phase', 'questions'].includes(key)))
+    if (Object.keys(output).some(key => !['phase', 'questions'].includes(key)))
       throw new Error('Question proposal contains unsupported authority fields')
-    if (newStoryChat && output.questions && typeof output.questions === 'object' &&
+    if (output.questions && typeof output.questions === 'object' &&
         !Array.isArray(output.questions)) return { questions: output.questions as { questions: unknown } }
-    if (!newStoryChat && typeof output.questions === 'string' &&
-        output.questions.trim().length > 5 && output.questions.length <= 6000)
-      return { questions: output.questions.trim() }
   }
   if (output.phase === 'proposal') return { proposal: expectedProposal(output, authorMessages,
     newStoryChat, delegationAuthorized) }
-  throw new Error('Pi discovery did not produce questions or a valid proposal')
+  throw new Error('Story discovery did not produce questions or a valid proposal')
 }
 export type DiscoveryInference = (session: Session, instructions: string) => Promise<string>
 async function realInference(store: StudioDatabase, owner: string, session: Session,
@@ -169,7 +166,7 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
     return agent.getLastAssistantText() ?? ''
   } finally { clearTimeout(timer); agent.dispose() }
 }
-async function skillInstructions(id: string, storyChat = false) {
+async function skillInstructions(id: string) {
   const root = await openSkillSnapshot(id)
   const docs = ['nt-story-discovery/SKILL.md', 'nt-catalog/SKILL.md',
     'nt-catalog/references/records.md', 'nt-catalog/references/authority-and-validation.md',
@@ -201,7 +198,7 @@ Use the user's full conversation to decide missing prerequisites.
 When decisions are ready, return a proposed foundation and task for explicit
 human review, not an approval. Never assume user approval in your output.
 Respond ONLY as valid JSON, either:
-${storyChat ? '{"phase":"questions","questions":{"questions":[{"id":"story-tone","kind":"alternatives","question":"Which tone should shape the story?","options":[{"id":"uneasy","title":"Uneasy"},{"id":"hopeful","title":"Hopeful"}],"recommendedId":"uneasy","recommendationReason":"Supports the mystery","allowStudioDecision":true},{"id":"duration","kind":"free-text","question":"How long should one playthrough take?","placeholder":"For example, 90–120 minutes","allowStudioDecision":true}]}}' : '{"phase":"questions","questions":"numbered questions and recommendations"}'}
+{"phase":"questions","questions":{"questions":[{"id":"story-tone","kind":"alternatives","question":"Which tone should shape the story?","options":[{"id":"uneasy","title":"Uneasy"},{"id":"hopeful","title":"Hopeful"}],"recommendedId":"uneasy","recommendationReason":"Supports the mystery","allowStudioDecision":true},{"id":"duration","kind":"free-text","question":"How long should one playthrough take?","placeholder":"For example, 90–120 minutes","allowStudioDecision":true}]}}
 or {"phase":"proposal","task":"brief generation objective","foundation":{
 "id":"lowercase-slug","title":"...","premise":"...","central_conflict":"...",
 "genre":"...","tone":"...","player_experience":"...","scope":"...",
@@ -222,7 +219,7 @@ Use authority 'delegated' ONLY for choices the author explicitly delegated.
 All model-origin proposals remain subject to author approval; the controller
 will preserve the author's exact messages as a separate protected decision.
 A model suggestion is not the author's original decision.
-${storyChat ? `For questions: emit a JSON object with ONLY a questions array of 1–16
+For questions: emit a JSON object with ONLY a questions array of 1–16
 questions. Each question has a unique stable lowercase-dash ID; supported kinds
 are alternatives, multiple-choice, yes-no, free-text. Choice kinds need 2–8
 options with unique lowercase-dash IDs and concise titles; yes-no uses fixed
@@ -233,7 +230,7 @@ Never ask for approval of Creative Direction or permission to change protected
 canon inside a Question Set; only the trusted exact approval gate can do that.
 Structured author answers may be delegated; do not attribute a Studio decision
 or inferred planning interpretation to the author as their exact words.
-Do not depend on unanswered sibling questions.` : ''}
+Do not depend on unanswered sibling questions.
 Do not use Markdown fences or extra text.
 \nPINNED SKILLS:\n${sections.join('\n')}`
 }
@@ -346,7 +343,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     const data = await input(request)
     const action = data.action
     if (action === 'draft') {
-      if (!chat || !saved || saved.phase !== 'questions' ||
+      if (!saved || saved.phase !== 'questions' ||
           !saved.questions || typeof saved.questions === 'string' ||
           data.revision !== saved.revision || data.setId !== saved.questions.id ||
           data.setRevision !== saved.questions.revision)
@@ -403,7 +400,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       return reply({ session: scope(saved), continuation: handoff })
     }
     if (!['start', 'answer', 'revise', 'retry', 'restart'].includes(String(action))) throw new DiscoveryError(400, 'Invalid discovery action')
-    if (action === 'restart' && (!chat || !saved || data.revision !== saved.revision ||
+    if (action === 'restart' && (!saved || data.revision !== saved.revision ||
         saved.questionContract === 'structured-v1' ||
         !['questions', 'blocked', 'proposed'].includes(saved.phase)))
       throw new DiscoveryError(409, 'Only an unsupported textual discovery session may be restarted.')
@@ -414,9 +411,9 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         data.revision !== saved.revision)) throw new DiscoveryError(409, 'Proposal is stale or unavailable')
     if (action === 'retry' && (!saved || saved.phase !== 'blocked' ||
         data.revision !== saved.revision)) throw new DiscoveryError(409, 'Blocked discovery revision has changed')
-    if (chat && action === 'answer' && saved?.questionContract !== 'structured-v1')
+    if (action === 'answer' && saved?.questionContract !== 'structured-v1')
       throw new DiscoveryError(409, 'Unsupported old question format. Restart discovery explicitly.')
-    if (action !== 'retry' && action !== 'restart' && !(chat && action === 'answer') &&
+    if (action !== 'retry' && action !== 'restart' && action !== 'answer' &&
         (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 4000))
       throw new DiscoveryError(422, 'Provide a brief or answer (up to 4000 characters)')
     if (chat && action === 'start' && data.text !== chat.originalObjective)
@@ -425,7 +422,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       throw new DiscoveryError(422, 'Discovery reached its safe turn limit')
     let session: Session
     if (action === 'start') {
-      if (!validPiSelection(data.model)) throw new DiscoveryError(422, 'Select an available Pi model')
+      if (!validPiSelection(data.model)) throw new DiscoveryError(422, 'Select an available model')
       await assertUserPiSelection(store, actor.id, data.model)
       const source = process.env.NT_STUDIO_SKILLS_SOURCE
       if (!source) throw new DiscoveryError(503, 'Configure NT_STUDIO_SKILLS_SOURCE for pinned NovelTea discovery')
@@ -435,7 +432,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       })
       if (!snapshot) throw new DiscoveryError(503, 'NovelTea discovery skills are unavailable')
       session = { phase: 'running', revision: 1, model: data.model, skillId: snapshot.id,
-        ...(chat ? { questionContract: 'structured-v1' as const } : {}),
+        questionContract: 'structured-v1',
         startedAt: Date.now(), brief: (data.text as string).trim(),
         turns: [{ role: 'user', text: chat?.originalObjective ?? (data.text as string).trim() }],
         ...(chat ? { chat } : {}) }
@@ -444,11 +441,11 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         questionContract: 'structured-v1',
         revision: saved!.revision + 1, questions: undefined, drafts: undefined,
         accepted: undefined, proposal: undefined, digest: undefined,
-        turns: [{ role: 'user', text: saved!.chat!.originalObjective }] }
+        turns: [{ role: 'user', text: saved!.chat?.originalObjective ?? saved!.brief }] }
     } else {
       let userTurn: Turn | undefined
       let accepted = saved!.accepted
-      if (chat && action === 'answer') {
+      if (action === 'answer') {
         const set = saved!.questions
         if (!set || typeof set === 'string' || data.setId !== set.id ||
             data.setRevision !== set.revision || data.text !== undefined)
@@ -477,18 +474,17 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     // after a worker dies during a provider turn.
     await save(store, actor.id, repo, workspace, session, saved?.revision ?? null)
     try {
-      const instructions = await skillInstructions(session.skillId, Boolean(chat))
+      const instructions = await skillInstructions(session.skillId)
       const invoke = infer ?? ((s: Session, i: string) => realInference(store, actor.id, s, i))
       const interpret = (raw: string) => {
         const delegationAuthorized = explicitFullDelegation(session.brief) ||
           !!session.accepted?.some(batch => batch.responses.some(r => r.answer.kind === 'delegate'))
         const result = parseResponse(raw, authorMessages(session), Boolean(chat), delegationAuthorized)
-        if (typeof result.questions === 'string') return { questions: result.questions }
         if (result.questions) {
-          if (!chat) throw new Error('Legacy onboarding requires its original question format')
           const set = parseProposedQuestionSet(result.questions,
-            sha({ firstTurnId: chat.firstTurnId, revision: session.revision + 1,
-              proposal: result.questions }), session.revision + 1)
+            sha({ binding: chat ? chat.firstTurnId : { repo, workspace },
+              revision: session.revision + 1, proposal: result.questions }),
+            session.revision + 1)
           // This trusted adapter authorizes delegation only for baseline creative
           // direction questions. It rejects authority/approval requests rather
           // than allowing a model to define its own approval workflow.
@@ -508,7 +504,6 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       catch {
         // Exactly one bounded corrective model pass is permitted, before any set
         // is accepted. Invalid output does not become an invented question.
-        if (!chat) throw new Error('Invalid discovery model response')
         corrected = true
         raw = await invoke(session, instructions + '\nController correction: the previous ' +
           'question/proposal JSON failed trusted validation. Return one complete valid ' +
@@ -578,6 +573,6 @@ export async function assertApprovedPiFoundation(store: StudioDatabase, owner: s
   const session = await load(store, owner, repo, onboardingWorkspace(workspace))
   if (!session || session.phase !== 'approved' || session.revision !== ref.revision ||
       session.digest !== ref.digest || JSON.stringify(session.proposal?.foundation) !== JSON.stringify(foundation)) {
-    throw new DiscoveryError(409, 'Approved Pi proposal does not match the selected repository, workspace or exact foundation')
+    throw new DiscoveryError(409, 'Approved discovery proposal does not match the selected repository, workspace or exact foundation')
   }
 }

@@ -79,7 +79,7 @@ export function planRevision(request: string, contract: CompletionContract, base
   const assignments: TurnSpecialistAssignment[] = []
   if (protectedChange) {
     if (targetIds.length || allowedPaths.length !== 1 || allowedPaths[0] !== protectedChange.path)
-      throw new Error('Protected amendment is not a Pi specialist authorization.')
+      throw new Error('Protected amendment is not a specialist authorization.')
     assignments.push({ id: 'protected-decision', specialist: 'trusted-controller',
       outcome: 'Apply only the separately approved exact author decision amendment',
       targets: [], dependsOn: [], discovery: 'canonical-story-read-only',

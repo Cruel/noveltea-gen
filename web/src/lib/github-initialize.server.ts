@@ -62,7 +62,7 @@ export async function githubInitializationRequest(
         await assertApprovedPiFoundation(store, actor.id, repositoryId,
           directory.slice(0, -5).replace(/\/$/, ''), input.discoveryApproval, input.foundation)
       } catch {
-        throw new GithubError(409, 'Pi discovery approval is missing, stale, or does not match the exact proposed foundation.')
+        throw new GithubError(409, 'Discovery approval is missing, stale, or does not match the exact proposed foundation.')
       }
     }
     const foundation = input.foundation === undefined ? null : candidate(input.foundation)

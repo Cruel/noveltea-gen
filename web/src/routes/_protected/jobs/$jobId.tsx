@@ -16,6 +16,7 @@ import { CheckpointTimeline, ThreadHistory } from '@/components/checkpoint-timel
 import { GenerationConfiguration } from './-GenerationConfiguration'
 import { GenerationActivity, progressDescription } from './-GenerationActivity'
 import { AuthorInteractions } from './-AuthorInteractions'
+import { publicRuntimeText } from '../../../lib/public-runtime-text'
 
 export const Route = createFileRoute('/_protected/jobs/$jobId')({
   loader: ({ context, params }) => Promise.all([
@@ -112,7 +113,7 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
         <div className="min-w-0">
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <Badge variant="outline" className={statusTone(job.status)}>{statusLabel(job.status)}</Badge>
-            <span className="text-xs text-muted-foreground">{job.fixture ? 'Fixture' : 'Pi generation'}</span>
+            <span className="text-xs text-muted-foreground">{job.fixture ? 'Fixture' : 'Model generation'}</span>
             <span className="text-xs text-muted-foreground">· {job.provider === 'gitlab' ? 'GitLab' : job.provider === 'github' ? 'GitHub' : job.provider}</span>
           </div>
           <h1 className="m-0 text-xl font-semibold tracking-tight md:text-2xl">Advanced Execution Details</h1>
@@ -195,7 +196,7 @@ function JobOverviewPanel({ job, controls, jobId, onRefresh }: {
                 isBlocked ? 'Generation stopped' : 'Current status'}</h2>
               {hasRecovery && <Badge variant="outline">Specialist files preserved</Badge>}
             </div>
-            {job.reason && <p className="mt-2 whitespace-pre-wrap break-words text-sm text-foreground/85">{readableReason(job.reason)}</p>}
+            {job.reason && <p className="mt-2 whitespace-pre-wrap break-words text-sm text-foreground/85">{publicRuntimeText(readableReason(job.reason))}</p>}
             {hasRecovery && <>
               <p className="mt-2 text-sm text-muted-foreground">
                 The uncommitted files have been preserved. Automated retry and publication are unavailable until they are inspected and explicitly reconciled.
@@ -212,7 +213,7 @@ function JobOverviewPanel({ job, controls, jobId, onRefresh }: {
                 <details className="job-disclosure w-full">
                   <summary>Recovery instructions and preserved files</summary>
                   <div className="mt-3 space-y-3 text-sm">
-                    <p className="whitespace-pre-wrap break-words">{job.recovery!.guidance}</p>
+                    <p className="whitespace-pre-wrap break-words">{publicRuntimeText(job.recovery!.guidance)}</p>
                     {job.recovery!.kind === 'manual-specialist' &&
                       <p>Compare Character records with existing canonical IDs, then inspect and reconcile the corrected files in the original worktree. The unverified draft must not be approved as-is.</p>}
                     {job.recovery!.files.length > 0 && <ul className="job-file-list">
@@ -254,9 +255,9 @@ function JobOverviewPanel({ job, controls, jobId, onRefresh }: {
     <Card>
       <CardHeader className="pb-2"><CardTitle className="text-sm">Execution summary</CardTitle></CardHeader>
       <CardContent className="job-metric-grid">
-        <div><span>Execution</span><strong>{job.status === 'prepared' ? 'Not started' : job.fixture ? 'Fixture' : 'Sandboxed Pi'}</strong></div>
+        <div><span>Execution</span><strong>{job.status === 'prepared' ? 'Not started' : job.fixture ? 'Fixture' : 'Sandboxed model'}</strong></div>
         <div><span>Control</span><strong>{controls ? statusLabel(controls.control) : 'Unavailable'}</strong></div>
-        <div><span>Pi model calls</span><strong>{controls
+        <div><span>Model calls</span><strong>{controls
           ? controls.budget.modelCalls + ' / ' + (controls.limits.modelCalls ?? 'no limit') : '—'}</strong></div>
         <div><span>Steps</span><strong>{controls
           ? controls.budget.steps + ' / ' + (controls.limits.steps ?? 'no limit') : '—'}</strong></div>
@@ -271,13 +272,13 @@ function JobOverviewPanel({ job, controls, jobId, onRefresh }: {
         <div><span>Queue</span><strong>{controls?.queue ? statusLabel(controls.queue) : '—'}</strong></div>
       </CardContent>
       {controls && <CardContent className="pt-0 text-xs text-muted-foreground">
-        Pi transcript usage only; direct-model calls are not included. {controls.budget.unpricedCalls
+        Model-session transcript usage only; direct-model calls are not included. {controls.budget.unpricedCalls
           ? controls.budget.unpricedCalls + ' call(s) have no reported cost. ' : ''}
         {controls.budget.unknownTokenCalls
           ? controls.budget.unknownTokenCalls + ' call(s) lack a token total.' : ''}
       </CardContent>}
       {controls?.budget.pause && <CardContent className="pt-0 text-sm text-amber-300">
-        Budget stopped: {controls.budget.pause.reason}
+        Budget stopped: {publicRuntimeText(controls.budget.pause.reason)}
       </CardContent>}
       {job.status === 'paused' && !job.fixture && controls && <CardContent className="pt-0">
         <BudgetEditor key={JSON.stringify(controls.limits)} jobId={jobId}
@@ -393,7 +394,7 @@ function BudgetEditor({ jobId, limits, onChanged }: {
     finally { setSaving(false) }
   }
   return <div className="border-t border-border pt-4">
-    <h3 className="text-sm font-medium">Increase Pi budgets</h3>
+    <h3 className="text-sm font-medium">Increase model budgets</h3>
     <p className="mt-1 text-xs text-muted-foreground">Limits can only increase. Existing usage is retained.</p>
     <div className="mt-3 grid gap-3 sm:grid-cols-4">
       <label className="grid gap-1 text-xs">Steps <Input type="number" min={0} max={1000000} disabled={saving}

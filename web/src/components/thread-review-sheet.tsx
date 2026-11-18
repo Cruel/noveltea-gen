@@ -139,7 +139,7 @@ export function ThreadReviewSheet({ threadId, initialScope, open, onOpenChange,
               <textarea aria-label="Correction annotation" rows={3} maxLength={1000}
                 value={annotation} onChange={event => { setAnnotation(event.target.value)
                   setRequestId(crypto.randomUUID()) }}
-                placeholder="Describe what Pi should correct in this record or hunk…"
+                placeholder="Describe what NovelTea Studio should correct in this record or hunk…"
                 className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm" />
               <Button type="button" size="sm" disabled={sending || !annotation.trim()}
                 onClick={() => void send()}>{sending ? 'Sending correction…' : 'Send correction as new Turn'}</Button>

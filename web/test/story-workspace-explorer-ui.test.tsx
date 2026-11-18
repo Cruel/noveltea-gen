@@ -66,7 +66,7 @@ test('record highlights remain separate from canonical selection, with explicit 
   }))
   assert.match(markup, /data-record-id="event.bell" data-activity="verified"/)
   assert.match(markup, /data-record-id="character.one" data-activity="proposed"/)
-  assert.match(markup, /aria-label="Character One · Pi-proposed, unverified"/)
+  assert.match(markup, /aria-label="Character One · Studio-proposed, unverified"/)
   assert.match(markup, /data-record-id="event.unassigned" data-activity="working"/)
   assert.equal((markup.match(/aria-current="true"/g) ?? []).length, 1)
   assert.doesNotMatch(markup, /data-activity="proposed"[^>]+aria-current="true"/)

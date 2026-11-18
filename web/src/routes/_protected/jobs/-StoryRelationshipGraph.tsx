@@ -210,7 +210,7 @@ export function StoryRelationshipGraph({ jobId, workspace, index, selectedId, on
     return { ...node, data: { ...node.data,
       label: String(node.data.label) + '\n' +
         (state === 'verified' ? 'Verified checkpoint' : state === 'working'
-          ? 'Active · unverified' : 'Pi-proposed · unverified') },
+          ? 'Active · unverified' : 'Studio-proposed · unverified') },
       style: { ...node.style, border: state === 'verified' ? '2px solid #48b67e' :
         state === 'working' ? '2px dashed #e6ba56' : '2px dashed #74c8f1' },
     }

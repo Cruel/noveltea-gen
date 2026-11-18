@@ -128,7 +128,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
       await assertUserPiSelection(store, actor.id, approval.model)
       verifyWebExecution(false)
     } catch {
-      return { state: 'blocked', message: 'Connect your Pi model and configure the rootless generation controller in Settings, then continue this approved Turn.' }
+      return { state: 'blocked', message: 'Connect your model and configure the rootless generation controller in Settings, then continue this approved Turn.' }
     }
   }
   const plan = interpretNaturalStoryPrompt(chat.originalObjective)

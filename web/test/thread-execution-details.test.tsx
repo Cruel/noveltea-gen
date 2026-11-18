@@ -43,7 +43,7 @@ test('inline execution evidence distinguishes verified checkpoints, unverified d
   assert.match(html, /Native validation: passed/)
   assert.match(html, /Semantic review: not-required/)
   assert.match(html, /Preserved interrupted specialist/)
-  assert.match(html, /Saved specialist Pi sessions/)
+  assert.match(html, /Saved specialist sessions/)
   assert.match(html, /session-12345678/)
   assert.match(html, /original transcript retained/)
   assert.match(html, /creative-direction\/foundation\.md/)

@@ -33,9 +33,9 @@ function Totals({ label, usage }: { label: string; usage: UsageAggregate }) {
 function Run({ run }: { run: RunUsage }) {
   const observed = run.spent
   const source = {
-    'pi-transcript': 'Pi transcript · observed',
+    'pi-transcript': 'Model transcript · observed',
     'retained-summary': 'Retained usage summary',
-    'fixture': 'Fixture · no Pi model usage',
+    'fixture': 'Fixture · no model usage',
     'prepared': 'Not started',
     'unavailable': 'Usage unavailable',
   }[run.origin]
@@ -82,7 +82,7 @@ export function ThreadUsage({ usage, threadId }: { usage: StoryUsage; threadId?:
         <Run key={run.jobId} run={run} />)}</ol>
     </details>}
     <p className="text-[11px] text-muted-foreground">
-      Observed Pi transcript totals only; direct-model or unreported usage is excluded.
+      Observed model-session transcript totals only; direct-model or unreported usage is excluded.
       Inherited messages are not billed again.
     </p>
   </div>

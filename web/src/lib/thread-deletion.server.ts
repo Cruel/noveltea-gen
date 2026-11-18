@@ -203,7 +203,7 @@ export async function deleteThread(store: StudioStore, owner: string, threadId: 
   // message and Pi delivery settles at a safe boundary.
   if (record.unsettledMessages && !record.runs.some(run =>
     run.status === 'running' || ['running', 'queued'].includes(run.queue ?? '')))
-    throw new Error('Unsettled Thread continuation or Pi delivery requires reconciliation before cleanup.')
+    throw new Error('Unsettled Thread continuation or model delivery requires reconciliation before cleanup.')
   let plan: Plan
   if (record.deletedAt) {
     if (!record.planJson) throw new Error('Deletion reservation has no physical plan.')

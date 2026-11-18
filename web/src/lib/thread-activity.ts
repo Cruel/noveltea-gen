@@ -90,7 +90,7 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
 
 export function activityTitle(step: ActivityStep): string {
   if (step.kind === 'started') return 'Started generation'
-  if (step.kind === 'report') return 'Pi status · ' + (step.detail?.summary ?? 'Working; unverified')
+  if (step.kind === 'report') return 'Model status · ' + (step.detail?.summary ?? 'Working; unverified')
   if (step.kind === 'finished') {
     switch (step.outcome) {
       case 'completed': return 'Generation finished'

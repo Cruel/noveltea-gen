@@ -150,7 +150,7 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
       return reply({ index, saved, editable: row.status === 'paused' && !row.requestJson,
         defaultModel: await readDefaultModel(store.persistence.settings, user.id),
         models, modelAvailability: models.length ? 'Connected user models available.' :
-          'Connect your Pi API key or ChatGPT account to select a model.' })
+          'Connect your API key or ChatGPT account to select a model.' })
     }
     if (row.status !== 'paused' || row.requestJson)
       throw new ConfigurationError(409, 'Generation configuration cannot change after the job has started.')
@@ -175,7 +175,7 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
     }
     if (draft.model) {
       try { await assertUserPiSelection(store, user.id, draft.model) }
-      catch { throw new ConfigurationError(422, 'The selected user Pi model is unavailable. Reconnect the provider.') }
+      catch { throw new ConfigurationError(422, 'The selected model is unavailable. Reconnect the provider.') }
     }
     const updated = await store.persistence.generation.jobs.saveConfiguration(
       user.id, id, JSON.stringify(draft), new Date().toISOString())

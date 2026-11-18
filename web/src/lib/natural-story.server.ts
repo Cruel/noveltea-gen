@@ -197,11 +197,11 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   const limits = checkLimits(input.limits)
   const available = await modelOptions(store, actor.id)
   const model = input.model === undefined ? available.defaultModel : input.model
-  if (model !== null && !validPiSelection(model)) throw new Error('Invalid Pi model selection.')
+  if (model !== null && !validPiSelection(model)) throw new Error('Invalid model selection.')
   if (input.fixture === true && model !== null)
-    throw new Error('Fixture execution cannot select a real Pi model.')
+    throw new Error('Fixture execution cannot select a real model.')
   if (model === null && input.fixture !== true)
-    throw new Error('Connect a Pi model in Settings, or explicitly choose a fixture test run.')
+    throw new Error('Connect a model in Settings, or explicitly choose a fixture test run.')
   if (model) await assertUserPiSelection(store, actor.id, model)
   verifyWebExecution(!model)
 

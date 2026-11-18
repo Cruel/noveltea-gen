@@ -66,7 +66,7 @@ export async function settingsRequest(auth: StudioAuth, store: StudioDatabase, r
         const available = await availableUserPiModels(store, actor.id)
         if (!available.some(item => item.provider === model.provider && item.id === model.id &&
           (!model.thinking || item.reasoning))) {
-          return json({ error: 'Connect this Pi model before setting it as the default.' }, 422)
+          return json({ error: 'Connect this model before setting it as the default.' }, 422)
         }
       }
       await preferences.putDefaultModel(actor.id, model, new Date().toISOString())

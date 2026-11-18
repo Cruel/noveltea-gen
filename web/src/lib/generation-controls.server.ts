@@ -252,11 +252,11 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
         if (draft.version !== 1 || !selected || typeof selected.provider !== 'string' ||
             typeof selected.id !== 'string' || pinned.fixture !== false ||
             pinned.provider !== selected.provider || pinned.model !== selected.id)
-          throw new Error('Only a consistent pinned sandboxed Pi job has editable budgets.')
+          throw new Error('Only a consistent pinned sandboxed model job has editable budgets.')
         const pi = await inspectPiPolicy(job)
         if (pi.policy.profile.provider !== selected.provider ||
             pi.policy.profile.model !== selected.id)
-          throw new Error('Saved Pi budget policy no longer matches the pinned model.')
+          throw new Error('Saved model budget policy no longer matches the pinned model.')
         const previous = pi.policy.limits
         const next = { ...previous, ...requested } as PiPolicy['limits']
         if (Object.entries(requested).some(([key, amount]) =>

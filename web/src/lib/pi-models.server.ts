@@ -50,7 +50,7 @@ function finishFlow(flow: Flow) {
 
 async function inputBody(request: Request) {
   const reader = request.body?.getReader()
-  if (!reader) throw new Error('Missing Pi credential request')
+  if (!reader) throw new Error('Missing model connection request')
   const chunks: Uint8Array[] = []
   let total = 0
   try {
@@ -58,7 +58,7 @@ async function inputBody(request: Request) {
       const { value, done } = await reader.read()
       if (done) break
       total += value.byteLength
-      if (total > 16_384) throw new Error('Pi credential request exceeds size limit')
+      if (total > 16_384) throw new Error('Model connection request exceeds size limit')
       chunks.push(value)
     }
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
@@ -189,7 +189,7 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
           typeof input.key !== 'string' || !input.key.trim() || input.key.length > 8192)
         return reply({ error: 'Choose a supported API provider and supply a key' }, 422)
       const runtime = await createUserPiRuntime(store, actor.id)
-      if (!runtime.getProvider(input.provider)) return reply({ error: 'Pi provider is not installed' }, 422)
+      if (!runtime.getProvider(input.provider)) return reply({ error: 'Model provider is unavailable' }, 422)
       const flow = flows.get(actor.id)
       if (flow?.provider === input.provider) {
         flow.abort.abort(); finishFlow(flow); flows.delete(actor.id)
@@ -242,7 +242,7 @@ export async function piModelsRequest(auth: StudioAuth, store: StudioDatabase,
     return reply({ error: 'Unknown credential action' }, 400)
   } catch (error) {
     if (error instanceof Error && error.message.includes('NT_PI_CREDENTIAL_KEY'))
-      return reply({ error: 'Studio Pi credential encryption is not configured (NT_PI_CREDENTIAL_KEY).' }, 503)
-    return reply({ error: 'Unable to access user Pi credentials. Check connection and operator configuration.' }, 409)
+      return reply({ error: 'Model credential encryption is not configured; contact the Studio operator.' }, 503)
+    return reply({ error: 'Unable to access model credentials. Check connection and operator configuration.' }, 409)
   }
 }

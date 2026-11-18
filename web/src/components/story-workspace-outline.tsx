@@ -32,7 +32,7 @@ export function StoryWorkspaceOutline({ index, selectedId, onSelect, highlights 
       data-activity={highlights[record.id]}
       aria-label={record.title + (highlights[record.id] === 'verified' ? ' · verified checkpoint' :
         highlights[record.id] === 'working' ? ' · active, unverified' :
-        highlights[record.id] === 'proposed' ? ' · Pi-proposed, unverified' : '')}
+        highlights[record.id] === 'proposed' ? ' · Studio-proposed, unverified' : '')}
       aria-current={selectedId === record.id ? 'true' : undefined}
       className={'h-auto min-h-7 w-full items-start justify-start px-2 py-1 text-left text-xs ' +
         (selectedId === record.id ? 'bg-secondary ' : '') +
@@ -44,7 +44,7 @@ export function StoryWorkspaceOutline({ index, selectedId, onSelect, highlights 
       <StoryChangeLabels change={record.change} />
       {highlights[record.id] && <span className="text-[10px] text-muted-foreground">
         {highlights[record.id] === 'verified' ? 'Verified' :
-          highlights[record.id] === 'working' ? 'Active · unverified' : 'Pi proposed'}
+          highlights[record.id] === 'working' ? 'Active · unverified' : 'Studio proposed'}
       </span>}
       {diagnostics > 0 && <span title={diagnostics + ' diagnostics'} className="text-destructive">!</span>}
     </Button>

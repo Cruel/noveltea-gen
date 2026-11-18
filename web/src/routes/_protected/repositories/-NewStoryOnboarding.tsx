@@ -140,7 +140,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       }
       let proposal: Reviewed
       if (discoveryMode === 'pi') {
-        if (!piProposal || !piReference) throw new Error('Approve the Pi discovery proposal before initializing.')
+        if (!piProposal || !piReference) throw new Error('Approve the discovery proposal before initializing.')
         proposal = piProposal
       } else {
         const saved = await persist()
@@ -210,7 +210,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
       {!created && <div role="group" aria-label="Story creation method" className="actions">
         <Button type="button" variant={discoveryMode === 'pi' ? 'secondary' : 'outline'}
           aria-pressed={discoveryMode === 'pi'} disabled={busy || piApproval !== null}
-          onClick={() => setDiscoveryMode('pi')}>Guided with Pi</Button>
+          onClick={() => setDiscoveryMode('pi')}>Guided with NovelTea Studio</Button>
         <Button type="button" variant={discoveryMode === 'structured' ? 'secondary' : 'outline'}
           aria-pressed={discoveryMode === 'structured'} disabled={busy || piApproval !== null}
           onClick={() => setDiscoveryMode('structured')}>Enter details manually</Button>
@@ -227,7 +227,7 @@ export function NewStoryOnboarding({ provider, repositoryId, initialWorkspace = 
             <Input disabled={busy} readOnly={!!verified.defaultBranch} value={initialBranch} onChange={e => setInitialBranch(e.target.value)} />
           </label>}
           <Button type="button" disabled={busy || unconfirmedWrite} onClick={() => void create(piApproved, piApproval)}>
-            {busy ? 'Creating…' : 'Initialize approved Pi foundation'}
+            {busy ? 'Creating…' : 'Initialize approved Creative Direction'}
           </Button>
         </div>}
       </>}

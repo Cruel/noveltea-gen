@@ -84,7 +84,7 @@ export function verifyWebExecution(fixture: boolean, agent = false) {
       (agent ? (!process.env.NT_SANDBOX_SOCKET?.startsWith('/') ||
         !process.env.NT_SANDBOX_TOKEN_FILE?.startsWith('/')) :
         (!process.env.NT_AGENT_RPC_URL || !process.env.NT_AGENT_RPC_TOKEN)))) {
-    throw new JobError(503, 'Real generation requires a rootless sandbox controller and an isolated per-user Pi runtime.')
+    throw new JobError(503, 'Real generation requires a rootless sandbox controller and an isolated per-user model runtime.')
   }
 }
 export function pinnedRequest(row: SavedJob, job: JobStartResult): GenerationRequest | null {
@@ -215,7 +215,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
       reason: 'Previous worker stopped without clean completion. Inspect preserved files and receipts; no replay is permitted.',
       recovery: { kind: 'operator-reconciliation' as const, stage: 'interrupted',
         workItem: null, files, candidateDigest: null,
-        guidance: 'Review the original dirty worktree and Pi session, reconcile the original writer and verified checkpoint, then continue from the exact eligible checkpoint. Never replay the interrupted specialist.' },
+        guidance: 'Review the original dirty worktree and model session, reconcile the original writer and verified checkpoint, then continue from the exact eligible checkpoint. Never replay the interrupted specialist.' },
       completedStages: [] }
   }
   let revisionVerified = true
@@ -438,7 +438,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       selected = (config.model ?? null) as PiSelection | null
       if (selected) {
         try { await assertUserPiSelection(store, user.id, selected) }
-        catch { throw new JobError(409, 'Pinned Pi credentials unavailable. Reconnect before starting.') }
+        catch { throw new JobError(409, 'Pinned model credentials unavailable. Reconnect before starting.') }
       }
     }
     verifyWebExecution(!selected)

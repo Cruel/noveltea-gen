@@ -264,12 +264,12 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
                 item.hasRevisionScope ? 'Next Turn · reviewed scope' : 'Next Turn · waiting for verified checkpoint / scope review'}</span> :
            item.role === 'user' && item.liveMode === 'steer'
             ? <span>{item.effectVerifiedAt ? 'Effect independently verified' :
-                item.liveState === 'delivered' ? 'Pi acknowledged · effect not independently verified' :
-                item.liveState === 'sdk-queued' ? 'Sent to Pi · awaiting acknowledgement' :
-                item.liveState === 'dispatching' ? 'Sending to Pi · delivery unresolved' :
+                item.liveState === 'delivered' ? 'Model acknowledged · effect not independently verified' :
+                item.liveState === 'sdk-queued' ? 'Sent to model · awaiting acknowledgement' :
+                item.liveState === 'dispatching' ? 'Sending to model · delivery unresolved' :
                 item.liveState === 'blocked' ? 'Delivery uncertain — inspect execution' :
                 item.liveState === 'deferred' ? 'Pending coordinator routing' :
-                'Queued for the current Pi turn'}</span>
+                'Queued for the current model turn'}</span>
             : item.role === 'user' && item.phase !== 'finished' &&
               <span>{item.phase === 'running' ? 'Admitted' : item.phase}</span>}
         </div>
@@ -317,10 +317,10 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
         </details>}
         {item.liveMode === 'steer' && (item.livePiSessionId || item.liveWorkItem || item.liveDeliveredAt) &&
           <details className="mt-1 text-xs text-muted-foreground">
-            <summary className="cursor-pointer">Pi delivery provenance</summary>
+            <summary className="cursor-pointer">Model delivery provenance</summary>
             <p>Source run: {item.liveSourceJobId}</p>
             {item.liveWorkItem && <p>Assigned specialist: {item.liveWorkItem}</p>}
-            {item.livePiSessionId && <p>Pi session: {item.livePiSessionId}</p>}
+            {item.livePiSessionId && <p>Model session: {item.livePiSessionId}</p>}
             {item.liveDeliveredAt && <p>Acknowledged: {new Date(item.liveDeliveredAt).toLocaleString()}</p>}
             {item.effectVerifiedAt && <p>Independent review: {item.effectReviewer} · {item.effectCommitSha} · {item.effectEvidence}</p>}
           </details>}
@@ -467,7 +467,7 @@ export function ThreadChat({ threadId, onActivityHover, onActivityPin, pinnedAct
       <div role="group" aria-label="Live message delivery" className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2 text-xs">
         <Button type="button" size="sm" variant={liveMode === 'steer' ? 'secondary' : 'outline'}
           aria-pressed={liveMode === 'steer'} disabled={sending} onClick={() => setLiveMode('steer')}>
-          Steer current work · next safe Pi boundary</Button>
+          Steer current work · next safe model boundary</Button>
         <Button type="button" size="sm" variant={liveMode === 'follow-up' ? 'secondary' : 'outline'}
           aria-pressed={liveMode === 'follow-up'} disabled={sending} onClick={() => setLiveMode('follow-up')}>
           Queue next Turn · after verified checkpoint</Button>

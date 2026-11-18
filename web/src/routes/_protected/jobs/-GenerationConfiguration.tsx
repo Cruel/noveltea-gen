@@ -134,7 +134,7 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
     }
     if (!data) throw new Error('Story catalog has not loaded.')
     const entry = data.models.find(item => item.provider + '/' + item.id === selectedModel)
-    if (selectedModel && !entry) throw new Error('The selected Pi model is no longer available. Reconnect it.')
+    if (selectedModel && !entry) throw new Error('The selected model is no longer available. Reconnect it.')
     if (thinking && !entry?.reasoning) throw new Error('The selected model does not support reasoning.')
     return { version: 1 as const, headSha: data.index.headSha, task, contract: selected, limits,
       model: entry ? { provider: entry.provider, id: entry.id,
@@ -266,7 +266,7 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
         value={rawContract} onChange={e => { setRawContract(e.target.value); setSaved(false) }} />
     </details>
     </fieldset>
-    <h3>Pi model and budgets</h3>
+    <h3>Model and budgets</h3>
     <p>Manage <a href="/settings#ai-models">model credentials and defaults</a> in Settings.</p>
     <p role="status">{data.modelAvailability} Selected models run through the isolated Story sandbox.
       Without a model, the job uses deterministic fixtures.</p>
@@ -325,7 +325,7 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
       </label>
     </div>
     <p className="muted">Active execution time excludes waits for author approval and survives worker restarts.
-      Pi budgets pause at safe boundaries. Sandbox CPU, RAM and process requests are capped
+      Model budgets pause at safe boundaries. Sandbox CPU, RAM and process requests are capped
       by the trusted host operator; leaving them blank preserves the existing defaults.
       Fixture jobs never make model requests.</p>
     {error && <p role="alert" className="error">{error}</p>}
@@ -335,7 +335,7 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
         {busy ? 'Validating…' : 'Validate and save'}
       </Button>
       <Button type="button" disabled={busy || !task.trim()} onClick={() => void persist(true)}>
-        {busy ? 'Starting…' : selectedModel ? 'Save and start Pi generation' : 'Save and start fixture generation'}
+        {busy ? 'Starting…' : selectedModel ? 'Save and start generation' : 'Save and start fixture generation'}
       </Button>
     </div>
   </section>

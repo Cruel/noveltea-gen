@@ -195,7 +195,7 @@ export async function submitFirstStoryTurn(
     // credential context. Keep the durable author request but disclose only
     // actionable, non-secret categories in the Chat response.
     const message = /Connect a Pi model|Pinned Pi credentials|credential/i.test(detail)
-      ? 'Connect a Pi model and select a default in Settings, then retry this saved message. No fixture or host credential fallback was used.'
+      ? 'Connect a model and select a default in Settings, then retry this saved message. No fixture or host credential fallback was used.'
       : /source revision changed|base revision changed/i.test(detail)
         ? 'The Story base revision changed. Inspect the saved Story before continuing discovery.'
         : 'Discovery could not finish. Your original message is saved; inspect the pinned discovery session in Chat before explicitly retrying any interrupted model call.'

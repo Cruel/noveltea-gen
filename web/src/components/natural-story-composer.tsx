@@ -92,7 +92,7 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
   const launch = async (result: Preview, explicitlyApproved: boolean) => {
     const model = selectedModel(result)
     if (!model && modelChoice !== 'fixture')
-      throw new Error('Connect a Pi model in Settings to generate a Story, or explicitly choose a fixture test run.')
+      throw new Error('Connect a model in Settings to generate a Story, or explicitly choose a fixture test run.')
     const id = result.jobId ?? pendingId ?? crypto.randomUUID()
     setPendingId(id)
     const response = await startStoryPrompt({ data: {
@@ -186,7 +186,7 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
           value={editText.preferences ?? multiline(contract?.envelope.preferences ?? [])}
           onChange={event => updateEdit('preferences', event.target.value)} />
       </label>
-      {preview && <label className="block space-y-1">Pi model
+      {preview && <label className="block space-y-1">Model
         <StudioSelect aria-label="Story generation model" value={modelChoice} disabled={busy}
           onValueChange={value => { setModelChoice(value); setPendingId(null); setApproved(false) }}
           options={[{ value: 'default', label: preview.defaultModel
@@ -194,7 +194,7 @@ export function NaturalStoryComposer({ storyId, onStarted }: {
             : 'No connected default model' },
           ...preview.models.map(model => ({ value: model.provider + '/' + model.id,
             label: model.provider + '/' + model.id })),
-          { value: 'fixture', label: 'Fixture-only test run (no Pi)' }]} />
+          { value: 'fixture', label: 'Fixture-only test run (no model)' }]} />
       </label>}
       <div className="grid gap-2 sm:grid-cols-3">
         <label>Maximum steps<Input aria-label="Maximum steps" type="number" min={0} max={1000000}

@@ -15,6 +15,9 @@ import { candidate } from '../src/lib/story-foundation.server'
 import { hasUserProtectedDecision } from '../../src/foundation-record'
 
 const url = 'http://localhost:3000'
+const structuredQuestions = (questions: unknown[]) => JSON.stringify({
+  phase: 'questions', questions: { questions },
+})
 const config = {
   baseURL: url, secret: 'pi-onboarding-test-secret-0123456789abcdefghijklmnop',
   github: { clientId: 'test', clientSecret: 'test-secret' },
@@ -85,9 +88,15 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       assert.match(prompt, /nt-catalog\/SKILL.md/)
       assert.match(prompt, /Ask all currently answerable creative questions/)
       return state.turns.length === 1
-        ? JSON.stringify({ phase: 'questions', questions: '1. What should the player feel? (Recommendation: wary)' })
+        ? structuredQuestions([{ id: 'feeling', kind: 'free-text',
+          question: 'How should players feel while investigating?',
+          placeholder: 'For example, wary and curious', allowStudioDecision: false }])
         : state.turns.length === 3
-          ? JSON.stringify({ phase: 'questions', questions: '1. Should the ending be fixed? (Recommendation: no)' })
+          ? structuredQuestions([{ id: 'ending', kind: 'yes-no',
+            question: 'Should the ending always be fixed?', allowStudioDecision: true },
+            { id: 'direction', kind: 'free-text',
+              question: 'What creative guidance should shape the ending?',
+              allowStudioDecision: false }])
           : proposed
     }
     const request = async (method: 'GET' | 'POST', value?: unknown, who = own, origin = url,
@@ -107,13 +116,18 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     const first = await request('POST', { action: 'start', model, text: 'A missing bell in a small town' })
     assert.equal(first.status, 200, JSON.stringify(first.body))
     assert.equal(first.body.session.phase, 'questions')
+    assert.equal(first.body.session.questions.questions[0].id, 'feeling')
     assert.equal(first.body.session.revision, 2)
     assert.equal((await request('POST', { action: 'start', model, text: 'Duplicate' })).status, 409)
     assert.equal((await request('POST', { action: 'answer', revision: 2, text: 'wary' },
       foreign)).status, 404)
     assert.equal((await request('POST', { action: 'answer', revision: 1, text: 'wary' })).status, 409)
+    const firstSet = first.body.session.questions
     const second = await request('POST', { action: 'answer', revision: 2,
-      text: 'The player should feel wary, and always have a choice.' })
+      setId: firstSet.id, setRevision: firstSet.revision,
+      responses: [{ questionId: 'feeling', answer: { kind: 'custom',
+        text: 'The player should feel wary, and always have a choice.', note: '' } }],
+    })
     assert.equal(second.status, 200, JSON.stringify(second.body))
     assert.equal(second.body.session.phase, 'questions')
     store.close()
@@ -122,8 +136,42 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     const reopened = await request('GET')
     assert.equal(reopened.body.session.phase, 'questions')
     assert.equal(reopened.body.session.turns.length, 4)
-    const third = await request('POST', { action: 'answer', revision: 4,
-      text: 'Please choose the ending structure; preserve player choice.' })
+    const secondSet = reopened.body.session.questions
+    assert.equal(secondSet.questions.length, 2)
+    const validResponses = [
+      { questionId: 'ending', answer: { kind: 'delegate', note: '' } },
+      { questionId: 'direction', answer: { kind: 'custom',
+        text: 'Please choose the ending structure; preserve player choice.', note: '' } },
+    ]
+    assert.equal((await request('POST', { action: 'answer', revision: 4,
+      setId: secondSet.id, setRevision: secondSet.revision,
+      responses: validResponses.slice(0, 1),
+    })).status, 422, 'missing mandatory answers cannot partially commit')
+    assert.equal((await request('POST', { action: 'answer', revision: 4,
+      setId: secondSet.id, setRevision: secondSet.revision,
+      responses: [{ questionId: 'ending', answer: { kind: 'option', optionId: 'yes', note: '' } },
+        { questionId: 'direction', answer: { kind: 'delegate', note: '' } }],
+    })).status, 422, 'agent cannot delegate an author-controlled item')
+    const draft = { direction: { selection: '__answer__', selectedIds: [],
+      multiCustom: false, customAnswer: 'Please choose the ending structure; preserve player choice.',
+      note: '' } }
+    const savedDraft = await request('POST', { action: 'draft', revision: 4,
+      setId: secondSet.id, setRevision: secondSet.revision, drafts: draft })
+    assert.equal(savedDraft.status, 200)
+    assert.equal(savedDraft.body.session.revision, 5)
+    assert.deepEqual(savedDraft.body.session.drafts, draft)
+    assert.equal((await request('POST', { action: 'draft', revision: 4,
+      setId: secondSet.id, setRevision: secondSet.revision, drafts: {} })).status, 409,
+      'second-tab stale draft must not overwrite newer input')
+    store.close()
+    store = openStudioDatabase(db)
+    auth = createStudioAuth(store, config)
+    assert.deepEqual((await request('GET')).body.session.drafts, draft,
+      'unsubmitted input survives server restart')
+    const third = await request('POST', { action: 'answer', revision: 5,
+      setId: secondSet.id, setRevision: secondSet.revision,
+      responses: validResponses,
+    })
     assert.equal(third.status, 200, JSON.stringify(third.body))
     assert.equal(third.body.session.phase, 'proposed')
     assert.equal(third.body.session.proposal.foundation.decisions.length, 4)
@@ -133,12 +181,12 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal(third.body.session.proposal.foundation.decisions[3].authority, 'delegated')
     assert.match(third.body.session.proposal.foundation.decisions[2].statement, /Please choose/)
     const foundation = third.body.session.proposal.foundation
-    assert.equal((await request('POST', {action: 'approve', revision: 5, digest: 'f'.repeat(64)})).status, 409)
+    assert.equal((await request('POST', {action: 'approve', revision: 6, digest: 'f'.repeat(64)})).status, 409)
     assert.equal((await request('POST', {action: 'approve', revision: 4,
       digest: third.body.session.digest})).status, 409)
     assert.equal((await request('POST', {action: 'revise', revision: 4,
       text: 'Unapproved edit'})).status, 409)
-    const accepted = await request('POST', {action: 'approve', revision: 6,
+    const accepted = await request('POST', {action: 'approve', revision: 7,
       digest: third.body.session.digest})
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body))
     assert.equal(accepted.body.session.phase, 'approved')
@@ -209,7 +257,8 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     const retry = await req({action:'retry', revision}, async state => {
       calls++
       assert.equal(state.turns.length, 1)
-      return JSON.stringify({phase:'questions', questions:'What is the main dramatic conflict?'})
+      return structuredQuestions([{ id: 'conflict', kind: 'free-text',
+        question: 'What is the main dramatic conflict?', allowStudioDecision: true }])
     })
     assert.equal(retry.status, 200)
     assert.equal(retry.body.session.phase, 'questions')

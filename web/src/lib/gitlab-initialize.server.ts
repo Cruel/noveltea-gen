@@ -133,7 +133,7 @@ export async function gitlabInitializeRequest(
           directory(input.directory), (input as Initialization & { discoveryApproval: unknown }).discoveryApproval,
           input.foundation)
       } catch {
-        throw new ProviderFailure(409, 'Pi discovery approval is stale or does not match this exact foundation.')
+        throw new ProviderFailure(409, 'Discovery approval is stale or does not match this exact foundation.')
       }
     }
     const { file, title } = candidate(input.foundation)

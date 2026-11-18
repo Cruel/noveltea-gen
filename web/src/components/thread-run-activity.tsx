@@ -54,7 +54,7 @@ export function ActivityRow({ step, onHover, onPin, pinned = false }: {
     <TraceIcon><StepIcon step={step} /></TraceIcon>
     <div className="min-w-0"><TraceTitle>{activityTitle(step)}</TraceTitle>
       {step.kind === 'report' && <TraceDescription>
-        Pi-proposed, unverified{step.detail?.proposedPaths?.length
+        Studio-proposed, unverified{step.detail?.proposedPaths?.length
           ? ' · ' + step.detail.proposedPaths.join(', ') : ''}
       </TraceDescription>}
       {pinButton}

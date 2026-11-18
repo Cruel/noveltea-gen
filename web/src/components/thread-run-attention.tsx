@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { authorInteractionsQuery } from '@/lib/author.queries'
 import { isAuthorState } from '@/lib/author-state'
 import { runAttentionText } from '@/lib/thread-attention'
+import { publicRuntimeText } from '@/lib/public-runtime-text'
 import { updateJobControl } from '@/lib/jobs.functions'
 import { jobQuery } from '@/lib/jobs.queries'
 import { CheckpointContinueAction } from './checkpoint-timeline'
@@ -107,7 +108,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
     <p className="whitespace-pre-wrap break-words text-sm">
       {retryableContinuation
         ? 'A setup check failed. Your previous instruction and verified Story checkpoint are preserved.'
-        : runAttentionText(job.status, job.reason)}
+        : runAttentionText(job.status, job.reason ? publicRuntimeText(job.reason) : job.reason)}
     </p>
     {!!verified.length && <p className="text-xs text-muted-foreground">
       {verified.length} verified {verified.length === 1 ? 'stage' : 'stages'} preserved.
@@ -138,7 +139,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
           {job.recovery.files.join(', ')}</p>}
         <p>{job.recovery.guidance}</p>
       </div>}
-      {job.reason && <p className="whitespace-pre-wrap break-words">Saved failure: {job.reason}</p>}
+      {job.reason && <p className="whitespace-pre-wrap break-words">Saved failure: {publicRuntimeText(job.reason)}</p>}
     </section>}
     {job.recovery && <div className="space-y-2 text-sm">
       <p>Unverified specialist files require manual reconciliation. They cannot be automatically retried or published.</p>
@@ -204,7 +205,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
         {showEvidence ? 'Hide technical reason' : 'Technical reason'}
       </button>}
     </div>
-    {showEvidence && job.reason && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs text-muted-foreground">{job.reason}</pre>}
+    {showEvidence && job.reason && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs text-muted-foreground">{publicRuntimeText(job.reason)}</pre>}
     <ThreadExecutionDetails jobId={run.jobId} />
   </section>
 }

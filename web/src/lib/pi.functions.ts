@@ -16,7 +16,7 @@ async function unwrap(response: Response) {
   if (!response.ok) {
     let message: string | undefined
     try { message = (JSON.parse(body) as { error?: string }).error } catch { /* no details */ }
-    throw new Error(message || 'Pi credential operation failed.')
+    throw new Error(message || 'Model connection operation failed.')
   }
   return body
 }

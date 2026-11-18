@@ -35,9 +35,9 @@ function seal(owner: string, provider: string, value: Credential, key: Buffer): 
 }
 function unseal(owner: string, provider: string, value: string, key: Buffer): Credential {
   const parts = value.split('.')
-  if (parts.length !== 3) throw new Error('Invalid Pi credential ciphertext')
+  if (parts.length !== 3) throw new Error('Invalid model credential ciphertext')
   const [iv, tag, body] = parts.map(x => Buffer.from(x!, 'base64'))
-  if (iv!.length !== 12 || tag!.length !== 16) throw new Error('Invalid Pi credential ciphertext')
+  if (iv!.length !== 12 || tag!.length !== 16) throw new Error('Invalid model credential ciphertext')
   const decipher = createDecipheriv('aes-256-gcm', key, iv!)
   decipher.setAAD(Buffer.from(owner + '\0' + provider))
   decipher.setAuthTag(tag!)
@@ -45,7 +45,7 @@ function unseal(owner: string, provider: string, value: string, key: Buffer): Cr
   if (credential.type === 'api_key' && typeof credential.key === 'string' && credential.key.length > 0) return credential
   if (credential.type === 'oauth' && typeof credential.access === 'string' &&
       typeof credential.refresh === 'string' && typeof credential.expires === 'number') return credential
-  throw new Error('Invalid persisted Pi credential')
+  throw new Error('Invalid saved model credential')
 }
 
 /** DB-backed Pi store: no Pi files, host env credential lookup, or cross-user paths.
@@ -69,22 +69,22 @@ export function userPiCredentials(store: StudioDatabase, owner: string,
     },
     async modify(provider, fn, options) {
       options?.signal?.throwIfAborted()
-      if (!providerId.test(provider)) throw new Error('Invalid Pi provider')
+      if (!providerId.test(provider)) throw new Error('Invalid model provider')
       const current = await readRow(provider)
       const next = await fn(current ? unseal(owner, provider, current.ciphertext, key) : undefined)
       options?.signal?.throwIfAborted()
       if (next === undefined) return current ? unseal(owner, provider, current.ciphertext, key) : undefined
-      if (JSON.stringify(next).length > 16_384) throw new Error('Pi credential exceeds size limit')
+      if (JSON.stringify(next).length > 16_384) throw new Error('Model credential exceeds size limit')
       const encrypted = seal(owner, provider, next, key)
       const changed = await store.persistence.piCredentials.compareAndSwap(
         owner, provider, encrypted, current?.revision ?? null)
-      if (!changed) throw new Error('Pi credentials changed concurrently; reconnect before retrying')
+      if (!changed) throw new Error('Model credentials changed concurrently; reconnect before retrying')
       invalidateRuntime(store, owner)
       return next
     },
     async delete(provider, options) {
       options?.signal?.throwIfAborted()
-      if (!providerId.test(provider)) throw new Error('Invalid Pi provider')
+      if (!providerId.test(provider)) throw new Error('Invalid model provider')
       await store.persistence.piCredentials.delete(owner, provider)
       invalidateRuntime(store, owner)
     },
@@ -111,7 +111,7 @@ async function buildUserPiRuntime(store: StudioDatabase, owner: string,
       apiKey: {
         ...original,
         check: async ({ credential }) => credential?.type === 'api_key' && credential.key
-          ? { type: 'api_key', source: 'user Pi credential' } : undefined,
+          ? { type: 'api_key', source: 'user model credential' } : undefined,
         resolve: async ({ credential, signal }) => credential?.type === 'api_key' && credential.key
           ? original.resolve({ credential, signal,
             ctx: { env: async () => undefined, fileExists: async () => false } }) : undefined,
@@ -206,6 +206,6 @@ export async function assertUserPiSelection(store: StudioDatabase, owner: string
   const models = await availableUserPiModels(store, owner)
   if (!models.some(model => model.provider === selected.provider && model.id === selected.id &&
       (!selected.thinking || model.reasoning))) {
-    throw new Error('Selected Pi model or credentials are unavailable. Reconnect the provider before continuing.')
+    throw new Error('Selected model or credentials are unavailable. Reconnect the provider before continuing.')
   }
 }

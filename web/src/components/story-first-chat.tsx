@@ -133,7 +133,7 @@ export function StoryFirstChat({
           {saved?.phase === 'blocked' && discovery?.session == null && (
             <div className="space-y-2 text-sm" role="status">
               <p className="m-0 text-muted-foreground">
-                If discovery has not started, connect a Pi model and select a default in Settings,
+                If discovery has not started, connect a model and select a default in Settings,
                 then retry the saved request. Existing discovery turns must be resumed using their
                 controls above; they are never replayed automatically.
               </p>

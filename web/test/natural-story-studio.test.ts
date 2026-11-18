@@ -74,7 +74,7 @@ test('natural prompt preview and initial Thread registration are owner scoped an
     await assert.rejects(() => launchNaturalStory(auth, db, headers, config.baseURL,
       { ...candidate, prompt: 'Only brainstorm plot ideas' }), /outline or ideation/)
     await assert.rejects(() => launchNaturalStory(auth, db, headers, config.baseURL,
-      candidate), /Connect a Pi model/)
+      candidate), /Connect a model/)
     assert.equal(await db.persistence.generation.jobs.identity(candidate.jobId), null,
       'rejected plans and missing credentials must not create jobs')
 

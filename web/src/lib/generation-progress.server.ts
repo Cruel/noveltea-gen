@@ -53,7 +53,7 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
   if (input.piStatus && (input.kind !== 'working' || input.files?.length || input.headSha ||
       input.outcome || input.specialist || input.status || input.changedRecordIds?.length ||
       input.validation || input.diagnostics !== undefined))
-    throw new Error('Pi status cannot claim controller evidence')
+    throw new Error('Model status cannot claim controller evidence')
   if (input.headSha && !/^[a-f0-9]{40}$/i.test(input.headSha))
     throw new Error('Invalid verified progress SHA')
   if (input.diagnostics !== undefined && (!Number.isSafeInteger(input.diagnostics) ||

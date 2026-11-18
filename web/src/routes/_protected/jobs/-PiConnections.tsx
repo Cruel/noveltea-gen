@@ -69,7 +69,7 @@ export function PiConnections({ onUpdate }: { onUpdate: () => Promise<void> }) {
   }
   const active = ['starting', 'pending'].includes(catalog?.oauth?.status ?? '')
 
-  return <section aria-label="Pi model provider connections">
+  return <section aria-label="Model provider connections">
     <p className="muted">Connect a personal provider. Credentials are encrypted on the server and never shared with sandbox tools. No local OAuth callback servers are used.</p>
     {(error || catalogQuery.error) && <p role="alert" className="error">{error || catalogQuery.error?.message}</p>}
     {catalog?.connected.length ? <ul>{catalog.connected.map(item =>

@@ -1,7 +1,34 @@
 import { AuthorQuestionControls } from './author-question-controls'
 import { initialQuestionDraft, questionDraftAnswer,
-  type QuestionDraft, type QuestionSet } from '../../../src/author-question-set'
+  type QuestionDraft, type QuestionSet, type QuestionResponse } from '../../../src/author-question-set'
 import { Button } from '@/components/ui/button'
+
+export type AcceptedQuestionRound = { setId: string; setRevision: number; principal: string;
+  submittedAt: string; questions: QuestionSet['questions']; responses: QuestionResponse[] }
+
+export function AuthorQuestionHistory({ accepted }: { accepted?: AcceptedQuestionRound[] }) {
+  if (!accepted?.length) return null
+  return <details className="text-xs">
+    <summary>Submitted question history ({accepted.length} rounds)</summary>
+    {accepted.map(batch => <div key={batch.setId} className="grid gap-1 p-2">
+      {batch.responses.map(response => {
+        const question = batch.questions.find(q => q.id === response.questionId)!
+        const answer = response.answer
+        const value = answer.kind === 'delegate' ? 'Delegated to NovelTea Studio'
+          : answer.kind === 'custom' ? answer.text
+            : answer.kind === 'multiple' ? [
+              ...answer.optionIds.map(id => question.options?.find(o => o.id === id)?.title ?? id),
+              ...(answer.text ? [answer.text] : []),
+            ].join('; ') : question.options?.find(o => o.id === answer.optionId)?.title ??
+              (answer.optionId === 'yes' ? 'Yes' : 'No')
+        return <p key={response.questionId} className="m-0">
+          <strong>{question.question}</strong> — {value}
+          {answer.note && <> (Note: {answer.note})</>}
+        </p>
+      })}
+    </div>)}
+  </details>
+}
 
 /** Shared controls render a whole immutable batch; no individual question
  * can be submitted as an approval or advance the waiting workflow. */
