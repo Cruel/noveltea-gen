@@ -120,11 +120,29 @@ async function buildUserPiRuntime(store: StudioDatabase, owner: string,
               ctx: { env: async () => undefined, fileExists: async () => false } }) : undefined,
       },
     } }
+    // The bundled Pi 1.5.0 catalog predates GPT-6.2 Sol. Its current OpenAI
+    // model contract (limits, API, pricing, capabilities) matches GPT-6.1 Sol.
+    // Extend only this pinned built-in provider; never load host Pi catalog or
+    // credentials, and prefer the SDK entry as soon as it becomes available.
+    const priorSol = provider.id === 'openai' && !provider.getModels().some(model => model.id === 'gpt-6.2-sol')
+      ? provider.getModels().find(model => model.id === 'gpt-6.1-sol' && model.api === 'openai-responses')
+      : undefined
+    const pinnedSol = priorSol ? { ...priorSol, id: 'gpt-6.2-sol', name: 'GPT-6.2 Sol' } : null
+    const supported = pinnedSol ? { ...restricted,
+      getModels: () => {
+        const models = restricted.getModels()
+        return models.some(model => model.id === pinnedSol.id) ? models : [...models, pinnedSol]
+      },
+      getAllModels: () => {
+        const models = restricted.getAllModels?.() ?? restricted.getModels()
+        return models.some(model => model.id === pinnedSol.id) ? models : [...models, pinnedSol]
+      },
+    } : restricted
     // OAuth refresh-token ownership stays in the per-user encrypted vault.
     // Only an OpenAI HTTP 401 can trigger a one-time transport retry. API keys,
     // non-OpenAI origins and other failures are never retried here.
     if (provider.id !== 'openai' || !provider.auth.oauth) {
-      runtime.registerNativeProvider(restricted)
+      runtime.registerNativeProvider(supported)
       continue
     }
     const renew = async (rejectedAccess: string): Promise<string | null> => {
@@ -138,7 +156,7 @@ async function buildUserPiRuntime(store: StudioDatabase, owner: string,
       })
       return updated?.type === 'oauth' ? updated.access : null
     }
-    runtime.registerNativeProvider({ ...restricted,
+    runtime.registerNativeProvider({ ...supported,
       stream: (model, context, options) => provider.stream(model, context, {
         ...options, fetch: withOpenAiOAuth401Retry(options?.fetch ?? fetch, renew),
       } as typeof options),

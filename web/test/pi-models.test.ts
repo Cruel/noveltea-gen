@@ -73,6 +73,11 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.deepEqual(added.body.connected, [{ providerId: 'openai', type: 'api_key' }])
     assert.ok(added.body.models.some((model: { provider: string }) => model.provider === 'openai'),
       'Pi SDK must report eligible models after an explicit per-user connection')
+    assert.ok(added.body.models.some((model: { provider: string; id: string }) =>
+      model.provider === 'openai' && model.id === 'gpt-6.2-sol'),
+    'An explicitly connected user must see the pinned GPT-6.2 Sol catalog entry')
+    assert.deepEqual((await request('GET', bobCookie)).body.models, [],
+      'The additional model must not be exposed without user credentials')
     assert.doesNotMatch(JSON.stringify(added.body), /ALICE-PRIVATE-MODEL-KEY|HOST-PRIVATE/)
     assert.deepEqual((await request('GET', bobCookie)).body.models, [], 'Bob cannot enumerate Alice models')
     assert.deepEqual((await request('GET', bobCookie)).body.connected, [])
@@ -138,6 +143,8 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
       assert.ok(restoredRuntime.getProvider('openai')?.auth.oauth, 'openai provider supports subscription OAuth')
       assert.equal((await restoredRuntime.getAuth('openai'))?.auth.apiKey, oauth.access,
         'OAuth connection is rehydrated from the user database, not the host Pi profile')
+      assert.ok((await restoredRuntime.getAvailable('openai')).some(model => model.id === 'gpt-6.2-sol'),
+        'The pinned new model must be selectable through owner-bound OAuth as well as API-key auth')
       await assert.rejects(async () => {
         const wrong = userPiCredentials(anotherStore, alice.id, { NT_PI_CREDENTIAL_KEY: randomBytes(32).toString('base64') })
         await wrong.read('openai')

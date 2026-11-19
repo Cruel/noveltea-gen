@@ -26,7 +26,7 @@ const runLabel = process.env.NT_TEST_WEB_PI_RUN_LABEL ?? "";
 const requestedModel = process.env.NT_TEST_WEB_PI_MODEL ?? "gpt-6-luna";
 if (runLabel && !/^[a-z0-9][a-z0-9-]{0,30}$/.test(runLabel))
   throw Error("Certification run label must be a short lowercase identifier.");
-if (!["gpt-6-luna", "gpt-6.1-sol"].includes(requestedModel))
+if (!["gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol"].includes(requestedModel))
   throw Error("Unrecognized opt-in certification model.");
 if (
   !["autonomous", "collaborative"].includes(mode ?? "") ||
