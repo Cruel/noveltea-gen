@@ -739,8 +739,21 @@ The saved local observation includes `adaptiveShape`, `adaptiveEvidence`,
 `finalGoal`, `recoveryCheckpoints` and source-bound receipt digests;
 missing, interrupted and malformed evidence fails closed. The
 `NT_TEST_WEB_PI_DIAGNOSTIC=1` option, for a trusted isolated run, logs
-a **category only** for a failed discovery turn; no raw model/provider
-message or OAuth credential is printed.
+the failure category, validation stage and **private evidence directory**;
+no raw model/provider response or OAuth credential is printed. Discovery
+retains immutable diagnostic evidence even **before** a Story Job or
+production graph exists, under
+`$NT_STATE_DIR/discovery-sessions/<owner-scope-hash>/<revision-stage-attempt>/`
+(or the usual XDG state root if `NT_STATE_DIR` is unset).
+Each attempt records `request.json` (pinned instructions), `response.json`
+(raw model output and SHA-256), `validation.json` (accepted/rejected with
+exact validator error), and a Pi `pi/*.jsonl` session transcript. Provider
+failures produce `inference-error.json` and retain partial Pi transcripts.
+The discovery DB session stores private evidence paths, but its public API
+projection never exposes them. These files can contain private Story content
+or provider error text: directories are mode `0700`, evidence files `0600`;
+inspect locally, never upload or commit them. Evidence from older runs using
+in-memory discovery sessions cannot be recreated retroactively.
 
 For checkpoint recovery, pass the preserved verified commit to
 `node scripts/live-new-story-runner.mjs retry <mode> <sha>`. The retry

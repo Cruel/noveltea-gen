@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent'
-import { readFile } from 'node:fs/promises'
+import { chmod, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
@@ -19,6 +19,7 @@ import { authorQuestionDirection, authorQuestionOptions } from '../../../src/aut
 import { parseProposedQuestionSet, parseQuestionDrafts, parseQuestionResponses,
   type QuestionSet, type QuestionResponse, type QuestionDraft } from '../../../src/author-question-set'
 import { continueApprovedStoryChat, type ContinuationStatus, type ProviderJobGateways } from './story-approved-continuation.server'
+import { createDiscoveryEvidence, type DiscoveryEvidence } from './discovery-evidence.server'
 
 type Turn = { role: 'user' | 'assistant'; text: string; source?: 'question-set' }
 type Foundation = {
@@ -63,7 +64,9 @@ type Session = { phase: Phase; revision: number; model: PiSelection; skillId: st
   drafts?: Record<string, QuestionDraft>;
   accepted?: Array<{ setId: string; setRevision: number; principal: string;
     submittedAt: string; questions: QuestionSet['questions']; responses: QuestionResponse[] }>;
-  chat?: ChatDiscoveryBinding }
+  chat?: ChatDiscoveryBinding;
+  /** Private controller evidence pointers; deliberately excluded from scope(). */
+  discoveryEvidencePaths?: string[] }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const reply = (value: unknown, status = 200) => Response.json(value, {
@@ -178,7 +181,7 @@ function discoveryCorrectionFeedback(error: unknown): string {
 }
 export type DiscoveryInference = (session: Session, instructions: string) => Promise<string>
 async function realInference(store: StudioDatabase, owner: string, session: Session,
-  instructions: string): Promise<string> {
+  instructions: string, evidence: DiscoveryEvidence): Promise<{ text: string; piSessionFile?: string }> {
   await assertUserPiSelection(store, owner, session.model)
   const runtime = await createUserPiRuntime(store, owner)
   const model = runtime.getModel(session.model.provider, session.model.id)
@@ -193,7 +196,7 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
   await loader.reload()
   const { session: agent } = await createAgentSession({ cwd: '/', agentDir: '/',
     modelRuntime: runtime, model, thinkingLevel: session.model.thinking,
-    resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory('/'),
+    resourceLoader: loader, settingsManager, sessionManager: SessionManager.create('/', evidence.piDirectory),
     noTools: 'all', tools: [] })
   const timer = setTimeout(() => { void agent.abort().catch(() => {}) }, 4 * 60_000)
   try {
@@ -203,8 +206,21 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
     const last = [...agent.messages].reverse().find(item => item.role === 'assistant')
     if (!last || last.role !== 'assistant' || last.stopReason !== 'stop')
       throw new Error('Pi specialist did not finish')
-    return agent.getLastAssistantText() ?? ''
-  } finally { clearTimeout(timer); agent.dispose() }
+    return { text: agent.getLastAssistantText() ?? '',
+      piSessionFile: agent.sessionManager.getSessionFile() ?? undefined }
+  } finally {
+    clearTimeout(timer)
+    try {
+      const piSessionFile = agent.sessionManager.getSessionFile()
+      if (piSessionFile) {
+        try { await chmod(piSessionFile, 0o600) }
+        catch (error) {
+          // Pi allocates a path before the first prompt has been persisted.
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
+    } finally { agent.dispose() }
+  }
 }
 async function skillInstructions(id: string) {
   const root = await openSkillSnapshot(id)
@@ -561,9 +577,28 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     // after a worker dies during a provider turn.
     await save(store, actor.id, repo, workspace, session, saved?.revision ?? null)
     let diagnosticStage = 'load-skills'
+    let evidence: DiscoveryEvidence | null = null
+    const evidencePaths: string[] = []
     try {
       const instructions = await skillInstructions(session.skillId)
-      const invoke = infer ?? ((s: Session, i: string) => realInference(store, actor.id, s, i))
+      const invoke = async (prompt: string, stage: 'initial' | 'corrective' | 'opening-questions') => {
+        // Production always records private evidence. Injected fixture replies
+        // do so only when the test supplies an isolated evidence root.
+        evidence = !infer || process.env.NT_DISCOVERY_EVIDENCE_DIR
+          ? await createDiscoveryEvidence({ owner: actor.id, repositoryId: repo,
+            workspace, revision: session.revision, stage, model: session.model,
+            skillId: session.skillId, instructions: prompt }) : null
+        if (evidence) evidencePaths.push(evidence.dir)
+        try {
+          const result = infer ? { text: await infer(session, prompt) } :
+            await realInference(store, actor.id, session, prompt, evidence!)
+          await evidence?.response(result.text, 'piSessionFile' in result ? result.piSessionFile : undefined)
+          return result.text
+        } catch (error) {
+          await evidence?.inferenceError(error)
+          throw error
+        }
+      }
       const interpret = (raw: string, mandatoryClarification = false) => {
         const delegationAuthorized = explicitFullDelegation(session.brief) ||
           !!session.accepted?.some(batch => batch.responses.some(r => r.answer.kind === 'delegate'))
@@ -586,12 +621,22 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         }
         return { proposal: result.proposal! }
       }
+      const validateWithEvidence = async (raw: string, mandatoryClarification = false) => {
+        try {
+          const checked = interpret(raw, mandatoryClarification)
+          await evidence?.validation('accepted')
+          return checked
+        } catch (error) {
+          await evidence?.validation('rejected', error)
+          throw error
+        }
+      }
       diagnosticStage = 'initial-inference'
-      let raw = await invoke(session, instructions)
+      let raw = await invoke(instructions, 'initial')
       diagnosticStage = 'initial-response-validation'
       let corrected = false
       let outcome: ReturnType<typeof interpret>
-      try { outcome = interpret(raw) }
+      try { outcome = await validateWithEvidence(raw) }
       catch (error) {
         corrected = true
         const clarification = error instanceof PlanningClarificationRequired
@@ -599,16 +644,16 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         // materially incompatible requirements, demand an actual new question,
         // not another unsupported proposal or an invented decision.
         diagnosticStage = 'corrective-inference'
-        raw = await invoke(session, instructions + (clarification
+        raw = await invoke(instructions + (clarification
           ? '\nController clarification required: ' + error.message +
             ' Return ONLY a focused structured Question Set requesting author direction. ' +
             'Do not choose for the author.'
           : '\nController correction: ' + discoveryCorrectionFeedback(error) +
             ' Return one complete valid structured Question Set or Creative Direction ' +
             'proposal with source-backed interpretations. Do not invent approvals ' +
-            'or substitute prose questions.'))
+            'or substitute prose questions.'), 'corrective')
         diagnosticStage = 'corrective-response-validation'
-        outcome = interpret(raw, clarification)
+        outcome = await validateWithEvidence(raw, clarification)
         if (clarification && outcome.proposal)
           throw Error('A material planning contradiction requires a new author question.')
       }
@@ -620,12 +665,12 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           outcome.proposal) {
         if (corrected) throw new Error('Discovery already exhausted its corrective model attempt')
         diagnosticStage = 'opening-question-inference'
-        raw = await invoke(session, instructions + '\nController requirement: the author has only ' +
+        raw = await invoke(instructions + '\nController requirement: the author has only ' +
           'supplied a sparse objective without comprehensive delegation. Your previous proposal ' +
           'skipped the required first baseline discovery questions. Return ONLY a questions ' +
-          'response with the minimum necessary recommended questions, not a proposal.')
+          'response with the minimum necessary recommended questions, not a proposal.', 'opening-questions')
         diagnosticStage = 'opening-question-validation'
-        outcome = interpret(raw)
+        outcome = await validateWithEvidence(raw)
         if (outcome.proposal) throw new Error('Required opening discovery questions were not supplied')
       }
       // The model proposes creative details, never replaces the original Turn's
@@ -635,6 +680,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         revision: session.revision + 1, turns: [...session.turns, { role: 'assistant', text: raw }],
         ...(outcome.questions ? { questions: outcome.questions } : {}),
         ...(outcome.proposal ? { proposal: outcome.proposal, digest: sha(outcome.proposal) } : {}),
+        discoveryEvidencePaths: [...(session.discoveryEvidencePaths ?? []), ...evidencePaths],
       }
       diagnosticStage = 'persist-valid-response'
       await save(store, actor.id, repo, workspace, next, session.revision)
@@ -677,12 +723,14 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         console.error('Trusted local Story discovery failure:', JSON.stringify({
           name, cause: knownValidation ? 'invalid-model-output' : cause,
           stage: diagnosticStage,
+          ...(evidencePaths.length ? { evidenceDirectory: evidencePaths.at(-1) } : {}),
           ...(knownValidation ? { validation: knownValidation } : {}),
         }))
       }
       // Never repeat an uncertain provider turn automatically or expose raw
       // model errors/credentials. Saved author input survives for inspection.
-      const blocked = { ...session, phase: 'blocked' as const, revision: session.revision + 1 }
+      const blocked: Session = { ...session, phase: 'blocked', revision: session.revision + 1,
+        discoveryEvidencePaths: [...(session.discoveryEvidencePaths ?? []), ...evidencePaths] }
       try { await save(store, actor.id, repo, workspace, blocked, session.revision) } catch { /* preserve races */ }
       throw new DiscoveryError(503, 'Discovery turn did not complete. State preserved; inspect it before choosing a new conversation.')
     }

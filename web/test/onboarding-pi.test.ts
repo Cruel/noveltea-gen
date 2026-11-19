@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHmac, randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { removeTestTree } from '../../test/helpers'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -284,7 +284,8 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-web-pi-retry-'))
   const prev = {key: process.env.NT_PI_CREDENTIAL_KEY, source: process.env.NT_STUDIO_SKILLS_SOURCE,
-    cache: process.env.NT_SKILL_CACHE_DIR}
+    cache: process.env.NT_SKILL_CACHE_DIR, evidence: process.env.NT_DISCOVERY_EVIDENCE_DIR}
+  process.env.NT_DISCOVERY_EVIDENCE_DIR = join(root, 'private-evidence')
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
   process.env.NT_STUDIO_SKILLS_SOURCE = makeSkills(root)
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshot-cache')
@@ -333,6 +334,34 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     assert.equal(retry.status, 200)
     assert.equal(retry.body.session.phase, 'questions')
     assert.equal(calls, 2)
+    const scopedRoots = readdirSync(join(root, 'private-evidence', 'discovery-sessions'))
+    assert.equal(scopedRoots.length, 1, 'Only this owner and discovery identity has evidence')
+    const privateScope = join(root, 'private-evidence', 'discovery-sessions', scopedRoots[0]!)
+    assert.equal(statSync(privateScope).mode & 0o777, 0o700)
+    const attempts = readdirSync(privateScope).map(name => join(privateScope, name))
+    assert.equal(attempts.length, 3, 'Failed inference and both corrective responses are retained')
+    const privatelySaved = JSON.parse((await store.persistence.onboarding.conversation(
+      alice.id, repo, ''))!.state)
+    assert.deepEqual(new Set(privatelySaved.discoveryEvidencePaths), new Set(attempts))
+    assert.equal(retry.body.session.discoveryEvidencePaths, undefined,
+      'Private transcript paths must not appear in the API session')
+    const initial = attempts.find(dir => dir.includes('-initial-') &&
+      readdirSync(dir).includes('inference-error.json'))!
+    const rejected = attempts.find(dir => dir.includes('-initial-') && dir !== initial)!
+    const accepted = attempts.find(dir => dir.includes('-corrective-'))!
+    const failedCall = JSON.parse(readFileSync(join(initial, 'inference-error.json'), 'utf8'))
+    assert.equal(failedCall.message, 'provider secret: NOT-FOR-UI')
+    assert.equal(statSync(join(initial, 'inference-error.json')).mode & 0o777, 0o600)
+    const rejectedRaw = JSON.parse(readFileSync(join(rejected, 'response.json'), 'utf8'))
+    const rejectedRule = JSON.parse(readFileSync(join(rejected, 'validation.json'), 'utf8'))
+    assert.match(rejectedRaw.raw, /Prefer a strong personal stake/)
+    assert.equal(rejectedRule.message, 'Invalid author-question recommendation.')
+    assert.equal(rejectedRule.status, 'rejected')
+    assert.equal(JSON.parse(readFileSync(join(accepted, 'validation.json'), 'utf8')).status,
+      'accepted')
+    assert.match(readFileSync(join(accepted, 'request.json'), 'utf8'),
+      /free-text question omit recommendedId and recommendationReason/)
+    assert.doesNotMatch(JSON.stringify(retry.body), /NOT-FOR-UI|Prefer a strong personal stake/)
     assert.equal((await req({action:'retry', revision}, async () => { throw new Error('unexpected') })).status, 409)
     // Simulate a worker dying after reserving an expensive Pi turn. Recovery
     // must require an explicit acknowledgement, with no automatic model call.
@@ -353,7 +382,7 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
   } finally {
     store.close()
     for (const [key, value] of [['NT_PI_CREDENTIAL_KEY', prev.key], ['NT_STUDIO_SKILLS_SOURCE', prev.source],
-      ['NT_SKILL_CACHE_DIR', prev.cache]] as const) {
+      ['NT_SKILL_CACHE_DIR', prev.cache], ['NT_DISCOVERY_EVIDENCE_DIR', prev.evidence]] as const) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
