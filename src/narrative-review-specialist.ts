@@ -1,5 +1,6 @@
 import { createPiStatusTool } from "./pi-work-status.js";
 import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -24,7 +25,8 @@ import { normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKind
 import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfillment.js";
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
 import { beginProtocolInvocation, recoverWithOneFreshSession, refuseReplayedProtocolInvocation,
-  type ResponseContractFailure } from "./response-contract-recovery.js";
+  inspectCompletedProtocolResponse, inspectCompletedProtocolReads,
+  ProtocolIntegrityBlockedError, type ResponseContractFailure } from "./response-contract-recovery.js";
 
 export type ReviewDimension = "continuity" | "pacing" | "characterization" | "puzzle-fairness" |
   "player-agency" | "dramatic-payoff" | "conditional-knowledge" | "obligation";
@@ -591,6 +593,28 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     specialistAssignments: packet.items.map(item => item.assignment),
   };
   const protocolReceipt = join(job.stateDir, "review-protocol", "assignment-" + packet.sourceDigest);
+  const contractName = "reviewer.assignment-verdict.v1";
+  if ([".started.json", ".initial.json", ".fresh-allowance.json", ".fresh.json"].some(suffix =>
+    existsSync(protocolReceipt + suffix))) {
+    const responseContract = assignmentVerdictResponseContract(packet);
+    const sessionRoots = [join(job.stateDir, "review-sessions", "assignment-fidelity")];
+    const verdict = await inspectCompletedProtocolResponse({
+      receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+      contract: contractName, sessionRoots,
+      validate: responseContract.validate, parse: responseContract.parse,
+    });
+    const original = await inspectCompletedProtocolReads({
+      receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+      contract: contractName, sessionRoots,
+    });
+    const required = pinnedSourcePaths(snapshot, boundedPinnedSources("nt-narrative-review"));
+    const reads = original.reads.map(path =>
+      canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
+    if (required.some(path => !reads.includes(path)) ||
+        reads.some(path => !reviewerPinnedSkillPath(snapshot.path, path)))
+      throw new ProtocolIntegrityBlockedError("Recovered reviewer lacks original pinned methodology reads");
+    return verdict;
+  }
   await refuseReplayedProtocolInvocation(protocolReceipt);
   const { session, context } = await sessionFor(job, snapshot, provider, model,
     thinking, "review", undefined, assignment, "assignment-fidelity");

@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -25,6 +25,10 @@ import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
 import { runPinnedObjectivePlanner } from "../src/orchestrator-planner.js";
 import { runPiAssignmentReview, prepareSemanticReview } from "../src/semantic-assignment-review.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { beginRejectedRepair, claimRejectedRepair, reconcileCompletedRepairWriter,
+  validateRejectedRepairDraft, commitRejectedRepairDraft, reconcileUnpublishedRepairCommit,
+  inspectRejectedRepair } from "../src/rejected-review-repair.js";
+import { inspectRepairLedger } from "../src/repair-ledger.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
@@ -209,6 +213,21 @@ test("production planner and independent reviewer recover in original Pi session
     assert.equal(protocolPlan.status, "accepted");
     assert.equal(protocolPlan.attempts, 2);
     assert.equal(protocolPlan.sessionFile, receipt.sessionFile);
+    // #195: simulate Graph losing its completed planner transition before
+    // publishing phase=planned. The original Pi transcript and acceptance
+    // receipt, not a new model invocation, must restore the same checkpoint.
+    const planningFile = join(job.stateDir, "objective-planning.json");
+    const { digest: _oldDigest, proposal: _oldProposal,
+      skillReads: _oldReads, ...originalPlanning } = receipt;
+    const interrupted = { ...originalPlanning, phase: "planning" as const };
+    writeFileSync(planningFile, JSON.stringify({ ...interrupted, digest: sha(JSON.stringify(interrupted)) }));
+    for (let restart = 0; restart < 2; restart++) {
+      const restored = await withJobModelRuntime(plannerRuntime, () =>
+        runPinnedObjectivePlanner(job, selection, plan, model.provider, model.id));
+      assert.deepEqual(restored.proposal, expectedPlan);
+      assert.equal(restored.digest, receipt.digest);
+      assert.equal(plannerCalls.length, 3, "Graph resume cannot repeat the original planner");
+    }
 
     const foundation = await runFoundationJob({
       story, job: id, task, envelope: "Dialogue mystery",
@@ -262,8 +281,135 @@ test("production planner and independent reviewer recover in original Pi session
       "review-protocol/assignment-" + packet.sourceDigest + ".initial.json"), "utf8"));
     assert.equal(reviewReceipt.attempts, 2);
     assert.equal(reviewReceipt.status, "accepted");
+    // #195: resume after completed reviewer Pi response, with its independent
+    // seal already on disk. Re-enter the real review adapter twice; the
+    // controller rechecks the same sealed historical source, without Pi.
+    for (let restart = 0; restart < 2; restart++) {
+      const repeat = await withJobModelRuntime(reviewerRuntime, () =>
+        withStoryJobLock(job, "independent-assignment-review", () =>
+          runPiAssignmentReview(job, [point], {
+            snapshot, provider: model.provider, model: model.id,
+            reviewer: "independent-pi-assignment-review", onSession: async () => {},
+          })));
+      assert.deepEqual(repeat.verdict, reviewed.verdict);
+      assert.equal(reviewerCalls.length, 3, "Graph resume cannot duplicate accepted reviewer response");
+    }
     assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
     assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
+
+    // #195: full Git crash boundary. Upgrade only the fixture's *unhashed*
+    // worker provenance to a deterministic original Pi session; the original
+    // foundation checkpoint, source files, Git and independent FAIL remain
+    // untouched. The real controller must still bind it all during admission.
+    const foundationFile = join(job.stateDir, "foundation.json");
+    const foundationReceipt = JSON.parse(readFileSync(foundationFile, "utf8"));
+    const originalSessionId = randomUUID();
+    const originalSessionDir = join(job.stateDir, "foundation-sessions");
+    mkdirSync(originalSessionDir, { recursive: true });
+    const originalSessionFile = join(originalSessionDir, "original.jsonl");
+    const piLine = (message: unknown) =>
+      JSON.stringify({ type: "message", message }) + "\n";
+    writeFileSync(originalSessionFile, JSON.stringify({ type: "session",
+      id: originalSessionId }) + "\n");
+    Object.assign(foundationReceipt, { workerMode: "pi",
+      provider: model.provider, model: model.id,
+      piSessionFile: originalSessionFile, piSessionId: originalSessionId });
+    writeFileSync(foundationFile, JSON.stringify(foundationReceipt));
+    const originalNegativeSha = point.commitSha;
+    const repair = await beginRejectedRepair(job, point);
+    assert.equal(repair.phase, "ready");
+    await withStoryJobLock(job, "rejected-review-writer", () =>
+      claimRejectedRepair(job, originalNegativeSha));
+    const correctedPath = item.assurance.changedPaths[0]!;
+    const correctedFile = join(job.worktreeStoryRoot, correctedPath);
+    const rejectedBytes = readFileSync(correctedFile, "utf8");
+    writeFileSync(correctedFile, rejectedBytes +
+      "\nThe witness describes finding the archive letter before the inference.\n");
+    const piPrevious = readFileSync(originalSessionFile, "utf8");
+    writeFileSync(originalSessionFile, piPrevious +
+      piLine({ role: "user", content: [{ type: "text",
+        text: "Correct the original source-linked review finding" }] }) +
+      piLine({ role: "assistant", stopReason: "stop",
+        content: [{ type: "text", text: "The cited original file was corrected." }] }));
+    for (let restart = 0; restart < 2; restart++) {
+      const resumed = await withStoryJobLock(job, "rejected-review-writer", () =>
+        reconcileCompletedRepairWriter(job, originalNegativeSha));
+      assert.equal(resumed.phase, "validating");
+      assert.equal(resumed.attempts, 1);
+      assert.equal((await inspectRepairLedger(job, plan.digest)).corrections.length, 1);
+    }
+    await withStoryJobLock(job, "rejected-review-validation", () =>
+      validateRejectedRepairDraft(job, originalNegativeSha));
+    assert.equal((await inspectRejectedRepair(job, originalNegativeSha)).phase,
+      "awaiting-checkpoint");
+
+    // A failing pre-commit hook stops the real publication AFTER the
+    // controller has durably sealed its intended paths, blob hashes, and
+    // validator proof. Replaying no model, reproduce the exact Git commit and
+    // crash before the immutable proof/verified-head/checkpoint are written.
+    const hookRelative = git(job.worktreeRoot, "rev-parse", "--git-path", "hooks/pre-commit");
+    const hook = resolve(job.worktreeRoot, hookRelative);
+    mkdirSync(resolve(hook, ".."), { recursive: true });
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    try {
+      await assert.rejects(withStoryJobLock(job, "rejected-review-commit", () =>
+        commitRejectedRepairDraft(job, originalNegativeSha)), /commit|hook|failed/i);
+    } finally { unlinkSync(hook); }
+    const beforeCommit = await inspectRejectedRepair(job, originalNegativeSha);
+    assert.ok(beforeCommit.commitIntent);
+    const intent = beforeCommit.commitIntent;
+    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), originalNegativeSha);
+    git(job.worktreeRoot, "-c", "user.name=NovelTea Generator",
+      "-c", "user.email=noveltea-gen@users.noreply.github.com",
+      "commit", "-m", "Correct rejected specialist assignment [" + job.jobId + "]\n\n" +
+      "NovelTea-Job: " + job.jobId + "\n" +
+      "NovelTea-Work-Item: repair-" + originalNegativeSha + "\n" +
+      "NovelTea-Plan-Version: " + intent.planVersion + "\n" +
+      "NovelTea-Review-Repair: " + intent.proofDigest);
+    const correctedSha = git(job.worktreeRoot, "rev-parse", "HEAD");
+    assert.notEqual(correctedSha, originalNegativeSha);
+    const proofFile = join(job.stateDir, "review-repairs", "proofs",
+      originalNegativeSha + ".json");
+    assert.equal(existsSync(proofFile), false);
+
+    // Both unexpected dirty files and altered intent are refused twice; no
+    // cleanup, bogus approval or duplicate model call is permitted.
+    const extraFile = join(job.worktreeStoryRoot, "unexpected.txt");
+    writeFileSync(extraFile, "Unrelated uncommitted data\n");
+    for (let i = 0; i < 2; i++)
+      await assert.rejects(withStoryJobLock(job, "rejected-review-commit", () =>
+        reconcileUnpublishedRepairCommit(job, originalNegativeSha)), /integrity-blocked/);
+    unlinkSync(extraFile);
+    assert.equal(existsSync(proofFile), false);
+    const repairedStateFile = join(job.stateDir, "review-repairs", originalNegativeSha + ".json");
+    const savedState = readFileSync(repairedStateFile, "utf8");
+    writeFileSync(repairedStateFile, JSON.stringify({
+      ...JSON.parse(savedState), commitIntent: {
+        ...intent, fileHashes: { ...intent.fileHashes, [correctedPath]: "0".repeat(64) },
+      },
+    }));
+    for (let i = 0; i < 2; i++)
+      await assert.rejects(withStoryJobLock(job, "rejected-review-commit", () =>
+        reconcileUnpublishedRepairCommit(job, originalNegativeSha)), /integrity-blocked/);
+    writeFileSync(repairedStateFile, savedState);
+
+    const published = await withStoryJobLock(job, "rejected-review-commit", () =>
+      reconcileUnpublishedRepairCommit(job, originalNegativeSha));
+    assert.equal(published?.phase, "reviewing");
+    assert.equal(published.repairedCommitSha, correctedSha);
+    assert.equal(existsSync(proofFile), true);
+    for (let i = 0; i < 2; i++) {
+      assert.equal(await withStoryJobLock(job, "rejected-review-commit", () =>
+        reconcileUnpublishedRepairCommit(job, originalNegativeSha)), null);
+      assert.equal((await inspectRejectedRepair(job, originalNegativeSha)).repairedCommitSha,
+        correctedSha);
+      assert.equal((await inspectRepairLedger(job, plan.digest)).corrections.length, 1);
+      assert.equal(git(job.worktreeRoot, "rev-list", "--count",
+        originalNegativeSha + "..HEAD"), "1");
+    }
+    assert.equal(git(repo, "rev-parse", "HEAD"), baseline,
+      "original repository remains untouched by isolated repair");
+    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
 
     // The production LangGraph schedule node must admit a NEW model planner,
     // exhaust its original three replies, and use exactly one source-pinned
@@ -334,6 +480,27 @@ test("production planner and independent reviewer recover in original Pi session
         graph.getState({ configurable: { thread_id: thread } }));
       assert.equal(rerun.values.orchestratorPlanningDigest, result.orchestratorPlanningDigest);
       assert.equal(fallbackCalls.length, 6, "graph checkpoint inspection cannot replay model calls");
+      // #195: lose the terminal planner receipt after a completed fresh
+      // fallback. Reconcile both Pi sessions, preserving the single allowance.
+      const secondSelection = await selectStoryOrchestrator(secondJob, thread, {
+        task, kind: "full-story", turnPlanDigest: secondPlan.digest,
+      }, source);
+      const planFile = join(secondJob.stateDir, "objective-planning.json");
+      const planned = JSON.parse(readFileSync(planFile, "utf8"));
+      const { digest: _digest, proposal: _proposal,
+        skillReads: _skillReads, ...beforePublication } = planned;
+      const interrupted = { ...beforePublication, phase: "planning" };
+      writeFileSync(planFile, JSON.stringify({
+        ...interrupted, digest: sha(JSON.stringify(interrupted)),
+      }));
+      for (let restart = 0; restart < 2; restart++) {
+        const restored = await withJobModelRuntime(fallbackRuntime, () =>
+          runPinnedObjectivePlanner(secondJob, secondSelection, secondPlan,
+            model.provider, model.id));
+        assert.deepEqual(restored.proposal, expectedSecond);
+        assert.equal(fallbackCalls.length, 6);
+        assert.equal(restored.sessionFile, freshReceipt.sessionFile);
+      }
     } finally { saver.db.close(); }
 
     // The independent reviewer is dispatched after a verified source commit.
@@ -389,6 +556,18 @@ test("production planner and independent reviewer recover in original Pi session
     const r1 = JSON.parse(readFileSync(reviewBase + ".initial.json", "utf8"));
     const r2 = JSON.parse(readFileSync(reviewBase + ".fresh.json", "utf8"));
     const fallback = JSON.parse(readFileSync(reviewBase + ".fresh-allowance.json", "utf8"));
+    // #195: the single fresh reviewer is reused on two interrupted Graph
+    // resumes, never retried or replaced with a third conversation.
+    for (let restart = 0; restart < 2; restart++) {
+      const repeated = await withJobModelRuntime(freshReviewerRuntime, () =>
+        withStoryJobLock(secondJob, "independent-assignment-review", () =>
+          runPiAssignmentReview(secondJob, [secondCheckpoint], {
+            snapshot, provider: model.provider, model: model.id,
+            reviewer: "independent-pi-assignment-review", onSession: async () => {},
+          })));
+      assert.deepEqual(repeated.verdict, recoveredReview.verdict);
+      assert.equal(freshReviewerCalls.length, 6);
+    }
     assert.equal(r1.status, "protocol-exhausted");
     assert.equal(r1.attempts, 3);
     assert.equal(r2.status, "accepted");

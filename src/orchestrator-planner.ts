@@ -23,7 +23,9 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { trustedHead } from "./revision.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
-import { recoverWithOneFreshSession, type ResponseContractFailure } from "./response-contract-recovery.js";
+import { beginProtocolInvocation, inspectCompletedProtocolResponse,
+  inspectCompletedProtocolReads, ProtocolIntegrityBlockedError,
+  recoverWithOneFreshSession, type ResponseContractFailure } from "./response-contract-recovery.js";
 
 const requiredFor = (plan: TurnEvidence): readonly string[] =>
   requiredOrchestratorSkillReads(plan.creativePolicy?.mode ?? "autonomous");
@@ -250,9 +252,29 @@ export async function runPinnedObjectivePlanner(
     throw new Error("Orchestrator planning requires an exact source-bound modern Turn plan.");
   if (existsSync(pathFor(job))) {
     const saved = await readPinnedObjectivePlanning(job, selection, plan, provider, model);
-    if (saved.phase !== "planned")
-      throw new Error("Interrupted orchestrator planning session; inspect its transcript before replay.");
-    return saved;
+    if (saved.phase === "planned") return saved;
+    const receiptFile = join(job.stateDir, "objective-plan-protocol");
+    const sessionRoots = [join(job.stateDir, "orchestrator-planning-sessions"),
+      join(job.stateDir, "orchestrator-planning-fresh-sessions")];
+    const proposal = await inspectCompletedProtocolResponse({
+      receiptFile, sourceDigest: plan.digest, contract: "orchestrator.work-plan.v1",
+      sessionRoots, validate: text => inspectOrchestratorProposal(text, plan),
+      parse: text => verifyOrchestratorProposal(parseText(text), plan),
+    });
+    const evidence = await inspectCompletedProtocolReads({
+      receiptFile, sourceDigest: plan.digest, contract: "orchestrator.work-plan.v1",
+      sessionRoots,
+    });
+    const required = requiredFor(plan).map(p => join(selection.receipt.skillSnapshot.path, "skills", p));
+    const readPaths = evidence.reads.map(path =>
+      canonicalPinnedReadPath(path, job.worktreeStoryRoot, selection.receipt.skillSnapshot.path));
+    if (required.some(path => !readPaths.includes(path)))
+      throw new ProtocolIntegrityBlockedError("Recovered planner omitted its original pinned skill reads");
+    const { digest: _priorDigest, ...original } = saved;
+    const finished = seal({ ...original, phase: "planned", sessionFile: evidence.sessionFile,
+      proposal, skillReads: readPaths });
+    await writeFile(pathFor(job), JSON.stringify(finished, null, 2) + "\n", { mode: 0o600 });
+    return verifyReceipt(finished, job, selection, plan, provider, model);
   }
   const project = await openStoryProject(job.worktreeStoryRoot);
   const snapshot = selection.receipt.skillSnapshot;
@@ -336,6 +358,8 @@ export async function runPinnedObjectivePlanner(
       mode: 0o600,
     });
     await context.beforeTurn(file);
+    await beginProtocolInvocation({ receiptFile: join(job.stateDir, "objective-plan-protocol"),
+      sourceDigest: plan.digest, contract: "orchestrator.work-plan.v1", session });
     const currentHead = await trustedHead(job);
     const approvedFoundation = await readChatApprovedFoundation(job);
     const foundationCommitted = approvedFoundation?.scope === "whole-story" &&

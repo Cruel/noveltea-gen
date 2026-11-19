@@ -17,7 +17,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints, finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
-import { inspectCheckpointReview, readRepairCommitProof, repairReviewAssignment,
+import { inspectCheckpointReview, readIndependentReview, readRepairCommitProof, repairReviewAssignment,
   type IndependentReviewResult, type RepairCommitProof } from "./checkpoint-assurance.js";
 import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
@@ -39,6 +39,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
 import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
+import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
@@ -109,6 +110,16 @@ export interface RepairRevision {
   direction: string;
   digest: string;
 }
+interface RepairCommitIntent {
+  version: 1;
+  beforeHead: string;
+  proofDigest: string;
+  planVersion: number;
+  sessionSha256: string;
+  paths: string[];
+  /** Exact validated canonical bytes staged for the original commit. */
+  fileHashes: Record<string, string>;
+}
 export type RepairPhase = "ready" | "repairing" | "awaiting-author" | "needs-plan" | "disputing" | "adjudicating" | "validating" |
   "awaiting-checkpoint" | "reviewing" | "passed" | "failed" | "blocked";
 export interface RepairReceipt {
@@ -129,6 +140,12 @@ export interface RepairReceipt {
   allowedPaths: string[];
   origin: RepairOrigin;
   sessionSha256: string;
+  /** Exact Pi transcript prefix at the one-way writer claim (not a new session). */
+  sessionBytesBeforeRepair?: number;
+  /** Submitted correction attests the completed Pi transcript independently of Git. */
+  submittedSessionSha256?: string;
+  /** Publication fence written before Git changes HEAD; no separate state owner. */
+  commitIntent?: RepairCommitIntent;
   phase: RepairPhase;
   attempts: number;
   revision?: RepairRevision;
@@ -335,6 +352,22 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
       state.sourceCommitSha !== sha || !SHA.test(state.rootFailureSha) ||
       !HASH.test(state.sourceReviewDigest) || !HASH.test(state.originalReviewDigest) ||
       !HASH.test(state.sessionSha256) ||
+      (state.sessionBytesBeforeRepair !== undefined &&
+        (!Number.isSafeInteger(state.sessionBytesBeforeRepair) || state.sessionBytesBeforeRepair < 1)) ||
+      (state.submittedSessionSha256 !== undefined && !HASH.test(state.submittedSessionSha256)) ||
+      (state.commitIntent !== undefined && (state.commitIntent.version !== 1 ||
+        !SHA.test(state.commitIntent.beforeHead) ||
+        !HASH.test(state.commitIntent.proofDigest) ||
+        !HASH.test(state.commitIntent.sessionSha256) ||
+        !Number.isSafeInteger(state.commitIntent.planVersion) ||
+        state.commitIntent.planVersion < 1 ||
+        !Array.isArray(state.commitIntent.paths) ||
+        !state.commitIntent.paths.length ||
+        state.commitIntent.paths.some(path => !originalSafePath(path)) ||
+        !state.commitIntent.fileHashes ||
+        Object.keys(state.commitIntent.fileHashes).sort().join("\\0") !==
+          [...state.commitIntent.paths].sort().join("\\0") ||
+        Object.values(state.commitIntent.fileHashes).some(value => !HASH.test(value)))) ||
       !Array.isArray(state.allowedPaths) || !state.allowedPaths.length ||
       state.allowedPaths.some(path => !originalSafePath(path) ||
         (path.startsWith("creative-direction/") && state.origin?.workItem !== "foundation")) ||
@@ -499,12 +532,70 @@ export async function claimRejectedRepair(job: JobStartResult, sha: string) {
   if (await trustedHead(job) !== state.baselineHead ||
       git(job, "status", "--porcelain=v1", "--untracked-files=all"))
     throw Error("Repair source moved or worktree contains a draft; never overwrite it.");
-  if (hash(await readFile(state.origin.sessionFile)) !== state.sessionSha256)
+  const originalTranscript = await readFile(state.origin.sessionFile);
+  if (hash(originalTranscript) !== state.sessionSha256)
     throw Error("Original Pi transcript changed; do not silently start a new session.");
+  state.sessionBytesBeforeRepair = originalTranscript.length;
   state.phase = "repairing";
   await save(job, state); // One-way crash fence before any external model call.
   return state;
 }
+/** A crash after Pi finished but before draft submission has an append-only
+ * original-session transcript. An incomplete turn is never treated as a
+ * submitted semantic correction. This inspection does not call Pi. */
+export async function inspectCompletedRepairPiTurn(sessionFile: string,
+  beforeBytes: number, originalSha256: string): Promise<"completed" | "incomplete"> {
+  if (!Number.isSafeInteger(beforeBytes) || beforeBytes < 1 || !HASH.test(originalSha256))
+    throw new ProtocolIntegrityBlockedError("Repair claim has no exact pre-prompt transcript fence");
+  const stat = await lstat(sessionFile);
+  if (!stat.isFile() || stat.isSymbolicLink() || await realpath(sessionFile) !== sessionFile ||
+      stat.size > 64 * 1024 * 1024)
+    throw new ProtocolIntegrityBlockedError("Original repair Pi transcript is unsafe");
+  const bytes = await readFile(sessionFile);
+  if (bytes.length < beforeBytes || hash(bytes.subarray(0, beforeBytes)) !== originalSha256)
+    throw new ProtocolIntegrityBlockedError("Original repair Pi session prefix changed");
+  const delta = bytes.subarray(beforeBytes).toString("utf8");
+  if (!delta.trim()) return "incomplete";
+  let records: Array<{ type?: string; message?: {
+    role?: string; stopReason?: string;
+    content?: Array<{ type: string; name?: string; text?: string }> } }>;
+  try {
+    records = delta.trim().split("\n").map(line => JSON.parse(line));
+  } catch { throw new ProtocolIntegrityBlockedError("Interrupted repair transcript contains partial entries"); }
+  const messages = records.filter(record => record.type === "message").map(record => record.message);
+  const users = messages.filter(message => message?.role === "user");
+  const finals = messages.filter(message => message?.role === "assistant" &&
+    message.stopReason === "stop");
+  if (users.length !== 1 || finals.length > 1 ||
+      messages.some(message => message?.role === "assistant" &&
+        ["error", "aborted"].includes(message.stopReason ?? "")))
+    throw new ProtocolIntegrityBlockedError("Repair continuation has multiple or unsuccessful model turns");
+  if (!finals.length) return "incomplete";
+  if (messages.at(-1)?.role !== "assistant" ||
+      messages.at(-1)?.stopReason !== "stop" ||
+      !Array.isArray(finals[0]?.content) ||
+      finals[0].content.some(c => c.type === "toolCall"))
+    throw new ProtocolIntegrityBlockedError("Repair transcript did not complete one bounded writer response");
+  return "completed";
+}
+
+/** Only the existing controller writer lease may recover a completed original
+ * Pi call. Without an attributable completed response and owned Git diff,
+ * preserve the dirty draft instead of replaying or clearing it. */
+export async function reconcileCompletedRepairWriter(job: JobStartResult, sha: string) {
+  const state = await inspectRejectedRepair(job, sha);
+  if (state.phase !== "repairing") return state;
+  if (state.sessionBytesBeforeRepair === undefined) return state;
+  if (await inspectCompletedRepairPiTurn(state.origin.sessionFile,
+      state.sessionBytesBeforeRepair, state.sessionSha256) !== "completed")
+    return state;
+  if (await trustedHead(job) !== state.baselineHead)
+    throw new ProtocolIntegrityBlockedError("Repair writer HEAD differs from its claimed source");
+  const paths = changedRepairPaths(job, state);
+  if (!paths.length) return state;
+  return finishRejectedRepairDraft(job, sha);
+}
+
 export function changedRepairPaths(job: JobStartResult, state: RepairReceipt) {
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   const entries = gitRaw(job, "status", "--porcelain=v1", "-z", "--untracked-files=all")
@@ -618,6 +709,7 @@ export async function finishRejectedRepairDraft(job: JobStartResult, sha: string
   state.paths = paths;
   state.draftDigest = hash(paths.map(path =>
     ({ path, diff: git(job, "diff", "--binary", "--", repoPath(job, path)) })));
+  state.submittedSessionSha256 = hash(await readFile(state.origin.sessionFile));
   state.phase = "validating";
   await save(job, state);
   return state;
@@ -858,6 +950,39 @@ async function ensureRepairLedger(job: JobStartResult, state: RepairReceipt) {
   return file;
 }
 
+/** Identical from pre-commit intent through recovered proof. */
+function repairPublicationDigest(sha: string, state: RepairReceipt) {
+  return hash({
+    workItemId: "repair-" + sha, sourceCommitSha: sha,
+    rootFailureSha: state.rootFailureSha, sourceReviewDigest: state.sourceReviewDigest,
+    assignmentId: state.assignment.id, assignmentRevision: state.revision?.digest ?? null,
+    nativeProof: state.validationProof, draft: state.draftDigest,
+    paths: state.paths, repairPlanDigest: state.planAmendment.digest,
+  });
+}
+
+function repairPublicationProof(job: JobStartResult, sha: string, state: RepairReceipt,
+  commitSha: string, intent: RepairCommitIntent): RepairCommitProof {
+  return {
+    version: 1, jobId: job.jobId, threadId: job.threadId, branch: job.branch,
+    baseSha: job.baseSha, phase: "committed", worker: "pi", workItemId: "repair-" + sha,
+    sourceCommitSha: sha, rootFailureSha: state.rootFailureSha,
+    sourceReviewDigest: state.sourceReviewDigest, originalReviewDigest: state.originalReviewDigest,
+    assignmentId: state.assignment.id,
+    assignmentDigest: hash(state.revision?.assignment ?? state.assignment),
+    ...(state.revision ? { assignmentRevision: state.revision } : {}),
+    beforeHead: intent.beforeHead, commitSha, paths: [...intent.paths],
+    digest: intent.proofDigest,
+    validation: { status: "passed", validatorVersion: job.validatorVersion,
+      proofDigest: state.validationProof! },
+    sessionFile: state.origin.sessionFile, sessionId: state.origin.sessionId,
+    sessionSha256: intent.sessionSha256,
+    provider: state.origin.provider, model: state.origin.model,
+    snapshot: state.origin.snapshot, planVersion: intent.planVersion,
+    repairPlanDigest: state.planAmendment.digest,
+  };
+}
+
 /** Recover the narrow crash boundary where Git and its immutable native
  * proof were committed but the verified-head ledger was not yet published.
  * Reconstruct only from the exact Foundation source and fully bound proof;
@@ -915,10 +1040,114 @@ async function recoverInterruptedFoundationRepair(job: JobStartResult, sha: stri
     { flag: "wx", mode: 0o600 });
 }
 
+/** Reconcile an original repair commit made immediately before process death.
+ * This only publishes missing receipts for an exact, already validated Git
+ * tree. It never runs a validator, replays Pi or advances another branch.
+ * Caller must hold the existing Story job lease. */
+export async function reconcileUnpublishedRepairCommit(job: JobStartResult, sha: string) {
+  if (!SHA.test(sha)) throw new ProtocolIntegrityBlockedError("Invalid rejected source SHA");
+  const file = pathFor(job, sha);
+  if (!existsSync(file)) return null;
+  const stat = await lstat(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128_000)
+    throw new ProtocolIntegrityBlockedError("Untrusted repair controller receipt");
+  let state: RepairReceipt;
+  try { state = JSON.parse(await readFile(file, "utf8")) as RepairReceipt; }
+  catch { throw new ProtocolIntegrityBlockedError("Unreadable repair controller receipt"); }
+  if (state.jobId !== job.jobId || state.threadId !== job.threadId ||
+      state.sourceCommitSha !== sha)
+    throw new ProtocolIntegrityBlockedError("Repair source does not match this job");
+  if (state.phase !== "awaiting-checkpoint") return null;
+  const head = git(job, "rev-parse", "HEAD");
+  if (head === state.baselineHead) return null; // A draft has not crossed Git yet.
+  const intent = state.commitIntent;
+  if (!intent || intent.version !== 1 || !state.validationProof ||
+      !state.submittedSessionSha256 || !state.draftDigest ||
+      intent.beforeHead !== state.baselineHead ||
+      intent.sessionSha256 !== state.submittedSessionSha256 ||
+      intent.proofDigest !== repairPublicationDigest(sha, state) ||
+      !Array.isArray(state.paths) || !state.paths.length ||
+      JSON.stringify(state.paths) !== JSON.stringify(intent.paths) ||
+      !intent.paths.every(p => originalSafePath(p) && state.allowedPaths.includes(p)) ||
+      !intent.fileHashes ||
+      Object.keys(intent.fileHashes).sort().join("|") !== [...intent.paths].sort().join("|") ||
+      Object.values(intent.fileHashes).some(value => !HASH.test(value)) ||
+      !Number.isSafeInteger(intent.planVersion) || intent.planVersion < 1)
+    throw new ProtocolIntegrityBlockedError("Unpublished commit lacks an exact validated source intent");
+  if (git(job, "rev-parse", "HEAD^") !== intent.beforeHead ||
+      git(job, "symbolic-ref", "--short", "HEAD") !== job.branch ||
+      git(job, "status", "--porcelain=v1", "--untracked-files=all"))
+    throw new ProtocolIntegrityBlockedError("Repair branch, parent or dirty worktree differs");
+  const commitPaths = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", head)
+    .split("\n").filter(Boolean).sort();
+  const expectedPaths = intent.paths.map(path => repoPath(job, path)).sort();
+  const trailers = git(job, "log", "-1", "--format=%B", head).split("\n");
+  if (JSON.stringify(commitPaths) !== JSON.stringify(expectedPaths) ||
+      !trailers.includes("NovelTea-Job: " + job.jobId) ||
+      !trailers.includes("NovelTea-Work-Item: repair-" + sha) ||
+      !trailers.includes("NovelTea-Plan-Version: " + intent.planVersion) ||
+      !trailers.includes("NovelTea-Review-Repair: " + intent.proofDigest))
+    throw new ProtocolIntegrityBlockedError("Git commit provenance or inventory differs from validated intent");
+  for (const path of intent.paths) {
+    if (hash(gitRaw(job, "show", head + ":" + repoPath(job, path))) !== intent.fileHashes[path])
+      throw new ProtocolIntegrityBlockedError("Committed canonical bytes differ from validated draft");
+  }
+  const sourceFile = join(job.stateDir, "recovery-checkpoints", sha + ".json");
+  const source = JSON.parse(await readFile(sourceFile, "utf8")) as RecoveryCheckpoint;
+  if (source.jobId !== job.jobId || source.commitSha !== sha ||
+      !source.assurance || source.assurance.assignmentId !== state.assignment?.id ||
+      (source.planVersion ?? state.planAmendment.basePlanVersion) !== intent.planVersion ||
+      !isAncestor(job, sha, intent.beforeHead))
+    throw new ProtocolIntegrityBlockedError("Rejected checkpoint or source grant has changed");
+  const failed = await readIndependentReview(job, source.assurance);
+  if (failed.status !== "failed" || !failed.result ||
+      sourceOf(failed.result) !== state.sourceReviewDigest)
+    throw new ProtocolIntegrityBlockedError("Original independent failed review is missing or changed");
+  const transcriptStat = await lstat(state.origin.sessionFile);
+  if (!transcriptStat.isFile() || transcriptStat.isSymbolicLink() ||
+      await realpath(state.origin.sessionFile) !== state.origin.sessionFile ||
+      hash(await readFile(state.origin.sessionFile)) !== intent.sessionSha256)
+    throw new ProtocolIntegrityBlockedError("Original submitted Pi transcript has changed");
+  const proofPath = join(job.stateDir, "review-repairs", "proofs", sha + ".json");
+  if (!existsSync(proofPath)) {
+    await mkdir(dirname(proofPath), { recursive: true, mode: 0o700 });
+    const proof = repairPublicationProof(job, sha, state, head, intent);
+    await writeFile(proofPath, JSON.stringify(proof, null, 2) + "\n",
+      { flag: "wx", mode: 0o600 });
+  }
+  const proof = await readRepairCommitProof(job, "repair-" + sha);
+  if (proof.commitSha !== head || proof.beforeHead !== intent.beforeHead ||
+      proof.digest !== intent.proofDigest || proof.sessionSha256 !== intent.sessionSha256 ||
+      proof.validation.proofDigest !== state.validationProof ||
+      JSON.stringify(proof.paths) !== JSON.stringify(intent.paths))
+    throw new ProtocolIntegrityBlockedError("Recovered immutable repair proof conflicts with pre-commit intent");
+  await recoverInterruptedFoundationRepair(job, sha);
+  const verifiedFile = join(job.stateDir, "revisions", "verified-head.json");
+  if (!existsSync(verifiedFile))
+    throw new ProtocolIntegrityBlockedError("Original verified-head predecessor is missing");
+  const ledger = JSON.parse(await readFile(verifiedFile, "utf8")) as {
+    version: number; jobId: string; headSha: string; workItemId: string };
+  if (ledger.version !== 1 || ledger.jobId !== job.jobId ||
+      ![intent.beforeHead, head].includes(ledger.headSha) ||
+      (ledger.headSha === head && ledger.workItemId !== "repair-" + sha))
+    throw new ProtocolIntegrityBlockedError("Verified-head ledger differs from repair predecessor");
+  if (ledger.headSha === intent.beforeHead) {
+    const tmp = verifiedFile + "." + randomUUID() + ".tmp";
+    await writeFile(tmp, JSON.stringify({ version: 1, jobId: job.jobId,
+      headSha: head, workItemId: "repair-" + sha }, null, 2) + "\n",
+      { flag: "wx", mode: 0o600 });
+    await rename(tmp, verifiedFile);
+  }
+  const point = await finalizeRecoveryCheckpoint(job, "repair-" + sha, intent.beforeHead, head);
+  return acceptRejectedRepairCheckpoint(job, sha, point);
+}
+
 /** Commit only the controller's exact validated draft, with an immutable
  * repair proof and native recovery checkpoint. Caller owns the writer lease.
  * Never reset or clean an interrupted draft or an unrecognized commit. */
 export async function commitRejectedRepairDraft(job: JobStartResult, sha: string) {
+  const recovered = await reconcileUnpublishedRepairCommit(job, sha);
+  if (recovered) return recovered;
   const state = await inspectRejectedRepair(job, sha);
   const workItemId = "repair-" + sha;
   const existingProof = join(job.stateDir, "review-repairs", "proofs", sha + ".json");
@@ -947,13 +1176,27 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
   // source-bound to the immutable Turn work-plan version saved in the overlay.
   const planVersion = original.planVersion ?? state.planAmendment.basePlanVersion;
   const headFile = await ensureRepairLedger(job, state);
-  const proofDigest = hash({
-    workItemId, sourceCommitSha: sha, rootFailureSha: state.rootFailureSha,
-    sourceReviewDigest: state.sourceReviewDigest, assignmentId: state.assignment.id,
-    assignmentRevision: state.revision?.digest ?? null,
-    nativeProof: state.validationProof, draft: state.draftDigest, paths: state.paths,
-    repairPlanDigest: state.planAmendment.digest,
-  });
+  const proofDigest = repairPublicationDigest(sha, state);
+  const transcriptDigest = hash(await readFile(state.origin.sessionFile));
+  if (!state.submittedSessionSha256 || transcriptDigest !== state.submittedSessionSha256)
+    throw new ProtocolIntegrityBlockedError("Submitted repair Pi transcript changed before Git publication");
+  const intent: RepairCommitIntent = {
+    version: 1, beforeHead: state.baselineHead, proofDigest, planVersion,
+    sessionSha256: transcriptDigest, paths: [...state.paths],
+    fileHashes: Object.fromEntries(await Promise.all(state.paths.map(async path => {
+      const target = join(job.worktreeStoryRoot, path);
+      const stat = await lstat(target);
+      if (!stat.isFile() || stat.isSymbolicLink() || await realpath(target) !== target)
+        throw new ProtocolIntegrityBlockedError("Unsafe validated repair file before Git publication");
+      return [path, hash(await readFile(target))];
+    }))),
+  };
+  if (state.commitIntent && JSON.stringify(state.commitIntent) !== JSON.stringify(intent))
+    throw new ProtocolIntegrityBlockedError("Existing repair publication intent disagrees with validated draft");
+  if (!state.commitIntent) {
+    state.commitIntent = intent;
+    await save(job, state);
+  }
   git(job, "add", "--", ...state.paths.map(path => repoPath(job, path)));
   git(job, "-c", "user.name=NovelTea Generator",
     "-c", "user.email=noveltea-gen@users.noreply.github.com", "commit", "-m",
@@ -970,24 +1213,7 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
         .split("\n").filter(Boolean).sort()) !==
         JSON.stringify(state.paths.map(p => repoPath(job, p)).sort()))
     throw Error("Repaired commit provenance or changed path inventory differs; preserve evidence.");
-  const proof: RepairCommitProof = {
-    version: 1, jobId: job.jobId, threadId: job.threadId, branch: job.branch,
-    baseSha: job.baseSha, phase: "committed", worker: "pi", workItemId,
-    sourceCommitSha: sha, rootFailureSha: state.rootFailureSha,
-    sourceReviewDigest: state.sourceReviewDigest, originalReviewDigest: state.originalReviewDigest,
-    assignmentId: state.assignment.id,
-    assignmentDigest: hash(state.revision?.assignment ?? state.assignment),
-    ...(state.revision ? { assignmentRevision: state.revision } : {}),
-    beforeHead: state.baselineHead, commitSha, paths: [...state.paths],
-    digest: proofDigest,
-    validation: { status: "passed", validatorVersion: job.validatorVersion,
-      proofDigest: state.validationProof },
-    sessionFile: state.origin.sessionFile, sessionId: state.origin.sessionId,
-    sessionSha256: hash(await readFile(state.origin.sessionFile)),
-    provider: state.origin.provider, model: state.origin.model,
-    snapshot: state.origin.snapshot, planVersion,
-    repairPlanDigest: state.planAmendment.digest,
-  };
+  const proof = repairPublicationProof(job, sha, state, commitSha, intent);
   await mkdir(dirname(existingProof), { recursive: true, mode: 0o700 });
   await writeFile(existingProof, JSON.stringify(proof, null, 2) + "\n",
     { flag: "wx", mode: 0o600 });
@@ -1230,8 +1456,16 @@ export async function adjudicateRejectedRepair(job: JobStartResult, sha: string)
 export async function advanceRejectedRepair(job: JobStartResult, sourceSha: string,
   options: RejectedRepairOptions = {}) {
   if (!SHA.test(sourceSha)) throw Error("Repair requires one exact reviewed commit.");
-  await withStoryJobLock(job, "reconcile-published-repair", () =>
-    recoverInterruptedFoundationRepair(job, sourceSha));
+  await withStoryJobLock(job, "reconcile-published-repair", async () => {
+    await reconcileUnpublishedRepairCommit(job, sourceSha);
+    await recoverInterruptedFoundationRepair(job, sourceSha);
+    if (existsSync(pathFor(job, sourceSha))) {
+      // A fully completed original Pi turn can be finalized exactly once
+      // from its durable session prefix and owned diff. An uncertain writer
+      // remains repairing, and the controller returns manual-reconcile.
+      await reconcileCompletedRepairWriter(job, sourceSha);
+    }
+  });
   const point = (await inspectRecoveryCheckpoints(job)).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
