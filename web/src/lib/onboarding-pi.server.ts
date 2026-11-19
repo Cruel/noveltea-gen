@@ -617,7 +617,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         const name = error instanceof Error ? error.name : 'unknown'
         const message = error instanceof Error ? error.message : ''
         const cause = /429|rate.limit|quota/i.test(message) ? 'rate-limit'
-          : /401|403|auth|token|refresh|credential/i.test(message) ? 'authentication'
+          : /\b(?:401|403|unauthorized|forbidden|authentication|oauth|access.token|refresh.token|credential)\b/i.test(message) ? 'authentication'
           : /aborted|timeout/i.test(message) ? 'aborted'
           : /Pi specialist did not finish/i.test(message) ? 'incomplete-model-turn'
           : /JSON|proposal|discovery reply|questions|foundation/i.test(message) ? 'invalid-model-output'
