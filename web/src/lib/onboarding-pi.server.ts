@@ -20,6 +20,9 @@ import { parseProposedQuestionSet, parseQuestionDrafts, parseQuestionResponses,
   type QuestionSet, type QuestionResponse, type QuestionDraft } from '../../../src/author-question-set'
 import { continueApprovedStoryChat, type ContinuationStatus, type ProviderJobGateways } from './story-approved-continuation.server'
 import { createDiscoveryEvidence, type DiscoveryEvidence } from './discovery-evidence.server'
+import { discoverySemanticPacket, discoverySemanticReviewInstructions,
+  parseDiscoverySemanticVerdict, discoverySemanticFailures, discoverySemanticDigest,
+  discoverySemanticCorrection } from '../../../src/discovery-semantic-review'
 
 type Turn = { role: 'user' | 'assistant'; text: string; source?: 'question-set' }
 type Foundation = {
@@ -66,7 +69,9 @@ type Session = { phase: Phase; revision: number; model: PiSelection; skillId: st
     submittedAt: string; questions: QuestionSet['questions']; responses: QuestionResponse[] }>;
   chat?: ChatDiscoveryBinding;
   /** Private controller evidence pointers; deliberately excluded from scope(). */
-  discoveryEvidencePaths?: string[] }
+  discoveryEvidencePaths?: string[];
+  /** Exact proposal/reviewer digest binding, never included in API projection. */
+  semanticReview?: { proposalDigest: string; packetDigest: string; verdictDigest: string } }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const reply = (value: unknown, status = 200) => Response.json(value, {
@@ -74,6 +79,11 @@ const reply = (value: unknown, status = 200) => Response.json(value, {
 })
 class DiscoveryError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
+}
+class DiscoverySemanticRejection extends Error {
+  constructor(readonly correction: string) {
+    super('Independent discovery review found unsupported or uncertain source scope.')
+  }
 }
 function scope(input: Session) {
   return { phase: input.phase, revision: input.revision, model: input.model,
@@ -161,6 +171,7 @@ function parseResponse(text: string, evidence: PlanningEvidence[], newStoryChat:
 /** Model-visible feedback must come from the trusted schema validator, never
  * include arbitrary provider errors, private session text or exception stacks. */
 function discoveryCorrectionFeedback(error: unknown): string {
+  if (error instanceof DiscoverySemanticRejection) return error.correction
   const reason = error instanceof Error ? error.message : ''
   if (reason === 'Invalid author-question recommendation.' ||
       reason === 'A free-text question cannot force suggested alternatives.') {
@@ -174,22 +185,17 @@ function discoveryCorrectionFeedback(error: unknown): string {
     return 'Each recommendedId must exactly match an option ID within that question.'
   if (reason === 'Discovery questions cannot request protected authority')
     return 'Only request creative preferences, not approval, permission, authorization or protected-canon changes.'
-  if (reason === 'The author delegated a different creative topic.')
-    return 'Each delegated Creative Decision must cite the exact answered Question Set ID and question ID about that creative topic. ' +
-      'Grounded tension belongs to tone; short detours belong to branch depth; turning-point choices belong to choice frequency. ' +
-      'Do not cite a valid but unrelated delegation.'
-  if (reason === 'Planning interpretation source does not concern this dimension.')
-    return 'Each planning interpretation must cite the submitted source for its exact dimension: ' +
-      'branching.depth cites branch depth, pacing cites pacing, and each production budget cites the matching artwork question. ' +
-      'A source for another topic cannot authorize this value.'
   if (reason === 'An author question requires 2–8 valid alternatives.' ||
       reason === 'Author alternatives need unique IDs, concise titles and bounded optional detail.')
     return 'Alternatives and multiple-choice questions require 2–8 options with unique lowercase-dash IDs and concise titles.'
   return 'The structured response did not satisfy the required Question Set, Creative Direction JSON or source-grounded planning contract.'
 }
-export type DiscoveryInference = (session: Session, instructions: string) => Promise<string>
+export type DiscoveryInference = (session: Session, instructions: string,
+  kind?: 'discovery' | 'semantic-review') => Promise<string>
 async function realInference(store: StudioDatabase, owner: string, session: Session,
-  instructions: string, evidence: DiscoveryEvidence): Promise<{ text: string; piSessionFile?: string }> {
+  instructions: string, evidence: DiscoveryEvidence,
+  payload?: object, validateReviewFormat?: (raw: string) => void):
+  Promise<{ text: string; piSessionFile?: string }> {
   await assertUserPiSelection(store, owner, session.model)
   const runtime = await createUserPiRuntime(store, owner)
   const model = runtime.getModel(session.model.provider, session.model.id)
@@ -208,14 +214,30 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
     noTools: 'all', tools: [] })
   const timer = setTimeout(() => { void agent.abort().catch(() => {}) }, 4 * 60_000)
   try {
-    await agent.prompt(JSON.stringify({ conversation: session.turns,
+    await agent.prompt(JSON.stringify(payload ?? { conversation: session.turns,
       planningSources: authorEvidence(session).map(({ source, decisionId, statement, authorText, selectedOption, delegated }) =>
         ({ source, decisionId, statement, authorText, selectedOption, delegated })) }), { expandPromptTemplates: false })
-    const last = [...agent.messages].reverse().find(item => item.role === 'assistant')
-    if (!last || last.role !== 'assistant' || last.stopReason !== 'stop')
-      throw new Error('Pi specialist did not finish')
-    return { text: agent.getLastAssistantText() ?? '',
-      piSessionFile: agent.sessionManager.getSessionFile() ?? undefined }
+    for (let attempt = 0; attempt < (validateReviewFormat ? 3 : 1); attempt++) {
+      const last = [...agent.messages].reverse().find(item => item.role === 'assistant')
+      if (!last || last.role !== 'assistant' || last.stopReason !== 'stop')
+        throw new Error('Pi specialist did not finish')
+      const text = agent.getLastAssistantText() ?? ''
+      try {
+        validateReviewFormat?.(text)
+        return { text, piSessionFile: agent.sessionManager.getSessionFile() ?? undefined }
+      } catch (error) {
+        if (attempt === 2) throw error
+        // Protocol-format repair stays in the same independent, read-only Pi
+        // conversation. Never retry the original creative assignment here.
+        await agent.prompt('Independent read-only review FORMAT correction: your previous ' +
+          'JSON assessments were invalid. Keep the exact review packet and unchanged ' +
+          'review criteria. Return only one complete JSON object with assessments ' +
+          'for EVERY claim ID and exact keys claimId, verdict, reason. Verdict is ' +
+          'supported, unsupported or uncertain; no omitted or invented IDs.',
+        { expandPromptTemplates: false })
+      }
+    }
+    throw Error('Independent discovery review format exhausted')
   } finally {
     clearTimeout(timer)
     try {
@@ -480,7 +502,10 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     if (action === 'approve') {
       if (!saved || saved.questionContract !== 'structured-v1' ||
           saved.phase !== 'proposed' || data.revision !== saved.revision ||
-          data.digest !== saved.digest) throw new DiscoveryError(409, 'Proposal is stale or unavailable')
+          !saved.digest || !/^[a-f0-9]{64}$/.test(saved.digest) ||
+          data.digest !== saved.digest || !saved.semanticReview ||
+          saved.semanticReview.proposalDigest !== saved.digest)
+        throw new DiscoveryError(409, 'Proposal is stale or unavailable')
       const approved: Session = { ...saved, phase: 'approved', revision: saved.revision + 1,
         proposal: { ...saved.proposal!, foundation: {
           ...saved.proposal!.foundation, decisions: saved.proposal!.foundation.decisions.map(d =>
@@ -607,6 +632,57 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           throw error
         }
       }
+      let lastSemanticReview: { packetDigest: string; verdictDigest: string } | undefined
+      const reviewSemantics = async (raw: string, proposal: Proposal) => {
+        // Exact identity and submission permission have already been checked
+        // by expectedProposal()/parsePlanningInterpretations(). The independent
+        // reviewer can only veto meaning; it cannot invent an author grant.
+        const parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```$/, '')) as {
+            foundation: { decisions: Array<{
+              statement: string; authority: string; source?: import('../../../src/planning-interpretation').PlanningSource
+            }> }
+          }
+        const packet = discoverySemanticPacket(session.brief, parsed.foundation.decisions,
+          proposal.interpretations, authorEvidence(session), proposal.foundation)
+        if (!packet.claims.length) {
+          // No delegated or source-bound model assertions to assess. The author
+          // still has to approve unbound proposals through the exact gate.
+          lastSemanticReview = discoverySemanticDigest(packet, { assessments: [] })
+          return
+        }
+        const instructions = discoverySemanticReviewInstructions
+        const reviewerEvidence = !infer || process.env.NT_DISCOVERY_EVIDENCE_DIR
+          ? await createDiscoveryEvidence({ owner: actor.id, repositoryId: repo, workspace,
+            revision: session.revision, stage: 'semantic-review', model: session.model,
+            skillId: session.skillId, instructions }) : null
+        if (reviewerEvidence) evidencePaths.push(reviewerEvidence.dir)
+        let output: string
+        try {
+          // A fresh Pi AgentSession and no tools; never the creative writer's
+          // conversation, its tool state or a model-selected review packet.
+          const result = infer ? { text: await infer(session,
+            instructions + '\nREVIEW_PACKET_JSON:\n' + JSON.stringify(packet), 'semantic-review') } :
+            await realInference(store, actor.id, session, instructions, reviewerEvidence!,
+              { reviewPacket: packet }, raw => { parseDiscoverySemanticVerdict(raw, packet) })
+          output = result.text
+          await reviewerEvidence?.response(output,
+            'piSessionFile' in result ? result.piSessionFile : undefined)
+        } catch (error) {
+          await reviewerEvidence?.inferenceError(error)
+          throw error
+        }
+        try {
+          const verdict = parseDiscoverySemanticVerdict(output, packet)
+          if (discoverySemanticFailures(verdict).length)
+            throw new DiscoverySemanticRejection(discoverySemanticCorrection(verdict))
+          await reviewerEvidence?.validation('accepted')
+          lastSemanticReview = discoverySemanticDigest(packet, verdict)
+        } catch (error) {
+          await reviewerEvidence?.validation('rejected', error)
+          throw error
+        }
+      }
       const interpret = (raw: string, mandatoryClarification = false) => {
         const delegationAuthorized = explicitFullDelegation(session.brief) ||
           !!session.accepted?.some(batch => batch.responses.some(r => r.answer.kind === 'delegate'))
@@ -632,6 +708,10 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const validateWithEvidence = async (raw: string, mandatoryClarification = false) => {
         try {
           const checked = interpret(raw, mandatoryClarification)
+          if (checked.proposal) {
+            diagnosticStage = 'semantic-review'
+            await reviewSemantics(raw, checked.proposal)
+          }
           await evidence?.validation('accepted')
           return checked
         } catch (error) {
@@ -687,7 +767,9 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const next: Session = { ...session, phase: outcome.proposal ? 'proposed' : 'questions',
         revision: session.revision + 1, turns: [...session.turns, { role: 'assistant', text: raw }],
         ...(outcome.questions ? { questions: outcome.questions } : {}),
-        ...(outcome.proposal ? { proposal: outcome.proposal, digest: sha(outcome.proposal) } : {}),
+        ...(outcome.proposal ? { proposal: outcome.proposal, digest: sha(outcome.proposal),
+          ...(lastSemanticReview ? { semanticReview: {
+            proposalDigest: sha(outcome.proposal), ...lastSemanticReview } } : {}) } : {}),
         discoveryEvidencePaths: [...(session.discoveryEvidencePaths ?? []), ...evidencePaths],
       }
       diagnosticStage = 'persist-valid-response'

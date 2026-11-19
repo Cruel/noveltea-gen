@@ -755,6 +755,19 @@ or provider error text: directories are mode `0700`, evidence files `0600`;
 inspect locally, never upload or commit them. Evidence from older runs using
 in-memory discovery sessions cannot be recreated retroactively.
 
+Discovery proposals now require the `discovery-semantic-scope/v1` independent
+read-only Pi reviewer before they can be presented for exact author approval.
+Its separate `semantic-review` private evidence directory retains the packet's
+model context, reviewer transcript, output and validation result. The durable
+discovery session binds the exact proposal digest to the packet/verdict digests.
+A failed or uncertain semantic assessment triggers bounded proposal correction;
+reviewer JSON-format errors receive up to two same-session read-only repairs.
+Only the signed-in author can approve a positively reviewed proposal. This
+review never grants delegation, protected-canon permission or Story write scope.
+See `docs/semantic-validation-audit.md` for the replaced lexical checks and
+remaining broader heuristic-audit findings. Full live certification is still
+required; structural fixtures cannot establish semantic reviewer accuracy.
+
 For checkpoint recovery, pass the preserved verified commit to
 `node scripts/live-new-story-runner.mjs retry <mode> <sha>`. The retry
 in a separately allocated Job retains the original Author Turn as

@@ -13,6 +13,7 @@ import { onboardingPiRequest, assertApprovedPiFoundation, type DiscoveryInferenc
 import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { candidate } from '../src/lib/story-foundation.server'
 import { hasUserProtectedDecision } from '../../src/foundation-record'
+import { withFixtureSemanticReview } from './support/discovery-semantic-fixture'
 
 const url = 'http://localhost:3000'
 const structuredQuestions = (questions: unknown[]) => JSON.stringify({
@@ -97,20 +98,22 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
             { id: 'direction', kind: 'free-text',
               question: 'What creative guidance should shape the ending?',
               allowStudioDecision: false }])
-          : JSON.stringify({ ...JSON.parse(proposed), foundation: {
+          : '```json\n' + JSON.stringify({ ...JSON.parse(proposed), foundation: {
             ...JSON.parse(proposed).foundation, decisions: [
               { statement: 'No fixed heroic ending', authority: 'delegated',
                 source: { kind: 'answer', setId: state.accepted![1]!.setId, questionId: 'ending' } },
             ],
-          } })
+          } }) + '\n```'
     }
     const request = async (method: 'GET' | 'POST', value?: unknown, who = own, origin = url,
-      inferStep = infer, workspace = 'projects/demo') => {
+      inferStep = infer, workspace = 'projects/demo',
+      review?: Parameters<typeof withFixtureSemanticReview>[1]) => {
       const response = await onboardingPiRequest(auth, store,
         new Request(url + '/api/onboarding/pi?' + new URLSearchParams({
           repositoryId: repo, workspace,
         }), { method, headers: {cookie: who, origin},
-          ...(method === 'POST' ? {body: JSON.stringify(value)} : {}) }), url, inferStep)
+          ...(method === 'POST' ? {body: JSON.stringify(value)} : {}) }), url,
+        withFixtureSemanticReview(inferStep, review))
       return { status: response.status, body: await response.json() as any }
     }
     assert.equal((await request('GET', undefined, '')).status, 401)
@@ -208,6 +211,61 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal((await request('POST', {action: 'answer', revision: ref.revision, text: 'Late'})).status, 409)
     assert.equal((await request('GET', undefined, foreign)).status, 404)
     assert.equal(calls.length, 3)
+
+    // A delegated ending cannot be used to create an unrelated artwork
+    // budget. The separate read-only review rejects both model proposals.
+    const previousEvidenceRoot = process.env.NT_DISCOVERY_EVIDENCE_DIR
+    process.env.NT_DISCOVERY_EVIDENCE_DIR = join(root, 'semantic-rejection-evidence')
+    try {
+      let writerCalls = 0, reviewCalls = 0
+      const writer: DiscoveryInference = async (state, prompt) => {
+        writerCalls++
+        if (state.turns.length === 1) return structuredQuestions([
+          { id: 'ending', kind: 'yes-no', question: 'Should the ending be hopeful?',
+            allowStudioDecision: true },
+        ])
+        if (writerCalls === 3) assert.match(prompt, /Independent read-only scope review rejected/)
+        return JSON.stringify({ ...JSON.parse(proposed), foundation: {
+          ...JSON.parse(proposed).foundation,
+          decisions: [{ statement: 'Use twelve expensive character portraits.',
+            authority: 'delegated', source: { kind: 'answer',
+              setId: state.accepted![0]!.setId, questionId: 'ending' } }],
+        } })
+      }
+      const reject: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = packet => {
+        reviewCalls++
+        assert.equal(packet.claims.length, 1)
+        return packet.claims.map(c => ({ claimId: c.id, verdict: 'unsupported' as const,
+          reason: 'A question about endings does not authorize an artwork budget.' }))
+      }
+      const workspace = 'projects/semantic-scope-rejection'
+      const start = await request('POST', { action: 'start', model,
+        text: 'A short mystery.' }, own, url, writer, workspace, reject)
+      assert.equal(start.status, 200)
+      const rejected = await request('POST', {
+        action: 'answer', revision: start.body.session.revision,
+        setId: start.body.session.questions.id,
+        setRevision: start.body.session.questions.revision,
+        responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace, reject)
+      assert.equal(rejected.status, 503)
+      assert.equal(writerCalls, 3)
+      assert.equal(reviewCalls, 2)
+      const saved = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      assert.equal(saved.phase, 'blocked')
+      assert.equal(saved.accepted[0].responses[0].answer.kind, 'delegate')
+      assert.equal(saved.proposal, undefined)
+      assert.equal(saved.semanticReview, undefined)
+      const reviews = saved.discoveryEvidencePaths.filter((path: string) =>
+        path.includes('-semantic-review-'))
+      assert.equal(reviews.length, 2)
+      assert.ok(reviews.every((path: string) =>
+        JSON.parse(readFileSync(join(path, 'validation.json'), 'utf8')).status === 'rejected'))
+    } finally {
+      if (previousEvidenceRoot === undefined) delete process.env.NT_DISCOVERY_EVIDENCE_DIR
+      else process.env.NT_DISCOVERY_EVIDENCE_DIR = previousEvidenceRoot
+    }
 
     // The shared contract permits 16 typed questions, each with 4,000 custom
     // text and 1,000 note characters. Both the autosave and final-answer

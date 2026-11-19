@@ -14,6 +14,7 @@ import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credenti
 import { listStoryThreads } from '../src/lib/story-threads.server'
 import type { DiscoveryInference } from '../src/lib/onboarding-pi.server'
 import { planningDimensions } from '../../src/planning-interpretation'
+import { withFixtureSemanticReview } from './support/discovery-semantic-fixture'
 
 const url = 'http://localhost:3000'
 const questionsReply = (questions: unknown[]) => JSON.stringify({ phase: 'questions',
@@ -238,7 +239,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
         headers: { cookie: aliceCookie, origin: url },
         body: JSON.stringify({ action: 'retry', revision: partial.body.session?.revision ??
           (await req(storyIds[0]!, firstId, 'GET')).body.session.revision }),
-      }), url, storyIds[0]!, firstId, async state => proposalFor(state))
+      }), url, storyIds[0]!, firstId, withFixtureSemanticReview(async state => proposalFor(state)))
     assert.equal(recovery.status, 200)
     const proposed = (await recovery.json() as any).session
     assert.equal(proposed.phase, 'proposed')
@@ -319,7 +320,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     const delegated = await submitFirstStoryTurn(auth, store, headers, url, {
       storyId: storyIds[1]!, jobId: delegatedId, prompt: delegatedPrompt,
       creativeMode: 'collaborative',
-    }, async state => proposalFor(state))
+    }, withFixtureSemanticReview(async state => proposalFor(state)))
     assert.equal(delegated.state, 'discovery')
     const delegatedSession = (await req(storyIds[1]!, delegatedId, 'GET')).body.session
     assert.equal(delegatedSession.phase, 'proposed')
@@ -372,7 +373,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
           responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } },
             { questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
         }),
-      }), url, storyIds[2]!, collaborativeId, async state => proposalFor(state))
+      }), url, storyIds[2]!, collaborativeId, withFixtureSemanticReview(async state => proposalFor(state)))
     assert.equal(resolved.status, 200)
     const resolvedSession = (await resolved.json() as any).session
     assert.equal(resolvedSession.phase, 'proposed')
@@ -528,7 +529,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
           responses: [{ questionId: 'puzzle-clarification', answer: {
             kind: 'option', optionId: 'no-puzzles', note: '' } }],
         }),
-      }), url, storyIds[4]!, conflictId, async state => proposalFor(state))
+      }), url, storyIds[4]!, conflictId, withFixtureSemanticReview(async state => proposalFor(state)))
     assert.equal(resolvedConflict.status, 200)
     const resolvedProposal = (await resolvedConflict.json() as any).session
     assert.equal(resolvedProposal.phase, 'proposed')

@@ -123,9 +123,6 @@ test('forged or incomplete source references and fabricated consent fail closed'
     claims.map(c => c.path === 'puzzle_emphasis' ? { ...c, basis: 'inferred' } : c),
     claims.map(c => c.path === 'choice_frequency' ? { ...c, source: at('studio') } : c),
     claims.map(c => c.path === 'branching.depth' ? { ...c, basis: 'explicit' } : c),
-    claims.map(c => c.path === 'first_playthrough' ? { ...c,
-      source: at('linearity') } : c),
-    claims.map(c => c.path === 'pacing' ? { ...c, source: at('linearity'), basis: 'inferred' } : c),
   ]) assert.throws(() => parsePlanningInterpretations(tampered, p, sources, true))
   assert.throws(() => parsePlanningInterpretations([...claims, { ...claims[0], extra: 'forged' }],
     p, sources, true))
@@ -213,7 +210,7 @@ test('explicit clarification supersedes earlier contradictory answers without re
     PlanningClarificationRequired)
 })
 
-test('a Studio-origin creative decision must cite its exact delegated topic', () => {
+test('Studio source checks demand a submitted authorized delegation, not lexical topic matching', () => {
   assert.equal(resolveDelegatedDecision(at('studio'), sources, 'A recurring motif').decisionId,
     'author-answer-3', 'a broad Story baseline delegation permits creative details')
   const specific: PlanningEvidence[] = [
@@ -223,8 +220,9 @@ test('a Studio-origin creative decision must cite its exact delegated topic', ()
   ]
   assert.equal(resolveDelegatedDecision(at('ending'), specific, 'A bittersweet ending').decisionId,
     'author-answer-1')
-  assert.throws(() => resolveDelegatedDecision(at('ending'), specific,
-    'A costly Character artwork budget'), /different creative topic/)
+  assert.equal(resolveDelegatedDecision(at('ending'), specific,
+    'A costly Character artwork budget').decisionId, 'author-answer-1',
+    'Exact source authorization is separate from independent semantic scope review')
   assert.throws(() => resolveDelegatedDecision(at('linearity'), sources,
     'An alternate branching ending'), /lacks an author delegation/)
   assert.throws(() => resolveDelegatedDecision({ kind: 'turn', index: 12 }, sources,
@@ -261,9 +259,9 @@ test('specific delegated decisions match their topic without copying literal pro
     }]
     assert.equal(resolveDelegatedDecision(at(id), evidence, statement).decisionId,
       'author-answer-' + id, 'The submitted delegation must authorize ' + id)
-    assert.throws(() => resolveDelegatedDecision(at(id), evidence,
-      'Require four distinct endings.'), /different creative topic/,
-    id + ' must not authorize unrelated endings')
+    assert.equal(resolveDelegatedDecision(at(id), evidence,
+      'Require four distinct endings.').decisionId, 'author-answer-' + id,
+    'The independent reviewer, not deterministic provenance, must veto unrelated meaning')
   }
 })
 
@@ -286,8 +284,9 @@ test('a delegated planning dimension can cite the exact answered topic ID despit
     'author-answer-pacing')
   const mismatched = adapted.map(c => c.path === 'pacing'
     ? { ...c, source: at('branch-depth') } : c)
-  assert.throws(() => parsePlanningInterpretations(mismatched, p, evidence, true),
-    /does not concern this dimension/, 'An unrelated delegated question cannot authorize pacing')
+  assert.equal(parsePlanningInterpretations(mismatched, p, evidence, true)
+    .find(item => item.path === 'pacing')?.sourceDecisionId, 'author-answer-branch-depth',
+  'The independent reviewer must reject mismatched meaning after exact provenance is established')
 })
 
 test('inferred estimates may not invent hard production caps', () => {

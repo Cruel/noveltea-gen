@@ -12,7 +12,7 @@ export async function createDiscoveryEvidence(options: {
   repositoryId: string
   workspace: string
   revision: number
-  stage: 'initial' | 'corrective' | 'opening-questions'
+  stage: 'initial' | 'corrective' | 'opening-questions' | 'semantic-review'
   model: { provider: string; id: string }
   skillId: string
   instructions: string
