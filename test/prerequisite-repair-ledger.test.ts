@@ -6,7 +6,8 @@ import { test } from "node:test";
 import type { JobStartResult } from "../src/job.js";
 import { admitPrerequisiteRepair, inspectRepairLedger, MAX_DEPENDENCY_CYCLES,
   settlePrerequisiteRepair, submitPrerequisiteRepair,
-  admitRepairFinding, submitRepairCorrection, totalTurnCorrections } from "../src/repair-ledger.js";
+  admitRepairFinding, admitCausalRevalidationFinding, submitRepairCorrection,
+  totalTurnCorrections } from "../src/repair-ledger.js";
 import { removeTestTree } from "./helpers.js";
 const sha = (c: string) => c.repeat(40);
 const digest = (c: string) => c.repeat(64);
@@ -53,6 +54,37 @@ test("out-of-scope, unsettled, conflicting and exhausted corrections fail closed
   await settlePrerequisiteRepair(j, { turnDigest, id: finding.id,
     submittedSha: sha("2"), reviewDigest: digest("4"), verdict: "passed" });
   assert.equal((await inspectRepairLedger(j, turnDigest)).prerequisites?.[0]?.status, "resolved");
+});
+test("a newly discovered downstream defect inherits the same Turn budget and causal predecessor", async t => {
+  const j = job(t);
+  const report = (message: string, sourceSha = sha("c"), path = "choice-points/reviewed.md") => ({
+    turnDigest, rootFailureSha: sha("a"), sourceSha, causedBy: sourceSha,
+    reviewDigest: digest("d"), assignmentId: "interactive",
+    obligation: "Preserve the earlier reviewed Choice after Event correction.",
+    findings: [{ path, kind: "continuity" as const, message,
+      affectedPaths: [path] }],
+  });
+  const first = await admitCausalRevalidationFinding(j, report("After correction, payoff contradicts Choice"));
+  const old = first.findings[0]!;
+  assert.equal(old.causedBy, sha("c"));
+  const again = await admitCausalRevalidationFinding(j, report("Choice payoff remains impossible"));
+  assert.equal(again.findings.length, 1);
+  assert.equal(again.findings[0]!.id, old.id);
+  assert.equal(totalTurnCorrections(again), 0);
+  await submitRepairCorrection(j, { turnDigest, rootFailureSha: sha("a"),
+    sourceSha: sha("c"), changedPaths: ["choice-points/reviewed.md"] });
+  assert.equal(totalTurnCorrections(await inspectRepairLedger(j, turnDigest)), 1);
+  const rephrased = await admitCausalRevalidationFinding(j, {
+    ...report("A second source revision still fails", sha("b")),
+    reviewDigest: digest("e"),
+  });
+  assert.equal(rephrased.findings.length, 1);
+  assert.equal(rephrased.findings[0]!.id, old.id);
+  assert.equal(rephrased.findings[0]!.causedBy, sha("c"),
+    "Original causal predecessor is immutable even after later source changes.");
+  await assert.rejects(() => admitCausalRevalidationFinding(j, {
+    ...report("Moved owner"), assignmentId: "event",
+  }), /originally assigned owner/);
 });
 test("dependency and original-session corrections consume the same 12-attempt Turn budget", async t => {
   const j = job(t);

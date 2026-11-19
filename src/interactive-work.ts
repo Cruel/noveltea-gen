@@ -212,7 +212,7 @@ export class RepairableInteractiveScopeError extends Error {
     super("Unauthorized interactive specialist file(s): " + paths.join(", "));
   }
 }
-function prerequisitesText(text: string) {
+export function prerequisitesText(text: string) {
   const lines = text.split("\n");
   if (lines[0] !== "---") throw new Error("Existing Event is missing canonical frontmatter.");
   const end = lines.indexOf("---", 1);

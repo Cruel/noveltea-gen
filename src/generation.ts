@@ -1090,6 +1090,7 @@ export function createGenerationGraph(
             () => authorBoundary(job));
           if (stopped) return stopped;
           const result = await advanceCrossDomainCloseout({ ...s.request,
+            originalInventory: s.inventory ?? undefined,
             milestoneId: pending.milestoneId, planVersion: pending.planVersion,
             expected: { sourceSha: pending.sourceSha,
               proposalDigest: pending.proposalDigest, repairId: pending.repairId } });

@@ -15,6 +15,7 @@ import { readEventMilestoneRepairGrant } from "./event-milestone-repair.js";
 import { inspectCompositionPrerequisite,
   type CloseoutProposal, type CompositionPrerequisiteInput } from "./cross-domain-prerequisite.js";
 import { admitPrerequisiteRepair, inspectRepairLedger } from "./repair-ledger.js";
+import { assertCompletedSelectiveRevalidation } from "./selective-revalidation-work.js";
 import { validateStoryJob } from "./validator.js";
 import { trustedHead } from "./revision.js";
 import type { JobStartResult } from "./job.js";
@@ -140,6 +141,17 @@ export async function preflightCompositionBoundary(
     if (prior && (prior.status !== "resolved" || !prior.attempts.some(a =>
       a.verdict === "passed" && ancestor(job, a.submittedSha, head))))
       return refuse("Milestone metadata is complete but the original prerequisite review remains unresolved.");
+    if (prior) {
+      const lastPassed = [...prior.attempts].reverse().find(a => a.verdict === "passed" &&
+        ancestor(job, a.submittedSha, head));
+      if (!lastPassed?.reviewDigest) return refuse("Missing independent correction review.");
+      try {
+        await assertCompletedSelectiveRevalidation(job, lastPassed.submittedSha,
+          turn.digest, lastPassed.reviewDigest);
+      } catch (error) {
+        return refuse("Dependent revalidation is not complete: " + String(error));
+      }
+    }
     return examined;
   }
   if (examined.kind === "refuse") return examined;

@@ -25,6 +25,9 @@ import { reviewNarrative, type EditorialVerdict, type ReviewAssignment } from ".
 import { validCloseoutProposal, retryCloseoutProposal, closeoutReviewMayRetry,
   type CloseoutProposal } from "./cross-domain-prerequisite.js";
 import type { CompletionContract } from "./architecture.js";
+import type { GenerationInventory } from "./generation-plan.js";
+import { revalidateAfterReviewedCorrection } from "./selective-revalidation-work.js";
+import { originalInventorySnapshotDigest } from "./selective-revalidation.js";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const sha = /^[a-f0-9]{40}$/;
@@ -53,11 +56,15 @@ interface Receipt {
   validation?: { status: "passed"; sourceSha: string; validatorVersion: string };
   review?: EditorialVerdict; reviewDigest?: string; failure?: string;
   history?: RejectedCloseout[];
+  originalInventoryDigest?: string;
   retry?: { sourceSession: string; feedback: string };
 }
 export interface CloseoutRunRequest extends CompositionBoundaryRequest {
   story: string; job: string; milestoneId: string; planVersion: number;
   provider?: string; model?: string;
+  /** Original controller inventory before the repair, checkpointed by the
+   * same generation graph. No independent dependency DAG is created. */
+  originalInventory?: GenerationInventory;
   /** Pinned by the graph preflight; an interrupted proposal is not a lease. */
   expected?: { sourceSha: string; proposalDigest: string; repairId: string };
 }
@@ -201,8 +208,14 @@ async function verifyRejectedChain(job: JobStartResult, state: Receipt) {
   const trusted = JSON.parse(await readFile(join(job.stateDir, "revisions",
     "verified-head.json"), "utf8")) as { version?: number; jobId?: string; headSha?: string };
   if (trusted.version !== 1 || trusted.jobId !== job.jobId ||
-      ![history[0]!.proposal.sourceSha, state.commitSha].includes(trusted.headSha))
+      !sha.test(trusted.headSha ?? ""))
     throw Error("Original verified Story boundary changed beneath failed corrections.");
+  if (![history[0]!.proposal.sourceSha, state.commitSha].includes(trusted.headSha)) {
+    if (state.phase !== "verified" || !state.commitSha)
+      throw Error("Original verified Story boundary changed beneath failed corrections.");
+    const { verifiedNarrativeChain } = await import("./job-successor.js");
+    await verifiedNarrativeChain(job, state.commitSha, trusted.headSha!);
+  }
 }
 async function publish(job: JobStartResult, state: Receipt) {
   await verifyRejectedChain(job, state);
@@ -212,11 +225,16 @@ async function publish(job: JobStartResult, state: Receipt) {
   if (existsSync(file)) {
     const previous = JSON.parse(await readFile(file, "utf8")) as {
       version: number; jobId: string; headSha: string };
-    if (previous.version !== 1 || previous.jobId !== job.jobId ||
-        ![state.history?.[0]?.proposal.sourceSha ?? state.proposal.sourceSha,
-          state.commitSha].includes(previous.headSha))
+    if (previous.version !== 1 || previous.jobId !== job.jobId)
       throw Error("Another verified Story boundary moved during dependency publication.");
     if (previous.headSha === state.commitSha) return;
+    if (previous.headSha !== (state.history?.[0]?.proposal.sourceSha ?? state.proposal.sourceSha)) {
+      // Post-closeout correction descendants are already separately reviewed.
+      // Never overwrite a later verified head with the earlier prerequisite.
+      const { verifiedNarrativeChain } = await import("./job-successor.js");
+      await verifiedNarrativeChain(job, state.commitSha!, previous.headSha);
+      return;
+    }
   }
   const tmp = file + "." + randomUUID() + ".tmp";
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
@@ -290,11 +308,20 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
     const file = fileOf(job, request.milestoneId);
     let state = await load(file);
     if (!state) {
+      if (!request.originalInventory || !request.originalInventory.items.length)
+        throw Error("Reviewed upstream correction requires the original controller work inventory.");
       const boundary = await preflightCompositionBoundary(job, request,
         request.milestoneId, request.planVersion);
       if (boundary.kind !== "repair")
         throw Error("No authenticated unmet cross-domain prerequisite: " +
           (boundary.kind === "ready" ? "Milestone is already complete" : boundary.reason));
+      if (request.originalInventory.headSha !== boundary.proposal.sourceSha ||
+          request.originalInventory.planVersion !== request.planVersion ||
+          !request.originalInventory.items.some(item =>
+            item.id === "event:" + request.milestoneId &&
+            item.status === "verified" &&
+            item.verifiedSha === boundary.proposal.sourceEventSha))
+        throw Error("Cross-domain revalidation cannot replace a reviewed original Event work item.");
       await preflightPiAssignment(job, "prerequisite:" + request.milestoneId, {
         provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
       });
@@ -303,10 +330,14 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
         workItemId: "prerequisite-" + request.milestoneId.slice(10),
         turnDigest: boundary.turnDigest, repairId: boundary.repairId,
         proposal: boundary.proposal, phase: "ready", worker: "pi",
+        originalInventoryDigest: originalInventorySnapshotDigest(request.originalInventory),
         provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
       };
       await persist(file, state);
     }
+    if (!request.originalInventory || state.originalInventoryDigest !==
+        originalInventorySnapshotDigest(request.originalInventory))
+      throw Error("Upstream corrective work lost the original pinned dependent inventory.");
     if (!validCloseoutProposal(state.proposal) ||
         state.version !== 1 || state.jobId !== job.jobId ||
         state.threadId !== job.threadId || state.baseSha !== job.baseSha ||
@@ -510,7 +541,23 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
     await publish(job, state);
     if (await trustedHead(job) !== state.commitSha)
       throw Error("Closeout verified-head publication has not become authoritative.");
-    return { status: "verified" as const, headSha: state.commitSha,
+    const source = state.history?.[0]?.proposal ?? state.proposal;
+    await revalidateAfterReviewedCorrection({
+      job, inventory: request.originalInventory,
+      correction: {
+        version: 1, planVersion: state.proposal.planVersion,
+        baseSha: source.sourceSha, successorSha: state.commitSha!,
+        upstreamItemId: "event:" + state.proposal.milestoneId,
+        predecessorCommitSha: state.proposal.sourceEventSha,
+        turnDigest: state.turnDigest, reviewDigest: state.reviewDigest!,
+        changedPaths: state.proposal.allowedPaths,
+        permittedPaths: source.allowedPaths,
+      },
+      contract: request.contract, task: request.task,
+      provider: state.provider, model: state.model,
+      skillsSource: request.skillsSource, validatorSource: request.validatorSource,
+    });
+    return { status: "verified" as const, headSha: await trustedHead(job),
       workItemId: state.workItemId };
     }
     throw Error("Dependency correction exceeded its three-cycle limit without a reviewed result.");
