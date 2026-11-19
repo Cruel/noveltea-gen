@@ -79,11 +79,35 @@ A bounded task derived from a Thread request or work plan, describing the specif
 **Specialist review**:
 An independent semantic check of a specialist's proposed changes against its assignment and the relevant Story state. Reviews can cover a bounded group of related assignments; findings require a corrected draft or author-directed resolution of a disagreement, never argument-only approval.
 
+**Repair finding**:
+A source-bound, persistent description of an unmet Story obligation or defect discovered during a Turn. It identifies the same underlying problem across repeated specialist attempts, even when the explanation changes.
+
+**Repair ledger**:
+The controller-owned record of Repair findings, attempts, assigned corrections and review outcomes across a Turn's execution and recovery. It is separate from canonical Story content and the agents' Pi conversation histories.
+
+**Corrective assignment**:
+A bounded specialist assignment authorized to resolve a Repair finding, including a defect in previously reviewed work. It preserves the original author objective and does not implicitly grant authority over protected decisions.
+
+**Repair cycle**:
+An orchestrated attempt to resolve a Repair finding through authorized specialist work and verification, possibly including a correction to previously completed work. Its attempts are tracked separately from local drafting corrections and transient infrastructure retries.
+
+**Repair exhaustion**:
+A Turn outcome in which the permitted correction attempts have been consumed without resolving a Repair finding. The Turn's eligible completed work and evidence remain available for author-guided continuation.
+
+**Review dispute**:
+A source-linked challenge to an independent specialist-review finding, presented for controller verification and, where needed, fresh independent adjudication. It cannot override the original verdict merely through an agent's argument.
+
+**Protocol failure**:
+An agent execution failure to satisfy its prescribed response or source-inspection contract, such as invalid JSON or missing required fields, independent of whether its Story-writing changes are correct. Its bounded correction attempts are tracked separately from substantive Repair findings.
+
+**Pending revalidation**:
+A previously reviewed specialist result whose relevant upstream evidence changed and must be checked against the updated Story before it can be carried forward as current.
+
 **Validated checkpoint**:
 A recoverable Story revision that passed mandatory deterministic verification. It does not imply independent semantic review.
 
 **Reviewed checkpoint**:
-A validated Story revision whose relevant changes and assignments have passed the required independent semantic review. Review may be selectively triggered or grouped under the controller's review policy.
+A validated Story revision whose relevant changes and assignments have passed the required independent semantic review. Review may be selectively triggered or grouped under the controller's review policy; later authorized corrections can supersede its content without rewriting its history.
 
 **Author Question**:
 A bounded request for an author's direction, with defined response options or an open-ended answer and optional recommendations. It can arise during Story discovery or ongoing Story work; answering it is distinct from granting protected-decision approval.
