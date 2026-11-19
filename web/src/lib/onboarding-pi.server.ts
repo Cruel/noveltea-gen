@@ -155,6 +155,27 @@ function parseResponse(text: string, evidence: PlanningEvidence[], newStoryChat:
     newStoryChat, delegationAuthorized) }
   throw new Error('Story discovery did not produce questions or a valid proposal')
 }
+/** Model-visible feedback must come from the trusted schema validator, never
+ * include arbitrary provider errors, private session text or exception stacks. */
+function discoveryCorrectionFeedback(error: unknown): string {
+  const reason = error instanceof Error ? error.message : ''
+  if (reason === 'Invalid author-question recommendation.' ||
+      reason === 'A free-text question cannot force suggested alternatives.') {
+    return 'Invalid Question Set recommendation: for a free-text question omit ' +
+      'recommendedId and recommendationReason; use only an optional placeholder. ' +
+      'For alternatives/multiple-choice, include a recommendedId matching one of ' +
+      'the offered option IDs before adding recommendationReason. For yes-no, ' +
+      'recommendedId may only be yes or no. Never supply recommendationReason alone.'
+  }
+  if (reason === 'Recommended solution must be one of the offered alternatives.')
+    return 'Each recommendedId must exactly match an option ID within that question.'
+  if (reason === 'Discovery questions cannot request protected authority')
+    return 'Only request creative preferences, not approval, permission, authorization or protected-canon changes.'
+  if (reason === 'An author question requires 2–8 valid alternatives.' ||
+      reason === 'Author alternatives need unique IDs, concise titles and bounded optional detail.')
+    return 'Alternatives and multiple-choice questions require 2–8 options with unique lowercase-dash IDs and concise titles.'
+  return 'The structured response did not satisfy the required Question Set, Creative Direction JSON or source-grounded planning contract.'
+}
 export type DiscoveryInference = (session: Session, instructions: string) => Promise<string>
 async function realInference(store: StudioDatabase, owner: string, session: Session,
   instructions: string): Promise<string> {
@@ -539,6 +560,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     // duplicated model calls on concurrent requests and unsafe automatic replay
     // after a worker dies during a provider turn.
     await save(store, actor.id, repo, workspace, session, saved?.revision ?? null)
+    let diagnosticStage = 'load-skills'
     try {
       const instructions = await skillInstructions(session.skillId)
       const invoke = infer ?? ((s: Session, i: string) => realInference(store, actor.id, s, i))
@@ -564,7 +586,9 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         }
         return { proposal: result.proposal! }
       }
+      diagnosticStage = 'initial-inference'
       let raw = await invoke(session, instructions)
+      diagnosticStage = 'initial-response-validation'
       let corrected = false
       let outcome: ReturnType<typeof interpret>
       try { outcome = interpret(raw) }
@@ -574,14 +598,16 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         // Exactly one bounded correction. If the author has contradictory or
         // materially incompatible requirements, demand an actual new question,
         // not another unsupported proposal or an invented decision.
+        diagnosticStage = 'corrective-inference'
         raw = await invoke(session, instructions + (clarification
           ? '\nController clarification required: ' + error.message +
             ' Return ONLY a focused structured Question Set requesting author direction. ' +
             'Do not choose for the author.'
-          : '\nController correction: the previous question/proposal JSON failed trusted ' +
-            'validation, including source-grounded planning. Return one complete valid ' +
-            'structured Question Set or Creative Direction proposal with all source-backed ' +
-            'interpretations. Do not invent approvals or substitute prose questions.'))
+          : '\nController correction: ' + discoveryCorrectionFeedback(error) +
+            ' Return one complete valid structured Question Set or Creative Direction ' +
+            'proposal with source-backed interpretations. Do not invent approvals ' +
+            'or substitute prose questions.'))
+        diagnosticStage = 'corrective-response-validation'
         outcome = interpret(raw, clarification)
         if (clarification && outcome.proposal)
           throw Error('A material planning contradiction requires a new author question.')
@@ -589,13 +615,16 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       // A sparse initial author objective must solicit baseline questions even
       // in Autonomous mode. Give one bounded corrective model pass if it skipped
       // discovery; never fabricate questions or accept an unreviewed proposal.
+      diagnosticStage = 'opening-question-requirement'
       if (chat && session.turns.length === 1 && needsOpeningQuestions(session.brief) &&
           outcome.proposal) {
         if (corrected) throw new Error('Discovery already exhausted its corrective model attempt')
+        diagnosticStage = 'opening-question-inference'
         raw = await invoke(session, instructions + '\nController requirement: the author has only ' +
           'supplied a sparse objective without comprehensive delegation. Your previous proposal ' +
           'skipped the required first baseline discovery questions. Return ONLY a questions ' +
           'response with the minimum necessary recommended questions, not a proposal.')
+        diagnosticStage = 'opening-question-validation'
         outcome = interpret(raw)
         if (outcome.proposal) throw new Error('Required opening discovery questions were not supplied')
       }
@@ -607,6 +636,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         ...(outcome.questions ? { questions: outcome.questions } : {}),
         ...(outcome.proposal ? { proposal: outcome.proposal, digest: sha(outcome.proposal) } : {}),
       }
+      diagnosticStage = 'persist-valid-response'
       await save(store, actor.id, repo, workspace, next, session.revision)
       return reply({ session: scope(next) })
     } catch (error) {
@@ -623,7 +653,32 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           : /JSON|proposal|discovery reply|questions|foundation/i.test(message) ? 'invalid-model-output'
           : /model|provider|api/i.test(message) ? 'provider'
           : 'other'
-        console.error('Trusted local Story discovery failure:', JSON.stringify({ name, cause }))
+        const knownValidation = [
+          'Discovery questions cannot request protected authority',
+          'Invalid bounded discovery Question Set.',
+          'Question IDs must be stable, unique and bounded.',
+          'Invalid author-question request.',
+          'Invalid bounded author question.',
+          'Invalid requested Studio-decision policy.',
+          'Author question context references must be bounded canonical Story locations.',
+          'Invalid author-question placeholder.',
+          'Invalid author-question recommendation.',
+          'A free-text question cannot force suggested alternatives.',
+          'A Yes/No question has fixed Yes/No/Other choices.',
+          'An author question requires 2–8 valid alternatives.',
+          'Author alternatives need unique IDs, concise titles and bounded optional detail.',
+          'Recommended solution must be one of the offered alternatives.',
+          'Question proposal contains unsupported authority fields',
+          'Story discovery did not produce questions or a valid proposal',
+          'Discovery already exhausted its corrective model attempt',
+          'Required opening discovery questions were not supplied',
+          'Pi specialist did not finish',
+        ].find(value => message === value)
+        console.error('Trusted local Story discovery failure:', JSON.stringify({
+          name, cause: knownValidation ? 'invalid-model-output' : cause,
+          stage: diagnosticStage,
+          ...(knownValidation ? { validation: knownValidation } : {}),
+        }))
       }
       // Never repeat an uncertain provider turn automatically or expose raw
       // model errors/credentials. Saved author input survives for inspection.

@@ -22,13 +22,15 @@ import { inspectJobReport } from '../../../src/job-report'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
 import { fullStoryTimeouts } from '../../../scripts/live-new-story-timeout.mjs'
+import { parseQuestionResponses, type QuestionSet } from '../../../src/author-question-set'
+import { authorQuestionKind, authorQuestionOptions } from '../../../src/author-question'
 
 type Mode = 'autonomous' | 'collaborative'
 type Discovery = {
   phase: string
   revision: number
   digest?: string
-  questions?: string
+  questions?: QuestionSet | null
   chat?: { sourceSha: string; originalObjective: string }
 }
 type ChatCase = {
@@ -83,15 +85,32 @@ export async function beginLiveNewStoryChat(args: ChatCase) {
   }
   let discovery = await request('GET')
   assert.equal(discovery.phase, 'questions', 'Sparse Story prompt must ask for author baseline preferences')
-  assert.match(discovery.questions ?? '', /recommend|suggest/i)
+  assert.ok(discovery.questions?.questions.length, 'Discovery must return a structured Question Set')
   for (let i = 0; i < 4 && discovery.phase === 'questions'; i++) {
-    const answer =
-      i === 0
-        ? adaptiveBrief ?? 'A compact atmospheric mystery on a stranded overnight train. Include fair-play clues, an enacted player choice and meaningfully different endings. I delegate unprotected creative details; propose the baseline.'
-        : adaptiveBrief
-          ? 'I delegate the remaining unprotected decisions while retaining the requested Story-wide Interaction profile and causal consequences. Propose the complete playable mystery baseline.'
-          : 'I delegate the rest of the unprotected choices. Propose the complete playable mystery baseline.'
-    discovery = await request('POST', { action: 'answer', revision: discovery.revision, text: answer })
+    const set = discovery.questions!
+    assert.ok(set.id && Number.isSafeInteger(set.revision), 'Question Set identity is mandatory')
+    const guidance = i === 0
+      ? adaptiveBrief ?? 'A compact atmospheric mystery on a stranded overnight train. Include fair-play clues, an enacted player choice and meaningfully different endings. I delegate unprotected creative details; propose the baseline.'
+      : adaptiveBrief ?? 'I delegate remaining unprotected choices. Preserve the agreed compact mystery baseline.'
+    // Scripted author choices go through the shared response contract. Only
+    // explicitly delegable questions receive a delegated answer.
+    const responses = set.questions.map((question, index) => {
+      const note = index === 0 ? guidance.slice(0, 1000) : ''
+      if (question.delegationAllowed === true)
+        return { questionId: question.id, answer: { kind: 'delegate' as const, note } }
+      const kind = authorQuestionKind(question)
+      if (kind === 'free-text')
+        return { questionId: question.id, answer: { kind: 'custom' as const, text: guidance, note: '' } }
+      const options = authorQuestionOptions(question)
+      const option = question.recommendedId ?? options[0]?.id
+      assert.ok(option, 'Certification cannot invent a choice for a malformed Question Set')
+      if (kind === 'multiple-choice')
+        return { questionId: question.id, answer: { kind: 'multiple' as const, optionIds: [option], note } }
+      return { questionId: question.id, answer: { kind: 'option' as const, optionId: option, note } }
+    })
+    parseQuestionResponses(set, responses)
+    discovery = await request('POST', { action: 'answer', revision: discovery.revision,
+      setId: set.id, setRevision: set.revision, responses })
   }
   assert.equal(discovery.phase, 'proposed')
   assert.ok(discovery.digest)

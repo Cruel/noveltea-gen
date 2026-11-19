@@ -250,7 +250,7 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
         if (pinned.turnPlanDigest) {
           const ledger = await inspectRepairLedger(job, pinned.turnPlanDigest)
           const head = await trustedHead(job)
-          const source = ledger.corrections.findLast(c =>
+          const source = ledger.corrections.slice().reverse().find(c =>
             c.result?.status === 'failed' && c.result.successorSha === head)
           if (source) {
             const repair = await inspectRejectedRepair(job, source.sourceSha)

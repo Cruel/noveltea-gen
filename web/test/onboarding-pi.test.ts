@@ -317,15 +317,22 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     assert.equal(resubmit.status, 409)
     const revision = (await store.persistence.onboarding.conversation(alice.id, repo, ''))!.revision
     let calls = 0
-    const retry = await req({action:'retry', revision}, async state => {
+    const retry = await req({action:'retry', revision}, async (state, instructions) => {
       calls++
       assert.equal(state.turns.length, 1)
+      if (calls === 1) return structuredQuestions([{ id: 'conflict', kind: 'free-text',
+        question: 'What is the main dramatic conflict?', allowStudioDecision: true,
+        recommendationReason: 'Prefer a strong personal stake' }])
+      assert.match(instructions, /Invalid Question Set recommendation/)
+      assert.match(instructions, /free-text question omit recommendedId and recommendationReason/)
+      assert.doesNotMatch(instructions, /provider secret: NOT-FOR-UI/)
       return structuredQuestions([{ id: 'conflict', kind: 'free-text',
-        question: 'What is the main dramatic conflict?', allowStudioDecision: true }])
+        question: 'What is the main dramatic conflict?', allowStudioDecision: true,
+        placeholder: 'A conflict with a personal stake' }])
     })
     assert.equal(retry.status, 200)
     assert.equal(retry.body.session.phase, 'questions')
-    assert.equal(calls, 1)
+    assert.equal(calls, 2)
     assert.equal((await req({action:'retry', revision}, async () => { throw new Error('unexpected') })).status, 409)
     // Simulate a worker dying after reserving an expensive Pi turn. Recovery
     // must require an explicit acknowledgement, with no automatic model call.
@@ -339,7 +346,7 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     })
     assert.equal(recovered.status, 200)
     assert.equal(recovered.body.session.phase, 'blocked')
-    assert.equal(calls, 1)
+    assert.equal(calls, 2)
     assert.equal((await req({action:'reconcile',revision:hanging.revision}, async () => {
       throw new Error('duplicate reconcile must not call Pi')
     })).status, 409)
