@@ -31,6 +31,7 @@ type Discovery = {
   revision: number
   digest?: string
   questions?: QuestionSet | null
+  proposal?: { foundation: { planning?: { first_playthrough?: { min_minutes: number; max_minutes: number } } } }
   chat?: { sourceSha: string; originalObjective: string }
 }
 type ChatCase = {
@@ -45,7 +46,9 @@ type ChatCase = {
   sourceSha: string
   mode: Mode
 }
-const prompt = 'Make me a mystery game'
+const firstPlaythrough = { min_minutes: 30, max_minutes: 45 } as const
+const durationDirection = 'A firm first-playthrough duration of 30–45 minutes on one complete route, excluding replays. Do not exceed 45 minutes.'
+const prompt = 'Make me a mystery game. ' + durationDirection
 const adaptiveShape = process.env.NT_TEST_WEB_PI_ADAPTIVE_SHAPE
 const adaptiveBrief = adaptiveShape === 'narrative-led'
   ? 'Make this a compact, dialogue-led mystery with observational exploration, credible clues, and at least one consequential choice. Some Milestones should be Event-only: do not invent a formal Puzzle or force a Choice at every Milestone. The ending must honor the original mystery promise and the effects of the actual player decisions. I delegate all unprotected creative details; propose the complete playable baseline.'
@@ -96,6 +99,16 @@ export async function beginLiveNewStoryChat(args: ChatCase) {
     // explicitly delegable questions receive a delegated answer.
     const responses = set.questions.map((question, index) => {
       const note = index === 0 ? guidance.slice(0, 1000) : ''
+      // Playtime is an explicit author constraint, never an agent delegation.
+      // The model may use a different question ID, so inspect the question text.
+      if (/\b(?:duration|playtime|playthrough|game length|how long|minute range)\b/i
+        .test(question.id + ' ' + question.question)) {
+        if (authorQuestionKind(question) === 'multiple-choice')
+          return { questionId: question.id, answer: { kind: 'multiple' as const,
+            optionIds: [], text: durationDirection, note: '' } }
+        return { questionId: question.id, answer: { kind: 'custom' as const,
+          text: durationDirection, note: '' } }
+      }
       if (question.delegationAllowed === true)
         return { questionId: question.id, answer: { kind: 'delegate' as const, note } }
       const kind = authorQuestionKind(question)
@@ -113,6 +126,8 @@ export async function beginLiveNewStoryChat(args: ChatCase) {
       setId: set.id, setRevision: set.revision, responses })
   }
   assert.equal(discovery.phase, 'proposed')
+  assert.deepEqual(discovery.proposal?.foundation.planning?.first_playthrough, firstPlaythrough,
+    'Reject a mismatched Story length before approving or starting expensive generation')
   assert.ok(discovery.digest)
   assert.equal(discovery.chat?.sourceSha, sourceSha)
   assert.equal(discovery.chat?.originalObjective, prompt)
