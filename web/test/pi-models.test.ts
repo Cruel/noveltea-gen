@@ -26,6 +26,31 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'nt-pi-credentials-'))
   const saved = { key: process.env.NT_PI_CREDENTIAL_KEY, host: process.env.OPENAI_API_KEY }
+  const originalFetch = globalThis.fetch
+  const remoteModelId = 'pi-remote-model-catalog-test'
+  const remoteCodexId = 'pi-remote-codex-catalog-test'
+  // Simulate a newer Pi catalog, without depending on network availability or
+  // baking any newly released model identity into NovelTea's implementation.
+  globalThis.fetch = async (input, init) => {
+    if (String(input).startsWith('https://pi.dev/api/models/providers/openai-codex?'))
+      return new Response(JSON.stringify({ models: [{
+        type: 'chat', id: remoteCodexId, name: 'Pi remote Codex test model',
+        provider: 'openai-codex', api: 'openai-codex-responses',
+        baseUrl: 'https://chatgpt.com/backend-api', reasoning: true,
+        input: ['text'], cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+        contextWindow: 100_000, maxTokens: 10_000,
+      }] }), { status: 200, headers: { 'last-modified':
+        new Date(Date.now() + 86_400_000).toUTCString() } })
+    if (String(input).startsWith('https://pi.dev/api/models/providers/openai?'))
+      return new Response(JSON.stringify({ models: [{
+        type: 'chat', id: remoteModelId, name: 'Pi remote test model', provider: 'openai',
+        api: 'openai-responses', baseUrl: 'https://api.openai.com/v1', reasoning: true,
+        input: ['text'], cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+        contextWindow: 100_000, maxTokens: 10_000,
+      }] }), { status: 200, headers: { 'last-modified':
+        new Date(Date.now() + 86_400_000).toUTCString() } })
+    return originalFetch(input, init)
+  }
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
   process.env.OPENAI_API_KEY = 'HOST-PRIVATE-DO-NOT-USE'
   let store = openStudioDatabase(join(directory, 'studio.sqlite'))
@@ -74,8 +99,8 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.ok(added.body.models.some((model: { provider: string }) => model.provider === 'openai'),
       'Pi SDK must report eligible models after an explicit per-user connection')
     assert.ok(added.body.models.some((model: { provider: string; id: string }) =>
-      model.provider === 'openai' && model.id === 'gpt-6.2-sol'),
-    'An explicitly connected user must see the pinned GPT-6.2 Sol catalog entry')
+      model.provider === 'openai' && model.id === remoteModelId),
+    'An explicitly connected user must see models discovered from the current Pi catalog')
     assert.deepEqual((await request('GET', bobCookie)).body.models, [],
       'The additional model must not be exposed without user credentials')
     assert.doesNotMatch(JSON.stringify(added.body), /ALICE-PRIVATE-MODEL-KEY|HOST-PRIVATE/)
@@ -143,8 +168,12 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
       assert.ok(restoredRuntime.getProvider('openai')?.auth.oauth, 'openai provider supports subscription OAuth')
       assert.equal((await restoredRuntime.getAuth('openai'))?.auth.apiKey, oauth.access,
         'OAuth connection is rehydrated from the user database, not the host Pi profile')
-      assert.ok((await restoredRuntime.getAvailable('openai')).some(model => model.id === 'gpt-6.2-sol'),
-        'The pinned new model must be selectable through owner-bound OAuth as well as API-key auth')
+      assert.ok((await restoredRuntime.getAvailable('openai')).some(model => model.id === remoteModelId),
+        'A freshly discovered model must remain selectable through owner-bound OAuth')
+      await userPiCredentials(anotherStore, alice.id).modify('openai-codex', async () => oauth)
+      const codexRuntime = await createUserPiRuntime(anotherStore, alice.id)
+      assert.ok((await codexRuntime.getAvailable('openai-codex')).some(model => model.id === remoteCodexId),
+        'A newly published Codex provider model must be selectable without manual registration')
       await assert.rejects(async () => {
         const wrong = userPiCredentials(anotherStore, alice.id, { NT_PI_CREDENTIAL_KEY: randomBytes(32).toString('base64') })
         await wrong.read('openai')
@@ -161,6 +190,7 @@ test('Pi model credentials are user-scoped, encrypted, restart-safe and never ex
     assert.match(anon.response.headers.get('cache-control') ?? '', /no-store/)
   } finally {
     store.close()
+    globalThis.fetch = originalFetch
     if (saved.key === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
     else process.env.NT_PI_CREDENTIAL_KEY = saved.key
     if (saved.host === undefined) delete process.env.OPENAI_API_KEY

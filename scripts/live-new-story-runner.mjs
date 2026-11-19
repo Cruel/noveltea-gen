@@ -24,10 +24,11 @@ const skills = join(process.env.HOME ?? "/home/thomas", "dev/noveltea-skills");
 const [action, mode, checkpointSha, sourceJobId, guidance = ""] = process.argv.slice(2);
 const runLabel = process.env.NT_TEST_WEB_PI_RUN_LABEL ?? "";
 const requestedModel = process.env.NT_TEST_WEB_PI_MODEL ?? "gpt-6-luna";
+const requestedProvider = process.env.NT_TEST_WEB_PI_PROVIDER ?? "openai-codex";
 if (runLabel && !/^[a-z0-9][a-z0-9-]{0,30}$/.test(runLabel))
   throw Error("Certification run label must be a short lowercase identifier.");
-if (!["gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol"].includes(requestedModel))
-  throw Error("Unrecognized opt-in certification model.");
+// Pi/Studio resolve the selected provider/model from the live model catalog.
+// The certification launcher must not maintain a separate model allowlist.
 if (
   !["autonomous", "collaborative"].includes(mode ?? "") ||
   !["start", "status", "retry", "fork", "resume", "worker"].includes(action ?? "")
@@ -71,6 +72,10 @@ if (action === "start" || action === "retry" || action === "fork" || action === 
   if (previous && action !== "start" && previous.model &&
       previous.model !== requestedModel)
     throw Error("Cannot switch the model of a pinned certification continuation.");
+  const provider = action === "start" ? requestedProvider : (previous?.provider ?? "openai");
+  if (action !== "start" && process.env.NT_TEST_WEB_PI_PROVIDER &&
+      process.env.NT_TEST_WEB_PI_PROVIDER !== provider)
+    throw Error("Cannot switch the provider of a pinned certification continuation.");
   if (previous && previous.status === "running" && alive(previous.pid))
     throw Error("Existing " + mode + " certification is already running: " + previous.pid);
   if (!existsSync(nativeCli) || !existsSync(join(skills, "skills/nt-story-orchestrate/SKILL.md")))
@@ -119,7 +124,7 @@ if (action === "start" || action === "retry" || action === "fork" || action === 
     cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   }).trim();
   save({ status: "running", pid: child.pid, startedAt: new Date().toISOString(), mode,
-    model: requestedModel, runLabel, gitHead, log, root, kind: action, timeoutMinutes,
+    provider, model: requestedModel, runLabel, gitHead, log, root, kind: action, timeoutMinutes,
     ...(adaptiveShape ? { adaptiveShape } : {}),
     ...(["retry", "fork"].includes(action) ? { checkpointSha, sourceJobId: sourceJobId || null, guidance } : {}),
     ...(prepared ? { checkpointSha: prepared.checkpointSha, sourceJobId: prepared.sourceJobId,
@@ -159,7 +164,7 @@ const env = {
   } : { NT_TEST_WEB_PI_ROOT: initial.root }),
   NT_TEST_WEB_PI_AUTH: "device-code",
   NT_TEST_WEB_PI_LOCAL_OAUTH: "1",
-  NT_TEST_WEB_PI_PROVIDER: "openai",
+  NT_TEST_WEB_PI_PROVIDER: initial.provider ?? "openai",
   NT_TEST_WEB_PI_MODEL: initial.model ?? "gpt-6-luna",
   NT_TEST_WEB_PI_PRESERVE: "1",
   NT_TEST_WEB_PI_DIAGNOSTIC: "1",

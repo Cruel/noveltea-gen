@@ -11,7 +11,8 @@ const providerId = /^[a-z][a-z0-9-]{0,63}$/
 /** Cache only the owner-bound in-memory Pi catalog/runtime, never an authorization
  * decision. Every availability check still re-reads credentials from the DB,
  * and mutation invalidates this entry before a later request can reuse it. */
-type RuntimeEntry = { fingerprint: string; pending: Promise<ModelRuntime> }
+type RuntimeEntry = { fingerprint: string; pending: Promise<ModelRuntime>; catalogCheckedAt: number }
+const CATALOG_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 const runtimeCache = new WeakMap<StudioDatabase, Map<string, RuntimeEntry>>()
 const MAX_OWNER_RUNTIMES = 16
 function invalidateRuntime(store: StudioDatabase, owner: string) {
@@ -92,13 +93,26 @@ export function userPiCredentials(store: StudioDatabase, owner: string,
   }
 }
 
+/** Refresh only connected providers after ambient auth has been restricted.
+ * Pi owns model definitions, network freshness and cached catalog semantics.
+ * Studio never reads the host Pi models or credentials. */
+async function refreshOwnerCatalog(runtime: ModelRuntime, credentials: Credentials,
+  env: NodeJS.ProcessEnv): Promise<void> {
+  if (env.PI_OFFLINE !== undefined) return
+  const providers = (await credentials.list()).map(item => item.providerId)
+  if (!providers.length) return
+  await runtime.refresh({ allowNetwork: true, providers, signal: AbortSignal.timeout(15_000) })
+}
+
 /** Never read ~/.pi/auth.json, ~/.pi/models.json or their model caches. */
 async function buildUserPiRuntime(store: StudioDatabase, owner: string,
   env: NodeJS.ProcessEnv) {
+  const credentials = userPiCredentials(store, owner, env)
   const runtime = await ModelRuntime.create({
-    credentials: userPiCredentials(store, owner, env),
+    credentials,
     modelsPath: null,
-    allowModelNetwork: false,
+    allowModelNetwork: true,
+    refreshOnCreate: false,
   })
   // Built-in Pi providers otherwise accept ambient host API keys (and, for
   // some providers, machine-local auth files). A per-user CredentialStore
@@ -120,29 +134,11 @@ async function buildUserPiRuntime(store: StudioDatabase, owner: string,
               ctx: { env: async () => undefined, fileExists: async () => false } }) : undefined,
       },
     } }
-    // The bundled Pi 1.5.0 catalog predates GPT-6.2 Sol. Its current OpenAI
-    // model contract (limits, API, pricing, capabilities) matches GPT-6.1 Sol.
-    // Extend only this pinned built-in provider; never load host Pi catalog or
-    // credentials, and prefer the SDK entry as soon as it becomes available.
-    const priorSol = provider.id === 'openai' && !provider.getModels().some(model => model.id === 'gpt-6.2-sol')
-      ? provider.getModels().find(model => model.id === 'gpt-6.1-sol' && model.api === 'openai-responses')
-      : undefined
-    const pinnedSol = priorSol ? { ...priorSol, id: 'gpt-6.2-sol', name: 'GPT-6.2 Sol' } : null
-    const supported = pinnedSol ? { ...restricted,
-      getModels: () => {
-        const models = restricted.getModels()
-        return models.some(model => model.id === pinnedSol.id) ? models : [...models, pinnedSol]
-      },
-      getAllModels: () => {
-        const models = restricted.getAllModels?.() ?? restricted.getModels()
-        return models.some(model => model.id === pinnedSol.id) ? models : [...models, pinnedSol]
-      },
-    } : restricted
     // OAuth refresh-token ownership stays in the per-user encrypted vault.
     // Only an OpenAI HTTP 401 can trigger a one-time transport retry. API keys,
     // non-OpenAI origins and other failures are never retried here.
     if (provider.id !== 'openai' || !provider.auth.oauth) {
-      runtime.registerNativeProvider(supported)
+      runtime.registerNativeProvider(restricted)
       continue
     }
     const renew = async (rejectedAccess: string): Promise<string | null> => {
@@ -156,7 +152,7 @@ async function buildUserPiRuntime(store: StudioDatabase, owner: string,
       })
       return updated?.type === 'oauth' ? updated.access : null
     }
-    runtime.registerNativeProvider({ ...supported,
+    runtime.registerNativeProvider({ ...restricted,
       stream: (model, context, options) => provider.stream(model, context, {
         ...options, fetch: withOpenAiOAuth401Retry(options?.fetch ?? fetch, renew),
       } as typeof options),
@@ -165,7 +161,7 @@ async function buildUserPiRuntime(store: StudioDatabase, owner: string,
       }),
     })
   }
-  await runtime.refresh({ allowNetwork: false })
+  await refreshOwnerCatalog(runtime, credentials, env)
   return runtime
 }
 
@@ -195,10 +191,17 @@ export async function createUserPiRuntime(store: StudioDatabase, owner: string,
   if (existing?.fingerprint === fingerprint) {
     entries.delete(owner)
     entries.set(owner, existing)
+    if (Date.now() - existing.catalogCheckedAt >= CATALOG_CHECK_INTERVAL_MS) {
+      existing.catalogCheckedAt = Date.now()
+      existing.pending = existing.pending.then(async runtime => {
+        await refreshOwnerCatalog(runtime, userPiCredentials(store, owner, env), env)
+        return runtime
+      })
+    }
     return existing.pending
   }
   const pending = buildUserPiRuntime(store, owner, env)
-  const entry: RuntimeEntry = { fingerprint, pending }
+  const entry: RuntimeEntry = { fingerprint, pending, catalogCheckedAt: Date.now() }
   entries.set(owner, entry)
   if (entries.size > MAX_OWNER_RUNTIMES) {
     const oldest = entries.keys().next().value
