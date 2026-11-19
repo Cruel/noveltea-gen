@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { driveRejectedRepairCycle, type RepairCycleOps, type RepairCycleState } from "../src/rejected-repair-controller.js";
+import { createGenerationGraph } from "../src/generation.js";
+import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
+import type { JobStartResult } from "../src/job.js";
 
 type State = RepairCycleState & { assignmentVersion?: number; attempts?: number };
 const original = "a".repeat(40), corrected = "b".repeat(40), second = "c".repeat(40);
@@ -41,9 +44,23 @@ function defaultOps(init: State, log: string[]): { ops: RepairCycleOps<State>; g
       rereview: async () => { log.push("independent-read-only-review"); },
       finishReview: async () => { log.push("seal-independent-verdict"); return current = { ...current, phase: "passed" }; },
       nextFailure: async () => { throw Error("Unexpected failed correction"); },
+      adjudicate: async () => { throw Error("Unexpected dispute adjudication"); },
     },
   };
 }
+
+test("the production graph retains one review-to-verification-to-scheduling path", async () => {
+  const graph = await createGenerationGraph().getGraphAsync();
+  for (const name of ["specialist_dispatch", "independent_assignment_review",
+    "verify_committed_work", "author_update_intake"])
+    assert.ok(graph.nodes[name], "Missing production node " + name);
+  for (const [source, target] of [
+    ["specialist_dispatch", "independent_assignment_review"],
+    ["independent_assignment_review", "verify_committed_work"],
+    ["verify_committed_work", "author_update_intake"],
+  ]) assert.ok(graph.edges.some(edge => edge.source === source && edge.target === target),
+    "Recovery must resume the existing graph at " + source + " -> " + target);
+});
 
 test("rejection -> same writer -> actual correction -> native validation -> distinct reviewer -> verified completion", async () => {
   const log: string[] = [];
@@ -131,6 +148,40 @@ test("two failed independent rereviews exhaust bounded correction without touchi
     "Unrelated work never gains an implicit repair attempt or scope change");
 });
 
+test("a dispute can never re-seal the original negative checkpoint", async () => {
+  await assert.rejects(() => reviewBoundedAssignments({} as JobStartResult, [],
+    async () => { throw Error("An adjudicator must not run for a seal request."); },
+    "independent-adjudicator", true,
+    { sourceSha: original, reviewDigest: "b".repeat(64), path: "events/absence.md",
+      line: 1, claim: "Original evidence contradicts the negative finding" }),
+    /Adjudication may not overwrite or re-seal/);
+});
+
+test("one read-only dispute adjudication cannot erase the sealed negative review or replay the writer", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "disputing", sourceCommitSha: original }, log);
+  flow.ops.adjudicate = async () => {
+    log.push("deterministic-source-check");
+    log.push("fresh-independent-adjudicator");
+    const settled: State = { phase: "blocked", sourceCommitSha: original };
+    flow.set(settled);
+    return settled;
+  };
+  const outcome = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(outcome.next, "author-escalation");
+  assert.deepEqual(log, ["deterministic-source-check", "fresh-independent-adjudicator"]);
+  await driveRejectedRepairCycle(flow.ops);
+  assert.equal(log.length, 2, "a sealed dispute result cannot be re-adjudicated on resume");
+});
+
+test("an authenticated other-owner report routes to controller rather than reissuing a write", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "needs-plan", sourceCommitSha: original }, log);
+  const result = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(result.next, "controller-replan");
+  assert.deepEqual(log, [], "a different specialist must obtain its own authorization");
+});
+
 test("interrupted original writer is not replayed after restart, regardless of available budget", async () => {
   const log: string[] = [];
   const flow = defaultOps({ phase: "repairing", sourceCommitSha: original,
@@ -139,6 +190,33 @@ test("interrupted original writer is not replayed after restart, regardless of a
   assert.equal(outcome.next, "manual-reconcile");
   assert.match(outcome.reason!, /never replay/);
   assert.deepEqual(log, []);
+});
+
+test("Turn-wide twelve-correction allowance is not cut short by the transition guard", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "ready", sourceCommitSha: original, attempts: 0 }, log);
+  flow.ops.commit = async () => {
+    const state = flow.get();
+    const next: State = { ...state, phase: "reviewing",
+      repairedCommitSha: (state.attempts! % 16).toString(16).repeat(40) };
+    flow.set(next);
+    return next;
+  };
+  flow.ops.finishReview = async () => {
+    const state = flow.get();
+    const next: State = { ...state, phase: state.attempts === 12 ? "passed" : "failed" };
+    flow.set(next);
+    return next;
+  };
+  flow.ops.nextFailure = async () => {
+    const state = flow.get();
+    const next: State = { ...state, phase: "ready", sourceCommitSha: state.repairedCommitSha! };
+    flow.set(next);
+    return next;
+  };
+  const result = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(result.next, "completed");
+  assert.equal(log.filter(step => step.startsWith("original-writer:")).length, 12);
 });
 
 test("bounded controller refuses unexpected loops instead of repeatedly calling the model", async () => {

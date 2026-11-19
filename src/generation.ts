@@ -664,12 +664,25 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
             finalizeReviewEventDependency(job, point.commitSha));
         }
         if (progress.next !== "completed") return {
+          ...(progress.next === "controller-replan" ? { escalation: {
+            kind: "dependency-replan" as const, requiresTrustedApproval: false,
+            sources: progress.state.outOfAuthority ? [{
+              source: progress.state.outOfAuthority.path,
+              message: progress.state.failure ?? "A supporting record is outside the original writer lease.",
+              repair: "controller-amendment",
+            }] : [],
+            action: "Assess the source-linked other-owner dependency against the original Turn " +
+              "and propose a separately controller-authorized bounded assignment; " +
+              "do not replay the original writer or expand its file permissions.",
+          } } : {}),
           status: progress.next === "author-choice" ? "paused" : "blocked",
           reason: progress.next === "author-choice"
             ? "Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending."
             : progress.next === "author-escalation"
-              ? "Bounded original-session corrections did not pass independent rereview. Author-led scope review is required."
-              : "Interrupted original-session correction is preserved for manual recovery.",
+              ? progress.state.failure ?? "Bounded original-session corrections did not pass independent rereview. Author-led scope review is required."
+              : progress.next === "controller-replan"
+                ? progress.state.failure ?? "Another specialist must provide a separately authorized prerequisite."
+                : "Interrupted original-session correction is preserved for manual recovery.",
         };
       }
     }

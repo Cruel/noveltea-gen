@@ -24,10 +24,13 @@ export interface RepairCycleOps<S extends RepairCycleState> {
   rereview(state: S): Promise<void>;
   finishReview(sourceSha: string): Promise<S>;
   nextFailure(state: S): Promise<S>;
+  /** Recheck deterministic source references before one fresh independent read-only review. */
+  adjudicate(state: S): Promise<S>;
 }
 export type RepairCycleResult<S extends RepairCycleState> =
   | { state: S; next: "completed" }
   | { state: S; next: "author-escalation" }
+  | { state: S; next: "controller-replan" }
   | { state: S; next: "manual-reconcile"; reason: string }
   | { state: S; next: "author-choice"; choice: {
     id: string; proposalSha256: string; question: SpecialistChoiceReceipt["question"] } | null };
@@ -35,7 +38,11 @@ export type RepairCycleResult<S extends RepairCycleState> =
 /** Never retries a claimed Pi turn after interruption. Each transition is
  * one-way and durable before any subsequent external side effect. */
 export async function driveRejectedRepairCycle<S extends RepairCycleState>(
-  ops: RepairCycleOps<S>, maxTransitions = 12,
+  // Up to twelve submitted corrections across the Turn can each require
+  // writer, validator, checkpoint, rereview and next-source transitions.
+  // The ledger enforces the substantive ceilings; this is only a finite
+  // controller-iteration guard and must not impose a hidden two-repair cap.
+  ops: RepairCycleOps<S>, maxTransitions = 80,
 ): Promise<RepairCycleResult<S>> {
   let state = await ops.begin();
   for (let step = 0; step < maxTransitions; step++) {
@@ -47,6 +54,14 @@ export async function driveRejectedRepairCycle<S extends RepairCycleState>(
       case "repairing":
         return { state, next: "manual-reconcile",
           reason: "An original Pi writer call was interrupted; never replay its external effects." };
+      case "needs-plan":
+        return { state, next: "controller-replan" };
+      case "disputing":
+        state = await ops.adjudicate(state);
+        continue;
+      case "adjudicating":
+        return { state, next: "manual-reconcile",
+          reason: "An independent dispute adjudication was interrupted; preserve its session." };
       case "awaiting-author": {
         const response = state.choiceId ? await ops.choice(state.choiceId) : null;
         if (response?.phase !== "answered" && response?.phase !== "resuming")

@@ -43,12 +43,13 @@ import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
+import { admitRepairFinding, inspectRepairLedger, submitRepairCorrection,
+  settleRepairReview, MAX_LOCAL_CORRECTIONS, MAX_TURN_CORRECTIONS } from "./repair-ledger.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const hash = (value: unknown) => createHash("sha256").update(
   typeof value === "string" || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest("hex");
-const MAX_ATTEMPTS = 2;
 
 /** A sealed failure that needs a NEW typed assignment is not a retryable
  * original-session repair. The shared dependency ledger records a pending,
@@ -108,7 +109,7 @@ export interface RepairRevision {
   direction: string;
   digest: string;
 }
-export type RepairPhase = "ready" | "repairing" | "awaiting-author" | "validating" |
+export type RepairPhase = "ready" | "repairing" | "awaiting-author" | "needs-plan" | "disputing" | "adjudicating" | "validating" |
   "awaiting-checkpoint" | "reviewing" | "passed" | "failed" | "blocked";
 export interface RepairReceipt {
   version: 1;
@@ -136,6 +137,13 @@ export interface RepairReceipt {
     thinking?: "low" | "high"; sessionFiles: string[];
   };
   choiceId?: string;
+  /** Verified read-only dependency that this specialist cannot change. */
+  outOfAuthority?: { path: string; sourceSha: string; reviewDigest: string };
+  /** A writer claim cannot alter the sealed verdict. One distinct read-only
+   * adjudication may be requested and is fenced before its Pi turn. */
+  dispute?: { path: string; line: number; claim: string;
+    adjudication?: { sessionFile: string; packetDigest: string;
+      verdict: "pass" | "fail"; findingsDigest: string } };
   baselineHead: string;
   draftDigest?: string;
   paths?: string[];
@@ -246,8 +254,6 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
     throw Error("Repair needs a clean verified descendant of the failed checkpoint.");
   const previous = point.workItem.startsWith("repair-")
     ? await inspectRejectedRepair(job, point.workItem.slice(7)) : null;
-  if (previous && previous.attempts >= MAX_ATTEMPTS)
-    throw Error("Bounded repair attempts exhausted; author intervention is required.");
   const originWorkItem = previous?.origin.workItem ?? point.workItem;
   const eventMilestone = point.workItem.startsWith("event-") &&
       point.assurance!.changedPaths.some(p => p.startsWith("milestones/"))
@@ -279,6 +285,15 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   const root = previous?.rootFailureSha ?? point.commitSha;
   const rootReview = previous?.originalReviewDigest ?? sourceOf(failure);
   const rootSource = previous?.originalSource ?? failure.source;
+  const ledger = await inspectRepairLedger(job, point.assurance!.turnDigest);
+  if (previous?.attempts && ledger.corrections.filter(c => c.rootFailureSha === root).length < previous.attempts)
+    throw Error("Existing pre-ledger correction receipts require explicit reconciliation; do not reset prior budgets.");
+  await admitRepairFinding(job, {
+    turnDigest: point.assurance!.turnDigest, rootFailureSha: root,
+    sourceSha: point.commitSha, reviewDigest: sourceOf(failure),
+    assignmentId: assignment.id, obligation: assignment.outcome,
+    findings: failure.findings,
+  });
   const state: RepairReceipt = {
     version: 1, jobId: job.jobId, threadId: job.threadId,
     sourceCommitSha: point.commitSha, rootFailureSha: root,
@@ -309,9 +324,19 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
         (path.startsWith("creative-direction/") && state.origin?.workItem !== "foundation")) ||
       (state.origin?.workItem === "foundation" &&
         (state.allowedPaths.length !== 1 || !state.allowedPaths[0]?.startsWith("creative-direction/"))) ||
-      !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > MAX_ATTEMPTS ||
-      !["ready", "repairing", "awaiting-author", "validating",
-        "awaiting-checkpoint", "reviewing", "passed", "failed", "blocked"].includes(state.phase))
+      !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > MAX_TURN_CORRECTIONS ||
+      !["ready", "repairing", "awaiting-author", "needs-plan", "disputing",
+        "adjudicating", "validating", "awaiting-checkpoint", "reviewing", "passed", "failed", "blocked"].includes(state.phase) ||
+      (state.outOfAuthority && (state.phase !== "needs-plan" ||
+        !originalSafePath(state.outOfAuthority.path) ||
+        !state.planAmendment.readOnlyDependencies.includes(state.outOfAuthority.path) ||
+        state.outOfAuthority.sourceSha !== state.sourceCommitSha ||
+        state.outOfAuthority.reviewDigest !== state.sourceReviewDigest)) ||
+      (state.dispute && (!originalSafePath(state.dispute.path) ||
+        !Number.isSafeInteger(state.dispute.line) || state.dispute.line < 1 ||
+        !state.dispute.claim.trim() || state.dispute.claim.length > 1000 ||
+        !state.findings.some(f => f.path === state.dispute!.path && f.line === state.dispute!.line) ||
+        !["disputing", "adjudicating", "blocked"].includes(state.phase))))
     throw Error("Repair receipt identity or state is invalid.");
   const checkpoints = await inspectRecoveryCheckpoints(job);
   const original = checkpoints.find(p => p.eligible && p.commitSha === state.rootFailureSha);
@@ -391,13 +416,22 @@ export function repairFeedback(state: RepairReceipt) {
     assignment: state.revision?.assignment ?? state.assignment,
     findings: state.findings, amendment: state.planAmendment,
     allowedPaths: state.planAmendment?.assignment.authority.existingPaths ?? state.allowedPaths,
-    attempt: state.attempts + 1, maxAttempts: MAX_ATTEMPTS,
+    attempt: state.attempts + 1, maxAttempts: MAX_LOCAL_CORRECTIONS,
   };
 }
 type EventRepairSources = Pick<import("./event-specialist.js").EventAssignment, "sourcePaths">;
 /** Build actionable feedback before claiming a paid turn or touching the writer
  * transcript. The failed source and adjacent records remain immutable. */
 export async function prepareRejectedRepairFeedback(job: JobStartResult, state: RepairReceipt) {
+  // Attempt numbers are per stable finding, not per changing source commit.
+  // A distinct downstream defect inherits the Turn-wide total but gets its own
+  // local correction allowance; do not tell the writer it is on attempt 3/2.
+  const turn = state.originalSource?.turnDigest;
+  const ledger = turn && HASH.test(turn) ? await inspectRepairLedger(job, turn) : null;
+  const open = ledger?.findings.filter(f => f.rootFailureSha === state.rootFailureSha &&
+    f.status === "open") ?? [];
+  const feedback = { ...repairFeedback(state),
+    attempt: open.length ? Math.max(...open.map(f => f.attempts.length)) + 1 : state.attempts + 1 };
   const event = state.origin.workItem.startsWith("event-");
   let sourcePaths: string[] = [];
   if (event) {
@@ -437,21 +471,20 @@ export async function prepareRejectedRepairFeedback(job: JobStartResult, state: 
         e.outcomes.flatMap(outcome => outcome.effects.filter(effect =>
           effect.line === finding.line))),
     })) : [];
-    return { ...repairFeedback(state), ...context, causalGrounding: EVENT_CAUSAL_GROUNDING,
+    return { ...feedback, ...context, causalGrounding: EVENT_CAUSAL_GROUNDING,
       ...(proof ? { originalConsequenceProof: proof, citedEffects } : {}) };
   }
-  return { ...repairFeedback(state), ...rejectedRepairContext(job, state, sourcePaths) };
+  return { ...feedback, ...rejectedRepairContext(job, state, sourcePaths) };
 }
 export async function claimRejectedRepair(job: JobStartResult, sha: string) {
   const state = await inspectRejectedRepair(job, sha);
-  if (state.phase !== "ready" || state.attempts >= MAX_ATTEMPTS)
+  if (state.phase !== "ready")
     throw Error("No safe repair attempt is ready; preserve the original session and draft.");
   if (await trustedHead(job) !== state.baselineHead ||
       git(job, "status", "--porcelain=v1", "--untracked-files=all"))
     throw Error("Repair source moved or worktree contains a draft; never overwrite it.");
   if (hash(await readFile(state.origin.sessionFile)) !== state.sessionSha256)
     throw Error("Original Pi transcript changed; do not silently start a new session.");
-  state.attempts++;
   state.phase = "repairing";
   await save(job, state); // One-way crash fence before any external model call.
   return state;
@@ -519,13 +552,38 @@ export function disagreementQuestion(state: RepairReceipt): SpecialistChoiceQues
 }
 /** The writer's text response is irrelevant: only actual owned Git modifications
  * can move a failed review into native validation. */
-export async function finishRejectedRepairDraft(job: JobStartResult, sha: string) {
+export async function finishRejectedRepairDraft(job: JobStartResult, sha: string,
+  reportedOutOfAuthority?: string,
+  reportedDispute?: { path: string; line: number; claim: string }) {
   const state = await inspectRejectedRepair(job, sha);
   if (state.phase !== "repairing") throw Error("Repair was not claimed in this process.");
   if (await trustedHead(job) !== state.baselineHead)
     throw Error("Repair changed verified Git HEAD; preserve draft and investigate.");
   const paths = changedRepairPaths(job, state);
   if (!paths.length) {
+    if (reportedOutOfAuthority && originalSafePath(reportedOutOfAuthority) &&
+        !state.allowedPaths.includes(reportedOutOfAuthority) &&
+        state.planAmendment.readOnlyDependencies.includes(reportedOutOfAuthority)) {
+      state.phase = "needs-plan";
+      state.outOfAuthority = { path: reportedOutOfAuthority,
+        sourceSha: state.sourceCommitSha, reviewDigest: state.sourceReviewDigest };
+      state.failure = "The original specialist requires other-owner work at " +
+        reportedOutOfAuthority + ". Return to controller planning; the original writer has no authority to edit this record.";
+      state.sessionSha256 = hash(await readFile(state.origin.sessionFile));
+      await save(job, state);
+      return state;
+    }
+    if (reportedDispute && originalSafePath(reportedDispute.path) &&
+        Number.isSafeInteger(reportedDispute.line) && reportedDispute.line > 0 &&
+        reportedDispute.claim.trim() && reportedDispute.claim.length <= 1000 &&
+        state.findings.some(f => f.path === reportedDispute.path &&
+          f.line === reportedDispute.line)) {
+      state.phase = "disputing";
+      state.dispute = reportedDispute;
+      state.sessionSha256 = hash(await readFile(state.origin.sessionFile));
+      await save(job, state);
+      return state;
+    }
     state.phase = "awaiting-author";
     state.sessionSha256 = hash(await readFile(state.origin.sessionFile));
     const choice = await recordSpecialistChoice(job, "repair-" + sha,
@@ -534,6 +592,13 @@ export async function finishRejectedRepairDraft(job: JobStartResult, sha: string
     await save(job, state);
     return state;
   }
+  // A claimed/incomplete Pi turn is NOT a completed correction. Charge once
+  // when actual owned file changes are submitted for native verification.
+  await submitRepairCorrection(job, {
+    turnDigest: state.originalSource.turnDigest,
+    rootFailureSha: state.rootFailureSha, sourceSha: sha, changedPaths: paths,
+  });
+  state.attempts++;
   state.paths = paths;
   state.draftDigest = hash(paths.map(path =>
     ({ path, diff: git(job, "diff", "--binary", "--", repoPath(job, path)) })));
@@ -619,15 +684,35 @@ export async function acceptRejectedRepairCheckpoint(job: JobStartResult,
   await save(job, state);
   return state;
 }
+/** A correction which leaves the original failing records byte-identical,
+ * or restores a previously rejected version, made no source progress on the
+ * still-rejected obligation. This comparison uses committed Git blobs, never
+ * model wording or an uncommitted worktree, and cannot overturn any review. */
+export function detectRepairStagnation(job: JobStartResult, state: RepairReceipt,
+  review: IndependentReviewResult): "no-progress" | "oscillation" | null {
+  if (review.status !== "failed" || !state.repairedCommitSha) return null;
+  const recurring = [...new Set(state.findings.filter(before =>
+    review.findings.some(after => after.path === before.path &&
+      (after.kind ?? "other") === (before.kind ?? "other"))).map(f => f.path))];
+  if (!recurring.length) return null;
+  const sameAs = (previousSha: string) => recurring.every(path =>
+    gitRaw(job, "show", previousSha + ":" + repoPath(job, path)) ===
+      gitRaw(job, "show", state.repairedCommitSha! + ":" + repoPath(job, path)));
+  if (sameAs(state.sourceCommitSha)) return "no-progress";
+  if (state.rootFailureSha !== state.sourceCommitSha && sameAs(state.rootFailureSha))
+    return "oscillation";
+  return null;
+}
 /** Pure terminal transition after the controller has verified the independent
  * successor receipt. Keeping both verdicts separate makes restart validation
  * against the original source possible after a second negative finding. */
-export function repairReviewOutcome(state: RepairReceipt, review: IndependentReviewResult): RepairReceipt {
+export function repairReviewOutcome(state: RepairReceipt, review: IndependentReviewResult,
+  exhausted = state.attempts >= MAX_LOCAL_CORRECTIONS): RepairReceipt {
   if (state.phase !== "reviewing" || !state.repairedCommitSha ||
       review.source.commitSha !== state.repairedCommitSha)
     throw Error("Repair verdict must refer to its reviewed successor.");
   const failed = review.status === "failed";
-  const phase = !failed ? "passed" : state.attempts >= MAX_ATTEMPTS ? "blocked" : "failed";
+  const phase = !failed ? "passed" : exhausted ? "blocked" : "failed";
   return { ...state, phase, successorFindings: structuredClone(review.findings),
     ...(failed ? { baselineHead: state.repairedCommitSha,
       failure: phase === "blocked"
@@ -645,7 +730,25 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   const review = await inspectCheckpointReview(job, point);
   if (!review || !["passed", "failed"].includes(review.status) || !review.result)
     throw Error("A new independent semantic verdict is mandatory after repaired file changes.");
-  const finished = repairReviewOutcome(state, review.result);
+  const ledger = await settleRepairReview(job, {
+    turnDigest: state.originalSource.turnDigest,
+    rootFailureSha: state.rootFailureSha, sourceSha: sha,
+    successorSha: state.repairedCommitSha, reviewDigest: sourceOf(review.result),
+    assignmentId: state.assignment.id, obligation: state.assignment.outcome,
+    status: review.result.status, findings: review.result.findings,
+  });
+  const unresolved = ledger.findings.filter(f =>
+    f.rootFailureSha === state.rootFailureSha && f.status === "open");
+  const exhausted = ledger.corrections.length >= MAX_TURN_CORRECTIONS ||
+    unresolved.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS);
+  const finished = repairReviewOutcome(state, review.result, exhausted);
+  const stagnation = detectRepairStagnation(job, state, review.result);
+  if (stagnation) {
+    finished.phase = "blocked";
+    finished.failure = stagnation === "oscillation"
+      ? "Correction restored previously rejected source bytes; stop oscillation and request a new bounded strategy."
+      : "Correction did not change the source records still rejected by independent review; stop ineffective same-writer retries.";
+  }
   if (review.status === "failed")
     finished.sessionSha256 = hash(await readFile(state.origin.sessionFile));
   await save(job, finished);
@@ -701,7 +804,11 @@ export async function consumeRejectedRepairChoice(job: JobStartResult, sha: stri
       direction: authorChoiceDirection(choice.question, choice.answer, choice.delegationAllowed === true) };
     state.revision = { ...revision, digest: hash(revision) };
   }
-  state.phase = state.attempts >= MAX_ATTEMPTS ? "blocked" : "ready";
+  const ledger = await inspectRepairLedger(job, state.originalSource.turnDigest);
+  const unresolved = ledger.findings.filter(f => f.rootFailureSha === state.rootFailureSha && f.status === "open");
+  state.phase = ledger.corrections.length >= MAX_TURN_CORRECTIONS ||
+    unresolved.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS)
+    ? "blocked" : "ready";
   state.sessionSha256 = hash(await readFile(state.origin.sessionFile));
   await save(job, state);
   await completeSpecialistChoice(job, state.choiceId);
@@ -888,7 +995,7 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
   // one-way Pi turn. A failed preflight must not strand a repair as an
   // interrupted writer call that never actually began.
   const state = await inspectRejectedRepair(job, sha);
-  if (state.phase !== "ready" || state.attempts >= MAX_ATTEMPTS)
+  if (state.phase !== "ready")
     throw Error("No safe original-session repair attempt is ready.");
   const focus = state.origin.workItem.startsWith("focus:")
     ? state.origin.workItem.slice(6).split(".")[0] : null;
@@ -939,8 +1046,8 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     });
   const feedback = await prepareRejectedRepairFeedback(job, state);
   const claimed = await claimRejectedRepair(job, sha);
-  if (claimed.attempts !== state.attempts + 1)
-    throw Error("Repair attempt counter changed while preparing the original Pi session.");
+  if (claimed.attempts !== state.attempts)
+    throw Error("Repair attempt counter changed before the original Pi session.");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: resolved.model,
     thinkingLevel: resolved.resolution.thinking, resourceLoader: loader, settingsManager,
@@ -949,6 +1056,8 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     customTools: [...scopedTools, createStoryValidateTool(job), createPiStatusTool()],
     noTools: "all", tools: ["read", "edit", "write", "grep", "find", "ls", "story_validate", "report_status"],
   });
+  let reportedOutOfAuthority: string | undefined;
+  let reportedDispute: { path: string; line: number; claim: string } | undefined;
   try {
     if (resolved.resolution.thinking &&
         session.thinkingLevel !== resolved.resolution.thinking)
@@ -983,6 +1092,14 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       "dependency or required source rather than inventing a Fact or Relationship transition. " +
       (state.origin.workItem.startsWith("interactive-choice-") ? CHOICE_PAYOFF_REPAIR + " " :
         state.origin.workItem.startsWith("interactive-puzzle-") ? PUZZLE_GOAL_REPAIR + " " : "") +
+      "If correction genuinely requires changing a source listed as a READ-ONLY " +
+      "affected dependency, do not edit it: return exactly one line " +
+      "OUT_OF_AUTHORITY: <canonical-relative-path> (and no edits) so the " +
+      "controller can evaluate an independent supporting assignment. " +
+      "If the reviewer is demonstrably wrong about a concrete historical " +
+      "source fact, use the exact line DISPUTE_REVIEW: <path>:<line> | <reason> " +
+      "(without editing). The controller can obtain ONE fresh independent " +
+      "read-only adjudication; your rebuttal cannot approve the change. " +
       "If a genuine disagreement prevents " +
       "correction, explain it in your response without editing; the controller " +
       "will ask the author. Your explanation cannot change the reviewer verdict. " +
@@ -996,8 +1113,12 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     if (!last || last.role !== "assistant" ||
         ["error", "aborted"].includes(last.stopReason))
       throw Error("Original specialist did not finish its correction turn.");
+    const reply = last.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    reportedOutOfAuthority = reply.match(/^OUT_OF_AUTHORITY:\s*([a-z][a-z0-9-]*\/[a-z0-9._-]+\.md)\s*$/m)?.[1];
+    const dispute = reply.match(/^DISPUTE_REVIEW:\s*([a-z][a-z0-9-]*\/[a-z0-9._-]+\.md):([1-9]\d*)\s*\|\s*(.{1,1000})\s*$/m);
+    if (dispute) reportedDispute = { path: dispute[1]!, line: Number(dispute[2]), claim: dispute[3]!.trim() };
   } finally { session.dispose(); }
-  return finishRejectedRepairDraft(job, sha);
+  return finishRejectedRepairDraft(job, sha, reportedOutOfAuthority, reportedDispute);
 }
 
 export interface RejectedRepairOptions {
@@ -1034,6 +1155,57 @@ async function reviewerFor(job: JobStartResult, sha: string, options: RejectedRe
     sessionFiles: [] };
   await save(job, state);
   return state.reviewer;
+}
+
+/** A dispute has exactly one fresh, read-only adjudicator, never the writer
+ * or previous reviewer session. Historical sealed negative review remains
+ * authoritative even if the new reviewer disagrees: that becomes a distinct,
+ * source-linked author/controller escalation, not an unreviewed approval. */
+export async function adjudicateRejectedRepair(job: JobStartResult, sha: string) {
+  const state = await inspectRejectedRepair(job, sha);
+  if (state.phase !== "disputing" || !state.dispute || !state.reviewer)
+    throw Error("No bounded, reviewer-pinned dispute is ready.");
+  const claim = state.dispute;
+  const line = gitRaw(job, "show", sha + ":" + repoPath(job, claim.path))
+    .split(/\r?\n/)[claim.line - 1];
+  if (line === undefined || !state.findings.some(f => f.path === claim.path && f.line === claim.line))
+    throw Error("Deterministic source check rejects a stale or invented dispute location.");
+  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+    p.eligible && p.commitSha === sha && p.assurance);
+  if (!point || sourceOf(await verifiedFailure(job, point)) !== state.sourceReviewDigest)
+    throw Error("Disputed review no longer matches the immutable source.");
+  const profile = state.reviewer;
+  state.phase = "adjudicating";
+  await save(job, state); // Crash fence: do not replay an uncertain independent Pi call.
+  let sessionFile: string | undefined;
+  const adjudication = await runPiAssignmentReview(job, [point], {
+    snapshot: profile.snapshot, provider: profile.provider,
+    model: profile.model, thinking: profile.thinking,
+    reviewer: "independent-pi-assignment-adjudication", seal: false,
+    challenge: { sourceSha: sha, reviewDigest: state.sourceReviewDigest,
+      path: claim.path, line: claim.line, claim: claim.claim },
+    onSession: async file => {
+      sessionFile = file;
+      const current = await inspectRejectedRepair(job, sha);
+      if (!current.reviewer || current.phase !== "adjudicating")
+        throw Error("Adjudicator transcript cannot attach to another repair phase.");
+      current.reviewer.sessionFiles.push(file);
+      await save(job, current);
+    },
+  });
+  const current = await inspectRejectedRepair(job, sha);
+  if (current.phase !== "adjudicating" || !current.dispute || !sessionFile)
+    throw Error("Dispute result lacks its owned independent reviewer session.");
+  current.dispute.adjudication = { sessionFile,
+    packetDigest: adjudication.packet.sourceDigest,
+    verdict: adjudication.verdict.verdict,
+    findingsDigest: hash(adjudication.verdict.findings) };
+  current.phase = "blocked";
+  current.failure = adjudication.verdict.verdict === "pass"
+    ? "Two independent reviewers disagree about the sealed source. Preserve both conclusions and obtain an authenticated author/controller resolution; a dispute does not erase the historical rejection."
+    : "Fresh independent review confirmed the original semantic failure. Provide a source-linked correction or a new authorized strategy; writer argument is not approval.";
+  await save(job, current);
+  return current;
 }
 
 /** One owned, restart-reconcilable controller workflow. The original failed
@@ -1095,6 +1267,8 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
     },
     finishReview: sha => withStoryJobLock(job, "rejected-review-seal", () =>
       finishRejectedRepairReview(job, sha)),
+    adjudicate: state => withStoryJobLock(job, "independent-review-dispute", () =>
+      adjudicateRejectedRepair(job, state.sourceCommitSha)),
     nextFailure: async state => {
       if (!state.repairedCommitSha)
         throw Error("Rejected correction lacks its source-linked successor.");
