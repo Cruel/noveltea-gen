@@ -118,6 +118,30 @@ test("fresh independent verdict carries forward a valid dependent without rewrit
   assert.ok(outcome.pending.includes("review"));
   assert.equal(outcome.failures.length, 0);
 });
+test("an original-owner successor can carry forward affected dependents without re-reviewing unrelated work", () => {
+  const originalInventory = inventory();
+  const plan = planSelectiveRevalidation({ inventory: originalInventory,
+    correction: correction(), reviews: reviewers() });
+  const successor = sha("f");
+  const verdicts = [
+    { itemId: "interactive:milestone.alpha", sourceSha: successor,
+      status: "passed" as const, reviewerDigest: digest("c") },
+    { itemId: "composition:milestone.alpha", sourceSha: successor,
+      status: "passed" as const, reviewerDigest: digest("d") },
+    { itemId: "review", sourceSha: successor,
+      status: "passed" as const, reviewerDigest: digest("e") },
+  ];
+  assert.throws(() => decideSelectiveRevalidation(plan, originalInventory, verdicts),
+    /stale source/i, "a new Git SHA without verified correction is not reviewer authority");
+  const settled = decideSelectiveRevalidation(plan, originalInventory, verdicts,
+    [successor]);
+  assert.deepEqual(settled.carriedForward,
+    ["composition:milestone.alpha", "interactive:milestone.alpha", "review"]);
+  assert.deepEqual(settled.pending, []);
+  assert.deepEqual(settled.failures, []);
+  assert.equal(originalInventory.items.find(i => i.id === "composition:milestone.beta")?.status,
+    "verified", "unaffected historical proof remains untouched");
+});
 test("a dependent cannot be certified before its changed upstream dependency", () => {
   const source = inventory();
   const plan = planSelectiveRevalidation({ inventory: source,
