@@ -32,6 +32,38 @@ export function localPiOAuth(provider: string) {
 
 export type BorrowedLocalPiOAuth = ReturnType<typeof localPiOAuth>
 
+type LocalOAuthOptions = { now?: () => number; renew?: () => void;
+  read?: (provider: string) => BorrowedLocalPiOAuth }
+
+function renewLocalPiOAuth(provider: string, model: string): void {
+  // Never emit the bearer token into the certification log.
+  execFileSync('pi', ['auth', 'print-bearer-token', '--provider', provider,
+    '--model', model, '--min-expiry', '40m'], {
+    stdio: 'ignore', timeout: 60_000,
+  })
+}
+
+/** The local Pi login is the sole owner of its refresh grant. Refresh before
+ * copying any access-only token into disposable Studio storage, including when
+ * the old token is already expired and cannot pass localPiOAuth's read check. */
+export function readyLocalPiOAuth(provider: string, model: string,
+  options: LocalOAuthOptions = {}): BorrowedLocalPiOAuth {
+  const now = options.now ?? Date.now
+  const read = options.read ?? localPiOAuth
+  let current: BorrowedLocalPiOAuth | undefined
+  try { current = read(provider) }
+  catch { /* An expired/missing access token may be renewable by Pi. */ }
+  if (current && current.expires - now() > 35 * 60_000) return current
+  try { (options.renew ?? (() => renewLocalPiOAuth(provider, model)))() }
+  catch {
+    throw new Error('Local Pi OAuth renewal failed. Reconnect Pi and retry certification.')
+  }
+  const next = read(provider)
+  if (next.expires - now() < 30 * 60_000)
+    throw new Error('Local Pi OAuth did not renew with sufficient validity for certification.')
+  return next
+}
+
 /** Local-only certification: Pi owns refresh-token rotation, never Studio.
  * Refresh the local login using its supported CLI, then copy only its access
  * token into the disposable Studio vault. This cannot consume the source
@@ -39,19 +71,11 @@ export type BorrowedLocalPiOAuth = ReturnType<typeof localPiOAuth>
 export async function syncLocalPiOAuth(provider: string, model: string,
   previous: BorrowedLocalPiOAuth,
   update: (next: BorrowedLocalPiOAuth) => Promise<void>,
-  options: { now?: () => number; renew?: () => void;
-    read?: (provider: string) => BorrowedLocalPiOAuth } = {},
+  options: LocalOAuthOptions = {},
 ): Promise<BorrowedLocalPiOAuth> {
   const now = options.now ?? Date.now
   if (previous.expires - now() > 35 * 60_000) return previous
-  const renew = options.renew ?? (() => {
-    // Ignore the printed bearer token: no access or refresh secrets in logs.
-    // --min-expiry preemptively refreshes before SDK requests start failing.
-    execFileSync('pi', ['auth', 'print-bearer-token', '--provider', provider,
-      '--model', model, '--min-expiry', '40m'], {
-      stdio: 'ignore', timeout: 60_000,
-    })
-  })
+  const renew = options.renew ?? (() => renewLocalPiOAuth(provider, model))
   renew()
   const next = (options.read ?? localPiOAuth)(provider)
   if (next.expires - now() < 30 * 60_000)

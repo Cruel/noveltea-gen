@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { ModelRuntime, type CreateModelRuntimeOptions } from '@earendil-works/pi-coding-agent'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
+import { withOpenAiOAuth401Retry } from './pi-oauth-fetch'
 
 type Credentials = NonNullable<CreateModelRuntimeOptions['credentials']>
 type Credential = NonNullable<Awaited<ReturnType<Credentials['read']>>>
@@ -107,16 +108,44 @@ async function buildUserPiRuntime(store: StudioDatabase, owner: string,
   for (const provider of runtime.getProviders()) {
     const original = provider.auth.apiKey
     if (!original) continue
-    runtime.registerNativeProvider({ ...provider, auth: { ...provider.auth,
+    const restricted = { ...provider, auth: { ...provider.auth,
       apiKey: {
         ...original,
-        check: async ({ credential }) => credential?.type === 'api_key' && credential.key
-          ? { type: 'api_key', source: 'user model credential' } : undefined,
-        resolve: async ({ credential, signal }) => credential?.type === 'api_key' && credential.key
-          ? original.resolve({ credential, signal,
-            ctx: { env: async () => undefined, fileExists: async () => false } }) : undefined,
+        check: async ({ credential }: Parameters<NonNullable<typeof original.check>>[0]) =>
+          credential?.type === 'api_key' && credential.key
+            ? { type: 'api_key' as const, source: 'user model credential' } : undefined,
+        resolve: async ({ credential, signal }: Parameters<typeof original.resolve>[0]) =>
+          credential?.type === 'api_key' && credential.key
+            ? original.resolve({ credential, signal,
+              ctx: { env: async () => undefined, fileExists: async () => false } }) : undefined,
       },
-    } })
+    } }
+    // OAuth refresh-token ownership stays in the per-user encrypted vault.
+    // Only an OpenAI HTTP 401 can trigger a one-time transport retry. API keys,
+    // non-OpenAI origins and other failures are never retried here.
+    if (provider.id !== 'openai' || !provider.auth.oauth) {
+      runtime.registerNativeProvider(restricted)
+      continue
+    }
+    const renew = async (rejectedAccess: string): Promise<string | null> => {
+      const credentials = userPiCredentials(store, owner, env)
+      const existing = await credentials.read(provider.id)
+      if (existing?.type !== 'oauth') return null
+      if (existing.access !== rejectedAccess) return null // Never substitute a different caller's token.
+      const updated = await credentials.modify(provider.id, async current => {
+        if (current?.type !== 'oauth' || current.access !== rejectedAccess) return undefined
+        return provider.auth.oauth!.refresh(current, AbortSignal.timeout(15_000))
+      })
+      return updated?.type === 'oauth' ? updated.access : null
+    }
+    runtime.registerNativeProvider({ ...restricted,
+      stream: (model, context, options) => provider.stream(model, context, {
+        ...options, fetch: withOpenAiOAuth401Retry(options?.fetch ?? fetch, renew),
+      } as typeof options),
+      streamSimple: (model, context, options) => provider.streamSimple(model, context, {
+        ...options, fetch: withOpenAiOAuth401Retry(options?.fetch ?? fetch, renew),
+      }),
+    })
   }
   await runtime.refresh({ allowNetwork: false })
   return runtime

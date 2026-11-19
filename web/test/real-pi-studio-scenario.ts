@@ -29,7 +29,7 @@ import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.s
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { userPiCredentials, assertUserPiSelection, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
-import { localPiOAuth, syncLocalPiOAuth } from './support/local-pi-oauth'
+import { readyLocalPiOAuth, syncLocalPiOAuth } from './support/local-pi-oauth'
 import { SandboxController, createControllerServer, type ControllerConfig } from '../src/sandbox-controller'
 import { beginLiveNewStoryChat, approveLiveNewStoryChat, verifyLiveNewStory } from './support/full-story-case'
 import { runPreservedCheckpointRetry } from './support/preserved-checkpoint-retry'
@@ -77,7 +77,7 @@ test(fullStory
   // switching to a disposable test encryption key. The test copy contains no
   // usable refresh token and cannot invalidate the normal Studio login.
   const oauth = subscriptionTest
-    ? isolatedLocalOAuth ? localPiOAuth(process.env.NT_TEST_WEB_PI_PROVIDER!)
+    ? isolatedLocalOAuth ? readyLocalPiOAuth(process.env.NT_TEST_WEB_PI_PROVIDER!, process.env.NT_TEST_WEB_PI_MODEL!)
       : await readIsolatedStudioOAuth(
           process.env.NT_TEST_WEB_PI_SOURCE_DB!, process.env.NT_PI_CREDENTIAL_KEY!,
           process.env.NT_TEST_WEB_PI_SOURCE_USER_ID, process.env.NT_TEST_WEB_PI_PROVIDER!,

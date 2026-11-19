@@ -1,11 +1,44 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { syncLocalPiOAuth } from './support/local-pi-oauth'
+import { readyLocalPiOAuth, syncLocalPiOAuth } from './support/local-pi-oauth'
 
 const now = 1_800_000_000_000
 const cred = (access: string, minutes: number) => ({
   type: 'oauth' as const, access, expires: now + minutes * 60_000,
   refresh: 'intentionally-not-a-real-refresh-grant',
+})
+
+test('certification refreshes expiring local OAuth before copying any credentials', () => {
+  let renewals = 0
+  let token = cred('old-access', 3)
+  const options = { now: () => now, renew: () => { renewals++; token = cred('new-access', 60) },
+    read: () => token }
+  const fresh = readyLocalPiOAuth('openai', 'gpt-6.1-sol', options)
+  assert.equal(fresh.access, 'new-access')
+  assert.equal(fresh.refresh, 'intentionally-not-a-real-refresh-grant')
+  assert.equal(renewals, 1)
+  assert.equal(readyLocalPiOAuth('openai', 'gpt-6.1-sol', options), fresh)
+  assert.equal(renewals, 1, 'Already fresh credentials are not needlessly refreshed')
+})
+
+test('certification can renew an already-expired local token but fails closed on bad renewal', () => {
+  let reads = 0
+  const fresh = readyLocalPiOAuth('openai', 'gpt-6.1-sol', {
+    now: () => now, renew: () => {},
+    read: () => {
+      if (!reads++) throw Error('Access token expired')
+      return cred('fresh', 60)
+    },
+  })
+  assert.equal(fresh.access, 'fresh')
+  assert.equal(reads, 2)
+  assert.throws(() => readyLocalPiOAuth('openai', 'gpt-6.1-sol', {
+    now: () => now, read: () => cred('still-old', 1), renew: () => {},
+  }), /sufficient validity/)
+  assert.throws(() => readyLocalPiOAuth('openai', 'gpt-6.1-sol', {
+    now: () => now, read: () => cred('old', 1),
+    renew: () => { throw Error('secret or token data') },
+  }), /Local Pi OAuth renewal failed/)
 })
 
 test('long-running certification syncs only fresh access tokens, never source refresh credentials', async () => {

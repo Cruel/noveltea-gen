@@ -38,7 +38,7 @@ import { inspectSpecialistChoice } from '../../src/specialist-choice'
 import { openStudioDatabase, migrateStudio } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
 import { readIsolatedStudioOAuth } from './studio-oauth-source'
-import { localPiOAuth } from './support/local-pi-oauth'
+import { readyLocalPiOAuth } from './support/local-pi-oauth'
 
 const dependencyTest = process.env.NT_TEST_WEB_PI_DEPENDENCY === '1'
 const collaborativeTest = process.env.NT_TEST_WEB_PI_COLLABORATIVE === '1'
@@ -69,7 +69,7 @@ test('opt-in live Pi: authenticated focused creation, dependency repair, or coll
   }).trim(), '2/systemd')
   // Reuse the certified read-only token copy. Its real refresh token is never
   // copied, logged, changed, or used by the disposable test Studio instance.
-  const oauth = subscription ? isolatedLocalOAuth ? localPiOAuth(process.env.NT_TEST_WEB_PI_PROVIDER!) :
+  const oauth = subscription ? isolatedLocalOAuth ? readyLocalPiOAuth(process.env.NT_TEST_WEB_PI_PROVIDER!, process.env.NT_TEST_WEB_PI_MODEL!) :
     await readIsolatedStudioOAuth(process.env.NT_TEST_WEB_PI_SOURCE_DB!, process.env.NT_PI_CREDENTIAL_KEY!,
       process.env.NT_TEST_WEB_PI_SOURCE_USER_ID, process.env.NT_TEST_WEB_PI_PROVIDER!) : null
 
