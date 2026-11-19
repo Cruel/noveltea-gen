@@ -137,8 +137,13 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     sourceGraph.saver.db.close()
 
     if (['initial-focus', 'dependency', 'steering', 'steering-protected', 'steering-stale'].includes(kind)) {
-      if (kind === 'dependency') {
-        process.env.NT_STUDIO_SKILLS_SOURCE = resolve(import.meta.dirname, '../../../noveltea-skills')
+      if (['dependency', 'steering', 'steering-protected', 'steering-stale'].includes(kind)) {
+        // These cases enter the real Generation graph. Once the steering
+        // boundary settles, it can schedule Architecture; that always requires
+        // a pinned skills checkout, even with a fixture author. The other
+        // admission cases intentionally remain independent of skills.
+        process.env.NT_STUDIO_SKILLS_SOURCE = savedEnv.NT_STUDIO_SKILLS_SOURCE ??
+          resolve(import.meta.dirname, '../../../noveltea-skills')
         process.env.NT_SKILL_CACHE_DIR = join(root, 'skills-cache')
       }
       const firstJobId = randomUUID()
