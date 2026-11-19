@@ -23,6 +23,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { trustedHead } from "./revision.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
+import { recoverWithOneFreshSession, type ResponseContractFailure } from "./response-contract-recovery.js";
 
 const requiredFor = (plan: TurnEvidence): readonly string[] =>
   requiredOrchestratorSkillReads(plan.creativePolicy?.mode ?? "autonomous");
@@ -190,6 +191,47 @@ function parseText(text: string): unknown {
   }
 }
 
+/** Exact path-only feedback; controller verification still owns the work plan. */
+export function inspectOrchestratorProposal(text: string, plan: TurnEvidence): ResponseContractFailure[] {
+  let value: unknown;
+  try { value = parseText(text); }
+  catch { return [{ path: "$.JSON", expected: "one complete parseable JSON object" }]; }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return [{ path: "$.JSON", expected: "JSON object with sourceSha, turnDigest, assignments" }];
+  const obj = value as Record<string, unknown>;
+  const failures: ResponseContractFailure[] = [];
+  if (Object.keys(obj).sort().join(",") !== "assignments,sourceSha,turnDigest")
+    failures.push({ path: "$", expected: "exactly sourceSha, turnDigest, assignments keys" });
+  if (obj.sourceSha !== plan.source.verifiedSha)
+    failures.push({ path: "$.sourceSha", expected: "exact controller-pinned verified source SHA" });
+  if (obj.turnDigest !== plan.digest)
+    failures.push({ path: "$.turnDigest", expected: "exact controller-pinned Turn digest" });
+  if (!Array.isArray(obj.assignments) || obj.assignments.length !== plan.assignments.length) {
+    failures.push({ path: "$.assignments", expected: "complete authorized assignment array, each ID exactly once" });
+  } else {
+    const known = new Map(plan.assignments.map(a => [a.id, a]));
+    const seen = new Set<string>();
+    for (const [index, item] of obj.assignments.entries()) {
+      if (!item || typeof item !== "object" || Array.isArray(item) ||
+          Object.keys(item).sort().join(",") !== "id,reason" ||
+          !known.has(item.id) || seen.has(item.id) ||
+          typeof item.reason !== "string" || !item.reason.trim() ||
+          item.reason.length > 1000 ||
+          known.get(item.id)!.dependsOn.some(parent => !seen.has(parent))) {
+        failures.push({ path: "$.assignments[" + index + "]",
+          expected: "unique authorized ID, nonempty reason (up to 1000 chars), causal dependency order" });
+      }
+      if (item && typeof item.id === "string") seen.add(item.id);
+    }
+  }
+  if (!failures.length) {
+    try { verifyOrchestratorProposal(value, plan); }
+    catch { failures.push({ path: "$.assignments",
+      expected: "all authorized IDs once in dependency order, no expanded scope" }); }
+  }
+  return failures.slice(0, 8);
+}
+
 /** Session is replay-safe. A partially delivered model turn is preserved for
  * manual reconciliation instead of generating a second, competing plan. */
 export async function runPinnedObjectivePlanner(
@@ -349,11 +391,12 @@ export async function runPinnedObjectivePlanner(
       "Plan digest: " +
       plan.digest;
     await withStoryJobLock(job, "orchestrator:objective", () => promptStorySpecialist(session, prompt));
+    let activeSession = session;
     const completedReads = () => {
-      const completed = new Set(session.messages
+      const completed = new Set(activeSession.messages
         .filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
           m.role === "toolResult" && !m.isError).map((m) => m.toolCallId));
-      return session.messages.flatMap((m) => m.role === "assistant"
+      return activeSession.messages.flatMap((m) => m.role === "assistant"
         ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
           c.type === "toolCall" && c.name === "read" && completed.has(c.id) &&
           typeof c.arguments?.path === "string") : [])
@@ -362,6 +405,7 @@ export async function runPinnedObjectivePlanner(
     const required = requiredFor(plan).map((p) => join(snapshot.path, "skills", p));
     const missingReads = () => required.filter(p => !completedReads().includes(p));
     if (missingReads().length) {
+      await context.beforeTurn(file);
       await withStoryJobLock(job, "orchestrator:objective-reads", () => promptStorySpecialist(session,
         "Before your proposal can be accepted, read EVERY exact missing pinned skill reference " +
         "with the read tool and return a fresh bounded proposal. This is still read-only and " +
@@ -370,36 +414,81 @@ export async function runPinnedObjectivePlanner(
     const last = [...session.messages].reverse().find((m) => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
       throw new Error("Pinned orchestrator planning turn did not complete successfully.");
-    const reads = completedReads();
     if (missingReads().length)
       throw new Error("Orchestrator did not actually read the selected pinned method and catalog.");
-    const checkProposal = () => verifyOrchestratorProposal(
-      parseText(session.getLastAssistantText() ?? ""), plan);
-    let proposal: OrchestratorProposal;
-    try { proposal = checkProposal(); }
-    catch (cause) {
-      // A completed model turn may legitimately misunderstand full assignment
-      // coverage. One bounded correction in the SAME preserved Pi session is
-      // safe: the controller still validates every ID and dependency. Never
-      // replay an errored/aborted turn or auto-authorize a missing assignment.
-      if (!(cause instanceof Error) || !cause.message.startsWith("Orchestrator ")) throw cause;
-      await withStoryJobLock(job, "orchestrator:objective-correction", () => promptStorySpecialist(session,
-        "Your proposal did not preserve the exact controller-authorized assignment set. " +
-        "Return a COMPLETE reordering annotation with EXACTLY these IDs, each once, " +
-        "including already committed stages. Do not create, remove, rename or defer " +
-        "any assignment. All dependencies must appear before their dependents. " +
-        "The author-approved Foundation, when present, is already committed. " +
-        "Return ONLY JSON with sourceSha, turnDigest and assignments. " +
-        "sourceSha=" + job.baseSha + " turnDigest=" + plan.digest +
-        " required IDs=" + JSON.stringify(requiredIds)));
-      const corrected = [...session.messages].reverse().find((m) => m.role === "assistant");
-      if (!corrected || corrected.role !== "assistant" ||
-          ["error", "aborted"].includes(corrected.stopReason))
-        throw new Error("Orchestrator correction turn did not complete safely.");
-      proposal = checkProposal();
-    }
+    const contract = "orchestrator.work-plan.v1";
+    const feedback = (failures: readonly ResponseContractFailure[]) =>
+      "RESPONSE-CONTRACT CORRECTION ONLY (" + contract + "). In this same Pi " +
+      "conversation return one complete unfenced JSON work plan. No tools or new " +
+      "Story work, permission, approval, or assignment changes. Exact failed " +
+      "paths:\n" + failures.map(f => f.path + ": " + f.expected).join("\n") +
+      "\nRequired IDs (each once, respecting dependencies): " + JSON.stringify(requiredIds) +
+      "\nController sourceSha=" + job.baseSha + " turnDigest=" + plan.digest;
+    let acceptedReads: string[] | undefined;
+    let acceptedSessionFile: string | undefined;
+    const proposal = await recoverWithOneFreshSession({
+      receiptFile: join(job.stateDir, "objective-plan-protocol"),
+      sourceDigest: plan.digest,
+      initial: {
+        session, contract, validate: text => inspectOrchestratorProposal(text, plan),
+        parse: text => verifyOrchestratorProposal(parseText(text), plan), feedback,
+        prompt: correction => withStoryJobLock(job, "orchestrator:objective-protocol",
+          () => promptStorySpecialist(session, correction)),
+        beforeCorrection: () => context.beforeTurn(file),
+      },
+      fresh: async () => {
+        const freshContext = await preparePiContext(job, project, {
+          group: "orchestrator:objective:protocol-fresh",
+          step: "orchestrator:objective:protocol-fresh:" + plan.digest,
+          paths: [], snapshot: snapshot.id, provider, model,
+          directory: join(job.stateDir, "orchestrator-planning-fresh-sessions"),
+        }, runtime);
+        const opened = await createAgentSession({
+          cwd: project.root, modelRuntime: runtime, model: freshContext.model,
+          thinkingLevel: freshContext.thinking, resourceLoader: loader, settingsManager,
+          sessionManager: freshContext.manager, customTools: tools ?? [],
+          noTools: "all", tools: [...SANDBOX_READ_ONLY_TOOLS],
+        });
+        const freshSession = opened.session;
+        if (freshContext.thinking && freshSession.thinkingLevel !== freshContext.thinking) {
+          freshSession.dispose(); throw Error("Fresh planner did not honor pinned thinking policy.");
+        }
+        activeSession = freshSession;
+        const freshFile = freshSession.sessionManager.getSessionFile();
+        if (!freshFile) { freshSession.dispose(); throw Error("Fresh planner lacks transcript."); }
+        return {
+          session: freshSession,
+          start: async () => {
+            await freshContext.beforeTurn(freshFile);
+            await withStoryJobLock(job, "orchestrator:objective-protocol-fresh",
+              () => promptStorySpecialist(freshSession, prompt));
+            if (missingReads().length)
+              throw Error("Fresh planner omitted required pinned methodology reads.");
+          },
+          prompt: correction => withStoryJobLock(job, "orchestrator:objective-protocol-fresh",
+            () => promptStorySpecialist(freshSession, correction)),
+          beforeCorrection: () => freshContext.beforeTurn(freshFile),
+          completed: async () => {
+            if (missingReads().length)
+              throw Error("Fresh planner response lost required pinned source reads.");
+            acceptedReads = completedReads();
+            acceptedSessionFile = freshFile;
+            await freshContext.completed(freshFile, freshSession.sessionId);
+          },
+          dispose: () => freshSession.dispose(),
+        };
+      },
+    });
     await context.completed(file, session.sessionId);
-    const finished = seal({ ...original, phase: "planned", proposal, skillReads: reads });
+    if (activeSession === session) {
+      acceptedReads = completedReads();
+      acceptedSessionFile = file;
+    }
+    if (!acceptedSessionFile || !acceptedReads ||
+        required.some(path => !acceptedReads!.includes(path)))
+      throw Error("Accepted planner lacks pinned method receipts or transcript.");
+    const finished = seal({ ...original, sessionFile: acceptedSessionFile, phase: "planned",
+      proposal, skillReads: acceptedReads });
     await writeFile(pathFor(job), JSON.stringify(finished, null, 2) + "\n", { mode: 0o600 });
     return verifyReceipt(finished, job, selection, plan, provider, model);
   } finally {

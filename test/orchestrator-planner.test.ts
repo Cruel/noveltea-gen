@@ -10,11 +10,13 @@ import { planWholeStory, planRevision } from "../web/src/lib/turn-plan.js";
 import { creativePolicy } from "../src/creative-policy.js";
 import {
   verifyOrchestratorProposal,
+  inspectOrchestratorProposal,
   readPinnedObjectivePlanning,
   restoreCheckpointedObjectivePlanning,
   type OrchestratorPlanningReceipt,
 } from "../src/orchestrator-planner.js";
 import { nextExecutionItem, type GenerationInventory } from "../src/generation-plan.js";
+import { recoverResponseContract } from "../src/response-contract-recovery.js";
 
 const a = "a".repeat(40);
 const contract = {
@@ -96,6 +98,39 @@ test("read-only orchestrator must return exact source-bound assignments and caus
       ),
     /unauthorized/i,
   );
+});
+
+test("real planner contract corrects malformed and unauthorized work plans within one Pi conversation", async () => {
+  const messages: Array<{ role: string; stopReason: string;
+    content: Array<{ type: string; text: string }> }> = [
+      { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "{ invalid" }] },
+    ];
+  let tools = ["read", "grep"];
+  const responses = [JSON.stringify({ ...proposal,
+    assignments: proposal.assignments.slice(1) }), JSON.stringify(proposal)];
+  const prompts: string[] = [];
+  const result = await recoverResponseContract({
+    session: {
+      sessionId: "planner-original",
+      sessionManager: { getSessionFile: () => "/tmp/planner-original.jsonl" },
+      messages, getActiveToolNames: () => tools,
+      setActiveToolsByName: names => { tools = names; },
+    },
+    contract: "orchestrator.work-plan.v1",
+    validate: text => inspectOrchestratorProposal(text, plan),
+    parse: text => verifyOrchestratorProposal(JSON.parse(text), plan),
+    prompt: async feedback => {
+      prompts.push(feedback);
+      assert.deepEqual(tools, [], "format-only planner correction has no tools");
+      messages.push({ role: "assistant", stopReason: "stop",
+        content: [{ type: "text", text: responses.shift()! }] });
+    },
+  });
+  assert.deepEqual(result, proposal);
+  assert.equal(prompts.length, 2);
+  assert.deepEqual(inspectOrchestratorProposal(JSON.stringify({ ...proposal,
+    sourceSha: "f".repeat(40) }), plan).map(f => f.path), ["$.sourceSha"]);
+  assert.deepEqual(tools, ["read", "grep"]);
 });
 
 test("signed planning receipt survives reconnect and rejects tampering, source and skill drift", async () => {
