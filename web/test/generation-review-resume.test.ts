@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { matchesReviewRepairResumeBoundary } from '../src/lib/generation-controls.server'
+import { matchesReviewRepairResumeBoundary, matchesGuidedRepairResumeBoundary,
+  matchesRepairSteeringReviewBoundary } from '../src/lib/generation-controls.server'
+import type { AuthorRepairGrant } from '../../src/repair-ledger'
 
 const sha = 'a'.repeat(40)
 const valid = () => {
@@ -28,6 +30,88 @@ const valid = () => {
   } as Parameters<typeof matchesReviewRepairResumeBoundary>[3]
   return { saved, choice, repair, point }
 }
+
+test('exhausted correction guidance may re-enter only the saved original review, never its writer', () => {
+  const head = 'b'.repeat(40)
+  const root = sha
+  const source = 'c'.repeat(40)
+  const saved = { status: 'blocked',
+    reason: 'Bounded original-session corrections did not pass independent rereview.',
+    active: { stage: 'event', milestone: 'milestone.witness' },
+    result: { status: 'event-cluster-committed', headSha: root },
+    ideaTask: null, ideaResult: null,
+  }
+  const repair = {
+    phase: 'failed' as const, rootFailureSha: root, sourceCommitSha: source,
+    repairedCommitSha: head, baselineHead: head,
+  }
+  const grant = {
+    id: 'e'.repeat(64), authorId: 'author', rootFailureSha: root,
+    sourceSha: source, headSha: head, guidance: 'Correct the witness timing',
+    localLimit: 3, turnLimit: 13,
+  } satisfies AuthorRepairGrant
+  const point = { eligible: true, commitSha: head, semanticReview: 'failed' as const,
+    workItem: 'repair-' + source,
+  }
+  const valid = () => matchesGuidedRepairResumeBoundary(saved, repair, grant, point, head)
+  assert.equal(valid(), true)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    { ...saved, result: { status: 'event-cluster-committed', headSha: head } },
+    repair, grant, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    { ...saved, status: 'running' }, repair, grant, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    { ...saved, reason: 'Unrelated disk conflict' }, repair, grant, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    { ...saved, result: { status: 'wrong-dispatch', headSha: root } },
+    repair, grant, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    { ...saved, ideaTask: { id: 'other' } },
+    repair, grant, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    saved, { ...repair, phase: 'blocked' }, grant, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    saved, repair, { ...grant, sourceSha: root }, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    saved, repair, { ...grant, headSha: root }, point, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    saved, repair, grant, { ...point, eligible: false }, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    saved, repair, grant, { ...point, semanticReview: 'passed' }, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    saved, repair, grant, { ...point, workItem: 'event-witness' }, head), false)
+  assert.equal(matchesGuidedRepairResumeBoundary(
+    saved, repair, grant, point, root), false)
+})
+
+test('author scope review after a sealed failed correction cannot replay its writer', () => {
+  const root = sha, previous = 'c'.repeat(40), head = 'b'.repeat(40)
+  const saved = {
+    status: 'paused', reason: 'Author approval required for live steering: protected decisions need exact consent.',
+    active: { stage: 'event', milestone: 'milestone.witness' },
+    result: { status: 'event-cluster-committed', headSha: root },
+    ideaTask: null, ideaResult: null,
+  }
+  const repair = {
+    phase: 'failed' as const, rootFailureSha: root, sourceCommitSha: previous,
+    repairedCommitSha: head, baselineHead: head,
+  }
+  const point = { eligible: true, commitSha: head, semanticReview: 'failed' as const,
+    workItem: 'repair-' + previous,
+  }
+  assert.equal(matchesRepairSteeringReviewBoundary(saved, repair, point, head), true)
+  assert.equal(matchesRepairSteeringReviewBoundary(
+    { ...saved, status: 'blocked' }, repair, point, head), false)
+  assert.equal(matchesRepairSteeringReviewBoundary(
+    { ...saved, result: { ...saved.result, headSha: head } },
+    repair, point, head), false)
+  assert.equal(matchesRepairSteeringReviewBoundary(
+    saved, { ...repair, phase: 'reviewing' }, point, head), false)
+  assert.equal(matchesRepairSteeringReviewBoundary(
+    saved, repair, { ...point, semanticReview: 'required-pending' }, head), false)
+  assert.equal(matchesRepairSteeringReviewBoundary(
+    saved, repair, point, previous), false)
+})
 
 test('verified author answer re-enters the original reviewer checkpoint without clearing its in-flight result', () => {
   const { saved, choice, repair, point } = valid()

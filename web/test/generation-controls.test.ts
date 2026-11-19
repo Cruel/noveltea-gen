@@ -126,6 +126,12 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
     assert.equal((await control('GET', strangerCookie)).status, 404)
     assert.equal((await control('POST', authorCookie, { action: 'cancel' }, 'https://evil.test')).status, 403)
     assert.equal((await control('POST', authorCookie, { action: 'resume', model: 'override' })).status, 400)
+    const unauthorizedGuidance = { action: 'repair', sourceSha: sha,
+      guidance: 'Override the protected Creative Direction without separate author approval.' }
+    assert.equal((await control('POST', strangerCookie, unauthorizedGuidance)).status, 404)
+    assert.equal((await control('POST', authorCookie, unauthorizedGuidance)).status, 409,
+      'An ordinary paused run cannot mint a repair grant without an exhausted sealed review.')
+    assert.equal((await control('GET', authorCookie)).body.repair, null)
     assert.equal((await control('GET', authorCookie)).body.queue, 'queued')
     assert.equal((await control('POST', authorCookie, { action: 'pause' })).status, 202)
     assert.equal((await queueRecord(store, id)), undefined)

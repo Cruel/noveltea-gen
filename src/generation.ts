@@ -117,6 +117,7 @@ function reviewEscalation(report: JobReport, inventory: GenerationInventory | nu
         : "The narrative reviewer exhausted or could not use its original-writer bounded repair path. Inspect the blocked review and authorize a targeted repair.",
   };
 }
+const REPAIR_STEERING_BOUNDARY = "Author steering queued after independently reviewed correction";
 const MAX_IDEA_ATTEMPTS = 3;
 const ideaDispatchFile = (job: JobStartResult) => join(job.stateDir, "generation-idea-dispatch.json");
 function selectIdeaTask(s: State, head: string, tasks: Awaited<ReturnType<typeof scheduleIdeasAtBoundary>>["tasks"],
@@ -662,12 +663,19 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
       if (reviewed.semanticReview === "failed") {
         const progress = await advanceRejectedRepair(job, point.commitSha, {
           skillsSource: s.request.skillsSource, provider: s.request.provider,
-          model: s.request.model });
+          model: s.request.model,
+          canYieldForSteering: async () => !!s.request.turnPlanDigest &&
+            !!s.inventory?.items.some(item => item.stage === "architecture" &&
+              item.status === "verified") && !!s.active && !!s.result &&
+            (await checkPlan(job, s.request, s.planVersion))?.plan?.version === s.planVersion,
+        });
         if (progress.next === "completed") {
           const { finalizeReviewEventDependency } = await import("./dependency-state.js");
           await withStoryJobLock(job, "event-dependency-review-completion", () =>
             finalizeReviewEventDependency(job, point.commitSha));
         }
+        if (progress.next === "steering-boundary")
+          return { reason: REPAIR_STEERING_BOUNDARY };
         if (progress.next !== "completed") return {
           ...(progress.next === "controller-replan" ? { escalation: {
             kind: "dependency-replan" as const, requiresTrustedApproval: false,
@@ -904,7 +912,29 @@ export function createGenerationGraph(
           // original specialist may reconcile the dirty/unpublished work boundary.
           if (s.ideaTask) return {};
           if (s.active && (receipt?.plan?.version ?? null) === s.planVersion) {
-            if (s.result) return {};
+            if (s.result) {
+              // A failed correction may have reached a *reviewed*, clean
+              // checkpoint while author steering was queued during its Pi
+              // turn. Do not wait through the whole correction loop. Process
+              // the message here before re-entering the same original review.
+              const adapter = currentSteeringBoundary();
+              if (adapter && s.request.turnPlanDigest &&
+                  (await adapter.pending(job)).length) {
+                clean(job);
+                const head = await trustedHead(job);
+                const reviewed = (await inspectRecoveryCheckpoints(job)).some(point =>
+                  point.eligible && point.commitSha === head &&
+                  point.workItem.startsWith("repair-") &&
+                  point.semanticReview === "failed");
+                if (reviewed) {
+                  const updated = await reconcile(s, job, false);
+                  const boundary = await applyLiveSteeringAtBoundary(job, s.request,
+                    updated.inventory ?? null);
+                  if (boundary) return boundary;
+                }
+              }
+              return s.reason === REPAIR_STEERING_BOUNDARY ? { reason: null } : {};
+            }
             try { clean(job); await trustedHead(job); } catch { return {}; }
           }
           if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
@@ -1239,7 +1269,8 @@ export function createGenerationGraph(
     .addEdge(START, "schedule")
     .addConditionalEdges("schedule", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("author_update_intake", s => s.status !== "running" ? END :
-      s.ideaTask ? "idea_integration" : s.active ? "specialist_dispatch" : "completion_decision")
+      s.ideaTask ? "idea_integration" : s.active && s.result ? "independent_assignment_review" :
+      s.active ? "specialist_dispatch" : "completion_decision")
     .addConditionalEdges("idea_integration", s => s.status !== "running" ? END : "verify_idea_integration")
     .addConditionalEdges("verify_idea_integration", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END :
@@ -1247,6 +1278,7 @@ export function createGenerationGraph(
       s.active ? "independent_assignment_review" : "author_update_intake")
     .addConditionalEdges("dependency_amendment", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("independent_assignment_review", s => s.status !== "running" ? END :
+      s.reason === REPAIR_STEERING_BOUNDARY ? "author_update_intake" :
       s.result ? "verify_committed_work" : "specialist_dispatch")
     .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END : "author_update_intake")
     .addEdge("completion_decision", END)

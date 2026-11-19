@@ -43,8 +43,20 @@ export type JobControls = {
     unknownTokenCalls: number; tokens: { input: number; output: number;
       cacheRead: number; cacheWrite: number; total: number }
     pause?: { reason: string } }
+  repair: null | {
+    attempts: number; limit: number
+    findings: Array<{ id: string; type: string; specialist: string; outcome: string;
+      paths: string[]; status: string; sourceSha: string; reviewDigest: string;
+      attempts: number; allowance: number; message: string;
+      requiredCorrection: string | null }>
+    recent: Array<{ sourceSha: string; paths: string[]; outcome: string; successorSha: string | null }>
+    prerequisites: Array<{ type: string; specialist: string; path: string;
+      status: string; attempts: number }>
+    continuation?: { sourceSha: string; rootSha: string; reviewedSha: string;
+      remainingGrants: number; pendingGuidance?: string }
+  }
 }
-export type JobControlAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget'
+export type JobControlAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget' | 'repair'
 
 async function result<T>(response: Response) {
   const body = await response.json() as T
@@ -102,8 +114,11 @@ export const getJobControls = createServerFn({ method: 'GET' })
       request(data, '/control'), data, readAuthConfig().baseURL)))
 
 export const updateJobControl = createServerFn({ method: 'POST' })
-  .validator((data: { jobId: string; action: JobControlAction; limits?: BudgetLimits }) => data)
+  .validator((data: { jobId: string; action: JobControlAction; limits?: BudgetLimits;
+    sourceSha?: string; guidance?: string }) => data)
   .handler(async ({ data }) => result<{ status?: string }>(
     await generationControlRequest(auth, database,
-      request(data.jobId, '/control', { action: data.action, ...(data.limits ? { limits: data.limits } : {}) }),
+      request(data.jobId, '/control', { action: data.action, ...(data.limits ? { limits: data.limits } : {}),
+        ...(data.sourceSha ? { sourceSha: data.sourceSha } : {}),
+        ...(data.guidance ? { guidance: data.guidance } : {}) }),
       data.jobId, readAuthConfig().baseURL)))

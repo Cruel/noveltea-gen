@@ -13,6 +13,7 @@ import { CheckpointContinueAction } from './checkpoint-timeline'
 import { startConfiguredGeneration } from '@/lib/generation.functions'
 import { AuthorInteractions } from '../routes/_protected/jobs/-AuthorInteractions'
 import { ThreadExecutionDetails } from './thread-execution-details'
+import { ThreadRepairStatus } from './thread-repair-status'
 import { SpecialistUnsentRecovery } from './specialist-unsent-recovery'
 
 type Run = { jobId: string; status: string; queuePhase: string | null }
@@ -73,6 +74,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
       <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
       {run.status === 'queued' ? 'Waiting for a generation slot…' : 'NovelTea is working…'}
     </div>
+    <ThreadRepairStatus jobId={run.jobId} status={run.status} />
     <SpecialistUnsentRecovery jobId={run.jobId} />
     <ThreadExecutionDetails jobId={run.jobId} />
   </div>
@@ -112,6 +114,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
         ? 'A setup check failed. Your previous instruction and verified Story checkpoint are preserved.'
         : runAttentionText(job.status, job.reason ? publicRuntimeText(job.reason) : job.reason)}
     </p>
+    <ThreadRepairStatus jobId={run.jobId} status={job.status} reason={job.reason} />
     {!!verified.length && <p className="text-xs text-muted-foreground">
       {verified.length} verified {verified.length === 1 ? 'stage' : 'stages'} preserved.
     </p>}

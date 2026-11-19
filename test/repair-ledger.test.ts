@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { JobStartResult } from "../src/job.js";
 import { admitRepairFinding, inspectRepairLedger, submitRepairCorrection,
-  settleRepairReview, type RepairFindingInput } from "../src/repair-ledger.js";
+  settleRepairReview, authorizeRepairGuidance, totalTurnCorrections, turnCorrectionLimit,
+  localCorrectionLimit, type RepairFindingInput } from "../src/repair-ledger.js";
 import { removeTestTree } from "./helpers.js";
 
 const sha = (char: string) => char.repeat(40);
@@ -50,6 +51,72 @@ test("a paraphrased failed rereview retains one finding and two completed correc
   const saved = await inspectRepairLedger(job, turnDigest);
   assert.equal(saved.corrections.length, 2);
   assert.equal(saved.findings[0]!.attempts.length, 2);
+});
+
+test("authenticated guidance extends one bounded source-linked correction without resetting review history", async t => {
+  const job = fixture(t);
+  await admitRepairFinding(job, source());
+  const submit = async (current: string, next: string, verdict: string) => {
+    await submitRepairCorrection(job, { turnDigest, rootFailureSha: original, sourceSha: current,
+      changedPaths: ["events/absence.md"] });
+    await settleRepairReview(job, { ...source(original, current),
+      reviewDigest: digest(verdict), successorSha: next,
+      status: "failed", findings: [finding("The witness is still missing")] });
+  };
+  await submit(original, sha("2"), "c");
+  await admitRepairFinding(job, { ...source(original, sha("2")), reviewDigest: digest("c") });
+  await submit(sha("2"), sha("3"), "d");
+  await assert.rejects(() => admitRepairFinding(job, {
+    ...source(original, sha("3")), reviewDigest: digest("d"),
+  }), /Local corrections exhausted/);
+  const input = { turnDigest, rootFailureSha: original, sourceSha: sha("2"),
+    headSha: sha("3"), authorId: "owner-1",
+    guidance: "Identify the source of the witness in the original Event prose." };
+  for (let restart = 0; restart < 2; restart++) {
+    const grant = await authorizeRepairGuidance(job, input);
+    assert.equal(grant.localLimit, 3);
+    assert.equal(grant.turnLimit, 13);
+    assert.equal((await inspectRepairLedger(job, turnDigest)).authorGrants?.length, 1);
+  }
+  await admitRepairFinding(job, { ...source(original, sha("3")), reviewDigest: digest("d") });
+  await submitRepairCorrection(job, { turnDigest, rootFailureSha: original, sourceSha: sha("3"),
+    changedPaths: ["events/absence.md"] });
+  const saved = await inspectRepairLedger(job, turnDigest);
+  await assert.rejects(() => authorizeRepairGuidance(job, input),
+    /exhausted, independently rejected source|previously authorized correction has already been submitted/);
+  assert.equal(totalTurnCorrections(saved), 3);
+  assert.equal(localCorrectionLimit(saved, original), 3);
+  assert.equal(turnCorrectionLimit(saved), 13);
+  assert.equal(saved.findings[0]?.attempts.length, 3);
+  await assert.rejects(() => submitRepairCorrection(job, {
+    turnDigest, rootFailureSha: original, sourceSha: sha("4"),
+    changedPaths: ["events/absence.md"],
+  }), /Local corrections exhausted|no admitted sealed finding/);
+  await assert.rejects(() => authorizeRepairGuidance(job, {
+    ...input, guidance: "An unrelated second approval",
+  }), /exhausted|not exhausted/i);
+});
+
+test("guidance cannot bypass original allowance, consume a pending writer or use a stale review source", async t => {
+  const job = fixture(t);
+  await admitRepairFinding(job, source());
+  const request = { turnDigest, rootFailureSha: original, sourceSha: original,
+    headSha: sha("2"), authorId: "real-author", guidance: "Correct the cited witness." };
+  await assert.rejects(() => authorizeRepairGuidance(job, request),
+    /exhausted, independently rejected source/);
+  await submitRepairCorrection(job, { turnDigest, rootFailureSha: original, sourceSha: original,
+    changedPaths: ["events/absence.md"] });
+  await assert.rejects(() => authorizeRepairGuidance(job, request),
+    /exhausted, independently rejected source/);
+  await settleRepairReview(job, { ...source(), reviewDigest: digest("c"),
+    successorSha: sha("2"), status: "failed", findings: [finding("Still unresolved")] });
+  await assert.rejects(() => authorizeRepairGuidance(job, request),
+    /not exhausted/);
+  await assert.rejects(() => authorizeRepairGuidance(job, {
+    ...request, guidance: "unsafe" + String.fromCharCode(10) + "change" }), /Invalid bounded author guidance/);
+  await assert.rejects(() => authorizeRepairGuidance(job, {
+    ...request, headSha: sha("3") }), /exhausted, independently rejected source/);
+  assert.equal((await inspectRepairLedger(job, turnDigest)).authorGrants?.length ?? 0, 0);
 });
 
 test("incomplete calls do not count and idempotent submitted corrections count once across rereads", async t => {

@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { StudioAuth } from './auth'
@@ -15,12 +16,16 @@ import { activeSpecialistChoice, focusedChoiceWorkItem, verifySpecialistChoice }
 import { validateStoryJob } from '../../../src/validator'
 import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
-import { inspectRejectedRepair, type RepairReceipt } from '../../../src/rejected-review-repair'
+import { inspectRejectedRepair, acceptGuidedRepairContinuation, type RepairReceipt } from '../../../src/rejected-review-repair'
+import { inspectRepairLedger, authorizeRepairGuidance, totalTurnCorrections,
+  MAX_AUTHOR_REPAIR_GRANTS, MAX_AUTHOR_GRANTS_PER_ROOT, type AuthorRepairGrant,
+  turnCorrectionLimit, localCorrectionLimit } from '../../../src/repair-ledger'
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from '../../../src/recovery-checkpoints'
+import { inspectCheckpointReview } from '../../../src/checkpoint-assurance'
 import { inspectPiPolicy, configurePiPolicy, type PiPolicy } from '../../../src/job-pi-policy'
 import { parseJobLimits } from '../../../src/job-limits'
 
-async function readSmallCommand(request: Request): Promise<string> {
+async function readSmallCommand(request: Request, maximum = 256): Promise<string> {
   const reader = request.body?.getReader()
   if (!reader) throw new Error('Missing job control command')
   const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -30,7 +35,7 @@ async function readSmallCommand(request: Request): Promise<string> {
       const { value, done } = await reader.read()
       if (done) break
       bytes += value.byteLength
-      if (bytes > 256) throw new Error('Control command exceeds 256 bytes')
+      if (bytes > maximum) throw new Error('Control command exceeds ' + maximum + ' bytes')
       result += decoder.decode(value, { stream: true })
     }
     return result + decoder.decode()
@@ -40,7 +45,43 @@ async function readSmallCommand(request: Request): Promise<string> {
 const reply = (value: unknown, status = 200) => Response.json(value, {
   status, headers: { 'Cache-Control': 'private, no-store' },
 })
-type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget'
+type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'budget' | 'repair'
+
+/** Project only compact evidence from independently sealed reviews. Never send
+ * transcript text, model tool calls or unverifiable findings to the browser. */
+async function inspectPublicRepairFindings(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
+  findings: Awaited<ReturnType<typeof inspectRepairLedger>>['findings']) {
+  const points = await inspectRecoveryCheckpoints(job)
+  const reviewed = new Map<string, ReturnType<typeof inspectCheckpointReview>>()
+  return Promise.all(findings.map(async finding => {
+    const key = finding.source.sourceSha
+    let requested = reviewed.get(key)
+    if (!requested) {
+      const point = points.find(p => p.eligible && p.commitSha === key && p.assurance)
+      requested = point ? inspectCheckpointReview(job, point) : Promise.resolve(null)
+      reviewed.set(key, requested)
+    }
+    const review = await requested
+    const digest = review?.result && createHash('sha256')
+      .update(JSON.stringify(review.result)).digest('hex')
+    if (!review || review.status !== 'failed' || !review.result ||
+        digest !== finding.source.reviewDigest)
+      throw Error('Repair finding lost its original independently sealed review evidence.')
+    const detail = review.result.findings.find(f =>
+      (f.kind ?? 'other') === finding.category &&
+      JSON.stringify([...new Set(f.affectedPaths ?? [f.path])].sort()) ===
+      JSON.stringify(finding.targets))
+    if (!detail) throw Error('Repair finding no longer matches the sealed source review.')
+    return {
+      id: finding.id, type: finding.category, specialist: finding.assignmentId,
+      outcome: finding.obligation, paths: finding.targets, status: finding.status,
+      sourceSha: finding.source.sourceSha, reviewDigest: finding.source.reviewDigest,
+      attempts: finding.attempts.length,
+      message: detail.message.slice(0, 400),
+      requiredCorrection: detail.requiredCorrection?.slice(0, 400) ?? null,
+    }
+  }))
+}
 
 /** Match an authenticated, already-verified answer to its exact checkpointed
  * assignment. A different pending writer cannot inherit the author decision. */
@@ -99,6 +140,65 @@ export function matchesReviewRepairResumeBoundary(
     authorChoiceMatchesActiveAssignment(point.workItem, saved.active)
 }
 
+/** A guidance grant is not a new specialist dispatch. Only a blocked
+ * independently rejected stage whose original committed result remains saved
+ * may re-enter its original review node after the author has raised the
+ * existing Repair ledger's exact source-bound allowance. */
+export function matchesGuidedRepairResumeBoundary(
+  saved: PendingReviewChoiceState,
+  repair: Pick<RepairReceipt, 'phase' | 'rootFailureSha' | 'sourceCommitSha' |
+    'repairedCommitSha' | 'baselineHead'>,
+  grant: AuthorRepairGrant,
+  point: Pick<RecoveryInspection, 'eligible' | 'commitSha' | 'workItem' | 'semanticReview'>,
+  headSha: string,
+): boolean {
+  const stage = saved.active && typeof saved.active === 'object'
+    ? (saved.active as { stage?: string }).stage : undefined
+  const allowedResult: Record<string, string> = {
+    foundation: 'committed', architecture: 'architecture-committed',
+    foundations: 'foundations-committed', event: 'event-cluster-committed',
+    interactive: 'interactive-slice-committed', composition: 'composition-committed',
+    focus: 'focused-committed',
+  }
+  const result = saved.result as { status?: string; headSha?: string } | null
+  return saved.status === 'blocked' &&
+    !!saved.reason && /correction|review/i.test(saved.reason) &&
+    !!stage && !!result && (result.status === 'review-handoff' ||
+      result.status === allowedResult[stage]) &&
+    !saved.ideaTask && !saved.ideaResult &&
+    result.headSha === repair.rootFailureSha &&
+    repair.phase === 'failed' && grant.rootFailureSha === repair.rootFailureSha &&
+    grant.sourceSha === repair.sourceCommitSha &&
+    grant.headSha === repair.repairedCommitSha &&
+    grant.headSha === repair.baselineHead &&
+    grant.headSha === headSha &&
+    point.eligible && point.semanticReview === 'failed' &&
+    point.commitSha === grant.headSha &&
+    point.workItem === 'repair-' + grant.sourceSha
+}
+
+/** A pending author steer reached an independently reviewed correction
+ * boundary and required scope/protected review. Resuming the unchanged
+ * original Story Turn grants no steering authority and cannot replay a writer. */
+export function matchesRepairSteeringReviewBoundary(
+  saved: PendingReviewChoiceState,
+  repair: Pick<RepairReceipt, 'phase' | 'rootFailureSha' | 'sourceCommitSha' |
+    'repairedCommitSha' | 'baselineHead'>,
+  point: Pick<RecoveryInspection, 'eligible' | 'commitSha' | 'workItem' | 'semanticReview'>,
+  headSha: string,
+): boolean {
+  const result = saved.result as { headSha?: string } | null | undefined
+  return saved.status === 'paused' &&
+    saved.reason?.startsWith('Author approval required for live steering:') === true &&
+    !!saved.active && !!result && !saved.ideaTask && !saved.ideaResult &&
+    result.headSha === repair.rootFailureSha &&
+    repair.phase === 'failed' && repair.repairedCommitSha === headSha &&
+    repair.baselineHead === headSha &&
+    point.eligible && point.semanticReview === 'failed' &&
+    point.commitSha === headSha &&
+    point.workItem === 'repair-' + repair.sourceCommitSha
+}
+
 /** Read-only, evidence-checked admission. Exported for crash/restart regression tests. */
 export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
   threadId: string, pinned: string, retry: boolean): Promise<'start' | 'resume'> {
@@ -141,6 +241,40 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
       // in-flight dispatch/result; only the exact authenticated answered
       // review-repair choice can re-enter its read-only review boundary.
       let reviewRepairBoundary = false
+      let guidedRepairBoundary = false
+      let steeringReviewBoundary = false
+      if (saved.status === 'paused' &&
+          saved.reason?.startsWith('Author approval required for live steering:') &&
+          saved.request) {
+        const pinned = saved.request as { turnPlanDigest?: string }
+        if (pinned.turnPlanDigest) {
+          const ledger = await inspectRepairLedger(job, pinned.turnPlanDigest)
+          const head = await trustedHead(job)
+          const source = ledger.corrections.findLast(c =>
+            c.result?.status === 'failed' && c.result.successorSha === head)
+          if (source) {
+            const repair = await inspectRejectedRepair(job, source.sourceSha)
+            const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+              p.eligible && p.commitSha === head)
+            steeringReviewBoundary = !!point && matchesRepairSteeringReviewBoundary(
+              saved, repair, point, head)
+          }
+        }
+      }
+      if (saved.status === 'blocked' && saved.request) {
+        const pinned = saved.request as { turnPlanDigest?: string }
+        if (pinned.turnPlanDigest) {
+          const ledger = await inspectRepairLedger(job, pinned.turnPlanDigest)
+          const grant = ledger.authorGrants?.at(-1)
+          if (grant) {
+            const repair = await inspectRejectedRepair(job, grant.sourceSha)
+            const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+              p.eligible && p.commitSha === grant.headSha)
+            guidedRepairBoundary = !!point && matchesGuidedRepairResumeBoundary(
+              saved, repair, grant, point, await trustedHead(job))
+          }
+        }
+      }
       const sourceSha = choiceAnswer?.workItem.match(/^repair-([a-f0-9]{40})$/)?.[1]
       if (sourceSha && saved.status === 'paused' &&
           saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.' &&
@@ -159,9 +293,9 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
         if (validation.status !== 'passed')
           throw new Error('Pinned native validator did not pass the unchanged Story. Restore the exact original validator before resuming.')
       }
-      if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && saved.status !== 'paused') ||
-          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary) ||
-          (saved.result && !reviewRepairBoundary) || saved.ideaTask || saved.ideaResult ||
+      if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && saved.status !== 'paused') ||
+          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary) ||
+          (saved.result && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary) || saved.ideaTask || saved.ideaResult ||
           (!saved.request || !sameGenerationRequest(saved.request as GenerationRequest,
             JSON.parse(pinned) as GenerationRequest)) || state.next.length !== 0)
         throw new Error('Checkpoint is not at a verified, idle safe boundary. Inspect the original specialist receipts.')
@@ -210,21 +344,111 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
     const queued = (await queueRecord(store, id))
     if (request.method === 'GET') {
       const pi = await inspectPiPolicy(job)
+      const pinned = saved.request ? JSON.parse(saved.request) as { turnPlanDigest?: string } : null
+      const ledger = pinned?.turnPlanDigest ?
+        await inspectRepairLedger(job, pinned.turnPlanDigest) : null
+      const failed = ledger?.corrections.filter(c => c.result?.status === 'failed').at(-1)
+      const pendingGrant = failed && ledger?.authorGrants?.find(g =>
+        g.rootFailureSha === failed.rootFailureSha && g.sourceSha === failed.sourceSha &&
+        g.headSha === failed.result?.successorSha &&
+        !ledger.corrections.some(c => c.rootFailureSha === g.rootFailureSha &&
+          c.sourceSha === g.headSha))
+      const active = failed && ledger?.findings.some(f =>
+        f.rootFailureSha === failed.rootFailureSha && f.status === 'open' &&
+        f.source.sourceSha === failed.result?.successorSha)
+      const repair = ledger && (ledger.findings.length || ledger.prerequisites?.length) ? {
+        attempts: totalTurnCorrections(ledger), limit: turnCorrectionLimit(ledger),
+        findings: (await inspectPublicRepairFindings(job, ledger.findings.slice(-12)))
+          .map(f => ({ ...f, allowance: localCorrectionLimit(ledger, ledger.findings.find(
+            saved => saved.id === f.id)!.rootFailureSha) })),
+        recent: ledger.corrections.slice(-12).map(c => ({
+          sourceSha: c.sourceSha, paths: c.changedPaths,
+          outcome: c.result?.status ?? 'pending',
+          successorSha: c.result?.successorSha ?? null,
+        })),
+        prerequisites: (ledger.prerequisites ?? []).slice(-12).map(p => ({
+          type: p.obligation, specialist: p.milestoneId, path: p.path,
+          status: p.status, attempts: p.attempts.length,
+        })),
+        ...(failed && active ? { continuation: {
+          sourceSha: failed.sourceSha, rootSha: failed.rootFailureSha,
+          reviewedSha: failed.result!.successorSha,
+          ...(pendingGrant ? { pendingGuidance: pendingGrant.guidance } : {}),
+          remainingGrants: Math.max(0, Math.min(
+            MAX_AUTHOR_REPAIR_GRANTS - (ledger.authorGrants?.length ?? 0),
+            MAX_AUTHOR_GRANTS_PER_ROOT - (ledger.authorGrants ?? []).filter(g =>
+              g.rootFailureSha === failed.rootFailureSha).length)),
+        } } : {}),
+      } : null
       return reply({ control: await readJobControl(job), queue: queued?.phase ?? null,
-        budget: pi.budget, limits: pi.policy.limits })
+        budget: pi.budget, limits: pi.policy.limits, repair })
     }
-    if (Number(request.headers.get('content-length') ?? 0) > 256)
+    if (Number(request.headers.get('content-length') ?? 0) > 2048)
       return reply({ error: 'Control command too large' }, 413)
-    const raw = await readSmallCommand(request)
+    const raw = await readSmallCommand(request, 2048)
     let command: Record<string, unknown>
     try { command = JSON.parse(raw) as Record<string, unknown> }
     catch { return reply({ error: 'Invalid control JSON' }, 400) }
     if (!command || typeof command !== 'object' || Array.isArray(command) ||
-        !['pause', 'resume', 'cancel', 'retry', 'budget'].includes(String(command.action)) ||
-        Object.keys(command).some(key => !['action', ...(command.action === 'budget' ? ['limits'] : [])].includes(key)) ||
-        (command.action !== 'budget' && Object.keys(command).length !== 1))
+        !['pause', 'resume', 'cancel', 'retry', 'budget', 'repair'].includes(String(command.action)) ||
+        Object.keys(command).some(key => !['action', ...(command.action === 'budget' ? ['limits'] : []),
+          ...(command.action === 'repair' ? ['sourceSha', 'guidance'] : [])].includes(key)) ||
+        (!['budget', 'repair'].includes(String(command.action)) && Object.keys(command).length !== 1))
       return reply({ error: 'Expected one typed control or budget action' }, 400)
     const action = command.action as Action
+    if (action === 'repair') {
+      if (!saved.request || !saved.thread || !['blocked', 'paused'].includes(saved.status) ||
+          !['finished', undefined].includes(queued?.phase) ||
+          typeof command.sourceSha !== 'string' ||
+          !/^[a-f0-9]{40}$/.test(command.sourceSha) ||
+          (command.guidance !== undefined && (typeof command.guidance !== 'string' ||
+            command.guidance.length > 1200)))
+        return reply({ error: 'Exhausted repair requires exact source and bounded guidance in a stopped job.' }, 409)
+      const sourceSha = command.sourceSha as string
+      const guidance = (typeof command.guidance === 'string' ? command.guidance.trim() : '') ||
+        'Attempt one more evidence-backed correction of the original sealed finding within the unchanged assignment and file grant.'
+      const grant = await withStoryJobLock(job, 'author-guided-repair', async () => {
+        const current = await store.persistence.generation.jobs.state(user.id, id)
+        if (!current || current.requestJson !== saved.request ||
+            current.threadId !== saved.thread || current.status !== saved.status)
+          throw Error('Generation changed before guided repair admission.')
+        const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
+        let state: PendingReviewChoiceState & { request?: GenerationRequest }
+        try {
+          const snapshot = await graph.getState({ configurable: { thread_id: saved.thread! } })
+          if (snapshot.next.length) throw Error('Repair graph is not idle at a reconciled checkpoint.')
+          state = snapshot.values as typeof state
+        } finally { saver.db.close() }
+        const repair = await inspectRejectedRepair(job, sourceSha)
+        const original = (state.result as { headSha?: string } | null)?.headSha
+        if (state.status !== 'blocked' || !state.active || !state.result ||
+            !state.reason?.includes('correction') && !state.reason?.includes('review') ||
+            original !== repair.rootFailureSha ||
+            repair.phase !== 'blocked' && repair.phase !== 'failed' ||
+            !repair.repairedCommitSha ||
+            repair.repairedCommitSha !== await trustedHead(job) ||
+            !state.request?.turnPlanDigest ||
+            state.request.turnPlanDigest !== repair.originalSource.turnDigest)
+          throw Error('Original failed repair and saved Story Turn are not a safe continuation boundary.')
+        const approved = await authorizeRepairGuidance(job, {
+          turnDigest: repair.originalSource.turnDigest, authorId: user.id,
+          rootFailureSha: repair.rootFailureSha, sourceSha: repair.sourceCommitSha,
+          headSha: repair.repairedCommitSha, guidance,
+        })
+        await acceptGuidedRepairContinuation(job, repair.sourceCommitSha, approved.id)
+        await store.persistence.generation.jobs.authorDecision(user.id, id, 'paused',
+          new Date().toISOString())
+        return approved
+      })
+      const current = await store.persistence.generation.jobs.state(user.id, id)
+      if (!current?.requestJson || !current.threadId) throw Error('Repair continuation lost its pinned job.')
+      const intent = await safeToResume(job, current.threadId, current.requestJson, false)
+      await setJobControl(job, 'running')
+      await store.persistence.generation.queue.reconcileAndEnqueue(user.id, id, intent, {
+        status: current.status, request: current.requestJson, thread: current.threadId,
+      }, false, new Date().toISOString())
+      return reply({ control: 'running', queue: 'queued', intent, grantId: grant.id }, 202)
+    }
     if (action === 'budget') {
       if (saved.status !== 'paused' || !saved.request || queued?.phase === 'running' ||
           queued?.phase === 'queued')
@@ -310,7 +534,7 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
   } catch (error) {
     const status = error instanceof Error && 'status' in error &&
       typeof error.status === 'number' ? error.status :
-      error instanceof Error && error.message === 'Control command exceeds 256 bytes' ? 413 : 409
+      error instanceof Error && error.message.startsWith('Control command exceeds ') ? 413 : 409
     return reply({ error: status === 404 ? 'Job not found' :
       error instanceof Error ? error.message : 'Control transition unavailable; inspect durable state.' }, status)
   }

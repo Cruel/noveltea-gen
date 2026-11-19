@@ -24,12 +24,16 @@ export interface RepairCycleOps<S extends RepairCycleState> {
   rereview(state: S): Promise<void>;
   finishReview(sourceSha: string): Promise<S>;
   nextFailure(state: S): Promise<S>;
+  /** Only after a sealed failed rereview may the graph yield for pending
+   * author steering. Never interrupt a claimed writer or a pending review. */
+  shouldYieldForSteering?: (state: S) => Promise<boolean>;
   /** Recheck deterministic source references before one fresh independent read-only review. */
   adjudicate(state: S): Promise<S>;
 }
 export type RepairCycleResult<S extends RepairCycleState> =
   | { state: S; next: "completed" }
   | { state: S; next: "author-escalation" }
+  | { state: S; next: "steering-boundary" }
   | { state: S; next: "controller-replan" }
   | { state: S; next: "manual-reconcile"; reason: string }
   | { state: S; next: "author-choice"; choice: {
@@ -38,11 +42,10 @@ export type RepairCycleResult<S extends RepairCycleState> =
 /** Never retries a claimed Pi turn after interruption. Each transition is
  * one-way and durable before any subsequent external side effect. */
 export async function driveRejectedRepairCycle<S extends RepairCycleState>(
-  // Up to twelve submitted corrections across the Turn can each require
-  // writer, validator, checkpoint, rereview and next-source transitions.
-  // The ledger enforces the substantive ceilings; this is only a finite
-  // controller-iteration guard and must not impose a hidden two-repair cap.
-  ops: RepairCycleOps<S>, maxTransitions = 80,
+  // At most 12 ordinary + 6 explicit author-granted corrections per Turn,
+  // each potentially traversing a writer, validator, checkpoint and separate
+  // independent rereview. The ledger owns attempt limits, not this guard.
+  ops: RepairCycleOps<S>, maxTransitions = 160,
 ): Promise<RepairCycleResult<S>> {
   let state = await ops.begin();
   for (let step = 0; step < maxTransitions; step++) {
@@ -83,6 +86,8 @@ export async function driveRejectedRepairCycle<S extends RepairCycleState>(
         state = await ops.finishReview(state.sourceCommitSha);
         continue;
       case "failed":
+        if (await ops.shouldYieldForSteering?.(state))
+          return { state, next: "steering-boundary" };
         state = await ops.nextFailure(state);
         continue;
       case "passed":

@@ -74,6 +74,43 @@ test("rejection -> same writer -> actual correction -> native validation -> dist
   assert.equal(done.state.repairedCommitSha, corrected);
 });
 
+test("pending author steering yields after sealed failed rereview, never in the middle of a writer", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "ready", sourceCommitSha: original, attempts: 0 }, log);
+  let pending = true;
+  flow.ops.finishReview = async () => {
+    log.push("independent-review-failed");
+    const current = { ...flow.get(), phase: "failed" as const };
+    flow.set(current);
+    return current;
+  };
+  flow.ops.shouldYieldForSteering = async () => pending;
+  flow.ops.nextFailure = async () => {
+    log.push("next-original-session-writer");
+    const current = { ...flow.get(), phase: "ready" as const, sourceCommitSha: corrected };
+    flow.set(current);
+    return current;
+  };
+  const pause = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(pause.next, "steering-boundary");
+  assert.equal(pause.state.phase, "failed");
+  assert.deepEqual(log, ["original-writer:" + original, "native-validate",
+    "new-signed-checkpoint", "independent-read-only-review",
+    "independent-review-failed"]);
+  pending = false;
+  flow.ops.finishReview = async () => {
+    log.push("independent-review-passed");
+    const current = { ...flow.get(), phase: "passed" as const };
+    flow.set(current);
+    return current;
+  };
+  const resumed = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(resumed.next, "completed");
+  assert.equal(log.filter(item => item === "original-writer:" + original).length, 1);
+  assert.equal(log.filter(item => item === "original-writer:" + corrected).length, 1);
+  assert.equal(log.filter(item => item === "independent-review-failed").length, 1);
+});
+
 test("argument-only disagreement never invokes validator or reviewer until trusted Author Choice", async () => {
   const log: string[] = [];
   const state: State = { phase: "ready", sourceCommitSha: original };

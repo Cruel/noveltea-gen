@@ -40,12 +40,15 @@ import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
 import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
 import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
+import { currentSteeringBoundary } from "./steering-boundary.js";
+import { steeringForAssignment } from "./steering-amendments.js";
 import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
 import { admitRepairFinding, inspectRepairLedger, submitRepairCorrection,
-  settleRepairReview, totalTurnCorrections, MAX_LOCAL_CORRECTIONS, MAX_TURN_CORRECTIONS } from "./repair-ledger.js";
+  settleRepairReview, totalTurnCorrections, turnCorrectionLimit, localCorrectionLimit,
+  MAX_LOCAL_CORRECTIONS, MAX_TURN_CORRECTIONS, MAX_AUTHOR_REPAIR_GRANTS } from "./repair-ledger.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -373,7 +376,7 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
         (path.startsWith("creative-direction/") && state.origin?.workItem !== "foundation")) ||
       (state.origin?.workItem === "foundation" &&
         (state.allowedPaths.length !== 1 || !state.allowedPaths[0]?.startsWith("creative-direction/"))) ||
-      !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > MAX_TURN_CORRECTIONS ||
+      !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > MAX_TURN_CORRECTIONS + MAX_AUTHOR_REPAIR_GRANTS ||
       !["ready", "repairing", "awaiting-author", "needs-plan", "disputing",
         "adjudicating", "validating", "awaiting-checkpoint", "reviewing", "passed", "failed", "blocked"].includes(state.phase) ||
       (state.outOfAuthority && (state.phase !== "needs-plan" ||
@@ -479,7 +482,18 @@ export async function prepareRejectedRepairFeedback(job: JobStartResult, state: 
   const ledger = turn && HASH.test(turn) ? await inspectRepairLedger(job, turn) : null;
   const open = ledger?.findings.filter(f => f.rootFailureSha === state.rootFailureSha &&
     f.status === "open") ?? [];
+  const guidance = ledger?.authorGrants?.filter(grant =>
+    grant.rootFailureSha === state.rootFailureSha).at(-1);
+  const steering = turn
+    ? await steeringForAssignment(job, turn, state.assignment.id, await trustedHead(job))
+    : "";
   const feedback = { ...repairFeedback(state),
+    maxAttempts: ledger ? localCorrectionLimit(ledger, state.rootFailureSha) : MAX_LOCAL_CORRECTIONS,
+    ...(guidance ? { authorGuidance: {
+      direction: guidance.guidance, grantId: guidance.id,
+      warning: "Author guidance does not change the original protected canon, approved objective, or write scope. Obtain separate exact approval for any such change.",
+    } } : {}),
+    ...(steering ? { authenticatedSafeBoundarySteering: steering } : {}),
     attempt: open.length ? Math.max(...open.map(f => f.attempts.length)) + 1 : state.attempts + 1 };
   const event = state.origin.workItem.startsWith("event-");
   let sourcePaths: string[] = [];
@@ -847,8 +861,8 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   });
   const unresolved = ledger.findings.filter(f =>
     f.rootFailureSha === state.rootFailureSha && f.status === "open");
-  const exhausted = totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS ||
-    unresolved.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS);
+  const exhausted = totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger) ||
+    unresolved.some(f => f.attempts.length >= localCorrectionLimit(ledger, f.rootFailureSha));
   const finished = repairReviewOutcome(state, review.result, exhausted);
   const stagnation = detectRepairStagnation(job, state, review.result);
   if (stagnation) {
@@ -914,8 +928,8 @@ export async function consumeRejectedRepairChoice(job: JobStartResult, sha: stri
   }
   const ledger = await inspectRepairLedger(job, state.originalSource.turnDigest);
   const unresolved = ledger.findings.filter(f => f.rootFailureSha === state.rootFailureSha && f.status === "open");
-  state.phase = totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS ||
-    unresolved.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS)
+  state.phase = totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger) ||
+    unresolved.some(f => f.attempts.length >= localCorrectionLimit(ledger, f.rootFailureSha))
     ? "blocked" : "ready";
   state.sessionSha256 = hash(await readFile(state.origin.sessionFile));
   await save(job, state);
@@ -1368,6 +1382,9 @@ export interface RejectedRepairOptions {
   provider?: string;
   model?: string;
   thinking?: "low" | "high";
+  /** The parent Graph owns the safe, native-verified steering admission
+   * boundary. Without an eligible inventory, corrections cannot yield. */
+  canYieldForSteering?: () => Promise<boolean>;
 }
 async function reviewerFor(job: JobStartResult, sha: string, options: RejectedRepairOptions) {
   const state = await inspectRejectedRepair(job, sha);
@@ -1450,6 +1467,36 @@ export async function adjudicateRejectedRepair(job: JobStartResult, sha: string)
   return current;
 }
 
+/** Same-Thread author continuation of an exhausted, independently reviewed
+ * repair. This transition is one-way and source bound; the next graph review
+ * boundary must still verify the new failed successor before any writer. */
+export async function acceptGuidedRepairContinuation(job: JobStartResult,
+  sha: string, grantId: string) {
+  const state = await inspectRejectedRepair(job, sha);
+  const ledger = await inspectRepairLedger(job, state.originalSource.turnDigest);
+  const grant = ledger.authorGrants?.find(item => item.id === grantId);
+  if (!grant || grant.rootFailureSha !== state.rootFailureSha ||
+      grant.sourceSha !== sha || !state.repairedCommitSha ||
+      state.repairedCommitSha !== grant.headSha ||
+      state.baselineHead !== grant.headSha ||
+      !["blocked", "failed"].includes(state.phase) ||
+      await trustedHead(job) !== grant.headSha ||
+      git(job, "status", "--porcelain=v1", "--untracked-files=all"))
+    throw Error("Guided repair grant does not match a clean, rejected successor checkpoint.");
+  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+    p.eligible && p.commitSha === grant.headSha && p.semanticReview === "failed");
+  if (!point || !point.assurance ||
+      !(ledger.findings.some(f => f.rootFailureSha === state.rootFailureSha &&
+        f.status === "open" && f.source.sourceSha === grant.headSha)))
+    throw Error("Guided repair source is no longer independently rejected.");
+  if (state.phase === "blocked") {
+    state.phase = "failed";
+    state.failure = undefined;
+    await save(job, state);
+  }
+  return state;
+}
+
 /** One owned, restart-reconcilable controller workflow. The original failed
  * review remains sealed. A second correction uses the same original writer
  * session, a new rejected checkpoint and a new independent Pi review. */
@@ -1486,6 +1533,12 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
       validateRejectedRepairDraft(job, sha)),
     commit: sha => withStoryJobLock(job, "rejected-review-commit", () =>
       commitRejectedRepairDraft(job, sha)),
+    shouldYieldForSteering: async () => {
+      const adapter = currentSteeringBoundary();
+      return !!adapter && !!options.canYieldForSteering &&
+        (await options.canYieldForSteering()) &&
+        (await adapter.pending(job)).length > 0;
+    },
     reviewStatus: async state => {
       const point = (await inspectRecoveryCheckpoints(job)).find(p =>
         p.eligible && p.commitSha === state.repairedCommitSha);

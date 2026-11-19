@@ -18,6 +18,24 @@ const PATH = /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/;
 export const MAX_LOCAL_CORRECTIONS = 2;
 export const MAX_DEPENDENCY_CYCLES = 3;
 export const MAX_TURN_CORRECTIONS = 12;
+/** A single author continuation grants one more local and Turn attempt.
+ * The absolute ceiling remains bounded even after multiple requests. */
+export const MAX_AUTHOR_REPAIR_GRANTS = 6;
+export const MAX_AUTHOR_GRANTS_PER_ROOT = 2;
+export interface AuthorRepairGrant {
+  id: string; authorId: string; rootFailureSha: string; sourceSha: string;
+  headSha: string; guidance: string; localLimit: number; turnLimit: number;
+}
+export function turnCorrectionLimit(ledger: RepairLedger): number {
+  return MAX_TURN_CORRECTIONS + (ledger.authorGrants?.length ?? 0);
+}
+export function localCorrectionLimit(ledger: RepairLedger, root: string): number {
+  return MAX_LOCAL_CORRECTIONS + (ledger.authorGrants ?? [])
+    .filter(grant => grant.rootFailureSha === root).length;
+}
+export function dependencyCycleLimit(ledger: RepairLedger): number {
+  return MAX_DEPENDENCY_CYCLES;
+}
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -69,6 +87,7 @@ export interface RepairLedger {
   corrections: RepairCorrection[];
   /** Additive private controller state; pre-existing ledgers remain readable. */
   prerequisites?: PrerequisiteRepair[];
+  authorGrants?: AuthorRepairGrant[];
 }
 export function totalTurnCorrections(ledger: RepairLedger): number {
   return ledger.corrections.length +
@@ -141,14 +160,31 @@ function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedg
             a.paths.some(path => !PATH.test(path)) ||
             (a.verdict !== undefined && (!["passed", "failed"].includes(a.verdict) ||
               !DIGEST.test(a.reviewDigest ?? ""))))))) ||
-      totalTurnCorrections(raw) > MAX_TURN_CORRECTIONS ||
+      (raw.authorGrants !== undefined && (!Array.isArray(raw.authorGrants) ||
+        raw.authorGrants.length > MAX_AUTHOR_REPAIR_GRANTS ||
+        new Set(raw.authorGrants.map(grant => grant.id)).size !== raw.authorGrants.length ||
+        raw.authorGrants.some((grant, index) =>
+          !DIGEST.test(grant.id) || !grant.authorId || grant.authorId.length > 180 ||
+          !SHA.test(grant.rootFailureSha) || !SHA.test(grant.sourceSha) ||
+          !SHA.test(grant.headSha) || !grant.guidance.trim() ||
+          grant.guidance.length > 1200 ||
+          grant.localLimit !== MAX_LOCAL_CORRECTIONS +
+            raw.authorGrants!.slice(0, index + 1).filter(g => g.rootFailureSha === grant.rootFailureSha).length ||
+          grant.turnLimit !== MAX_TURN_CORRECTIONS + index + 1 ||
+          grant.id !== digest({ authorId: grant.authorId,
+            rootFailureSha: grant.rootFailureSha, sourceSha: grant.sourceSha,
+            headSha: grant.headSha, guidance: grant.guidance,
+            localLimit: grant.localLimit, turnLimit: grant.turnLimit }) ||
+          raw.authorGrants!.filter(g => g.rootFailureSha === grant.rootFailureSha).length >
+            MAX_AUTHOR_GRANTS_PER_ROOT))) ||
+      totalTurnCorrections(raw) > turnCorrectionLimit(raw) ||
       new Set(raw.findings.map(f => f.id)).size !== raw.findings.length ||
       new Set(raw.corrections.map(c => c.rootFailureSha + ":" + c.sourceSha)).size !== raw.corrections.length ||
       raw.findings.some(f => !DIGEST.test(f.id) || !SHA.test(f.rootFailureSha) ||
         !f.assignmentId || !f.obligation || !["open", "resolved", "escalated"].includes(f.status) ||
         !SHA.test(f.source?.sourceSha) || !DIGEST.test(f.source?.reviewDigest) ||
         !Array.isArray(f.targets) || !f.targets.length || f.targets.some(p => !PATH.test(p)) ||
-        !Array.isArray(f.attempts) || f.attempts.length > MAX_TURN_CORRECTIONS ||
+        !Array.isArray(f.attempts) || f.attempts.length > turnCorrectionLimit(raw) ||
         f.attempts.some(s => !SHA.test(s))) ||
       raw.corrections.some(c => !SHA.test(c.rootFailureSha) || !SHA.test(c.sourceSha) ||
         !Array.isArray(c.changedPaths) || !c.changedPaths.length ||
@@ -178,6 +214,56 @@ async function save(job: JobStartResult, ledger: RepairLedger) {
   await writeFile(tmp, JSON.stringify(ledger, null, 2) + "\n", { mode: 0o600, flag: "wx" });
   await rename(tmp, file);
 }
+/** Only the authenticated Studio control adapter may request a grant, under
+ * the existing Story job writer lease. A model/author message never changes
+ * attempt caps implicitly and replay cannot create another allowance. */
+export async function authorizeRepairGuidance(job: JobStartResult, input: {
+  turnDigest: string; authorId: string; rootFailureSha: string; sourceSha: string;
+  headSha: string; guidance: string;
+}): Promise<AuthorRepairGrant> {
+  if (!DIGEST.test(input.turnDigest) || !SHA.test(input.rootFailureSha) ||
+      !SHA.test(input.sourceSha) || !SHA.test(input.headSha) ||
+      !input.authorId || input.authorId.length > 180 ||
+      input.guidance !== input.guidance.trim() || !input.guidance.trim() ||
+      input.guidance.length > 1200 ||
+      /[\u0000-\u001f\u007f]/.test(input.guidance))
+    throw Error("Invalid bounded author guidance or source identity.");
+  const ledger = await inspectRepairLedger(job, input.turnDigest);
+  const unresolved = ledger.findings.filter(f =>
+    f.rootFailureSha === input.rootFailureSha && f.status === "open");
+  if (!unresolved.length || !unresolved.some(f => f.source.sourceSha === input.headSha) ||
+      !ledger.corrections.some(c => c.rootFailureSha === input.rootFailureSha &&
+        c.result?.status === "failed") ||
+      ledger.corrections.some(c => c.rootFailureSha === input.rootFailureSha && !c.result))
+    throw Error("Author continuation requires an exhausted, independently rejected source.");
+  const grants = ledger.authorGrants ?? (ledger.authorGrants = []);
+  const same = grants.find(grant => grant.authorId === input.authorId &&
+    grant.rootFailureSha === input.rootFailureSha && grant.sourceSha === input.sourceSha &&
+    grant.headSha === input.headSha && grant.guidance === input.guidance);
+  if (same) {
+    if (ledger.corrections.some(c => c.rootFailureSha === input.rootFailureSha &&
+      c.sourceSha === same.headSha))
+      throw Error("The previously authorized correction has already been submitted.");
+    return same;
+  }
+  if (grants.length >= MAX_AUTHOR_REPAIR_GRANTS ||
+      grants.filter(grant => grant.rootFailureSha === input.rootFailureSha).length >=
+        MAX_AUTHOR_GRANTS_PER_ROOT)
+    throw Error("Explicit repair allowance ceiling reached; a new reviewed Turn is required.");
+  if (totalTurnCorrections(ledger) < turnCorrectionLimit(ledger) &&
+      unresolved.every(f => f.attempts.length < localCorrectionLimit(ledger, f.rootFailureSha)))
+    throw Error("The original correction allowance is not exhausted; guidance may steer an ordinary safe boundary.");
+  const localLimit = localCorrectionLimit(ledger, input.rootFailureSha) + 1;
+  const turnLimit = turnCorrectionLimit(ledger) + 1;
+  const grant = { ...input, localLimit, turnLimit,
+    id: digest({ authorId: input.authorId, rootFailureSha: input.rootFailureSha,
+      sourceSha: input.sourceSha, headSha: input.headSha,
+      guidance: input.guidance, localLimit, turnLimit }) };
+  grants.push(grant);
+  await save(job, ledger);
+  return grant;
+}
+
 /** Match by controller-authenticated obligation/category/affected records, not
  * by the reviewer's mutable wording, source commit, or line number. Multiple
  * same-shape defects share the stricter correction allowance: a review cannot
@@ -215,9 +301,9 @@ function recordFindings(ledger: RepairLedger, report: FindingReport, causedBy?: 
   return active;
 }
 function ensureRoom(ledger: RepairLedger, findings: RepairFinding[]) {
-  if (totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS)
+  if (totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger))
     throw Error("Turn correction ceiling exhausted; preserve verified work and findings.");
-  if (findings.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS))
+  if (findings.some(f => f.attempts.length >= localCorrectionLimit(ledger, f.rootFailureSha)))
     throw Error("Local corrections exhausted for a source-linked Repair finding.");
 }
 
@@ -244,7 +330,7 @@ export async function admitPrerequisiteRepair(job: JobStartResult, input: {
       item.path !== input.path || item.sourceEventSha !== input.sourceEventSha ||
       item.causedBy !== input.causedBy))
     throw Error("Prerequisite repair changed its canonical owner or origin.");
-  if (totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS)
+  if (totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger))
     throw Error("Turn correction ceiling exhausted; preserve prerequisite findings.");
   if (item && item.attempts.length >= MAX_DEPENDENCY_CYCLES && item.status !== "resolved")
     throw Error("Dependency repair cycles exhausted; preserve original finding.");
@@ -289,7 +375,7 @@ export async function submitPrerequisiteRepair(job: JobStartResult, input: {
   if (finding.sourceSha !== input.sourceSha ||
       finding.attempts.some(a => !a.verdict) ||
       finding.attempts.length >= MAX_DEPENDENCY_CYCLES ||
-      totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS)
+      totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger))
     throw Error("Stale, unsettled or exhausted prerequisite correction.");
   finding.attempts.push({ sourceSha: input.sourceSha, submittedSha: input.submittedSha,
     paths: input.paths });
