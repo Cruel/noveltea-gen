@@ -13,7 +13,7 @@ import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
-import { sealIndependentReview, repairReviewAssignment, readRepairCommitProof,
+import { sealIndependentReview, inspectCheckpointReview, repairReviewAssignment, readRepairCommitProof,
   type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -42,11 +42,26 @@ export interface SemanticReviewItem {
   /** Historical failed promise, not an additional grant or inherited verdict. */
   rejectedEventComparison?: { sourceCommitSha: string; findings: IndependentReviewResult["findings"];
     originalProof: EventConsequenceProof };
+  /** Every repaired specialist, not just Events, is reviewed against the
+   * original sealed failure and the previous attempted correction. */
+  priorNegative?: { sourceCommitSha: string; rootFailureSha: string;
+    reviewDigest: string; findings: IndependentReviewResult["findings"];
+    completedCorrections: number };
+}
+export interface ReviewDisputeClaim {
+  sourceSha: string;
+  reviewDigest: string;
+  path: string;
+  line: number;
+  claim: string;
 }
 export interface SemanticReviewPacket {
   policy: "assignment-fidelity/v1";
   sourceDigest: string;
   items: SemanticReviewItem[];
+  /** Independent adjudication is advisory and cannot erase a sealed failure. */
+  dispute?: { negativeFindings: IndependentReviewResult["findings"];
+    sourceSha: string; claim: string; path: string; line: number };
 }
 export interface SemanticFinding {
   commitSha: string;
@@ -80,8 +95,9 @@ function git(job: JobStartResult, ...args: string[]): string {
     stdio: ["ignore", "pipe", "pipe"], maxBuffer: MAX_DIFF_BYTES + MAX_CONTEXT_BYTES });
 }
 
-function packetDigest(items: SemanticReviewItem[]) {
-  return hash(JSON.stringify({ policy: "assignment-fidelity/v1", items }));
+function packetDigest(items: SemanticReviewItem[], dispute?: SemanticReviewPacket["dispute"]) {
+  return hash(JSON.stringify({ policy: "assignment-fidelity/v1", items,
+    ...(dispute ? { dispute } : {}) }));
 }
 
 /** Review only the work actually authorized at this durable checkpoint.
@@ -113,7 +129,7 @@ export function semanticUnitOutcome(workItem: string, specialist?: string): stri
 }
 
 export async function prepareSemanticReview(job: JobStartResult,
-  requested: RecoveryCheckpoint[]): Promise<SemanticReviewPacket> {
+  requested: RecoveryCheckpoint[], challenge?: ReviewDisputeClaim): Promise<SemanticReviewPacket> {
   if (!requested.length || requested.length > MAX_ITEMS)
     throw new Error("Semantic review group must be bounded to 1–8 checkpoints.");
   const saved = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.assurance);
@@ -223,6 +239,21 @@ export async function prepareSemanticReview(job: JobStartResult,
         }
       }
     }
+    let priorNegative: SemanticReviewItem["priorNegative"];
+    if (point.workItem.startsWith("repair-")) {
+      const sourceSha = point.workItem.slice("repair-".length);
+      if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw Error("Unsafe correction source identity.");
+      const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
+      const prior = await inspectRejectedRepair(job, sourceSha);
+      if (prior.repairedCommitSha !== point.commitSha ||
+          (challenge?.sourceSha === point.commitSha
+            ? !["failed", "blocked"].includes(prior.phase)
+            : prior.phase !== "reviewing"))
+        throw Error("Independent successor review lost its sealed correction context.");
+      priorNegative = { sourceCommitSha: sourceSha, rootFailureSha: prior.rootFailureSha,
+        reviewDigest: prior.sourceReviewDigest, findings: prior.findings,
+        completedCorrections: prior.attempts };
+    }
     let rejectedEventComparison: SemanticReviewItem["rejectedEventComparison"];
     if (point.workItem.startsWith("repair-") && assignment.specialist === "nt-event-design") {
       const sourceCommitSha = point.workItem.slice("repair-".length);
@@ -259,7 +290,8 @@ export async function prepareSemanticReview(job: JobStartResult,
       ...(eventMilestone ? { eventMilestoneFieldGrant: { ...eventMilestone,
         fields: ["completeness", "fulfillment"] as ["completeness", "fulfillment"] } } : {}),
       ...(eventConsequenceProof ? { eventConsequenceProof } : {}),
-      ...(rejectedEventComparison ? { rejectedEventComparison } : {}) });
+      ...(rejectedEventComparison ? { rejectedEventComparison } : {}),
+      ...(priorNegative ? { priorNegative } : {}) });
   }
   // Group only commits on a single ancestry chain. Unrelated branches and
   // unrelated assignment batches are never silently combined.
@@ -271,7 +303,24 @@ export async function prepareSemanticReview(job: JobStartResult,
     git(job, "merge-base", "--is-ancestor", items[i - 1]!.assurance.commitSha,
       items[i]!.assurance.commitSha);
   }
-  return { policy: "assignment-fidelity/v1", sourceDigest: packetDigest(items), items };
+  let dispute: SemanticReviewPacket["dispute"];
+  if (challenge) {
+    if (requested.length !== 1 || requested[0]!.commitSha !== challenge.sourceSha ||
+        !/^[a-f0-9]{40}$/.test(challenge.sourceSha) ||
+        !/^[a-f0-9]{64}$/.test(challenge.reviewDigest) ||
+        !Number.isSafeInteger(challenge.line) || challenge.line < 1 ||
+        typeof challenge.claim !== "string" || !challenge.claim.trim() || challenge.claim.length > 1000)
+      throw Error("Adjudication is not bound to one sealed failed review.");
+    const sealed = await inspectCheckpointReview(job, requested[0]!);
+    if (sealed?.status !== "failed" || !sealed.result ||
+        hash(JSON.stringify(sealed.result)) !== challenge.reviewDigest ||
+        !sealed.result.findings.some(f => f.path === challenge.path && f.line === challenge.line))
+      throw Error("Disputed claim does not identify the exact sealed negative evidence.");
+    dispute = { sourceSha: challenge.sourceSha, claim: challenge.claim,
+      path: challenge.path, line: challenge.line, negativeFindings: sealed.result.findings };
+  }
+  return { policy: "assignment-fidelity/v1", sourceDigest: packetDigest(items, dispute),
+    items, ...(dispute ? { dispute } : {}) };
 }
 
 /** Correct only unambiguous transcription errors in a PASS review's evidence
@@ -410,9 +459,11 @@ export function independentReviewResults(packet: SemanticReviewPacket, verdict: 
  * converts verified findings to immutable per-checkpoint review receipts. */
 export async function reviewBoundedAssignments(job: JobStartResult,
   points: RecoveryCheckpoint[], evaluator: SemanticEvaluator, reviewer: string,
-  seal = false): Promise<{ packet: SemanticReviewPacket; verdict: SemanticVerdict }> {
+  seal = false, challenge?: ReviewDisputeClaim): Promise<{ packet: SemanticReviewPacket; verdict: SemanticVerdict }> {
   if (!reviewer.trim()) throw new Error("Independent reviewer identity is required.");
-  const packet = await prepareSemanticReview(job, points);
+  if (challenge && seal)
+    throw Error("Adjudication may not overwrite or re-seal a negative checkpoint.");
+  const packet = await prepareSemanticReview(job, points, challenge);
   const verdict = validateSemanticVerdict(packet, await evaluator(structuredClone(packet)));
   if (seal) {
     const results = independentReviewResults(packet, verdict, reviewer);
@@ -431,11 +482,11 @@ export async function runPiAssignmentReview(job: JobStartResult,
     snapshot: import("./snapshot.js").SkillSnapshot;
     provider: string; model: string; thinking?: "low" | "high";
     onSession: (file: string) => Promise<void>;
-    reviewer: string; seal?: boolean;
+    reviewer: string; seal?: boolean; challenge?: ReviewDisputeClaim;
   }) {
   const { reviewSpecialistAssignments } = await import("./narrative-review-specialist.js");
   return reviewBoundedAssignments(job, points,
     packet => reviewSpecialistAssignments(job, options.snapshot, packet,
       options.provider, options.model, options.thinking, options.onSession),
-    options.reviewer, options.seal ?? true);
+    options.reviewer, options.seal ?? true, options.challenge);
 }

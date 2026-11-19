@@ -424,6 +424,135 @@ test("one authorized Choice assignment can certify multiple meaningful Choices w
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
+/**
+ * Run the actual compiled production graph from an already committed fixture
+ * Foundation. Only the external Pi transport/review boundary is deterministic:
+ * the graph's verification, author boundary and next specialist are real.
+ * This is a routing regression, not a substitute for a live Pi certification.
+ */
+async function runFixtureRecoveryGraph(
+  name: string, refused: boolean,
+) {
+  const f = setup(name);
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["Retain the approved archive witness objective and its causal requirements."]);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  // The deterministic mock replaces the negative-review transport, not the
+  // graph's mandatory source assurance. Keep the independently sealed fixture
+  // proof real or the scheduler must refuse to carry this Foundation forward.
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const before = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
+  assert.ok(foundation, "Recovery needs the already authored Foundation assignment");
+  const log: string[] = [];
+  // Persist the controller's phase across repeated graph boundary entry:
+  // an already sealed repair is reconciled, never written a second time.
+  const original = { sourceCommitSha: before };
+  let repair = { ...original, phase: refused ? "needs-plan" : "ready",
+    repairedCommitSha: undefined as string | undefined };
+  const set = (phase: typeof repair.phase, repairedCommitSha?: string) =>
+    repair = { ...repair, phase, repairedCommitSha };
+  const priorEnv = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    const graph = createGenerationGraph(saver, "cli", async state => {
+      if (state.active?.id !== "foundation") return {}; // Later fixture stages require no Pi review.
+      assert.equal(state.active?.id, "foundation");
+      assert.equal(state.result?.headSha, before);
+      const { driveRejectedRepairCycle } = await import("../src/rejected-repair-controller.js");
+      const outcome = await driveRejectedRepairCycle({
+        begin: async () => repair,
+        inspect: async sourceSha => {
+          assert.equal(sourceSha, original.sourceCommitSha);
+          return repair;
+        },
+        correct: async () => {
+          log.push("original-session-correction");
+          return set("validating");
+        },
+        choice: async () => { throw Error("No author question is expected"); },
+        consume: async () => { throw Error("No author response is expected"); },
+        validate: async () => {
+          log.push("native-validation");
+          return set("awaiting-checkpoint");
+        },
+        commit: async () => {
+          log.push("correction-proof-publication");
+          return set("reviewing", before);
+        },
+        reviewStatus: async () => "required-pending" as const,
+        rereview: async () => { log.push("fresh-independent-review"); },
+        finishReview: async () => {
+          log.push("independent-verdict");
+          return set("passed", before);
+        },
+        nextFailure: async () => { throw Error("Unexpected rejected correction"); },
+        adjudicate: async () => { throw Error("Unexpected dispute"); },
+      });
+      if (outcome.next === "controller-replan") {
+        log.push("refuse-other-owner-write");
+        return { status: "blocked" as const, reason: "Outside original specialist authority",
+          escalation: {
+            kind: "dependency-replan" as const, requiresTrustedApproval: false,
+            sources: [{ source: "characters/witness.md", message: "Another owner must correct this record",
+              repair: "controller-amendment" }],
+            action: "Require a separate authenticated controller assignment",
+          } };
+      }
+      assert.equal(outcome.next, "completed");
+      return { result: state.result };
+    });
+    const config = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(config, {
+      active: foundation, result: { status: "foundation-committed", headSha: before },
+      status: "running", reason: null, completedStages: [], pauseAfter: "architecture",
+    }, "specialist_dispatch");
+    const next = await graph.invoke(null, config);
+    assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial,
+      "The author's original Story repository must not be rewritten");
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+    return { f, next, before, log };
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(priorEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test("production generation graph routes bounded correction, independent review and next specialist without replay", {
+  skip: !available,
+}, async () => {
+  const { f, next, before, log } = await runFixtureRecoveryGraph("repair-graph-success", false);
+  assert.deepEqual(log, [
+    "original-session-correction", "native-validation", "correction-proof-publication",
+    "fresh-independent-review", "independent-verdict",
+  ]);
+  assert.equal(next.status, "paused", JSON.stringify(next));
+  assert.deepEqual(next.completedStages.map((stage: { stage: string }) => stage.stage),
+    ["foundation", "architecture"], "Graph must dispatch subsequent authorized work");
+  assert.notEqual(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before,
+    "Subsequent specialist makes its own distinct fixture commit");
+  assert.equal(next.completedStages[0]?.headSha, before,
+    "Original completed Foundation is carried forward, not written again");
+});
+
+test("production generation graph refuses another owner's recovery without advancing work", {
+  skip: !available,
+}, async () => {
+  const { f, next, before, log } = await runFixtureRecoveryGraph("repair-graph-refusal", true);
+  assert.deepEqual(log, ["refuse-other-owner-write"]);
+  assert.equal(next.status, "blocked");
+  assert.equal(next.escalation?.kind, "dependency-replan");
+  assert.match(next.reason!, /Outside original specialist authority/);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before,
+    "No unauthorized source mutation or downstream dispatch is allowed");
+  assert.deepEqual(next.completedStages, []);
+});
+
 test("single-Milestone generation checkpoints foundation then resumes all specialists in a new process", { skip: !available }, () => {
   const f = setup("complete");
   const paused = f.cli([...f.start, "--pause-after", "foundation"]);

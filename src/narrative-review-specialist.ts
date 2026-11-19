@@ -499,6 +499,20 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "a needed other-owner source. Check BOTH prose and typed state; do not approve " +
       "cosmetic prose changes that leave the typed discrepancy. The optional " +
       "eventConsequenceProof is a source index, not a verdict or permission to edit. " +
+      "If dispute is present, this is a SEPARATE read-only adjudication of " +
+      "one sealed failed source, not a new authority to approve it. Independently " +
+      "check the precise disputed source line, the previous negative findings " +
+      "and the specialist claim against actual immutable canonicalContext. " +
+      "Neither the original negative verdict nor the writer argument is " +
+      "automatically decisive; return your own full source-linked PASS or FAIL " +
+      "under the same validation contract. Your verdict cannot erase the " +
+      "historical review receipt. " +
+      "If priorNegative is present, assess the NEW committed source and diff " +
+      "against the prior sealed negative findings for the SAME original assignment, " +
+      "including the precise source-linked requirement and prior correction attempts. " +
+      "A revised sentence alone does not satisfy an unchanged requirement; a " +
+      "past failed verdict is not erased or deemed passed by the writer. " +
+      "Do not require unrelated future specialist work or expand authorization. " +
       "If rejectedEventComparison is present, verify the NEW committed typed " +
       "state and prose against the SAME original failed promise and findings; " +
       "do not pass on a cosmetic paraphrase. A sealed MISSING-REQUIREMENT " +
