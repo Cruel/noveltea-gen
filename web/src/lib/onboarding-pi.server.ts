@@ -174,6 +174,14 @@ function discoveryCorrectionFeedback(error: unknown): string {
     return 'Each recommendedId must exactly match an option ID within that question.'
   if (reason === 'Discovery questions cannot request protected authority')
     return 'Only request creative preferences, not approval, permission, authorization or protected-canon changes.'
+  if (reason === 'The author delegated a different creative topic.')
+    return 'Each delegated Creative Decision must cite the exact answered Question Set ID and question ID about that creative topic. ' +
+      'Grounded tension belongs to tone; short detours belong to branch depth; turning-point choices belong to choice frequency. ' +
+      'Do not cite a valid but unrelated delegation.'
+  if (reason === 'Planning interpretation source does not concern this dimension.')
+    return 'Each planning interpretation must cite the submitted source for its exact dimension: ' +
+      'branching.depth cites branch depth, pacing cites pacing, and each production budget cites the matching artwork question. ' +
+      'A source for another topic cannot authorize this value.'
   if (reason === 'An author question requires 2–8 valid alternatives.' ||
       reason === 'Author alternatives need unique IDs, concise titles and bounded optional detail.')
     return 'Alternatives and multiple-choice questions require 2–8 options with unique lowercase-dash IDs and concise titles.'

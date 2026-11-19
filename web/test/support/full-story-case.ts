@@ -48,6 +48,10 @@ type ChatCase = {
 }
 const firstPlaythrough = { min_minutes: 30, max_minutes: 45 } as const
 const durationDirection = 'A firm first-playthrough duration of 30–45 minutes on one complete route, excluding replays. Do not exceed 45 minutes.'
+/** A preamble mentioning the fixed duration does not turn a mystery-premise
+ * question into a playtime question. Only the question's identity can do so. */
+export const isCertificationDurationQuestion = (id: string) =>
+  /(?:^|-)(?:duration|playthrough|playtime|game-length|story-length|first-playthrough)(?:$|-)/i.test(id)
 const prompt = 'Make me a mystery game. ' + durationDirection
 const adaptiveShape = process.env.NT_TEST_WEB_PI_ADAPTIVE_SHAPE
 const adaptiveBrief = adaptiveShape === 'narrative-led'
@@ -99,10 +103,9 @@ export async function beginLiveNewStoryChat(args: ChatCase) {
     // explicitly delegable questions receive a delegated answer.
     const responses = set.questions.map((question, index) => {
       const note = index === 0 ? guidance.slice(0, 1000) : ''
-      // Playtime is an explicit author constraint, never an agent delegation.
-      // The model may use a different question ID, so inspect the question text.
-      if (/\b(?:duration|playtime|playthrough|game length|how long|minute range)\b/i
-        .test(question.id + ' ' + question.question)) {
+      // Playtime is already an explicit author constraint. Do not mistake
+      // an incidental duration mention in a *premise* question for playtime.
+      if (isCertificationDurationQuestion(question.id)) {
         if (authorQuestionKind(question) === 'multiple-choice')
           return { questionId: question.id, answer: { kind: 'multiple' as const,
             optionIds: [], text: durationDirection, note: '' } }

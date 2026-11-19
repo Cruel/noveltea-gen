@@ -53,11 +53,46 @@ export function resolveDelegatedDecision(raw: unknown, evidence: PlanningEvidenc
   const bound = resolvePlanningEvidence(raw, evidence)
   if (!bound.delegated) throw Error('Studio decision lacks an author delegation.')
   if (bound.source.kind === 'turn' || delegationForBaseline.test(bound.statement)) return bound
+  // Author Question IDs are stable, trusted-bound source identities. Do not
+  // require the model's decision statement to repeat the question's literal
+  // words: "grounded tension" is a tone decision, and "short detours that
+  // rejoin" is a branch-depth decision. Keep each recognized topic bounded by
+  // its own evidence/statement vocabulary, not a generic creative permission.
+  const namedTopics: Array<{ questionId: RegExp; decision: RegExp }> = [
+    { questionId: /(?:^|-)tone(?:$|-)|(?:^|-)(?:mood|atmosphere)(?:$|-)/,
+      decision: /\b(?:tone|tensi\w*|atmospher\w*|mood|dread|uneas\w*|suspens\w*|grounded|horror|hopeful|somber|supernatural|cozy|menac\w*)\b/i },
+    { questionId: /(?:^|-)(?:choice|decision)-frequency(?:$|-)/,
+      decision: /\b(?:choices?|decisions?|turning points?)\b[\s\S]{0,130}\b(?:often|spars\w*|occasion\w*|frequen\w*|throughout|routine|turning points?|only|distributed)\b|\b(?:often|spars\w*|occasion\w*|frequen\w*|throughout|routine|only|distributed)\b[\s\S]{0,130}\b(?:choices?|decisions?)\b/i },
+    { questionId: /(?:^|-)(?:choice|decision)-impact(?:$|-)/,
+      decision: /\b(?:choices?|decisions?)\b[\s\S]{0,140}\b(?:affect\w*|change\w*|alter\w*|consequen\w*|impact\w*|outcome\w*|cooperat\w*|aftermath)\b|\b(?:impact\w*|consequen\w*)\b/i },
+    { questionId: /(?:^|-)(?:branch-depth|branching-depth)(?:$|-)/,
+      decision: /\b(?:branch\w*|diverg\w*|detour\w*|rejoin\w*|converg\w*|linear|shared investigation)\b/i },
+    { questionId: /(?:^|-)(?:route-exclusivity|branch-exclusivity)(?:$|-)/,
+      decision: /\b(?:exclusiv\w*|routes?|replay|shared|aftermath|vary|varies|essential clues?|content)\b/i },
+    { questionId: /(?:^|-)(?:puzzle-emphasis|puzzle-play)(?:$|-)/,
+      decision: /\b(?:puzzles?|investigat\w*|evidence|inspect\w*|mechanic\w*|challeng\w*|deduct\w*)\b/i },
+    { questionId: /(?:^|-)(?:pacing|story-pacing)(?:$|-)/,
+      decision: /\b(?:pacing|balance\w*|interviews?|explor\w*|investigat\w*|dialogue|hands.on|narrat\w*)\b/i },
+    { questionId: /(?:^|-)(?:illustrated-backgrounds|background-budget)(?:$|-)/,
+      decision: /\b(?:illustrat\w*|backgrounds?|backdrops?|artwork|visuals?)\b/i },
+    { questionId: /(?:^|-)(?:background-variants|variant-budget)(?:$|-)/,
+      decision: /\b(?:variants?|backgrounds?|backdrops?|artwork|visuals?)\b/i },
+    { questionId: /(?:^|-)(?:character-artwork|character-art|character-portraits)(?:$|-)/,
+      decision: /\b(?:characters?|artwork|portraits?|sprites?|visuals?)\b/i },
+    { questionId: /(?:^|-)(?:mystery-premise|story-premise|case-premise)(?:$|-)/,
+      decision: /\b(?:myster\w*|case|investigat\w*|missing|disappear\w*|crime|suspect\w*|premise)\b/i },
+  ]
+  if (bound.source.kind === 'answer') {
+    const questionId = bound.source.questionId
+    if (namedTopics.some(topic => topic.questionId.test(questionId) && topic.decision.test(statement)))
+      return bound
+  }
   const topics = ['ending', 'branch', 'puzzle', 'tone', 'genre', 'character', 'protagonist',
     'setting', 'location', 'clue', 'conflict', 'mystery', 'pacing', 'artwork', 'background']
   if (!topics.some(topic => new RegExp('\\b' + topic, 'i').test(bound.statement) &&
       new RegExp('\\b' + topic, 'i').test(statement)))
     throw Error('The author delegated a different creative topic.')
+
   return bound
 }
 const required = ['choice_frequency', 'choice_impact', 'branching.depth',
@@ -88,6 +123,28 @@ const subject = (path: string) => path.startsWith('branching.') ? /branch|linear
   : path === 'pacing' ? /pac|narrative|explor|dialogue/i
   : path === 'first_playthrough' ? /playthrough|playtime|duration|length|minute|hour|time/i
   : /production|budget|artwork|asset|illustrat|background|variant|concept/i
+/** The ID is part of the actual answered Question Set, not a model-supplied
+ * citation string. Only an expressly delegated matching topic can use this
+ * alternative to fragile lexical matching of the question's display text. */
+const delegatedPlanningSourceId = (path: string, source: PlanningSource): boolean => {
+  if (source.kind !== 'answer') return false
+  const ids: Record<string, RegExp> = {
+    choice_frequency: /^(?:choice|decision)-frequency$/,
+    choice_impact: /^(?:choice|decision)-impact$/,
+    'branching.depth': /^(?:branch|branching)-depth$/,
+    'branching.route_exclusivity': /^(?:route|branch)-exclusivity$/,
+    puzzle_emphasis: /^puzzle-(?:emphasis|play)$/,
+    pacing: /^(?:story-)?pacing$/,
+    first_playthrough: /^(?:first-)?playthrough(?:-length)?$|^(?:duration|playtime|game-length)$/,
+    'production.illustrated_backgrounds': /^(?:illustrated-backgrounds|background-budget)$/,
+    'production.background_variants': /^(?:background-variants|variant-budget)$/,
+    'production.character_artwork.main': /^(?:character-artwork|character-art|character-portraits)$/,
+    'production.character_artwork.supporting': /^(?:character-artwork|character-art|character-portraits)$/,
+    'production.character_artwork.extra': /^(?:character-artwork|character-art|character-portraits)$/,
+  }
+  return ids[path]?.test(source.questionId) ?? false
+}
+
 const delegationForBaseline = /\b(?:remaining|rest|everything|all other|all remaining|entire|whole)\b[\s\S]{0,100}\b(?:baseline|creative|story|direction|decision|detail|choice|requirement)s?\b|\b(?:all|remaining|rest)\s+(?:story\s+)?(?:baseline|planning)\b/i
 const clarification = (evidence: PlanningEvidence[], dimension: 'branch' | 'puzzle') =>
   [...evidence].reverse().find(item => !item.delegated && item.source.kind === 'answer' &&
@@ -171,6 +228,7 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
     // budget. A broad baseline delegation is expressly allowed for missing values.
     if (!subject(item.path).test(bound.statement) &&
         !(bound.delegated && (bound.source.kind === 'turn' ||
+          delegatedPlanningSourceId(item.path, bound.source) ||
           delegationForBaseline.test(bound.statement))))
       throw Error('Planning interpretation source does not concern this dimension.')
     // An arbitrary option label may contain the category while denying it

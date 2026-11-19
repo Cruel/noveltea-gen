@@ -231,6 +231,65 @@ test('a Studio-origin creative decision must cite its exact delegated topic', ()
     'A new ending'), /not a submitted/)
 })
 
+test('specific delegated decisions match their topic without copying literal prompt words', () => {
+  const cases = [
+    ['story-tone', 'How should the mystery feel?', 'Use grounded tension rather than supernatural threats.'],
+    ['choice-frequency', 'How often should players make meaningful decisions?',
+      'Place meaningful choices at investigative turning points rather than throughout routine clue collection.'],
+    ['choice-impact', 'How much weight should decisions carry?',
+      'Let interview choices affect cooperation and final disclosure change the aftermath.'],
+    ['branch-depth', 'How far should playthroughs diverge?',
+      'Use short detours that return to the shared investigation.'],
+    ['route-exclusivity', 'How much content should be exclusive to particular routes?',
+      'Limit exclusive material to brief exchanges and aftermath beats.'],
+    ['puzzle-emphasis', 'What kind of interactive challenges?',
+      'Build puzzles around inspecting and presenting evidence.'],
+    ['pacing', 'Where should players spend most of their time?',
+      'Balance substantial interviews with hands-on investigation.'],
+    ['illustrated-backgrounds', 'How many different art concepts?',
+      'Target three illustrated backgrounds.'],
+    ['background-variants', 'How many visual variants?',
+      'Allow one illustrated background variant.'],
+    ['character-artwork', 'How many character portraits?',
+      'Use three Main, two Supporting, and zero Extra character portraits.'],
+  ] as const
+  for (const [id, question, statement] of cases) {
+    const evidence: PlanningEvidence[] = [{
+      source: at(id), decisionId: 'author-answer-' + id, statement:
+        question + ' — Author explicitly delegated this question',
+      authorText: '', selectedOption: false, delegated: true,
+    }]
+    assert.equal(resolveDelegatedDecision(at(id), evidence, statement).decisionId,
+      'author-answer-' + id, 'The submitted delegation must authorize ' + id)
+    assert.throws(() => resolveDelegatedDecision(at(id), evidence,
+      'Require four distinct endings.'), /different creative topic/,
+    id + ' must not authorize unrelated endings')
+  }
+})
+
+test('a delegated planning dimension can cite the exact answered topic ID despite natural wording', () => {
+  const evidence: PlanningEvidence[] = [...sources,
+    { source: at('branch-depth'), decisionId: 'author-answer-branch-depth',
+      statement: 'How far should playthroughs diverge? — Author explicitly delegated this question',
+      authorText: '', selectedOption: false, delegated: true },
+    { source: at('pacing'), decisionId: 'author-answer-pacing',
+      statement: 'Where should players spend most of their time? — Author explicitly delegated this question',
+      authorText: '', selectedOption: false, delegated: true },
+  ]
+  const adapted = claims.map(c => c.path === 'branching.depth'
+    ? { ...c, source: at('branch-depth'), basis: 'delegated' as const }
+    : c.path === 'pacing' ? { ...c, source: at('pacing'), basis: 'delegated' as const } : c)
+  const accepted = parsePlanningInterpretations(adapted, p, evidence, true)
+  assert.equal(accepted.find(item => item.path === 'branching.depth')?.sourceDecisionId,
+    'author-answer-branch-depth')
+  assert.equal(accepted.find(item => item.path === 'pacing')?.sourceDecisionId,
+    'author-answer-pacing')
+  const mismatched = adapted.map(c => c.path === 'pacing'
+    ? { ...c, source: at('branch-depth') } : c)
+  assert.throws(() => parsePlanningInterpretations(mismatched, p, evidence, true),
+    /does not concern this dimension/, 'An unrelated delegated question cannot authorize pacing')
+})
+
 test('inferred estimates may not invent hard production caps', () => {
   const vagueHard = [{ ...sources[0]!,
     statement: 'I think 5 backgrounds would be nice, and aim for 90 to 120 minutes.',
