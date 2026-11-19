@@ -547,7 +547,10 @@ export async function authorEventCluster(
       const calls = session.messages.flatMap(m => m.role === "assistant"
         ? m.content.filter(c => c.type === "toolCall") : []);
 
-      const summary = await requireSpecialistManifest(session, parseEventManifest, "Event");
+      const summary = await requireSpecialistManifest(session, parseEventManifest, "Event",
+        join(job.stateDir, "protocol-recovery", "event-" + encodeURIComponent(assignment.workItemId) +
+          "-" + attempt + ".json"),
+        () => context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined));
       if (!summary.modifiedRecords.length) {
         // Only a genuinely no-write, settled model turn may report missing
         // prerequisites. A modified/reverted or interrupted writer has no

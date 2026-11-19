@@ -296,7 +296,9 @@ export async function authorInteractive(
         session,
         (text) => parseInteractiveManifest(text, domain),
         "Interactive",
-        domain === "puzzle" && assignment.puzzleObligation?.required === false,
+        join(job.stateDir, "protocol-recovery", "interactive-" + encodeURIComponent(assignment.workItemId) +
+          "-" + domain + "-" + attempt + ".json"),
+        () => context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined),
       );
       if (data.paths.length === 0) {
         if (

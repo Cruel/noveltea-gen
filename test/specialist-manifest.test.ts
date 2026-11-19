@@ -56,6 +56,31 @@ test("a deliberate empty Choice report names its source conflict instead of requ
   }), "choice"), /verified Event-only omission/);
 });
 
+test("manifest correction accepts unordered JSON keys without trying another writer turn", () => {
+  const unordered = JSON.stringify({
+    laterObligations: ["Review the Choice later"],
+    modifiedRecords: ["events/arrival.md"],
+    architecturalConflicts: [],
+  });
+  assert.deepEqual(parseEventManifest(unordered), {
+    modifiedRecords: ["events/arrival.md"],
+    architecturalConflicts: [],
+    laterObligations: ["Review the Choice later"],
+  });
+});
+
+test("a later malformed manifest cannot be concealed by an earlier valid report with a different key order", () => {
+  const accepted = JSON.stringify({
+    modifiedRecords: ["events/old.md"],
+    architecturalConflicts: [],
+    laterObligations: [],
+  });
+  const missing = JSON.stringify({ laterObligations: ["Not a complete manifest"] });
+  assert.equal(lastSpecialistManifest(accepted + "\\n" + missing)?.modifiedRecords, undefined);
+  assert.throws(() => parseEventManifest(accepted + "\\n" + missing), /JSON manifest/);
+  assert.equal(lastSpecialistManifest(accepted + '\\n{"laterObligations":['), null);
+});
+
 test("manifest scanning selects the last complete manifest, without accepting malformed JSON or absent fields", () => {
   const valid = {
     modifiedRecords: ["events/disclosure-conversation.md"],
