@@ -10,8 +10,10 @@ import type { GenerationInventory, ExecutionItem } from "../src/generation-plan.
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { proposeDependentCorrection, planSelectiveRevalidation } from "../src/selective-revalidation.js";
 import { auditDependentCorrectionDraft, inspectDependentCorrection,
-  verifyDependentCorrectionSuccessor, verifiedPiSession } from "../src/dependent-correction-work.js";
+  reconcileDependentCommit, verifyDependentCorrectionSuccessor,
+  verifiedPiSession } from "../src/dependent-correction-work.js";
 import { removeTestTree } from "./helpers.js";
+import { admitCausalRevalidationFinding, submitRepairCorrection } from "../src/repair-ledger.js";
 
 const hash = (value: unknown) => createHash("sha256").update(
   typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -145,6 +147,41 @@ test("a reviewed dependent successor preserves original commit and verifies real
   await assert.rejects(() => verifyDependentCorrectionSuccessor(
     x.job, x.commitSha, x.state.attempts[0].sourceSha, ["events/choice.md"],
     git(x.repo, "log", "-1", "--format=%B").split("\n")), /checkpoint|review|original|source/i);
+});
+test("interrupted post-Git submission reconciles once from exact native, original-owner and Repair proofs", async t => {
+  const x = await setup(t);
+  const attempt = x.state.attempts[0]!;
+  const pending = {
+    ...structuredClone(x.state), phase: "authored",
+    currentSourceSha: attempt.sourceSha, attempts: [], commitSha: undefined,
+    draftPaths: attempt.paths, draftDigest: attempt.draftDigest,
+    validationDigest: attempt.validationDigest,
+    writerSession: attempt.writerSession, writerSessionDigest: attempt.writerSessionDigest,
+  };
+  x.save(pending);
+  await assert.rejects(() => reconcileDependentCommit(x.job, pending as any),
+    /Repair attempt/, "a valid-looking Git trailer alone cannot submit an unadmitted repair");
+  await admitCausalRevalidationFinding(x.job, {
+    turnDigest: x.proposal.turnDigest, rootFailureSha: x.historicalSha,
+    sourceSha: attempt.sourceSha, causedBy: attempt.sourceSha,
+    reviewDigest: x.proposal.revalidationReviewDigest,
+    assignmentId: x.proposal.assignmentId, obligation: x.proposal.obligation,
+    findings: [{ path: "events/choice.md", kind: "continuity",
+      message: "This Choice requires its originally promised consequence.",
+      affectedPaths: ["events/choice.md"] }],
+  });
+  await submitRepairCorrection(x.job, {
+    turnDigest: x.proposal.turnDigest, rootFailureSha: x.historicalSha,
+    sourceSha: attempt.sourceSha, changedPaths: attempt.paths,
+  });
+  const tampered = { ...pending, draftDigest: digest("d") };
+  await assert.rejects(() => reconcileDependentCommit(x.job, tampered as any),
+    /committed source|path grant/i);
+  assert.equal(await reconcileDependentCommit(x.job, pending as any), true);
+  assert.equal(pending.phase, "committed");
+  assert.equal(pending.commitSha, x.commitSha);
+  assert.equal(await reconcileDependentCommit(x.job, pending as any), false,
+    "reconciliation must not duplicate a real submitted Git revision");
 });
 test("already-reviewed Choice correction may not rewrite a previous Event prerequisite gate", async t => {
   const x = await setup(t);

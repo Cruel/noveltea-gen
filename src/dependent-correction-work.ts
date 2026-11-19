@@ -160,6 +160,49 @@ export async function inspectDependentCorrection(job: JobStartResult,
     throw Error("Dependent correction source chain is stale.");
   return state;
 }
+/** Reconcile the one crash window after Git commit but before the private
+ * receipt was marked committed. No Pi call, second submit or second commit.
+ * A branch change never turns an arbitrary source into trusted evidence. */
+export async function reconcileDependentCommit(job: JobStartResult,
+  state: DependentCorrectionReceipt): Promise<boolean> {
+  if (state.phase !== "authored" || state.commitSha) return false;
+  const source = state.currentSourceSha;
+  const head = git(job, "rev-parse", "HEAD");
+  if (head === source) return false;
+  if (!SHA.test(head) || git(job, "rev-parse", head + "^") !== source ||
+      changed(job).length || !state.writerSession || !state.writerSessionDigest ||
+      state.writerSessionDigest !== await verifiedPiSession(job, state.writerSession,
+        state.origin.sessionFile) || !state.draftPaths?.length ||
+      !state.draftDigest || !state.validationDigest ||
+      !/^[a-f0-9]{64}$/.test(state.validationDigest))
+    throw Error("Interrupted dependent correction has no authenticated completed Git submission.");
+  const paths = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", head)
+    .split("\n").filter(Boolean).sort();
+  const expectedPaths = state.draftPaths.map(p => repoPath(job, p)).sort();
+  const message = git(job, "log", "-1", "--format=%B", head).split("\n");
+  if (JSON.stringify(paths) !== JSON.stringify(expectedPaths) ||
+      state.draftPaths.some(p => !state.proposal.authorizedPaths.includes(p)) ||
+      ![
+        "NovelTea-Job: " + job.jobId,
+        "NovelTea-Work-Item: dependent-repair-" + state.proposal.originalCommitSha,
+        "NovelTea-Plan-Version: " + state.proposal.planVersion,
+        "NovelTea-Dependent-Correction: " + state.proposal.digest,
+        "NovelTea-Dependent-Native: " + state.validationDigest,
+      ].every(line => message.includes(line)) ||
+      state.draftDigest !== hash(state.draftPaths.map(p => [p,
+        git(job, "diff", "--binary", source, head, "--", repoPath(job, p))])))
+    throw Error("Interrupted dependent correction's committed source or original path grant differs.");
+  const ledger = await inspectRepairLedger(job, state.proposal.turnDigest);
+  if (!ledger.corrections.some(c =>
+    c.rootFailureSha === state.proposal.originalCommitSha &&
+    c.sourceSha === source && !c.result &&
+    JSON.stringify(c.changedPaths) === JSON.stringify(state.draftPaths)))
+    throw Error("Interrupted dependent commit lacks the original Turn's submitted Repair attempt.");
+  state.commitSha = head;
+  state.phase = "committed";
+  await atomic(fileOf(job, state.proposal), state);
+  return true;
+}
 async function reviewTranscript(job: JobStartResult, file: string) {
   if (!file?.startsWith(join(job.stateDir, "review-sessions") + sep) ||
       !existsSync(file) || await realpath(file) !== file)
@@ -243,7 +286,7 @@ function authenticatedSpecialist(workItem: string, original: string) {
   return original;
 }
 async function reviewAssignment(job: JobStartResult, proposal: DependentCorrectionAssignment,
-  paths: string[], commitSha: string): Promise<ReviewAssignment> {
+  paths: string[], consumedPaths: string[], commitSha: string): Promise<ReviewAssignment> {
   const turn = await readReviewTurnEvidence(job);
   const author = turn?.assignments.find(a => a.id === proposal.assignmentId);
   if (!turn || turn.digest !== proposal.turnDigest || !author ||
@@ -251,7 +294,8 @@ async function reviewAssignment(job: JobStartResult, proposal: DependentCorrecti
     throw Error("Dependent rereview lost the original author goal or specialist authority.");
   return {
     contract: turn.contract, planVersion: proposal.planVersion,
-    scopeIds: author.targets, paths: [...new Set([...paths, ...proposal.authorizedPaths])],
+    scopeIds: author.targets, paths: [...new Set([...paths, ...consumedPaths,
+      ...proposal.authorizedPaths])].sort(),
     routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
     turnGoal: "Independent rereview of a *corrected historically accepted* " +
       "specialist assignment. Evaluate the original obligation: " + author.outcome +
@@ -330,6 +374,10 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
       state.snapshot.path !== opts.reviewerSnapshot.path ||
       state.origin.provider !== opts.provider || state.origin.model !== opts.model)
     throw Error("Recovered dependent correction substituted its original owner, session or reviewer.");
+  // If the Git commit finished but the next receipt write did not, recover
+  // the exact native/trailer/Repair-bound commit without starting another Pi.
+  if (state.phase === "authored")
+    await reconcileDependentCommit(job, state);
   if (state.phase === "writing" || state.phase === "reviewing")
     throw Error("Interrupted original-owner writer/reviewer has a preserved session; inspect before replay.");
   if (state.phase === "blocked") throw Error(state.failure ?? "Dependent correction exhausted");
@@ -396,7 +444,8 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
           git(job, "rev-parse", "HEAD") !== s.commitSha || changed(job).length)
         throw Error("Dependent correction commit changed its original source or is dirty.");
       s.phase = "reviewing"; await atomic(path, s);
-      const assignment = await reviewAssignment(job, proposal, s.draftPaths!, s.commitSha);
+      const assignment = await reviewAssignment(job, proposal, s.draftPaths!,
+        opts.sourcePaths, s.commitSha);
       s.review = await reviewNarrative({ ...job, headSha: s.commitSha },
         s.snapshot, assignment, opts.provider, opts.model, undefined,
         async file => { s.reviewerSession = file; await atomic(path, s); });

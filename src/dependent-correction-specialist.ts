@@ -18,10 +18,10 @@ import type { JobStartResult } from "./job.js";
 import type { RepairOrigin } from "./rejected-review-repair.js";
 import type { DependentCorrectionAssignment } from "./selective-revalidation.js";
 
-function kind(proposal: DependentCorrectionAssignment) {
+function kind(proposal: DependentCorrectionAssignment, origin: RepairOrigin) {
   if (proposal.itemId.startsWith("event:")) return "event" as const;
-  if (proposal.itemId.startsWith("interactive:") ||
-      proposal.itemId.startsWith("choice:") ||
+  if (origin.workItem.startsWith("interactive-choice-")) return "event" as const;
+  if (origin.workItem.startsWith("interactive-puzzle-") ||
       proposal.itemId.startsWith("puzzle:")) return "puzzle" as const;
   if (proposal.itemId.startsWith("composition:")) return "dialogue" as const;
   return "review" as const;
@@ -56,7 +56,7 @@ export async function authorDependentCorrection(input: {
     group: "dependent-repair:" + proposal.itemId + ":" + proposal.digest,
     step: "dependent-repair:" + proposal.digest,
     paths: [...new Set([...input.originalPaths, ...proposal.authorizedPaths])],
-    snapshot: origin.snapshot.id, task: { kind: kind(proposal),
+    snapshot: origin.snapshot.id, task: { kind: kind(proposal, origin),
       ids: [...new Set([proposal.itemId.replace(/^[^:]+:/, "")])], scope: "related" },
     provider: origin.provider, model: origin.model, thinking: origin.thinking,
     directory: sessionDir,
