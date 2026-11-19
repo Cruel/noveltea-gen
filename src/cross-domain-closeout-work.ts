@@ -241,7 +241,15 @@ async function reviewerAssignment(job: JobStartResult, request: CloseoutRunReque
     event: string; step: string; branch: string; status: string; witness?: string[] }>;
     milestoneRoutes: Array<{ id: string; routes: Array<{
       status: string; witness?: string[] }> }> } };
-  const events = new Set(event.validation?.eventIds ?? []);
+  // The Choice specialist may enact consequences in newly authored Event
+  // records. The original Event receipt is deliberately immutable and cannot
+  // list those later Events, so derive review scope from the actual inspected
+  // canonical source inventory rather than that original receipt alone.
+  const events = new Set([...event.validation?.eventIds ?? [],
+    ...((checked.report as { records?: Array<{ path: string; metadata?: {
+      type?: string; id?: string } }> }).records ?? [])
+      .filter(record => source.includes(record.path) && record.metadata?.type === "event")
+      .map(record => record.metadata!.id!)]);
   const routes = report.coverage.branchProgress.filter(r => events.has(r.event))
     .map(r => ({ event: r.event, step: r.step, branch: r.branch,
       status: r.status, witness: r.witness ?? [] }));
