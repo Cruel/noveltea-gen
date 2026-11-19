@@ -799,7 +799,12 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
 }
 
 /** The production parent graph. Specialists retain ownership of side effects and recovery. */
-export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner: "server" | "cli" = "server") {
+export function createGenerationGraph(
+  checkpointer?: SqliteSaver, executionOwner: "server" | "cli" = "server",
+  // Deterministic transport-boundary substitution for graph-level tests.
+  // Production callers always use the real sealed review/repair adapter.
+  reviewBoundary: (state: State) => Promise<Partial<State>> = independentAssignmentBoundary,
+) {
   return new StateGraph(Channels, { input: GenerationInputSchema })
     .addNode("schedule", async (s, config) => {
       const input = GenerationInputSchema.shape.request.safeParse(s.request);
@@ -1081,7 +1086,7 @@ export function createGenerationGraph(checkpointer?: SqliteSaver, executionOwner
           p.reportDigest !== entry.reportDigest), { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }] };
       } catch (error) { return blocked(error); }
     })
-    .addNode("independent_assignment_review", independentAssignmentBoundary)
+    .addNode("independent_assignment_review", reviewBoundary)
     .addNode("verify_committed_work", async s => {
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-verification", async () => {

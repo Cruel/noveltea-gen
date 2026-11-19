@@ -38,7 +38,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
-import { withStoryJobLock } from "./job-lock.js";
+import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
 import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
@@ -285,29 +285,45 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   const root = previous?.rootFailureSha ?? point.commitSha;
   const rootReview = previous?.originalReviewDigest ?? sourceOf(failure);
   const rootSource = previous?.originalSource ?? failure.source;
-  const ledger = await inspectRepairLedger(job, point.assurance!.turnDigest);
-  if (previous?.attempts && ledger.corrections.filter(c => c.rootFailureSha === root).length < previous.attempts)
-    throw Error("Existing pre-ledger correction receipts require explicit reconciliation; do not reset prior budgets.");
-  await admitRepairFinding(job, {
-    turnDigest: point.assurance!.turnDigest, rootFailureSha: root,
-    sourceSha: point.commitSha, reviewDigest: sourceOf(failure),
-    assignmentId: assignment.id, obligation: assignment.outcome,
-    findings: failure.findings,
-  });
-  const state: RepairReceipt = {
-    version: 1, jobId: job.jobId, threadId: job.threadId,
-    sourceCommitSha: point.commitSha, rootFailureSha: root,
-    sourceReviewDigest: sourceOf(failure), originalReviewDigest: rootReview,
-    originalSource: rootSource, source: failure.source,
-    findings: structuredClone(failure.findings), planAmendment, assignment,
-    allowedPaths: [...planAmendment.assignment.authority.existingPaths], origin,
-    sessionSha256: hash(await readFile(origin.sessionFile)),
-    phase: "ready", attempts: previous?.attempts ?? 0, baselineHead: head,
-    ...(previous?.revision ? { revision: previous.revision } : {}),
-    ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}),
+  // Admission is one serialized controller mutation: checking the old receipt,
+  // charging/creating the Turn finding and publishing the repair state must
+  // not race another resume or specialist writer. The next-failure caller
+  // already owns this same Story lease, so it must not acquire it recursively.
+  const admit = async () => {
+    if (existsSync(pathFor(job, point.commitSha)))
+      return inspectRejectedRepair(job, point.commitSha);
+    if (await trustedHead(job) !== head ||
+        git(job, "status", "--porcelain=v1", "--untracked-files=all"))
+      throw Error("Repair source changed before serialized admission.");
+    const ledger = await inspectRepairLedger(job, point.assurance!.turnDigest);
+    if (previous?.attempts &&
+        ledger.corrections.filter(c => c.rootFailureSha === root).length < previous.attempts)
+      throw Error("Existing pre-ledger correction receipts require explicit reconciliation; do not reset prior budgets.");
+    await admitRepairFinding(job, {
+      turnDigest: point.assurance!.turnDigest, rootFailureSha: root,
+      sourceSha: point.commitSha, reviewDigest: sourceOf(failure),
+      assignmentId: assignment.id, obligation: assignment.outcome,
+      findings: failure.findings,
+    });
+    const state: RepairReceipt = {
+      version: 1, jobId: job.jobId, threadId: job.threadId,
+      sourceCommitSha: point.commitSha, rootFailureSha: root,
+      sourceReviewDigest: sourceOf(failure), originalReviewDigest: rootReview,
+      originalSource: rootSource, source: failure.source,
+      findings: structuredClone(failure.findings), planAmendment, assignment,
+      allowedPaths: [...planAmendment.assignment.authority.existingPaths], origin,
+      sessionSha256: hash(await readFile(origin.sessionFile)),
+      phase: "ready", attempts: previous?.attempts ?? 0, baselineHead: head,
+      ...(previous?.revision ? { revision: previous.revision } : {}),
+      ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}),
+    };
+    await save(job, state);
+    return state;
   };
-  await save(job, state);
-  return state;
+  const owner = activeStoryWriter();
+  if (owner?.active && owner.job.jobId === job.jobId &&
+      owner.job.stateDir === job.stateDir) return admit();
+  return withStoryJobLock(job, "rejected-review-admission", admit);
 }
 export async function inspectRejectedRepair(job: JobStartResult, sha: string): Promise<RepairReceipt> {
   if (!SHA.test(sha)) throw Error("Invalid repair source SHA.");
@@ -1222,7 +1238,8 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
   return driveRejectedRepairCycle({
     begin: async () => {
       const state = await beginRejectedRepair(job, point);
-      await reviewerFor(job, state.sourceCommitSha, options);
+      await withStoryJobLock(job, "rejected-review-profile", () =>
+        reviewerFor(job, state.sourceCommitSha, options));
       return state;
     },
     inspect: sha => inspectRejectedRepair(job, sha),
