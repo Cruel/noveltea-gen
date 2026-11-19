@@ -16,7 +16,9 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 const canonicalMilestone = /^milestones\/[a-z0-9][a-z0-9._-]*\.md$/;
 
 export async function readEventMilestoneRepairGrant(job: JobStartResult,
-  point: RecoveryCheckpoint, original: TurnAssignmentEvidence): Promise<EventMilestoneRepairGrant | undefined> {
+  point: RecoveryCheckpoint, original: TurnAssignmentEvidence,
+  purpose: "rejected-review" | "deferred-choice-closeout" = "rejected-review",
+): Promise<EventMilestoneRepairGrant | undefined> {
   if (!point.workItem.startsWith("event-")) return undefined;
   const slug = point.workItem.slice(6);
   const id = "milestone." + slug;
@@ -50,8 +52,9 @@ export async function readEventMilestoneRepairGrant(job: JobStartResult,
       !canonicalMilestone.test(selected.path) ||
       receipt.assignment.milestonePath !== selected.path ||
       !receipt.assignment.sourcePaths?.includes(selected.path) ||
-      !receipt.paths?.includes(selected.path) ||
-      !point.assurance?.changedPaths.includes(selected.path) ||
+      (purpose === "rejected-review" &&
+        (!receipt.paths?.includes(selected.path) ||
+          !point.assurance?.changedPaths.includes(selected.path))) ||
       proof?.version !== 1 || !Array.isArray(proof.sourceHashes))
     throw Error("Event repair lacks its original verified typed Milestone field grant.");
 

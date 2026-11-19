@@ -196,6 +196,11 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       await verifyIndependentReviewRepairSuccessor(job, commit, parents[1]!, paths, trailers);
       continue;
     }
+    if (trailers.some(line => /^NovelTea-Work-Item: prerequisite-[a-z][a-z0-9-]*$/.test(line))) {
+      const { verifyCrossDomainCloseoutSuccessor } = await import("./cross-domain-closeout-work.js");
+      await verifyCrossDomainCloseoutSuccessor(job, commit, parents[1]!, paths, trailers);
+      continue;
+    }
     if (await verifyReviewedSpecialistSuccessor(job, commit, parents[1]!, paths, trailers))
       continue;
     if (trailers.includes("NovelTea-Work-Item: idea-placement")) {
