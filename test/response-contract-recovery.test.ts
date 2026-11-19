@@ -62,6 +62,27 @@ test("shared protocol recovery corrects invalid JSON and schema in one Pi sessio
   } finally { await rm(tmp, { recursive: true, force: true }); }
 });
 
+test("non-manifest prerequisite reporting uses the shared no-write schema retry", async () => {
+  const f = fakeSession("{ broken", [
+    JSON.stringify({ verdict: "pass", evidence: ["events/setup.md:12"], reason: "Verified" }),
+  ]);
+  const result = await recoverResponseContract({
+    session: f.session, contract: "prerequisite.milestone-closeout.v1",
+    schema: "Required keys: verdict, evidence, reason.",
+    validate: text => {
+      try {
+        const value = JSON.parse(text) as { verdict?: string };
+        return value.verdict === "pass" ? [] : [{ path: "$.verdict", expected: "pass" }];
+      } catch { return [{ path: "$.JSON", expected: "valid JSON object" }]; }
+    },
+    parse: text => JSON.parse(text) as { verdict: string },
+    prompt: f.prompt,
+  });
+  assert.equal(result.verdict, "pass");
+  assert.deepEqual(f.advertised, [[]]);
+  assert.match(f.prompts[0]!, /verdict, evidence, reason/);
+  assert.doesNotMatch(f.prompts[0]!, /modifiedRecords/);
+});
 test("valid first response never prompts or consumes a correction", async () => {
   const f = fakeSession(good, []);
   const result = await recoverResponseContract({

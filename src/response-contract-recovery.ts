@@ -94,7 +94,8 @@ function response(session: ResponseContractSession): string {
   return last.content.filter(c => c.type === "text").map(c => c.text ?? "").join("\n");
 }
 
-function correctionFeedback(contract: string, failures: readonly ResponseContractFailure[]): string {
+function correctionFeedback(contract: string, failures: readonly ResponseContractFailure[],
+  schema?: string): string {
   // Only known schema paths and expected shapes are echoed; never send the
   // untrusted response, parser exception, secret-bearing values or stack.
   const safe = failures.slice(0, 8).map(f => f.path + ": " + f.expected).join("\n");
@@ -105,9 +106,9 @@ function correctionFeedback(contract: string, failures: readonly ResponseContrac
     "unfenced JSON response. Preserve all truthful architecturalConflicts and " +
     "laterObligations; do not claim that a failed review is resolved. " +
     "Exact contract failures:\n" + safe +
-    "\nRequired report keys: modifiedRecords, architecturalConflicts, " +
+    "\n" + (schema ?? "Required report keys: modifiedRecords, architecturalConflicts, " +
     "laterObligations (each an array of nonempty strings). modifiedRecords " +
-    "must be the complete actual cumulative Story-relative changed paths. " +
+    "must be the complete actual cumulative Story-relative changed paths. ") +
     "The controller independently checks the Git diff, source and receipts.";
 }
 
@@ -126,6 +127,8 @@ export async function recoverResponseContract<T>(options: {
   beforeCorrection?: () => Promise<void>;
   feedback?: (failures: readonly ResponseContractFailure[]) => string;
   receiptFile?: string;
+  /** Static, controller-authored contract text for a non-manifest response. */
+  schema?: string;
 }): Promise<T> {
   const { session, contract, validate, parse, prompt, receiptFile } = options;
   const sessionFile = session.sessionManager.getSessionFile();
@@ -175,7 +178,8 @@ export async function recoverResponseContract<T>(options: {
       session.setActiveToolsByName([]);
       if (session.getActiveToolNames().length)
         throw new Error("Format-only protocol correction could not revoke Pi tools.");
-      await prompt(options.feedback ? options.feedback(failures) : correctionFeedback(contract, failures));
+      await prompt(options.feedback
+        ? options.feedback(failures) : correctionFeedback(contract, failures, options.schema));
       const next = session.messages.slice(before);
       if (next.some(m => m.role === "assistant" &&
           Array.isArray(m.content) && m.content.some(c => c.type === "toolCall")))
@@ -246,6 +250,7 @@ export async function recoverWithOneFreshSession<T>(options: {
       validate: options.initial.validate, parse: options.initial.parse,
       prompt: fresh.prompt, beforeCorrection: fresh.beforeCorrection,
       feedback: fresh.feedback ?? options.initial.feedback,
+      schema: options.initial.schema,
       receiptFile: options.receiptFile + ".fresh.json",
     });
     await fresh.completed?.();

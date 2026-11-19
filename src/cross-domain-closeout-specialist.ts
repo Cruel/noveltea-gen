@@ -4,7 +4,8 @@
  * fulfillment after native validation. No unchecked writer replay on resume.
  */
 import { join, sep } from "node:path";
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { openStoryProject } from "./project.js";
 import { createProjectResourceLoader } from "./pi.js";
@@ -15,6 +16,7 @@ import { createPiStatusTool } from "./pi-work-status.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
+import { recoverResponseContract, type ResponseContractFailure } from "./response-contract-recovery.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import type { JobStartResult } from "./job.js";
 import type { CloseoutProposal } from "./cross-domain-prerequisite.js";
@@ -32,6 +34,7 @@ export async function authorMilestoneCloseout(
   sourcePaths: string[], provider: string, model: string,
   onSession: (file: string) => Promise<void>,
   audit: () => Promise<string[]>,
+  retry?: { sourceSession: string; feedback: string },
 ): Promise<CloseoutSpecialistResponse> {
   if (await openSkillSnapshot(snapshot.id) !== snapshot.path)
     throw Error("Cross-domain closeout lost its original pinned Event skill snapshot.");
@@ -55,10 +58,17 @@ export async function authorMilestoneCloseout(
     directory: join(job.stateDir, "prerequisite-sessions", proposal.digest),
   }, runtime);
   const sandbox = await selectSandboxPiTools(job, snapshot, skills);
+  if (retry && (!retry.sourceSession.startsWith(join(job.stateDir, "prerequisite-sessions") + sep) ||
+      !existsSync(retry.sourceSession) || !retry.feedback.trim()))
+    throw Error("Prerequisite retry lost its original writer conversation or negative evidence.");
+  const sessionManager = retry
+    ? SessionManager.forkFrom(retry.sourceSession, project.root,
+      join(job.stateDir, "prerequisite-sessions", proposal.digest))
+    : context.manager;
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager,
+    sessionManager,
     customTools: [...(sandbox ?? []), createStoryValidateTool(job),
       context.contextTool, createPiStatusTool()],
     noTools: "all", tools: ["read", "edit", "story_context", "story_validate", "report_status"],
@@ -95,28 +105,50 @@ export async function authorMilestoneCloseout(
       "PINNED REFERENCE PATHS:\n" + required.join("\n") +
       "\nCANONICAL CONTEXT PATHS:\n" + sourcePaths.join("\n") +
       "\nCONTROLLER PROPOSAL:\n" + JSON.stringify(proposal);
-    let prompt = context.contextNote + instruction;
+    let prompt = context.contextNote + instruction + (retry
+      ? "\nORIGINAL INDEPENDENT REVIEW REJECTED YOUR PREVIOUS CLOSEOUT. " +
+        "Your earlier commit and its failed reviewer proof remain immutable. " +
+        "This is the SAME authoring context carried forward in a new source-bound " +
+        "attempt. Correct only the previously allowed Milestone fields. " +
+        "Never soften or erase the negative finding. REVIEW EVIDENCE:\n" +
+        retry.feedback.slice(0, 2400) : "");
     for (let attempt = 0; attempt < 3; attempt++) {
       await context.beforeTurn(sessionFile);
       await promptStorySpecialist(session, prompt);
       const last = [...session.messages].reverse().find(m => m.role === "assistant");
       if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
         throw Error("Milestone closeout specialist turn did not settle successfully.");
-      await requirePinnedSkillReads(session, project.root, required, "Milestone closeout");
-      const message = last.content.filter(c => c.type === "text").map(c => c.text).join("\n");
-      let answer: Record<string, unknown>;
-      try { answer = parseSpecialistJson(message); }
-      catch (error) {
-        if (attempt >= 2) throw error;
-        prompt = "Your result was not strict JSON. Keep the original scope, correct the response " +
-          "in this same session with verdict, evidence and reason; never add write permissions.";
-        continue;
-      }
+      await requirePinnedSkillReads(session, project.root, required, "Milestone closeout",
+        "verdict/evidence/reason JSON response");
+      const answer = await recoverResponseContract({
+        session, contract: "prerequisite.milestone-closeout.v1",
+        receiptFile: join(job.stateDir, "response-contracts",
+          proposal.digest + "-" + attempt + ".json"),
+        schema: "Required report keys: verdict (pass or block), evidence (nonempty " +
+          "array of source-linked strings), and reason (nonempty explanation). " +
+          "No new Story edits or authorization changes are permitted. ",
+        validate: (text): ResponseContractFailure[] => {
+          let reply: Record<string, unknown>;
+          try { reply = parseSpecialistJson(text); }
+          catch { return [{ path: "$.JSON", expected: "one complete valid JSON object" }]; }
+          const failures: ResponseContractFailure[] = [];
+          if (!["pass", "block"].includes(String(reply.verdict)))
+            failures.push({ path: "$.verdict", expected: "pass or block" });
+          if (!Array.isArray(reply.evidence) || !reply.evidence.length ||
+              reply.evidence.some(s => typeof s !== "string"))
+            failures.push({ path: "$.evidence", expected: "nonempty string array" });
+          if (typeof reply.reason !== "string" || !reply.reason.trim())
+            failures.push({ path: "$.reason", expected: "nonempty string" });
+          return failures;
+        },
+        parse: parseSpecialistJson,
+        prompt: feedback => promptStorySpecialist(session, feedback),
+        beforeCorrection: () => context.beforeTurn(sessionFile),
+      });
       if (answer.verdict === "block")
         throw Error("Event specialist identified missing upstream evidence: " +
           String(answer.reason ?? "No actual closeout evidence").slice(0, 1500));
-      if (answer.verdict !== "pass" || !Array.isArray(answer.evidence) ||
-          !answer.evidence.length || answer.evidence.some(x => typeof x !== "string"))
+      if (answer.verdict !== "pass")
         throw Error("Milestone closeout returned an invalid or unsupported verdict.");
       const diagnostics = await audit();
       if (!diagnostics.length) {

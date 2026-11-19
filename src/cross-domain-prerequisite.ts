@@ -76,6 +76,28 @@ export function validCloseoutProposal(proposal: CloseoutProposal): boolean {
   const { digest: actual, ...body } = proposal;
   return actual === digest(body);
 }
+/** Revisions made in response to a *negative independent review* retain the
+ * original owner, Milestone field-only scope and causal dependencies. A failed
+ * source cannot become a grant to edit Event/Choice/Character/World records. */
+export function retryCloseoutProposal(previous: CloseoutProposal,
+  rejectedCommitSha: string): CloseoutProposal {
+  if (!validCloseoutProposal(previous) || !SHA.test(rejectedCommitSha) ||
+      previous.sourceSha === rejectedCommitSha)
+    throw Error("Cannot retry an invalid or uncommitted prerequisite proposal.");
+  const { digest: _oldDigest, ...original } = previous;
+  const body = { ...original, sourceSha: rejectedCommitSha };
+  return { ...body, digest: digest(body) };
+}
+export function closeoutReviewMayRetry(
+  review: { verdict: string; findings: Array<{ severity: string; repair: string; source: string }> },
+  proposal: CloseoutProposal,
+): boolean {
+  return validCloseoutProposal(proposal) && review.verdict === "block" &&
+    Array.isArray(review.findings) && review.findings.some(f => f.severity === "blocking") &&
+    review.findings.filter(f => f.severity === "blocking").every(f =>
+      f.repair === "event" && f.source.startsWith(proposal.allowedPaths[0]! + ":") &&
+      /:[1-9][0-9]*$/.test(f.source));
+}
 export type CompositionPrerequisiteVerdict =
   | { kind: "ready" }
   | { kind: "refuse"; reason: string }

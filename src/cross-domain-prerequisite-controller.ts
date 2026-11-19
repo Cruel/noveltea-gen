@@ -27,6 +27,7 @@ export interface CompositionBoundaryRequest {
 export type CompositionBoundaryDecision =
   | { kind: "ready" }
   | { kind: "refuse"; reason: string }
+  | { kind: "author-required"; reason: string }
   | { kind: "repair"; proposal: CloseoutProposal; repairId: string; turnDigest: string };
 
 async function readReceipt(job: JobStartResult, folder: string, milestone: string) {
@@ -55,13 +56,17 @@ export async function preflightCompositionBoundary(
   milestoneId: string, planVersion: number,
 ): Promise<CompositionBoundaryDecision> {
   const refuse = (reason: string): CompositionBoundaryDecision => ({ kind: "refuse", reason });
-  if (!request.turnPlanDigest)
-    return refuse("Composition has no pinned original Turn for cross-domain prerequisite admission.");
+  // Existing pre-cutover Turns did not persist the modern objective pin.
+  // No additional write authority is granted for those runs: the original
+  // Composition, Event, and Interactive validators remain authoritative.
+  if (!request.turnPlanDigest) return { kind: "ready" };
   const turn = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
   if (!turn || turn.kind !== "full-story" || turn.objective?.breadth !== "whole-story" ||
       turn.objective.deliveryDepth !== "composition" ||
       turn.contract.scope.depth !== "composition" || turn.digest !== request.turnPlanDigest)
-    return refuse("Original Turn does not authorize a whole-Story Composition prerequisite.");
+    return { kind: "author-required", reason:
+      "The original Turn has no whole-Story authority for this additional Event/Choice closeout. " +
+      "Obtain a separately approved bounded scope amendment; do not synthesize a writer grant." };
   const eventOwner = turn.assignments.find(a => a.id === "event");
   const choiceOwner = turn.assignments.find(a => a.id === "interactive");
   const composition = turn.assignments.find(a => a.id === "composition");
@@ -72,6 +77,11 @@ export async function preflightCompositionBoundary(
   const head = await trustedHead(job);
   const event = await readReceipt(job, "event-items", milestoneId);
   const interactive = await readReceipt(job, "interactive-items", milestoneId);
+  // Fully realized Event-only Milestones intentionally have no Choice commit.
+  // Defer to the existing Composition omission/proof gate rather than treating
+  // their valid reviewed omission as an unmet closeout prerequisite.
+  if (event.validation?.status === "passed" &&
+      event.validation.milestoneState === "complete") return { kind: "ready" };
   const point = (await inspectRecoveryCheckpoints(job)).find(p =>
     p.eligible && p.workItem === "event-" + milestoneId.slice("milestone.".length) &&
     p.commitSha === event.commitSha);
@@ -99,7 +109,8 @@ export async function preflightCompositionBoundary(
       choicePoint.semanticReview !== "passed" ||
       choicePoint.assurance?.turnDigest !== turn.digest ||
       (interactive.units[1]?.phase === "committed" &&
-        (!puzzle || puzzle.semanticReview !== "passed")))
+        (!puzzle || puzzle.semanticReview !== "passed" ||
+          puzzle.assurance?.turnDigest !== turn.digest)))
     return refuse("Deferred Milestone has no fresh independently approved Choice/Puzzle prerequisite.");
   const checked = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
     { ...job, baseSha: head });
@@ -107,10 +118,13 @@ export async function preflightCompositionBoundary(
     diagnostics: unknown[];
     protection: { status: string; base: string; changes: unknown[]; warnings: unknown[] };
   };
+  if (report?.protection?.status === "checked" && report.protection.base === head &&
+      (report.protection.changes.length || report.protection.warnings.length))
+    return { kind: "author-required", reason:
+      "Original Story contains protected-authority changes; obtain exact author approval." };
   if (checked.status !== "passed" || !report || !Array.isArray(report.diagnostics) ||
       report.diagnostics.length || report.protection?.status !== "checked" ||
-      report.protection.base !== head || report.protection.changes.length ||
-      report.protection.warnings.length)
+      report.protection.base !== head)
     return refuse("Native Story/protection preflight is not valid at exact current HEAD.");
   if (await trustedHead(job) !== head)
     return refuse("Composition prerequisite source HEAD changed during preflight.");

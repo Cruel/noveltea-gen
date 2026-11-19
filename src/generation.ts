@@ -921,6 +921,14 @@ export function createGenerationGraph(
               next.planVersion && next.request?.turnPlanDigest && !next.request.fixture) {
             const decision = await preflightCompositionBoundary(job, next.request,
               next.active.milestone, next.planVersion);
+            if (decision.kind === "author-required") return {
+              ...next, status: "paused" as const, reason: decision.reason,
+              escalation: { kind: "protected-approval" as const,
+                requiresTrustedApproval: true,
+                sources: [{ source: next.active.milestone, message: decision.reason,
+                  repair: "protected" }],
+                action: "Request the original author’s approval through the existing scope/decision workflow." },
+            };
             if (decision.kind === "refuse") return {
               ...next, status: "blocked" as const,
               reason: "Composition prerequisite preflight refused: " + decision.reason,
@@ -958,29 +966,6 @@ export function createGenerationGraph(
           return { ...next, crossDomainCloseout: null, ideaTask: selected, escalation: null };
         } catch (error) { return blocked(error); }
       });
-    })
-    .addNode("cross_domain_closeout", async s => {
-      try {
-        const pending = s.crossDomainCloseout;
-        if (!pending || !s.active || s.active.stage !== "composition" ||
-            s.active.milestone !== pending.milestoneId ||
-            s.planVersion !== pending.planVersion)
-          throw Error("A cross-domain repair cannot proceed without its pinned Composition dependency.");
-        const job = await openJob(s);
-        const stopped = await withStoryJobLock(job, "cross-domain-author-boundary", () =>
-          authorBoundary(job));
-        if (stopped) return stopped;
-        const result = await advanceCrossDomainCloseout({ ...s.request,
-          milestoneId: pending.milestoneId, planVersion: pending.planVersion,
-          expected: { sourceSha: pending.sourceSha,
-            proposalDigest: pending.proposalDigest, repairId: pending.repairId } });
-        if (result.status !== "verified")
-          throw Error("Cross-domain prerequisite lacks an independently reviewed correction.");
-        // Re-enter the SAME Turn and original work inventory. Revalidate the
-        // new HEAD and complete native Milestone contract before Composition.
-        return { crossDomainCloseout: null, active: null, result: null,
-          reason: null, escalation: null };
-      } catch (error) { return blocked(error); }
     })
     .addNode("idea_integration", async s => {
       if (s.ideaResult) return {};
@@ -1063,6 +1048,29 @@ export function createGenerationGraph(
       });
     })
     .addNode("specialist_dispatch", async s => {
+      if (s.crossDomainCloseout) {
+        try {
+          const pending = s.crossDomainCloseout;
+          if (!s.active || s.active.stage !== "composition" ||
+              s.active.milestone !== pending.milestoneId ||
+              s.planVersion !== pending.planVersion || s.result)
+            throw Error("Prerequisite correction lost its pinned Composition source.");
+          const job = await openJob(s);
+          const stopped = await withStoryJobLock(job, "cross-domain-author-boundary",
+            () => authorBoundary(job));
+          if (stopped) return stopped;
+          const result = await advanceCrossDomainCloseout({ ...s.request,
+            milestoneId: pending.milestoneId, planVersion: pending.planVersion,
+            expected: { sourceSha: pending.sourceSha,
+              proposalDigest: pending.proposalDigest, repairId: pending.repairId } });
+          if (result.status !== "verified")
+            throw Error("Prerequisite lacks independent correction review.");
+          // No separate recovery graph: re-enter the original controller
+          // inventory and recheck native Milestone readiness before Composition.
+          return { crossDomainCloseout: null, active: null, result: null,
+            reason: null, escalation: null };
+        } catch (error) { return blocked(error); }
+      }
       // A saved dispatch result means the external stage completed before a parent
       // verification checkpoint. Otherwise the stage API reconciles its receipt,
       // including a commit published before its receipt; never invent a new writer.
@@ -1231,9 +1239,7 @@ export function createGenerationGraph(
     .addEdge(START, "schedule")
     .addConditionalEdges("schedule", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("author_update_intake", s => s.status !== "running" ? END :
-      s.crossDomainCloseout ? "cross_domain_closeout" :
-        s.ideaTask ? "idea_integration" : s.active ? "specialist_dispatch" : "completion_decision")
-    .addConditionalEdges("cross_domain_closeout", s => s.status !== "running" ? END : "author_update_intake")
+      s.ideaTask ? "idea_integration" : s.active ? "specialist_dispatch" : "completion_decision")
     .addConditionalEdges("idea_integration", s => s.status !== "running" ? END : "verify_idea_integration")
     .addConditionalEdges("verify_idea_integration", s => s.status !== "running" ? END : "author_update_intake")
     .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END :

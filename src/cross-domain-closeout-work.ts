@@ -16,21 +16,35 @@ import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
 import { preflightCompositionBoundary, type CompositionBoundaryDecision,
   type CompositionBoundaryRequest } from "./cross-domain-prerequisite-controller.js";
 import { authorMilestoneCloseout } from "./cross-domain-closeout-specialist.js";
-import { submitPrerequisiteRepair, settlePrerequisiteRepair, inspectRepairLedger } from "./repair-ledger.js";
+import { admitPrerequisiteRepair, submitPrerequisiteRepair, settlePrerequisiteRepair,
+  inspectRepairLedger, MAX_DEPENDENCY_CYCLES } from "./repair-ledger.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { reviewNarrative, type EditorialVerdict, type ReviewAssignment } from "./narrative-review-specialist.js";
-import { validCloseoutProposal, type CloseoutProposal } from "./cross-domain-prerequisite.js";
+import { validCloseoutProposal, retryCloseoutProposal, closeoutReviewMayRetry,
+  type CloseoutProposal } from "./cross-domain-prerequisite.js";
 import type { CompletionContract } from "./architecture.js";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const sha = /^[a-f0-9]{40}$/;
+interface RejectedCloseout {
+  proposal: CloseoutProposal;
+  commitSha: string;
+  reviewDigest: string;
+  review: EditorialVerdict;
+  writerSessionDigest: string;
+  reviewerSessionDigest: string;
+  writerSessionFile: string;
+  reviewerSessionFile: string;
+  reviewSnapshot: SkillSnapshot;
+  feedback: string;
+}
 interface Receipt {
   version: 1; jobId: string; threadId: string; baseSha: string;
   workItemId: string; turnDigest: string; repairId: string;
   proposal: CloseoutProposal;
-  phase: "ready" | "writing" | "authored" | "committed" | "reviewing" | "reviewed" | "verified" | "blocked";
+  phase: "ready" | "retry-ready" | "writing" | "authored" | "committed" | "reviewing" | "reviewed" | "verified" | "blocked";
   worker: "pi"; provider: string; model: string;
   snapshot?: SkillSnapshot; reviewSnapshot?: SkillSnapshot;
   sessionFile?: string; reviewerSessionFile?: string;
@@ -38,6 +52,8 @@ interface Receipt {
   evidence?: string[]; authoredDigest?: string; commitSha?: string;
   validation?: { status: "passed"; sourceSha: string; validatorVersion: string };
   review?: EditorialVerdict; reviewDigest?: string; failure?: string;
+  history?: RejectedCloseout[];
+  retry?: { sourceSession: string; feedback: string };
 }
 export interface CloseoutRunRequest extends CompositionBoundaryRequest {
   story: string; job: string; milestoneId: string; planVersion: number;
@@ -141,7 +157,55 @@ function verifyCommitted(job: JobStartResult, state: Receipt) {
     gitRaw(job, "show", state.proposal.sourceSha + ":" + repoPath(job, state.proposal.allowedPaths[0]!)),
     gitRaw(job, "show", state.commitSha + ":" + repoPath(job, state.proposal.allowedPaths[0]!)));
 }
+/** A failed independent review never becomes a trusted positive checkpoint.
+ * It can occur *inside* a later successful dependency repair chain only after
+ * each original source, field-only diff and negative reviewer is reauthenticated. */
+async function verifyRejectedChain(job: JobStartResult, state: Receipt) {
+  const history = state.history ?? [];
+  if (history.length >= MAX_DEPENDENCY_CYCLES)
+    throw Error("Prerequisite correction exceeded the three-cycle bound.");
+  if (!history.length) return;
+  const ledger = await inspectRepairLedger(job, state.turnDigest);
+  let parent = history[0]!.proposal.sourceSha;
+  for (const entry of history) {
+    if (!validCloseoutProposal(entry.proposal) || entry.proposal.sourceSha !== parent ||
+        !sha.test(entry.commitSha) ||
+        git(job, "rev-parse", entry.commitSha + "^") !== parent ||
+        git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", entry.commitSha) !==
+          repoPath(job, entry.proposal.allowedPaths[0]!) ||
+        !git(job, "log", "-1", "--format=%B", entry.commitSha).split("\n")
+          .includes("NovelTea-Prerequisite: " + entry.proposal.digest) ||
+        entry.review.verdict !== "block" ||
+        entry.reviewDigest !== hash(JSON.stringify({
+          reviewerSessionDigest: entry.reviewerSessionDigest,
+          proposal: entry.proposal.digest, commitSha: entry.commitSha,
+          verdict: entry.review.verdict, findings: entry.review.findings,
+          evidence: entry.review.evidence })) ||
+        entry.writerSessionDigest !== await checkedSessionDigest(job,
+          entry.writerSessionFile, "prerequisite-sessions") ||
+        entry.reviewerSessionDigest !== await checkedSessionDigest(job,
+          entry.reviewerSessionFile, "review-sessions") ||
+        await openSkillSnapshot(entry.reviewSnapshot.id) !== entry.reviewSnapshot.path ||
+        !ledger.prerequisites?.some(p => p.id === state.repairId && p.attempts.some(a =>
+          a.sourceSha === parent && a.submittedSha === entry.commitSha &&
+          a.verdict === "failed" && a.reviewDigest === entry.reviewDigest)))
+      throw Error("Rejected prerequisite ancestor lost its original independent negative review.");
+    assertMilestoneFulfillmentOnly(gitRaw(job, "show", parent + ":" +
+      repoPath(job, entry.proposal.allowedPaths[0]!)),
+      gitRaw(job, "show", entry.commitSha + ":" +
+        repoPath(job, entry.proposal.allowedPaths[0]!)));
+    parent = entry.commitSha;
+  }
+  if (state.proposal.sourceSha !== parent)
+    throw Error("Current closeout does not descend directly from its reviewed failed source.");
+  const trusted = JSON.parse(await readFile(join(job.stateDir, "revisions",
+    "verified-head.json"), "utf8")) as { version?: number; jobId?: string; headSha?: string };
+  if (trusted.version !== 1 || trusted.jobId !== job.jobId ||
+      ![history[0]!.proposal.sourceSha, state.commitSha].includes(trusted.headSha))
+    throw Error("Original verified Story boundary changed beneath failed corrections.");
+}
 async function publish(job: JobStartResult, state: Receipt) {
+  await verifyRejectedChain(job, state);
   if (!state.commitSha || state.phase !== "verified") throw Error("Cannot publish unreviewed dependency.");
   verifyCommitted(job, state);
   const file = join(job.stateDir, "revisions", "verified-head.json");
@@ -149,7 +213,8 @@ async function publish(job: JobStartResult, state: Receipt) {
     const previous = JSON.parse(await readFile(file, "utf8")) as {
       version: number; jobId: string; headSha: string };
     if (previous.version !== 1 || previous.jobId !== job.jobId ||
-        ![state.proposal.sourceSha, state.commitSha].includes(previous.headSha))
+        ![state.history?.[0]?.proposal.sourceSha ?? state.proposal.sourceSha,
+          state.commitSha].includes(previous.headSha))
       throw Error("Another verified Story boundary moved during dependency publication.");
     if (previous.headSha === state.commitSha) return;
   }
@@ -221,7 +286,7 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
         request.milestoneId, request.planVersion);
       if (boundary.kind !== "repair")
         throw Error("No authenticated unmet cross-domain prerequisite: " +
-          (boundary.kind === "refuse" ? boundary.reason : "Milestone is already complete"));
+          (boundary.kind === "ready" ? "Milestone is already complete" : boundary.reason));
       await preflightPiAssignment(job, "prerequisite:" + request.milestoneId, {
         provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
       });
@@ -241,23 +306,28 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
         state.proposal.planVersion !== request.planVersion ||
         state.worker !== "pi" || state.provider !== (request.provider ?? "openai") ||
         state.model !== (request.model ?? "gpt-6-luna") ||
-        (request.expected && (state.proposal.sourceSha !== request.expected.sourceSha ||
-          state.proposal.digest !== request.expected.proposalDigest ||
+        (request.expected && (
+          (state.history?.[0]?.proposal.sourceSha ?? state.proposal.sourceSha) !== request.expected.sourceSha ||
+          (state.history?.[0]?.proposal.digest ?? state.proposal.digest) !== request.expected.proposalDigest ||
           state.repairId !== request.expected.repairId)))
       throw Error("Closeout resumed with a stale original Turn, provider or source.");
     if (state.phase === "blocked" || state.phase === "writing" ||
         state.phase === "reviewing")
       throw Error("Interrupted or rejected closeout must be reconciled at its preserved " +
         "original specialist/reviewer session, never replayed.");
+    for (let cycle = 0; cycle < MAX_DEPENDENCY_CYCLES; cycle++) {
     const proposal = state.proposal;
     const head = git(job, "rev-parse", "HEAD");
-    if (state.phase === "ready") {
-      const checked = await preflightCompositionBoundary(job, request,
-        request.milestoneId, request.planVersion);
-      if (checked.kind !== "repair" || checked.proposal.digest !== proposal.digest ||
-          checked.repairId !== state.repairId || checked.turnDigest !== state.turnDigest)
-        throw Error("Pending cross-domain repair lost its exact current-HEAD/Turn authority.");
-      if (head !== proposal.sourceSha || await trustedHead(job) !== proposal.sourceSha ||
+    if (state.phase === "ready" || state.phase === "retry-ready") {
+      const first = state.phase === "ready";
+      if (first) {
+        const checked = await preflightCompositionBoundary(job, request,
+          request.milestoneId, request.planVersion);
+        if (checked.kind !== "repair" || checked.proposal.digest !== proposal.digest ||
+            checked.repairId !== state.repairId || checked.turnDigest !== state.turnDigest)
+          throw Error("Pending cross-domain repair lost its exact current-HEAD/Turn authority.");
+      } else await verifyRejectedChain(job, state);
+      if (head !== proposal.sourceSha || first && await trustedHead(job) !== proposal.sourceSha ||
           gitRaw(job, "status", "--porcelain=v1", "--untracked-files=all"))
         throw Error("Closeout writer cannot start on moved HEAD or dirty source.");
       const event = JSON.parse(await readFile(join(job.stateDir, "event-items",
@@ -289,7 +359,7 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
         const evidence = await authorMilestoneCloseout(job, state.snapshot,
           proposal, sources, state.provider, state.model,
           async sessionFile => { state!.sessionFile = sessionFile; await persist(file, state!); },
-          audit);
+          audit, state.retry);
         await validateCloseoutDraft(job, request, proposal);
         state.evidence = evidence.evidence;
         state.writerSessionDigest = await checkedSessionDigest(job, state.sessionFile,
@@ -304,7 +374,7 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
     }
     if (state.phase === "authored") {
       if (git(job, "rev-parse", "HEAD") !== proposal.sourceSha ||
-          await trustedHead(job) !== proposal.sourceSha)
+          !(state.history?.length) && await trustedHead(job) !== proposal.sourceSha)
         throw Error("Authored closeout changed its Git source before commit.");
       await validateCloseoutDraft(job, request, proposal);
       if (state.authoredDigest !== hash(await readFile(join(job.worktreeStoryRoot,
@@ -374,10 +444,51 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
       await settlePrerequisiteRepair(job, { turnDigest: state.turnDigest, id: state.repairId,
         submittedSha: state.commitSha, reviewDigest: state.reviewDigest, verdict });
       if (verdict === "failed") {
-        state.phase = "blocked"; state.failure =
-          "Independent review rejected the Milestone closeout; supporting owner work requires an explicit new controller plan.";
+        if (!state.writerSessionDigest || !state.reviewerSessionDigest ||
+            !state.sessionFile || !state.reviewerSessionFile || !state.reviewSnapshot)
+          throw Error("Negative dependency review has no preserved sessions.");
+        const feedback = JSON.stringify(state.review.findings);
+        const mayRetry = closeoutReviewMayRetry(state.review, proposal) &&
+          (state.history?.length ?? 0) + 1 < MAX_DEPENDENCY_CYCLES;
+        if (!mayRetry) {
+          state.phase = "blocked"; state.failure =
+            "Independent reviewer found another-owner/protected prerequisite or exhausted the " +
+            "three-cycle limit. Preserve the negative review; request controller amendment: " +
+            feedback.slice(0, 1800);
+          await persist(file, state);
+          throw Error(state.failure);
+        }
+        const rejected: RejectedCloseout = {
+          proposal, commitSha: state.commitSha, reviewDigest: state.reviewDigest,
+          review: state.review,
+          writerSessionDigest: state.writerSessionDigest,
+          reviewerSessionDigest: state.reviewerSessionDigest,
+          writerSessionFile: state.sessionFile,
+          reviewerSessionFile: state.reviewerSessionFile,
+          reviewSnapshot: state.reviewSnapshot, feedback,
+        };
+        const newProposal = retryCloseoutProposal(proposal, state.commitSha);
+        await admitPrerequisiteRepair(job, {
+          turnDigest: state.turnDigest, milestoneId: newProposal.milestoneId,
+          path: newProposal.allowedPaths[0]!, sourceEventSha: newProposal.sourceEventSha,
+          proposalDigest: newProposal.digest, sourceSha: newProposal.sourceSha,
+          planVersion: newProposal.planVersion,
+        });
+        state.history = [...state.history ?? [], rejected];
+        state.retry = { sourceSession: state.sessionFile, feedback };
+        state.proposal = newProposal;
+        state.commitSha = undefined;
+        state.review = undefined;
+        state.reviewDigest = undefined;
+        state.reviewerSessionFile = undefined;
+        state.reviewerSessionDigest = undefined;
+        state.writerSessionDigest = undefined;
+        state.authoredDigest = undefined;
+        state.sessionFile = undefined;
+        state.reviewSnapshot = undefined;
+        state.phase = "retry-ready";
         await persist(file, state);
-        throw Error(state.failure);
+        continue;
       }
       state.phase = "verified"; await persist(file, state);
     }
@@ -393,6 +504,8 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
       throw Error("Closeout verified-head publication has not become authoritative.");
     return { status: "verified" as const, headSha: state.commitSha,
       workItemId: state.workItemId };
+    }
+    throw Error("Dependency correction exceeded its three-cycle limit without a reviewed result.");
   });
 }
 /** Recognized by the existing narrative successor verifier. An arbitrary
@@ -406,6 +519,19 @@ export async function verifyCrossDomainCloseoutSuccessor(
   if (!workItem) throw Error("No source-bound prerequisite successor work item.");
   const name = "milestone." + workItem.slice("prerequisite-".length);
   const state = await load(fileOf(job, name));
+  if (state?.phase === "verified" && state.history?.some(h => h.commitSha === commit)) {
+    await verifyRejectedChain(job, state);
+    const rejected = state.history.find(h => h.commitSha === commit)!;
+    const expected = repoPath(job, rejected.proposal.allowedPaths[0]!);
+    if (state.jobId !== job.jobId || !validCloseoutProposal(rejected.proposal) ||
+        rejected.proposal.sourceSha !== parent ||
+        JSON.stringify(paths) !== JSON.stringify([expected]) ||
+        !trailers.includes("NovelTea-Job: " + job.jobId) ||
+        !trailers.includes("NovelTea-Work-Item: " + workItem) ||
+        !trailers.includes("NovelTea-Prerequisite: " + rejected.proposal.digest))
+      throw Error("Historical rejected prerequisite is not a verified ancestor of the later approved closeout.");
+    return;
+  }
   if (!state || !validCloseoutProposal(state.proposal) ||
       state.version !== 1 || state.jobId !== job.jobId ||
       state.phase !== "verified" || state.workItemId !== workItem ||
@@ -432,6 +558,7 @@ export async function verifyCrossDomainCloseoutSuccessor(
       !trailers.includes("NovelTea-Job: " + job.jobId) ||
       !trailers.includes("NovelTea-Prerequisite: " + state.proposal.digest))
     throw Error("Prerequisite successor is unverified, stale or changed out of scope.");
+  await verifyRejectedChain(job, state);
   verifyCommitted(job, state);
   const ledger = await inspectRepairLedger(job, state.turnDigest);
   if (!ledger.prerequisites?.some(p => p.id === state.repairId && p.status === "resolved" &&

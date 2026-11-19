@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { inspectCompositionPrerequisite } from "../src/cross-domain-prerequisite.js";
+import { inspectCompositionPrerequisite, closeoutReviewMayRetry, retryCloseoutProposal } from "../src/cross-domain-prerequisite.js";
 
 const sha = (n: string) => n.repeat(40);
 const baseline = {
@@ -84,6 +84,24 @@ test("stale or corrupt sources and unproven outcomes never authorize repair", ()
     assert.equal(inspectCompositionPrerequisite(input).kind, "refuse",
       JSON.stringify(input).slice(0, 200));
   }
+});
+test("a negative closeout review permits only same-Milestone Event field correction", () => {
+  const finding = inspectCompositionPrerequisite(clone());
+  assert.equal(finding.kind, "repair");
+  if (finding.kind !== "repair") return;
+  const review = { verdict: "block", findings: [{
+    severity: "blocking", repair: "event",
+    source: "milestones/choice-enacted.md:12",
+  }] };
+  assert.equal(closeoutReviewMayRetry(review, finding.proposal), true);
+  assert.equal(closeoutReviewMayRetry({ ...review, findings: review.findings.map(f =>
+    ({ ...f, repair: "interactive" })) }, finding.proposal), false);
+  assert.equal(closeoutReviewMayRetry({ ...review, findings: review.findings.map(f =>
+    ({ ...f, source: "events/setup.md:12" })) }, finding.proposal), false);
+  const advanced = retryCloseoutProposal(finding.proposal, sha("b"));
+  assert.equal(advanced.sourceSha, sha("b"));
+  assert.deepEqual(advanced.allowedPaths, finding.proposal.allowedPaths);
+  assert.notEqual(advanced.digest, finding.proposal.digest);
 });
 test("a missing author-owned Event or unresolved protected scope is not an automatic closeout", () => {
   const input = clone();

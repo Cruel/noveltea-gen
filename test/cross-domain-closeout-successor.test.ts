@@ -10,7 +10,8 @@ import { removeTestTree } from "./helpers.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair,
   settlePrerequisiteRepair } from "../src/repair-ledger.js";
 import { verifyCrossDomainCloseoutSuccessor } from "../src/cross-domain-closeout-work.js";
-import { validCloseoutProposal, type CloseoutProposal } from "../src/cross-domain-prerequisite.js";
+import { validCloseoutProposal, retryCloseoutProposal,
+  type CloseoutProposal } from "../src/cross-domain-prerequisite.js";
 import type { JobStartResult } from "../src/job.js";
 const hash = (v: string) => createHash("sha256").update(v).digest("hex");
 function git(cwd: string, ...args: string[]) {
@@ -31,7 +32,7 @@ The audience recognizes the genuine consequence.
 `;
 const completed = original.replace("completeness: partial", "completeness: complete")
   .replace("any_of: []", "any_of:\n    - [event.setup]");
-async function setup(t: import("node:test").TestContext) {
+async function setup(t: import("node:test").TestContext, firstVerdict: "passed" | "failed" = "passed") {
   const root = mkdtempSync(join(tmpdir(), "nt-cross-domain-proof-"));
   const priorCache = process.env.NT_SKILL_CACHE_DIR;
   process.env.NT_SKILL_CACHE_DIR = join(root, "skill-cache");
@@ -86,7 +87,10 @@ NovelTea-Prerequisite: ${proposal.digest}`);
   const after = git(root, "rev-parse", "HEAD");
   await submitPrerequisiteRepair(job, { turnDigest, id: admitted.id,
     sourceSha: before, submittedSha: after, paths: [path] });
-  const review = { verdict: "pass", findings: [], evidence: [path + ":5"] };
+  const review = firstVerdict === "passed"
+    ? { verdict: "pass", findings: [], evidence: [path + ":5"] }
+    : { verdict: "block", findings: [{ severity: "blocking", repair: "event",
+      source: path + ":5", message: "Original Milestone is unearned" }], evidence: [path + ":5"] };
   mkdirSync(join(stateDir, "prerequisite-sessions"), { recursive: true });
   mkdirSync(join(stateDir, "review-sessions"), { recursive: true });
   const writerSessionFile = join(stateDir, "prerequisite-sessions", "writer.jsonl");
@@ -101,7 +105,7 @@ NovelTea-Prerequisite: ${proposal.digest}`);
   const reviewDigest = hash(JSON.stringify({ reviewerSessionDigest,
     proposal: proposal.digest, commitSha: after, ...review }));
   await settlePrerequisiteRepair(job, { turnDigest, id: admitted.id,
-    submittedSha: after, reviewDigest, verdict: "passed" });
+    submittedSha: after, reviewDigest, verdict: firstVerdict });
   const state = {
     version: 1, jobId: "job-1", threadId: "thread-1", baseSha: before,
     workItemId: "prerequisite-choice-enacted", turnDigest, repairId: admitted.id,
@@ -115,13 +119,72 @@ NovelTea-Prerequisite: ${proposal.digest}`);
   mkdirSync(join(stateDir, "prerequisite-items"), { recursive: true });
   const receiptFile = join(stateDir, "prerequisite-items", "choice-enacted.json");
   writeFileSync(receiptFile, JSON.stringify(state));
+  mkdirSync(join(stateDir, "revisions"), { recursive: true });
+  writeFileSync(join(stateDir, "revisions", "verified-head.json"),
+    JSON.stringify({ version: 1, jobId: "job-1", headSha: before,
+      workItemId: "event-choice-enacted" }));
   const trailers = git(root, "log", "-1", "--format=%B").split("\n");
-  return { job, proposal, receiptFile, state, before, after, trailers, path };
+  return { job, root, target, stateDir, snapshot, turnDigest, admitted,
+    proposal, receiptFile, state, before, after, trailers, path };
 }
 test("verified descendant accepts exactly a signed, reviewed Milestone-only Git successor", async t => {
   const f = await setup(t);
   await verifyCrossDomainCloseoutSuccessor(f.job, f.after, f.before,
     ["story/" + f.path], f.trailers);
+});
+test("a later passed closeout carries a rejected ancestor without rewriting its negative verdict", async t => {
+  const f = await setup(t, "failed");
+  const next = retryCloseoutProposal(f.proposal, f.after);
+  await admitPrerequisiteRepair(f.job, { turnDigest: f.turnDigest,
+    sourceSha: f.after, sourceEventSha: f.before,
+    milestoneId: next.milestoneId, path: f.path,
+    proposalDigest: next.digest, planVersion: next.planVersion });
+  writeFileSync(f.target, completed.replace("event.setup", "event.verified-payoff"));
+  git(f.root, "add", "--", "story/" + f.path);
+  git(f.root, "commit", "-qm", `Reviewed correction
+
+NovelTea-Job: job-1
+NovelTea-Work-Item: prerequisite-choice-enacted
+NovelTea-Plan-Version: 2
+NovelTea-Prerequisite: ${next.digest}`);
+  const final = git(f.root, "rev-parse", "HEAD");
+  await submitPrerequisiteRepair(f.job, { turnDigest: f.turnDigest,
+    id: f.admitted.id, sourceSha: f.after, submittedSha: final, paths: [f.path] });
+  const lastReviewerFile = join(f.stateDir, "review-sessions", "second.jsonl");
+  const transcript = JSON.stringify({ type: "session", id: "second" }) + "\n" +
+    JSON.stringify({ type: "message", role: "assistant", text: "confirmed corrected outcome" }) + "\n";
+  writeFileSync(lastReviewerFile, transcript);
+  const lastReview = { verdict: "pass", findings: [], evidence: [f.path + ":5"] };
+  const lastReviewDigest = hash(JSON.stringify({ reviewerSessionDigest: hash(transcript),
+    proposal: next.digest, commitSha: final, ...lastReview }));
+  await settlePrerequisiteRepair(f.job, { turnDigest: f.turnDigest,
+    id: f.admitted.id, submittedSha: final, reviewDigest: lastReviewDigest, verdict: "passed" });
+  const state: any = { ...f.state, proposal: next, commitSha: final,
+    validation: { status: "passed", sourceSha: f.after,
+      validatorVersion: f.job.validatorVersion },
+    authoredDigest: hash(readFileSync(f.target, "utf8")),
+    reviewerSessionFile: lastReviewerFile, reviewerSessionDigest: hash(transcript),
+    review: lastReview, reviewDigest: lastReviewDigest,
+    history: [{
+      proposal: f.proposal, commitSha: f.after, reviewDigest: f.state.reviewDigest,
+      review: f.state.review,
+      writerSessionDigest: f.state.writerSessionDigest,
+      reviewerSessionDigest: f.state.reviewerSessionDigest,
+      writerSessionFile: f.state.sessionFile,
+      reviewerSessionFile: f.state.reviewerSessionFile,
+      reviewSnapshot: f.snapshot, feedback: "original Milestone still unearned",
+    }] };
+  writeFileSync(f.receiptFile, JSON.stringify(state));
+  await verifyCrossDomainCloseoutSuccessor(f.job, f.after, f.before,
+    ["story/" + f.path], f.trailers);
+  const finalMessage = git(f.root, "log", "-1", "--format=%B").split("\n");
+  await verifyCrossDomainCloseoutSuccessor(f.job, final, f.after,
+    ["story/" + f.path], finalMessage);
+  const corrupted = structuredClone(state);
+  corrupted.history[0].reviewDigest = "f".repeat(64);
+  writeFileSync(f.receiptFile, JSON.stringify(corrupted));
+  await assert.rejects(() => verifyCrossDomainCloseoutSuccessor(f.job, final,
+    f.after, ["story/" + f.path], finalMessage), /negative review/);
 });
 test("a forged reviewed phase, record path or original source hash cannot grant downstream admission", async t => {
   const f = await setup(t);
