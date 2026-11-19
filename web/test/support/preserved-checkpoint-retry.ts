@@ -71,13 +71,21 @@ export async function inspectPreservedCheckpointRetry(args: {
   const sourceThread = await store.persistence.advancedThreads.sourceThread(source.ownerId, sourceId)
   assert.ok(sourceThread, 'Source execution has no verified Story Thread')
   const originalThread = await store.persistence.advancedThreads.sourceThread(source.ownerId, source.jobId)
-  if (process.env.NT_TEST_WEB_PI_RETRY_ISOLATED === '1' && sourceId !== source.jobId) {
+  if (sourceId !== source.jobId) {
     const lineage = await verifyCertifiedRecoveryLineage(original, parent)
     assert.ok(lineage?.hops.length && lineage.terminalJobId === parent.jobId,
-      'Historical fork source must have a complete verified lineage to the original Story')
+      'Continuation source must have a complete verified lineage to the original Story')
+    if (process.env.NT_TEST_WEB_PI_RETRY_ISOLATED !== '1') {
+      // A previously isolated diagnostic fork has its own Thread. Continuing
+      // THAT Thread is safe only if its root is a certified child in the
+      // original Story lineage, not merely a matching user-supplied Thread ID.
+      assert.ok(sourceThread.id === originalThread?.id ||
+        lineage.hops.some(hop => sourceThread.id === 'fork:' + hop.childJobId),
+      'Same-Thread retry cannot select an unrelated descendant Thread')
+    }
   } else {
     assert.equal(sourceThread.id, originalThread?.id,
-      'Same-Thread retry cannot silently select an unrelated descendant Thread')
+      'Retry source must remain in its original Story Thread')
   }
   const latest = await store.persistence.advancedThreads.run(source.ownerId, sourceThread.id, 'last')
   assert.ok(latest, 'Original Thread has no execution')

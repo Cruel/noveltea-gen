@@ -640,6 +640,28 @@ export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<R
   }
   return results.sort((a, b) => a.completedWorkItems.length - b.completedWorkItems.length);
 }
+/** Every prior checkpoint carries cumulative no-write decisions. Repeated
+ * identities across verified ancestors are expected, not fresh approvals.
+ * Still reject duplicate entries inside one source or any changed controller
+ * seal: neither can be silently normalized into recovery authority. */
+export function mergeRecoveryOmissions(
+  ...groups: ReadonlyArray<readonly NonNullable<RecoveryCheckpoint["omittedWorkItems"]>[number][]>
+): NonNullable<RecoveryCheckpoint["omittedWorkItems"]> {
+  const unique = new Map<string, NonNullable<RecoveryCheckpoint["omittedWorkItems"]>[number]>();
+  for (const group of groups) {
+    const seen = new Set<string>();
+    for (const entry of group) {
+      if (seen.has(entry.workItem))
+        throw Error("Duplicate interactive omission within one recovery source: " + entry.workItem);
+      seen.add(entry.workItem);
+      const prior = unique.get(entry.workItem);
+      if (prior && JSON.stringify(prior.seal) !== JSON.stringify(entry.seal))
+        throw Error("Conflicting controller omission seal in recovery history: " + entry.workItem);
+      if (!prior) unique.set(entry.workItem, entry);
+    }
+  }
+  return [...unique.values()];
+}
 /** Runs only under the existing writer lock. Repeating it never replays a Pi writer. */
 export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   workItem: string, parentSha: string, commitSha: string) {
@@ -706,7 +728,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     inherited.push({ workItem: "interactive-choice-" + slug, seal },
       { workItem: "interactive-puzzle-" + slug, seal });
   }
-  const omissions = [...previous.flatMap(p => p.omittedWorkItems ?? []), ...inherited];
+  const localOmissions: NonNullable<RecoveryCheckpoint["omittedWorkItems"]> = [];
   if (workItem.startsWith("composition-")) {
     const slug = workItem.slice("composition-".length);
     const source = JSON.parse(await readFile(
@@ -717,20 +739,15 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
       if (!seal || source.units[1]?.phase !== "not-applicable" ||
           JSON.stringify(seal) !== JSON.stringify(source.units[1].eventOnly))
         throw Error("Composition omitted Choice without a matched controller Event-only review.");
-      for (const workItem of ["interactive-choice-" + slug, "interactive-puzzle-" + slug]) {
-        const prior = omissions.find(entry => entry.workItem === workItem);
-        if (prior && JSON.stringify(prior.seal) !== JSON.stringify(seal))
-          throw Error("Composition omission differs from inherited independent review.");
-        if (!prior) omissions.push({ workItem, seal });
-      }
+      localOmissions.push({ workItem: "interactive-choice-" + slug, seal },
+        { workItem: "interactive-puzzle-" + slug, seal });
     } else if (source.units?.[1]?.phase === "not-applicable") {
       if (!source.units[1].noWrite) throw new Error("Composition omitted Puzzle without a controller seal.");
-      omissions.push({ workItem: "interactive-puzzle-" + slug, seal: source.units[1].noWrite });
+      localOmissions.push({ workItem: "interactive-puzzle-" + slug, seal: source.units[1].noWrite });
     }
   }
-  const unique = [...new Map(omissions.map(entry => [entry.workItem, entry])).values()];
-  if (unique.length !== omissions.length)
-    throw new Error("Recovery attempted to duplicate an optional Puzzle no-write decision.");
+  const unique = mergeRecoveryOmissions(
+    ...previous.map(point => point.omittedWorkItems ?? []), inherited, localOmissions);
   const omitted = await verifyOmissions(job, unique, commitSha);
   const remaining = work.order.filter(id => !completed.includes(id) && !omitted.has(id));
   const next = remaining.find(id => (work.dependencies[id] ?? []).every(dep =>
