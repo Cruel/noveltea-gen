@@ -44,7 +44,7 @@ import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeeds
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
 import { admitRepairFinding, inspectRepairLedger, submitRepairCorrection,
-  settleRepairReview, MAX_LOCAL_CORRECTIONS, MAX_TURN_CORRECTIONS } from "./repair-ledger.js";
+  settleRepairReview, totalTurnCorrections, MAX_LOCAL_CORRECTIONS, MAX_TURN_CORRECTIONS } from "./repair-ledger.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -755,7 +755,7 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   });
   const unresolved = ledger.findings.filter(f =>
     f.rootFailureSha === state.rootFailureSha && f.status === "open");
-  const exhausted = ledger.corrections.length >= MAX_TURN_CORRECTIONS ||
+  const exhausted = totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS ||
     unresolved.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS);
   const finished = repairReviewOutcome(state, review.result, exhausted);
   const stagnation = detectRepairStagnation(job, state, review.result);
@@ -822,7 +822,7 @@ export async function consumeRejectedRepairChoice(job: JobStartResult, sha: stri
   }
   const ledger = await inspectRepairLedger(job, state.originalSource.turnDigest);
   const unresolved = ledger.findings.filter(f => f.rootFailureSha === state.rootFailureSha && f.status === "open");
-  state.phase = ledger.corrections.length >= MAX_TURN_CORRECTIONS ||
+  state.phase = totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS ||
     unresolved.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS)
     ? "blocked" : "ready";
   state.sessionSha256 = hash(await readFile(state.origin.sessionFile));

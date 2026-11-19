@@ -16,6 +16,7 @@ const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const PATH = /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/;
 export const MAX_LOCAL_CORRECTIONS = 2;
+export const MAX_DEPENDENCY_CYCLES = 3;
 export const MAX_TURN_CORRECTIONS = 12;
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -43,6 +44,22 @@ export interface RepairCorrection {
   changedPaths: string[];
   result?: { successorSha: string; status: "passed" | "failed"; reviewDigest: string };
 }
+export interface PrerequisiteRepair {
+  /** Identity follows the same canonical obligation through changed wording and HEADs. */
+  id: string;
+  obligation: "milestone-closeout";
+  milestoneId: string;
+  path: string;
+  sourceEventSha: string;
+  proposalDigest: string;
+  sourceSha: string;
+  planVersion: number;
+  status: "open" | "resolved";
+  /** A genuine new downstream defect cites the originating completed correction. */
+  causedBy?: string;
+  attempts: Array<{ sourceSha: string; submittedSha: string; paths: string[];
+    reviewDigest?: string; verdict?: "passed" | "failed" }>;
+}
 export interface RepairLedger {
   version: 1;
   jobId: string;
@@ -50,6 +67,12 @@ export interface RepairLedger {
   turnDigest: string;
   findings: RepairFinding[];
   corrections: RepairCorrection[];
+  /** Additive private controller state; pre-existing ledgers remain readable. */
+  prerequisites?: PrerequisiteRepair[];
+}
+export function totalTurnCorrections(ledger: RepairLedger): number {
+  return ledger.corrections.length +
+    (ledger.prerequisites ?? []).reduce((total, p) => total + p.attempts.length, 0);
 }
 interface FindingReport {
   turnDigest: string;
@@ -101,7 +124,24 @@ function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedg
   if (raw.version !== 1 || raw.jobId !== job.jobId || raw.threadId !== job.threadId ||
       raw.turnDigest !== turnDigest || !Array.isArray(raw.findings) ||
       !Array.isArray(raw.corrections) || raw.findings.length > 512 ||
-      raw.corrections.length > MAX_TURN_CORRECTIONS ||
+      (raw.prerequisites !== undefined && (!Array.isArray(raw.prerequisites) ||
+        raw.prerequisites.length > 512 ||
+        new Set(raw.prerequisites.map(p => p.id)).size !== raw.prerequisites.length ||
+        raw.prerequisites.some(p => !DIGEST.test(p.id) ||
+          p.obligation !== "milestone-closeout" ||
+          !/^milestone\.[a-z][a-z0-9-]*$/.test(p.milestoneId) ||
+          !/^milestones\/[a-z0-9._-]+\.md$/.test(p.path) ||
+          !SHA.test(p.sourceEventSha) || !SHA.test(p.sourceSha) ||
+          !DIGEST.test(p.proposalDigest) || !Number.isSafeInteger(p.planVersion) ||
+          p.planVersion < 1 || !["open", "resolved"].includes(p.status) ||
+          (p.causedBy !== undefined && !SHA.test(p.causedBy)) ||
+          !Array.isArray(p.attempts) || p.attempts.length > MAX_DEPENDENCY_CYCLES ||
+          p.attempts.some(a => !SHA.test(a.sourceSha) || !SHA.test(a.submittedSha) ||
+            !Array.isArray(a.paths) || !a.paths.length ||
+            a.paths.some(path => !PATH.test(path)) ||
+            (a.verdict !== undefined && (!["passed", "failed"].includes(a.verdict) ||
+              !DIGEST.test(a.reviewDigest ?? ""))))))) ||
+      totalTurnCorrections(raw) > MAX_TURN_CORRECTIONS ||
       new Set(raw.findings.map(f => f.id)).size !== raw.findings.length ||
       new Set(raw.corrections.map(c => c.rootFailureSha + ":" + c.sourceSha)).size !== raw.corrections.length ||
       raw.findings.some(f => !DIGEST.test(f.id) || !SHA.test(f.rootFailureSha) ||
@@ -175,10 +215,108 @@ function recordFindings(ledger: RepairLedger, report: FindingReport, causedBy?: 
   return active;
 }
 function ensureRoom(ledger: RepairLedger, findings: RepairFinding[]) {
-  if (ledger.corrections.length >= MAX_TURN_CORRECTIONS)
+  if (totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS)
     throw Error("Turn correction ceiling exhausted; preserve verified work and findings.");
   if (findings.some(f => f.attempts.length >= MAX_LOCAL_CORRECTIONS))
     throw Error("Local corrections exhausted for a source-linked Repair finding.");
+}
+
+/** This is an independently sourced prerequisite finding, not a fabricated
+ * negative reviewer verdict. Only call after checking native evidence, the
+ * original Turn and its signed Event Milestone field grant. */
+export async function admitPrerequisiteRepair(job: JobStartResult, input: {
+  turnDigest: string; milestoneId: string; path: string; sourceEventSha: string;
+  proposalDigest: string; sourceSha: string; planVersion: number; causedBy?: string;
+}): Promise<PrerequisiteRepair> {
+  if (!DIGEST.test(input.turnDigest) || !DIGEST.test(input.proposalDigest) ||
+      !SHA.test(input.sourceSha) || !SHA.test(input.sourceEventSha) ||
+      !/^milestone\.[a-z][a-z0-9-]*$/.test(input.milestoneId) ||
+      !/^milestones\/[a-z0-9._-]+\.md$/.test(input.path) ||
+      !Number.isSafeInteger(input.planVersion) || input.planVersion < 1 ||
+      (input.causedBy !== undefined && !SHA.test(input.causedBy)))
+    throw Error("Prerequisite repair lacks authenticated source and owner identity.");
+  const ledger = await inspectRepairLedger(job, input.turnDigest);
+  const id = digest({ turnDigest: input.turnDigest, obligation: "milestone-closeout",
+    milestoneId: input.milestoneId, path: input.path });
+  const entries = ledger.prerequisites ?? (ledger.prerequisites = []);
+  let item = entries.find(p => p.id === id);
+  if (item && (item.milestoneId !== input.milestoneId ||
+      item.path !== input.path || item.sourceEventSha !== input.sourceEventSha ||
+      item.causedBy !== input.causedBy))
+    throw Error("Prerequisite repair changed its canonical owner or origin.");
+  if (totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS)
+    throw Error("Turn correction ceiling exhausted; preserve prerequisite findings.");
+  if (item && item.attempts.length >= MAX_DEPENDENCY_CYCLES && item.status !== "resolved")
+    throw Error("Dependency repair cycles exhausted; preserve original finding.");
+  if (!item) {
+    item = { id, obligation: "milestone-closeout", milestoneId: input.milestoneId,
+      path: input.path, sourceEventSha: input.sourceEventSha,
+      proposalDigest: input.proposalDigest, sourceSha: input.sourceSha,
+      planVersion: input.planVersion, status: "open", attempts: [],
+      ...(input.causedBy ? { causedBy: input.causedBy } : {}) };
+    entries.push(item);
+  } else if (item.sourceSha === input.sourceSha &&
+      item.proposalDigest !== input.proposalDigest) {
+    throw Error("Conflicting prerequisite proposal for one verified Story source.");
+  } else if (item.sourceSha !== input.sourceSha) {
+    if (item.attempts.some(a => !a.verdict))
+      throw Error("Unsettled dependency repair cannot be replanned at a new HEAD.");
+    item.sourceSha = input.sourceSha; item.proposalDigest = input.proposalDigest;
+    item.planVersion = input.planVersion;
+  }
+  await save(job, ledger);
+  return item;
+}
+
+/** A completed, changed and controller-audited specialist submission counts
+ * once, even when later independent review rejects it. Uncertain calls do not. */
+export async function submitPrerequisiteRepair(job: JobStartResult, input: {
+  turnDigest: string; id: string; sourceSha: string; submittedSha: string; paths: string[];
+}) {
+  const ledger = await inspectRepairLedger(job, input.turnDigest);
+  const finding = ledger.prerequisites?.find(p => p.id === input.id);
+  if (!finding || finding.status !== "open" || !SHA.test(input.sourceSha) ||
+      !SHA.test(input.submittedSha) || input.sourceSha === input.submittedSha ||
+      input.paths.length !== 1 || input.paths[0] !== finding.path)
+    throw Error("Dependency repair submission is not a bounded authorized edit.");
+  const existing = finding.attempts.find(a => a.submittedSha === input.submittedSha);
+  if (existing) {
+    if (existing.sourceSha !== input.sourceSha ||
+        JSON.stringify(existing.paths) !== JSON.stringify(input.paths))
+      throw Error("Conflicting prerequisite correction submission.");
+    return finding;
+  }
+  if (finding.sourceSha !== input.sourceSha ||
+      finding.attempts.some(a => !a.verdict) ||
+      finding.attempts.length >= MAX_DEPENDENCY_CYCLES ||
+      totalTurnCorrections(ledger) >= MAX_TURN_CORRECTIONS)
+    throw Error("Stale, unsettled or exhausted prerequisite correction.");
+  finding.attempts.push({ sourceSha: input.sourceSha, submittedSha: input.submittedSha,
+    paths: input.paths });
+  await save(job, ledger);
+  return finding;
+}
+
+/** A new independent verdict, not the writer's assessment, settles the cycle. */
+export async function settlePrerequisiteRepair(job: JobStartResult, input: {
+  turnDigest: string; id: string; submittedSha: string; reviewDigest: string;
+  verdict: "passed" | "failed";
+}) {
+  if (!DIGEST.test(input.reviewDigest) || !SHA.test(input.submittedSha))
+    throw Error("Prerequisite review lacks a sealed independent source.");
+  const ledger = await inspectRepairLedger(job, input.turnDigest);
+  const finding = ledger.prerequisites?.find(p => p.id === input.id);
+  const attempt = finding?.attempts.find(a => a.submittedSha === input.submittedSha);
+  if (!finding || !attempt) throw Error("Prerequisite review has no submitted correction.");
+  if (attempt.verdict) {
+    if (attempt.verdict !== input.verdict || attempt.reviewDigest !== input.reviewDigest)
+      throw Error("Conflicting independent prerequisite verdict.");
+    return finding;
+  }
+  attempt.verdict = input.verdict; attempt.reviewDigest = input.reviewDigest;
+  if (input.verdict === "passed") finding.status = "resolved";
+  await save(job, ledger);
+  return finding;
 }
 
 /** Register sealed negative review at initial admission or after rereview.

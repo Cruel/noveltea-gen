@@ -19,6 +19,8 @@ import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { runInteractiveWorkItem } from "./interactive-work.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { runCompositionWorkItem } from "./composition-work.js";
+import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
+import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
 import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
@@ -202,6 +204,9 @@ const Channels = Annotation.Root({
   graphThreadId: Annotation<string | null>(),
   adaptiveVersion: Annotation<number | null>(),
   dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
+  /** A controller-admitted prerequisite, before the next dependent dispatch. */
+  crossDomainCloseout: Annotation<{ milestoneId: string; planVersion: number;
+    sourceSha: string; proposalDigest: string; repairId: string } | null>(),
 });
 type State = typeof Channels.State;
 const openJob = async (s: Pick<State, "request">) => {
@@ -908,6 +913,38 @@ export function createGenerationGraph(
           const boundary = await applyLiveSteeringAtBoundary(job, s.request, next.inventory ?? null);
           if (boundary) return { ...next, ...boundary, ideaTask: null, escalation: null };
           const head = await trustedHead(job);
+          // Existing Event/Choice ownership and its native fulfillment contract
+          // are checked before allocating any Composition model context. A
+          // saved closeout proposal is a graph routing decision, never a lease;
+          // the separate node re-authenticates the entire source under lock.
+          if (next.active?.stage === "composition" && next.active.milestone &&
+              next.planVersion && next.request?.turnPlanDigest && !next.request.fixture) {
+            const decision = await preflightCompositionBoundary(job, next.request,
+              next.active.milestone, next.planVersion);
+            if (decision.kind === "author-required") return {
+              ...next, status: "paused" as const, reason: decision.reason,
+              escalation: { kind: "protected-approval" as const,
+                requiresTrustedApproval: true,
+                sources: [{ source: next.active.milestone, message: decision.reason,
+                  repair: "protected" }],
+                action: "Request the original author’s approval through the existing scope/decision workflow." },
+            };
+            if (decision.kind === "refuse") return {
+              ...next, status: "blocked" as const,
+              reason: "Composition prerequisite preflight refused: " + decision.reason,
+              escalation: { kind: "dependency-replan" as const,
+                requiresTrustedApproval: false,
+                sources: [{ source: next.active.milestone, message: decision.reason,
+                  repair: "event" }],
+                action: "Inspect original Event/Choice proofs and authorize only a verified " +
+                  "bounded prerequisite amendment. Do not dispatch Composition or fabricate fulfillment." },
+            };
+            if (decision.kind === "repair") return { ...next,
+              crossDomainCloseout: { milestoneId: next.active.milestone,
+                planVersion: next.planVersion, sourceSha: decision.proposal.sourceSha,
+                proposalDigest: decision.proposal.digest, repairId: decision.repairId },
+              ideaTask: null, escalation: null };
+          }
           // A single logical boundary after independently reviewed, commitless
           // omissions. No fabricated Git commit, no repeated Pi calls, and no
           // unrelated writer draft may be included in the handoff.
@@ -926,7 +963,7 @@ export function createGenerationGraph(
             ? { tasks: [] } : await scheduleIdeasAtBoundary(job, "parent-generation");
           const selected = selectIdeaTask({ ...s, ...next } as State, head, scheduled.tasks,
             next.active ?? null);
-          return { ...next, ideaTask: selected, escalation: null };
+          return { ...next, crossDomainCloseout: null, ideaTask: selected, escalation: null };
         } catch (error) { return blocked(error); }
       });
     })
@@ -1011,6 +1048,29 @@ export function createGenerationGraph(
       });
     })
     .addNode("specialist_dispatch", async s => {
+      if (s.crossDomainCloseout) {
+        try {
+          const pending = s.crossDomainCloseout;
+          if (!s.active || s.active.stage !== "composition" ||
+              s.active.milestone !== pending.milestoneId ||
+              s.planVersion !== pending.planVersion || s.result)
+            throw Error("Prerequisite correction lost its pinned Composition source.");
+          const job = await openJob(s);
+          const stopped = await withStoryJobLock(job, "cross-domain-author-boundary",
+            () => authorBoundary(job));
+          if (stopped) return stopped;
+          const result = await advanceCrossDomainCloseout({ ...s.request,
+            milestoneId: pending.milestoneId, planVersion: pending.planVersion,
+            expected: { sourceSha: pending.sourceSha,
+              proposalDigest: pending.proposalDigest, repairId: pending.repairId } });
+          if (result.status !== "verified")
+            throw Error("Prerequisite lacks independent correction review.");
+          // No separate recovery graph: re-enter the original controller
+          // inventory and recheck native Milestone readiness before Composition.
+          return { crossDomainCloseout: null, active: null, result: null,
+            reason: null, escalation: null };
+        } catch (error) { return blocked(error); }
+      }
       // A saved dispatch result means the external stage completed before a parent
       // verification checkpoint. Otherwise the stage API reconciles its receipt,
       // including a commit published before its receipt; never invent a new writer.
@@ -1219,7 +1279,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
           pendingOrder: null, pendingVersion: null, graphThreadId: null, adaptiveVersion: null,
-          dependencyHistory: [] };
+          dependencyHistory: [], crossDomainCloseout: null };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)

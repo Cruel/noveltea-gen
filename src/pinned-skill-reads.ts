@@ -29,7 +29,8 @@ export function completedPinnedSkillReads(messages: AgentSession["messages"], ro
 }
 
 export async function requirePinnedSkillReads(session: AgentSession, root: string,
-  required: string[], stage: string): Promise<string[]> {
+  required: string[], stage: string, expectedReport =
+    "modifiedRecords/architecturalConflicts/laterObligations JSON manifest"): Promise<string[]> {
   const first = required.find(path => path.includes("/skills/"));
   // Cache roots themselves can contain /skills/ (e.g. $TMP/skills/<digest>).
   // The final /skills/ component names the actual snapshot skill directory.
@@ -43,8 +44,8 @@ export async function requirePinnedSkillReads(session: AgentSession, root: strin
         "Read each missing reference using the read tool with its EXACT stable skill:// " +
         "address, never an absolute snapshot hash path. Reassess your existing draft against " +
         "the newly read guidance; repair only authorized Story files if needed, " +
-        "run story_validate, then repeat the COMPLETE modifiedRecords/architecturalConflicts/" +
-        "laterObligations JSON manifest. Do not stage or commit anything.\nMISSING PINNED REFERENCES:\n" +
+        "run story_validate, then repeat the COMPLETE " + expectedReport +
+        ". Do not stage or commit anything.\nMISSING PINNED REFERENCES:\n" +
         missing()
           .map((path) => "skill://" + path.slice(path.lastIndexOf("/skills/") + 8))
           .join("\n"),
