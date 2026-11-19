@@ -83,9 +83,14 @@ async function sourceReceipt(job: JobStartResult, item: ExecutionItem,
   if (point.workItem.startsWith("composition-")) {
     const entry = slug ? await read("composition-items/" + slug + ".json") : null;
     if (!entry || entry.commitSha !== point.commitSha ||
-        entry.planVersion !== item.planVersion) return null;
-    const written = recordPath(entry.paths);
-    return written?.length ? written : null;
+        entry.planVersion !== item.planVersion ||
+        !recordPath(entry.paths)?.length) return null;
+    // Current Composition receipts record written Authored Content paths, not
+    // all Story sources the writer/reviewer consumed. Treating the output list
+    // as an exhaustive read set would silently carry forward prose that still
+    // depends on an altered upstream Event. Classify as UNKNOWN until a
+    // native/pinned source-consumption receipt actually exists.
+    return null;
   }
   // Unknown source instrumentation is not evidence of independence. World,
   // Character, baseline Foundation and synthetic stages are handled by their

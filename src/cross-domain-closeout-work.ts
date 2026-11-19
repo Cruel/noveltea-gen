@@ -208,8 +208,14 @@ async function verifyRejectedChain(job: JobStartResult, state: Receipt) {
   const trusted = JSON.parse(await readFile(join(job.stateDir, "revisions",
     "verified-head.json"), "utf8")) as { version?: number; jobId?: string; headSha?: string };
   if (trusted.version !== 1 || trusted.jobId !== job.jobId ||
-      ![history[0]!.proposal.sourceSha, state.commitSha].includes(trusted.headSha))
+      !sha.test(trusted.headSha ?? ""))
     throw Error("Original verified Story boundary changed beneath failed corrections.");
+  if (![history[0]!.proposal.sourceSha, state.commitSha].includes(trusted.headSha)) {
+    if (state.phase !== "verified" || !state.commitSha)
+      throw Error("Original verified Story boundary changed beneath failed corrections.");
+    const { verifiedNarrativeChain } = await import("./job-successor.js");
+    await verifiedNarrativeChain(job, state.commitSha, trusted.headSha!);
+  }
 }
 async function publish(job: JobStartResult, state: Receipt) {
   await verifyRejectedChain(job, state);
@@ -219,11 +225,16 @@ async function publish(job: JobStartResult, state: Receipt) {
   if (existsSync(file)) {
     const previous = JSON.parse(await readFile(file, "utf8")) as {
       version: number; jobId: string; headSha: string };
-    if (previous.version !== 1 || previous.jobId !== job.jobId ||
-        ![state.history?.[0]?.proposal.sourceSha ?? state.proposal.sourceSha,
-          state.commitSha].includes(previous.headSha))
+    if (previous.version !== 1 || previous.jobId !== job.jobId)
       throw Error("Another verified Story boundary moved during dependency publication.");
     if (previous.headSha === state.commitSha) return;
+    if (previous.headSha !== (state.history?.[0]?.proposal.sourceSha ?? state.proposal.sourceSha)) {
+      // Post-closeout correction descendants are already separately reviewed.
+      // Never overwrite a later verified head with the earlier prerequisite.
+      const { verifiedNarrativeChain } = await import("./job-successor.js");
+      await verifiedNarrativeChain(job, state.commitSha!, previous.headSha);
+      return;
+    }
   }
   const tmp = file + "." + randomUUID() + ".tmp";
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
@@ -546,7 +557,7 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
       provider: state.provider, model: state.model,
       skillsSource: request.skillsSource, validatorSource: request.validatorSource,
     });
-    return { status: "verified" as const, headSha: state.commitSha,
+    return { status: "verified" as const, headSha: await trustedHead(job),
       workItemId: state.workItemId };
     }
     throw Error("Dependency correction exceeded its three-cycle limit without a reviewed result.");

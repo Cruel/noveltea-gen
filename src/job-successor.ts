@@ -201,6 +201,12 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       await verifyCrossDomainCloseoutSuccessor(job, commit, parents[1]!, paths, trailers);
       continue;
     }
+    if (trailers.some(line =>
+      /^NovelTea-Work-Item: dependent-repair-[a-f0-9]{40}$/.test(line))) {
+      const { verifyDependentCorrectionSuccessor } = await import("./dependent-correction-work.js");
+      await verifyDependentCorrectionSuccessor(job, commit, parents[1]!, paths, trailers);
+      continue;
+    }
     if (await verifyReviewedSpecialistSuccessor(job, commit, parents[1]!, paths, trailers))
       continue;
     if (trailers.includes("NovelTea-Work-Item: idea-placement")) {

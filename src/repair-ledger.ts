@@ -349,8 +349,10 @@ export async function admitCausalRevalidationFinding(job: JobStartResult,
   // original causal origin and completed attempt history; genuinely different
   // target/category shapes receive a new, source-linked causal predecessor.
   const findings = recordFindings(ledger, report, report.causedBy);
-  ensureRoom(ledger, findings);
+  // A valid late negative review remains immutable evidence even when the
+  // Turn is out of correction attempts. Refusal must not erase the finding.
   await save(job, ledger);
+  ensureRoom(ledger, findings);
   return ledger;
 }
 /** A model/provider failure or an interrupted Pi turn never enters here.

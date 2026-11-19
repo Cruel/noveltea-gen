@@ -40,9 +40,25 @@ async function fixture(t: import("node:test").TestContext) {
     skillDirs: [], requiredSkills: ["nt-narrative-review"] });
   assert.ok(snapshot);
   const stateDir = join(root, "state");
-  const job = { jobId: "job-a", threadId: "thread-a", stateDir } as JobStartResult;
+  const repo = join(root, "story");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "Verified correction boundary");
+  for (const args of [
+    ["init", "-q", "-b", "main"], ["config", "user.name", "Test"],
+    ["config", "user.email", "test@example.invalid"], ["add", "."],
+    ["commit", "-qm", "Reviewed correction"],
+  ]) {
+    const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+  }
+  const next = spawnSync("git", ["rev-parse", "HEAD"],
+    { cwd: repo, encoding: "utf8" });
+  assert.equal(next.status, 0);
+  const successorSha = next.stdout.trim(), upstreamSha = sha("1");
+  const job = { jobId: "job-a", threadId: "thread-a", stateDir,
+    worktreeRoot: repo, worktreeStoryRoot: repo, storyRelativePath: "", branch: "main",
+    baseSha: successorSha } as JobStartResult;
   const turnDigest = sum("a");
-  const upstreamSha = sha("1"), successorSha = sha("2");
   const primary = {
     id: "event:milestone.alpha", stage: "event", milestone: "milestone.alpha",
     status: "verified", verifiedSha: sha("3"), dependencies: [], planVersion: 2,
@@ -76,7 +92,7 @@ async function fixture(t: import("node:test").TestContext) {
     JSON.stringify({ type: "message", message: { role: "assistant",
       content: [{ type: "text", text: "Accepted revised source at Milestone line 9" }] } }) + "\n";
   writeFileSync(reviewerFile, transcript);
-  const sessionDigest = hash(transcript);
+  const sessionDigest = createHash("sha256").update(transcript).digest("hex");
   const verdict = { verdict: "pass", findings: [], evidence: ["milestones/alpha.md:9"] };
   const reviewerDigest = hash({ verdict, sessionDigest, source: successorSha, item: dependent.id });
   const record = {
@@ -89,10 +105,14 @@ async function fixture(t: import("node:test").TestContext) {
   const state = { version: 1, jobId: job.jobId, threadId: job.threadId,
     turnDigest, proposal: plan, snapshot, provider: "openai", model: "gpt-6-luna",
     originalInventoryDigest: originalInventorySnapshotDigest(inventory),
-    state: "completed", results: [result] };
+    state: "completed", finalHead: successorSha, results: [result] };
   const receiptFile = join(stateDir, "revalidation-items", successorSha + ".json");
   const upstreamFile = join(stateDir, "prerequisite-items", "alpha.json");
   mkdirSync(join(stateDir, "revalidation-items"), { recursive: true });
+  mkdirSync(join(stateDir, "revisions"), { recursive: true });
+  writeFileSync(join(stateDir, "revisions", "verified-head.json"),
+    JSON.stringify({ version: 1, jobId: job.jobId, headSha: successorSha,
+      workItemId: "prerequisite-alpha" }));
   mkdirSync(join(stateDir, "prerequisite-items"), { recursive: true });
   writeFileSync(upstreamFile, JSON.stringify({ jobId: job.jobId,
     phase: "verified", commitSha: successorSha, reviewDigest,
@@ -111,6 +131,8 @@ test("an incomplete, forged, stale, missing or interrupted reviewer never carrie
   const f = await fixture(t);
   for (const mutation of [
     (s: any) => { s.state = "reviewing"; },
+    (s: any) => { s.finalHead = sha("f"); },
+    (s: any) => { delete s.finalHead; },
     (s: any) => { s.correctiveAssignment = { digest: sum("f") }; },
     (s: any) => { s.state = "completed"; s.results = []; },
     (s: any) => { s.results[0].verdict.evidence = ["events/fabricated.md:999"]; },

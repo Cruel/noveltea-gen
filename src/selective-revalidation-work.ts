@@ -21,6 +21,8 @@ import { loadSkillConfig } from "./skills.js";
 import { reviewNarrative, type EditorialVerdict, type EditorialFinding,
   type ReviewAssignment } from "./narrative-review-specialist.js";
 import { authenticateSelectiveImpact } from "./selective-revalidation-controller.js";
+import { advanceDependentCorrection, inspectDependentCorrection } from "./dependent-correction-work.js";
+import { verifiedNarrativeChain } from "./job-successor.js";
 import { originalInventorySnapshotDigest, assertSelectiveRevalidationPlan,
   assertDependentCorrection,
   decideSelectiveRevalidation, proposeDependentCorrection,
@@ -55,6 +57,11 @@ interface Receipt {
   results: RevalidationReview[];
   failure?: string;
   correctiveAssignment?: DependentCorrectionAssignment;
+  /** Negative reviews are never deleted on correction. */
+  historicalFailures?: RevalidationReview[];
+  corrected?: Array<{ proposal: DependentCorrectionAssignment;
+    itemId: string; successorSha: string; reviewDigest: string }>;
+  finalHead?: string;
 }
 async function save(path: string, value: Receipt) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -79,14 +86,17 @@ async function transcript(job: JobStartResult, path: string): Promise<string> {
   const first = JSON.parse(raw.split("\n")[0]!) as { type?: string; id?: string };
   if (first.type !== "session" || !first.id?.trim())
     throw Error("Independent revalidation reviewer lacks a durable Pi session header.");
-  return hash(raw);
+  // Transcript receipts attest raw Pi session bytes, not a JSON-encoded
+  // string. This is the same SHA-256 basis as the original writer/reviewer.
+  return createHash("sha256").update(raw).digest("hex");
 }
-function checkReview(job: JobStartResult, plan: SelectiveRevalidationPlan, review: RevalidationReview) {
+function checkReview(job: JobStartResult, plan: SelectiveRevalidationPlan,
+  review: RevalidationReview, authenticatedHeads: readonly string[] = []) {
   const { digest, ...body } = review;
   if (!DIGEST.test(digest) || hash(body) !== digest ||
       !DIGEST.test(review.originalReviewDigest) || !DIGEST.test(review.reviewerDigest) ||
       !SHA.test(review.originalCommitSha) ||
-      review.sourceSha !== plan.successorSha ||
+      ![plan.successorSha, ...authenticatedHeads].includes(review.sourceSha) ||
       !review.verdict || review.verdict.verdict !== (review.status === "passed" ? "pass" : "block") ||
       review.reviewerDigest !== hash({ verdict: review.verdict,
         sessionDigest: review.sessionDigest, source: review.sourceSha, item: review.itemId }) ||
@@ -118,6 +128,33 @@ function preciseCorrectivePaths(item: ExecutionItem, sources: string[],
   // Reviewer prose does not grant extra paths. A finding on another owner's
   // record is an amendment request, never an implicit owner correction.
   return requested.filter(path => owned.has(path));
+}
+async function authenticatedCorrectionHeads(job: JobStartResult, state: Receipt) {
+  const completed = state.corrected ?? [];
+  const heads: string[] = [];
+  if (new Set(completed.map(x => x.itemId)).size !== completed.length)
+    throw Error("Duplicate original-owner corrective successors.");
+  for (const corrected of completed) {
+    assertDependentCorrection(corrected.proposal, state.proposal);
+    if (corrected.itemId !== corrected.proposal.itemId ||
+        !state.historicalFailures?.some(review => review.itemId === corrected.itemId &&
+          review.status === "failed" &&
+          review.reviewerDigest === corrected.proposal.revalidationReviewDigest))
+      throw Error("Correction no longer cites its immutable negative dependent review.");
+    const receipt = await inspectDependentCorrection(job, corrected.proposal, state.proposal);
+    const last = receipt?.attempts.at(-1);
+    if (receipt?.phase !== "verified" || !last || last.review.verdict !== "pass" ||
+        last.commitSha !== corrected.successorSha ||
+        last.reviewDigest !== corrected.reviewDigest)
+      throw Error("Dependent corrective source lacks an independently passed Git successor.");
+    heads.push(corrected.successorSha);
+  }
+  for (const history of state.historicalFailures ?? []) {
+    checkReview(job, state.proposal, history, heads);
+    if (history.sessionDigest !== await transcript(job, history.sessionFile))
+      throw Error("Historical negative dependent review was altered after correction.");
+  }
+  return heads;
 }
 /** Recheck the durable independent verdicts whenever the original graph
  * resumes Composition. This is a read-only gate: saved model prose alone
@@ -152,22 +189,27 @@ export async function assertCompletedSelectiveRevalidation(
       upstream.reviewDigest !== state.proposal.correctionReviewDigest ||
       upstream.originalInventoryDigest !== state.originalInventoryDigest)
     throw Error("Dependent carry-forward does not match its original reviewed correction grant.");
-  if (state.correctiveAssignment) {
-    assertDependentCorrection(state.correctiveAssignment, state.proposal);
-    throw Error("A pending dependent corrective assignment cannot be certified as completed.");
-  }
+  if (state.correctiveAssignment)
+    throw Error("A pending original-owner correction cannot be certified as completed.");
+  const heads = await authenticatedCorrectionHeads(job, state);
+  // Every completion belongs to one exact verified Story source. Reusing a
+  // passing review after later unrelated commits would silently skip impact.
+  if (!state.finalHead || state.finalHead !== await trustedHead(job))
+    throw Error("Dependent carry-forward is stale against the current verified Story HEAD.");
+  await verifiedNarrativeChain(job, successorSha, state.finalHead);
   const expected = [...state.proposal.affected, ...state.proposal.unknown];
   if (new Set(expected).size !== expected.length || state.results.length !== expected.length ||
       new Set(state.results.map(r => r.itemId)).size !== expected.length ||
       state.results.some(r => !expected.includes(r.itemId) || r.status !== "passed"))
     throw Error("Revalidation cannot carry forward unreviewed, failed or duplicate dependent work.");
   for (const result of state.results) {
-    checkReview(job, state.proposal, result);
+    checkReview(job, state.proposal, result, heads);
     if (result.sessionDigest !== await transcript(job, result.sessionFile))
       throw Error("Dependent reviewer transcript no longer matches the sealed verdict.");
   }
   const ledger = await inspectRepairLedger(job, turnDigest);
-  if (ledger.findings.some(f => f.causedBy === successorSha && f.status === "open"))
+  if (ledger.findings.some(f => [successorSha, ...heads].includes(f.causedBy ?? "") &&
+      f.status !== "resolved"))
     throw Error("An unresolved causally linked downstream Repair finding blocks Composition.");
   return state.proposal;
 }
@@ -188,8 +230,9 @@ export interface RevalidateAfterCorrectionOptions {
  */
 export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCorrectionOptions) {
   const { job, inventory, correction } = opts;
-  if (await trustedHead(job) !== correction.successorSha)
-    throw Error("Selective revalidation needs the exact published, independently reviewed upstream HEAD.");
+  const currentHead = await trustedHead(job);
+  if (currentHead !== correction.successorSha)
+    await verifiedNarrativeChain(job, correction.successorSha, currentHead);
   if (!opts.task.trim() || !opts.provider.trim() || !opts.model.trim())
     throw Error("Revalidation has no original author objective or pinned model.");
   const turn = await readReviewTurnEvidence(job);
@@ -237,8 +280,9 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
   if (state.results.some(r => !wanted.includes(r.itemId)) ||
       new Set(state.results.map(r => r.itemId)).size !== state.results.length)
     throw Error("Revalidation receipt includes an unauthorized or duplicate dependent.");
+  const reviewedHeads = await authenticatedCorrectionHeads(job, state);
   for (const result of state.results) {
-    checkReview(job, plan, result);
+    checkReview(job, plan, result, reviewedHeads);
     if (result.sessionDigest !== await transcript(job, result.sessionFile))
       throw Error("Prior independent revalidation transcript changed after review.");
     const point = originalPoints[result.itemId]?.at(-1);
@@ -251,7 +295,8 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     assertDependentCorrection(state.correctiveAssignment, plan);
     const cited = state.results.find(r => r.itemId === state.correctiveAssignment!.itemId &&
       r.status === "failed");
-    const point = originalPoints[state.correctiveAssignment.itemId]?.at(-1);
+    const point = originalPoints[state.correctiveAssignment.itemId]?.find(p =>
+      p.commitSha === state.correctiveAssignment!.originalCommitSha);
     if (!cited || cited.reviewerDigest !== state.correctiveAssignment.revalidationReviewDigest ||
         !point?.assurance ||
         state.correctiveAssignment.originalCommitSha !== point.commitSha ||
@@ -265,14 +310,63 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
   }
   if (state.state === "reviewing")
     throw Error("Interrupted independent revalidation session requires transcript reconciliation; no replay.");
-  if (state.state === "blocked")
-    throw Error(state.failure ?? "A downstream reviewed obligation still requires correction.");
+  if (state.state === "blocked" && !state.correctiveAssignment)
+    throw Error(state.failure ?? "A downstream reviewed obligation still requires a controller amendment.");
   if (state.state === "completed") {
+    await assertCompletedSelectiveRevalidation(job, correction.successorSha, correction.turnDigest,
+      correction.reviewDigest);
     if (state.results.length !== wanted.length ||
         state.results.some(r => r.status !== "passed"))
       throw Error("Completed revalidation has unreviewed or failed dependents.");
     return { plan, revalidated: state.results.map(r => r.itemId), carriedForward: plan.unaffected };
   }
+  const finishOwnerCorrection = async () => {
+    const proposal = state!.correctiveAssignment;
+    if (!proposal) return;
+    const prior = state!.results.find(r => r.itemId === proposal.itemId &&
+      r.status === "failed" && r.reviewerDigest === proposal.revalidationReviewDigest);
+    const original = originalPoints[proposal.itemId]?.find(p =>
+      p.commitSha === proposal.originalCommitSha);
+    if (!prior || !original?.assurance || !original.eligible)
+      throw Error("Failed dependent correction has no original sealed reviewer or specialist.");
+    const outcome = await advanceDependentCorrection({
+      job, proposal, plan, point: original, reviewerSnapshot: state!.snapshot,
+      provider: opts.provider, model: opts.model, validatorSource: opts.validatorSource,
+      sourcePaths: [...new Set([...(reviewedSources[proposal.itemId]?.sourcePaths ?? []),
+        ...original.assurance.changedPaths, ...correction.changedPaths])],
+      findings: prior.verdict.findings.map(f => ({ source: f.source, message: f.message })),
+    });
+    const receipt = await inspectDependentCorrection(job, proposal, plan);
+    const approved = receipt?.attempts.at(-1);
+    if (receipt?.phase !== "verified" || !approved ||
+        approved.commitSha !== outcome.commitSha ||
+        approved.reviewDigest !== outcome.reviewDigest ||
+        approved.review.verdict !== "pass")
+      throw Error("Dependent correction returned without a fresh independent positive proof.");
+    const reviewed: Omit<RevalidationReview, "digest"> = {
+      itemId: proposal.itemId, sourceSha: approved.commitSha,
+      originalCommitSha: prior.originalCommitSha,
+      originalReviewDigest: prior.originalReviewDigest,
+      reviewerDigest: hash({ verdict: approved.review,
+        sessionDigest: approved.reviewerSessionDigest,
+        source: approved.commitSha, item: proposal.itemId }),
+      sessionFile: approved.reviewerSession,
+      sessionDigest: approved.reviewerSessionDigest,
+      verdict: approved.review, status: "passed",
+    };
+    state!.historicalFailures = [...state!.historicalFailures ?? [], prior];
+    state!.results = state!.results.map(result => result === prior
+      ? { ...reviewed, digest: hash(reviewed) } : result);
+    state!.corrected = [...state!.corrected ?? [], {
+      proposal, itemId: proposal.itemId, successorSha: approved.commitSha,
+      reviewDigest: approved.reviewDigest,
+    }];
+    state!.correctiveAssignment = undefined;
+    state!.state = "admitted";
+    state!.failure = undefined;
+    await save(file, state!);
+  };
+  if (state.correctiveAssignment) await finishOwnerCorrection();
   const order = reviewOrder(inventory, wanted);
   for (const id of order) {
     if (state.results.some(r => r.itemId === id)) continue;
@@ -289,6 +383,7 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       ...correction.changedPaths])].sort();
     if (relevant.length > 32)
       throw Error("Dependent revalidation exceeds bounded Story context.");
+    const reviewHead = await trustedHead(job);
     const assignment: ReviewAssignment = {
       contract: opts.contract, planVersion: correction.planVersion,
       scopeIds: [...item.targetIds], paths: relevant,
@@ -306,23 +401,24 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
           existingPaths: [...point.assurance.changedPaths], mayCreate: false },
       }],
       revalidation: { assignmentId: point.assurance.assignmentId,
-        originalCommitSha: point.commitSha, correctedHeadSha: correction.successorSha,
-        changedPaths: correction.changedPaths },
+        originalCommitSha: point.commitSha, correctedHeadSha: reviewHead,
+        changedPaths: [...new Set([...correction.changedPaths,
+          ...(state.corrected ?? []).flatMap(c => c.proposal.authorizedPaths)])] },
     };
-    await preflightPiAssignment(job, "revalidate:" + correction.successorSha + ":" + id,
+    await preflightPiAssignment(job, "revalidate:" + reviewHead + ":" + id,
       { provider: opts.provider, model: opts.model });
     state.state = "reviewing"; state.reviewing = { itemId: id }; await save(file, state);
-    const verdict = await reviewNarrative({ ...job, headSha: correction.successorSha },
+    const verdict = await reviewNarrative({ ...job, headSha: reviewHead },
       state.snapshot, assignment, opts.provider, opts.model, undefined,
       async sessionFile => { state!.reviewing = { itemId: id, sessionFile }; await save(file, state!); });
     const sessionFile = state.reviewing?.sessionFile;
     if (!sessionFile) throw Error("Dependent reviewer has no durable independent session.");
     const sessionDigest = await transcript(job, sessionFile);
     const r: Omit<RevalidationReview, "digest"> = {
-      itemId: id, sourceSha: correction.successorSha,
+      itemId: id, sourceSha: reviewHead,
       originalCommitSha: point.commitSha, originalReviewDigest: original?.reviewDigest ??
         hash(point.assurance),
-      reviewerDigest: hash({ verdict, sessionDigest, source: correction.successorSha, item: id }),
+      reviewerDigest: hash({ verdict, sessionDigest, source: reviewHead, item: id }),
       sessionFile, sessionDigest, verdict,
       status: verdict.verdict === "pass" ? "passed" : "failed",
       ...(verdict.verdict === "block" ? { findings: verdict.findings
@@ -334,12 +430,19 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     state.results.push(sealed);
     state.state = "admitted"; state.reviewing = undefined;
     await save(file, state);
-    const projection = decideSelectiveRevalidation(plan, inventory, state.results);
+    const projection = decideSelectiveRevalidation(plan, inventory, state.results,
+      [...state.corrected ?? []].map(c => c.successorSha));
     if (projection.failures.length) {
       const failed = projection.failures.at(-1)!;
-      const ownerPaths = originalPoints[id]!.flatMap(p => p.assurance?.changedPaths ?? []);
+      // One original specialist session may only repair paths it actually wrote.
+      // Interactive Choice and Puzzle share the high-level Turn owner, but
+      // never share an interchangeable writer transcript or file grant.
+      const owners = originalPoints[id]!.filter(p => p.assurance &&
+        failed.findings!.every(f => p.assurance!.changedPaths.includes(f.path)));
+      const originalPoint = owners.length === 1 ? owners[0]! : null;
+      const ownerPaths = originalPoint?.assurance?.changedPaths ?? [];
       const exactPaths = preciseCorrectivePaths(item, ownerPaths, verdict.findings);
-      const ownerCanCorrect = exactPaths.length > 0 &&
+      const ownerCanCorrect = !!originalPoint && exactPaths.length > 0 &&
         failed.findings!.every(f => exactPaths.includes(f.path));
       const originalAssignment = turn.assignments.find(a =>
         a.id === point.assurance!.assignmentId);
@@ -347,21 +450,23 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
         throw Error("Dependent correction lost the original specialist goal.");
       if (ownerCanCorrect) {
         state.correctiveAssignment = proposeDependentCorrection({
-          plan, item, originalCommitSha: point.commitSha,
-          assignmentId: point.assurance.assignmentId,
-          specialist: originalAssignment.specialist,
+          plan, item, originalCommitSha: originalPoint!.commitSha,
+          assignmentId: originalPoint!.assurance!.assignmentId,
+          specialist: originalPoint!.workItem.startsWith("interactive-puzzle-")
+            ? "nt-puzzle-design" : originalAssignment.specialist,
           originalReviewDigest: original?.reviewDigest ?? hash(point.assurance),
           revalidationReviewDigest: sealed.reviewerDigest, ownerPaths,
-          blockingPaths: exactPaths, originalObligation: originalAssignment.outcome,
+          blockingPaths: exactPaths, currentHeadSha: reviewHead,
+          originalObligation: originalAssignment.outcome,
         });
       }
       await admitCausalRevalidationFinding(job, {
         turnDigest: correction.turnDigest,
-        rootFailureSha: point.commitSha,
-        sourceSha: correction.successorSha, reviewDigest: sealed.reviewerDigest,
+        rootFailureSha: ownerCanCorrect ? originalPoint!.commitSha : point.commitSha,
+        sourceSha: reviewHead, reviewDigest: sealed.reviewerDigest,
         assignmentId: point.assurance.assignmentId,
         obligation: "Revalidate previously reviewed " + id + " after source-bound upstream correction.",
-        causedBy: correction.successorSha,
+        causedBy: reviewHead,
         findings: failed.findings!.map(f => ({
           path: f.path, kind: f.kind, message: f.message,
           affectedPaths: ownerCanCorrect ? exactPaths : [f.path],
@@ -377,12 +482,16 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
           "specialist. Causal Repair finding recorded, but a separate controller-authorized " +
           "owner/dependency amendment is mandatory; reviewer prose grants no new files.";
       await save(file, state);
-      throw Error(state.failure);
+      if (!ownerCanCorrect) throw Error(state.failure);
+      await finishOwnerCorrection();
     }
   }
-  const verdicts = decideSelectiveRevalidation(plan, inventory, state.results);
+  const verdicts = decideSelectiveRevalidation(plan, inventory, state.results,
+    [...state.corrected ?? []].map(c => c.successorSha));
   if (verdicts.pending.length || verdicts.failures.length)
     throw Error("Downstream revalidation remains incomplete; do not resume dependent writing.");
-  state.state = "completed"; await save(file, state);
+  state.state = "completed";
+  state.finalHead = await trustedHead(job);
+  await save(file, state);
   return { plan, revalidated: verdicts.carriedForward, carriedForward: plan.unaffected };
 }

@@ -248,6 +248,8 @@ export function proposeDependentCorrection(input: {
   revalidationReviewDigest: string;
   ownerPaths: string[];
   blockingPaths: string[];
+  /** Current verified Story SHA after previously completed dependent corrections. */
+  currentHeadSha?: string;
   originalObligation: string;
 }): DependentCorrectionAssignment {
   const { plan, item } = input;
@@ -263,9 +265,11 @@ export function proposeDependentCorrection(input: {
   const paths = [...new Set(input.blockingPaths)].sort();
   if (!paths.length || paths.some(path => !input.ownerPaths.includes(path)))
     throw Error("Dependent correction requires an exact in-owner bounded path grant.");
+  const sourceSha = input.currentHeadSha ?? plan.successorSha;
+  if (!SHA.test(sourceSha)) throw Error("Dependent correction source HEAD is invalid.");
   const body = {
     version: 1 as const, kind: "reviewed-dependent-correction" as const,
-    sourceSha: plan.successorSha, turnDigest: plan.turnDigest,
+    sourceSha, turnDigest: plan.turnDigest,
     planVersion: plan.planVersion, originalCommitSha: input.originalCommitSha,
     itemId: item.id, assignmentId: input.assignmentId,
     specialist: input.specialist, originalReviewDigest: input.originalReviewDigest,
@@ -284,7 +288,7 @@ export function assertDependentCorrection(
       !SHA.test(proposal.originalCommitSha) || !HASH.test(proposal.turnDigest) ||
       !HASH.test(proposal.originalReviewDigest) ||
       !HASH.test(proposal.revalidationReviewDigest) ||
-      proposal.sourceSha !== plan.successorSha ||
+      !SHA.test(proposal.sourceSha) ||
       proposal.causalCorrectionSha !== plan.successorSha ||
       proposal.turnDigest !== plan.turnDigest ||
       proposal.planVersion !== plan.planVersion ||
@@ -314,11 +318,16 @@ export interface RevalidationVerdict {
 export function decideSelectiveRevalidation(
   plan: SelectiveRevalidationPlan, inventory: GenerationInventory,
   verdicts: readonly RevalidationVerdict[],
+  /** Extra heads independently authenticated as narrow reviewed successors. */
+  reviewedSuccessorHeads: readonly string[] = [],
 ) {
   assertSelectiveRevalidationPlan(plan);
   if (plan.inventoryDigest !== itemDigest(inventory) ||
       plan.planVersion !== inventory.planVersion || plan.sourceSha !== inventory.headSha)
     throw Error("Revalidation verdict is not bound to the original approved inventory.");
+  if (reviewedSuccessorHeads.some(sha => !SHA.test(sha)))
+    throw Error("Reviewed dependent successor SHA is malformed.");
+  const acceptedHeads = new Set([plan.successorSha, ...reviewedSuccessorHeads]);
   const affected = new Set([...plan.affected, ...plan.unknown]);
   const items = new Map(inventory.items.map(item => [item.id, item]));
   const decided = new Set<string>();
@@ -327,7 +336,7 @@ export function decideSelectiveRevalidation(
     findings: RevalidationVerdict["findings"] }> = [];
   for (const verdict of verdicts) {
     if (!affected.has(verdict.itemId) || decided.has(verdict.itemId) ||
-        verdict.sourceSha !== plan.successorSha || !HASH.test(verdict.reviewerDigest))
+        !acceptedHeads.has(verdict.sourceSha) || !HASH.test(verdict.reviewerDigest))
       throw Error("Revalidation verdict belongs to an unaffected or stale source.");
     if (!items.has(verdict.itemId) ||
         items.get(verdict.itemId)!.dependencies.some(parent =>
