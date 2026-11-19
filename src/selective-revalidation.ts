@@ -13,6 +13,9 @@ const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const PATH = /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** Exact persisted GenerationInventory identity, shared by the upstream writer
+ * and downstream reviewer to avoid accidental double-serialization. */
+export const originalInventorySnapshotDigest = (inventory: GenerationInventory) => digest(inventory);
 
 export interface ReviewedUpstreamCorrection {
   version: 1;
@@ -35,7 +38,9 @@ export interface ReviewedUpstreamCorrection {
 export interface ReviewedConsumerEvidence {
   commitSha: string;
   reviewDigest: string;
-  status: "passed" | "failed" | "required-pending";
+  status: "passed" | "failed" | "required-pending" | "not-required";
+  /** Verified historical commit predates the first corrected upstream output. */
+  sourcePrecedesUpstream?: boolean;
   /** Controller-verified source reads from the original work/review receipts. */
   sourcePaths: string[];
 }
@@ -68,7 +73,7 @@ function assertSourcePaths(paths: unknown): asserts paths is string[] {
       new Set(paths).size !== paths.length)
     throw Error("Selective revalidation has no safe, deduplicated source-path evidence.");
 }
-function checkedPlan(plan: SelectiveRevalidationPlan) {
+export function assertSelectiveRevalidationPlan(plan: SelectiveRevalidationPlan) {
   if (!plan || plan.version !== 1 || !SHA.test(plan.sourceSha) ||
       !SHA.test(plan.successorSha) || !HASH.test(plan.inventoryDigest) ||
       !HASH.test(plan.correctionReviewDigest) || !HASH.test(plan.turnDigest) ||
@@ -131,6 +136,14 @@ export function planSelectiveRevalidation(input: {
     if (item.id === original.id) continue;
     if (item.status !== "verified") continue;
     const source = reviews[item.id];
+    if (source && ["passed", "not-required"].includes(source.status) &&
+        source.commitSha === item.verifiedSha && HASH.test(source.reviewDigest) &&
+        source.sourcePrecedesUpstream === true) {
+      // An earlier immutable review cannot have consumed the yet-unwritten
+      // upstream revision. Its historical success remains valid by design.
+      unaffected.add(item.id);
+      continue;
+    }
     if (!source || source.status !== "passed" ||
         source.commitSha !== item.verifiedSha || !HASH.test(source.reviewDigest) ||
         !Array.isArray(source.sourcePaths) || !source.sourcePaths.length) {
@@ -181,7 +194,7 @@ export function planSelectiveRevalidation(input: {
 export function applySelectiveRevalidation(
   inventory: GenerationInventory, plan: SelectiveRevalidationPlan,
 ): GenerationInventory {
-  checkedPlan(plan);
+  assertSelectiveRevalidationPlan(plan);
   if (plan.sourceSha !== inventory.headSha ||
       plan.planVersion !== inventory.planVersion ||
       plan.inventoryDigest !== itemDigest(inventory))
@@ -203,6 +216,89 @@ export function applySelectiveRevalidation(
       : { ...item }),
   };
 }
+/** Read-only controller proposal for a narrow post-review owner correction.
+ * This is not a Pi write grant: the existing specialist runner must separately
+ * authenticate/execute the assignment before any source file may change. */
+export interface DependentCorrectionAssignment {
+  version: 1;
+  kind: "reviewed-dependent-correction";
+  sourceSha: string;
+  turnDigest: string;
+  planVersion: number;
+  originalCommitSha: string;
+  itemId: string;
+  assignmentId: string;
+  specialist: string;
+  originalReviewDigest: string;
+  revalidationReviewDigest: string;
+  causalCorrectionSha: string;
+  /** ONLY original authoring paths cited in the failed independent verdict. */
+  authorizedPaths: string[];
+  /** The original specialist's goal, not the later reviewer's invented scope. */
+  obligation: string;
+  digest: string;
+}
+export function proposeDependentCorrection(input: {
+  plan: SelectiveRevalidationPlan;
+  item: ExecutionItem;
+  originalCommitSha: string;
+  assignmentId: string;
+  specialist: string;
+  originalReviewDigest: string;
+  revalidationReviewDigest: string;
+  ownerPaths: string[];
+  blockingPaths: string[];
+  originalObligation: string;
+}): DependentCorrectionAssignment {
+  const { plan, item } = input;
+  assertSelectiveRevalidationPlan(plan);
+  if (![...plan.affected, ...plan.unknown].includes(item.id) ||
+      !SHA.test(input.originalCommitSha) || !HASH.test(input.originalReviewDigest) ||
+      !HASH.test(input.revalidationReviewDigest) ||
+      !input.assignmentId.trim() || !input.specialist.trim() ||
+      !input.originalObligation.trim())
+    throw Error("Dependent correction has no independently reviewed original owner or finding.");
+  assertSourcePaths(input.ownerPaths);
+  assertSourcePaths(input.blockingPaths);
+  const paths = [...new Set(input.blockingPaths)].sort();
+  if (!paths.length || paths.some(path => !input.ownerPaths.includes(path)))
+    throw Error("Dependent correction requires an exact in-owner bounded path grant.");
+  const body = {
+    version: 1 as const, kind: "reviewed-dependent-correction" as const,
+    sourceSha: plan.successorSha, turnDigest: plan.turnDigest,
+    planVersion: plan.planVersion, originalCommitSha: input.originalCommitSha,
+    itemId: item.id, assignmentId: input.assignmentId,
+    specialist: input.specialist, originalReviewDigest: input.originalReviewDigest,
+    revalidationReviewDigest: input.revalidationReviewDigest,
+    causalCorrectionSha: plan.successorSha, authorizedPaths: paths,
+    obligation: input.originalObligation,
+  };
+  return { ...body, digest: digest(body) };
+}
+export function assertDependentCorrection(
+  proposal: DependentCorrectionAssignment, plan: SelectiveRevalidationPlan,
+) {
+  assertSelectiveRevalidationPlan(plan);
+  if (!proposal || proposal.version !== 1 || proposal.kind !== "reviewed-dependent-correction" ||
+      !HASH.test(proposal.digest) ||
+      !SHA.test(proposal.originalCommitSha) || !HASH.test(proposal.turnDigest) ||
+      !HASH.test(proposal.originalReviewDigest) ||
+      !HASH.test(proposal.revalidationReviewDigest) ||
+      proposal.sourceSha !== plan.successorSha ||
+      proposal.causalCorrectionSha !== plan.successorSha ||
+      proposal.turnDigest !== plan.turnDigest ||
+      proposal.planVersion !== plan.planVersion ||
+      ![...plan.affected, ...plan.unknown].includes(proposal.itemId) ||
+      !proposal.assignmentId?.trim() || !proposal.specialist?.trim() ||
+      !proposal.obligation?.trim())
+    throw Error("Dependent correction authority is stale, unreviewed or not the original owner.");
+  assertSourcePaths(proposal.authorizedPaths);
+  if (!proposal.authorizedPaths.length)
+    throw Error("Dependent correction has no bound canonical path.");
+  const { digest: actual, ...body } = proposal;
+  if (actual !== digest(body))
+    throw Error("Dependent correction plan differs from the source-bound original.");
+}
 export interface RevalidationVerdict {
   itemId: string;
   sourceSha: string;
@@ -219,7 +315,7 @@ export function decideSelectiveRevalidation(
   plan: SelectiveRevalidationPlan, inventory: GenerationInventory,
   verdicts: readonly RevalidationVerdict[],
 ) {
-  checkedPlan(plan);
+  assertSelectiveRevalidationPlan(plan);
   if (plan.inventoryDigest !== itemDigest(inventory) ||
       plan.planVersion !== inventory.planVersion || plan.sourceSha !== inventory.headSha)
     throw Error("Revalidation verdict is not bound to the original approved inventory.");

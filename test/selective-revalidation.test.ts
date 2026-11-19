@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { applySelectiveRevalidation, planSelectiveRevalidation,
-  decideSelectiveRevalidation } from "../src/selective-revalidation.js";
+  decideSelectiveRevalidation, assertDependentCorrection,
+  proposeDependentCorrection } from "../src/selective-revalidation.js";
 import type { GenerationInventory, ExecutionItem } from "../src/generation-plan.js";
 
 const sha = (char: string) => char.repeat(40);
@@ -58,6 +59,18 @@ test("one upstream Event correction revalidates only dependent reviewed results"
   assert.equal(next.items.find(i => i.id === "event:milestone.alpha")!.status, "verified");
   assert.deepEqual(source.items.every(i => i.status === "verified"), true,
     "Original verified inventory is never overwritten");
+});
+test("review-not-required ancestors predating the source correction are retained without a new model call", () => {
+  const source = inventory(), references = reviewers();
+  references["event:milestone.beta"] = {
+    commitSha: sha("a"), reviewDigest: digest("4"), status: "not-required",
+    sourcePaths: [], sourcePrecedesUpstream: true,
+  };
+  const plan = planSelectiveRevalidation({ inventory: source,
+    correction: correction(), reviews: references });
+  assert.ok(plan.unaffected.includes("event:milestone.beta"));
+  assert.ok(plan.unaffected.includes("interactive:milestone.beta"));
+  assert.equal(plan.unknown.length, 0);
 });
 test("source-read-only consumers are impacted even without direct structural edges", () => {
   const source = inventory(), receipts = reviewers();
@@ -142,6 +155,32 @@ test("a downstream finding keeps its identity when the new source SHA or wording
   const different = decideSelectiveRevalidation(first, source,
     report(corrected, "New independent defect", "choice-points/new.md"));
   assert.notEqual(different.failures[0]!.id, initial.failures[0]!.id);
+});
+test("a failed dependent proposes only its original owner and owned paths, without minting a writer grant", () => {
+  const source = inventory();
+  const plan = planSelectiveRevalidation({ inventory: source,
+    correction: correction(), reviews: reviewers() });
+  const item = source.items.find(i => i.id === "interactive:milestone.alpha")!;
+  const options = {
+    plan, item, originalCommitSha: item.verifiedSha!,
+    assignmentId: "interactive", specialist: "nt-interactive-narrative",
+    originalReviewDigest: digest("a"), revalidationReviewDigest: digest("b"),
+    originalObligation: "Preserve the originally reviewed interactive branches.",
+    ownerPaths: ["choice-points/original.md", "events/consequence.md"],
+    blockingPaths: ["choice-points/original.md"],
+  };
+  const proposal = proposeDependentCorrection(options);
+  assert.deepEqual(proposal.authorizedPaths, ["choice-points/original.md"]);
+  assert.doesNotThrow(() => assertDependentCorrection(proposal, plan));
+  const forged = structuredClone(proposal);
+  forged.specialist = "nt-event-design";
+  assert.throws(() => assertDependentCorrection(forged, plan), /digest|original/i);
+  assert.throws(() => proposeDependentCorrection({
+    ...options, blockingPaths: ["characters/new.md"],
+  }), /in-owner/);
+  assert.throws(() => proposeDependentCorrection({
+    ...options, item: source.items.find(i => i.id === "event:milestone.beta")!,
+  }), /original owner|independently reviewed/i);
 });
 test("failed dependent remains pending and emits a causally linked finding, without resetting upstream identity", () => {
   const source = inventory();

@@ -63,6 +63,10 @@ export interface ReviewAssignment {
   /** Independent successor judgment of an already-failed assignment; the
    * earlier negative checkpoint is immutable and this is not a prewrite review. */
   reassessment?: { assignmentId: string; failedSourceSha: string; correctedHeadSha: string };
+  /** Previously PASSED unit reconsidered against a later, independently
+   * reviewed upstream change. This is read-only and never a write grant. */
+  revalidation?: { assignmentId: string; originalCommitSha: string;
+    correctedHeadSha: string; changedPaths: string[] };
 }
 const guidance = ["nt-narrative-review/SKILL.md", "nt-catalog/SKILL.md",
   "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
@@ -228,6 +232,18 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
         "committed; judge each source and reject unresolved contradictions, " +
         "duplicate Characters or unauthorized retcons. Future Event/Choice and " +
         "Composition work remains outside this original foundations checkpoint. " : "") +
+      (assignment.revalidation ?
+        "POST-UPSTREAM SOURCE REVALIDATION: The original independent reviewer PASSED the " +
+        "unit at immutable Git commit " + assignment.revalidation.originalCommitSha +
+        ". An independently reviewed, controller-authorized upstream correction has " +
+        "changed only " + assignment.revalidation.changedPaths.join(", ") +
+        " and advanced Story HEAD to " + assignment.revalidation.correctedHeadSha +
+        ". Re-evaluate ONLY the prior specialist's original obligation and its " +
+        "actual consumed premises against the CURRENT native-validated Story. " +
+        "The original positive review stays historically true; passing now requires " +
+        "fresh source-linked evidence. Do NOT rewrite the original verdict, waive " +
+        "a conflict, broaden owner scope or require unrelated future assignments. " +
+        "If invalidated, BLOCK with exact source/line and the responsible owner. " : "") +
       (assignment.omission ?
         "This is a PRE-WRITE OMISSION REVIEW: independently decide whether the listed " +
         "pending specialist's precise outcome is already fulfilled by the current " +

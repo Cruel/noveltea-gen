@@ -332,6 +332,27 @@ export async function admitRepairFinding(job: JobStartResult, report: FindingRep
   ensureRoom(ledger, findings);
   return ledger;
 }
+/** A later independent reviewer may expose a *new* defect in work that was
+ * legitimately passed at its historical source. The earlier PASS stays
+ * immutable. The new finding is owned by the original assignment, and its
+ * causal predecessor is the actual completed upstream correction. */
+export async function admitCausalRevalidationFinding(job: JobStartResult,
+  report: FindingReport & { causedBy: string }) {
+  assertReport(report);
+  if (!SHA.test(report.causedBy) || report.causedBy !== report.sourceSha)
+    throw Error("Downstream revalidation has no authentic causal correction source.");
+  const ledger = await inspectRepairLedger(job, report.turnDigest);
+  const existing = ledger.findings.filter(f => f.rootFailureSha === report.rootFailureSha);
+  if (existing.length && existing.some(f => f.assignmentId !== report.assignmentId))
+    throw Error("Causal revalidation changed its originally assigned owner.");
+  // A paraphrased finding after a later correction retains its stable identity,
+  // original causal origin and completed attempt history; genuinely different
+  // target/category shapes receive a new, source-linked causal predecessor.
+  const findings = recordFindings(ledger, report, report.causedBy);
+  ensureRoom(ledger, findings);
+  await save(job, ledger);
+  return ledger;
+}
 /** A model/provider failure or an interrupted Pi turn never enters here.
  * The completed writer must have submitted actual owned changed paths first. */
 export async function submitRepairCorrection(job: JobStartResult, input: Submission) {
