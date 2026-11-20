@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { assertPlanContinuity } from "./plan-continuity.js";
+import { assertPlanContinuity, assertFoundationArchitectureContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
@@ -608,23 +608,16 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     let receipt: Receipt;
     if (existsSync(file)) {
       receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
-      const previousArchitecture = arch.history?.at(-1);
-      const carried = receipt.architectureHead !== arch.expectedHead &&
-        !!arch.plan.causalAmendment && !!previousArchitecture &&
-        previousArchitecture.plan.version === receipt.planVersion &&
-        previousArchitecture.plan.items[0]?.verifiedSha === receipt.architectureHead &&
-        previousArchitecture.carryForward?.includes("foundations") === true;
       if (receipt.version !== 1 || receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
           (receipt.branch !== undefined && receipt.branch !== job.branch) ||
           (receipt.worktreeRoot !== undefined && receipt.worktreeRoot !== job.worktreeRoot) ||
           (receipt.threadId !== undefined && receipt.threadId !== job.threadId) ||
-          (receipt.architectureHead !== arch.expectedHead && !carried) ||
           receipt.steeringDigest !== (input.steering ? digest(input.steering) : undefined) ||
           receipt.units?.length !== 2 ||
           receipt.units[0]?.domain !== "world" || receipt.units[1]?.domain !== "character") {
         throw new Error("Foundation receipt differs from the authorized architecture plan; reconcile explicitly.");
       }
-      assertPlanContinuity(job, arch, "foundations", receipt.planVersion, receipt.contractDigest, true);
+      assertFoundationArchitectureContinuity(job, arch, receipt, receipt.contractDigest);
     } else {
       if (input.action !== "run") throw new Error("No foundations receipt to inspect.");
       const startHead = await trustedHead(job);

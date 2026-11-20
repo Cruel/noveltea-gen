@@ -22,6 +22,7 @@ import { preflightPiAssignment } from "./job-pi-policy.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { reviewNarrative, type EditorialVerdict, type ReviewAssignment } from "./narrative-review-specialist.js";
+import { repairProgressScope, productiveEditorialRepair } from "./editorial-repair-progress.js";
 import { validCloseoutProposal, retryCloseoutProposal, closeoutReviewMayRetry,
   type CloseoutProposal } from "./cross-domain-prerequisite.js";
 import type { CompletionContract } from "./architecture.js";
@@ -458,6 +459,9 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
       state.reviewSnapshot = snapshot; state.phase = "reviewing"; await persist(file, state);
       try {
         const assignment = await reviewerAssignment(job, request, proposal, state.commitSha!);
+        const previous = state.history?.at(-1);
+        if (previous) assignment.progressScope = repairProgressScope(job,
+          previous.commitSha, state.commitSha!, proposal.allowedPaths, previous.review.findings);
         state.review = await reviewNarrative({ ...job, headSha: state.commitSha! },
           snapshot, assignment, state.provider, state.model, undefined,
           async sessionFile => { state!.reviewerSessionFile = sessionFile; await persist(file, state!); });
@@ -494,10 +498,14 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
           throw Error("Negative dependency review has no preserved sessions.");
         const feedback = JSON.stringify(state.review.findings);
         const mayRetry = closeoutReviewMayRetry(state.review, proposal);
-        if (!mayRetry) {
+        const productive = !state.history?.length ||
+          productiveEditorialRepair(state.review.progressDiagnosis, true);
+        if (!mayRetry || !productive) {
           state.phase = "blocked"; state.failure =
-            "Independent reviewer requires another owner's or protected source. " +
-            "Preserve the negative review and request a controller amendment: " +
+            (!productive ? "Independent source-grounded Diagnostic found no meaningful " +
+              "progress. Preserve failed revisions and request an approved new strategy: " :
+              "Independent reviewer requires another owner's or protected source. " +
+              "Preserve the negative review and request a controller amendment: ") +
             feedback.slice(0, 1800);
           await persist(file, state);
           throw Error(state.failure);

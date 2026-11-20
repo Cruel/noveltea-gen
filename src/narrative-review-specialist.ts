@@ -22,6 +22,8 @@ import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignmen
 import { postcommitDiagnosticAdmission, parsePostcommitDiagnosis,
   savePostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
 import { CHOICE_PAYOFF_REVIEW } from "./choice-payoff-guidance.js";
+import { validateEditorialRepairDiagnosis, type EditorialRepairDiagnosis,
+  type EditorialRepairProgress } from "./editorial-repair-progress.js";
 import { PUZZLE_GOAL_REVIEW } from "./puzzle-goal-fidelity.js";
 import { normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKinds,
   validateSemanticVerdict } from "./semantic-assignment-review.js";
@@ -47,6 +49,8 @@ export interface EditorialVerdict {
   findings: EditorialFinding[];
   evidence: string[];
   sessionFile?: string;
+  /** Reviewer-produced, source-attested progress advice; never an approval. */
+  progressDiagnosis?: EditorialRepairDiagnosis;
 }
 export interface ReviewAssignment {
   contract: unknown;
@@ -74,6 +78,8 @@ export interface ReviewAssignment {
    * reviewed upstream change. This is read-only and never a write grant. */
   revalidation?: { assignmentId: string; originalCommitSha: string;
     correctedHeadSha: string; changedPaths: string[] };
+  /** Historical negative plus actual previous-to-current Git additions. */
+  progressScope?: EditorialRepairProgress;
 }
 const guidance = ["nt-narrative-review/SKILL.md", "nt-catalog/SKILL.md",
   "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
@@ -135,7 +141,11 @@ export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignme
     if (missingEditorialRouteWitnesses(assignment, v.evidence!).length)
       throw new Error("Passing narrative reviewer omitted a source-linked file:line for a representative route witness.");
   }
-  return { verdict: v.verdict!, findings: v.findings, evidence: v.evidence };
+  const diagnosis = assignment.progressScope && v.verdict === "block"
+    ? validateEditorialRepairDiagnosis(v.progressDiagnosis, assignment.progressScope)
+    : undefined;
+  return { verdict: v.verdict!, findings: v.findings, evidence: v.evidence,
+    ...(diagnosis ? { progressDiagnosis: diagnosis } : {}) };
 }
 
 async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider: string,
@@ -289,6 +299,18 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
         "new target dependencies and the merged Story, report uncertainty and bounded alternative " +
         "reconciliation options in each message. Never alter the generation branch or silently " +
         "pick a winner. Do not claim exhaustive route verification. " : "") +
+      (assignment.progressScope ?
+        "SOURCE-GROUNDED CORRECTION DIAGNOSTIC: The previous independent review BLOCKED. " +
+        "After judging the full current canonical Story, compare its unresolved findings " +
+        "and the authenticated Git additions supplied in ASSIGNMENT.progressScope. " +
+        "If this review still BLOCKS, include progressDiagnosis:{status:'material|stalled|uncertain', " +
+        "reason:'source-based explanation (at least 12 chars)',evidence:{path,quote}|null}. " +
+        "Material means an actual meaningful improvement on at least one earlier rejected " +
+        "obligation; quote 8-500 literal characters from a newly ADDED canonical line " +
+        "under an authorized path. A cosmetic rewrite or an unrelated added sentence " +
+        "is STALLED even when the Git SHA changes. If improvement cannot be determined, " +
+        "report UNCERTAIN. In either case KEEP the negative verdict and every actionable " +
+        "finding; this assessment is diagnostic advice, not a second PASS. " : "") +
       "Use the bounded progression witnesses as representative routes, NOT exhaustive proof. " +
       "Review every listed Choice outcome and Puzzle solution, including least-informed routes. " +
       "CHECKPOINT SCOPE: If ASSIGNMENT.turnGoal specifies a POST-CHOICE checkpoint, " +
@@ -340,7 +362,7 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       // required path:line. Repair only the JSON source-link presentation in
       // this same read-only session; a blocking finding cannot become a pass.
       if (!(error instanceof Error) ||
-          !/invalid severity\/source-linked editorial findings|Narrative review requires evidence linked|Passing narrative reviewer omitted a source-linked file:line for a representative route witness/.test(error.message))
+          !/invalid severity\/source-linked editorial findings|Narrative review requires evidence linked|Passing narrative reviewer omitted a source-linked file:line for a representative route witness|Source-grounded editorial convergence diagnosis/.test(error.message))
         throw error;
       const gaps = initial.verdict === "pass" && Array.isArray(initial.evidence)
         ? missingEditorialRouteWitnesses(assignment, initial.evidence) : [];
@@ -356,6 +378,9 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
           "for example event.x#choose/protect: events/x.md:24. No extra #step/ prefix. " +
           "If any route is not supported by actual source, return an actionable BLOCK instead; " +
           "never fabricate positive evidence. " : "") +
+        (assignment.progressScope ? "For a continuing BLOCK also include the required " +
+          "progressDiagnosis status/reason/evidence. Material evidence must quote one of " +
+          "ASSIGNMENT.progressScope.added; stagnant or uncertain requires evidence:null. " : "") +
         "Return a fresh complete unfenced JSON object; no write, shell, " +
         "approval or repair tools.");
       const revised = parseSpecialistJson(lastReply(session));
@@ -715,6 +740,29 @@ async function reviewPostcommitDiagnosis(job: JobStartResult, snapshot: SkillSna
   await savePostcommitDiagnosis(job, cycle, packet, verdict, admission, diagnosis);
 }
 
+/** Reusable crash boundary: acceptance is sealed before a resource preflight
+ * can pause the Diagnostic. Recovery reopens the same authenticated round. */
+export async function continueAcceptedPostcommitDiagnostic(
+  job: JobStartResult, cycle: import("./postcommit-review-cycle.js").PostcommitReviewCycle,
+  diagnose: (saved: import("./postcommit-review-cycle.js").PostcommitReviewCycle) => Promise<void>,
+) {
+  const { inspectPostcommitReviewCycle } = await import("./postcommit-review-cycle.js");
+  const checked = await inspectPostcommitReviewCycle(job, cycle.rootSha, cycle.assignmentDigest);
+  if (!checked) throw Error("Accepted postcommit review cycle was not retained.");
+  await diagnose(checked);
+}
+
+/** All accepted review paths, including recovered and fresh-session fallback,
+ * must converge here before returning a verdict to the Repair finalizer. */
+async function diagnoseAcceptedPostcommitRound(job: JobStartResult, snapshot: SkillSnapshot,
+  packet: SemanticReviewPacket, verdict: SemanticVerdict,
+  cycle: import("./postcommit-review-cycle.js").PostcommitReviewCycle,
+  provider: string, model: string, thinking: "low" | "high" | undefined) {
+  await continueAcceptedPostcommitDiagnostic(job, cycle,
+    checked => reviewPostcommitDiagnosis(job, snapshot, packet, verdict,
+      checked, provider, model, thinking));
+}
+
 export async function reviewSpecialistAssignments(job: JobStartResult, snapshot: SkillSnapshot,
   packet: SemanticReviewPacket, provider: string, model: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
@@ -829,6 +877,8 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       const successor = await replacePostcommitProtocolReviewer(job, packet,
         existingCycle, freshIdentity);
       await acceptPostcommitReviewRound(job, packet, recovered, successor);
+      await diagnoseAcceptedPostcommitRound(job, snapshot, packet, recovered,
+        successor, provider, model, thinking);
       return recovered;
     }
     const original = await inspectCompletedProtocolReads({
@@ -876,6 +926,10 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       }
     } else if (cycleId) {
       throw new ProtocolIntegrityBlockedError("Review predates its cycle provenance; explicit reconciliation required");
+    }
+    if (existingCycle) {
+      await diagnoseAcceptedPostcommitRound(job, snapshot, packet, verdict,
+        existingCycle, provider, model, thinking);
     }
     return verdict;
   }
@@ -968,11 +1022,8 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       cycle = await replacePostcommitProtocolReviewer(job, packet, cycle, freshIdentity);
     if (cycle) {
       await acceptPostcommitReviewRound(job, packet, verdict, cycle);
-      const checked = await (await import("./postcommit-review-cycle.js"))
-        .inspectPostcommitReviewCycle(job, cycle.rootSha, cycle.assignmentDigest);
-      if (!checked) throw Error("Accepted postcommit review cycle was not retained.");
-      await reviewPostcommitDiagnosis(job, snapshot, packet, verdict,
-        checked, provider, model, thinking);
+      await diagnoseAcceptedPostcommitRound(job, snapshot, packet, verdict,
+        cycle, provider, model, thinking);
     }
     return verdict;
   } finally { session.dispose(); }

@@ -989,7 +989,8 @@ test("#212: a source-grounded upstream contradiction produces a sealed causal am
   const f = setup("causal-no-write");
   Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-causal" });
   const first = f.cli(f.start);
-  assert.equal(first.status, "blocked", JSON.stringify(first));
+  assert.equal(first.status, "paused", first.reason);
+  assert.equal(first.nextStage, null, "Pending causal amendment must not dispatch unrelated work");
   const proposal = first.causalAmendment;
   assert.equal(proposal?.schema, "noveltea-causal-amendment/v1", JSON.stringify(first));
   assert.equal(proposal.authority, "proposal-only");
@@ -1005,7 +1006,8 @@ test("#212: a source-grounded upstream contradiction produces a sealed causal am
   assert.equal(JSON.parse(original).phase, "prerequisite-reported");
   const sha = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   const again = f.cli(["generate", "resume"]);
-  assert.equal(again.status, "blocked", JSON.stringify(again));
+  assert.equal(again.status, "paused", again.reason);
+  assert.equal(again.nextStage, null);
   assert.deepEqual(again.causalAmendment, proposal);
   for (const [change, denied] of [
     [(receipt: any) => { receipt.jobId = "other-job"; }, /identity mismatch|source-bound|another job/i],
@@ -1021,7 +1023,7 @@ test("#212: a source-grounded upstream contradiction produces a sealed causal am
     if (attempt.status === 0) {
       const result = JSON.parse(attempt.stdout);
       assert.equal(result.status, "blocked", result.reason);
-      assert.match(result.reason, /causal|plan|source-bound|receipt/i);
+      assert.match(result.reason, /causal|plan|source-bound|receipt|no-write/i);
     } else assert.match(attempt.stderr, denied);
     writeFileSync(file, original);
   }
@@ -1029,6 +1031,30 @@ test("#212: a source-grounded upstream contradiction produces a sealed causal am
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), sha);
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+});
+
+test("#212: two independently ready Milestones do not advance HEAD while a causal amendment awaits disposition", { skip: !available }, () => {
+  const f = setup("causal-two-ready");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope.targets.push("milestone.reckoning");
+  writeFileSync(f.contract, JSON.stringify(contract));
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-causal",
+    NT_ARCHITECTURE_FIXTURE_CASE: "causal" });
+  const first = f.cli(f.start);
+  assert.equal(first.status, "paused", first.reason);
+  assert.equal(first.nextStage, null);
+  assert.ok(first.causalAmendment, "A failed original Event must remain approvable");
+  assert.equal(first.causalAmendment.source.milestoneId, "milestone.disclosure");
+  const independent = first.inventory.items.find((i: any) => i.id === "event:milestone.reckoning");
+  assert.equal(independent?.status, "pending", "The other Milestone really is ready, not transitively blocked.");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const second = f.cli(["generate", "resume"]);
+  assert.equal(second.status, "paused", second.reason);
+  assert.equal(second.nextStage, null);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.deepEqual(second.causalAmendment, first.causalAmendment);
+  assert.equal(existsSync(join(f.job.stateDir, "event-items/reckoning.json")), false,
+    "Independent Event must not run before author disposition.");
 });
 
 test("#212: exact author-signed causal replan revises only the contradicted Milestone", { skip: !available }, () => {
@@ -1078,7 +1104,7 @@ test("#212: certified predecessor is carried across approval, corrected source g
   await sealFixtureGenerationCheckpoint(f, "character-foundations");
   const blocked = f.cli(["generate", "resume"]);
   const candidate = blocked.causalAmendment;
-  assert.equal(blocked.status, "blocked", JSON.stringify(blocked));
+  assert.equal(blocked.status, "paused", blocked.reason);
   assert.ok(candidate?.carryForward.includes("foundations"), JSON.stringify(candidate));
   const carry = join(root, "causal-reviewed-carry.json");
   writeFileSync(carry, JSON.stringify(candidate.carryForward));
@@ -1106,6 +1132,28 @@ test("#212: certified predecessor is carried across approval, corrected source g
   assert.notEqual(event.expectedHead, candidate.source.sha);
   const originalPlan = join(f.job.stateDir, "milestone-blueprint-history");
   assert.equal(existsSync(originalPlan), true);
+
+  // The immutable Foundations receipt is still v1. Requiring it to match
+  // only the immediately preceding Architecture v2 would strand v3.
+  const foundationPath = join(f.job.stateDir, "character-world.json");
+  const foundationV1 = readFileSync(foundationPath, "utf8");
+  const nextProposal = f.cli(["architecture", "propose", "--contract", f.contract,
+    "--carry-forward", carry]);
+  const nextSignature = authorApproval(f.story, "single", f.env, root, {
+    ...nextProposal.authorSigningRequest,
+    reason: "Retain the independently reviewed v1 foundations through a second scoped amendment.",
+  });
+  const nextApproved = f.cli(["architecture", "approve", "--proposal",
+    nextProposal.proposal.digest, "--approval", nextSignature.file]);
+  assert.equal(nextApproved.plan.version, 3);
+  assert.ok(nextApproved.history.slice(-2).every((step: any) =>
+    step.carryForward.includes("foundations")));
+  f.cli(["architecture", "run", "--fixture", "--skills-source", source]);
+  const reused = f.cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(reused.status, "foundations-committed");
+  assert.equal(reused.planVersion, 1, "The original v1 receipt remains historically authoritative.");
+  assert.equal(readFileSync(foundationPath, "utf8"), foundationV1,
+    "The originally reviewed foundation receipt must not be rewritten to v2 or v3.");
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
 });

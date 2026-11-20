@@ -21,6 +21,7 @@ import { validateStoryJob } from "./validator.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { reviewNarrative, type EditorialVerdict, type ReviewAssignment } from "./narrative-review-specialist.js";
+import { repairProgressScope, productiveEditorialRepair } from "./editorial-repair-progress.js";
 import { assertDependentCorrection, type DependentCorrectionAssignment,
   type SelectiveRevalidationPlan } from "./selective-revalidation.js";
 import type { JobStartResult } from "./job.js";
@@ -451,6 +452,9 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
       s.phase = "reviewing"; await atomic(path, s);
       const assignment = await reviewAssignment(job, proposal, s.draftPaths!,
         opts.sourcePaths, s.commitSha);
+      const previous = s.attempts.at(-1);
+      if (previous) assignment.progressScope = repairProgressScope(job,
+        previous.commitSha, s.commitSha, s.draftPaths!, previous.review.findings);
       s.review = await reviewNarrative({ ...job, headSha: s.commitSha },
         s.snapshot, assignment, opts.provider, opts.model, undefined,
         async file => { s.reviewerSession = file; await atomic(path, s); });
@@ -494,7 +498,13 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
         await publishDependentHead(job, proposal.sourceSha, s.commitSha);
         return { commitSha: s.commitSha, reviewDigest: s.reviewDigest };
       }
-      if (s.review.findings.some(f => f.severity === "blocking" &&
+      if (s.attempts.length > 1 &&
+          !productiveEditorialRepair(s.review.progressDiagnosis, true)) {
+        s.phase = "blocked";
+        s.failure = "Independent source-grounded Diagnostic found no meaningful progress " +
+          "on the original rejected obligation. Preserve reviewed revisions; obtain a new " +
+          "controller/author-approved strategy before spending more repair budget.";
+      } else if (s.review.findings.some(f => f.severity === "blocking" &&
           !proposal.authorizedPaths.includes(f.source.split(":")[0]!))) {
         s.phase = "blocked";
         s.failure = "Independent rereview requires another owner's source; correction refused.";

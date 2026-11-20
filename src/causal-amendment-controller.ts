@@ -4,8 +4,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { readFile } from "node:fs/promises";
-import { eventPrerequisiteReportDigest } from "./event-work.js";
-import { verifyJobPiSession } from "./job-session.js";
+import { authenticateEventNoWrite } from "./event-prerequisite-auth.js";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
@@ -70,27 +69,7 @@ export async function inspectCausalAmendment(job: JobStartResult, input: {
         item.status === "verified" && item.targetIds.includes(event.milestoneId))) {
     throw Error("No current source-bound, clean Event causal discovery is eligible for upstream amendment.");
   }
-  const source = event.prerequisite;
-  if (source.assignmentDigest !== sha(event.assignment) ||
-      source.worker !== event.worker ||
-      source.sessionFile !== (event.sessionFile ?? "fixture") ||
-      source.reportDigest !== eventPrerequisiteReportDigest({
-        jobId: event.jobId, workItemId: event.workItemId,
-        expectedHead: event.expectedHead, planDigest: event.planDigest,
-        sessionSha256: source.sessionSha256, sessionId: source.sessionId,
-        assignmentDigest: source.assignmentDigest, snapshotId: source.snapshotId,
-        sessionFile: source.sessionFile, worker: source.worker,
-        conflicts: event.conflicts, obligations: event.obligations,
-        causalDiscovery: event.causalDiscovery,
-      })) throw Error("Event causal discovery does not match its sealed no-write source.");
-  if (source.worker === "pi") {
-    await verifyJobPiSession(job, "event", source.sessionFile, source.sessionId, event.workItemId);
-    if (createHash("sha256").update(await readFile(source.sessionFile)).digest("hex") !==
-        source.sessionSha256)
-      throw Error("Event causal discovery transcript changed since its settled turn.");
-  } else if (source.sessionSha256 !== "f".repeat(64) || source.sessionId !== "fixture") {
-    throw Error("Invalid deterministic no-write fixture provenance.");
-  }
+  await authenticateEventNoWrite(job, event);
   // This verifies the complete original writer/reviewer cycle, exact private
   // source hashes, original model identity, and job/Thread/assignment pins.
   const blueprint = await readReviewedMilestoneBlueprint(job, event.blueprintPin, event.assignment);

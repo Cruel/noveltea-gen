@@ -162,19 +162,39 @@ export function hasPlanContinuity(
           fingerprint !== digest(contractOnly ? step.plan.contract : step.plan))) {
       throw new Error("Historical plan carry-forward does not match its signed proposal or original work.");
     }
+    // Every signed transition must explicitly retain this historical work,
+    // not just the most recent replan. Otherwise a v1 receipt can silently
+    // skip a v2 decision that revoked its continuity.
+    if (!step.carryForward?.includes(stage)) return false;
     if (version < latest.version - 1) {
       const successor = history.find(h => h.plan?.version === version + 1);
       if (!successor || JSON.stringify(step.approvedContract) !== JSON.stringify(successor.plan.contract))
         return false;
     } else {
       if (JSON.stringify(step.approvedContract) !== JSON.stringify(latest.contract)) return false;
-      // The latest signed transition explicitly reviews the retained work.
-      // A subsequent replan without this declaration invalidates it again.
-      if (!step.carryForward?.includes(stage)) return false;
     }
   }
   checkHistoricalWork(job, stage, latest.version - 1, git(job, "rev-parse", "HEAD"));
   return true;
+}
+
+/** Revalidate the original foundation's exact Architecture source across
+ * every signed carry-forward, never just the most recent History entry. */
+export function assertFoundationArchitectureContinuity(
+  job: JobStartResult, architecture: PlanSnapshot & { expectedHead: string },
+  foundation: { planVersion: number; architectureHead: string },
+  fingerprint?: string,
+) {
+  assertPlanContinuity(job, architecture, "foundations", foundation.planVersion,
+    fingerprint, fingerprint !== undefined);
+  if (foundation.planVersion === architecture.plan?.version) {
+    if (foundation.architectureHead !== architecture.expectedHead)
+      throw Error("Current Foundations receipt refers to a different Architecture HEAD.");
+    return;
+  }
+  const origin = architecture.history?.find(step => step.plan.version === foundation.planVersion);
+  if (!origin || origin.plan.items[0]?.verifiedSha !== foundation.architectureHead)
+    throw Error("Carried Foundations do not match their original signed Architecture source.");
 }
 
 /** Report an explicit, actionable stale-plan error instead of changing old

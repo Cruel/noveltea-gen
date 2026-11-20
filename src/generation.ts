@@ -383,6 +383,12 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     });
     if (!isDeepStrictEqual(sealed, s.causalAmendment))
       throw Error("Checkpointed causal amendment differs from its source-bound Event report.");
+    // Other ready Milestones must not advance HEAD while an amendment awaits
+    // author disposition against this exact source revision.
+    return { request, status: "paused",
+      reason: "Source-bound causal amendment awaits author disposition at " + head +
+        ". Approve its exact digest or reconcile the sealed proposal before Story work resumes.",
+      active: null, ideaTask: null, result: null };
   }
   // Failed specialists own persistent recovery receipts. Later commits from
   // independent clusters do not permit replay against a changed HEAD.
@@ -958,6 +964,7 @@ export function createGenerationGraph(
           if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
           clean(job);
           const next = await reconcile(s, job);
+          if (next.status === "paused") return next;
           const boundary = await applyLiveSteeringAtBoundary(job, s.request, next.inventory ?? null);
           if (boundary) return { ...next, ...boundary, ideaTask: null, escalation: null };
           const head = await trustedHead(job);
@@ -1433,7 +1440,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
       return { schema: "noveltea-generation/v1", status: current.status ?? state.status,
         reason: current.reason ?? state.reason, checkpointStatus: state.status,
         jobId: job.jobId, threadId: config.configurable.thread_id, checkpointPath: path,
-        nextStage: visible.ideaTask ? "idea-integration" : visible.active?.stage ??
+        nextStage: visible.status === "paused" ? null : visible.ideaTask ? "idea-integration" : visible.active?.stage ??
           (visible.inventory ? nextExecutionItem(visible.inventory,
             visible.pendingOrder ?? visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,

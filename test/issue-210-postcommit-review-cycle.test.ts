@@ -20,6 +20,7 @@ import {
   inspectCompletedProtocolResponse,
 } from "../src/response-contract-recovery.js";
 import type { JobStartResult } from "../src/job.js";
+import { continueAcceptedPostcommitDiagnostic } from "../src/narrative-review-specialist.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -167,6 +168,34 @@ test("#210 postcommit reviewer keeps ONE independent Pi identity across three co
   } finally {
     finish();
   }
+});
+
+test("#211 an accepted negative review survives a budget pause before Diagnostic admission", async () => {
+  const { job, reviewer, writer, file, finish } = setup();
+  try {
+    const original = packet(root);
+    const first = await bindPostcommitReviewCycle(job, original, snapshot,
+      "openai", "gpt-6", undefined, reviewer, writer);
+    assert.ok(first);
+    addReview(file, "negative review accepted before any Diagnostic model call");
+    await acceptPostcommitReviewRound(job, original, verdict(original, false), first);
+    let runs = 0;
+    await assert.rejects(continueAcceptedPostcommitDiagnostic(job, first, async checked => {
+      assert.equal(checked.rounds.length, 1);
+      runs++;
+      throw Error("Simulated active-time budget pause before Diagnostic admission.");
+    }), /budget pause/);
+    const saved = await inspectPostcommitReviewCycle(job, root, assignmentDigest);
+    assert.equal(saved?.rounds.length, 1, "The accepted verdict cannot be lost on pause.");
+    await continueAcceptedPostcommitDiagnostic(job, first, async checked => {
+      runs++;
+      assert.deepEqual(checked.rounds, saved!.rounds,
+        "Recovery must diagnose the original accepted verdict, not rerun its reviewer.");
+    });
+    assert.equal(runs, 2);
+    assert.deepEqual((await inspectPostcommitReviewCycle(job, root, assignmentDigest))?.rounds,
+      saved?.rounds, "No repeated accepted rounds were created during Diagnostic recovery.");
+  } finally { finish(); }
 });
 
 test("#210 wrong Thread, changed model/skill, tampered historical prefix and stale source fail closed", async () => {

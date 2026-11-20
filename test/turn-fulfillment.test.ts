@@ -180,6 +180,24 @@ test("#208 refuses final Milestone-plan closure without stage-owned canonical ev
     /unsupported|stale/, "A nominally successful plan cannot silently waive a missing owner obligation.");
 });
 
+test("#208: local Event and downstream Event obligations have separate objective identities", () => {
+  const packet = makePacket();
+  const local = "milestone-plan:milestone.reveal:local-event:0";
+  const downstream = "milestone-plan:milestone.reveal:event:0";
+  const bound: TurnFulfillmentPacket = { ...packet, objectives: [
+    ...packet.objectives,
+    { id: local, text: "Require reachable local Event evidence." },
+    { id: downstream, text: "Require the separate Event-owned downstream obligation." },
+  ] };
+  const accepted = complete(bound);
+  assert.equal(new Set(bound.objectives.map(o => o.id)).size, bound.objectives.length);
+  assert.equal(validateTurnFulfillment(bound, accepted).verdict, "complete",
+    "Both independent Event obligations can be fulfilled with actual canonical evidence.");
+  assert.throws(() => validateTurnFulfillment(bound, {
+    ...accepted, checks: accepted.checks.filter(c => c.objectiveId !== downstream),
+  }), /unsupported|stale/);
+});
+
 test("an outlined branch has Arc/Milestone evidence without requiring an Event witness", () => {
   const packet = makePacket();
   const outlineContract = { ...contract, scope: { ...contract.scope, depth: "architecture" as const } };

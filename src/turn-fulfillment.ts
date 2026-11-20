@@ -145,7 +145,7 @@ async function reviewedMilestoneObjectives(job: JobStartResult, plan: Plan): Pro
       ...handoff.design.events.flatMap(local => local.evidence.map(e => e.anchorPath)),
     ]));
     for (const [index, local] of handoff.design.events.entries()) {
-      objectives.push({ id: "milestone-plan:" + milestoneId + ":event:" + index,
+      objectives.push({ id: "milestone-plan:" + milestoneId + ":local-event:" + index,
         text: "At " + milestoneId + ", verify actual canonical, reachable Event evidence and earned " +
           "knowledge against the reviewed provisional local design, not the plan's claims. " +
           JSON.stringify(local) + " (reviewed plan digest " + handoff.pin.digest + ")." });
@@ -324,10 +324,10 @@ export function validateTurnFulfillment(packet: TurnFulfillmentPacket,
   };
   const stageWitness = (id: string, path: string): boolean => {
     if (!id.startsWith("milestone-plan:")) return true;
-    const owner = /^milestone-plan:milestone\.[a-z0-9-]+:(event|interactive|composition):\d+$/
+    const owner = /^milestone-plan:milestone\.[a-z0-9-]+:(local-event|event|interactive|composition):\d+$/
       .exec(id)?.[1];
     if (!owner) return false;
-    if (owner === "event") return path.startsWith("events/");
+    if (owner === "event" || owner === "local-event") return path.startsWith("events/");
     if (owner === "interactive") return ["events/", "choice-points/", "puzzles/"]
       .some(prefix => path.startsWith(prefix));
     return path.startsWith("authored-content/");
