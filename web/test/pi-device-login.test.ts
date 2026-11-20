@@ -36,10 +36,16 @@ test('device-only selection never silently falls back to browser OAuth', () => {
 })
 
 test('Studio uses upstream Pi device codes, stores encrypted credentials, and never binds OAuth callback ports', {
-  timeout: 45_000,
+  // Pi SDK initialization and device-code polling can be slow under the
+  // parallel Studio CI suite. The mocked OAuth endpoint is not the bottleneck.
+  timeout: 90_000,
 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'nt-device-only-'))
   const oldKey = process.env.NT_PI_CREDENTIAL_KEY
+  const oldOffline = process.env.PI_OFFLINE
+  // OAuth is fully mocked. Avoid unrelated live model-catalog refresh requests
+  // once a device login connects; they make this test depend on network timing.
+  process.env.PI_OFFLINE = '1'
   const originalFetch = globalThis.fetch
   const originalListen = Server.prototype.listen
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
@@ -140,15 +146,19 @@ test('Studio uses upstream Pi device codes, stores encrypted credentials, and ne
     store.close()
     if (oldKey === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
     else process.env.NT_PI_CREDENTIAL_KEY = oldKey
+    if (oldOffline === undefined) delete process.env.PI_OFFLINE
+    else process.env.PI_OFFLINE = oldOffline
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test('legacy Codex login selects device code rather than opening localhost:1455', {
-  timeout: 25_000,
+  timeout: 45_000,
 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'nt-codex-device-'))
   const oldKey = process.env.NT_PI_CREDENTIAL_KEY
+  const oldOffline = process.env.PI_OFFLINE
+  process.env.PI_OFFLINE = '1'
   const originalFetch = globalThis.fetch
   const originalListen = Server.prototype.listen
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
@@ -205,6 +215,8 @@ test('legacy Codex login selects device code rather than opening localhost:1455'
     store.close()
     if (oldKey === undefined) delete process.env.NT_PI_CREDENTIAL_KEY
     else process.env.NT_PI_CREDENTIAL_KEY = oldKey
+    if (oldOffline === undefined) delete process.env.PI_OFFLINE
+    else process.env.PI_OFFLINE = oldOffline
     rmSync(dir, { recursive: true, force: true })
   }
 })
