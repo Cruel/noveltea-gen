@@ -10,7 +10,7 @@ import { withStoryJobLock } from "./job-lock.js";
 import { parseCarryForward, verifyCarryForwardCandidates } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
-import { preflightPiAssignment } from "./job-pi-policy.js";
+import { preflightPiAssignment, PiBudgetPause } from "./job-pi-policy.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -701,6 +701,13 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           pin = await createReviewedBlueprint(job, receipt.snapshot!, receipt.plan!,
             receipt.provider, receipt.model, receipt.blueprintTask, head);
         } catch (error) {
+          if (error instanceof PiBudgetPause) {
+            // Safe-budget pauses have durable source/session receipts, not a
+            // semantic rejection or an ambiguous interrupted writer.
+            delete receipt.blueprintFailure;
+            await persist(file, receipt);
+            throw error;
+          }
           const reason = error instanceof Error ? error.message : String(error);
           receipt.blueprintFailure = {
             kind: classifyBlueprintFailure(reason),

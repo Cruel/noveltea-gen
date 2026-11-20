@@ -75,9 +75,9 @@ export function captureBlueprintReplay(
     version < 0 ||
     !Number.isInteger(iteration) ||
     iteration < (kind === "blueprint-patch" ? 1 : 0) ||
-    iteration > 2
+    !Number.isSafeInteger(iteration)
   )
-    throw Error("Blueprint replay requires a valid plan and bounded correction iteration.");
+    throw Error("Blueprint replay requires a valid plan and correction iteration.");
   const root = resolve(directory);
   if (
     basename(root) !== "architecture-blueprints" ||

@@ -17,9 +17,11 @@ import {
 import { createControllerServer, SandboxController, type ControllerConfig } from "../web/src/sandbox-controller.js";
 import { createReviewedBlueprint, readApprovedBlueprint, type BlueprintReview } from "../src/architecture-blueprint.js";
 import { blueprintDigest } from "../src/architecture-blueprint-patch.js";
+import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
 import type { Plan } from "../src/architecture.js";
 import { startStoryJob } from "../src/job.js";
 import { withStoryJobLock } from "../src/job-lock.js";
+import { configurePiPolicy, inspectPiPolicy, PiBudgetPause } from "../src/job-pi-policy.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { removeTestTree } from "./helpers.js";
@@ -82,17 +84,78 @@ const obligation = {
   beatIds: ["arrival", "archive"],
 };
 const negative: BlueprintReview = {
-  status: "revise",
-  findings: [{ beatId: "arrival",
+  schema: "noveltea-blueprint-review/v2", status: "revise", prior: [],
+  findings: [{ beatId: "arrival", origin: "initial",
+    requirement: { source: "foundation", quote: "Prove the truth from dated records" },
+    evidence: { beatId: "arrival", quote: "A departure entry was entered at dusk" },
     reason: "The arrival timeline relies on an uncorroborated town entry.",
     correction: "Append an independent dated shift record corroborating arrival." }],
 };
-const positive: BlueprintReview = { status: "pass", findings: [] };
-const correction = { kind: "append-observation", findingBeatId: "arrival",
-  beatId: "arrival", value: { source: "independent guard shift log",
-    observable: "Guard signed a separate dusk service-gate patrol entry",
-    supports: "Corroborates arrival timing independently of the town entry",
-    limits: "Does not disclose the protected source identity" } };
+const progress = (round: number, beatId: "arrival" | "archive", quote: string) => ({
+  round, findingIndex: 0, status: "resolved" as const,
+  reason: "Independently inspectable new records resolve this exact prior blocker.",
+  evidence: { beatId, quote },
+});
+const progress0 = progress(0, "arrival", "Guard signed a separate dusk service-gate patrol entry");
+const progress1 = progress(1, "archive", "Guard ledger separately records a protected arrival");
+const progress2 = progress(2, "archive", "Registrar ledger connects the independent shift and gate entries");
+const negative1: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
+  status: "revise",
+  prior: [progress0],
+  findings: [{ beatId: "archive", origin: "overlooked",
+    requirement: { source: "foundation", quote: "Prove the truth from dated records" },
+    evidence: { beatId: "archive", quote: "An entry records a protected arrival at dusk" },
+    reason: "The arrival's gate log is not independently cross-checked.",
+    correction: "Add a separate guard ledger entry to the archive beat." }],
+};
+const negative2: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
+  status: "revise", prior: [progress0, progress1],
+  findings: [{ beatId: "archive", origin: "introduced",
+    requirement: { source: "foundation", quote: "Prove the truth from dated records" },
+    evidence: { beatId: "archive", quote: "Guard ledger separately records a protected arrival" },
+    reason: "The newly introduced record needs a linking registrar entry.",
+    correction: "Add the registrar's independent link between both dated logs." }],
+};
+const positive: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
+  status: "pass", findings: [], prior: [progress0, progress1, progress2] };
+const stillBlocked = (round: number) => ({
+  round, findingIndex: 0, status: "persisting" as const,
+  reason: "The timeline still relies on the same uncorroborated source.",
+  evidence: { beatId: "arrival", quote: "A departure entry was entered at dusk" },
+});
+const stalled1: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
+  status: "revise", prior: [stillBlocked(0)], findings: [
+    { ...negative.findings[0]!, origin: "continuing" },
+  ] };
+const stalled2: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
+  status: "revise", prior: [stillBlocked(0), stillBlocked(1)], findings: [
+    { ...negative.findings[0]!, origin: "continuing" },
+  ] };
+const oldChange = beats[0]!.change;
+const noisyChange = oldChange + " with decorative, irrelevant additional descriptive words";
+const stalledPatches = [
+  { kind: "replace", findingBeatId: "arrival",
+    path: "beats/arrival/change", expected: oldChange, value: noisyChange },
+  { kind: "replace", findingBeatId: "arrival",
+    path: "beats/arrival/change", expected: noisyChange, value: oldChange },
+];
+const corrections = [
+  { kind: "append-observation", findingBeatId: "arrival",
+    beatId: "arrival", value: { source: "independent guard shift log",
+      observable: progress0.evidence.quote,
+      supports: "Corroborates arrival timing independently of the town entry",
+      limits: "Does not disclose the protected source identity" } },
+  { kind: "append-observation", findingBeatId: "archive",
+    beatId: "archive", value: { source: "independent patrol log",
+      observable: progress1.evidence.quote,
+      supports: "Corroborates the initial gate evidence independently",
+      limits: "Still does not determine who completed the registration" } },
+  { kind: "append-observation", findingBeatId: "archive",
+    beatId: "archive", value: { source: "independent registrar archive",
+      observable: progress2.evidence.quote,
+      supports: "Proves the causal chain between the dated sources",
+      limits: "Does not expose the protected witness" } },
+];
 const readCalls = (): ToolCall[] => [
   "skill://nt-story-architecture/SKILL.md",
   "skill://nt-catalog/SKILL.md",
@@ -106,7 +169,14 @@ function promptText(messages: readonly unknown[]): string {
   return JSON.stringify(users.at(-1)?.content ?? "");
 }
 type Call = { prompt: string; tools: string[]; messages: readonly unknown[]; lastRole: string };
-function scripted(calls: Call[]): Provider {
+function scripted(calls: Call[], scenario: "productive" | "stalled" = "productive"): Provider {
+  let reviewerRound = 0;
+  let writerRound = 0;
+  let protocolRepaired = false;
+  const verdicts = scenario === "productive"
+    ? [negative, negative1, negative2, positive]
+    : [negative, stalled1, stalled2];
+  const writerPatches = scenario === "productive" ? corrections : stalledPatches;
   const stream = (_model: Model, ctx: TranscriptContext, _options?: SimpleStreamOptions) => {
     const result = createAssistantMessageEventStream();
     const active = new Set<string>();
@@ -118,9 +188,6 @@ function scripted(calls: Call[]): Provider {
     const prompt = promptText(ctx.messages);
     const lastRole = ctx.messages.at(-1)?.role ?? "";
     const reviewer = prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER");
-    const reviewedOnce = calls.some(c => c.prompt.includes(
-      "INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER") &&
-      c.lastRole === "toolResult");
     calls.push({ prompt, tools: [...active], messages: structuredClone(ctx.messages), lastRole });
     const needRead = (prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") || reviewer) &&
       lastRole !== "toolResult";
@@ -134,16 +201,26 @@ function scripted(calls: Call[]): Provider {
       content = asText(evidence.map(v => JSON.stringify(v)).join("\n"));
     else if (prompt.includes("READ-ONLY SOURCE-GROUNDED CAUSAL OBLIGATION INVENTORY"))
       content = asText(JSON.stringify(obligation));
-    else if (reviewer) content = asText(JSON.stringify(reviewedOnce ? positive : negative));
-    else if (prompt.includes("INDEPENDENT CAUSAL REVIEW.")) {
-      // The writer patches the EXACT digest of the negative verdict and original
-      // draft, rather than fabricating a replacement blueprint.
-      const initial = { schema: "noveltea-causal-blueprint/v1", premise: header.premise,
-        beats: beats.map((b, i) => ({ ...b, observations: evidence[i]!.observations })),
-        resolution: header.resolution };
+    else if (reviewer) {
+      const round = reviewerRound++;
+      // Round 2 intentionally violates the response contract once. Its
+      // correction must not count as a new semantic revision.
+      content = asText(JSON.stringify(scenario === "productive" && round === 2
+        ? { schema: "noveltea-blueprint-review/v2", status: "revise", findings: [], prior: [] }
+        : verdicts[round]));
+    } else if (prompt.includes("CONTROLLER REJECTED YOUR REVIEW PROTOCOL")) {
+      assert.equal(protocolRepaired, false);
+      protocolRepaired = true;
+      content = asText(JSON.stringify(negative2));
+    } else if (prompt.includes("INDEPENDENT CAUSAL REVIEW.") ||
+        prompt.includes("RESUME AT VERIFIED CAUSAL BLUEPRINT WRITER BOUNDARY.")) {
+      const match = /BASE DIGEST: ([a-f0-9]{64}) REVIEW DIGEST: ([a-f0-9]{64})/.exec(prompt);
+      assert.ok(match, "the controller must give the exact previous source/verdict digests");
+      const correction = writerPatches[writerRound++];
+      assert.ok(correction, "writer must only perform the authorized corrections");
       content = asText([
         JSON.stringify({ schema: "noveltea-blueprint-patch/v1",
-          baseDigest: blueprintDigest(initial), reviewDigest: blueprintDigest(negative) }),
+          baseDigest: match[1], reviewDigest: match[2] }),
         JSON.stringify(correction),
       ].join("\n"));
     } else throw Error("Unexpected scripted Blueprint Pi prompt: " + prompt.slice(0, 160));
@@ -184,7 +261,7 @@ function available() {
   } catch { return false; }
 }
 
-test("#202: real Blueprint controller preserves independent reviewer across correction and sealed approval", {
+test("#202/#203: production Blueprint review converges after three revisions, protocol repair and a safe budget resume", {
   skip: !available() && "Requires registered rootless sandbox and local noveltea-skills",
   timeout: 240_000,
 }, async () => {
@@ -195,6 +272,7 @@ test("#202: real Blueprint controller preserves independent reviewer across corr
     "NT_REQUIRE_SANDBOX_TOOLS", "NT_REQUIRE_USER_PI_RUNTIME"] as const;
   const old = Object.fromEntries(keys.map(k => [k, process.env[k]]));
   let controller: SandboxController | undefined;
+  let stalledJobId: string | undefined;
   let server: ReturnType<typeof createControllerServer> | undefined;
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -260,28 +338,67 @@ test("#202: real Blueprint controller preserves independent reviewer across corr
     const create = () => withJobModelRuntime(runtime, () =>
       withStoryJobLock(job, "global-architecture", () =>
         createReviewedBlueprint(job, snapshot, plan, model.provider, model.id, task, baseSha)));
+    await configurePiPolicy(job, { version: 1,
+      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 7 } });
+    await assert.rejects(create(), (error: unknown) =>
+      error instanceof PiBudgetPause && error.reason === "modelCalls",
+      "seven scripted planner/review calls must pause BEFORE the next writer turn");
+    assert.equal((await inspectPiPolicy(job)).budget.pause?.reason, "modelCalls");
+    const directory = join(job.stateDir, "architecture-blueprints");
+    assert.ok(existsSync(join(directory, "plan-1-pause-1-writer.json")));
+    assert.equal(existsSync(join(directory, "plan-1-approved.json")), false);
+    await configurePiPolicy(job, { version: 1,
+      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 8 } });
+    await assert.rejects(create(), (error: unknown) =>
+      error instanceof PiBudgetPause && error.reason === "modelCalls",
+      "the completed writer patch should pause before a new reviewer turn");
+    assert.ok(existsSync(join(directory, "plan-1-pause-1-review.json")));
+    assert.ok(existsSync(join(directory, "plan-1-draft-1.json")),
+      "paused review must retain the completed, verified patch");
+    assert.equal(existsSync(join(directory, "plan-1-verdict-1.json")), false,
+      "no new verdict was started when the budget paused");
+    assert.equal((await inspectPiPolicy(job)).budget.modelCalls, 8);
+    await configurePiPolicy(job, { version: 1,
+      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 60 } });
+    const pausedWriter = JSON.parse(readFileSync(join(directory,
+      "plan-1-pause-1-review.json"), "utf8")).pin as { plannerSessionFile: string };
+    const pausedTranscript = readFileSync(pausedWriter.plannerSessionFile);
+    try {
+      writeFileSync(pausedWriter.plannerSessionFile, Buffer.concat([
+        pausedTranscript, Buffer.from('{"type":"message","message":{"role":"user","content":"Unsealed replay"}}\\n'),
+      ]));
+      await assert.rejects(create(), /session changed after its safe budget pause/,
+        "a post-pause writer turn must never be replayed as if the writer were idle");
+    } finally { writeFileSync(pausedWriter.plannerSessionFile, pausedTranscript); }
     const pin = await create();
     assert.equal(pin.schema, "noveltea-approved-blueprint/v4");
-    assert.equal(pin.draftVersion, 1, "negative verdict must cause a patched second revision");
+    assert.equal(pin.draftVersion, 3, "three productive corrections must pass without fixed attempt exhaustion");
+    assert.equal((await inspectPiPolicy(job)).budget.pause, undefined);
     assert.notEqual(pin.plannerSessionId, pin.reviewerSessionId);
     assert.notEqual(pin.plannerSessionFile, pin.reviewerSessionFile);
-    const directory = join(job.stateDir, "architecture-blueprints");
     const receipt = (index: number) => JSON.parse(readFileSync(
       join(directory, "plan-1-review-session-" + index + ".json"), "utf8"));
     const first = receipt(0), second = receipt(1);
-    assert.equal(first.sessionId, second.sessionId, "one reviewer Pi session over both rounds");
-    assert.equal(first.sessionFile, second.sessionFile);
-    assert.equal(first.cycleId, second.cycleId);
-    assert.equal(first.cycleId, pin.reviewCycleId);
-    assert.equal(first.transcriptBytes < second.transcriptBytes, true);
+    for (let i = 1; i <= 3; i++) {
+      assert.equal(receipt(i).sessionId, first.sessionId);
+      assert.equal(receipt(i).sessionFile, first.sessionFile);
+      assert.equal(receipt(i).cycleId, pin.reviewCycleId);
+      assert.ok(receipt(i).transcriptBytes > receipt(i - 1).transcriptBytes);
+      assert.equal(JSON.parse(readFileSync(join(directory,
+        "plan-1-convergence-" + i + ".json"), "utf8")).productive, true);
+    }
     assert.equal(hash(readFileSync(pin.reviewerSessionFile).subarray(
       0, first.transcriptBytes).toString("utf8")), first.transcriptDigest);
-    assert.deepEqual(JSON.parse(readFileSync(join(directory, "plan-1-verdict-0.json"), "utf8")), negative);
-    assert.deepEqual(JSON.parse(readFileSync(join(directory, "plan-1-verdict-1.json"), "utf8")), positive);
+    for (const [i, verdict] of [negative, negative1, negative2, positive].entries())
+      assert.deepEqual(JSON.parse(readFileSync(join(directory,
+        "plan-1-verdict-" + i + ".json"), "utf8")), verdict);
     const reviews = calls.filter(c =>
       c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER"));
-    assert.equal(reviews.length, 4, "each of two review turns must reread source before verdict");
-    assert.equal(reviews.filter(c => c.lastRole === "toolResult").length, 2);
+    assert.equal(reviews.length, 8, "all four semantic rounds must reread source before verdict");
+    assert.equal(reviews.filter(c => c.lastRole === "toolResult").length, 4);
+    assert.equal(calls.filter(c =>
+      c.prompt.includes("CONTROLLER REJECTED YOUR REVIEW PROTOCOL")).length, 1,
+      "malformed structured review receives bounded protocol correction, not another semantic round");
     assert.match(reviews[2]!.prompt, /PREVIOUS VERIFIED VERDICT/);
     assert.match(reviews[2]!.prompt, /EXACT SOURCE CHANGES/);
     assert.match(reviews[2]!.prompt, /CONTINUING YOUR EXISTING INDEPENDENT REVIEW CYCLE/);
@@ -294,6 +411,9 @@ test("#202: real Blueprint controller preserves independent reviewer across corr
     }
     assert.equal((await readApprovedBlueprint(job, plan, snapshot,
       model.provider, model.id, task, baseSha))?.pin.reviewCycleId, pin.reviewCycleId);
+    const replay = captureBlueprintReplay(directory, 1, 3, "blueprint-review-verdict",
+      join(tmp, "iteration-3-review-replay.json"));
+    assert.ok(replay, "offline replay must accept a third productive correction");
     const count = calls.length;
     assert.deepEqual(await create(), pin, "approved replay never invokes Pi again");
     assert.equal(calls.length, count);
@@ -325,15 +445,49 @@ test("#202: real Blueprint controller preserves independent reviewer across corr
         model.provider, model.id, task, baseSha), /transcript changed/);
     } finally { writeFileSync(pin.reviewerSessionFile, originalTranscript); }
     assert.equal((await readApprovedBlueprint(job, plan, snapshot,
-      model.provider, model.id, task, baseSha))?.pin.draftVersion, 1);
+      model.provider, model.id, task, baseSha))?.pin.draftVersion, 3);
     assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "",
       "blueprint review cannot mutate canonical Story");
     assert.equal(git(repo, "rev-parse", "HEAD"), baseSha);
+
+    // A separate real Job/Thread through the same production controller:
+    // two valid writer patches first add cosmetic text, then return exactly
+    // to the old draft. Both negative reviews remain source-grounded; the
+    // controller must request reassessment without creating any approval.
+    stalledJobId = randomUUID();
+    const db2 = new DatabaseSync(join(app, "studio.sqlite"));
+    try {
+      db2.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+        .run(stalledJobId, owner, "story", baseSha, null);
+    } finally { db2.close(); }
+    const stuck = await startStoryJob({
+      story, job: stalledJobId, worktreeCacheRoot: scoped,
+    });
+    const stuckCalls: Call[] = [];
+    const stuckRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    stuckRuntime.registerNativeProvider(scripted(stuckCalls, "stalled"));
+    await stuckRuntime.refresh({ allowNetwork: false });
+    await assert.rejects(() => withJobModelRuntime(stuckRuntime, () =>
+      withStoryJobLock(stuck, "global-architecture", () =>
+        createReviewedBlueprint(stuck, snapshot, plan, model.provider, model.id, task, baseSha))),
+    /requires independent reassessment after two nonproductive corrections/);
+    const stuckDir = join(stuck.stateDir, "architecture-blueprints");
+    assert.equal(existsSync(join(stuckDir, "plan-1-approved.json")), false);
+    assert.equal(JSON.parse(readFileSync(join(stuckDir, "plan-1-convergence-1.json"),
+      "utf8")).stalled, 1);
+    const end = JSON.parse(readFileSync(join(stuckDir, "plan-1-convergence-2.json"), "utf8"));
+    assert.equal(end.stalled, 2);
+    assert.equal(end.oscillating, true);
+    assert.equal(stuckCalls.filter(c =>
+      c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER") &&
+      c.lastRole === "toolResult").length, 3);
+    assert.equal(git(stuck.worktreeRoot, "status", "--porcelain"), "");
   } finally {
     for (const key of keys) {
       if (old[key] === undefined) delete process.env[key];
       else process.env[key] = old[key];
     }
+    if (controller && stalledJobId) await controller.dispose(stalledJobId);
     if (controller) await controller.dispose(id);
     if (server) await new Promise<void>(done => server!.close(() => done()));
     await removeTestTree(tmp);
