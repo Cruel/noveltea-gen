@@ -7,6 +7,7 @@ import {
   type ArchitectureDraftReview,
   type ArchitectureDraftRound,
 } from "../src/architecture-draft-review.js";
+import { parseArchitectureDraftDiagnosis } from "../src/architecture-draft-diagnosis.js";
 
 const paths = ["arcs/arc-one.md", "milestones/milestone-one.md"];
 const requirements = {
@@ -42,6 +43,30 @@ const status = (round: number, findingIndex: number, state: string, path: string
   status: state,
   reason: "The current source now adds a separate test.",
   evidence: { path, quote },
+});
+
+test("stalled Architecture review obtains source-bound independent diagnosis, not an approval", () => {
+  const diagnosis = {
+    schema: "noveltea-architecture-draft-diagnosis/v1",
+    action: "continue",
+    explanation: "The register correction needs a different independent source.",
+    assessments: [{
+      kind: "material", reason: "The cited transfer record remains uncorroborated.",
+      requirement: { source: "foundation", quote: "independent evidence of the hidden transfer" },
+      evidence: { path: paths[0], quote: "transfer lacks any independently verifiable trail" },
+    }],
+  };
+  assert.deepEqual(parseArchitectureDraftDiagnosis(JSON.stringify(diagnosis),
+    original, requirements, [round0]), diagnosis);
+  assert.throws(() => parseArchitectureDraftDiagnosis(JSON.stringify({
+    ...diagnosis, action: "pass",
+  }), original, requirements, [round0]), /bounded independent reassessment/);
+  assert.throws(() => parseArchitectureDraftDiagnosis(JSON.stringify({
+    ...diagnosis, assessments: [{ ...diagnosis.assessments[0],
+      evidence: { path: paths[0], quote: "fabricated evidence" } }],
+  }), original, requirements, [round0]), /exact existing source/);
+  assert.throws(() => parseArchitectureDraftDiagnosis(JSON.stringify(diagnosis),
+    original, requirements, []), /sealed negative review/);
 });
 
 test("Architecture draft review accepts only source-bound current-stage findings", () => {

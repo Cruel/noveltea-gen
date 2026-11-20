@@ -106,7 +106,7 @@ function promptText(messages: readonly unknown[]) {
   return JSON.stringify(users.at(-1)?.content ?? "");
 }
 type Call = { prompt: string; lastRole: string; active: string[]; messages: readonly unknown[] };
-function scripted(calls: Call[], options?: { forbidden?: boolean; crash?: boolean }): Provider {
+function scripted(calls: Call[], options?: { forbidden?: boolean; crash?: boolean; stall?: boolean }): Provider {
   let iteration = 0;
   let crashed = false;
   const stream = (_model: Model, ctx: TranscriptContext, _opts?: SimpleStreamOptions) => {
@@ -137,7 +137,24 @@ function scripted(calls: Call[], options?: { forbidden?: boolean; crash?: boolea
       }));
       reason = "toolUse";
     } else {
-      content = [{ type: "text", text: JSON.stringify(verdicts[iteration++]!) }];
+      const isDiagnostic = prompt.includes("INDEPENDENT READ-ONLY ARCHITECTURE DIAGNOSTIC");
+      const body = options?.stall
+        ? isDiagnostic
+          ? { schema: "noveltea-architecture-draft-diagnosis/v1", action: "escalate",
+            explanation: "The unchanged uncorroborated evidence cannot pass independent review.",
+            assessments: [{ kind: "material", reason: "The cited witness report still lacks corroboration.",
+              requirement: { source: "foundation", quote: "independent transfer evidence" },
+              evidence: evidence(original) }] }
+          : { schema: "noveltea-architecture-draft-review/v2", status: "revise",
+            findings: [finding(original, iteration ? "continuing" : "initial")],
+            prior: Array.from({ length: iteration }, (_, round) => ({
+              round, findingIndex: 0, status: "persisting",
+              reason: "The same missing independent corroboration remains unresolved.",
+              evidence: evidence(original),
+            })) }
+        : verdicts[iteration]!;
+      iteration++;
+      content = [{ type: "text", text: JSON.stringify(body) }];
     }
     const message: AssistantMessage = {
       role: "assistant",
@@ -539,6 +556,63 @@ test(
           "interrupted or forbidden reviewer cannot restart without source reconciliation",
         );
       }
+
+      // A third independent, read-only Pi diagnostic is actually invoked when
+      // two consecutive revisions make no source progress. It must not turn
+      // a negative precommit review into approval or run the writer again.
+      const diagnosticJobId = randomUUID();
+      extraJobIds.push(diagnosticJobId);
+      const diagnosisDb = new DatabaseSync(join(app, "studio.sqlite"));
+      try {
+        diagnosisDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+          .run(diagnosticJobId, owner, "story", baseSha, null);
+      } finally { diagnosisDb.close(); }
+      const stalledJob = await startStoryJob({
+        story, job: diagnosticJobId, worktreeCacheRoot: scoped,
+      });
+      mkdirSync(join(stalledJob.worktreeStoryRoot, "milestones"), { recursive: true });
+      writeFileSync(join(stalledJob.worktreeStoryRoot, path), original);
+      const diagnosisCalls: Call[] = [];
+      const diagnosticRuntime = await ModelRuntime.create({
+        modelsPath: null, refreshOnCreate: false,
+      });
+      diagnosticRuntime.registerNativeProvider(scripted(diagnosisCalls, { stall: true }));
+      await diagnosticRuntime.refresh({ allowNetwork: false });
+      await configurePiPolicy(stalledJob, {
+        version: 1, profile: { provider: model.provider, model: model.id },
+        limits: { steps: 20 },
+      });
+      await withJobModelRuntime(diagnosticRuntime, () =>
+        withStoryJobLock(stalledJob, "global-architecture", async () => {
+          const cycle = await createArchitectureDraftReviewCycle(
+            stalledJob, snapshot, plan, model.provider, model.id,
+            [path], { id: "writer-" + randomUUID(),
+              file: join(stalledJob.stateDir, "architecture-sessions", "writer.jsonl") },
+          );
+          try {
+            for (let round = 0; round < 3; round++) {
+              const result = await cycle.review();
+              assert.equal(result.verdict.status, "revise");
+              assert.equal(result.convergence.reassess, round === 2);
+            }
+            const diagnosis = await cycle.diagnose();
+            assert.equal(diagnosis.action, "escalate");
+            const sealed = JSON.parse(readFileSync(join(stalledJob.stateDir,
+              "architecture-draft-reviews", cycle.identity.cycleId,
+              "diagnostic-2.json"), "utf8"));
+            assert.equal(sealed.diagnosis.action, "escalate");
+            assert.notEqual(sealed.diagnostic.id, sealed.reviewer.id);
+            assert.notEqual(sealed.diagnostic.id, sealed.writer.id);
+            assert.equal(readFileSync(join(stalledJob.worktreeStoryRoot, path), "utf8"), original);
+            assert.equal(diagnosisCalls.some(call =>
+              call.prompt.includes("INDEPENDENT READ-ONLY ARCHITECTURE DIAGNOSTIC")), true);
+            assert.equal(diagnosisCalls.filter(call =>
+              call.prompt.includes("INDEPENDENT READ-ONLY ARCHITECTURE DIAGNOSTIC"))
+              .every(call => !call.active.some(tool =>
+                ["write", "edit", "bash", "exec"].includes(tool))), true);
+          } finally { cycle.dispose(); }
+        }),
+      );
     } finally {
       for (const key of keys) {
         if (previous[key] === undefined) delete process.env[key];

@@ -268,7 +268,7 @@ export async function authorComposition(
   modelId: string,
   thinking: "low" | "high" | undefined,
   onSession: (file: string, id: string) => Promise<void>,
-  verifyDraft: (evidence: CompositionEvidence) => Promise<string[]>,
+  verifyDraft: (evidence: CompositionEvidence) => Promise<{ problems: string[]; stage: "pre-review" | "editorial" }>,
 ): Promise<CompositionEvidence> {
   const { session, project, pinned, context, sandboxed } = await createSession(
     job,
@@ -327,6 +327,7 @@ export async function authorComposition(
       "Graph will independently verify sources, actual Markdown, coverage and editorial review.\nASSIGNMENT:\n" +
       JSON.stringify(assignment, null, 2) +
       specialistAuthorInstruction(assignment.authorTask);
+    let consecutivePreReviewFailures = 0;
     for (let attempt = 0; ; attempt++) {
       const writerFile = session.sessionManager.getSessionFile() ?? undefined;
       if (attempt === 0) await context.beforeTurn(writerFile);
@@ -388,19 +389,25 @@ export async function authorComposition(
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
         piSessionId: session.sessionId,
       };
-      const problems = await verifyDraft(evidence);
-      if (!problems.length) {
+      const feedback = await verifyDraft(evidence);
+      if (!feedback.problems.length) {
         await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
         return evidence;
       }
-      // Semantic corrections are governed by the source-bound Review cycle and
-      // the job resource budget, never a fixed two-turn cutoff.
+      // Native diagnostics, malformed Git manifests and structural validation
+      // do not reach the independent reviewer. They must not gain unbounded
+      // semantic retries merely because the Pi policy has no configured limit.
+      if (feedback.stage === "pre-review") {
+        if (++consecutivePreReviewFailures > 2)
+          throw Error("Composition validation/manifest recovery exhausted before independent review.");
+      } else consecutivePreReviewFailures = 0;
+      // Only substantive editorial corrections use source-bound convergence.
       prompt =
         "The independent graph audit rejected the draft. In this SAME session, repair only the " +
         "problems below, without changing Event/Choice/Milestone/Character/Fact/Relationship/author-protected canon. " +
         "Read saved prose and replay ALL branches, including least-informed entry and optional clues. " +
         "Re-run validation and report the FULL changed path manifest.\n" +
-        problems.join("\n");
+        feedback.problems.join("\n");
     }
   } finally {
     session.dispose();

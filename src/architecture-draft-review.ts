@@ -19,7 +19,8 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { openSkillSnapshot } from "./snapshot.js";
-import { reviewCycleId, assertReviewCycleSession } from "./review-cycle.js";
+import { reviewCycleId, assertReviewCycleSession, sourceReviewConvergence } from "./review-cycle.js";
+import { parseArchitectureDraftDiagnosis } from "./architecture-draft-diagnosis.js";
 
 const sha = (input: unknown) =>
   createHash("sha256")
@@ -198,27 +199,7 @@ export function architectureDraftConvergence(
   previous: readonly ArchitectureDraftRound[],
   stalledBefore = 0,
 ) {
-  const now = sha(sources);
-  const oscillating = previous.some((round) => sha(round.sources) === now);
-  const last = previous.at(-1);
-  const regressed = review.prior.some((p) => p.status === "regressed");
-  const productive =
-    !!last &&
-    !oscillating &&
-    !regressed &&
-    review.prior.some((p) => {
-      if (p.status !== "resolved" && p.status !== "improved") return false;
-      const old = previous[p.round]!.verdict.findings[p.findingIndex]!;
-      return (
-        sources[old.path] !== last.sources[old.path] &&
-        sources[old.path]?.includes(p.evidence.quote) &&
-        !last.sources[old.path]?.includes(p.evidence.quote)
-      );
-    });
-  if (last && review.status === "pass" && !productive)
-    throw Error("Architecture draft pass lacks source-grounded progress or repeats an old draft.");
-  const stalled = !last || productive ? 0 : stalledBefore + 1;
-  return { productive, oscillating, stalled, reassess: review.status === "revise" && stalled >= 2 };
+  return sourceReviewConvergence(review, sources, previous, stalledBefore);
 }
 
 function cycleScope(
@@ -496,6 +477,7 @@ export async function createArchitectureDraftReviewCycle(
     };
     const history: ArchitectureDraftRound[] = [];
     let stalled = 0;
+    let diagnosticsUsed = 0;
     let lastDigest: string | null = null;
     let lastPin: ArchitectureDraftReviewPin | undefined;
 
@@ -697,6 +679,104 @@ export async function createArchitectureDraftReviewCycle(
         history.push({ sources, verdict });
         lastPin = verdict.status === "pass" ? { cycleId, round, receiptDigest: lastDigest } : undefined;
         return { verdict, convergence, pin: lastPin };
+      },
+      async diagnose() {
+        if (stalled < 2 || history.at(-1)?.verdict.status !== "revise")
+          throw Error("Architecture diagnosis is only available after nonproductive sealed reviews.");
+        if (diagnosticsUsed >= 2)
+          throw Error("Architecture review exhausted bounded independent diagnostic reassessment.");
+        const round = history.length - 1;
+        const file = join(cycleDirectory(job, cycleId), "diagnostic-" + round + ".json");
+        if (existsSync(file))
+          throw Error("Architecture diagnosis already started; reconcile its original evidence.");
+        const saved = JSON.parse(await readFile(roundPath(job, cycleId, round), "utf8")) as RoundReceipt;
+        const transcript = await transcriptEvidence(job, reviewer);
+        if (sha(saved) !== lastDigest ||
+            transcript.length < saved.transcriptBytes ||
+            sha(transcript.subarray(0, saved.transcriptBytes).toString("utf8")) !== saved.transcriptDigest ||
+            sha(await sourceDraft(job, paths)) !== sha(history.at(-1)!.sources) ||
+            (await openSkillSnapshot(snapshot.id)) !== snapshot.path)
+          throw Error("Architecture diagnosis cannot reassess altered source or reviewer lineage.");
+        const stepId = step + ":diagnostic:" + round;
+        const diagnosticContext = await preparePiContext(job, project, {
+          group: stepId, step: stepId, paths: [], snapshot: snapshot.id,
+          provider, model, insideWriter: true,
+          directory: join(job.stateDir, "architecture-draft-review-sessions", "diagnostics"),
+        }, runtime);
+        const { session: opened } = await createAgentSession({
+          cwd: project.root, modelRuntime: runtime,
+          model: diagnosticContext.model, thinkingLevel: diagnosticContext.thinking,
+          resourceLoader: loader, settingsManager, sessionManager: diagnosticContext.manager,
+          customTools: safeTools ?? [], noTools: "all", tools: [...SANDBOX_READ_ONLY_TOOLS],
+        });
+        try {
+          const diagnostic = { id: opened.sessionId,
+            file: opened.sessionManager.getSessionFile() ?? "" };
+          if (!diagnostic.file || [writer.id, reviewer.id].includes(diagnostic.id) ||
+              [writer.file, reviewer.file].includes(diagnostic.file))
+            throw Error("Architecture Diagnostic reviewer must be a third independent conversation.");
+          const start = opened.messages.length;
+          const prompt =
+            "INDEPENDENT READ-ONLY ARCHITECTURE DIAGNOSTIC. You are neither the writer " +
+            "nor the original read-only reviewer. The last two attempted corrections did " +
+            "not resolve source-grounded blockers. Review the exact current dirty Arc/Milestone " +
+            "draft, the original requirements, all sealed negative verdicts and their source " +
+            "lineage. Read the pinned nt-story-architecture and nt-catalog methods, the " +
+            "Foundation and EVERY authorized current draft path. Diagnose reviewer drift, " +
+            "material defects, downstream requirements and scope conflicts. Do not change " +
+            "files, approve canon, waive a negative verdict, grant new writing scope, or " +
+            "return an Architecture pass. Recommend continue, replace, split or escalate. " +
+            "Return ONLY JSON with exact keys schema,action,explanation,assessments. " +
+            "schema:'noveltea-architecture-draft-diagnosis/v1'; action:" +
+            "'continue|replace|split|escalate'; assessments: 1-8 entries with kind:" +
+            "'material|cosmetic|deferred|scope',reason,requirement:{source,quote}," +
+            "evidence:{path,quote}. Every requirement quote and current file quote must " +
+            "be a literal substring at least 8 characters long.\n" +
+            "ORIGINAL REQUIREMENTS: " + JSON.stringify(requirements) + "\n" +
+            "SEALED VERDICT HISTORY: " + JSON.stringify(history.map((h, i) => ({
+              round: i, sources: Object.fromEntries(Object.entries(h.sources).map(([p, v]) => [p, sha(v)])),
+              verdict: h.verdict,
+            }))) + "\n" +
+            "CURRENT SOURCE PATHS: " + JSON.stringify(paths);
+          const parse = () => {
+            const reads = completedPinnedSkillReads(
+              opened.messages.slice(start), project.root, snapshot.path);
+            if (required.some(path => !reads.includes(path)))
+              throw Error("Architecture Diagnostic skipped pinned methodology or current sources.");
+            return parseArchitectureDraftDiagnosis(opened.getLastAssistantText() ?? "",
+              history.at(-1)!.sources, requirements, history);
+          };
+          await guardPiBudget(job, stepId, diagnostic.file);
+          await promptStorySpecialist(opened, diagnosticContext.contextNote + prompt);
+          let diagnosis: ReturnType<typeof parseArchitectureDraftDiagnosis>;
+          try { diagnosis = parse(); }
+          catch (error) {
+            await guardPiBudget(job, stepId, diagnostic.file);
+            await promptStorySpecialist(opened,
+              "DIAGNOSTIC PROTOCOL CORRECTION ONLY: read all required sources and return " +
+              "strict cited diagnosis JSON; never approve or modify the draft. " +
+              "Controller rejected: " + String(error));
+            diagnosis = parse();
+          }
+          if (sha(await sourceDraft(job, paths)) !== sha(history.at(-1)!.sources) ||
+              (await readFile(join(project.root, "creative-direction/foundation.md"), "utf8")) !==
+                originalFoundation ||
+              (await openSkillSnapshot(snapshot.id)) !== snapshot.path)
+            throw Error("Architecture diagnostic encountered changed Story sources or methodology.");
+          await diagnosticContext.completed(diagnostic.file, diagnostic.id);
+          const bytes = await transcriptEvidence(job, diagnostic);
+          await writeFile(file, JSON.stringify({
+            schema: "noveltea-architecture-draft-diagnostic-receipt/v1",
+            cycleId, round, writer, reviewer, diagnostic,
+            sourceDigest: sha(history.at(-1)!.sources),
+            reviewDigest: lastDigest, diagnosis,
+            transcriptBytes: bytes.length,
+            transcriptDigest: sha(bytes.toString("utf8")),
+          }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+          diagnosticsUsed++;
+          if (diagnosis.action === "continue") stalled = 0;
+          return diagnosis;
+        } finally { opened.dispose(); }
       },
       dispose() {
         session.dispose();

@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { authorComposition, createCompositionReviewCycle, verifyCompositionReviewPin,
   type CompositionReviewPin, type CompositionAssignment,
@@ -74,6 +75,12 @@ export interface CompositionOptions {
 }
 const milestonePattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
+/** The publication gate compares sealed semantic fields, not JSON key insertion order. */
+export function assertCompositionReviewerMatch(verified: SemanticReview,
+  copied: SemanticReview | undefined): void {
+  if (!copied || !isDeepStrictEqual(verified, copied))
+    throw Error("Composition copied reviewer receipt differs from its sealed independent verdict.");
+}
 function rawGit(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[key];
@@ -719,7 +726,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             assertHead(job, base);
             if (evidence.conflicts.length) {
               const optional = optionalDialogueDeferralFeedback(assign, evidence.conflicts);
-              if (optional) return [optional];
+              if (optional) return { stage: "pre-review" as const, problems: [optional] };
               throw new Error("Unresolved source conflict: " + evidence.conflicts.join("; "));
             }
             const result = await validate(base);
@@ -727,14 +734,16 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             if (report?.protection?.status !== "checked" || report.protection.base !== base ||
                 report.protection.changes.length || report.protection.warnings.length)
               throw new Error("Composition protected author decisions changed; repair refused.");
-            if (report.diagnostics.length) return report.diagnostics.slice(0, 24).map(d =>
-              `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
+            if (report.diagnostics.length) return { stage: "pre-review" as const,
+              problems: report.diagnostics.slice(0, 24).map(d =>
+                `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`) };
             if (result.status !== "passed") throw new Error("Canonical validator rejected composition draft.");
-            if (manifestFeedback) return [manifestFeedback +
-              ". Report the exact changed Authored Content paths; existing valid prose does not need cosmetic edits."];
+            if (manifestFeedback) return { stage: "pre-review" as const,
+              problems: [manifestFeedback +
+              ". Report the exact changed Authored Content paths; existing valid prose does not need cosmetic edits."] };
             let structural: Awaited<ReturnType<typeof verifyCompositionProse>>;
             try { structural = await verifyCompositionProse(job, report, assign, paths!); }
-            catch (e) { return [String(e)]; }
+            catch (e) { return { stage: "pre-review" as const, problems: [String(e)] }; }
             // Independent semantic review participates in the SAME bounded
             // writer repair loop. Never accept a structurally green draft that
             // an editorial reviewer has already rejected.
@@ -749,14 +758,15 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
               const result = await cycle.review(paths!, [...structural.outcomes, ...structural.solutions]);
               const review = result.review;
               if (review.verdict !== "pass" || review.concerns.length)
-                return review.concerns;
+                return { stage: "editorial" as const,
+                  problems: review.concerns.length ? review.concerns : ["Independent editorial review blocked without correction details."] };
               if (!result.pin) throw new Error("Composition editorial pass lacks sealed review lineage.");
               s.reviewedDigest = await fileDigest(job, paths!);
               s.reviewedEvidence = review;
               s.reviewPin = result.pin;
               await save(file, s);
             }
-            return [];
+            return { stage: "editorial" as const, problems: [] };
           };
           const evidence = s.worker === "fixture" ? await fixtureAuthor(job, assign)
             : await authorComposition(job, s.snapshot!, assign, s.provider, s.model,
@@ -792,8 +802,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
                 base, s.planVersion, s.planDigest,
                 { id: s.writerSessionId, file: s.sessionFile }, s.paths, s.reviewPin)
             : (() => { throw Error("Composition requires its original sealed independent reviewer pass."); })();
-        if (s.worker === "pi" && JSON.stringify(review) !== JSON.stringify(s.reviewedEvidence))
-          throw Error("Composition copied reviewer receipt differs from its sealed independent verdict.");
+        if (s.worker === "pi") assertCompositionReviewerMatch(review, s.reviewedEvidence);
         if (review.verdict !== "pass" || review.concerns.length || !review.sourceEvidence.length)
           throw new Error("Branch-to-prose editorial review blocked: " + review.concerns.join("; "));
         if (s.worker === "pi" && [...structural.outcomes, ...structural.solutions].some(route =>

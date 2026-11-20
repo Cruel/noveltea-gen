@@ -55,6 +55,28 @@ interface SessionSeal {
 }
 interface Round { draft: MilestoneBlueprint; review: MilestoneBlueprintReview;
   draftDigest: string; reviewDigest: string }
+
+/** Reconstruct nonprogress entirely from sealed rounds, including after a restart.
+ * Cosmetic rewrites, oscillation, and newly discovered issues alone cannot
+ * reset the two-correction reassessment threshold. */
+export function milestoneReviewStagnation(rounds: readonly Round[]): number {
+  let stalled = 0;
+  for (let i = 1; i < rounds.length; i++) {
+    const prior = rounds[i - 1]!;
+    const current = rounds[i]!;
+    const oscillating = rounds.slice(0, i).some(r => r.draftDigest === current.draftDigest);
+    const previousBlockers = prior.review.findings;
+    const remaining = new Set(current.review.findings.map(f => f.eventId + "\0" + f.anchorPath));
+    const improved = !oscillating && previousBlockers.some(f => {
+      const before = prior.draft.events.find(e => e.id === f.eventId);
+      const after = current.draft.events.find(e => e.id === f.eventId);
+      return !remaining.has(f.eventId + "\0" + f.anchorPath) &&
+        !!before && !!after && sha(before) !== sha(after);
+    });
+    stalled = improved ? 0 : stalled + 1;
+  }
+  return stalled;
+}
 interface Receipt {
   schema: "noveltea-milestone-plan-receipt/v1";
   lineage: Lineage; phase: Phase; rounds: Round[];
@@ -445,9 +467,9 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   }
   // The writer and reviewer remain independent read-only Pi sessions across
   // substantive corrections. A partial prompt is never automatically replayed.
-  let previousDigest = receipt.rounds.at(-1)?.draftDigest;
-  let stagnation = 0;
   for (;;) {
+    if (receipt.phase === "revision" && milestoneReviewStagnation(receipt.rounds) >= 2)
+      throw Error("Milestone Blueprint has two sealed nonproductive corrections; independent diagnostic reassessment required.");
     if (receipt.phase === "admitted" || receipt.phase === "revision") {
       const previousPhase = receipt.phase;
       // Seal ambiguity BEFORE the SDK may create a Pi transcript. A crash in
@@ -508,6 +530,10 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft, assignment);
       await reviewer.context.completed(reviewer.session.sessionManager.getSessionFile()!, reviewer.session.sessionId);
       receipt.reviewer = await seal(reviewer.session);
+      const previousRound = receipt.rounds.at(-1);
+      if (verdict.status === "pass" && previousRound?.review.status === "revise" &&
+          previousRound.draftDigest === sha(receipt.draft))
+        throw Error("Milestone reviewer cannot approve an unchanged rejected draft.");
       receipt.rounds.push({ draft: receipt.draft, review: verdict,
         draftDigest: sha(receipt.draft), reviewDigest: sha(verdict) });
       if (verdict.status === "pass") {
@@ -516,14 +542,11 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         await persist(file, receipt);
         return { blueprint: receipt.draft, pin: pinOf(receipt) };
       }
-      if (previousDigest === sha(receipt.draft)) stagnation++;
-      else stagnation = 0;
-      if (stagnation >= 2) {
+      if (milestoneReviewStagnation(receipt.rounds) >= 2) {
         receipt.phase = "revision";
         await persist(file, receipt);
         throw Error("Milestone Blueprint review is not converging; inspect sealed findings for a diagnostic review.");
       }
-      previousDigest = sha(receipt.draft);
       receipt.phase = "revision";
       await persist(file, receipt);
     } finally { reviewer.session.dispose(); }

@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { parseCausalBlueprint, type BlueprintReview, type CausalBlueprint } from "./architecture-blueprint.js";
 import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
+import type { ConvergentReview } from "./review-convergence.js";
 
 export const blueprintDigest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -153,6 +154,22 @@ export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintRevi
           if (!op.value.includes(op.expected))
             throw Error("Blueprint patch cannot erase a prior Choice consequence.");
         } else throw Error("Blueprint patch path cannot replace decisions, IDs or structure.");
+      }
+      // A finding on one Beat is not blanket authority to rewrite global
+      // answers, another Arc goal, feasibility or the resolution. Require an
+      // exact citation to the ORIGINAL global field/Arc being replaced.
+      const section = op.path.split("/")[0];
+      if (["causalAnswer", "feasibility", "arcs", "resolution"].includes(section!)) {
+        const matching = review.findings.some(finding => {
+          if (finding.beatId !== op.findingBeatId || !("evidence" in finding)) return false;
+          const citation = (finding as ConvergentReview["findings"][number]).evidence;
+          const targeted = section === "resolution"
+            ? citation.beatId === "resolution" && "field" in citation && citation.field === key
+            : citation.beatId === "story" && "field" in citation && citation.field === section;
+          return targeted && op.expected.includes(citation.quote);
+        });
+        if (!matching)
+          throw Error("Blueprint global replacement lacks a finding against this exact field or Arc goal.");
       }
       if (holder[key] !== op.expected) throw Error("Blueprint patch expected old value is stale.");
       holder[key] = op.value;

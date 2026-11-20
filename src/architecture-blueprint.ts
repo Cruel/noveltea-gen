@@ -1451,6 +1451,7 @@ async function performBlueprintDiagnosis(job: JobStartResult, snapshot: SkillSna
     let diagnosis: BlueprintDiagnosis;
     try { diagnosis = parse(); }
     catch (error) {
+      await diagnosisSession.context.beforeTurn(diagnosisSession.file);
       await promptStorySpecialist(diagnosisSession.session,
         "CONTROLLER REJECTED DIAGNOSTIC RESPONSE: " +
         (error instanceof Error ? error.message : "invalid evidence") +
@@ -1523,6 +1524,7 @@ async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillS
     let verdict: ConvergentReview;
     try { verdict = parse(); }
     catch (error) {
+      await fresh.context.beforeTurn(fresh.file);
       await promptStorySpecialist(fresh.session,
         "CONTROLLER REJECTED REPLACEMENT REVIEW PROTOCOL: " +
         (error instanceof Error ? error.message : "invalid reviewer evidence") +

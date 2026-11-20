@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { JobStartResult } from "../src/job.js";
+import { assertCompositionReviewerMatch } from "../src/composition-work.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
 import {
   compositionReviewCycleId,
@@ -184,8 +185,17 @@ test("negative Composition review, corrected refused-clue prose, same reviewer r
         [path],
         pin,
       );
-    assert.equal((await verify()).verdict, "pass");
-    assert.deepEqual((await verify()).sourceEvidence, passed.sourceEvidence);
+    const sealed = await verify();
+    assert.equal(sealed.verdict, "pass");
+    assert.deepEqual(sealed.sourceEvidence, passed.sourceEvidence);
+    // Exercise the exact guard used by the real Pi publication path, not only
+    // the pin reader. The live reviewer and pin reader construct opposite
+    // object insertion orders for otherwise identical verified fields.
+    const liveReview = { verdict: "pass" as const,
+      sourceEvidence: passed.sourceEvidence, concerns: [], sessionFile: reviewer.file };
+    assertCompositionReviewerMatch(sealed, liveReview);
+    assert.throws(() => assertCompositionReviewerMatch(sealed,
+      { ...liveReview, sessionFile: writer.file }), /copied reviewer receipt differs/);
 
     writeFileSync(
       join(cycleDir, "round-1.json"),

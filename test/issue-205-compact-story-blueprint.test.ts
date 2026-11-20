@@ -169,6 +169,30 @@ test("#205 a source-bound global fix can converge without inventing evidence bat
   /cannot approve/);
 });
 
+test("#205 a local Beat finding cannot authorize unrelated global answer or Arc rewrites", () => {
+  const local = clone(review);
+  local.findings[0]!.evidence = { beatId: "gate",
+    quote: "A dated service-gate record establishes an independent trail" } as typeof finding.evidence;
+  const localPatch = { ...patch, reviewDigest: blueprintDigest(local) };
+  assert.throws(() => applyBlueprintPatch(blueprint, local, localPatch),
+    /global replacement lacks a finding/);
+  const dual = { ...review, findings: [...local.findings, ...review.findings] };
+  assert.doesNotThrow(() => applyBlueprintPatch(blueprint, dual,
+    { ...patch, reviewDigest: blueprintDigest(dual) }));
+
+  const arcFinding = clone(review);
+  arcFinding.findings[0]!.evidence = { beatId: "story", field: "arcs",
+    quote: "Investigate the missing clerk" };
+  const arcPatch = {
+    ...patch, reviewDigest: blueprintDigest(arcFinding),
+    operations: [{ kind: "replace", findingBeatId: "gate",
+      path: "arcs/resolution/goal", expected: blueprint.arcs![1]!.goal,
+      value: "Reveal the confidential witness's identity" }],
+  };
+  assert.throws(() => applyBlueprintPatch(blueprint, arcFinding, arcPatch),
+    /global replacement lacks a finding/);
+});
+
 test("#205 source-bound reviewers reject impossible route totals and protected witness disclosure", () => {
   const route = clone(blueprint);
   route.feasibility!.playthrough = "Both exclusive routes each take 60 minutes and must be added together";

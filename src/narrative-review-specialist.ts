@@ -657,11 +657,11 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
   try {
     const file = session.sessionManager.getSessionFile();
     if (!file) throw Error("Postcommit review requires a durable read-only Pi session.");
+    // Admission must succeed before binding a reviewer identity. A budget
+    // pause here has no started protocol invocation or reviewer transcript.
+    await context!.beforeTurn(file ?? undefined);
     let cycle = await bindPostcommitReviewCycle(job, packet, snapshot,
       provider, model, thinking, { id: session.sessionId, file });
-    // A preflight budget pause must not strand an invocation that never made
-    // its first model call. Seal the start marker after admission, before prompt.
-    await context!.beforeTurn(file ?? undefined);
     await beginProtocolInvocation({ receiptFile: protocolReceipt,
       sourceDigest: packet.sourceDigest, contract: "reviewer.assignment-verdict.v1", session });
     if (file) await onSession(file);
@@ -729,16 +729,16 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
       },
       fresh: async () => {
         const opened = await sessionFor(job, snapshot, provider, model, thinking,
-          "review", undefined, assignment, "assignment-fidelity", true);
+          "review", undefined, assignment, "assignment-fidelity", true, scope);
         const next = opened.session;
         reviewedSession = next;
         const nextFile = next.sessionManager.getSessionFile();
         if (!nextFile) { next.dispose(); throw Error("Fresh reviewer lacks transcript."); }
-        await onSession(nextFile);
         return {
           session: next,
           start: async () => {
             await opened.context!.beforeTurn(nextFile);
+            await onSession(nextFile);
             await promptStorySpecialist(next, assignmentFidelityPrompt(snapshot, packet));
             const unread = required.filter(path =>
               !completedReads(next, job.worktreeStoryRoot, snapshot.path).includes(path));

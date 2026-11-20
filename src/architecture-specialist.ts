@@ -402,9 +402,14 @@ export async function authorArchitecture(
           draftReview = result.pin;
           break;
         }
-        if (result.convergence.reassess) throw new Error(
-          "Independent Architecture draft review requires independent reassessment " +
-          "after two nonproductive corrections; preserve draft and original Pi sessions.");
+        if (result.convergence.reassess) {
+          // Do not invoke the original writer again until a third, independent
+          // read-only Diagnostic has examined the sealed source and verdicts.
+          const diagnosis = await cycle.diagnose();
+          if (diagnosis.action !== "continue")
+            throw Error("Architecture Diagnostic recommended " + diagnosis.action +
+              "; original draft and review sessions are preserved for author-guided reconciliation.");
+        }
         await guardPiBudget(job, "architecture:precommit-writer:" + plan.version + ":" + iteration,
           sessionFile);
         await promptStorySpecialist(session,
