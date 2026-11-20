@@ -1,6 +1,6 @@
 # Bounded correction and recovery in Story generation
 
-Status: accepted; extends ADR 0002's goal-driven orchestration.
+Status: accepted as amended by [ADR 0006](0006-persistent-review-and-incremental-story-blueprints.md), which supersedes fresh substantive reviewer sessions per correction, hard semantic correction-count exhaustion, and semantic finding identity matching for ordinary review progression. Other recovery, authorization, integrity and protocol decisions remain applicable.
 
 ## Context
 

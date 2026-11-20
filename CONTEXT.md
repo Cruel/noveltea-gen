@@ -73,26 +73,38 @@ The agent responsible for interpreting an author objective against existing Stor
 **Work plan**:
 A revisable set of specialist assignments and dependencies intended to fulfill an author objective. Verified Story changes and author direction may alter remaining work without redefining the original objective.
 
+**Story Blueprint**:
+A provisional, Story-wide causal design establishing the central narrative resolution, major turning points, Milestones, and consequential outcomes without specifying all local evidence or scenes.
+
+**Milestone Blueprint**:
+A provisional design for one Milestone's causal Events, evidence, decisions, and downstream obligations, developed when its verified prerequisites are available.
+
 **Specialist assignment**:
 A bounded task derived from a Thread request or work plan, describing the specific outcome a specialist is responsible for producing. It is the reference for reviewing that specialist's proposed Story changes, rather than the original broad Story brief.
+
+**Review cycle**:
+A bounded collaboration between an independent, read-only reviewer and an authorized writer over successive revisions of the same work, retaining both conversations until review is resolved or escalated.
+
+**Diagnostic review**:
+A fresh independent assessment of a stalled or nonconverging Review cycle, used to distinguish genuine blockers from reviewer drift or unsuitable planning scope without granting approval or write authority.
 
 **Specialist review**:
 An independent semantic check of a specialist's proposed changes against its assignment and the relevant Story state. Reviews can cover a bounded group of related assignments; findings require a corrected draft or author-directed resolution of a disagreement, never argument-only approval.
 
 **Repair finding**:
-A source-bound, persistent description of an unmet Story obligation or defect discovered during a Turn. It identifies the same underlying problem across repeated specialist attempts, even when the explanation changes.
+A source-bound unmet Story obligation or defect discovered during a Turn that may require an authorized corrective assignment. Reviewers may follow multiple evolving concerns within one Review cycle without assigning a permanent identity to every observation.
 
 **Repair ledger**:
-The controller-owned record of Repair findings, attempts, assigned corrections and review outcomes across a Turn's execution and recovery. It is separate from canonical Story content and the agents' Pi conversation histories.
+Controller-owned recovery state linking authorized corrective work with verified revisions, submitted attempts, review outcomes and continuation authority. It does not own a reviewer's evolving semantic analysis or canonical Story content.
 
 **Corrective assignment**:
 A bounded specialist assignment authorized to resolve a Repair finding, including a defect in previously reviewed work. It preserves the original author objective and does not implicitly grant authority over protected decisions.
 
 **Repair cycle**:
-An orchestrated attempt to resolve a Repair finding through authorized specialist work and verification, possibly including a correction to previously completed work. Its attempts are tracked separately from local drafting corrections and transient infrastructure retries.
+A controller-mediated correction of a source-bound failure through authorized specialist work and verification, possibly revising earlier reviewed content. It is distinct from a Review cycle, which may address multiple evolving concerns within one bounded assignment.
 
 **Repair exhaustion**:
-A Turn outcome in which the permitted correction attempts have been consumed without resolving a Repair finding. The Turn's eligible completed work and evidence remain available for author-guided continuation.
+A safe stop when an unresolved correction cannot proceed within available authority, integrity safeguards or recovery limits. The Turn's eligible completed work and evidence remain available for author-guided continuation.
 
 **Review dispute**:
 A source-linked challenge to an independent specialist-review finding, presented for controller verification and, where needed, fresh independent adjudication. It cannot override the original verdict merely through an agent's argument.
