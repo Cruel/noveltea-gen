@@ -702,7 +702,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         const existingBlueprint = await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
           receipt.provider, receipt.model, receipt.blueprintTask, head);
         if (!existingBlueprint) await preflightPiAssignment(job,
-          "architecture-blueprint:" + receipt.plan!.version, { provider: receipt.provider, model: receipt.model });
+          "blueprint:" + receipt.plan!.version, { provider: receipt.provider, model: receipt.model });
         receipt.phase = "blueprinting";
         await persist(file, receipt);
         let pin: BlueprintPin;

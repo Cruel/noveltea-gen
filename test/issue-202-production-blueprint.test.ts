@@ -170,8 +170,10 @@ function promptText(messages: readonly unknown[]): string {
   return JSON.stringify(users.at(-1)?.content ?? "");
 }
 type Call = { prompt: string; tools: string[]; messages: readonly unknown[]; lastRole: string };
-function scripted(calls: Call[], scenario: "productive" | "stalled" = "productive"): Provider {
+function scripted(calls: Call[], scenario: "productive" | "stalled" = "productive",
+  crashFirstReviewer = false): Provider {
   let reviewerRound = 0;
+  let reviewerCrashed = false;
   let writerRound = 0;
   let protocolRepaired = false;
   const verdicts = scenario === "productive"
@@ -190,6 +192,10 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" = "productiv
     const lastRole = ctx.messages.at(-1)?.role ?? "";
     const reviewer = prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER");
     calls.push({ prompt, tools: [...active], messages: structuredClone(ctx.messages), lastRole });
+    if (reviewer && crashFirstReviewer && !reviewerCrashed) {
+      reviewerCrashed = true;
+      throw Error("Simulated crash during initial reviewer prompt before verdict sealing.");
+    }
     const needRead = (prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") || reviewer) &&
       lastRole !== "toolResult";
     let content: AssistantMessage["content"];
@@ -275,6 +281,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
   let controller: SandboxController | undefined;
   let stalledJobId: string | undefined;
   let graphJobId: string | undefined;
+  let crashGraphJobId: string | undefined;
   let server: ReturnType<typeof createControllerServer> | undefined;
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -517,10 +524,10 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       story: graphStory, job: graphJobId!, action: "inspect",
     });
     await configurePiPolicy(graphJob, { version: 1,
-      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 5 } });
+      profile: { provider: model.provider, model: model.id }, limits: { steps: 1 } });
     await assert.rejects(graphRun(), (error: unknown) =>
-      error instanceof PiBudgetPause && error.reason === "modelCalls",
-      "production graph pauses after full initial stages but before first reviewer");
+      error instanceof PiBudgetPause && error.reason === "steps",
+      "one remaining step admits the planner exactly once, then pauses before first reviewer");
     const graphDir = join(graphJob.stateDir, "architecture-blueprints");
     assert.ok(existsSync(join(graphDir, "plan-1-pause-initial-review.json")),
       "initial review boundary must be durable before its budget exception");
@@ -540,6 +547,15 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       assert.equal(invalidPause.recovery?.status, "blocked",
         "reconciliation must reject a forged initial-review pause before resuming Pi");
     } finally { writeFileSync(initialMarkerPath, originalMarker); }
+    const headerPath = join(graphDir, "plan-1-outline-header.json");
+    const headerBytes = readFileSync(headerPath);
+    try {
+      writeFileSync(headerPath, JSON.stringify({ ...JSON.parse(headerBytes.toString("utf8")),
+        premise: "Tampered staged premise",
+      }));
+      assert.equal((await graphInspect()).recovery?.status, "blocked",
+        "staged header tampering is rejected by the shared verifier");
+    } finally { writeFileSync(headerPath, headerBytes); }
     const graphWriterBefore = originalSealed.plannerSessionId;
     // Exercise the exact-session recovery contract when legitimate historical
     // Pi session data exceeds the opportunistic 1.5 MB reuse threshold. The
@@ -566,7 +582,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     const completeBudget = (await inspectPiPolicy(job)).budget.modelCalls;
     await configurePiPolicy(graphJob, { version: 1,
       profile: { provider: model.provider, model: model.id },
-      limits: { modelCalls: completeBudget } });
+      limits: { steps: 3, modelCalls: completeBudget } });
     await assert.rejects(graphRun(), (error: unknown) =>
       error instanceof PiBudgetPause && error.reason === "modelCalls",
       "graph reaches verified Blueprint approval, then pauses before canonical writer");
@@ -580,11 +596,60 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       c.prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") && c.lastRole === "toolResult").length,
     1, "graph resume does not regenerate original staged Blueprint");
     assert.equal(git(graphJob.worktreeRoot, "status", "--porcelain"), "");
+
+    // Crash after the reviewer is admitted on a resumed initial pause but
+    // before any independent verdict is sealed. A fresh reviewer must never
+    // replay the lost turn, even though the initial budget-pause marker exists.
+    crashGraphJobId = randomUUID();
+    const crashDb = new DatabaseSync(join(app, "studio.sqlite"));
+    try {
+      crashDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+        .run(crashGraphJobId, owner, "story", graphBase, null);
+    } finally { crashDb.close(); }
+    const crashJob = await startStoryJob({ story: graphStory, job: crashGraphJobId,
+      worktreeCacheRoot: scoped });
+    const crashCalls: Call[] = [];
+    const crashRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    crashRuntime.registerNativeProvider(scripted(crashCalls, "productive", true));
+    await crashRuntime.refresh({ allowNetwork: false });
+    const crashRun = () => withJobModelRuntime(crashRuntime, () =>
+      runArchitectureJob({ story: graphStory, job: crashGraphJobId!,
+        action: "run", contract: graphContract, task, provider: model.provider,
+        model: model.id, skillsSource: source, validatorSource: source }));
+    const crashInspect = () => runArchitectureJob({
+      story: graphStory, job: crashGraphJobId!, action: "inspect",
+    });
+    await configurePiPolicy(crashJob, { version: 1,
+      profile: { provider: model.provider, model: model.id }, limits: { steps: 1 } });
+    await assert.rejects(crashRun(), (err: unknown) =>
+      err instanceof PiBudgetPause && err.reason === "steps");
+    const crashDir = join(crashJob.stateDir, "architecture-blueprints");
+    assert.ok(existsSync(join(crashDir, "plan-1-pause-initial-review.json")));
+    assert.equal((await crashInspect()).recovery?.status, "ready");
+    await configurePiPolicy(crashJob, { version: 1,
+      profile: { provider: model.provider, model: model.id }, limits: { steps: 3 } });
+    await assert.rejects(crashRun(), /Simulated crash during initial reviewer prompt|did not read Creative Direction/);
+    assert.ok(crashCalls.some(call => call.prompt.includes(
+      "INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER")),
+    "the first reviewer prompt must have been attempted before failure");
+    const startReceipt = JSON.parse(readFileSync(join(crashDir,
+      "plan-1-initial-review-started.json"), "utf8"));
+    assert.equal(startReceipt.schema, "noveltea-blueprint-initial-review-start/v1");
+    assert.equal(startReceipt.blueprintDigest.length, 64);
+    assert.ok(startReceipt.reviewerSessionId);
+    assert.equal(existsSync(join(crashDir, "plan-1-verdict-0.json")), false);
+    assert.equal((await crashInspect()).recovery?.status, "blocked",
+      "reviewer crash is blocked despite otherwise intact pause marker");
+    const callsBefore = crashCalls.length;
+    await assert.rejects(crashRun(), /Architecture recovery blocked/);
+    assert.equal(crashCalls.length, callsBefore,
+      "crashed first review cannot be replayed by any Pi session");
   } finally {
     for (const key of keys) {
       if (old[key] === undefined) delete process.env[key];
       else process.env[key] = old[key];
     }
+    if (controller && crashGraphJobId) await controller.dispose(crashGraphJobId);
     if (controller && graphJobId) await controller.dispose(graphJobId);
     if (controller && stalledJobId) await controller.dispose(stalledJobId);
     if (controller) await controller.dispose(id);

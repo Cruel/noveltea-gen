@@ -221,6 +221,8 @@ const pausePath = (job: JobStartResult, version: number, iteration: number, boun
   join(root(job), "plan-" + version + "-pause-" + iteration + "-" + boundary + ".json");
 const initialPausePath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-pause-initial-review.json");
+const initialReviewStartedPath = (job: JobStartResult, version: number) =>
+  join(root(job), "plan-" + version + "-initial-review-started.json");
 async function obligationSources(job: JobStartResult, plan: Plan, task: string): Promise<ObligationSources> {
   return { foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
     contract: plan.contract, task };
@@ -276,44 +278,17 @@ async function transcript(job: JobStartResult, file: string, id: string, directo
   try { header = JSON.parse(first ?? "") as typeof header; } catch { throw Error("Invalid blueprint Pi transcript header."); }
   if (header.type !== "session" || header.id !== id) throw Error("Blueprint Pi transcript identity mismatch.");
 }
-async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
-  provider: string, model: string, task: string, head: string, pausedPin?: BlueprintPin): Promise<{
-    blueprint: CausalBlueprint; pin: BlueprintPin; rounds: ReviewRound[]; stalled: number;
-  } | null> {
-  const path = approvedPath(job, plan.version);
-  if (!pausedPin && !existsSync(path)) return null;
-  const record = pausedPin ?? await safeRead(path, root(job)) as BlueprintPin;
-  const expected = sameLineage(job, plan, snapshot, provider, model, task, head);
-  if (!record || !["noveltea-approved-blueprint/v2", "noveltea-approved-blueprint/v3",
-      "noveltea-approved-blueprint/v4"].includes(record.schema) ||
-      (record.schema !== "noveltea-approved-blueprint/v2"
-        ? !record.stagesDigest || !HASH.test(record.stagesDigest)
-        : record.stagesDigest !== undefined) ||
-      (record.schema === "noveltea-approved-blueprint/v4"
-        ? record.reviewCycleId !== reviewCycleId(expected)
-        : record.reviewCycleId !== undefined) ||
-      Object.entries(expected).some(([key, value]) => record[key as keyof BlueprintPin] !== value) ||
-      !Number.isSafeInteger(record.draftVersion) || record.draftVersion < 0 ||
-      !HASH.test(record.blueprintDigest) || !HASH.test(record.reviewDigest) ||
-      !HASH.test(record.obligationsDigest))
-    throw Error("Approved causal blueprint is stale, incomplete or bound to a different scope.");
-  const admission = await safeRead(admittedPath(job, plan.version), root(job));
-  if (!strict(admission, Object.keys(expected)) ||
-      Object.entries(expected).some(([key, value]) => admission[key] !== value))
-    throw Error("Causal blueprint source-bound pre-session admission is stale or absent.");
-  const start = await safeRead(join(root(job), "plan-" + plan.version + "-started.json"), root(job));
-  if (!start || typeof start !== "object" ||
-      Object.entries(expected).some(([key, value]) =>
-        (start as Record<string, unknown>)[key] !== value) ||
-      (start as Record<string, unknown>).plannerSessionId !== record.plannerSessionId ||
-      (start as Record<string, unknown>).plannerSessionFile !== record.plannerSessionFile)
-    throw Error("Causal blueprint source-bound planner start receipt is stale or absent.");
-  const sources = await obligationSources(job, plan, task);
-  const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
+/** Single verifier for approved and initial-pause v1/v2/v3 staged drafts. */
+async function verifyStageChain(job: JobStartResult, plan: Plan, stageDigest?: string): Promise<{
+  initial: CausalBlueprint; outline?: BlueprintOutline; stages?: unknown;
+}> {
+  let outline: BlueprintOutline | undefined;
+  let stages: unknown;
   const initial = parseCausalBlueprint(JSON.stringify(await safeRead(
     draftPath(job, plan.version, 0), root(job))));
-  if (record.schema !== "noveltea-approved-blueprint/v2") {
+  if (stageDigest !== undefined) {
     const receipt = await safeRead(stagesPath(job, plan.version), root(job));
+    stages = receipt;
     const batched = !!receipt && typeof receipt === "object" &&
       "schema" in receipt && receipt.schema === "noveltea-blueprint-stages/v3";
     const split = batched || (!!receipt && typeof receipt === "object" &&
@@ -326,9 +301,9 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
         !["noveltea-blueprint-stages/v1", "noveltea-blueprint-stages/v2",
           "noveltea-blueprint-stages/v3"].includes(String(receipt.schema)) ||
         !Array.isArray(receipt.evidenceDigests) ||
-        sha(receipt) !== record.stagesDigest)
+        sha(receipt) !== stageDigest)
       throw Error("Approved causal blueprint stage receipt changed or is missing.");
-    const outline = parseBlueprintOutline(JSON.stringify(
+    outline = parseBlueprintOutline(JSON.stringify(
       await safeRead(outlinePath(job, plan.version), root(job))));
     if (sha(outline) !== receipt.outlineDigest)
       throw Error("Approved causal outline changed after admission.");
@@ -375,6 +350,43 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
     if (!isDeepStrictEqual(assembleBlueprintStages(outline, evidence), initial))
       throw Error("Approved causal draft differs from its staged source-bound evidence.");
   }
+  return { initial, outline, stages };
+}
+async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
+  provider: string, model: string, task: string, head: string, pausedPin?: BlueprintPin): Promise<{
+    blueprint: CausalBlueprint; pin: BlueprintPin; rounds: ReviewRound[]; stalled: number;
+  } | null> {
+  const path = approvedPath(job, plan.version);
+  if (!pausedPin && !existsSync(path)) return null;
+  const record = pausedPin ?? await safeRead(path, root(job)) as BlueprintPin;
+  const expected = sameLineage(job, plan, snapshot, provider, model, task, head);
+  if (!record || !["noveltea-approved-blueprint/v2", "noveltea-approved-blueprint/v3",
+      "noveltea-approved-blueprint/v4"].includes(record.schema) ||
+      (record.schema !== "noveltea-approved-blueprint/v2"
+        ? !record.stagesDigest || !HASH.test(record.stagesDigest)
+        : record.stagesDigest !== undefined) ||
+      (record.schema === "noveltea-approved-blueprint/v4"
+        ? record.reviewCycleId !== reviewCycleId(expected)
+        : record.reviewCycleId !== undefined) ||
+      Object.entries(expected).some(([key, value]) => record[key as keyof BlueprintPin] !== value) ||
+      !Number.isSafeInteger(record.draftVersion) || record.draftVersion < 0 ||
+      !HASH.test(record.blueprintDigest) || !HASH.test(record.reviewDigest) ||
+      !HASH.test(record.obligationsDigest))
+    throw Error("Approved causal blueprint is stale, incomplete or bound to a different scope.");
+  const admission = await safeRead(admittedPath(job, plan.version), root(job));
+  if (!strict(admission, Object.keys(expected)) ||
+      Object.entries(expected).some(([key, value]) => admission[key] !== value))
+    throw Error("Causal blueprint source-bound pre-session admission is stale or absent.");
+  const start = await safeRead(join(root(job), "plan-" + plan.version + "-started.json"), root(job));
+  if (!start || typeof start !== "object" ||
+      Object.entries(expected).some(([key, value]) =>
+        (start as Record<string, unknown>)[key] !== value) ||
+      (start as Record<string, unknown>).plannerSessionId !== record.plannerSessionId ||
+      (start as Record<string, unknown>).plannerSessionFile !== record.plannerSessionFile)
+    throw Error("Causal blueprint source-bound planner start receipt is stale or absent.");
+  const sources = await obligationSources(job, plan, task);
+  const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
+  const { initial } = await verifyStageChain(job, plan, record.stagesDigest);
   validateBlueprintObligations(manifest, initial, sources);
   if (sha(manifest) !== record.obligationsDigest)
     throw Error("Approved causal proof obligations changed after review.");
@@ -510,61 +522,21 @@ async function readInitialReviewPause(job: JobStartResult, plan: Plan, snapshot:
   if (bytes.length !== marker.plannerTranscriptBytes ||
       createHash("sha256").update(bytes).digest("hex") !== marker.plannerTranscriptDigest)
     throw Error("Initial Blueprint planner transcript changed after safe pause.");
+  // An initial pause is usable only before the first reviewer is admitted.
+  // The write-once start receipt intentionally outlives a crash in the
+  // reviewer prompt or before its verdict is sealed.
+  if (existsSync(initialReviewStartedPath(job, plan.version)))
+    throw Error("Initial Blueprint reviewer already started; inspect original session instead of replay.");
   const { readdir } = await import("node:fs/promises");
   if ((await readdir(root(job))).some(name => new RegExp(
     "^plan-" + plan.version + "-(verdict|review-session|convergence|patch|approved)-").test(name) ||
     name === "plan-" + plan.version + "-approved.json"))
     throw Error("Initial Blueprint review has already started or progressed; inspect instead of replay.");
-  const stages = await safeRead(stagesPath(job, plan.version), root(job)) as {
-    schema?: string; headerDigest?: string; beatDigests?: string[];
-    coreDigest?: string; routesDigest?: string; outlineDigest?: string; evidenceDigests?: string[];
-  };
-  if (!strict(stages, ["schema", "headerDigest", "beatDigests", "coreDigest",
-        "routesDigest", "outlineDigest", "evidenceDigests"]) ||
-      stages.schema !== "noveltea-blueprint-stages/v3" ||
-      sha(stages) !== marker.stagesDigest)
-    throw Error("Initial Blueprint stage chain differs from paused receipt.");
-  const header = parseBlueprintOutlineHeader(JSON.stringify(await safeRead(
-    outlineHeaderPath(job, plan.version), root(job))));
-  if (sha(header) !== stages.headerDigest ||
-      !Array.isArray(stages.beatDigests) ||
-      stages.beatDigests.length !== Math.ceil(header.beatIds.length / BEAT_BATCH_SIZE))
-    throw Error("Initial Blueprint header or beat digests changed.");
-  const beats: BlueprintOutlineBeat[] = [];
-  for (let first = 0; first < header.beatIds.length; first += BEAT_BATCH_SIZE) {
-    const rows = await safeRead(outlineBeatPath(job, plan.version, first), root(job));
-    if (!Array.isArray(rows) || sha(rows) !== stages.beatDigests[first / BEAT_BATCH_SIZE])
-      throw Error("Initial Blueprint staged beat batch changed.");
-    beats.push(...parseBlueprintBeatBatch(rows.map(x => JSON.stringify(x)).join("\n"),
-      header, first, beats));
-  }
-  const core = assembleBlueprintOutlineCore(header, beats);
-  if (sha(core) !== stages.coreDigest ||
-      !isDeepStrictEqual(core, await safeRead(outlineCorePath(job, plan.version), root(job))))
-    throw Error("Initial Blueprint causal core changed.");
-  const routes = await safeRead(outlineRoutesPath(job, plan.version), root(job));
-  if (!Array.isArray(routes) || sha(routes) !== stages.routesDigest)
-    throw Error("Initial Blueprint routes changed.");
-  const outline = assembleCurrentBlueprintOutline(core, routes as BlueprintRouteConsequence[]);
-  if (sha(outline) !== stages.outlineDigest ||
-      !isDeepStrictEqual(outline, parseBlueprintOutline(JSON.stringify(
-        await safeRead(outlinePath(job, plan.version), root(job))))))
-    throw Error("Initial Blueprint outline changed.");
-  const evidence: BlueprintEvidence[] = [];
-  if (!Array.isArray(stages.evidenceDigests) ||
-      stages.evidenceDigests.length !== Math.ceil(outline.beats.length / EVIDENCE_BATCH_SIZE))
-    throw Error("Initial Blueprint evidence count changed.");
-  for (let first = 0; first < outline.beats.length; first += EVIDENCE_BATCH_SIZE) {
-    const rows = await safeRead(evidencePath(job, plan.version, first), root(job));
-    if (!Array.isArray(rows) || sha(rows) !== stages.evidenceDigests[first / EVIDENCE_BATCH_SIZE])
-      throw Error("Initial Blueprint evidence batch changed.");
-    evidence.push(...parseBlueprintEvidence(rows.map(x => JSON.stringify(x)).join("\n"),
-      outline, first));
-  }
-  const initial = assembleBlueprintStages(outline, evidence);
-  if (sha(initial) !== marker.draftDigest ||
-      !isDeepStrictEqual(initial, await safeRead(draftPath(job, plan.version, 0), root(job))))
-    throw Error("Initial Blueprint draft differs from the sealed stages.");
+  const verifiedStages = await verifyStageChain(job, plan, marker.stagesDigest as string);
+  const { initial, outline, stages } = verifiedStages;
+  if (!outline || !stages || (stages as { schema?: string }).schema !== "noveltea-blueprint-stages/v3" ||
+      sha(initial) !== marker.draftDigest)
+    throw Error("Initial Blueprint draft or stage chain differs from paused receipt.");
   const sources = await obligationSources(job, plan, task);
   const manifest = validateBlueprintObligations(await safeRead(
     obligationsPath(job, plan.version), root(job)), initial, sources);
@@ -1372,6 +1344,15 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         }
       }
       let verdict: BlueprintReview;
+      if (version === 0) {
+        await immutable(initialReviewStartedPath(job, plan.version), {
+          schema: "noveltea-blueprint-initial-review-start/v1",
+          ...sameLineage(job, plan, snapshot, provider, model, task, head),
+          reviewCycleId: cycleId, blueprintDigest: sha(blueprint),
+          plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
+          reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
+        });
+      }
       const messageStart = reviewer.session.messages.length;
       await promptStorySpecialist(reviewer.session,
         (version === 0 ? reviewer.context.contextNote :

@@ -50,7 +50,8 @@ function cited(blueprint: CausalBlueprint, value: unknown, from?: string) {
   const candidates = new Set(from ? [from] : []);
   for (const beat of blueprint.beats)
     if (beat.dependsOn.some(id => candidates.has(id))) candidates.add(beat.id);
-  if (citation.beatId === "resolution") {
+  if ("field" in citation) {
+    if (citation.beatId !== "resolution") return false;
     if (!exact(citation, ["beatId", "field", "quote"]) ||
         !["conclusion", "uncertainty", "supportedBy"].includes(String(citation.field)) ||
         (from && !blueprint.resolution.supportedBy.some(id => candidates.has(id))))

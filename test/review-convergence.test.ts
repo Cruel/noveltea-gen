@@ -161,6 +161,48 @@ test("a precise resolution-only correction passes with every beat byte-identical
   }] }, narrowed, [{ blueprint: draft0, verdict: oldReview }], sources), /evidence is stale/);
 });
 
+test("a beat named resolution and the actual resolution field are distinct cited sources", () => {
+  const withResolutionBeat = structuredClone(draft0);
+  withResolutionBeat.beats.push({
+    id: "resolution", purpose: "Reconcile the dated records", dependsOn: ["archive"],
+    change: "The refuge records are compared at the final archive",
+    decisions: [], observations: [{
+      source: "registrar ledger",
+      observable: "A registrar entry records a protected arrival",
+      supports: "The alias may match the missing clerk",
+      limits: "No independent verification of identity",
+    }],
+  });
+  withResolutionBeat.resolution.supportedBy = ["resolution"];
+  withResolutionBeat.resolution.conclusion = "The clerk definitely arrived at the shelter";
+  const first: ConvergentReview = {
+    schema: "noveltea-blueprint-review/v2", status: "revise", prior: [],
+    findings: [finding("resolution", "A registrar entry records a protected arrival")],
+  };
+  assert.equal(evaluateReviewConvergence(first, withResolutionBeat, [], sources).review, first,
+    "without a field, resolution identifies the existing causal beat");
+  const fixed = structuredClone(withResolutionBeat);
+  fixed.resolution.conclusion = "The registrar entry suggests but cannot prove an arrival";
+  const passed: ConvergentReview = {
+    schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
+    prior: [prior(0, 0, "resolved", "resolution",
+      "The registrar entry suggests but cannot prove an arrival")],
+  };
+  passed.prior[0]!.evidence = {
+    beatId: "resolution", field: "conclusion",
+    quote: "The registrar entry suggests but cannot prove an arrival",
+  };
+  assert.equal(evaluateReviewConvergence(passed, fixed,
+    [{ blueprint: withResolutionBeat, verdict: first }], sources).productive, true,
+    "with an explicit field, resolution identifies the corrected root conclusion");
+  assert.throws(() => evaluateReviewConvergence({ ...first, findings: [{
+    ...first.findings[0]!,
+    evidence: { beatId: "resolution", field: "conclusion",
+      quote: "A registrar entry records a protected arrival" },
+  }] }, withResolutionBeat, [], sources), /source citation/,
+    "a root citation must never search a same-named beat");
+});
+
 test("missing earlier blockers, fabricated source quotes and false new origins fail closed", () => {
   const old = [{ blueprint: draft0, verdict: initial }];
   assert.throws(() => evaluateReviewConvergence(
