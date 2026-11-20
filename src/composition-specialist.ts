@@ -1,5 +1,6 @@
 import { createPiStatusTool } from "./pi-work-status.js";
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -10,10 +11,19 @@ import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
-import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
+import { preparePiContext, guardPiBudget, piNarrativeGroup } from "./job-pi-policy.js";
 import { completedContextReads } from "./story-context.js";
 import type { SkillConfig } from "./skills.js";
 import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
+import { reviewCycleId, assertReviewCycleSession, sourceReviewDiagnosticTrigger } from "./review-cycle.js";
+import {
+  compositionReviewConvergence,
+  compositionReviewRequirements,
+  parseCompositionReview,
+  parseCompositionDiagnosis,
+  type CompositionReviewRound,
+  type CompositionReviewVerdict,
+} from "./composition-review-policy.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export interface CompositionAssignment {
@@ -37,7 +47,8 @@ export interface CompositionAssignment {
  * Do not turn a contingent account in an Event body into a performed route. */
 export function compositionOptionalDialoguePolicy(eventOnly: boolean): string {
   if (!eventOnly) return "";
-  return "EVENT-ONLY SOURCE CONTRACT: The independently approved Event-only Milestone needs " +
+  return (
+    "EVENT-ONLY SOURCE CONTRACT: The independently approved Event-only Milestone needs " +
     "playable prose for its enacted, typed Event steps, not a fabricated formal Choice. " +
     "If the Event narrative mentions possible OPTIONAL future witness testimony, voluntary " +
     "cooperation, refusal or withdrawal without typed routes/effects that enact them, " +
@@ -48,7 +59,8 @@ export function compositionOptionalDialoguePolicy(eventOnly: boolean): string {
     "in laterObligations for separately authorized design; it is NOT a reason to " +
     "block the already-verified mandatory Event. If the original author really " +
     "requires that dialogue to fulfill THIS Milestone, report architecturalConflicts " +
-    "instead and do not invent its branches. ";
+    "instead and do not invent its branches. "
+  );
 }
 export interface CompositionEvidence {
   modifiedRecords: string[];
@@ -56,6 +68,7 @@ export interface CompositionEvidence {
   obligations: string[];
   skillReads: string[];
   piSessionFile?: string;
+  piSessionId?: string;
 }
 export interface SemanticReview {
   verdict: "pass" | "block";
@@ -65,7 +78,8 @@ export interface SemanticReview {
 }
 
 const catalog = [
-  "nt-catalog/SKILL.md", "nt-catalog/references/records.md",
+  "nt-catalog/SKILL.md",
+  "nt-catalog/references/records.md",
   "nt-catalog/references/progression.md",
   "nt-catalog/references/authority-and-validation.md",
   "nt-catalog/references/glossary.md",
@@ -76,7 +90,9 @@ const guidance = ["nt-narrative-composition/SKILL.md", ...catalog];
 export function parseSpecialistJson(text: string): Record<string, unknown> {
   const objects: Record<string, unknown>[] = [];
   for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
-    let depth = 0, quoted = false, escaped = false;
+    let depth = 0,
+      quoted = false,
+      escaped = false;
     for (let end = start; end < text.length; end++) {
       const c = text[end]!;
       if (quoted) {
@@ -88,95 +104,190 @@ export function parseSpecialistJson(text: string): Record<string, unknown> {
       else if (c === "}" && --depth === 0) {
         try {
           const data: unknown = JSON.parse(text.slice(start, end + 1));
-          if (data && typeof data === "object" && !Array.isArray(data)) objects.push(data as Record<string, unknown>);
-        } catch { /* next candidate */ }
+          if (data && typeof data === "object" && !Array.isArray(data))
+            objects.push(data as Record<string, unknown>);
+        } catch {
+          /* next candidate */
+        }
         break;
       }
     }
   }
-  const match = objects.reverse().find(data => "modifiedRecords" in data || "verdict" in data);
+  const match = objects.reverse().find((data) => "modifiedRecords" in data || "verdict" in data);
   if (!match) throw new Error("Composition specialist returned no parseable JSON manifest.");
   return match;
 }
 function strings(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(s => typeof s === "string" && s.length > 0);
+  return Array.isArray(value) && value.every((s) => typeof s === "string" && s.length > 0);
 }
-async function createSession(job: JobStartResult, snapshot: SkillSnapshot, assignment: CompositionAssignment,
-  provider: string, modelId: string, thinking: "low" | "high" | undefined,
-  phase: "write" | "review", extraPaths: string[] = [], insideWriter = false) {
+async function createSession(
+  job: JobStartResult,
+  snapshot: SkillSnapshot,
+  assignment: CompositionAssignment,
+  provider: string,
+  modelId: string,
+  thinking: "low" | "high" | undefined,
+  phase: "write" | "review" | "diagnostic",
+  extraPaths: string[] = [],
+  insideWriter = false,
+) {
   const project = await openStoryProject(job.worktreeStoryRoot);
-  const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
-    skillDirs: [], requiredSkills: ["nt-narrative-composition", "nt-catalog"] };
-  const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true,
-    config, [], phase === "review" ? "reviewer" : "specialist");
+  const config: SkillConfig = {
+    discovery: "explicit-only",
+    novelteaSkills: snapshot.path,
+    skillDirs: [],
+    requiredSkills: ["nt-narrative-composition", "nt-catalog"],
+  };
+  const { loader, settingsManager } = createProjectResourceLoader(
+    project,
+    undefined,
+    true,
+    config,
+    [],
+    phase !== "write" ? "reviewer" : "specialist",
+  );
   await loader.reload();
   const { skills, diagnostics } = loader.getSkills();
-  for (const diag of diagnostics) if (diag.type === "error") throw new Error("Composition skill discovery: " + diag.message);
+  for (const diag of diagnostics)
+    if (diag.type === "error") throw new Error("Composition skill discovery: " + diag.message);
   for (const name of ["nt-narrative-composition", "nt-catalog"]) {
-    if (!skills.some(s => s.name === name && s.filePath.startsWith(join(snapshot.path, "skills") + sep))) {
+    if (!skills.some((s) => s.name === name && s.filePath.startsWith(join(snapshot.path, "skills") + sep))) {
       throw new Error("Missing pinned composition specialist skill: " + name);
     }
   }
   const runtime = await createJobModelRuntime();
   const dir = join(job.stateDir, "composition-sessions", assignment.workItemId, phase);
-  const context = await preparePiContext(job, project, {
-    group: piNarrativeGroup("composition:" + phase, assignment.sourcePaths, assignment.milestoneId),
-    step: "composition:" + assignment.workItemId + ":" + phase,
-    paths: [...assignment.sourcePaths, ...extraPaths], snapshot: snapshot.id,
-    task: { kind: "dialogue", ids: assignment.eventIds, scope: "related" },
-    provider, model: modelId, thinking, directory: dir, insideWriter,
-  }, runtime);
-  const sandboxTools = await selectSandboxPiTools(job, snapshot, skills, undefined,
-    phase === "review" ? "read-only" : "writer", phase === "review" ? "reviewer" : "specialist");
+  const context = await preparePiContext(
+    job,
+    project,
+    {
+      group: piNarrativeGroup("composition:" + phase, assignment.sourcePaths, assignment.milestoneId),
+      step: "composition:" + assignment.workItemId + ":" + phase,
+      paths: [...assignment.sourcePaths, ...extraPaths],
+      snapshot: snapshot.id,
+      task: { kind: "dialogue", ids: assignment.eventIds, scope: "related" },
+      provider,
+      model: modelId,
+      thinking,
+      directory: dir,
+      insideWriter,
+    },
+    runtime,
+  );
+  const sandboxTools = await selectSandboxPiTools(
+    job,
+    snapshot,
+    skills,
+    undefined,
+    phase !== "write" ? "read-only" : "writer",
+    phase !== "write" ? "reviewer" : "specialist",
+  );
   const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
+    cwd: project.root,
+    modelRuntime: runtime,
+    model: context.model,
+    thinkingLevel: context.thinking,
+    resourceLoader: loader,
+    settingsManager,
     sessionManager: context.manager,
-    customTools: [...(sandboxTools ?? []), ...(phase === "write" ? [createStoryValidateTool(job)] : []), context.contextTool, createPiStatusTool()],
-    noTools: "all", tools: phase === "write"
-      ? [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"]
-      : [...SANDBOX_READ_ONLY_TOOLS, "story_context", "report_status"],
+    customTools: [
+      ...(sandboxTools ?? []),
+      ...(phase === "write" ? [createStoryValidateTool(job)] : []),
+      context.contextTool,
+      createPiStatusTool(),
+    ],
+    noTools: "all",
+    tools:
+      phase === "write"
+        ? [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"]
+        : [...SANDBOX_READ_ONLY_TOOLS, "story_context", "report_status"],
   });
   if (context.thinking && session.thinkingLevel !== context.thinking) {
-    session.dispose(); throw new Error("Pi did not honor requested thinking effort.");
+    session.dispose();
+    throw new Error("Pi did not honor requested thinking effort.");
   }
-  return { session, project, context, sandboxed: !!sandboxTools,
-    pinned: guidance.map(p => join(snapshot.path, "skills", p)) };
+  return {
+    session,
+    project,
+    context,
+    sandboxed: !!sandboxTools,
+    pinned: guidance.map((p) => join(snapshot.path, "skills", p)),
+  };
 }
 function lastReply(session: Awaited<ReturnType<typeof createSession>>["session"]) {
-  const last = [...session.messages].reverse().find(m => m.role === "assistant");
+  const last = [...session.messages].reverse().find((m) => m.role === "assistant");
   if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
-    throw new Error("Composition Pi turn failed: " + (last?.role === "assistant" ? last.stopReason : "no response"));
+    throw new Error(
+      "Composition Pi turn failed: " + (last?.role === "assistant" ? last.stopReason : "no response"),
+    );
   }
-  return last.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+  return last.content
+    .filter((c) => c.type === "text")
+    .map((c) => c.text)
+    .join("\n");
 }
-function toolPaths(session: Awaited<ReturnType<typeof createSession>>["session"], projectRoot: string, snapshotRoot: string) {
-  const done = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-    m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-  const direct = session.messages.flatMap(m => m.role === "assistant"
-    ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> =>
-      c.type === "toolCall" && done.has(c.id) &&
-      typeof c.arguments?.path === "string").map(c => {
-        const path = canonicalPinnedReadPath(c.arguments.path as string, projectRoot, snapshotRoot);
-        return { tool: c.name, path,
-          relative: relative(projectRoot, path).split(sep).join("/") };
-      }) : []);
-  return [...direct, ...completedContextReads(session.messages, projectRoot).map(relativePath => ({
-    tool: "read", path: resolve(projectRoot, relativePath), relative: relativePath,
-  }))];
+function toolPaths(
+  session: Awaited<ReturnType<typeof createSession>>["session"],
+  projectRoot: string,
+  snapshotRoot: string,
+  from = 0,
+) {
+  const messages = session.messages.slice(from);
+  const done = new Set(
+    messages
+      .filter((m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult" && !m.isError)
+      .map((m) => m.toolCallId),
+  );
+  const direct = messages.flatMap((m) =>
+    m.role === "assistant"
+      ? m.content
+          .filter(
+            (c): c is Extract<typeof c, { type: "toolCall" }> =>
+              c.type === "toolCall" && done.has(c.id) && typeof c.arguments?.path === "string",
+          )
+          .map((c) => {
+            const path = canonicalPinnedReadPath(c.arguments.path as string, projectRoot, snapshotRoot);
+            return { tool: c.name, path, relative: relative(projectRoot, path).split(sep).join("/") };
+          })
+      : [],
+  );
+  return [
+    ...direct,
+    ...completedContextReads(messages, projectRoot).map((relativePath) => ({
+      tool: "read",
+      path: resolve(projectRoot, relativePath),
+      relative: relativePath,
+    })),
+  ];
 }
-export async function authorComposition(job: JobStartResult, snapshot: SkillSnapshot,
-  assignment: CompositionAssignment, provider: string, modelId: string,
-  thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
-  verifyDraft: (evidence: CompositionEvidence) => Promise<string[]>): Promise<CompositionEvidence> {
-  const { session, project, pinned, context, sandboxed } = await createSession(job, snapshot, assignment,
-    provider, modelId, thinking, "write");
+export async function authorComposition(
+  job: JobStartResult,
+  snapshot: SkillSnapshot,
+  assignment: CompositionAssignment,
+  provider: string,
+  modelId: string,
+  thinking: "low" | "high" | undefined,
+  onSession: (file: string, id: string) => Promise<void>,
+  verifyDraft: (evidence: CompositionEvidence) => Promise<string[]>,
+): Promise<CompositionEvidence> {
+  const { session, project, pinned, context, sandboxed } = await createSession(
+    job,
+    snapshot,
+    assignment,
+    provider,
+    modelId,
+    thinking,
+    "write",
+  );
   try {
     const sessionFile = session.sessionManager.getSessionFile();
-    if (sessionFile) await onSession(sessionFile);
-    let prompt = "You are a pinned nt-narrative-composition author for one bounded composition milestone. " +
+    if (sessionFile) await onSession(sessionFile, session.sessionId);
+    let prompt =
+      "You are a pinned nt-narrative-composition author for one bounded composition milestone. " +
       "FIRST read ALL pinned guidance files below using read, then read sourcePaths including Event steps, " +
       "Character voices, Relationship, Facts, Revelations, any optional clue discovery, and existing content.\n" +
-      pinnedSkillReferences(snapshot, pinned) + "\n" +
+      pinnedSkillReferences(snapshot, pinned) +
+      "\n" +
       "Write real player-facing dialogue/narration in canonical authored-content/*.md only. " +
       "No engine records, no invented schema keys, no branch retcons. Edit ONLY allowedExistingContent " +
       "or add new Authored Content; do NOT alter other Story records, including Events, Choice Points, Milestones, " +
@@ -208,121 +319,725 @@ export async function authorComposition(job: JobStartResult, snapshot: SkillSnap
       "Do not write editorial directions as playable prose. " +
       "If a source lacks a needed route, report a conflict; NEVER manufacture new Event effects or bypass gates. " +
       compositionOptionalDialoguePolicy(assignment.eventOnly) +
-      (sandboxed ?
-        "Call story_validate with no arguments; Git and host shell access are unavailable in the sandbox. " :
-        "Call story_validate with no arguments and inspect Git diff. Do not git add, reset, checkout or commit. ") +
+      (sandboxed
+        ? "Call story_validate with no arguments; Git and host shell access are unavailable in the sandbox. "
+        : "Call story_validate with no arguments and inspect Git diff. Do not git add, reset, checkout or commit. ") +
       "Finally output ONE unfenced JSON object with the cumulative paths and precise obligations: " +
       '{"modifiedRecords":["authored-content/example.md"],"architecturalConflicts":[],"laterObligations":[]}. ' +
       "Graph will independently verify sources, actual Markdown, coverage and editorial review.\nASSIGNMENT:\n" +
-      JSON.stringify(assignment, null, 2) + specialistAuthorInstruction(assignment.authorTask);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+      JSON.stringify(assignment, null, 2) +
+      specialistAuthorInstruction(assignment.authorTask);
+    for (let attempt = 0; ; attempt++) {
+      const writerFile = session.sessionManager.getSessionFile() ?? undefined;
+      if (attempt === 0) await context.beforeTurn(writerFile);
+      else
+        await guardPiBudget(
+          job,
+          "composition:" + assignment.workItemId + ":write-correction:" + attempt,
+          writerFile,
+        );
       await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
       await requirePinnedSkillReads(session, project.root, pinned, "Composition specialist");
       let text = lastReply(session);
       let parsed: Record<string, unknown> | undefined;
       for (let formatAttempt = 0; formatAttempt < 3; formatAttempt++) {
-        try { parsed = parseSpecialistJson(text); break; }
-        catch (error) {
+        try {
+          parsed = parseSpecialistJson(text);
+          break;
+        } catch (error) {
           if (formatAttempt === 2) throw error;
-          await promptStorySpecialist(session, "Reformat your LAST cumulative modifiedRecords, architecturalConflicts, " +
-            "and laterObligations report as a single valid JSON object. " +
-            "Preserve the already-authored files unchanged; only correct the response format.");
+          await guardPiBudget(
+            job,
+            "composition:" + assignment.workItemId + ":write-correction:" + attempt,
+            session.sessionManager.getSessionFile() ?? undefined,
+          );
+          await promptStorySpecialist(
+            session,
+            "Reformat your LAST cumulative modifiedRecords, architecturalConflicts, " +
+              "and laterObligations report as a single valid JSON object. " +
+              "Preserve the already-authored files unchanged; only correct the response format.",
+          );
           text = lastReply(session);
         }
       }
       if (!parsed) throw new Error("Composition specialist manifest was not provided.");
       const calls = toolPaths(session, project.root, snapshot.path);
-      if (assignment.mandatoryReads.some(p => !calls.some(c => c.tool === "read" && c.relative === p))) {
+      if (assignment.mandatoryReads.some((p) => !calls.some((c) => c.tool === "read" && c.relative === p))) {
         throw new Error("Composition specialist omitted pinned skill or essential source reads.");
       }
-      if (!calls.some(c => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/"))) {
+      if (
+        !calls.some((c) => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/"))
+      ) {
         throw new Error("Composition specialist did not author canonical Authored Content.");
       }
-      if (!strings(parsed.modifiedRecords) || !parsed.modifiedRecords.length ||
-          !strings(parsed.architecturalConflicts) || !strings(parsed.laterObligations)) {
-        throw new Error("Composition specialist must report modifiedRecords, architecturalConflicts and laterObligations.");
+      if (
+        !strings(parsed.modifiedRecords) ||
+        !parsed.modifiedRecords.length ||
+        !strings(parsed.architecturalConflicts) ||
+        !strings(parsed.laterObligations)
+      ) {
+        throw new Error(
+          "Composition specialist must report modifiedRecords, architecturalConflicts and laterObligations.",
+        );
       }
       const evidence: CompositionEvidence = {
-        modifiedRecords: parsed.modifiedRecords, conflicts: parsed.architecturalConflicts,
-        obligations: parsed.laterObligations, skillReads: pinned,
+        modifiedRecords: parsed.modifiedRecords,
+        conflicts: parsed.architecturalConflicts,
+        obligations: parsed.laterObligations,
+        skillReads: pinned,
         piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
+        piSessionId: session.sessionId,
       };
       const problems = await verifyDraft(evidence);
       if (!problems.length) {
         await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
         return evidence;
       }
-      if (attempt === 2) throw new Error("Composition exhausted bounded repairs: " + problems.join("; "));
-      prompt = "The independent graph audit rejected the draft. In this SAME session, repair only the " +
+      // Semantic corrections are governed by the source-bound Review cycle and
+      // the job resource budget, never a fixed two-turn cutoff.
+      prompt =
+        "The independent graph audit rejected the draft. In this SAME session, repair only the " +
         "problems below, without changing Event/Choice/Milestone/Character/Fact/Relationship/author-protected canon. " +
         "Read saved prose and replay ALL branches, including least-informed entry and optional clues. " +
-        "Re-run validation and report the FULL changed path manifest.\n" + problems.join("\n");
+        "Re-run validation and report the FULL changed path manifest.\n" +
+        problems.join("\n");
     }
-    throw new Error("Composition repair loop terminated unexpectedly.");
-  } finally { session.dispose(); }
+  } finally {
+    session.dispose();
+  }
 }
-export async function reviewComposition(job: JobStartResult, snapshot: SkillSnapshot,
-  assignment: CompositionAssignment, paths: string[], provider: string, modelId: string,
-  thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
-  insideWriter = false): Promise<SemanticReview> {
-  const { session, project, pinned, context } = await createSession(job, snapshot, assignment,
-    provider, modelId, thinking, "review", paths, insideWriter);
+/** The same read-only Pi session reviews every revision of this Composition
+ * assignment. The trusted writer lock and the existing writing-phase recovery
+ * barrier prevent a failed turn from silently replaying edits. */
+export interface CompositionReviewPin {
+  cycleId: string;
+  round: number;
+  receiptDigest: string;
+}
+type SessionIdentity = { id: string; file: string };
+type CompositionReviewReceipt = {
+  schema: "noveltea-composition-review-round/v1";
+  cycleId: string;
+  round: number;
+  previousDigest: string | null;
+  writer: SessionIdentity;
+  reviewer: SessionIdentity;
+  sources: Record<string, string>;
+  verdict: CompositionReviewVerdict;
+  transcriptBytes: number;
+  transcriptDigest: string;
+};
+const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+const reviewDirectory = (job: JobStartResult, cycleId: string) =>
+  join(job.stateDir, "composition-review-cycles", cycleId);
+const reviewRoundFile = (job: JobStartResult, cycleId: string, round: number) =>
+  join(reviewDirectory(job, cycleId), "round-" + round + ".json");
+const admissionFile = (job: JobStartResult, cycleId: string) =>
+  join(reviewDirectory(job, cycleId), "admitted.json");
+
+export function compositionReviewCycleId(
+  job: JobStartResult,
+  snapshot: SkillSnapshot,
+  assignment: CompositionAssignment,
+  provider: string,
+  model: string,
+  baseHead: string,
+  planVersion: number,
+  planDigest: string,
+) {
+  return reviewCycleId({
+    jobId: job.jobId,
+    threadId: job.threadId,
+    baseSha: job.baseSha,
+    executionHead: baseHead,
+    planVersion,
+    contractDigest: planDigest,
+    snapshotId: snapshot.id,
+    provider,
+    model,
+    taskDigest: hash(JSON.stringify(assignment)),
+  });
+}
+async function compositionSource(projectRoot: string, paths: readonly string[]) {
+  const sources: Record<string, string> = {};
+  for (const path of paths) {
+    if (!/^authored-content\/[a-zA-Z0-9][a-zA-Z0-9_-]*\.md$/.test(path))
+      throw Error("Unsafe Composition review path: " + path);
+    const absolute = join(projectRoot, path);
+    if ((await realpath(absolute)) !== absolute || !(await lstat(absolute)).isFile())
+      throw Error("Composition review source path is unsafe.");
+    sources[path] = await readFile(absolute, "utf8");
+  }
+  return sources;
+}
+async function reviewerTranscript(job: JobStartResult, reviewer: SessionIdentity) {
+  const folder = join(job.stateDir, "composition-sessions");
+  if (
+    !reviewer.file.startsWith(folder + sep) ||
+    (await realpath(reviewer.file)) !== reviewer.file ||
+    !(await lstat(reviewer.file)).isFile()
+  )
+    throw Error("Composition reviewer transcript path is missing or unsafe.");
+  const bytes = await readFile(reviewer.file);
+  let header: { type?: string; id?: string };
   try {
-    const sessionFile = session.sessionManager.getSessionFile();
-    if (sessionFile) await onSession(sessionFile);
-    await context.beforeTurn(sessionFile);
-    await promptStorySpecialist(session, context.contextNote + "You are an INDEPENDENT read-only editorial reviewer. Read the pinned composition " +
-      "skill and catalog, the ACTUAL saved authored-content paths, linked Events, " +
-      "every actually assigned choice outcome and Puzzle solution route (if any), " +
-      "character voices, initial knowledge, facts, revelations, and optional " +
-      "discovery routes. Do not trust the writer's explanation or Event narrative body as proof of state. " +
-      "Compare each line against the least-informed reachable route and the exact source step/branch. " +
-      "Block actual authored prose defects: leaked branch-only truth in shared/menu text, " +
-      "unearned optional evidence, missing outcome-conditioned aftermath, missing Event ownership, " +
-      "summaries instead of playable lines, author-protected rewordings or incoherent consequences. " +
-      "When assignment.eventOnly is true, verify that any voluntary testimony/withdrawal " +
-      "mentioned in the Event narrative body is NOT treated as enacted unless typed branches " +
-      "and effects independently license it; a consent-bounded offer is playable without " +
-      "inventing a positive or negative response. A deferred optional account is a " +
-      "laterObligation, not a defect in a complete unconditional rescue scene. " +
-      "One Authored Content record per composeTargets Event is required; existing clue content " +
-      "covers its discovery Event. An Event's narrative body is planning context, NOT proof of " +
-      "player knowledge or a physically present object. Review the actual saved prose ONLY for " +
-      "what can be established from these records; do not block because engine UI/backdrop is " +
-      "outside this ticket or because the schema lacks typed step-level content links. " +
-      "Use headings for branch ownership. Report only actionable contradictions in authored prose. " +
-      "Do not edit or invoke shell. Read these pinned references FIRST:\n" +
-      pinnedSkillReferences(snapshot, pinned) + "\n Read these Story paths:\n" +
-      [...new Set([...assignment.sourcePaths, ...paths])].join("\n") +
-      "\nReturn unfenced JSON ONLY: " +
-      '{"verdict":"pass"|"block","sourceEvidence":["event.X#step/branch licenses ..."],"concerns":[]}. ' +
-      "A pass requires explicit source-linked evidence for EVERY outcome in " +
-      "assignment.choicePoints and EVERY actual puzzle solution route in " +
-      "assignment.puzzleSolutions. If none are assigned, never fabricate two endings " +
-      "or a fixed Puzzle count. Verify the real branchWitnesses instead. " +
-      "If uncertain, block.\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
-    const missingReads = () => {
-      const calls = toolPaths(session, project.root, snapshot.path);
-      return [...pinned, ...[...assignment.mandatoryReads, ...paths].map(p => resolve(project.root, p))]
-        .filter(path => !calls.some(c => c.tool === "read" && c.path === path));
+    header = JSON.parse(bytes.toString("utf8").split("\n")[0] ?? "");
+  } catch {
+    throw Error("Composition reviewer transcript header is malformed.");
+  }
+  if (header.type !== "session" || header.id !== reviewer.id)
+    throw Error("Composition reviewer transcript identity differs from sealed session.");
+  return bytes;
+}
+
+/** A sealed verdict must be the Pi assistant's actual completed response,
+ * not an assertion inserted into the controller receipt after the fact. */
+function transcriptReviewVerdict(prefix: Buffer): unknown {
+  let last: unknown;
+  try {
+    for (const line of prefix.toString("utf8").split("\n").filter(Boolean)) {
+      const entry = JSON.parse(line) as {
+        type?: string;
+        message?: { role?: string; stopReason?: string; content?: Array<{ type?: string; text?: string }> };
+      };
+      const message = entry.type === "message" ? entry.message : undefined;
+      if (
+        message?.role !== "assistant" ||
+        ["error", "aborted"].includes(message.stopReason ?? "")
+      )
+        continue;
+      const response = message.content
+        ?.filter((part) => part.type === "text")
+        .map((part) => part.text ?? "")
+        .join("\n")
+        .trim()
+        .replace(/^```(?:json)?\s*\n/i, "")
+        .replace(/\n```\s*$/, "");
+      if (response) {
+        try {
+          last = JSON.parse(response);
+        } catch {
+          /* bounded protocol correction may precede the final verdict */
+        }
+      }
+    }
+  } catch {
+    throw Error("Composition reviewer transcript has corrupt persisted Pi evidence.");
+  }
+  if (!last) throw Error("Composition reviewer transcript lacks its actual editorial verdict.");
+  return last;
+}
+
+export async function verifyCompositionReviewPin(
+  job: JobStartResult,
+  snapshot: SkillSnapshot,
+  assignment: CompositionAssignment,
+  provider: string,
+  model: string,
+  baseHead: string,
+  planVersion: number,
+  planDigest: string,
+  writer: SessionIdentity,
+  paths: string[],
+  pin: CompositionReviewPin,
+) {
+  const cycleId = compositionReviewCycleId(
+    job,
+    snapshot,
+    assignment,
+    provider,
+    model,
+    baseHead,
+    planVersion,
+    planDigest,
+  );
+  if (
+    pin.cycleId !== cycleId ||
+    !Number.isSafeInteger(pin.round) ||
+    pin.round < 0 ||
+    !/^[a-f0-9]{64}$/.test(pin.receiptDigest)
+  )
+    throw Error("Composition review pin does not match its authorized assignment.");
+  const admitted = JSON.parse(await readFile(admissionFile(job, cycleId), "utf8")) as {
+    schema: string;
+    cycleId: string;
+    writer: SessionIdentity;
+    reviewer: SessionIdentity;
+  };
+  if (
+    admitted.schema !== "noveltea-composition-review-admission/v1" ||
+    admitted.cycleId !== cycleId ||
+    admitted.writer.id !== writer.id ||
+    admitted.writer.file !== writer.file
+  )
+    throw Error("Composition review admission has wrong writer provenance.");
+  assertReviewCycleSession(writer, admitted.reviewer);
+  await reviewerTranscript(job, writer);
+  const current = await compositionSource(job.worktreeStoryRoot, paths);
+  let previousDigest: string | null = null;
+  let sealedReview: SemanticReview | undefined;
+  for (let round = 0; round <= pin.round; round++) {
+    const receipt = JSON.parse(
+      await readFile(reviewRoundFile(job, cycleId, round), "utf8"),
+    ) as CompositionReviewReceipt;
+    if (
+      receipt.schema !== "noveltea-composition-review-round/v1" ||
+      receipt.cycleId !== cycleId ||
+      receipt.round !== round ||
+      receipt.previousDigest !== previousDigest ||
+      receipt.writer.id !== writer.id ||
+      receipt.writer.file !== writer.file ||
+      !Number.isSafeInteger(receipt.transcriptBytes) ||
+      receipt.transcriptBytes <= 0 ||
+      !/^[a-f0-9]{64}$/.test(receipt.transcriptDigest)
+    )
+      throw Error("Composition review round receipt has incorrect session or lineage.");
+    assertReviewCycleSession(writer, receipt.reviewer, admitted.reviewer);
+    const bytes = await reviewerTranscript(job, receipt.reviewer);
+    if (
+      bytes.length < receipt.transcriptBytes ||
+      hash(bytes.subarray(0, receipt.transcriptBytes)) !== receipt.transcriptDigest
+    )
+      throw Error("Composition review transcript changed after its sealed verdict.");
+    if (
+      JSON.stringify(transcriptReviewVerdict(bytes.subarray(0, receipt.transcriptBytes))) !==
+      JSON.stringify(receipt.verdict)
+    )
+      throw Error("Composition review receipt does not match the Pi review response.");
+    previousDigest = hash(JSON.stringify(receipt));
+    if (
+      round === pin.round &&
+      (receipt.verdict.status !== "pass" ||
+        previousDigest !== pin.receiptDigest ||
+        JSON.stringify(Object.keys(receipt.sources).sort()) !== JSON.stringify([...paths].sort()) ||
+        Object.keys(current).some((path) => hash(current[path]!) !== receipt.sources[path]))
+    )
+      throw Error("Composition review pass does not bind the current Authored Content.");
+    if (round === pin.round)
+      sealedReview = {
+        verdict: "pass",
+        concerns: [],
+        sourceEvidence: receipt.verdict.sourceEvidence,
+        sessionFile: receipt.reviewer.file,
+      };
+  }
+  if (!sealedReview) throw Error("Composition review has no sealed current pass.");
+  return sealedReview;
+}
+
+/** Fresh independent Diagnosis is deliberately unable to approve prose. */
+async function diagnoseComposition(
+  job: JobStartResult,
+  snapshot: SkillSnapshot,
+  assignment: CompositionAssignment,
+  provider: string,
+  model: string,
+  thinking: "low" | "high" | undefined,
+  writer: SessionIdentity,
+  reviewer: SessionIdentity,
+  cycleId: string,
+  paths: string[],
+  sources: Record<string, string>,
+  history: CompositionReviewRound[],
+  trigger: string,
+) {
+  const evidenceDigest = hash(
+    JSON.stringify({
+      cycleId,
+      trigger,
+      sources: Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, hash(v)])),
+      history: history.map((r) => ({
+        verdict: r.verdict,
+        sources: Object.fromEntries(Object.entries(r.sources).map(([p, v]) => [p, hash(v)])),
+      })),
+    }),
+  );
+  const file = join(reviewDirectory(job, cycleId), "diagnostic-" + history.length + ".json");
+  const { session, project, pinned, context } = await createSession(
+    job,
+    snapshot,
+    assignment,
+    provider,
+    model,
+    thinking,
+    "diagnostic",
+    paths,
+    true,
+  );
+  try {
+    const diagnostic = { id: session.sessionId, file: session.sessionManager.getSessionFile() ?? "" };
+    if (
+      [writer.id, reviewer.id].includes(diagnostic.id) ||
+      [writer.file, reviewer.file].includes(diagnostic.file)
+    )
+      throw Error("Composition Diagnostic review must have an independent Pi conversation.");
+    const start = session.messages.length;
+    await guardPiBudget(
+      job,
+      "composition:" + assignment.workItemId + ":diagnostic:" + cycleId + ":" + history.length,
+      diagnostic.file,
+    );
+    await promptStorySpecialist(
+      session,
+      context.contextNote +
+        "You are an INDEPENDENT read-only DIAGNOSTIC, not the regular editorial " +
+        "reviewer, writer or controller. Read ALL pinned skills, actual current Authored " +
+        "Content, Events and route witnesses. Determine whether prior findings are " +
+        "material, cosmetic, deferred downstream, or outside this exact assignment. " +
+        "A diagnosis may recommend continue, replace the reviewer, split authorized " +
+        "scope or escalate. It CANNOT approve current prose, waive a blocker, authorize " +
+        "new edits or alter protected decisions.\nTRIGGER: " +
+        trigger +
+        "\nPINNED SKILLS:\n" +
+        pinnedSkillReferences(snapshot, pinned) +
+        "\nMANDATORY FILES:\n" +
+        [...new Set([...assignment.mandatoryReads, ...paths])].join("\n") +
+        "\nREQUIREMENTS:\n" +
+        compositionReviewRequirements +
+        "\nASSIGNMENT:\n" +
+        JSON.stringify(assignment) +
+        "\nPRIOR REVIEW ROUNDS AND ACTUAL SOURCE:\n" +
+        JSON.stringify(history) +
+        "\nRETURN strict JSON {schema:'noveltea-composition-diagnosis/v1'," +
+        "action:'continue'|'replace'|'split'|'escalate',explanation,assessments:[]} " +
+        "with one or more {kind:'material'|'deferred'|'cosmetic'|'scope',reason," +
+        "requirement:{source:'assignment'|'policy',quote},evidence:{path,quote}}. " +
+        "Quote exact requirement and CURRENT authored prose substrings (8+ chars).",
+    );
+    const missing = () => {
+      const calls = toolPaths(session, project.root, snapshot.path, start);
+      return [
+        ...pinned,
+        ...[...assignment.mandatoryReads, ...paths].map((p) => resolve(project.root, p)),
+      ].filter((p) => !calls.some((c) => c.tool === "read" && c.path === p));
     };
-    if (missingReads().length) {
-      await promptStorySpecialist(session, "Your independent review is incomplete. Use read to inspect " +
-        "each EXACT missing pinned skill or canonical Story file below; do not edit or invoke shell. " +
-        "Then independently reassess the ACTUAL saved prose and return a new source-linked " +
-        "verdict/sourceEvidence/concerns JSON object.\nMISSING READS:\n" + missingReads().join("\n"));
+    const parse = () => {
+      if (missing().length) throw Error("Composition Diagnostic omitted required current sources.");
+      return parseCompositionDiagnosis(lastReply(session), paths, sources, {
+        assignment: JSON.stringify(assignment),
+        policy: compositionReviewRequirements,
+      });
+    };
+    let diagnosis: ReturnType<typeof parseCompositionDiagnosis>;
+    try {
+      diagnosis = parse();
+    } catch (error) {
+      await guardPiBudget(
+        job,
+        "composition:" + assignment.workItemId + ":diagnostic:" + cycleId + ":" + history.length,
+        diagnostic.file,
+      );
+      await promptStorySpecialist(
+        session,
+        "INDEPENDENT DIAGNOSTIC PROTOCOL CORRECTION. Re-read missing source files, " +
+          "do not alter Story files and return the strict diagnosis JSON with current " +
+          "source citations. Missing: " +
+          JSON.stringify(missing()) +
+          ". Controller reason: " +
+          String(error),
+      );
+      diagnosis = parse();
     }
-    if (missingReads().length) {
-      throw new Error("Independent composition reviewer did not read pinned skill, essential source witnesses and saved prose.");
-    }
-    const parsed = parseSpecialistJson(lastReply(session));
-    if ((parsed.verdict !== "pass" && parsed.verdict !== "block") ||
-        !strings(parsed.sourceEvidence) || !strings(parsed.concerns)) {
-      throw new Error("Independent composition reviewer returned an invalid source-linked verdict.");
-    }
-    await context.completed(sessionFile!, session.sessionId);
-    return { verdict: parsed.verdict, sourceEvidence: parsed.sourceEvidence,
-      concerns: parsed.concerns, sessionFile: sessionFile ?? undefined };
-  } finally { session.dispose(); }
+    if (JSON.stringify(await compositionSource(project.root, paths)) !== JSON.stringify(sources))
+      throw Error("Composition Diagnostic source changed during independent assessment.");
+    await context.completed(diagnostic.file, diagnostic.id);
+    const transcript = await reviewerTranscript(job, diagnostic);
+    await writeFile(
+      file,
+      JSON.stringify(
+        {
+          schema: "noveltea-composition-diagnostic-receipt/v1",
+          cycleId,
+          trigger,
+          evidenceDigest,
+          writer,
+          reviewer,
+          diagnostic,
+          diagnosis,
+          transcriptBytes: transcript.length,
+          transcriptDigest: hash(transcript),
+        },
+        null,
+        2,
+      ) + "\n",
+      { flag: "wx", mode: 0o600 },
+    );
+    return { diagnosis, evidenceDigest };
+  } finally {
+    session.dispose();
+  }
+}
+
+export async function createCompositionReviewCycle(
+  job: JobStartResult,
+  snapshot: SkillSnapshot,
+  assignment: CompositionAssignment,
+  provider: string,
+  modelId: string,
+  thinking: "low" | "high" | undefined,
+  writer: SessionIdentity,
+  baseHead: string,
+  planVersion: number,
+  planDigest: string,
+  onSession: (file: string) => Promise<void>,
+) {
+  const cycleId = compositionReviewCycleId(
+    job,
+    snapshot,
+    assignment,
+    provider,
+    modelId,
+    baseHead,
+    planVersion,
+    planDigest,
+  );
+  const { session, project, pinned, context } = await createSession(
+    job,
+    snapshot,
+    assignment,
+    provider,
+    modelId,
+    thinking,
+    "review",
+    [],
+    true,
+  );
+  try {
+    const reviewer = { id: session.sessionId, file: session.sessionManager.getSessionFile() ?? "" };
+    assertReviewCycleSession(writer, reviewer);
+    await mkdir(reviewDirectory(job, cycleId), { recursive: true });
+    await writeFile(
+      admissionFile(job, cycleId),
+      JSON.stringify(
+        {
+          schema: "noveltea-composition-review-admission/v1",
+          cycleId,
+          writer,
+          reviewer,
+        },
+        null,
+        2,
+      ) + "\n",
+      { flag: "wx", mode: 0o600 },
+    );
+    await onSession(reviewer.file);
+    const history: CompositionReviewRound[] = [];
+    let stalled = 0;
+    let previousDigest: string | null = null;
+    let diagnosisCount = 0;
+    return {
+      async review(paths: string[], requiredRoutes: string[]) {
+        const sources = await compositionSource(project.root, paths);
+        const prior = history.at(-1);
+        if (prior && JSON.stringify([...paths].sort()) !== JSON.stringify(Object.keys(prior.sources).sort()))
+          throw Error("Composition review draft inventory changed mid-cycle; reconcile scope.");
+        if (previousDigest) {
+          const earlier = JSON.parse(
+            await readFile(reviewRoundFile(job, cycleId, history.length - 1), "utf8"),
+          ) as CompositionReviewReceipt;
+          const bytes = await reviewerTranscript(job, reviewer);
+          if (
+            hash(JSON.stringify(earlier)) !== previousDigest ||
+            bytes.length < earlier.transcriptBytes ||
+            hash(bytes.subarray(0, earlier.transcriptBytes)) !== earlier.transcriptDigest
+          )
+            throw Error("Composition reviewer history changed between revisions.");
+        }
+        const start = session.messages.length;
+        await guardPiBudget(
+          job,
+          "composition:" + assignment.workItemId + ":editorial-review:" + history.length,
+          reviewer.file,
+        );
+        const changed = Object.fromEntries(
+          paths
+            .filter((path) => prior && prior.sources[path] !== sources[path])
+            .map((path) => [path, { before: hash(prior!.sources[path]!), after: hash(sources[path]!) }]),
+        );
+        const prompt =
+          (history.length
+            ? "CONTINUE YOUR SAME INDEPENDENT READ-ONLY COMPOSITION REVIEW. Your earlier " +
+              "analysis is available but never source authority. Explicitly reconcile all past " +
+              "material concerns as resolved, improved, persisting or regressed. Check CURRENT " +
+              "source and newly introduced or previously overlooked material defects.\n"
+            : context.contextNote + "You are an INDEPENDENT READ-ONLY Composition editorial reviewer.\n") +
+          "Read every pinned skill and the complete current Authored Content, linked Events, " +
+          "Choice and Puzzle witnesses, Facts, Revelations and least-informed route. " +
+          "Never edit, invoke shell, or treat Event planning narration or writer assurance " +
+          "as proof of earned player knowledge. Preserve protected wording; optional testimony " +
+          "is not enacted without typed effects. Do not impose cosmetic preferences or later-stage " +
+          "requirements on this assignment. Route evidence must cover all actual assigned " +
+          "Choice outcomes and Puzzle solutions; a pass needs a full present-stage rereview.\n" +
+          "PINNED SKILLS:\n" +
+          pinnedSkillReferences(snapshot, pinned) +
+          "\nCURRENT FILES:\n" +
+          [...new Set([...assignment.sourcePaths, ...paths])].join("\n") +
+          "\nREQUIREMENTS (quote exact substrings):\n" +
+          compositionReviewRequirements +
+          "\nASSIGNMENT:\n" +
+          JSON.stringify(assignment) +
+          "\nEARLIER SEALED VERDICTS:\n" +
+          JSON.stringify(
+            history.map((r, i) => ({
+              round: i,
+              verdict: r.verdict,
+              sourceDigests: Object.fromEntries(Object.entries(r.sources).map(([p, v]) => [p, hash(v)])),
+            })),
+          ) +
+          "\nCURRENT SOURCE DIGESTS:\n" +
+          JSON.stringify(Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, hash(v)]))) +
+          "\nCHANGED SOURCE DIGESTS:\n" +
+          JSON.stringify(changed) +
+          "\nReturn ONLY strict JSON: {schema:'noveltea-composition-review/v2'," +
+          "status:'pass'|'revise',findings:[],prior:[],sourceEvidence:[]}. " +
+          "For each current material finding: {path,reason,correction,requirement:{source:" +
+          "'assignment'|'policy',quote},evidence:{path,quote},origin:'initial'|'continuing'|" +
+          "'introduced'|'overlooked'}. Quotes must be exact 8+ character substrings " +
+          "of the cited requirement and current Authored Content path. On follow-ups " +
+          "include one prior entry for EVERY historical finding: " +
+          "{round,findingIndex,status:'resolved'|'improved'|'persisting'|'regressed'," +
+          "reason,evidence:{path,quote}} with a CURRENT quote from that original path. " +
+          "Pass requires findings:[], all prior resolved, and sourceEvidence for each " +
+          "actual route. A revise verdict needs 1-8 actionable current blockers. " +
+          "Current required routes: " +
+          JSON.stringify(requiredRoutes) +
+          ".";
+        await promptStorySpecialist(session, prompt);
+        const mandatory = [
+          ...pinned,
+          ...[...assignment.mandatoryReads, ...paths].map((path) => resolve(project.root, path)),
+        ];
+        const missingReads = () => {
+          const calls = toolPaths(session, project.root, snapshot.path, start);
+          return mandatory.filter((path) => !calls.some((c) => c.tool === "read" && c.path === path));
+        };
+        const parse = () => {
+          if (missingReads().length)
+            throw Error("Composition review omitted mandatory current-round method/source reads.");
+          const result = parseCompositionReview(
+            lastReply(session),
+            paths,
+            sources,
+            {
+              assignment: JSON.stringify(assignment),
+              policy: compositionReviewRequirements,
+            },
+            history,
+          );
+          if (
+            result.status === "pass" &&
+            requiredRoutes.some(
+              (route) =>
+                !result.sourceEvidence.some((line) => line.toLowerCase().includes(route.toLowerCase())),
+            )
+          )
+            throw Error("Composition editorial pass omitted source-linked Choice/Puzzle route evidence.");
+          return result;
+        };
+        let verdict: CompositionReviewVerdict;
+        try {
+          verdict = parse();
+        } catch (error) {
+          await guardPiBudget(
+            job,
+            "composition:" + assignment.workItemId + ":editorial-review:" + history.length,
+            reviewer.file,
+          );
+          await promptStorySpecialist(
+            session,
+            "READ-ONLY PROTOCOL CORRECTION. This is NOT " +
+              "a creative revision. Read missing current files and return complete strict JSON " +
+              "with exact source citations and all historical blocker statuses. Missing reads: " +
+              JSON.stringify(missingReads()) +
+              ". Controller reason: " +
+              String(error),
+          );
+          verdict = parse();
+        }
+        if (JSON.stringify(await compositionSource(project.root, paths)) !== JSON.stringify(sources))
+          throw Error("Composition prose changed while the independent reviewer read it.");
+        const convergence = compositionReviewConvergence(verdict, sources, history, stalled);
+        stalled = convergence.stalled;
+        await context.completed(reviewer.file, reviewer.id);
+        const transcript = await reviewerTranscript(job, reviewer);
+        const receipt: CompositionReviewReceipt = {
+          schema: "noveltea-composition-review-round/v1",
+          cycleId,
+          round: history.length,
+          previousDigest,
+          writer,
+          reviewer,
+          sources: Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, hash(v)])),
+          verdict,
+          transcriptBytes: transcript.length,
+          transcriptDigest: hash(transcript),
+        };
+        await writeFile(
+          reviewRoundFile(job, cycleId, history.length),
+          JSON.stringify(receipt, null, 2) + "\n",
+          { flag: "wx", mode: 0o600 },
+        );
+        previousDigest = hash(JSON.stringify(receipt));
+        history.push({ sources, verdict });
+        const candidate = sourceReviewDiagnosticTrigger(history, stalled, diagnosisCount);
+        const trigger =
+          candidate === "review-depth" && history.length < 5 + diagnosisCount * 4 ? null : candidate;
+        if (trigger) {
+          const { diagnosis } = await diagnoseComposition(
+            job,
+            snapshot,
+            assignment,
+            provider,
+            modelId,
+            thinking,
+            writer,
+            reviewer,
+            cycleId,
+            paths,
+            sources,
+            history,
+            trigger,
+          );
+          diagnosisCount++;
+          if (diagnosis.action !== "continue")
+            throw Error(
+              "Composition Diagnostic review requires author-guided " +
+                (diagnosis.action === "replace"
+                  ? "independent reviewer replacement"
+                  : diagnosis.action === "split"
+                    ? "plan restructuring"
+                    : "escalation") +
+                "; a diagnosis cannot approve or expand a prose assignment.",
+            );
+          stalled = 0;
+        } else if (stalled >= 2 && diagnosisCount >= 2) {
+          throw Error(
+            "Composition Review cycle remains unproductive after bounded diagnostics; author reconciliation required.",
+          );
+        }
+        return {
+          review: {
+            verdict: verdict.status === "pass" ? ("pass" as const) : ("block" as const),
+            sourceEvidence: verdict.sourceEvidence,
+            concerns: verdict.findings.map((f) => f.path + ": " + f.reason + " Repair: " + f.correction),
+            sessionFile: reviewer.file,
+          },
+          pin:
+            verdict.status === "pass"
+              ? ({
+                  cycleId,
+                  round: history.length - 1,
+                  receiptDigest: previousDigest,
+                } as CompositionReviewPin)
+              : undefined,
+        };
+      },
+      dispose() {
+        session.dispose();
+      },
+    };
+  } catch (error) {
+    session.dispose();
+    throw error;
+  }
 }

@@ -1663,11 +1663,20 @@ It checks section presence, distinct responses and known branch-exclusive
 lexical leaks, but cannot derive full prose-to-step semantics from the current
 schema. For **real Pi work**, a separate **read-only Pi editorial reviewer**
 must read the saved content, witnesses and pinned guidance and return a
-source-linked verdict covering each route. A blocked review returns actionable
-diagnostics to the **same** writer Pi session, with at most two repair turns;
-exhaustion prevents commit and preserves the failed draft and transcripts.
-The passing verdict is bound to the exact reviewed file digest and independently
-rechecked at commit time. This review is editorial judgement, not a claim of
+source-linked verdict covering each route. The same independent reviewer and
+authorized writer retain their separate Pi sessions across corrections of one
+Composition assignment. Each review must account for earlier concerns,
+changed source, regressions and current route-state/knowledge obligations.
+Substantive corrections have no fixed count ceiling: actual progress is
+source-checked, nonproductive rounds or repeated new blockers trigger a fresh
+independent Diagnostic review, and job model/time/cost budgets remain enforced.
+A diagnosis never approves prose or broadens the writer's authority; unresolved
+replacement, scope changes or disagreement stop for safe reconciliation.
+Malformed reviewer responses get bounded protocol correction without consuming
+a semantic revision. Every negative verdict, source digest and reviewer
+transcript prefix is sealed separately; an interrupted writer is not replayed
+blindly. The passing verdict is bound to the exact reviewed file digest,
+original session identity and independently rechecked at commit time. This review is editorial judgement, not a claim of
 mechanically proven playability or engine output. A successful work item makes exactly one
 provenance-attributed commit and advances the verified-head marker. The
 author's original checkout is never touched.

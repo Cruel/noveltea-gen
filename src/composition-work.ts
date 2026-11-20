@@ -5,7 +5,8 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { authorComposition, reviewComposition, type CompositionAssignment,
+import { authorComposition, createCompositionReviewCycle, verifyCompositionReviewPin,
+  type CompositionReviewPin, type CompositionAssignment,
   type CompositionEvidence, type SemanticReview } from "./composition-specialist.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
@@ -59,8 +60,9 @@ interface Receipt {
   worker: "fixture" | "pi"; provider: string; model: string; thinking?: "low" | "high";
   snapshot?: SkillSnapshot; phase: "pending" | "writing" | "authored" | "committed";
   beforeHead?: string; paths?: string[]; claimedPaths?: string[]; digest?: string;
-  commitSha?: string; sessionFile?: string; reviewSessionFile?: string;
-  reviewedDigest?: string; reviewedEvidence?: SemanticReview;
+  commitSha?: string; sessionFile?: string; writerSessionId?: string; reviewSessionFile?: string;
+  reviewedDigest?: string; reviewedEvidence?: SemanticReview; reviewPin?: CompositionReviewPin;
+  authorTask?: string;
   skillReads?: string[]; obligations?: string[]; conflicts?: string[]; failure?: string;
   validation?: { protectionBase: string; validatorVersion: string; branchReview: ReviewEvidence;
     eventCoverage: Array<{ id: string; witness: string[] }> };
@@ -444,6 +446,7 @@ function output(job: JobStartResult, state: Receipt) {
     paths: state.paths ?? [], validation: state.validation, failure: state.failure,
     obligations: state.obligations ?? [], skillSnapshot: state.snapshot?.id,
     sessionFile: state.sessionFile, reviewSessionFile: state.reviewSessionFile,
+    reviewPin: state.reviewPin,
     completionEvidence: { deterministicCoverage: state.phase === "committed",
       editorialReview: state.validation?.branchReview.reviewer ?? "unverified",
       engineImplementation: "not-started", fullStory: false } };
@@ -640,15 +643,17 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         milestoneId: input.milestone, workItemId: "composition-" + input.milestone.slice(10),
         planVersion: architecture.plan.version, planDigest, interactiveHead,
         worker: input.fixture ? "fixture" : "pi", provider: input.provider ?? "openai",
-        model: input.model ?? "gpt-6-luna", thinking: input.thinking, phase: "pending" };
+        model: input.model ?? "gpt-6-luna", thinking: input.thinking,
+        authorTask: input.task, phase: "pending" };
       await save(file, state);
     }
     if (input.action === "inspect") return output(job, state);
     if (Boolean(input.fixture) !== (state.worker === "fixture") ||
         input.provider && input.provider !== state.provider ||
         input.model && input.model !== state.model ||
-        input.thinking && input.thinking !== state.thinking)
-      throw new Error("Composition worker selection differs from persisted assignment.");
+        input.thinking && input.thinking !== state.thinking ||
+        input.task && input.task !== state.authorTask)
+      throw new Error("Composition worker selection or assigned task differs from persisted assignment.");
     const config = input.skillsSource
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
       : state.snapshot
@@ -694,11 +699,12 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       }
       const baseline = verified(await validate(base), base);
       const assign = { ...selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone),
-        ...(input.task ? { authorTask: input.task } : {}) };
+        ...(s.authorTask ? { authorTask: s.authorTask } : {}) };
       if (s.phase === "pending") {
         await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"
           ? { provider: s.provider, model: s.model, thinking: s.thinking } : undefined);
         s.phase = "writing"; s.beforeHead = base; await save(file, s);
+        let cycle: Awaited<ReturnType<typeof createCompositionReviewCycle>> | undefined;
         try {
           const verifyDraft = async (evidence: CompositionEvidence) => {
             let paths: string[] | undefined;
@@ -733,31 +739,39 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             // writer repair loop. Never accept a structurally green draft that
             // an editorial reviewer has already rejected.
             if (s.worker === "pi") {
-              const review = await reviewComposition(job, s.snapshot!, assign, paths!,
+              if (!s.sessionFile || !s.writerSessionId)
+                throw new Error("Composition reviewer cannot start without original writer session provenance.");
+              cycle ??= await createCompositionReviewCycle(job, s.snapshot!, assign,
                 s.provider, s.model, s.thinking,
-                async session => { s.reviewSessionFile = session; await save(file, s); }, true);
-              const missing = [...structural.outcomes, ...structural.solutions].filter(route =>
-                !review.sourceEvidence.some(line => line.toLowerCase().includes(route.toLowerCase())));
-              if (review.verdict !== "pass" || review.concerns.length || missing.length)
-                return [...review.concerns, ...missing.map(route =>
-                  "Editorial review needs source-linked evidence for " + route)];
+                { id: s.writerSessionId, file: s.sessionFile },
+                base, s.planVersion, s.planDigest,
+                async session => { s.reviewSessionFile = session; await save(file, s); });
+              const result = await cycle.review(paths!, [...structural.outcomes, ...structural.solutions]);
+              const review = result.review;
+              if (review.verdict !== "pass" || review.concerns.length)
+                return review.concerns;
+              if (!result.pin) throw new Error("Composition editorial pass lacks sealed review lineage.");
               s.reviewedDigest = await fileDigest(job, paths!);
               s.reviewedEvidence = review;
+              s.reviewPin = result.pin;
               await save(file, s);
             }
             return [];
           };
           const evidence = s.worker === "fixture" ? await fixtureAuthor(job, assign)
             : await authorComposition(job, s.snapshot!, assign, s.provider, s.model,
-              s.thinking, async session => { s.sessionFile = session; await save(file, s); },
+              s.thinking, async (session, id) => { s.sessionFile = session;
+                s.writerSessionId = id; await save(file, s); },
               verifyDraft);
           s.claimedPaths = evidence.modifiedRecords;
+          if (evidence.piSessionId) s.writerSessionId = evidence.piSessionId;
           s.paths = await auditCompositionPaths(job, assign, evidence.modifiedRecords);
           s.conflicts = evidence.conflicts; s.obligations = evidence.obligations;
           s.skillReads = evidence.skillReads;
           s.digest = await fileDigest(job, s.paths);
           s.phase = "authored"; await save(file, s);
         } catch (e) { s.failure = String(e); await save(file, s); throw e; }
+        finally { cycle?.dispose(); }
       }
       try {
         if (!s.paths || !s.claimedPaths || !s.digest || s.conflicts?.length ||
@@ -772,10 +786,14 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         const review: SemanticReview = s.worker === "fixture"
           ? { verdict: "pass", sourceEvidence: assign.branchWitnesses.map(b =>
               `${b.event}#${b.step}/${b.branch}: ${b.witness.join(", ")}`), concerns: [] }
-          : s.reviewedDigest === s.digest && s.reviewedEvidence
-            ? s.reviewedEvidence
-            : await reviewComposition(job, s.snapshot!, assign, s.paths, s.provider, s.model, s.thinking,
-                async session => { s.reviewSessionFile = session; await save(file, s); });
+          : s.reviewedDigest === s.digest && s.reviewedEvidence && s.reviewPin &&
+              s.sessionFile && s.writerSessionId
+            ? await verifyCompositionReviewPin(job, s.snapshot!, assign, s.provider, s.model,
+                base, s.planVersion, s.planDigest,
+                { id: s.writerSessionId, file: s.sessionFile }, s.paths, s.reviewPin)
+            : (() => { throw Error("Composition requires its original sealed independent reviewer pass."); })();
+        if (s.worker === "pi" && JSON.stringify(review) !== JSON.stringify(s.reviewedEvidence))
+          throw Error("Composition copied reviewer receipt differs from its sealed independent verdict.");
         if (review.verdict !== "pass" || review.concerns.length || !review.sourceEvidence.length)
           throw new Error("Branch-to-prose editorial review blocked: " + review.concerns.join("; "));
         if (s.worker === "pi" && [...structural.outcomes, ...structural.solutions].some(route =>

@@ -17,12 +17,98 @@ export interface ReviewCycleScope {
 }
 
 export function reviewCycleId(scope: ReviewCycleScope): string {
-  const { jobId, threadId, baseSha, executionHead, planVersion, contractDigest,
-    snapshotId, provider, model, taskDigest } = scope;
-  return createHash("sha256").update(JSON.stringify({
-    schema: "noveltea-review-cycle/v1", jobId, threadId, baseSha, executionHead,
-    planVersion, contractDigest, snapshotId, provider, model, taskDigest,
-  })).digest("hex");
+  const {
+    jobId,
+    threadId,
+    baseSha,
+    executionHead,
+    planVersion,
+    contractDigest,
+    snapshotId,
+    provider,
+    model,
+    taskDigest,
+  } = scope;
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        schema: "noveltea-review-cycle/v1",
+        jobId,
+        threadId,
+        baseSha,
+        executionHead,
+        planVersion,
+        contractDigest,
+        snapshotId,
+        provider,
+        model,
+        taskDigest,
+      }),
+    )
+    .digest("hex");
+}
+
+/** Shared, source-grounded progress policy for bounded text review assignments.
+ * A revised manuscript is not progress unless a prior finding is materially
+ * improved at its original path; changing words or reporting fresh findings
+ * does not buy another semantic retry. */
+export function sourceReviewConvergence(
+  review: {
+    status: "pass" | "revise";
+    prior: readonly {
+      round: number;
+      findingIndex: number;
+      status: "resolved" | "improved" | "persisting" | "regressed";
+      evidence: { path: string; quote: string };
+    }[];
+  },
+  sources: Record<string, string>,
+  previous: readonly {
+    sources: Record<string, string>;
+    verdict: { findings: readonly { path: string }[] };
+  }[],
+  stalledBefore = 0,
+) {
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const now = digest(sources);
+  const oscillating = previous.some((round) => digest(round.sources) === now);
+  const last = previous.at(-1);
+  const productive =
+    !!last &&
+    !oscillating &&
+    !review.prior.some((item) => item.status === "regressed") &&
+    review.prior.some((item) => {
+      if (item.status !== "resolved" && item.status !== "improved") return false;
+      const finding = previous[item.round]?.verdict.findings[item.findingIndex];
+      return (
+        !!finding &&
+        sources[finding.path] !== last.sources[finding.path] &&
+        sources[finding.path]?.includes(item.evidence.quote) &&
+        !last.sources[finding.path]?.includes(item.evidence.quote)
+      );
+    });
+  if (last && review.status === "pass" && !productive)
+    throw Error("Source review pass lacks source-grounded progress or repeats old text.");
+  const stalled = !last || productive ? 0 : stalledBefore + 1;
+  return { productive, oscillating, stalled, reassess: review.status === "revise" && stalled >= 2 };
+}
+
+export function sourceReviewDiagnosticTrigger(
+  rounds: readonly { verdict: { status: "pass" | "revise"; findings: readonly { origin?: string }[] } }[],
+  stalled: number,
+  diagnosed = 0,
+): "stagnation" | "late-blockers" | "review-depth" | null {
+  if (rounds.at(-1)?.verdict.status !== "revise" || diagnosed >= 2) return null;
+  if (stalled >= 2) return "stagnation";
+  const late = rounds
+    .slice(-3)
+    .filter(
+      (round, index) =>
+        rounds.length - Math.min(rounds.length, 3) + index >= 2 &&
+        round.verdict.findings.some((f) => f.origin === "introduced" || f.origin === "overlooked"),
+    );
+  if (late.length >= 2) return "late-blockers";
+  return rounds.length >= 5 ? "review-depth" : null;
 }
 
 export function assertReviewCycleSession(
@@ -30,8 +116,14 @@ export function assertReviewCycleSession(
   reviewer: { id: string; file: string },
   original?: { id: string; file: string },
 ): void {
-  if (!writer.id || !writer.file || !reviewer.id || !reviewer.file ||
-      writer.id === reviewer.id || writer.file === reviewer.file ||
-      (original && (reviewer.id !== original.id || reviewer.file !== original.file)))
+  if (
+    !writer.id ||
+    !writer.file ||
+    !reviewer.id ||
+    !reviewer.file ||
+    writer.id === reviewer.id ||
+    writer.file === reviewer.file ||
+    (original && (reviewer.id !== original.id || reviewer.file !== original.file))
+  )
     throw Error("Independent review cycle has a wrong or changed reviewer Pi session.");
 }
