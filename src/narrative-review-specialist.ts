@@ -26,7 +26,7 @@ import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfi
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
 import { beginProtocolInvocation, recoverWithOneFreshSession, refuseReplayedProtocolInvocation,
   resumeExhaustedFreshProtocol, inspectResumableProtocolExhaustion, ProtocolExhaustedError,
-  inspectCompletedProtocolResponse, inspectCompletedProtocolReads,
+  inspectAcceptedFreshProtocolHandoff, inspectCompletedProtocolResponse, inspectCompletedProtocolReads,
   ProtocolIntegrityBlockedError, type ResponseContractFailure } from "./response-contract-recovery.js";
 
 export type ReviewDimension = "continuity" | "pacing" | "characterization" | "puzzle-fairness" |
@@ -608,7 +608,8 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
 ): Promise<SemanticVerdict> {
   const { openPostcommitReviewCycle, postcommitCycleId,
     bindPostcommitReviewCycle, replacePostcommitProtocolReviewer,
-    acceptPostcommitReviewRound } = await import("./postcommit-review-cycle.js");
+    acceptPostcommitReviewRound, adoptAcceptedPostcommitFallback
+  } = await import("./postcommit-review-cycle.js");
   const existingCycle = await openPostcommitReviewCycle(job, packet, snapshot,
     provider, model, thinking);
   const cycleId = postcommitCycleId(job, packet, snapshot, provider, model);
@@ -727,9 +728,32 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
         reads.some(path => !reviewerPinnedSkillPath(snapshot.path, path)))
       throw new ProtocolIntegrityBlockedError("Recovered reviewer lacks original pinned methodology reads");
     if (existingCycle) {
-      if (original.sessionFile !== existingCycle.reviewer.file)
-        throw new ProtocolIntegrityBlockedError("Recovered reviewer has a different cycle conversation");
-      await acceptPostcommitReviewRound(job, packet, verdict, existingCycle);
+      const handoff = await inspectAcceptedFreshProtocolHandoff({
+        receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+        contract: contractName, sessionRoots,
+      });
+      if (handoff) {
+        if (original.sessionFile !== handoff.fresh.file)
+          throw new ProtocolIntegrityBlockedError("Accepted fresh review is not the verified fallback transcript");
+        // Confirm the discarded original performed its required method reads,
+        // even though the accepted verdict belongs to the fresh reviewer.
+        const earlier = await inspectCompletedProtocolReads({
+          receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+          contract: contractName, sessionRoots, allowExhausted: true,
+          preferOriginal: true,
+        });
+        const earlierReads = earlier.reads.map(path =>
+          canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
+        if (earlier.sessionFile !== handoff.original.file ||
+            required.some(path => !earlierReads.includes(path)) ||
+            earlierReads.some(path => !reviewerPinnedSkillPath(snapshot.path, path)))
+          throw new ProtocolIntegrityBlockedError("Exhausted original review lacks pinned methods");
+        await adoptAcceptedPostcommitFallback(job, packet, existingCycle, handoff, verdict);
+      } else {
+        if (original.sessionFile !== existingCycle.reviewer.file)
+          throw new ProtocolIntegrityBlockedError("Recovered reviewer has a different cycle conversation");
+        await acceptPostcommitReviewRound(job, packet, verdict, existingCycle);
+      }
     } else if (cycleId) {
       throw new ProtocolIntegrityBlockedError("Review predates its cycle provenance; explicit reconciliation required");
     }

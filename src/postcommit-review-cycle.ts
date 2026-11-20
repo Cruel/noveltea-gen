@@ -411,6 +411,34 @@ export async function replacePostcommitProtocolReviewer(
   return saved;
 }
 
+/** Recover the narrow crash window after a fresh protocol verdict is sealed
+ * but BEFORE its reviewer identity is adopted. Only an independently verified
+ * original/fresh handoff may rotate the cycle. Repeated reconciliation is safe. */
+export async function adoptAcceptedPostcommitFallback(
+  job: JobStartResult,
+  packet: SemanticReviewPacket,
+  cycle: PostcommitReviewCycle,
+  handoff: { original: { id: string; file: string }; fresh: { id: string; file: string } },
+  verdict: SemanticVerdict,
+): Promise<void> {
+  const saved = await inspectPostcommitReviewCycle(job, cycle.rootSha, cycle.assignmentDigest);
+  if (!saved || saved.id !== cycle.id)
+    throw Error("Accepted fallback cannot adopt an unknown postcommit cycle.");
+  const matches = (a: { id: string; file: string }, b: { id: string; file: string }) =>
+    a.id === b.id && a.file === b.file;
+  if (matches(saved.reviewer, handoff.original)) {
+    // replacePostcommitProtocolReviewer revalidates the authorization and
+    // writes the one-time reviewer rotation before any verdict acceptance.
+    const successor = await replacePostcommitProtocolReviewer(job, packet, saved, handoff.fresh);
+    await acceptPostcommitReviewRound(job, packet, verdict, successor);
+  } else if (saved.protocolFresh && matches(saved.reviewer, handoff.fresh)) {
+    // A crash after adoption but before round sealing is also replay-safe.
+    await acceptPostcommitReviewRound(job, packet, verdict, saved);
+  } else {
+    throw Error("Accepted protocol fallback does not match original or adopted reviewer identity.");
+  }
+}
+
 export async function acceptPostcommitReviewRound(
   job: JobStartResult,
   packet: SemanticReviewPacket,

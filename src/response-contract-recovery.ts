@@ -326,16 +326,59 @@ export async function inspectCompletedProtocolResponse<T>(options: {
   return result;
 }
 
+/** Return BOTH Pi identities only when the original protocol exhausted
+ * its three turns and the one authorized fresh session has an accepted,
+ * transcript-verified response. It never starts or reopens a model session. */
+export async function inspectAcceptedFreshProtocolHandoff(options: {
+  receiptFile: string; sourceDigest: string; contract: string; sessionRoots: string[];
+}): Promise<{ original: { id: string; file: string }; fresh: { id: string; file: string } } | null> {
+  const { receiptFile, sourceDigest, contract, sessionRoots } = options;
+  const first = await regularJson<ContractReceipt>(receiptFile + ".initial.json");
+  const allowance = await regularJson<FreshAuthorization>(receiptFile + ".fresh-allowance.json");
+  const second = await regularJson<ContractReceipt>(receiptFile + ".fresh.json");
+  // A normal accepted original invocation has no fallback handoff.
+  if (!allowance && !second) return null;
+  if (!first || !allowance || !second ||
+      first.status !== "protocol-exhausted" || first.attempts !== 3 ||
+      !first.failedPaths.length || first.sourceDigest !== sourceDigest ||
+      second.status !== "accepted" || second.sourceDigest !== sourceDigest ||
+      allowance.version !== 1 || allowance.contract !== contract ||
+      allowance.sourceDigest !== sourceDigest || allowance.freshAllowanceConsumed !== true ||
+      allowance.originalInvocationId !== first.invocationId ||
+      allowance.originalSessionId !== first.sessionId ||
+      allowance.originalSessionFile !== first.sessionFile ||
+      allowance.freshInvocationId !== second.invocationId ||
+      allowance.freshSessionId !== second.sessionId ||
+      allowance.freshSessionFile !== second.sessionFile ||
+      first.sessionId === second.sessionId || first.sessionFile === second.sessionFile)
+    throw new ProtocolIntegrityBlockedError("Accepted fallback handoff has invalid original/fresh provenance");
+  checkedReceipt(first, sourceDigest, contract, null, null);
+  checkedReceipt(second, sourceDigest, contract, null, allowance);
+  const original = await transcriptResponses(first.sessionFile, sessionRoots, first.sessionId);
+  const fresh = await transcriptResponses(second.sessionFile, sessionRoots, second.sessionId);
+  if (!first.responseOrdinal || first.responseOrdinal !== original.complete.length ||
+      !second.responseOrdinal || second.responseOrdinal !== fresh.complete.length ||
+      createHash("sha256").update(original.complete.at(-1) ?? "").digest("hex") !==
+        first.responseHash ||
+      createHash("sha256").update(fresh.complete.at(-1) ?? "").digest("hex") !==
+        second.responseHash)
+    throw new ProtocolIntegrityBlockedError("Accepted fallback transcript or original exhaustion changed");
+  return { original: { id: first.sessionId, file: first.sessionFile },
+    fresh: { id: second.sessionId, file: second.sessionFile } };
+}
+
 /** Return the authenticated completed invocation's original transcript and
  * successful read tools, for production planner/reviewer admission after a
  * crash between response completion and their next Graph checkpoint. */
 export async function inspectCompletedProtocolReads(options: {
   receiptFile: string; sourceDigest: string; contract: string; sessionRoots: string[];
   allowExhausted?: boolean;
+  /** Inspect the original exhausted review even when its replacement passed. */
+  preferOriginal?: boolean;
 }): Promise<{ sessionFile: string; reads: string[] }> {
   const first = await regularJson<ContractReceipt>(options.receiptFile + ".initial.json");
   const fresh = await regularJson<ContractReceipt>(options.receiptFile + ".fresh.json");
-  const selected = fresh ?? first;
+  const selected = options.preferOriginal ? first : fresh ?? first;
   if (!selected || !(selected.status === "accepted" ||
       options.allowExhausted && selected.status === "protocol-exhausted") ||
       selected.sourceDigest !== options.sourceDigest ||

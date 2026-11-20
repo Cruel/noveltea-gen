@@ -37,15 +37,84 @@ export interface MilestoneBlueprint {
   }>;
   downstream: Array<{ owner: Owner; obligation: string }>;
 }
+type MilestoneEvent = MilestoneBlueprint["events"][number];
+type MilestoneField = Exclude<keyof MilestoneEvent, "id">;
+const MILESTONE_FIELDS: readonly MilestoneField[] =
+  ["purpose", "knowledge", "dependsOn", "participants", "evidence", "routes"];
+type MilestoneFinding = {
+  eventId: string; anchorPath: string; requirement: string;
+  reason: string; correction: string;
+  /** v3 findings anchor the actual defect, not merely the Event path. */
+  evidence?: { field: MilestoneField; quote: string };
+};
+type MilestonePriorEvidence =
+  | { kind: "revised"; eventId: string; field: MilestoneField;
+      before: string; after: string }
+  | { kind: "removed"; eventId: string; field: MilestoneField; before: string }
+  | { kind: "current"; eventId: string; field: MilestoneField; quote: string };
 export interface MilestoneBlueprintReview {
-  /** v1 remains readable for previously sealed plans; new Pi verdicts use v2. */
-  schema: "noveltea-milestone-blueprint-review/v1" | "noveltea-milestone-blueprint-review/v2";
+  /** v1/v2 remain readable under their sealed policy; newly admitted reviews use v3. */
+  schema: "noveltea-milestone-blueprint-review/v1" |
+    "noveltea-milestone-blueprint-review/v2" | "noveltea-milestone-blueprint-review/v3";
   status: "pass" | "revise";
-  findings: Array<{ eventId: string; anchorPath: string; requirement: string;
-    reason: string; correction: string }>;
+  findings: MilestoneFinding[];
   prior?: Array<{ round: number; findingIndex: number;
     status: "resolved" | "improved" | "persisting" | "regressed";
-    reason: string; evidence: { eventId: string; quote: string } }>;
+    reason: string; evidence: { eventId: string; quote: string } | MilestonePriorEvidence }>;
+}
+
+function milestoneFieldText(event: MilestoneEvent, field: MilestoneField): string {
+  const value = event[field];
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+const milestoneEvent = (draft: MilestoneBlueprint, id: string) =>
+  draft.events.find(event => event.id === id);
+
+function milestoneCorrectionEvidence(p: NonNullable<MilestoneBlueprintReview["prior"]>[number],
+  finding: MilestoneFinding, original: MilestoneBlueprint, current: MilestoneBlueprint,
+): boolean {
+  const evidence = p.evidence;
+  if (!("kind" in evidence) || evidence.eventId !== finding.eventId ||
+      !(MILESTONE_FIELDS as readonly string[]).includes(evidence.field))
+    return false;
+  const source = milestoneEvent(original, finding.eventId);
+  if (!source) return false;
+  const before = milestoneFieldText(source, evidence.field);
+  // New v3 findings bind the repair to the very field and quote that were
+  // independently rejected, so unrelated Event or field edits cannot launder a PASS.
+  if (finding.evidence &&
+      (finding.evidence.field !== evidence.field ||
+       (evidence.kind === "current"
+         ? finding.evidence.quote !== evidence.quote
+         : finding.evidence.quote !== evidence.before)))
+    return false;
+  if (evidence.kind === "removed") {
+    return !!evidence.before && evidence.before.length >= 8 &&
+      before.includes(evidence.before) && !milestoneEvent(current, finding.eventId);
+  }
+  const target = milestoneEvent(current, finding.eventId);
+  if (!target) return false;
+  const after = milestoneFieldText(target, evidence.field);
+  if (evidence.kind === "revised")
+    return evidence.before.length >= 8 && evidence.after.length >= 8 &&
+      before.includes(evidence.before) && !after.includes(evidence.before) &&
+      after.includes(evidence.after) && !before.includes(evidence.after);
+  return evidence.kind === "current" && evidence.quote.length >= 8 &&
+    after.includes(evidence.quote);
+}
+
+/** Require changed, source-bound evidence against EACH rejected target before
+ * admitting a new independent PASS, not just an unrelated global draft diff. */
+export function milestonePassCorrections(draft: MilestoneBlueprint,
+  previous: readonly Round[], review: MilestoneBlueprintReview): boolean {
+  if (review.status !== "pass" || !previous.length) return true;
+  if (review.schema !== "noveltea-milestone-blueprint-review/v3") return true; // sealed legacy
+  return previous.every((round, index) => round.review.findings.every((finding, findingIndex) => {
+    const proof = review.prior?.find(p => p.round === index && p.findingIndex === findingIndex);
+    return proof?.status === "resolved" &&
+      milestoneCorrectionEvidence(proof, finding, round.draft, draft) &&
+      "kind" in proof.evidence && proof.evidence.kind !== "current";
+  }));
 }
 interface Lineage {
   jobId: string; threadId: string; baseSha: string; executionHead: string;
@@ -71,10 +140,26 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
     const oscillating = rounds.slice(0, i).some(r => r.draftDigest === current.draftDigest);
     const improved = !oscillating && (current.review.prior ?? []).some(p => {
       if (p.status !== "resolved" && p.status !== "improved") return false;
-      const finding = rounds[p.round]?.review.findings[p.findingIndex];
-      if (!finding || finding.eventId !== p.evidence.eventId) return false;
-      const before = prior.draft.events.find(e => e.id === finding.eventId);
-      const after = current.draft.events.find(e => e.id === finding.eventId);
+      const source = rounds[p.round];
+      const finding = source?.review.findings[p.findingIndex];
+      if (!finding || p.evidence.eventId !== finding.eventId) return false;
+      if (current.review.schema === "noveltea-milestone-blueprint-review/v3") {
+        if (!source || !milestoneCorrectionEvidence(p, finding, source.draft, current.draft) ||
+            !("kind" in p.evidence)) return false;
+        const before = milestoneEvent(prior.draft, finding.eventId);
+        const after = milestoneEvent(current.draft, finding.eventId);
+        if (p.evidence.kind === "removed") return !!before && !after;
+        if (p.evidence.kind !== "revised" || !before || !after) return false;
+        const oldField = milestoneFieldText(before, p.evidence.field);
+        const newField = milestoneFieldText(after, p.evidence.field);
+        return oldField.includes(p.evidence.before) &&
+          !newField.includes(p.evidence.before) &&
+          newField.includes(p.evidence.after) && !oldField.includes(p.evidence.after);
+      }
+      // Older sealed v2 reviews retain their historical convergence policy.
+      if ("kind" in p.evidence) return false;
+      const before = milestoneEvent(prior.draft, finding.eventId);
+      const after = milestoneEvent(current.draft, finding.eventId);
       return !!before && !!after && sha(before) !== sha(after) &&
         JSON.stringify(after).includes(p.evidence.quote) &&
         !JSON.stringify(before).includes(p.evidence.quote);
@@ -177,26 +262,39 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
 }
 export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlueprint,
   assignment: Pick<EventAssignment, "milestonePath" | "sourcePaths">,
-  previous: readonly Round[] = []): MilestoneBlueprintReview {
+  previous: readonly Round[] = [],
+  policy: "admission" | "sealed-replay" = "admission"): MilestoneBlueprintReview {
   let raw: unknown;
   try { raw = parse(text); } catch { throw Error("Independent Milestone review returned invalid JSON."); }
-  const current = object(raw) && raw.schema === "noveltea-milestone-blueprint-review/v2";
-  if (!exact(raw, current ? ["schema", "status", "findings", "prior"] :
+  const version = object(raw) ? raw.schema : null;
+  const modern = version === "noveltea-milestone-blueprint-review/v3";
+  const hasPrior = modern || version === "noveltea-milestone-blueprint-review/v2";
+  if (!["noveltea-milestone-blueprint-review/v1",
+        "noveltea-milestone-blueprint-review/v2",
+        "noveltea-milestone-blueprint-review/v3"].includes(String(version)) ||
+      !exact(raw, hasPrior ? ["schema", "status", "findings", "prior"] :
         ["schema", "status", "findings"]) ||
-      (current ? raw.schema !== "noveltea-milestone-blueprint-review/v2" :
-        raw.schema !== "noveltea-milestone-blueprint-review/v1") ||
       !["pass", "revise"].includes(String(raw.status)) ||
       !Array.isArray(raw.findings) || raw.findings.length > 12 ||
       (raw.status === "pass") !== (raw.findings.length === 0))
     throw Error("Independent Milestone review needs an explicit source-bound verdict.");
   for (const item of raw.findings) {
-    if (!exact(item, ["eventId", "anchorPath", "requirement", "reason", "correction"]) ||
-        !draft.events.some(event => event.id === item.eventId) ||
-        !assignment.sourcePaths.includes(String(item.anchorPath)) ||
-        ![item.requirement, item.reason, item.correction].every(v => string(v)))
-      throw Error("Independent Milestone review finding has no current Event/source evidence.");
+    const event = draft.events.find(e => e.id === item.eventId);
+    if (!exact(item, modern
+          ? ["eventId", "anchorPath", "requirement", "reason", "correction", "evidence"]
+          : ["eventId", "anchorPath", "requirement", "reason", "correction"]) ||
+        !event || !assignment.sourcePaths.includes(String(item.anchorPath)) ||
+        ![item.requirement, item.reason, item.correction].every(v => string(v)) ||
+        (modern && (!exact(item.evidence, ["field", "quote"]) ||
+          !MILESTONE_FIELDS.includes(item.evidence.field as MilestoneField) ||
+          !string(item.evidence.quote) || item.evidence.quote.length < 8 ||
+          !milestoneFieldText(event, item.evidence.field as MilestoneField)
+            .includes(item.evidence.quote))))
+      throw Error("Independent Milestone review finding has no cited defective Event field.");
   }
-  if (current) {
+  if (!hasPrior && previous.length && policy === "admission")
+    throw Error("New Milestone review requires v3 correction evidence after a rejected round.");
+  if (hasPrior) {
     const review = raw as unknown as MilestoneBlueprintReview;
     const count = previous.reduce((total, round) => total + round.review.findings.length, 0);
     if (!Array.isArray(review.prior) || review.prior.length !== count)
@@ -204,21 +302,44 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
     const seen = new Set<string>();
     for (const p of review.prior) {
       const key = p.round + ":" + p.findingIndex;
-      const original = previous[p.round]?.review.findings[p.findingIndex];
-      const event = draft.events.find(item => item.id === original?.eventId);
+      const source = previous[p.round];
+      const original = source?.review.findings[p.findingIndex];
       if (!Number.isSafeInteger(p.round) || !Number.isSafeInteger(p.findingIndex) ||
-          seen.has(key) || !original ||
+          seen.has(key) || !source || !original ||
           !["resolved", "improved", "persisting", "regressed"].includes(p.status) ||
-          !string(p.reason) ||
-          !exact(p.evidence, ["eventId", "quote"]) ||
-          p.evidence.eventId !== original.eventId ||
-          !string(p.evidence.quote) || p.evidence.quote.length < 8 ||
-          !event || !JSON.stringify(event).includes(p.evidence.quote))
-        throw Error("Milestone previous finding assessment lacks exact current Event evidence.");
+          !string(p.reason) || !object(p.evidence) ||
+          p.evidence.eventId !== original.eventId)
+        throw Error("Milestone previous finding assessment lacks source-bound identity.");
+      if (modern) {
+        const proof = p.evidence as MilestonePriorEvidence;
+        const keys = proof.kind === "revised"
+          ? ["kind", "eventId", "field", "before", "after"]
+          : proof.kind === "removed"
+            ? ["kind", "eventId", "field", "before"]
+            : ["kind", "eventId", "field", "quote"];
+        if (!exact(proof, keys) ||
+            !milestoneCorrectionEvidence(p, original, source.draft, draft) ||
+            ((p.status === "resolved" || p.status === "improved")
+              ? proof.kind === "current"
+              : proof.kind !== "current"))
+          throw Error("Milestone finding correction needs a change to its rejected field or verified Event removal.");
+      } else {
+        const proof = p.evidence as { eventId: string; quote: string };
+        const event = milestoneEvent(draft, original.eventId);
+        if (!exact(proof, ["eventId", "quote"]) ||
+            !string(proof.quote) || proof.quote.length < 8 ||
+            !event || !JSON.stringify(event).includes(proof.quote))
+          throw Error("Milestone previous finding assessment lacks exact current Event evidence.");
+      }
       seen.add(key);
     }
     if (review.status === "pass" && review.prior.some(p => p.status !== "resolved"))
       throw Error("Milestone reviewer cannot pass with unresolved historical blockers.");
+    if (review.status === "pass" && previous.length &&
+        policy === "admission" && !modern)
+      throw Error("New Milestone approval requires v3 correction evidence against rejected Event fields.");
+    if (modern && !milestonePassCorrections(draft, previous, review))
+      throw Error("Milestone pass has no verified correction of the rejected Event claim.");
   }
   return raw as unknown as MilestoneBlueprintReview;
 }
@@ -275,7 +396,7 @@ function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
   for (const [index, round] of value.rounds.entries()) {
     const draft = parseMilestoneBlueprint(JSON.stringify(round.draft), assignment);
     const review = parseMilestoneBlueprintReview(JSON.stringify(round.review), draft,
-      assignment, value.rounds.slice(0, index));
+      assignment, value.rounds.slice(0, index), "sealed-replay");
     if (round.draftDigest !== sha(draft) || round.reviewDigest !== sha(review))
       throw Error("Milestone review evidence changed after its sealed verdict.");
   }
@@ -347,13 +468,26 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "EXISTING anchorPath and proposed eventId. Preserve your prior findings and reassess the actual " +
     "new draft, distinguishing resolved blockers and regressions. Assess EACH prior " +
     "finding by exact round and findingIndex, including distinct findings on the same " +
-    "Event/source path. Cosmetic rewrites and newly discovered blockers alone are not " +
-    "progress. A pass has no findings and every previous finding resolved; revise " +
-    "reports material blockers. Return ONLY JSON " +
-    "{schema:'noveltea-milestone-blueprint-review/v2',status:'pass|revise'," +
-    "findings:[{eventId,anchorPath,requirement,reason,correction}]," +
+    "Event/source path. Every NEW finding MUST cite the defective Event FIELD and " +
+    "an exact 8+ character quote from that field; do not just cite its path. " +
+    "To resolve a prior finding, either cite the specific original rejected field " +
+    "text REMOVED and newly added replacement text in THAT SAME field, or cite " +
+    "the original rejected text and prove its provisional Event was removed. " +
+    "A replacement Event may be added, but deleting the rejected ID must be verifiable. " +
+    "The original rejected quote must be absent from the current field; citing " +
+    "unchanged rejected prose and edits to another Event cannot authorize a pass. " +
+    "For unchanged blockers cite current evidence instead. Cosmetic rewrites and " +
+    "newly discovered blockers alone are not progress. A pass has no findings and " +
+    "every prior finding resolved; revise reports material blockers. Return ONLY JSON " +
+    "{schema:'noveltea-milestone-blueprint-review/v3',status:'pass|revise'," +
+    "findings:[{eventId,anchorPath,requirement,reason,correction," +
+    "evidence:{field:'purpose|knowledge|dependsOn|participants|evidence|routes'," +
+    "quote:exact defective field text}}]," +
     "prior:[{round,findingIndex,status:'resolved|improved|persisting|regressed'," +
-    "reason,evidence:{eventId,quote:exact CURRENT Event text 8+ chars}}]}. " +
+    "reason,evidence:{kind:'revised',eventId,field,before:exact original rejected " +
+    "quote,after:exact NEW field quote}|{kind:'removed',eventId,field," +
+    "before:exact original rejected quote}|{kind:'current',eventId,field," +
+    "quote:exact unchanged current field text}}]}. " +
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
     "\nPREVIOUS SEALED REVIEWS: " + JSON.stringify(prior.map(r => ({ draftDigest: r.draftDigest,
       review: r.review }))) + "\nCURRENT PLAN: " + JSON.stringify(draft);
@@ -569,14 +703,15 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
       const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft,
         assignment, receipt.rounds);
-      if (verdict.schema !== "noveltea-milestone-blueprint-review/v2")
-        throw Error("New Milestone reviews require per-finding source-grounded reassessment.");
+      if (verdict.schema !== "noveltea-milestone-blueprint-review/v3")
+        throw Error("New Milestone reviews require field-bound, source-grounded reassessment.");
       await reviewer.context.completed(reviewer.session.sessionManager.getSessionFile()!, reviewer.session.sessionId);
       receipt.reviewer = await seal(reviewer.session);
       const previousRound = receipt.rounds.at(-1);
       if (verdict.status === "pass" && previousRound?.review.status === "revise" &&
-          previousRound.draftDigest === sha(receipt.draft))
-        throw Error("Milestone reviewer cannot approve an unchanged rejected draft.");
+          (previousRound.draftDigest === sha(receipt.draft) ||
+            !milestonePassCorrections(receipt.draft, receipt.rounds, verdict)))
+        throw Error("Milestone reviewer cannot approve without repairing the exact rejected Event field.");
       receipt.rounds.push({ draft: receipt.draft, review: verdict,
         draftDigest: sha(receipt.draft), reviewDigest: sha(verdict) });
       if (verdict.status === "pass") {

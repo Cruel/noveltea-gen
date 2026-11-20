@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   acceptPostcommitReviewRound,
+  adoptAcceptedPostcommitFallback,
   bindPostcommitReviewCycle,
   inspectPostcommitReviewCycle,
   openPostcommitReviewCycle,
@@ -14,6 +15,10 @@ import {
   reviewCycleRoot,
 } from "../src/postcommit-review-cycle.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "../src/semantic-assignment-review.js";
+import {
+  inspectAcceptedFreshProtocolHandoff,
+  inspectCompletedProtocolResponse,
+} from "../src/response-contract-recovery.js";
 import type { JobStartResult } from "../src/job.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
 
@@ -347,6 +352,114 @@ test("#210 bounded protocol-fresh handoff preserves review identity and refuses 
   } finally {
     finish();
   }
+});
+
+test("#210 ordinary accepted original protocol does not require a fallback handoff", async () => {
+  const { job, finish } = setup();
+  try {
+    const p = packet(root);
+    const prefix = join(job.stateDir, "review-protocol", "assignment-" + p.sourceDigest);
+    mkdirSync(join(prefix, ".."), { recursive: true });
+    writeFileSync(prefix + ".initial.json",
+      JSON.stringify({ version: 1, status: "accepted", sourceDigest: p.sourceDigest }));
+    assert.equal(await inspectAcceptedFreshProtocolHandoff({
+      receiptFile: prefix, sourceDigest: p.sourceDigest,
+      contract: "reviewer.assignment-verdict.v1",
+      sessionRoots: [join(job.stateDir, "review-sessions", "assignment-fidelity")],
+    }), null);
+  } finally { finish(); }
+});
+
+test("#210 restart adopts an accepted fallback from sealed receipts without another model call", async () => {
+  const { job, reviewer, writer, file, finish } = setup();
+  try {
+    const p = packet(root);
+    const cycle = await bindPostcommitReviewCycle(job, p, snapshot,
+      "openai", "gpt-6", undefined, reviewer, writer);
+    assert.ok(cycle);
+    const contract = "reviewer.assignment-verdict.v1";
+    const nonce = (id: string, path: string) => digest(contract + "\u0000" + id + "\u0000" + path);
+    const originalReply = '{"invalid":"unparsable source verdict"}';
+    const finalReview = verdict(p, false);
+    const finalReply = JSON.stringify(finalReview);
+    const originalHeader = JSON.stringify({ type: "session", id: reviewer.id }) + "\n";
+    const message = (text: string) => JSON.stringify({
+      type: "message", message: { role: "assistant", stopReason: "stop",
+        content: [{ type: "text", text }] },
+    }) + "\n";
+    writeFileSync(file, originalHeader + Array.from({ length: 3 },
+      () => message(originalReply)).join(""));
+    const newFile = join(job.stateDir, "review-sessions", "assignment-fidelity",
+      "protocol-fresh", "sealed.jsonl");
+    mkdirSync(join(newFile, ".."), { recursive: true });
+    const fresh = { id: randomUUID(), file: newFile };
+    writeFileSync(newFile, JSON.stringify({ type: "session", id: fresh.id }) +
+      "\n" + message(finalReply));
+    const receipts = join(job.stateDir, "review-protocol", "assignment-" + p.sourceDigest);
+    mkdirSync(join(receipts, ".."), { recursive: true });
+    const originalInvocationId = nonce(reviewer.id, file);
+    const freshInvocationId = nonce(fresh.id, fresh.file);
+    const started = { version: 1, contract, sourceDigest: p.sourceDigest,
+      sessionId: reviewer.id, sessionFile: file, invocationId: originalInvocationId,
+      transcriptBytesBeforePrompt: Buffer.byteLength(originalHeader),
+      transcriptSha256BeforePrompt: digest(originalHeader) };
+    const first = { version: 1, contract, sourceDigest: p.sourceDigest,
+      sessionId: reviewer.id, sessionFile: file, invocationId: originalInvocationId,
+      status: "protocol-exhausted", attempts: 3,
+      responseOrdinal: 3, responseHash: digest(originalReply),
+      failedPaths: ["$.verdict"] };
+    const allowance = { version: 1, contract, sourceDigest: p.sourceDigest,
+      originalSessionId: reviewer.id, originalSessionFile: file,
+      originalInvocationId, freshAllowanceConsumed: true,
+      freshSessionId: fresh.id, freshSessionFile: fresh.file, freshInvocationId };
+    const accepted = { version: 1, contract, sourceDigest: p.sourceDigest,
+      sessionId: fresh.id, sessionFile: fresh.file, invocationId: freshInvocationId,
+      status: "accepted", attempts: 1, responseOrdinal: 1,
+      responseHash: digest(finalReply), failedPaths: [] };
+    for (const [suffix, receipt] of Object.entries({
+      ".started.json": started, ".initial.json": first,
+      ".fresh-allowance.json": allowance, ".fresh.json": accepted,
+    })) writeFileSync(receipts + suffix, JSON.stringify(receipt));
+    // This simulates termination after acceptance but before cycle adoption.
+    assert.deepEqual((await inspectPostcommitReviewCycle(job, root, assignmentDigest))?.reviewer,
+      reviewer);
+    const sessionRoots = [join(job.stateDir, "review-sessions", "assignment-fidelity")];
+    const recovered = await inspectCompletedProtocolResponse({
+      receiptFile: receipts, sourceDigest: p.sourceDigest, contract, sessionRoots,
+      validate: text => text === finalReply ? [] :
+        [{ path: "$.verdict", expected: "source-bound reviewer verdict" }],
+      parse: text => JSON.parse(text) as SemanticVerdict,
+    });
+    assert.deepEqual(recovered, finalReview);
+    const handoff = await inspectAcceptedFreshProtocolHandoff({
+      receiptFile: receipts, sourceDigest: p.sourceDigest, contract, sessionRoots,
+    });
+    assert.deepEqual(handoff, { original: reviewer, fresh });
+    const originalBefore = readFileSync(file);
+    const freshBefore = readFileSync(newFile);
+    await adoptAcceptedPostcommitFallback(job, p, cycle, handoff!, recovered);
+    let updated = await inspectPostcommitReviewCycle(job, root, assignmentDigest);
+    assert.equal(updated?.reviewer.id, fresh.id);
+    assert.equal(updated?.protocolFresh, true);
+    assert.equal(updated?.rounds.length, 1);
+    // Crash a second time after rotation but before normal return: replay of
+    // exactly these verified receipts is idempotent, with no Pi invocation.
+    await adoptAcceptedPostcommitFallback(job, p, cycle, handoff!, recovered);
+    updated = await inspectPostcommitReviewCycle(job, root, assignmentDigest);
+    assert.equal(updated?.rounds.length, 1);
+    assert.deepEqual(readFileSync(file), originalBefore);
+    assert.deepEqual(readFileSync(newFile), freshBefore);
+    const corrected = packet(second, true);
+    assert.deepEqual((await openPostcommitReviewCycle(job, corrected,
+      snapshot, "openai", "gpt-6"))?.reviewer, fresh);
+
+    // Tampering with the already consumed handoff cannot authorize adoption.
+    writeFileSync(receipts + ".fresh-allowance.json",
+      JSON.stringify({ ...allowance, originalInvocationId: "0".repeat(64) }));
+    await assert.rejects(inspectAcceptedFreshProtocolHandoff({
+      receiptFile: receipts, sourceDigest: p.sourceDigest, contract, sessionRoots,
+    }), /invalid original\/fresh provenance/);
+  } finally { finish(); }
 });
 
 test("#210 a material scope change starts a separate reviewer lineage with a sealed predecessor", async () => {
