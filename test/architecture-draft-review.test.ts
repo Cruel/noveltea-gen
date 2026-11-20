@@ -1,62 +1,203 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseArchitectureDraftReview, architectureDraftFormatCorrection, ARCHITECTURE_DRAFT_CORRECTION_LIMIT } from "../src/architecture-draft-review.js";
+import {
+  parseArchitectureDraftReview,
+  architectureDraftFormatCorrection,
+  architectureDraftConvergence,
+  type ArchitectureDraftReview,
+  type ArchitectureDraftRound,
+} from "../src/architecture-draft-review.js";
 
 const paths = ["arcs/arc-one.md", "milestones/milestone-one.md"];
-
-test("precommit Architecture correction is bounded to two original-session revisions and three independent verdicts", () => {
-  assert.equal(ARCHITECTURE_DRAFT_CORRECTION_LIMIT, 2);
-  assert.equal(ARCHITECTURE_DRAFT_CORRECTION_LIMIT + 1, 3);
+const requirements = {
+  foundation: "The investigation must establish independent evidence of the hidden transfer.",
+  contract: "Preserve the author's protected decision and meaningful lasting route changes.",
+  task: "Determine where the missing witness went without exposing their identity.",
+  blueprint: "The archive contains two independently inspectable records of the arrival.",
+};
+const original = {
+  [paths[0]!]: "The witness transfer lacks any independently verifiable trail.",
+  [paths[1]!]: "The arriving investigator hears the same story from a single witness.",
+};
+const finding = (path: string, quote: string, origin = "initial") => ({
+  path,
+  origin,
+  reason: "The proposed corroboration has only a single source.",
+  correction: "Name independent evidence available to the player in this exact stage.",
+  requirement: { source: "foundation", quote: "independent evidence of the hidden transfer" },
+  evidence: { path, quote },
+});
+const verdict = (findings: unknown[], prior: unknown[] = [], status = findings.length ? "revise" : "pass") =>
+  JSON.stringify({ schema: "noveltea-architecture-draft-review/v2", status, findings, prior });
+const initial = parseArchitectureDraftReview(
+  verdict([finding(paths[0]!, "transfer lacks any independently verifiable trail")]),
+  paths,
+  original,
+  requirements,
+);
+const round0: ArchitectureDraftRound = { sources: original, verdict: initial };
+const status = (round: number, findingIndex: number, state: string, path: string, quote: string) => ({
+  round,
+  findingIndex,
+  status: state,
+  reason: "The current source now adds a separate test.",
+  evidence: { path, quote },
 });
 
-test("precommit Architecture review accepts only explicit bounded source-anchored feedback", () => {
-  assert.deepEqual(parseArchitectureDraftReview(
-    '{"status":"pass","findings":[]}', paths), { status: "pass", findings: [] });
-  const result = parseArchitectureDraftReview(JSON.stringify({
-    status: "revise", findings: [{
-      path: "milestones/milestone-one.md",
-      reason: "The player has no independent observation against the witness account.",
-      correction: "Describe which testable observation can corroborate the account without inventing an Event.",
-    }],
-  }), paths);
-  assert.equal(result.status, "revise");
-  assert.equal(result.findings[0]!.path, paths[1]);
-});
-
-test("a malformed independent verdict receives bounded same-session format correction, not automatic path normalization", () => {
-  const malformed = JSON.stringify({ status: "revise", findings: [{
-    path: "milestones.milestone-one.md", reason: "Unsupported clue", correction: "Choose one",
-  }] });
-  assert.throws(() => parseArchitectureDraftReview(malformed, paths), /unauthorized findings/);
+test("Architecture draft review accepts only source-bound current-stage findings", () => {
+  assert.equal(initial.status, "revise");
+  assert.equal(initial.prior.length, 0);
+  assert.deepEqual(parseArchitectureDraftReview(verdict([]), paths, original, requirements), {
+    schema: "noveltea-architecture-draft-review/v2",
+    status: "pass",
+    findings: [],
+    prior: [],
+  });
   const guidance = architectureDraftFormatCorrection(paths);
   assert.match(guidance, /same read-only session/);
-  assert.match(guidance, /forward slash, not a period/);
+  assert.match(guidance, /forward slashes, not periods/);
   assert.match(guidance, /milestones\/milestone-one.md/);
   assert.match(guidance, /grants no write scope/i);
-  assert.doesNotMatch(guidance, /milestones\.milestone-one\.md/);
   assert.throws(() => architectureDraftFormatCorrection(["../private.md"]), /authorized record paths/);
-  const corrected = malformed.replace("milestones.milestone-one.md", "milestones/milestone-one.md");
-  assert.equal(parseArchitectureDraftReview(corrected, paths).findings[0]?.path,
-    "milestones/milestone-one.md");
 });
 
-test("precommit feedback cannot approve scope, omit evidence or smuggle paths", () => {
-  const finding = (path: string) => ({
-    status: "revise", findings: [{ path, reason: "Evidence gap", correction: "Describe the test" }],
-  });
-  for (const invalid of [
-    "not JSON", "{}", JSON.stringify({ status: "pass", findings: [{ path: paths[0],
-      reason: "ignored", correction: "no" }] }),
-    JSON.stringify({ status: "revise", findings: [] }),
-    JSON.stringify(finding("creative-direction/foundation.md")),
-    JSON.stringify(finding("milestones/../private.md")),
-    JSON.stringify(finding("arcs/not-authored.md")),
-    JSON.stringify({ ...finding(paths[0]), approved: true }),
-    JSON.stringify({ status: "revise", findings: Array(9).fill(finding(paths[0]).findings[0]) }),
-    JSON.stringify({ status: "revise", findings: [{
-      path: paths[0], reason: "x", correction: "y".repeat(751),
-    }] }),
-  ]) {
-    assert.throws(() => parseArchitectureDraftReview(invalid, paths), /draft review|reviewer/i);
-  }
+test("persistent Architecture reviewer can follow three improving revisions and pass", () => {
+  const sources1 = {
+    ...original,
+    [paths[0]!]: original[paths[0]!] + " An independent shift log records the gate opening.",
+  };
+  const p0 = status(0, 0, "resolved", paths[0]!, "An independent shift log records the gate opening");
+  const r1 = parseArchitectureDraftReview(
+    verdict([finding(paths[1]!, "same story from a single witness", "overlooked")], [p0]),
+    paths,
+    sources1,
+    requirements,
+    [round0],
+  );
+  const c1 = architectureDraftConvergence(r1, sources1, [round0]);
+  assert.equal(c1.productive, true);
+  const round1 = { sources: sources1, verdict: r1 };
+  const sources2 = {
+    ...sources1,
+    [paths[1]!]: sources1[paths[1]!] + " A second registrar confirms the witness transfer.",
+  };
+  const p1 = status(1, 0, "resolved", paths[1]!, "A second registrar confirms the witness transfer");
+  const r2 = parseArchitectureDraftReview(
+    verdict([finding(paths[0]!, "independently verifiable trail", "continuing")], [p0, p1]),
+    paths,
+    sources2,
+    requirements,
+    [round0, round1],
+  );
+  const c2 = architectureDraftConvergence(r2, sources2, [round0, round1], c1.stalled);
+  assert.equal(c2.productive, true);
+  const round2 = { sources: sources2, verdict: r2 };
+  const sources3 = {
+    ...sources2,
+    [paths[0]!]: sources2[paths[0]!] + " A certified passenger list confirms the same identity.",
+  };
+  const p2 = status(2, 0, "resolved", paths[0]!, "A certified passenger list confirms the same identity");
+  const pass = parseArchitectureDraftReview(verdict([], [p0, p1, p2]), paths, sources3, requirements, [
+    round0,
+    round1,
+    round2,
+  ]);
+  assert.equal(architectureDraftConvergence(pass, sources3, [round0, round1, round2]).productive, true);
+  assert.equal(pass.status, "pass");
+});
+
+test("Architecture stage and source authorization fail closed", () => {
+  const valid = finding(paths[0]!, "transfer lacks any independently verifiable trail");
+  for (const text of [
+    "not JSON",
+    "{}",
+    verdict([{ ...valid, path: "creative-direction/foundation.md" }]),
+    verdict([{ ...valid, path: "milestones/../private.md" }]),
+    verdict([{ ...valid, evidence: { path: paths[1], quote: "transfer lacks any independently" } }]),
+    verdict([{ ...valid, evidence: { path: paths[0], quote: "Unseen new evidence" } }]),
+    verdict([{ ...valid, requirement: { source: "contract", quote: "There must be twelve Event scenes" } }]),
+    verdict([{ ...valid, origin: "introduced" }]),
+    verdict([{ ...valid, correction: "y".repeat(751) }]),
+    verdict(Array(9).fill(valid)),
+    JSON.stringify({ ...JSON.parse(verdict([valid])), approved: true }),
+  ])
+    assert.throws(
+      () => parseArchitectureDraftReview(text, paths, original, requirements),
+      /review|verdict|findings|JSON/i,
+    );
+  const notRead = verdict([valid], []);
+  assert.throws(
+    () => parseArchitectureDraftReview(notRead, paths, original, requirements, [round0]),
+    /account|origin|unauthorized/,
+  );
+  const missingHistory = verdict(
+    [finding(paths[0]!, "transfer lacks any independently verifiable trail", "continuing")],
+    [],
+  );
+  assert.throws(
+    () => parseArchitectureDraftReview(missingHistory, paths, original, requirements, [round0]),
+    /account/,
+  );
+  assert.throws(
+    () =>
+      parseArchitectureDraftReview(
+        verdict(
+          [],
+          [status(0, 0, "persisting", paths[0]!, "transfer lacks any independently verifiable trail")],
+        ),
+        paths,
+        original,
+        requirements,
+        [round0],
+      ),
+    /unresolved findings/,
+  );
+});
+
+test("Architecture nonprogress, stale proof, new blocker churn and oscillation never authorize a pass", () => {
+  const p0 = status(0, 0, "persisting", paths[0]!, "transfer lacks any independently verifiable trail");
+  const unchanged = parseArchitectureDraftReview(
+    verdict([finding(paths[0]!, "transfer lacks any independently verifiable trail", "continuing")], [p0]),
+    paths,
+    original,
+    requirements,
+    [round0],
+  );
+  const c1 = architectureDraftConvergence(unchanged, original, [round0]);
+  assert.equal(c1.productive, false);
+  assert.equal(c1.stalled, 1);
+  const round1 = { sources: original, verdict: unchanged };
+  const p1 = status(1, 0, "persisting", paths[0]!, "transfer lacks any independently verifiable trail");
+  const noisy = { ...original, [paths[0]!]: original[paths[0]!] + " Decorative flourish only." };
+  const r2 = parseArchitectureDraftReview(
+    verdict(
+      [finding(paths[0]!, "transfer lacks any independently verifiable trail", "continuing")],
+      [p0, p1],
+    ),
+    paths,
+    noisy,
+    requirements,
+    [round0, round1],
+  );
+  const c2 = architectureDraftConvergence(r2, noisy, [round0, round1], c1.stalled);
+  assert.equal(c2.productive, false);
+  assert.equal(c2.reassess, true);
+  assert.throws(
+    () =>
+      architectureDraftConvergence(
+        parseArchitectureDraftReview(
+          verdict(
+            [],
+            [status(0, 0, "resolved", paths[0]!, "transfer lacks any independently verifiable trail")],
+          ),
+          paths,
+          original,
+          requirements,
+          [round0],
+        ),
+        original,
+        [round0],
+      ),
+    /source-grounded progress|repeats/,
+  );
 });

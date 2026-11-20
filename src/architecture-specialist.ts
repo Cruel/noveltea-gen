@@ -20,6 +20,8 @@ import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { boundedPinnedSources, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
+import { guardPiBudget } from "./job-pi-policy.js";
+import type { ArchitectureDraftReviewPin } from "./architecture-draft-review.js";
 
 /** A new agent-authored Arc/Milestone decision cannot silently grant itself
  * author protection. Previously pinned author-protected decisions are retained
@@ -231,7 +233,8 @@ export async function authorArchitecture(
   onSession: (sessionId: string, path: string) => Promise<void>,
   authorTask?: string,
   blueprint?: CausalBlueprint,
-): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[]; milestoneOrder: string[] }> {
+): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[]; milestoneOrder: string[];
+  draftReview: ArchitectureDraftReviewPin }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = {
     discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -378,16 +381,26 @@ export async function authorArchitecture(
     // Review the ACTUAL uncommitted draft before it becomes a source-verified
     // Architecture checkpoint. The independent read-only reviewer cannot
     // approve canon or weaken the later mandatory postcommit semantic gate.
-    const { reviewArchitectureDraft, ARCHITECTURE_DRAFT_CORRECTION_LIMIT } =
+    const { createArchitectureDraftReviewCycle, verifyArchitectureDraftReviewPin } =
       await import("./architecture-draft-review.js");
-    for (let iteration = 0; iteration <= ARCHITECTURE_DRAFT_CORRECTION_LIMIT; iteration++) {
-      const review = await reviewArchitectureDraft(job, snapshot, plan, provider, modelId,
-        authoredPaths, iteration, blueprint);
-      if (review.status === "pass") break;
-      if (iteration === ARCHITECTURE_DRAFT_CORRECTION_LIMIT) throw new Error(
-        "Independent Architecture draft rereview still rejected source-grounded causality/Choice/route issues: " +
-        JSON.stringify(review.findings) + ". Preserve the draft and original Pi sessions for reconciliation.");
-      await promptStorySpecialist(session,
+    const writer = { id: session.sessionId, file: sessionFile };
+    const cycle = await createArchitectureDraftReviewCycle(job, snapshot, plan, provider,
+      modelId, authoredPaths, writer, authorTask ?? "", blueprint);
+    let draftReview: ArchitectureDraftReviewPin | undefined;
+    try {
+      for (let iteration = 0; ; iteration++) {
+        const result = await cycle.review();
+        const review = result.verdict;
+        if (review.status === "pass") {
+          draftReview = result.pin;
+          break;
+        }
+        if (result.convergence.reassess) throw new Error(
+          "Independent Architecture draft review requires independent reassessment " +
+          "after two nonproductive corrections; preserve draft and original Pi sessions.");
+        await guardPiBudget(job, "architecture:precommit-writer:" + plan.version + ":" + iteration,
+          sessionFile);
+        await promptStorySpecialist(session,
         "INDEPENDENT PRECOMMIT ARCHITECTURE REVIEW: The read-only reviewer found " +
         "specific problems in the existing Arc/Milestone draft. Within ONLY the " +
         "already authorized files, correct these findings in this SAME original writer " +
@@ -399,22 +412,26 @@ export async function authorArchitecture(
         "CAUSAL_MILESTONE_ORDER line listing all authored Milestones. " +
         "The subsequent independent rereview remains mandatory.\n" +
         JSON.stringify(review.findings));
-      const corrected = [...session.messages].reverse().find(m => m.role === "assistant");
-      if (!corrected || corrected.role !== "assistant" ||
-          ["error", "aborted"].includes(corrected.stopReason))
-        throw Error("Architecture same-session review correction was interrupted; preserve draft.");
-      const stillInvalid = await authorityErrors();
-      if (stillInvalid.length)
-        throw Error("Architecture review correction invented protected decisions: " + stillInvalid.join("; "));
-      const candidateOrder = architectureMilestoneOrder(corrected.content.filter(c =>
-        c.type === "text").map(c => c.text).join("\n"));
-      if (!candidateOrder)
-        throw Error("Architecture review correction omitted the exact causal Milestone order; preserve draft.");
-      milestoneOrder = candidateOrder;
-    }
+        const corrected = [...session.messages].reverse().find(m => m.role === "assistant");
+        if (!corrected || corrected.role !== "assistant" ||
+            ["error", "aborted"].includes(corrected.stopReason))
+          throw Error("Architecture same-session review correction was interrupted; preserve draft.");
+        const stillInvalid = await authorityErrors();
+        if (stillInvalid.length)
+          throw Error("Architecture review correction invented protected decisions: " + stillInvalid.join("; "));
+        const candidateOrder = architectureMilestoneOrder(corrected.content.filter(c =>
+          c.type === "text").map(c => c.text).join("\n"));
+        if (!candidateOrder)
+          throw Error("Architecture review correction omitted the exact causal Milestone order; preserve draft.");
+        milestoneOrder = candidateOrder;
+      }
+    } finally { cycle.dispose(); }
+    if (!draftReview) throw Error("Architecture precommit review ended without an exact independent pass.");
+    await verifyArchitectureDraftReviewPin(job, snapshot, plan, provider, modelId,
+      authoredPaths, writer, draftReview, authorTask ?? "", blueprint);
     await context.completed(sessionFile, session.sessionId);
     return { piSessionId: session.sessionId, piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
-      skillReads: reads.filter(p => required.includes(p)), milestoneOrder };
+      skillReads: reads.filter(p => required.includes(p)), milestoneOrder, draftReview };
   } finally {
     session.dispose();
   }
