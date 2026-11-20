@@ -93,6 +93,7 @@ async function subject(job: JobStartResult, input: ApprovalRequest): Promise<Omi
       ? createHash("sha256").update(JSON.stringify({
         plan: r.plan, head: verifiedHead, contract: r.proposal.contract,
         ...(r.proposal.carryForward !== undefined ? { carryForward: r.proposal.carryForward } : {}),
+        ...(r.proposal.causalAmendment ? { causalAmendment: r.proposal.causalAmendment } : {}),
       })).digest("hex") : undefined;
     if (r.jobId !== job.jobId || r.baseSha !== job.baseSha ||
         (r.threadId && r.threadId !== job.threadId) ||

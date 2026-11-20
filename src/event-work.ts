@@ -14,6 +14,7 @@ import { authorEventCluster, scopedEventEvidenceConflict, eventEvidenceRepairFee
   observedNondecisionMilestone,
   eventMilestoneBodyRestoreFeedback, type EventAssignment, type EventEvidence } from "./event-specialist.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
+import type { CausalDiscovery } from "./causal-amendment.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
@@ -26,7 +27,8 @@ import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
-import { ensureMilestoneBlueprint, inspectMilestoneBlueprint, readReviewedMilestoneBlueprint,
+import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint,
+  inspectMilestoneBlueprint, readReviewedMilestoneBlueprint,
   type MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -46,6 +48,7 @@ interface EventReceipt {
   skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
   conflicts?: string[]; obligations?: string[];
+  causalDiscovery?: CausalDiscovery;
   /** Advisory typed evidence tied to native-validated draft and final commit. */
   consequenceProof?: EventConsequenceProof;
   /** A completed, clean no-write original session; never executable authority. */
@@ -76,7 +79,7 @@ interface Report {
     search: { truncated: boolean } };
   readiness: { design: { stages: Record<string, { minimum: string }> } };
 }
-interface ArchitectureReceipt { jobId: string; phase: string; expectedHead: string; plan?: Plan }
+type ArchitectureReceipt = import("./plan-continuity.js").PlanSnapshot & { expectedHead: string };
 interface FoundationsReceipt {
   jobId: string; planVersion: number; architectureHead: string;
   units: Array<{ id: string; phase: string; commitSha?: string }>;
@@ -107,7 +110,7 @@ export function eventPrerequisiteReportDigest(value: {
   jobId: string; workItemId: string; expectedHead: string; planDigest: string;
   sessionSha256: string; sessionId: string; assignmentDigest: string;
   snapshotId: string; sessionFile: string; worker: "pi" | "fixture";
-  conflicts: string[]; obligations: string[];
+  conflicts: string[]; obligations: string[]; causalDiscovery?: CausalDiscovery;
 }) {
   if (!/^[a-f0-9]{40}$/.test(value.expectedHead) ||
       !/^[a-f0-9]{64}$/.test(value.sessionSha256) ||
@@ -443,7 +446,8 @@ function output(job: JobStartResult, state: EventReceipt) {
     specialist: "nt-event-design", paths: state.paths, validation: state.validation,
     obligations: state.obligations, conflicts: state.conflicts,
     outstanding: state.validation?.remaining ?? [],
-    failure: state.failure, prerequisite: state.prerequisite, reroutedFrom: state.reroutedFrom,
+    failure: state.failure, prerequisite: state.prerequisite, causalDiscovery: state.causalDiscovery,
+    reroutedFrom: state.reroutedFrom,
     sessionFile: state.sessionFile, skillReads: state.skillReads,
     consequenceProof: state.consequenceProof,
     milestoneBlueprint: state.blueprintPin ? { status: "approved", ...state.blueprintPin } : undefined,
@@ -455,9 +459,10 @@ function output(job: JobStartResult, state: EventReceipt) {
       editorial: "unverified", unrelatedComposition: "not-required", fullStory: false } };
 }
 async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
-  rerouted = false): Promise<EventEvidence> {
+  rerouted = false, causalReplanned = false): Promise<EventEvidence> {
   const configured = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
-  const variant = configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" :
+  const variant = configured === "no-write-causal" && causalReplanned ? "fulfilled" :
+    configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" :
     configured === "no-write-evidence-once" ? rerouted ? "fulfilled" : "no-write-evidence" :
     configured === "no-write-accounts-once" ? rerouted ? "fulfilled" : "no-write-accounts" :
     configured === "phantom-milestone" ? "decision-pending" : configured;
@@ -471,13 +476,22 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
       `---\nschema: '0.1'\ntype: event\nid: event.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${prose}\n`, { flag: "wx" });
     files.push(local);
   };
-  if (["no-write-prerequisite", "no-write-evidence", "no-write-accounts", "no-write-dirty", "no-write-empty", "no-write-protected"].includes(variant)) {
+  if (["no-write-prerequisite", "no-write-evidence", "no-write-accounts", "no-write-dirty", "no-write-empty", "no-write-protected", "no-write-causal"].includes(variant)) {
     if (variant === "no-write-dirty") {
       await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
       await writeFile(join(job.worktreeStoryRoot, "events/uncertain-draft.md"), "Unapproved draft.\n");
     }
+    const canonical = variant === "no-write-causal"
+      ? await readFile(join(job.worktreeStoryRoot, assignment.milestonePath), "utf8") : "";
+    const selectedChange = canonical.match(/^change:\s*"([^"]+)"/m)?.[1] ?? "";
     return { claimedPaths: [], skillReads: [],
-      conflicts: variant === "no-write-empty" ? [] : variant === "no-write-protected"
+      ...(variant === "no-write-causal" ? { causalDiscovery: {
+        sourcePath: assignment.milestonePath, sourceQuote: selectedChange,
+        violatedObligation: "Only the selected Milestone\x27s supported change, not unobserved past facts",
+        proposedCorrection: "Correct the selected Milestone\x27s contradictory signed-ledger chronology while retaining protected author choices.",
+      } } : {}),
+      conflicts: variant === "no-write-causal" ? ["Upstream canonical signed ledger chronology contradicts the accessible witness."] :
+        variant === "no-write-empty" ? [] : variant === "no-write-protected"
         ? ["Protected author approval for an out-of-scope new Milestone is required."] :
         variant === "no-write-evidence"
           ? ["The selected Milestone lacks the material evidence of which spaces and people were accessible during the relevant interval; the current Event does not establish it."] :
@@ -580,9 +594,15 @@ export async function runEventWorkItem(input: EventOptions) {
     }
     const arch = JSON.parse(await readFile(join(root, "architecture.json"), "utf8")) as ArchitectureReceipt;
     const foundation = JSON.parse(await readFile(join(root, "character-world.json"), "utf8")) as FoundationsReceipt;
+    const historic = arch.history?.at(-1);
+    const carriedFoundations = foundation.architectureHead !== arch.expectedHead &&
+      !!arch.plan?.causalAmendment && !!historic &&
+      historic.plan.version === foundation.planVersion &&
+      historic.plan.items[0]?.verifiedSha === foundation.architectureHead &&
+      historic.carryForward?.includes("foundations") === true;
     if (arch.jobId !== job.jobId || arch.phase !== "committed" || !arch.plan ||
         foundation.jobId !== job.jobId ||
-        foundation.architectureHead !== arch.expectedHead ||
+        (foundation.architectureHead !== arch.expectedHead && !carriedFoundations) ||
         foundation.units?.length !== 2 || foundation.units[0]?.id !== "world-foundations" ||
         foundation.units[1]?.id !== "character-foundations" ||
         foundation.units.some(u => u.phase !== "committed" || !u.commitSha)) {
@@ -594,8 +614,10 @@ export async function runEventWorkItem(input: EventOptions) {
       throw new Error("Character foundation commit does not carry verified work-item provenance.");
     }
     try {
-      rawGit(job, "merge-base", "--is-ancestor", arch.expectedHead, foundation.units[0]!.commitSha!);
+      rawGit(job, "merge-base", "--is-ancestor", foundation.architectureHead, foundation.units[0]!.commitSha!);
       rawGit(job, "merge-base", "--is-ancestor", foundation.units[0]!.commitSha!, foundation.units[1]!.commitSha!);
+      if (carriedFoundations)
+        rawGit(job, "merge-base", "--is-ancestor", foundation.units[1]!.commitSha!, arch.expectedHead);
       rawGit(job, "merge-base", "--is-ancestor", foundation.units[1]!.commitSha!, "HEAD");
     }
     catch { throw new Error("Job HEAD does not descend through the verified Character/World foundations."); }
@@ -613,7 +635,63 @@ export async function runEventWorkItem(input: EventOptions) {
           receipt.milestoneId !== input.milestone || receipt.workItemId !== workItemId) {
         throw new Error("Event receipt is not bound to the authorized Story plan and job identity.");
       }
-      assertPlanContinuity(job, arch, "event:" + input.milestone, receipt.planVersion, receipt.planDigest);
+      const amendment = arch.plan.causalAmendment;
+      if (input.action === "run" && amendment && receipt.planVersion + 1 === arch.plan.version &&
+          amendment.source.milestoneId === input.milestone &&
+          amendment.source.sha === receipt.expectedHead &&
+          amendment.source.reportDigest === receipt.prerequisite?.reportDigest) {
+        const old = receipt;
+        const pin = old.blueprintPin;
+        const prereq = old.prerequisite;
+        if (old.phase !== "prerequisite-reported" || old.claimedPaths?.length ||
+            !old.assignment || !pin || !prereq || !old.snapshot ||
+            !old.causalDiscovery || old.causalDiscovery.sourcePath !== amendment.source.path ||
+            !old.conflicts || !old.obligations ||
+            arch.history?.at(-1)?.plan.version !== old.planVersion ||
+            hash(JSON.stringify(arch.history.at(-1)!.plan)) !== old.planDigest ||
+            prereq.assignmentDigest !== hash(JSON.stringify(old.assignment)) ||
+            prereq.expectedHead !== old.expectedHead ||
+            prereq.snapshotId !== old.snapshot.id || prereq.worker !== old.worker ||
+            prereq.sessionFile !== (old.sessionFile ?? "fixture") ||
+            prereq.reportDigest !== eventPrerequisiteReportDigest({
+              jobId: old.jobId, workItemId: old.workItemId,
+              expectedHead: old.expectedHead, planDigest: old.planDigest,
+              sessionSha256: prereq.sessionSha256, sessionId: prereq.sessionId,
+              assignmentDigest: prereq.assignmentDigest, snapshotId: prereq.snapshotId,
+              sessionFile: prereq.sessionFile, worker: prereq.worker,
+              conflicts: old.conflicts, obligations: old.obligations,
+              causalDiscovery: old.causalDiscovery,
+            })) throw Error("Causal Event replay lacks a sealed, unchanged original no-write discovery.");
+        if (old.worker === "pi") {
+          await verifyJobPiSession(job, "event", old.sessionFile, prereq.sessionId, old.workItemId);
+          if (!old.sessionFile || hash(await readFile(old.sessionFile)) !== prereq.sessionSha256)
+            throw Error("Causal Event original Pi transcript changed before restart.");
+        } else if (prereq.sessionSha256 !== "f".repeat(64) || prereq.sessionId !== "fixture") {
+          throw Error("Causal Event fixture source does not match its original sealed receipt.");
+        }
+        if (dirty(job).length || await trustedHead(job) !== arch.expectedHead)
+          throw Error("Causal Event restart requires the exact clean corrected Architecture HEAD.");
+        try { rawGit(job, "merge-base", "--is-ancestor", old.expectedHead, arch.expectedHead); }
+        catch { throw Error("Causal Event source does not precede the approved Architecture correction."); }
+        await archiveReviewedMilestoneBlueprint(job, pin, old.assignment);
+        const archive = join(root, "event-causal-history",
+          input.milestone.slice(10) + "-" + prereq.reportDigest + ".json");
+        await mkdir(dirname(archive), { recursive: true });
+        if (existsSync(archive)) {
+          if (JSON.stringify(JSON.parse(await readFile(archive, "utf8"))) !== JSON.stringify(old))
+            throw Error("Preserved original causal Event no-write report was changed.");
+        } else await persist(archive, old);
+        receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
+          milestoneId: input.milestone, workItemId,
+          planVersion: arch.plan.version, planDigest, expectedHead: arch.expectedHead,
+          phase: "ready", worker: old.worker, provider: old.provider, model: old.model,
+          snapshot: old.snapshot, blueprintRequired: true,
+          blueprintTask: input.task ?? old.blueprintTask ?? "" };
+        await persist(receiptFile, receipt);
+      } else {
+        assertPlanContinuity(job, arch, "event:" + input.milestone,
+          receipt.planVersion, receipt.planDigest);
+      }
     } else {
       if (input.action !== "run") throw new Error("No Event work item to inspect.");
       const head = await trustedHead(job);
@@ -634,7 +712,8 @@ export async function runEventWorkItem(input: EventOptions) {
         localPlanning: await inspectMilestoneBlueprint(job, receipt.milestoneId) };
     }
     if (receipt.blueprintRequired && input.task !== undefined && !receipt.reroutedFrom &&
-        input.task !== receipt.blueprintTask)
+        input.task !== receipt.blueprintTask &&
+        !(input.reroute && input.task === input.reroute.task))
       throw Error("Event author objective changed after its source-bound Milestone planning admission.");
     if (Boolean(input.fixture) !== (receipt.worker === "fixture") ||
         input.provider && input.provider !== receipt.provider ||
@@ -679,6 +758,7 @@ export async function runEventWorkItem(input: EventOptions) {
         sessionId: source.sessionId, assignmentDigest: hash(JSON.stringify(original.assignment)),
         snapshotId: original.snapshot!.id, sessionFile: source.sessionFile,
         worker: original.worker, conflicts: original.conflicts, obligations: original.obligations,
+        ...(original.causalDiscovery ? { causalDiscovery: original.causalDiscovery } : {}),
       }) !== receipt.reroutedFrom ||
         source.assignmentDigest !== hash(JSON.stringify(original.assignment)) ||
         source.worker !== original.worker || source.snapshotId !== original.snapshot?.id)
@@ -729,7 +809,8 @@ export async function runEventWorkItem(input: EventOptions) {
             assignmentDigest: receipt.prerequisite.assignmentDigest,
             snapshotId: receipt.prerequisite.snapshotId,
             sessionFile: receipt.prerequisite.sessionFile, worker: receipt.prerequisite.worker,
-            conflicts: receipt.conflicts, obligations: receipt.obligations }))
+            conflicts: receipt.conflicts, obligations: receipt.obligations,
+            ...(receipt.causalDiscovery ? { causalDiscovery: receipt.causalDiscovery } : {}) }))
         throw Error("Event prerequisite report changed after its original Pi decision.");
       try { rawGit(job, "merge-base", "--is-ancestor", receipt.expectedHead, await trustedHead(job)); }
       catch { throw Error("Event prerequisite report no longer descends from its pinned Story source."); }
@@ -931,7 +1012,8 @@ export async function runEventWorkItem(input: EventOptions) {
           };
           let evidence: EventEvidence;
           if (receipt.worker === "fixture") {
-            evidence = await fixtureAuthor(job, assign, !!receipt.reroutedFrom);
+            evidence = await fixtureAuthor(job, assign, !!receipt.reroutedFrom,
+              !!arch.plan?.causalAmendment);
             if (["failed-repair", "repair"].includes(process.env.NT_EVENT_FIXTURE_CASE ?? "")) {
               // Exercise the same bounded, source-located feedback seam as Pi:
               // one fixture corrects the contradiction; another refuses.
@@ -989,6 +1071,7 @@ export async function runEventWorkItem(input: EventOptions) {
             receipt.claimedPaths = [];
             receipt.conflicts = evidence.conflicts;
             receipt.obligations = evidence.obligations;
+            receipt.causalDiscovery = evidence.causalDiscovery;
             receipt.skillReads = evidence.skillReads;
             receipt.sessionFile = evidence.sessionFile;
             const payload = { jobId: job.jobId, workItemId: receipt.workItemId,
@@ -996,7 +1079,8 @@ export async function runEventWorkItem(input: EventOptions) {
               sessionSha256, sessionId, assignmentDigest: hash(JSON.stringify(receipt.assignment)),
               snapshotId: receipt.snapshot!.id, sessionFile: evidence.sessionFile ?? "fixture",
               worker: receipt.worker, conflicts: evidence.conflicts,
-              obligations: evidence.obligations };
+              obligations: evidence.obligations,
+              ...(evidence.causalDiscovery ? { causalDiscovery: evidence.causalDiscovery } : {}) };
             receipt.prerequisite = { expectedHead: receipt.expectedHead, sessionSha256,
               sessionId, assignmentDigest: payload.assignmentDigest,
               snapshotId: payload.snapshotId, sessionFile: payload.sessionFile,

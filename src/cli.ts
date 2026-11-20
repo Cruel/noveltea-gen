@@ -73,6 +73,7 @@ Usage:
   pnpm dev job author resume --story /path/to/story --job draft-1 --file typed-response.json
   pnpm dev job author control --story /path/to/story --job draft-1 --state paused
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
+  pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract unchanged-scope.json --causal-digest <sha256> --carry-forward reviewed.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --approval /path/to/plan-approval-reference.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
   pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --approval /path/to/decision-approval-reference.json
@@ -113,6 +114,9 @@ Job architecture:
                             envelope {presentation,hardLimits,preferences}
   --mode <mode>            autonomous requires contract; collaborative may await author scope
   --proposal <sha256>      Exact digest from architecture propose (approve only)
+  --causal-digest <sha256>  Exact source-bound Generation causal amendment (propose only);
+                           requires unchanged contract and author-signed approval
+  --carry-forward <json>  Explicit independently reviewed unaffected work IDs (propose only)
   --digest <sha256>        Exact reviewed candidate digest from inspect (reconcile only)
   --approval <file>         Recorded controller reference JSON {receiptId,nonce}
   --skills-source <path>   NovelTea skills checkout to pin
@@ -697,15 +701,16 @@ async function main(): Promise<void> {
       throw new Error("Expected job architecture run|inspect|propose|approve|reconcile.");
     }
     const values = parseJobOptions(args, "architecture", ["--story", "--job", "--contract", "--mode",
-      "--proposal", "--digest", "--approval", "--carry-forward", "--skills-source", "--validator-source",
+      "--proposal", "--digest", "--approval", "--carry-forward", "--causal-digest",
+      "--skills-source", "--validator-source",
       "--provider", "--model", "--fixture"], ["--fixture"], "Missing value for architecture option ");
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job architecture requires --story and --job.");
     const mode = values.get("--mode");
     if (mode && mode !== "autonomous" && mode !== "collaborative") throw new Error("Architecture mode must be autonomous or collaborative.");
     if (action === "propose" && !values.has("--contract")) throw new Error("Architecture propose requires --contract.");
-    if (action !== "propose" && values.has("--carry-forward")) {
-      throw new Error("Only architecture propose accepts --carry-forward.");
+    if (action !== "propose" && (values.has("--carry-forward") || values.has("--causal-digest"))) {
+      throw new Error("Only architecture propose accepts --carry-forward and --causal-digest.");
     }
     if (action === "approve" && (!values.has("--proposal") || !values.has("--approval"))) {
       throw new Error("Architecture approve requires --proposal and --approval.");
@@ -730,7 +735,8 @@ async function main(): Promise<void> {
     const { runArchitectureJob } = await import("./architecture.js");
     const result = await runArchitectureJob({
       story, job, action: action as "run" | "inspect" | "propose" | "approve" | "reconcile",
-      contract, carryForward, mode: mode as "autonomous" | "collaborative" | undefined,
+      contract, carryForward, causalDigest: values.get("--causal-digest"),
+      mode: mode as "autonomous" | "collaborative" | undefined,
       proposal: values.get("--proposal"), approvalFile: values.get("--approval"),
       recoveryDigest: values.get("--digest"),
       skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),

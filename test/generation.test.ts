@@ -288,8 +288,8 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
     Object.assign(process.env, f.env);
     try {
       const job = await startStoryJob({ story: f.story, job: "single" }, false);
-      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
-        p.eligible && p.workItem === workItem);
+      const point = (await inspectRecoveryCheckpoints(job)).filter(p =>
+        p.eligible && p.workItem === workItem).at(-1);
       assert.ok(point?.assurance, "Missing native-validated " + workItem);
       if (point.semanticReview === "not-required" || point.semanticReview === "passed") return;
       assert.equal(point.semanticReview, "required-pending", workItem);
@@ -985,6 +985,131 @@ test("clean Event no-write prerequisite is blocked for typed plan approval witho
   assert.equal(resumed.inventory.version, first.inventory.version);
 });
 
+test("#212: a source-grounded upstream contradiction produces a sealed causal amendment, never a write grant", { skip: !available }, () => {
+  const f = setup("causal-no-write");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-causal" });
+  const first = f.cli(f.start);
+  assert.equal(first.status, "blocked", JSON.stringify(first));
+  const proposal = first.causalAmendment;
+  assert.equal(proposal?.schema, "noveltea-causal-amendment/v1", JSON.stringify(first));
+  assert.equal(proposal.authority, "proposal-only");
+  assert.equal(proposal.authorApprovalRequired, true);
+  assert.equal(proposal.source.milestoneId, "milestone.disclosure");
+  assert.equal(proposal.source.reportDigest.length, 64);
+  assert.ok(proposal.affected.includes("event:milestone.disclosure"));
+  assert.ok(proposal.affected.includes("interactive:milestone.disclosure"));
+  assert.deepEqual(proposal.carryForward, [], "Legacy fixtures have no independent review assurance.");
+  assert.ok(!proposal.carryForward.includes("event:milestone.disclosure"));
+  const file = join(f.job.stateDir, "event-items/disclosure.json");
+  const original = readFileSync(file, "utf8");
+  assert.equal(JSON.parse(original).phase, "prerequisite-reported");
+  const sha = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const again = f.cli(["generate", "resume"]);
+  assert.equal(again.status, "blocked", JSON.stringify(again));
+  assert.deepEqual(again.causalAmendment, proposal);
+  for (const [change, denied] of [
+    [(receipt: any) => { receipt.jobId = "other-job"; }, /identity mismatch|source-bound|another job/i],
+    [(receipt: any) => { receipt.planVersion++; }, /source-bound|plan/i],
+    [(receipt: any) => { receipt.causalDiscovery.proposedCorrection = "Retcon all canon"; }, /sealed no-write source/i],
+  ] as const) {
+    const tampered = JSON.parse(original);
+    change(tampered);
+    writeFileSync(file, JSON.stringify(tampered));
+    const attempt = spawnSync(process.execPath, [...cliEntry(), "job", "generate", "resume",
+      "--story", f.story, "--job", "single"], {
+      encoding: "utf8", env: f.env, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
+    if (attempt.status === 0) {
+      const result = JSON.parse(attempt.stdout);
+      assert.equal(result.status, "blocked", result.reason);
+      assert.match(result.reason, /causal|plan|source-bound|receipt/i);
+    } else assert.match(attempt.stderr, denied);
+    writeFileSync(file, original);
+  }
+  assert.equal(readFileSync(file, "utf8"), original);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), sha);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+});
+
+test("#212: exact author-signed causal replan revises only the contradicted Milestone", { skip: !available }, () => {
+  const f = setup("causal-approved");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-causal",
+    NT_ARCHITECTURE_FIXTURE_CASE: "causal" });
+  const blocked = f.cli(f.start);
+  const candidate = blocked.causalAmendment;
+  assert.equal(candidate.authority, "proposal-only", JSON.stringify(blocked));
+  assert.match(f.cli(["architecture", "propose", "--contract", f.contract,
+    "--causal-digest", "0".repeat(64)], false), /Causal replan|source-bound/);
+  const proposed = f.cli(["architecture", "propose", "--contract", f.contract,
+    "--causal-digest", candidate.digest]);
+  const sig = authorApproval(f.story, "single", f.env, root,
+    { ...proposed.authorSigningRequest, reason: "Approve exactly one correction to the contradictory ledger chronology." }).file;
+  const approved = f.cli(["architecture", "approve", "--proposal", proposed.proposal.digest,
+    "--approval", sig]);
+  assert.equal(approved.plan.version, 2);
+  assert.deepEqual(approved.plan.causalAmendment, candidate);
+  const before = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const authored = f.cli(["architecture", "run", "--fixture", "--skills-source", source]);
+  assert.equal(authored.plan.version, 2);
+  assert.equal(authored.plan.items[0].status, "verified");
+  assert.notEqual(authored.headSha, before);
+  assert.deepEqual(git(f.job.worktreeRoot, "diff", "--name-only", before, authored.headSha)
+    .split("\n"), ["story/milestones/disclosure.md"]);
+  assert.match(readFileSync(join(f.job.worktreeStoryRoot, "milestones/disclosure.md"), "utf8"),
+    /disputed timestamp/);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
+test("#212: certified predecessor is carried across approval, corrected source gets a fresh Event and Blueprint", { skip: !available }, async () => {
+  const f = setup("causal-reviewed-continuation");
+  Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-causal",
+    NT_ARCHITECTURE_FIXTURE_CASE: "causal" });
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["A signed ledger chronology must be reconciled with independent access evidence."]);
+  const first = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(first.status, "paused", JSON.stringify(first));
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const architecture = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(architecture.status, "paused", JSON.stringify(architecture));
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  f.cli(["foundations", "run", "--fixture", "--skills-source", source], false);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  f.cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  const blocked = f.cli(["generate", "resume"]);
+  const candidate = blocked.causalAmendment;
+  assert.equal(blocked.status, "blocked", JSON.stringify(blocked));
+  assert.ok(candidate?.carryForward.includes("foundations"), JSON.stringify(candidate));
+  const carry = join(root, "causal-reviewed-carry.json");
+  writeFileSync(carry, JSON.stringify(candidate.carryForward));
+  const proposed = f.cli(["architecture", "propose", "--contract", f.contract,
+    "--causal-digest", candidate.digest, "--carry-forward", carry]);
+  const signature = authorApproval(f.story, "single", f.env, root,
+    { ...proposed.authorSigningRequest, reason: "Authorize the exact one-Milestone correction and independently reviewed carry-forward." });
+  const authorized = f.cli(["architecture", "approve", "--proposal", proposed.proposal.digest,
+    "--approval", signature.file]);
+  assert.equal(authorized.plan.version, 2);
+  assert.deepEqual(authorized.history.at(-1).carryForward, ["foundations"]);
+  const corrected = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(corrected.status, "paused", JSON.stringify(corrected));
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  const resumed = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(resumed.status, "paused", JSON.stringify(resumed));
+  assert.equal(resumed.inventory.items.find((item: any) =>
+    item.id === "event:milestone.disclosure").status, "verified");
+  const eventHistory = join(f.job.stateDir, "event-causal-history",
+    "disclosure-" + candidate.source.reportDigest + ".json");
+  assert.equal(JSON.parse(readFileSync(eventHistory, "utf8")).phase, "prerequisite-reported");
+  const event = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  assert.equal(event.phase, "committed");
+  assert.equal(event.planVersion, 2);
+  assert.notEqual(event.expectedHead, candidate.source.sha);
+  const originalPlan = join(f.job.stateDir, "milestone-blueprint-history");
+  assert.equal(existsSync(originalPlan), true);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+});
+
 test("clean no-write Event report authorizes one new bounded Event setup without changing Choice grants", { skip: !available }, () => {
   const f = setup("event-prerequisite-reassign");
   Object.assign(f.env, { NT_EVENT_FIXTURE_CASE: "no-write-once" });
@@ -1107,7 +1232,9 @@ test("second no-write report and protected prerequisite remain honestly blocked"
     const receiptPath = join(f.job.stateDir, "event-items/disclosure.json");
     const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
     assert.equal(receipt.phase, "prerequisite-reported");
-    assert.equal(Boolean(receipt.reroutedFrom), variant === "no-write-prerequisite");
+    assert.equal(Boolean(receipt.reroutedFrom), variant === "no-write-prerequisite",
+      JSON.stringify({ variant, status: first.status, reason: first.reason,
+        phase: receipt.phase, failure: receipt.failure }));
     assert.equal(first.inventory.items.find((i: any) => i.id === "interactive:milestone.disclosure")?.status,
       "blocked");
     const before = git(f.job.worktreeRoot, "rev-parse", "HEAD");

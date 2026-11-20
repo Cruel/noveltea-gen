@@ -401,6 +401,30 @@ test("no-write Event reports are explicit, bounded and never confused with a suc
     assert.throws(() => eventPrerequisiteReportDigest(invalid), /no-write prerequisite report/);
 });
 
+test("#212: typed causal no-write evidence cannot masquerade as writer authority", () => {
+  const causalDiscovery = { sourcePath: "milestones/disclosure.md",
+    sourceQuote: "The ledger conclusively proves that the witness was there.",
+    violatedObligation: "The ledger establishes the witness arrival",
+    proposedCorrection: "Make the chronology uncertain until the access records agree." };
+  const manifest = { modifiedRecords: [], architecturalConflicts: ["Contradictory chronology"],
+    laterObligations: ["Check source"], causalDiscovery };
+  assert.deepEqual(parseEventManifest(JSON.stringify(manifest)).causalDiscovery, causalDiscovery);
+  for (const invalid of [
+    { ...manifest, modifiedRecords: ["milestones/disclosure.md"] },
+    { ...manifest, architecturalConflicts: [] },
+    { ...manifest, causalDiscovery: { ...causalDiscovery, sourceQuote: "" } },
+    { ...manifest, causalDiscovery: { ...causalDiscovery, unapprovedPaths: ["arcs/truth.md"] } },
+  ]) assert.throws(() => parseEventManifest(JSON.stringify(invalid)), /Causal discovery/);
+  const receipt = { jobId: "single", workItemId: "event-disclosure", expectedHead: "a".repeat(40),
+    planDigest: "b".repeat(64), sessionSha256: "c".repeat(64), sessionId: "session",
+    assignmentDigest: "d".repeat(64), snapshotId: "e".repeat(64),
+    sessionFile: "/state/settled-session.jsonl", worker: "pi" as const,
+    conflicts: ["Contradictory chronology"], obligations: ["Check source"], causalDiscovery };
+  const sealed = eventPrerequisiteReportDigest(receipt);
+  assert.notEqual(sealed, eventPrerequisiteReportDigest({ ...receipt, causalDiscovery: {
+    ...causalDiscovery, proposedCorrection: "Rewrite every world fact and protected choice." } }));
+});
+
 test("early Event draft preflight identifies truncated YAML instead of mistaking it for a validator defect", () => {
   assert.equal(canonicalFrontmatterStructureError("---\nschema: '0.1'\ntype: event\nid: event.clue\n"),
     "The file is missing its closing --- delimiter after YAML frontmatter.");

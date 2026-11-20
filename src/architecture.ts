@@ -8,6 +8,8 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { parseCarryForward, verifyCarryForwardCandidates } from "./plan-continuity.js";
+import { readCheckpointedCausalAmendment } from "./causal-amendment-controller.js";
+import type { CausalAmendment } from "./causal-amendment.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { preflightPiAssignment, PiBudgetPause } from "./job-pi-policy.js";
@@ -60,6 +62,8 @@ export interface Plan {
   version: number;
   contract: CompletionContract;
   items: WorkItem[];
+  /** Explicit author-approved correction to exact preexisting canonical source. */
+  causalAmendment?: CausalAmendment;
 }
 interface Receipt {
   format: 1;
@@ -79,8 +83,10 @@ interface Receipt {
   snapshot?: SkillSnapshot;
   plan?: Plan;
   history: Array<{ plan: Plan; proposal: string; approvedContract: CompletionContract;
-    verifiedHead: string; carryForward?: string[]; reason: string; source: "trusted-controller"; signed: AuthorApprovalEvidence }>;
-  proposal?: { digest: string; contract: CompletionContract; version: number; baselineHead?: string; carryForward?: string[] };
+    verifiedHead: string; carryForward?: string[]; causalAmendment?: CausalAmendment;
+    reason: string; source: "trusted-controller"; signed: AuthorApprovalEvidence }>;
+  proposal?: { digest: string; contract: CompletionContract; version: number; baselineHead?: string;
+    carryForward?: string[]; causalAmendment?: CausalAmendment };
   manuallyReconciled?: { paths: string[]; digest: string };
   phase: "awaiting-author" | "ready" | "blueprinting" | "writing" | "authored" | "committed";
   /** Private, independently reviewed causal plan. Not a Story source or author approval. */
@@ -116,6 +122,7 @@ export interface ArchitectureOptions {
   contract?: unknown; task?: string; mode?: "autonomous" | "collaborative";
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
   proposal?: string; approvalFile?: string; recoveryDigest?: string; carryForward?: string[];
+  causalDigest?: string;
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -185,6 +192,7 @@ export function verifyPlanHistory(job: JobStartResult, state: Pick<Receipt, "his
         entry.proposal !== hash(JSON.stringify({
           plan: entry.plan, head: entry.verifiedHead, contract: entry.approvedContract,
           ...(entry.carryForward !== undefined ? { carryForward: parseCarryForward(entry.carryForward) } : {}),
+          ...(entry.causalAmendment ? { causalAmendment: entry.causalAmendment } : {}),
         })) ||
         (i > 0 && (entry.plan.version !== state.history[i - 1]!.plan.version + 1 ||
           JSON.stringify(entry.plan.contract) !== JSON.stringify(state.history[i - 1]!.approvedContract)))) {
@@ -193,7 +201,9 @@ export function verifyPlanHistory(job: JobStartResult, state: Pick<Receipt, "his
   }
   const last = state.history.at(-1);
   if (last && (state.plan?.version !== last.plan.version + 1 ||
-      JSON.stringify(state.plan.contract) !== JSON.stringify(last.approvedContract))) {
+      JSON.stringify(state.plan.contract) !== JSON.stringify(last.approvedContract) ||
+      JSON.stringify(state.plan.causalAmendment ?? null) !==
+        JSON.stringify(last.causalAmendment ?? null))) {
     throw new Error("Current architecture completion contract differs from the approved plan revision.");
   }
 }
@@ -265,6 +275,11 @@ async function changedPaths(job: JobStartResult) {
   if (!paths.length) throw new Error("Architecture specialist produced no changes.");
   return paths.sort();
 }
+function assertCausalPaths(plan: Plan, paths: string[]) {
+  if (plan.causalAmendment &&
+      JSON.stringify(paths) !== JSON.stringify([plan.causalAmendment.source.path]))
+    throw Error("Causal Architecture correction may change only its author-approved source Milestone.");
+}
 async function contentDigest(job: JobStartResult, paths: string[]) {
   return hash(JSON.stringify(await Promise.all(paths.map(async path => [path, hash(await readFile(join(job.worktreeStoryRoot, path), "utf8"))]))));
 }
@@ -332,6 +347,8 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
     if (state.phase === "authored") {
       const paths = state.paths;
       if (!paths?.length || paths.some(p => !authorizedArchitectureRecordPath(p)) ||
+          state.plan?.causalAmendment &&
+            JSON.stringify(paths) !== JSON.stringify([state.plan.causalAmendment.source.path]) ||
           !state.contentDigest || !/^[a-f0-9]{64}$/.test(state.contentDigest)) {
         return blocked("Authored work-item inventory is missing or corrupt; inspect the Story before recovery.");
       }
@@ -388,6 +405,17 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
   }
 }
 async function fixtureAuthor(job: JobStartResult, state: Receipt) {
+  if (state.plan?.causalAmendment) {
+    const source = state.plan.causalAmendment.source;
+    const file = join(job.worktreeStoryRoot, source.path);
+    const old = await readFile(file, "utf8");
+    if (!old.includes(source.quote))
+      throw Error("Causal Architecture fixture lost its exact protected source quotation.");
+    await writeFile(file, old.replace(source.quote,
+      "The archive ledger bears a disputed timestamp. Ada checks independently dated " +
+      "access evidence and witness accounts before inferring the transfer chronology."));
+    return;
+  }
   const targets = state.plan!.contract.scope.targets;
   const arcs = targets.filter(id => id.startsWith("arc."));
   if (!arcs.length) arcs.push("arc.truth");
@@ -396,8 +424,16 @@ async function fixtureAuthor(job: JobStartResult, state: Receipt) {
   const records = [
     ...arcs.map(arc => ({ folder: "arcs", id: arc, type: "arc", fields: 'dramatic_question: "Can truth survive loyalty?"\ncharacters: []',
       body: "The inquiry puts a friendship under pressure. Each admission makes concealment harder, until loyalty must mean either silence or accountability." })),
-    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "${process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only" ? "Ada learns that Neri concealed the missing witness transfer ledger" : "The hidden evidence becomes a shared responsibility"}"\narcs: [${arcs[i % arcs.length]}]\nfulfillment: {any_of: []}`,
-      body: process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only"
+    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "${process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only" ? "Ada learns that Neri concealed the missing witness transfer ledger" :
+        process.env.NT_ARCHITECTURE_FIXTURE_CASE === "causal" ? "The signed transfer ledger conclusively proves that the missing witness entered the archive at midnight" :
+        "The hidden evidence becomes a shared responsibility"}"\narcs: [${arcs[i % arcs.length]}]\nfulfillment: {any_of: []}`,
+      body: process.env.NT_ARCHITECTURE_FIXTURE_CASE === "causal"
+        ? "The missing witness is documented elsewhere at midnight, while the unverified ledger " +
+          "entry claims the same witness personally entered the archive at midnight. " +
+          "The architecture treats that uncorroborated entry as conclusive proof. " +
+          "The player needs independently dated access evidence to distinguish altered ink " +
+          "from a genuine entry before any Event can establish the timeline."
+        : process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only"
         ? "In the archive, Neri presents Ada with the signed transfer ledger for the missing witness. Ada verifies the entry against the register and learns Neri hid this record. This is a single observational discovery, not a promise of player-selectable branches; its causal evidence and trust shift must be demonstrated within the Event before player-facing prose is composed."
         : "The investigator can no longer act alone once the witness discloses the evidence. A future conversation could earn this disclosure through trust; an evidence-led confrontation is another possible route. Event design must establish the prerequisites and consequences before either route is bound. Reuse the inquiry setting and express the revelation through dialogue." })),
   ];
@@ -604,10 +640,23 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       if (input.action === "propose") {
         const contract = parseContract(input.contract);
         const carryForward = input.carryForward === undefined ? undefined : parseCarryForward(input.carryForward);
+        const causalAmendment = input.causalDigest ? await readCheckpointedCausalAmendment(job) : undefined;
+        if (causalAmendment) {
+          if (isFocusedScope(state.plan!.contract))
+            throw Error("A focused existing-record Turn cannot be widened into Milestone Architecture correction.");
+          if (input.causalDigest !== causalAmendment.digest ||
+              state.plan?.version !== causalAmendment.source.planVersion ||
+              baselineHead !== causalAmendment.source.sha ||
+              JSON.stringify(contract) !== JSON.stringify(state.plan.contract) ||
+              (carryForward ?? []).some(id => !causalAmendment.carryForward.includes(id)))
+            throw Error("Causal replan expands the objective, mismatches its source or carries affected/unreviewed work.");
+        }
         if (carryForward) verifyCarryForwardCandidates(job, state.plan!.version, baselineHead, carryForward);
         state.proposal = { contract, version: state.plan!.version + 1, baselineHead, carryForward,
+          ...(causalAmendment ? { causalAmendment } : {}),
           digest: hash(JSON.stringify({ plan: state.plan, head: baselineHead, contract,
-            ...(carryForward !== undefined ? { carryForward } : {}) })) };
+            ...(carryForward !== undefined ? { carryForward } : {}),
+            ...(causalAmendment ? { causalAmendment } : {}) })) };
       } else {
         if (!state.proposal || input.proposal !== state.proposal.digest || !input.approvalFile) {
           throw new Error("Plan approval requires the exact proposal digest and a recorded controller reference.");
@@ -620,16 +669,35 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
             payload.planVersion !== state.proposal.version) {
           throw new Error("Controller plan approval does not match the exact proposed contract, plan version and verified head.");
         }
+        // Recheck the source-bound causal claim against the original generation
+        // Thread immediately before consuming exact author approval.
+        if (state.proposal.causalAmendment) {
+          const current = await readCheckpointedCausalAmendment(job);
+          if (JSON.stringify(current) !== JSON.stringify(state.proposal.causalAmendment))
+            throw Error("Author-approved causal amendment lost its original source or review evidence.");
+        }
         state.history.push({ plan: state.plan!, proposal: state.proposal.digest,
           approvedContract: state.proposal.contract, verifiedHead: baselineHead,
           carryForward: state.proposal.carryForward,
+          ...(state.proposal.causalAmendment ? { causalAmendment: state.proposal.causalAmendment } : {}),
           reason: payload.reason, source: "trusted-controller", signed });
         const prior = state.plan!;
         state.plan = newPlan(state.proposal.contract, state.proposal.version);
+        if (state.proposal.causalAmendment)
+          state.plan.causalAmendment = state.proposal.causalAmendment;
         // Accepted architecture remains evidence, not a fresh authorization to rewrite canon.
         if (state.phase === "committed") {
           state.plan.items = prior.items.map(item => ({ ...item, planVersion: state.plan!.version,
             authorization: { ...item.authorization, source: "trusted-controller", planVersion: state.plan!.version } }));
+          // A causal correction requires new, narrowly scoped Architecture
+          // evidence. Old global-architecture completion is never promoted.
+          if (state.plan.causalAmendment) {
+            state.plan.items[0] = {
+              ...state.plan.items[0]!, status: "pending", verifiedSha: undefined,
+              authorization: { source: "trusted-controller", planVersion: state.plan.version,
+                paths: [state.plan.causalAmendment.source.path] },
+            };
+          }
           state.phase = "ready";
           state.executionHead = baselineHead;
           // A newly approved work boundary must never reuse the previous commit's
@@ -698,8 +766,18 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           try { checkArchitecture(before, receipt.plan!.contract); return {}; }
           catch { /* A newly approved scope requires a new causal blueprint. */ }
         }
-        if (receipt.blueprintTask === undefined) receipt.blueprintTask = input.task ?? "";
-        if (input.task !== undefined && input.task !== receipt.blueprintTask)
+        const correction = receipt.plan?.causalAmendment;
+        const boundedTask = (input.task ?? "") + (correction ?
+          "\n\nTRUSTED CONTROLLER-APPROVED UPSTREAM CAUSAL CORRECTION. " +
+          "Revise ONLY " + correction.source.path +
+          " so the approved Milestone no longer makes this unsupported claim: " + correction.source.quote +
+          ". Exact failed Blueprint obligation: " + correction.obligation +
+          ". Proposed correction: " + correction.correction +
+          ". Preserve all original author-protected choices and the rest of Story canon. " +
+          "Do not change any other Arc or Milestone or downstream Event. " +
+          "Review the resulting one-file canonical diff and independent source-bound verdict." : "");
+        if (receipt.blueprintTask === undefined) receipt.blueprintTask = boundedTask;
+        if (input.task !== undefined && boundedTask !== receipt.blueprintTask)
           throw Error("Architecture author task differs from pinned causal plan.");
         const head = receipt.executionHead ?? receipt.expectedHead;
         const existingBlueprint = await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
@@ -789,6 +867,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         }
         assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         receipt.paths = await changedPaths(job);
+        assertCausalPaths(receipt.plan!, receipt.paths);
         receipt.contentDigest = await contentDigest(job, receipt.paths);
         receipt.phase = "authored"; await persist(file, receipt);
         return { receipt };
@@ -851,6 +930,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           delete receipt.architectureMetrics;
         }
         if (receipt.paths) {
+          assertCausalPaths(receipt.plan!, receipt.paths);
           if (await contentDigest(job, receipt.paths) !== receipt.contentDigest) throw new Error("Authored architecture bytes changed; do not reuse acceptance.");
           if (receipt.paths.some(path => !selected.some(r => r.path === path))) throw new Error("Architecture wrote records outside the accepted scope.");
           if (!recovering) {

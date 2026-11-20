@@ -12,6 +12,7 @@ import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { lastSpecialistManifest, requireSpecialistManifest } from "./specialist-manifest.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
+import type { CausalDiscovery } from "./causal-amendment.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
@@ -55,10 +56,13 @@ export interface EventEvidence {
   sessionFile?: string;
   piSessionId?: string;
   authorQuestion?: SpecialistChoiceQuestion;
+  /** No-write source-bound claim only; does not authorize an Architecture edit. */
+  causalDiscovery?: CausalDiscovery;
   skillReads: string[];
 }
 
-export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[]; laterObligations: string[] } {
+export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[];
+  laterObligations: string[]; causalDiscovery?: CausalDiscovery } {
   const obj = lastSpecialistManifest(text);
   const strings = (value: unknown): value is string[] =>
     Array.isArray(value) && value.every(x => typeof x === "string" && x.trim().length > 0);
@@ -68,8 +72,21 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
         !obj.laterObligations.length)) {
     throw new Error("Event specialist must return a JSON manifest with modifiedRecords, architecturalConflicts and laterObligations.");
   }
+  let causalDiscovery: CausalDiscovery | undefined;
+  if (obj.causalDiscovery !== undefined) {
+    const claim = obj.causalDiscovery as Partial<CausalDiscovery> | null;
+    const keys = ["sourcePath", "sourceQuote", "violatedObligation", "proposedCorrection"];
+    if (!claim || typeof claim !== "object" || Array.isArray(claim) ||
+        Object.keys(claim).sort().join("|") !== keys.sort().join("|") ||
+        obj.modifiedRecords.length || !obj.architecturalConflicts.length ||
+        keys.some(key => typeof claim[key as keyof CausalDiscovery] !== "string" ||
+          !(claim[key as keyof CausalDiscovery] as string).trim() ||
+          (claim[key as keyof CausalDiscovery] as string).length > 1000))
+      throw Error("Causal discovery must be an exact no-write source-bound prerequisite claim.");
+    causalDiscovery = claim as CausalDiscovery;
+  }
   return { modifiedRecords: obj.modifiedRecords, architecturalConflicts: obj.architecturalConflicts,
-    laterObligations: obj.laterObligations };
+    laterObligations: obj.laterObligations, ...(causalDiscovery ? { causalDiscovery } : {}) };
 }
 
 /** The actual selected Milestone must positively describe player-visible
@@ -431,7 +448,14 @@ export function eventSpecialistPrompt(
       "Do not request author permission for a discovery Event already in this " +
       "authorized work item. No choice authorizes protected changes. " +
       "No-write prerequisite reports have modifiedRecords:[] and must precede " +
-      "any edit. An authored Event with an in-scope evidence gap needs a bounded " +
+      "any edit. For a genuinely impossible upstream causal obligation ONLY, " +
+      "the no-write manifest MAY include causalDiscovery:{sourcePath,sourceQuote," +
+      "violatedObligation,proposedCorrection}. Cite an exact 20+ character quote " +
+      "from the current canonical selected Milestone, and a verbatim establishes/" +
+      "purpose/downstream obligation in the independently reviewed local plan. " +
+      "A contradiction or reviewer request is NOT permission to change Architecture; " +
+      "the controller will independently verify and authorize any adjustment. " +
+      "An authored Event with an in-scope evidence gap needs a bounded " +
       "same-session correction, not an invented downstream owner. The graph verifies " +
       "source, manifests, authority and validation.",
     assignmentLabel: "AUTHORIZED ASSIGNMENT",
@@ -567,7 +591,7 @@ export async function authorEventCluster(
           throw new Error("Event no-write prerequisite report follows a writer tool or author-choice resume.");
         await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
         return { claimedPaths: [], conflicts: summary.architecturalConflicts,
-          obligations: summary.laterObligations,
+          obligations: summary.laterObligations, causalDiscovery: summary.causalDiscovery,
           skillReads, sessionFile: session.sessionManager.getSessionFile() ?? undefined,
           piSessionId: session.sessionId };
       }

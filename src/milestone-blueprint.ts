@@ -229,6 +229,12 @@ function fileFor(job: JobStartResult, id: string) {
   if (!MILESTONE.test(id)) throw Error("Invalid Milestone Blueprint target identifier.");
   return join(job.stateDir, "milestone-blueprints", id.slice("milestone.".length) + ".json");
 }
+function historicalFileFor(job: JobStartResult, pin: MilestoneBlueprintPin) {
+  if (!MILESTONE.test(pin.milestoneId) || !HASH.test(pin.cycleId))
+    throw Error("Invalid archived Milestone Blueprint pin.");
+  return join(job.stateDir, "milestone-blueprint-history",
+    pin.milestoneId.slice("milestone.".length) + "-" + pin.cycleId + ".json");
+}
 
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
@@ -635,7 +641,15 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
   pin: MilestoneBlueprintPin, assignment: Pick<EventAssignment,
     "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
 ): Promise<MilestoneBlueprint> {
-  const record = await load(job, pin.milestoneId);
+  let record = await load(job, pin.milestoneId);
+  if (record?.lineage.reviewCycleId !== pin.cycleId) {
+    const archived = historicalFileFor(job, pin);
+    if (!existsSync(archived)) throw Error("Missing reviewed historical Milestone Blueprint.");
+    const info = await lstat(archived);
+    if (!info.isFile() || info.isSymbolicLink() || await realpath(archived) !== archived)
+      throw Error("Archived Milestone Blueprint is not a safe immutable private receipt.");
+    record = JSON.parse(await readFile(archived, "utf8")) as Receipt;
+  }
   if (!record) throw Error("Missing reviewed Milestone Blueprint.");
   validateReceiptShape(record, pin.milestoneId);
   if (record.lineage.jobId !== job.jobId || record.lineage.threadId !== job.threadId ||
@@ -659,6 +673,27 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
     await verifySeal(job, record.reviewer, "reviewer");
   }
   return record.draft!;
+}
+
+/** After a signed upstream correction, preserve the original whole review
+ * cycle before admitting a fresh plan. Never silently mutate a reviewed plan
+ * into one about new source bytes. The archive is read-only and source-pinned. */
+export async function archiveReviewedMilestoneBlueprint(job: JobStartResult,
+  pin: MilestoneBlueprintPin, assignment: EventAssignment) {
+  await readReviewedMilestoneBlueprint(job, pin, assignment);
+  const active = fileFor(job, pin.milestoneId);
+  const archived = historicalFileFor(job, pin);
+  if (existsSync(archived)) {
+    if (existsSync(active)) {
+      const current = await load(job, pin.milestoneId);
+      if (current?.lineage.reviewCycleId === pin.cycleId)
+        throw Error("Two active copies of the same archived Milestone Blueprint exist.");
+    }
+    return;
+  }
+  if (!existsSync(active)) throw Error("Original approved Milestone Blueprint was lost before archival.");
+  await mkdir(dirname(archived), { recursive: true });
+  await rename(active, archived);
 }
 
 /** Must be called at the one Event admission boundary under the existing writer lock.

@@ -14,6 +14,7 @@ export interface PlanHistoryStep {
   approvedContract: CompletionContract;
   verifiedHead: string;
   carryForward?: string[];
+  causalAmendment?: import("./causal-amendment.js").CausalAmendment;
   source: "trusted-controller";
   signed: AuthorApprovalEvidence;
 }
@@ -152,7 +153,8 @@ export function hasPlanContinuity(
     const payload = signed.payload;
     const proposed = { plan: step.plan, head: step.verifiedHead,
       contract: step.approvedContract,
-      ...(step.carryForward !== undefined ? { carryForward: parseCarryForward(step.carryForward) } : {}) };
+      ...(step.carryForward !== undefined ? { carryForward: parseCarryForward(step.carryForward) } : {}),
+      ...(step.causalAmendment ? { causalAmendment: step.causalAmendment } : {}) };
     if (payload.kind !== "plan" || payload.planVersion !== version + 1 ||
         payload.proposalSha256 !== step.proposal || payload.verifiedHead !== step.verifiedHead ||
         step.proposal !== digest(proposed) ||

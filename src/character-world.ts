@@ -67,12 +67,7 @@ interface Receipt {
   snapshot?: SkillSnapshot;
   units: [Unit, Unit];
 }
-interface ArchitectureReceipt {
-  jobId: string;
-  phase: string;
-  expectedHead: string;
-  plan?: Plan;
-}
+type ArchitectureReceipt = import("./plan-continuity.js").PlanSnapshot & { expectedHead: string };
 interface Obligation { id: string; path: string; field: string; requiredBy: string; code: string; message: string }
 interface CatalogRecord { path: string; metadata: { type: string; id: string; status: string; arcs?: string[];
   characters?: string[]; initial?: boolean; initial_knowledge?: Array<{ fact: string }> } }
@@ -613,11 +608,17 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     let receipt: Receipt;
     if (existsSync(file)) {
       receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
+      const previousArchitecture = arch.history?.at(-1);
+      const carried = receipt.architectureHead !== arch.expectedHead &&
+        !!arch.plan.causalAmendment && !!previousArchitecture &&
+        previousArchitecture.plan.version === receipt.planVersion &&
+        previousArchitecture.plan.items[0]?.verifiedSha === receipt.architectureHead &&
+        previousArchitecture.carryForward?.includes("foundations") === true;
       if (receipt.version !== 1 || receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
           (receipt.branch !== undefined && receipt.branch !== job.branch) ||
           (receipt.worktreeRoot !== undefined && receipt.worktreeRoot !== job.worktreeRoot) ||
           (receipt.threadId !== undefined && receipt.threadId !== job.threadId) ||
-          receipt.architectureHead !== arch.expectedHead ||
+          (receipt.architectureHead !== arch.expectedHead && !carried) ||
           receipt.steeringDigest !== (input.steering ? digest(input.steering) : undefined) ||
           receipt.units?.length !== 2 ||
           receipt.units[0]?.domain !== "world" || receipt.units[1]?.domain !== "character") {

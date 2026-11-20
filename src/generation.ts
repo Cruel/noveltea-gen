@@ -16,6 +16,8 @@ import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob } from "./character-world.js";
 import { runEventWorkItem } from "./event-work.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
+import { inspectCausalAmendment } from "./causal-amendment-controller.js";
+import type { CausalAmendment, CausalDiscovery } from "./causal-amendment.js";
 import { runInteractiveWorkItem } from "./interactive-work.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { runCompositionWorkItem } from "./composition-work.js";
@@ -205,6 +207,8 @@ const Channels = Annotation.Root({
   graphThreadId: Annotation<string | null>(),
   adaptiveVersion: Annotation<number | null>(),
   dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
+  /** A sealed source-grounded causal replan request, never write authority. */
+  causalAmendment: Annotation<CausalAmendment | null>(),
   /** A controller-admitted prerequisite, before the next dependent dispatch. */
   crossDomainCloseout: Annotation<{ milestoneId: string; planVersion: number;
     sourceSha: string; proposalDigest: string; repairId: string } | null>(),
@@ -367,6 +371,19 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const plan = receipt?.plan;
   const request = plan ? { ...s.request, contract: plan.contract } : s.request;
   const head = await trustedHead(job);
+  if (s.causalAmendment && plan?.version === s.causalAmendment.source.planVersion) {
+    if (!s.inventory || head !== s.causalAmendment.source.sha ||
+        s.inventory.planVersion !== plan.version)
+      throw Error("Pending causal amendment is stale; reconcile before scheduling an upstream writer.");
+    const sealed = await inspectCausalAmendment(job, {
+      sourceSha: head, reportDigest: s.causalAmendment.source.reportDigest,
+      milestoneId: s.causalAmendment.source.milestoneId,
+      inventory: s.inventory, plan,
+      validatorSource: s.request.validatorSource ?? s.request.skillsSource,
+    });
+    if (!isDeepStrictEqual(sealed, s.causalAmendment))
+      throw Error("Checkpointed causal amendment differs from its source-bound Event report.");
+  }
   // Failed specialists own persistent recovery receipts. Later commits from
   // independent clusters do not permit replay against a changed HEAD.
   // A new authorized plan is the boundary for reconsidering local failures.
@@ -460,6 +477,7 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const effective = adaptive?.inventory ?? pending.inventory;
   const pendingOrder = adaptive?.order ?? pending.order ?? s.pendingOrder ?? null;
   return { request, planVersion: plan?.version ?? null, completedStages, failures,
+    ...(plan?.version !== s.causalAmendment?.source.planVersion ? { causalAmendment: null } : {}),
     inventory: effective, pendingOrder, pendingVersion: pending.stateVersion,
     adaptiveVersion: adaptive?.version ?? s.adaptiveVersion ?? null,
     active: nextExecutionItem(effective,
@@ -1112,6 +1130,7 @@ export function createGenerationGraph(
           let evidence = result as typeof result & {
             prerequisite?: { reportDigest: string; expectedHead: string };
             conflicts?: string[]; obligations?: string[]; reroutedFrom?: string;
+            causalDiscovery?: CausalDiscovery;
           };
           if (!evidence.prerequisite || !/^[a-f0-9]{64}$/.test(evidence.prerequisite.reportDigest))
             throw Error("A no-write Event dependency report lacks a sealed source receipt.");
@@ -1142,6 +1161,20 @@ export function createGenerationGraph(
               : route.reason + " ") +
             "The original settled session is preserved; no unauthorized Choice or upstream work " +
             "was dispatched. Obtain a controller-approved bounded architecture/work-plan revision.";
+          if (route.kind === "replan-required" && evidence.causalDiscovery && s.inventory) {
+            const receipt = await checkPlan(job, s.request, s.planVersion);
+            if (!receipt?.plan) throw Error("Causal replan lacks its verified Architecture plan.");
+            const causalAmendment = await withStoryJobLock(job, "causal-amendment-admission", () =>
+              inspectCausalAmendment(job, {
+                sourceSha: evidence.prerequisite!.expectedHead,
+                reportDigest: evidence.prerequisite!.reportDigest,
+                milestoneId: s.active!.milestone!, inventory: s.inventory!,
+                plan: receipt.plan,
+                validatorSource: s.request.validatorSource ?? s.request.skillsSource,
+              }));
+            return { failures: { ...s.failures, [s.active!.id]: failure },
+              causalAmendment, active: null, result: null };
+          }
           return { failures: { ...s.failures, [s.active!.id]: failure }, active: null, result: null };
         }
         return { result };
@@ -1312,7 +1345,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
           pendingOrder: null, pendingVersion: null, graphThreadId: null, adaptiveVersion: null,
-          dependencyHistory: [], crossDomainCloseout: null };
+          dependencyHistory: [], crossDomainCloseout: null, causalAmendment: null };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)
@@ -1408,6 +1441,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         recoveryCheckpoints: await inspectRecoveryCheckpoints(await startStoryJob({ story: job.storyRoot, job: job.jobId }, false)),
         orchestrationSelection, orchestrationPlanning,
         dependencyPlan: await inspectDependencyPlan(job),
+        causalAmendment: visible.causalAmendment ?? null,
         pendingPlan: state.request.turnPlanDigest
           ? await readPendingState(job, state.request.turnPlanDigest) : null,
         escalation: visible.escalation ?? (state.status === "completed" ? null : reviewEscalation(report, visible.inventory ?? null)),
