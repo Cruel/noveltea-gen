@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { parseCausalBlueprint, type CausalBlueprint } from "../src/architecture-blueprint.js";
 import { applyBlueprintPatch, blueprintDigest } from "../src/architecture-blueprint-patch.js";
 import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
+import { reviewCycleId } from "../src/review-cycle.js";
 import { assembleCurrentBlueprintOutline, parseBlueprintOutlineCore } from "../src/architecture-blueprint-stages.js";
 import { replayCase } from "../src/execution-replay.js";
 
@@ -285,6 +286,38 @@ test("split core/Choice stage replay is tied to both immutable stage digests", (
       mechanism: "rewritten without review" } });
     assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
       join(temporary, "bad-core")), /causal core or Choice-route receipt changed/);
+  }));
+
+test("replay authenticates two verdict snapshots in the same review transcript", () =>
+  withFixture(({ temporary, root, file, save, initial: original, corrected: revised }) => {
+    const file0 = join(dirname(root), "architecture-blueprint-review-sessions", "reviewer0.jsonl");
+    const first = readFileSync(file0);
+    const full = Buffer.concat([first, Buffer.from(JSON.stringify({
+      type: "message", message: { role: "user", content: "Re-review correction" },
+    }) + "\n")]);
+    writeFileSync(file0, full);
+    const admitted = JSON.parse(readFileSync(file("admitted"), "utf8"));
+    const cycleId = reviewCycleId(admitted);
+    const turn = (draft: unknown, verdict: unknown, bytes: Buffer) => ({
+      schema: "noveltea-blueprint-review-turn/v1", cycleId,
+      sessionId: "reviewer0", sessionFile: file0, blueprintDigest: digest(draft),
+      verdictDigest: digest(verdict), transcriptBytes: bytes.length,
+      transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
+    });
+    save("review-session-0", turn(original, revise, first));
+    save("review-session-1", turn(revised, { status: "pass", findings: [] }, full));
+    captureBlueprintReplay(root, 1, 1, "blueprint-review-verdict",
+      join(temporary, "continuing-review"));
+    assert.equal(replayCase(join(temporary, "continuing-review")).matched, true);
+    save("review-session-1", {
+      ...turn(revised, { status: "pass", findings: [] }, full), cycleId: "f".repeat(64),
+    });
+    assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
+      join(temporary, "wrong-cycle")), /identity changed/);
+    save("review-session-1", turn(revised, { status: "pass", findings: [] }, full));
+    writeFileSync(file0, Buffer.concat([first, Buffer.from("modified follow-up\n")]));
+    assert.throws(() => captureBlueprintReplay(root, 1, 1, "blueprint-patch",
+      join(temporary, "tampered-transcript")), /transcript changed/);
   }));
 
 test("capture rejects stale patch, changed review provenance and altered planning stage", () =>

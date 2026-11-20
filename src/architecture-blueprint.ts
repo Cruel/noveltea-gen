@@ -16,6 +16,7 @@ import { preparePiContext } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
+import { assertReviewCycleSession, reviewCycleId } from "./review-cycle.js";
 import { buildBlueprintObligations, validateBlueprintObligations,
   type BlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
 import { parseBlueprintPatch, applyBlueprintPatch,
@@ -72,7 +73,9 @@ export interface BlueprintReview {
   findings: Array<{ beatId: string; reason: string; correction: string }>;
 }
 export interface BlueprintPin {
-  schema: "noveltea-approved-blueprint/v2" | "noveltea-approved-blueprint/v3";
+  schema: "noveltea-approved-blueprint/v2" | "noveltea-approved-blueprint/v3" | "noveltea-approved-blueprint/v4";
+  /** Only v4 approvals carry a continuing reviewer conversation. */
+  reviewCycleId?: string;
   jobId: string;
   threadId: string;
   baseSha: string;
@@ -245,7 +248,7 @@ async function safeRead(path: string, parent: string): Promise<unknown> {
 function sameLineage(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
   provider: string, model: string, task: string, head: string): Omit<BlueprintPin, "schema" | "draftVersion" |
   "blueprintDigest" | "reviewDigest" | "obligationsDigest" | "stagesDigest" | "plannerSessionId" | "plannerSessionFile" |
-  "reviewerSessionId" | "reviewerSessionFile"> {
+  "reviewerSessionId" | "reviewerSessionFile" | "reviewCycleId"> {
   return { jobId: job.jobId, threadId: job.threadId, baseSha: job.baseSha,
     executionHead: head, planVersion: plan.version, contractDigest: sha(plan.contract),
     snapshotId: snapshot.id, provider, model, taskDigest: sha(task) };
@@ -267,10 +270,14 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
   if (!existsSync(path)) return null;
   const record = await safeRead(path, root(job)) as BlueprintPin;
   const expected = sameLineage(job, plan, snapshot, provider, model, task, head);
-  if (!record || !["noveltea-approved-blueprint/v2", "noveltea-approved-blueprint/v3"].includes(record.schema) ||
-      (record.schema === "noveltea-approved-blueprint/v3"
+  if (!record || !["noveltea-approved-blueprint/v2", "noveltea-approved-blueprint/v3",
+      "noveltea-approved-blueprint/v4"].includes(record.schema) ||
+      (record.schema !== "noveltea-approved-blueprint/v2"
         ? !record.stagesDigest || !HASH.test(record.stagesDigest)
         : record.stagesDigest !== undefined) ||
+      (record.schema === "noveltea-approved-blueprint/v4"
+        ? record.reviewCycleId !== reviewCycleId(expected)
+        : record.reviewCycleId !== undefined) ||
       Object.entries(expected).some(([key, value]) => record[key as keyof BlueprintPin] !== value) ||
       !Number.isInteger(record.draftVersion) || record.draftVersion < 0 ||
       record.draftVersion > MAX_CORRECTIONS ||
@@ -292,7 +299,7 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
   const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
   const initial = parseCausalBlueprint(JSON.stringify(await safeRead(
     draftPath(job, plan.version, 0), root(job))));
-  if (record.schema === "noveltea-approved-blueprint/v3") {
+  if (record.schema !== "noveltea-approved-blueprint/v2") {
     const receipt = await safeRead(stagesPath(job, plan.version), root(job));
     const batched = !!receipt && typeof receipt === "object" &&
       "schema" in receipt && receipt.schema === "noveltea-blueprint-stages/v3";
@@ -360,6 +367,7 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
     throw Error("Approved causal proof obligations changed after review.");
   let blueprint = initial;
   const reviewers = new Set<string>();
+  let previousTranscriptBytes = 0;
   for (let i = 0; i <= record.draftVersion; i++) {
     const stored = await safeRead(draftPath(job, plan.version, i), root(job));
     if (sha(blueprint) !== sha(stored))
@@ -367,17 +375,42 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
     const verdict = await safeRead(verdictPath(job, plan.version, i), root(job));
     const review = parseBlueprintReview(JSON.stringify(verdict), blueprint);
     const reviewSession = await safeRead(reviewSessionPath(job, plan.version, i), root(job)) as {
-      sessionId: string; sessionFile: string; verdictDigest: string; blueprintDigest: string };
-    if (!strict(reviewSession, ["sessionId", "sessionFile", "verdictDigest", "blueprintDigest"]) ||
+      schema?: string; cycleId?: string; sessionId: string; sessionFile: string;
+      verdictDigest: string; blueprintDigest: string; transcriptBytes?: number;
+      transcriptDigest?: string };
+    const persistent = record.schema === "noveltea-approved-blueprint/v4";
+    if (!strict(reviewSession, persistent
+          ? ["schema", "cycleId", "sessionId", "sessionFile", "verdictDigest",
+            "blueprintDigest", "transcriptBytes", "transcriptDigest"]
+          : ["sessionId", "sessionFile", "verdictDigest", "blueprintDigest"]) ||
         reviewSession.verdictDigest !== sha(verdict) ||
         reviewSession.blueprintDigest !== sha(blueprint) ||
-        reviewSession.sessionId === record.plannerSessionId ||
-        reviewers.has(reviewSession.sessionId) || reviewers.has(reviewSession.sessionFile))
+        (persistent
+          ? reviewSession.schema !== "noveltea-blueprint-review-turn/v1" ||
+            reviewSession.cycleId !== record.reviewCycleId ||
+            !Number.isSafeInteger(reviewSession.transcriptBytes) ||
+            reviewSession.transcriptBytes! <= previousTranscriptBytes ||
+            !HASH.test(reviewSession.transcriptDigest ?? "") ||
+            (i > 0 && (reviewSession.sessionId !== record.reviewerSessionId ||
+              reviewSession.sessionFile !== record.reviewerSessionFile))
+          : reviewers.has(reviewSession.sessionId) || reviewers.has(reviewSession.sessionFile)))
       throw Error("Causal blueprint independent review provenance changed.");
+    assertReviewCycleSession(
+      { id: record.plannerSessionId, file: record.plannerSessionFile },
+      { id: reviewSession.sessionId, file: reviewSession.sessionFile },
+      persistent ? { id: record.reviewerSessionId, file: record.reviewerSessionFile } : undefined);
     reviewers.add(reviewSession.sessionId);
     reviewers.add(reviewSession.sessionFile);
     await transcript(job, reviewSession.sessionFile, reviewSession.sessionId,
       "architecture-blueprint-review-sessions");
+    if (persistent) {
+      const bytes = await readFile(reviewSession.sessionFile);
+      if (bytes.length < reviewSession.transcriptBytes! ||
+          createHash("sha256").update(bytes.subarray(0, reviewSession.transcriptBytes!))
+            .digest("hex") !== reviewSession.transcriptDigest)
+        throw Error("Causal blueprint review transcript changed after sealed verdict.");
+      previousTranscriptBytes = reviewSession.transcriptBytes!;
+    }
     if (i === record.draftVersion) {
       if (review.status !== "pass" || sha(blueprint) !== record.blueprintDigest ||
           sha(verdict) !== record.reviewDigest ||
@@ -392,22 +425,6 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
   await transcript(job, record.plannerSessionFile, record.plannerSessionId, "architecture-blueprint-sessions");
   await transcript(job, record.reviewerSessionFile, record.reviewerSessionId, "architecture-blueprint-review-sessions");
   return { blueprint, pin: record };
-}
-
-/** Reserve one new independent reviewer identity before issuing ANY model call.
- * Review independence must fail at the actual expensive boundary, not only
- * after a passing blueprint has been persisted and reopened. */
-export function reserveIndependentBlueprintReviewer(
-  planner: { id: string; file: string },
-  reviewer: { id: string; file: string },
-  prior: Set<string>,
-) {
-  if (!reviewer.id || !reviewer.file || !planner.id || !planner.file ||
-      reviewer.id === planner.id || reviewer.file === planner.file ||
-      prior.has(reviewer.id) || prior.has(reviewer.file))
-    throw Error("Independent causal blueprint reviewer reused a prior Pi session or transcript.");
-  prior.add(reviewer.id);
-  prior.add(reviewer.file);
 }
 
 /** A reviewer must be a separate read-only Pi session. All prompts and source
@@ -680,6 +697,7 @@ function reviewPrompt(
   obligations: BlueprintObligations,
   task: string,
   outline: BlueprintOutline,
+  prior?: { blueprint: CausalBlueprint; verdict: BlueprintReview; patch: unknown },
 ) {
   return (
     "You are an INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER. " +
@@ -725,6 +743,19 @@ function reviewPrompt(
     JSON.stringify(outline) +
     "\nFULL MERGED BLUEPRINT JSON:\n" +
     JSON.stringify(blueprint) +
+    (prior ? "\nTHIS IS A CONTINUATION OF YOUR OWN INDEPENDENT REVIEW, NOT A " +
+      "NEW REVIEWER. First RE-READ each required pinned skill and the Creative " +
+      "Direction using read tools in THIS turn. Review your last verified " +
+      "verdict against the exact new draft. Identify which previous defects " +
+      "are resolved, improved, persistent or regressed; inspect the actual " +
+      "patch and every new material blocker. Do not approve just because the " +
+      "writer claims a correction, and do not overlook the full original " +
+      "scope. New material findings are allowed but must cite real current " +
+      "causal requirements, not optional preferences. " +
+      "\nPREVIOUS REVIEWED BLUEPRINT DIGEST: " + sha(prior.blueprint) +
+      "\nPREVIOUS VERIFIED VERDICT: " + JSON.stringify(prior.verdict) +
+      "\nEXACT SOURCE CHANGES: " + JSON.stringify(prior.patch) +
+      "\nNEW REVIEWED BLUEPRINT DIGEST: " + sha(blueprint) : "") +
     "\n" +
     'Return ONLY strict JSON {"status":"pass","findings":[]} or ' +
     '{"status":"revise","findings":[{"beatId":"exact beat slug",' +
@@ -751,6 +782,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     sameLineage(job, plan, snapshot, provider, model, task, head));
   const planner = await sessionFor(job, snapshot, provider, model,
     "blueprint:" + plan.version, "architecture-blueprint-sessions");
+  let reviewer: Awaited<ReturnType<typeof sessionFor>> | undefined;
   try {
     // Even a crash before the first successful JSON result leaves durable evidence
     // of the begun Pi writer. Its session must not be silently replayed.
@@ -853,7 +885,13 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     };
     await immutable(stagesPath(job, plan.version), stagesReceipt);
     let previous: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined;
-    const reviewedSessions = new Set<string>();
+    let sourceChanges: unknown;
+    const cycleId = reviewCycleId(sameLineage(job, plan, snapshot, provider, model, task, head));
+    reviewer = await sessionFor(job, snapshot, provider, model,
+      "blueprint-review-cycle:" + cycleId, "architecture-blueprint-review-sessions");
+    assertReviewCycleSession(
+      { id: planner.session.sessionId, file: planner.file },
+      { id: reviewer.session.sessionId, file: reviewer.file });
     for (let version = 0; version <= MAX_CORRECTIONS; version++) {
       let blueprint: CausalBlueprint;
       if (version === 0) {
@@ -884,54 +922,60 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           result = parsePatch();
         }
         await immutable(patchPath(job, plan.version, version), result.patch);
+        sourceChanges = result.patch;
         blueprint = result.blueprint;
         await immutable(draftPath(job, plan.version, version), blueprint);
       }
-      const reviewer = await sessionFor(job, snapshot, provider, model,
-        "blueprint-review:" + plan.version + ":" + version, "architecture-blueprint-review-sessions");
+      // A continuing reviewer is one conversation, not an exemption from
+      // job model-call, cost or active-time checks at the next safe boundary.
+      if (version > 0) await reviewer.context.beforeTurn(reviewer.file);
       let verdict: BlueprintReview;
-      try {
-        reserveIndependentBlueprintReviewer(
-          { id: planner.session.sessionId, file: planner.file },
-          { id: reviewer.session.sessionId, file: reviewer.file },
-          reviewedSessions,
-        );
-        await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
-          reviewPrompt(plan, blueprint, manifest!, task, outline));
-        verifyReadSources(reviewer.session.messages, reviewer.project.root, snapshot);
-        try { verdict = parseBlueprintReview(lastText(reviewer.session), blueprint); }
-        catch {
-          await promptStorySpecialist(reviewer.session, "Your verdict was malformed. " +
-            "No file or source is changed. Return the same COMPLETE independent findings " +
-            "with exact valid JSON keys and exact beat IDs; no fences or explanations. " +
-            "Only status pass with [] or revise with 1–8 findings is allowed.");
-          verifyReadSources(reviewer.session.messages, reviewer.project.root, snapshot);
-          verdict = parseBlueprintReview(lastText(reviewer.session), blueprint);
-        }
-        await reviewer.context.completed(reviewer.file, reviewer.session.sessionId);
-        await immutable(verdictPath(job, plan.version, version), verdict);
-        await immutable(reviewSessionPath(job, plan.version, version), {
-          sessionId: reviewer.session.sessionId, sessionFile: reviewer.file,
-          blueprintDigest: sha(blueprint), verdictDigest: sha(verdict),
-        });
-        if (verdict.status === "pass") {
-          await planner.context.completed(planner.file, planner.session.sessionId);
-          const pin: BlueprintPin = {
-            schema: "noveltea-approved-blueprint/v3",
-            ...sameLineage(job, plan, snapshot, provider, model, task, head),
-            draftVersion: version, blueprintDigest: sha(blueprint), reviewDigest: sha(verdict),
-            obligationsDigest: sha(manifest), stagesDigest: sha(stagesReceipt),
-            plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
-            reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
-          };
-          await immutable(approvedPath(job, plan.version), pin);
-          return pin;
-        }
-        if (version === MAX_CORRECTIONS)
-          throw Error("Independent causal blueprint review exhausted bounded corrections: " +
-            JSON.stringify(verdict.findings) + ". Preserve original private evidence.");
-        previous = { blueprint, verdict };
-        await promptStorySpecialist(planner.session,
+      const messageStart = reviewer.session.messages.length;
+      await promptStorySpecialist(reviewer.session,
+        (version === 0 ? reviewer.context.contextNote :
+          "CONTINUING YOUR EXISTING INDEPENDENT REVIEW CYCLE. Your prior analysis " +
+          "is context, not authority. Re-read the pinned methodology and current " +
+          "Creative Direction before returning a new source-bound verdict. ") +
+        reviewPrompt(plan, blueprint, manifest!, task, outline,
+          previous ? { ...previous, patch: sourceChanges } : undefined));
+      verifyReadSources(reviewer.session.messages.slice(messageStart), reviewer.project.root, snapshot);
+      try { verdict = parseBlueprintReview(lastText(reviewer.session), blueprint); }
+      catch {
+        await promptStorySpecialist(reviewer.session, "Your verdict was malformed. " +
+          "No file or source is changed. Return the same COMPLETE independent findings " +
+          "with exact valid JSON keys and exact beat IDs; no fences or explanations. " +
+          "Only status pass with [] or revise with 1–8 findings is allowed.");
+        verifyReadSources(reviewer.session.messages.slice(messageStart), reviewer.project.root, snapshot);
+        verdict = parseBlueprintReview(lastText(reviewer.session), blueprint);
+      }
+      await reviewer.context.completed(reviewer.file, reviewer.session.sessionId);
+      const bytes = await readFile(reviewer.file);
+      await immutable(verdictPath(job, plan.version, version), verdict);
+      await immutable(reviewSessionPath(job, plan.version, version), {
+        schema: "noveltea-blueprint-review-turn/v1", cycleId,
+        sessionId: reviewer.session.sessionId, sessionFile: reviewer.file,
+        blueprintDigest: sha(blueprint), verdictDigest: sha(verdict),
+        transcriptBytes: bytes.length,
+        transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
+      });
+      if (verdict.status === "pass") {
+        await planner.context.completed(planner.file, planner.session.sessionId);
+        const pin: BlueprintPin = {
+          schema: "noveltea-approved-blueprint/v4", reviewCycleId: cycleId,
+          ...sameLineage(job, plan, snapshot, provider, model, task, head),
+          draftVersion: version, blueprintDigest: sha(blueprint), reviewDigest: sha(verdict),
+          obligationsDigest: sha(manifest), stagesDigest: sha(stagesReceipt),
+          plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
+          reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
+        };
+        await immutable(approvedPath(job, plan.version), pin);
+        return pin;
+      }
+      if (version === MAX_CORRECTIONS)
+        throw Error("Independent causal blueprint review exhausted bounded corrections: " +
+          JSON.stringify(verdict.findings) + ". Preserve original private evidence.");
+      previous = { blueprint, verdict };
+      await promptStorySpecialist(planner.session,
           "INDEPENDENT CAUSAL REVIEW. The original blueprint and immutable " +
           "source-derived proof obligation manifest remain fixed; do not rewrite them. " +
           "Return ONLY STRICT JSON LINES (JSONL), no enclosing array or wrapper. " +
@@ -998,8 +1042,10 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
             outline.causalAnswer : null) +
           " BASE DIGEST: " + sha(blueprint) + " REVIEW DIGEST: " + sha(verdict) +
           " FINDINGS: " + JSON.stringify(verdict.findings));
-      } finally { reviewer.session.dispose(); }
     }
     throw Error("Causal blueprint did not receive independent approval.");
-  } finally { planner.session.dispose(); }
+  } finally {
+    reviewer?.session.dispose();
+    planner.session.dispose();
+  }
 }

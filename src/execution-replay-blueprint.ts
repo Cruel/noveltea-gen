@@ -20,6 +20,7 @@ import {
   type BlueprintEvidence, type BlueprintOutlineBeat, type BlueprintRouteConsequence,
 } from "./architecture-blueprint-stages.js";
 import { executeReplay, replaySha256, writeReplayCase, type ReplayInput } from "./execution-replay.js";
+import { assertReviewCycleSession, reviewCycleId, type ReviewCycleScope } from "./review-cycle.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -180,6 +181,8 @@ export function captureBlueprintReplay(
   let preceding: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined;
   let latestPatch: BlueprintPatch | undefined;
   const reviewerIdentities = new Set<string>();
+  let continuingReviewer: { id: string; file: string } | undefined;
+  let lastTranscriptBytes = 0;
   for (let i = 0; i <= iteration; i++) {
     if (i > 0) {
       if (!preceding) throw Error("Blueprint replay lacks a prior independent review.");
@@ -192,23 +195,46 @@ export function captureBlueprintReplay(
     }
     const verdict = parseBlueprintReview(JSON.stringify(json(file("verdict-" + i))), current);
     const reviewSession = json(file("review-session-" + i)) as Record<string, unknown>;
+    const persistent = reviewSession.schema === "noveltea-blueprint-review-turn/v1";
     if (
-      Object.keys(reviewSession).sort().join(",") !== "blueprintDigest,sessionFile,sessionId,verdictDigest" ||
+      Object.keys(reviewSession).sort().join(",") !== (persistent
+        ? "blueprintDigest,cycleId,schema,sessionFile,sessionId,transcriptBytes,transcriptDigest,verdictDigest"
+        : "blueprintDigest,sessionFile,sessionId,verdictDigest") ||
       reviewSession.blueprintDigest !== blueprintDigest(current) ||
       reviewSession.verdictDigest !== blueprintDigest(verdict) ||
-      reviewSession.sessionId === started.plannerSessionId ||
-      reviewerIdentities.has(String(reviewSession.sessionId)) ||
-      reviewerIdentities.has(String(reviewSession.sessionFile))
+      (persistent
+        ? reviewSession.cycleId !== reviewCycleId(admitted as unknown as ReviewCycleScope) ||
+          !Number.isSafeInteger(reviewSession.transcriptBytes) ||
+          (reviewSession.transcriptBytes as number) <= lastTranscriptBytes ||
+          typeof reviewSession.transcriptDigest !== "string" ||
+          !HASH.test(reviewSession.transcriptDigest) ||
+          (i > 0 && !continuingReviewer)
+        : !!continuingReviewer ||
+          reviewerIdentities.has(String(reviewSession.sessionId)) ||
+          reviewerIdentities.has(String(reviewSession.sessionFile)))
     )
       throw Error("Blueprint replay independent review digest or identity changed.");
-    reviewerIdentities.add(String(reviewSession.sessionId));
-    reviewerIdentities.add(String(reviewSession.sessionFile));
+    const identity = { id: String(reviewSession.sessionId), file: String(reviewSession.sessionFile) };
+    assertReviewCycleSession(
+      { id: String(started.plannerSessionId), file: String(started.plannerSessionFile) },
+      identity, persistent ? continuingReviewer : undefined);
+    if (persistent) continuingReviewer ??= identity;
+    reviewerIdentities.add(identity.id);
+    reviewerIdentities.add(identity.file);
     validateTranscript(
       reviewSession.sessionFile,
       reviewSession.sessionId,
       stateDir,
       "architecture-blueprint-review-sessions",
     );
+    if (persistent) {
+      const bytes = regular(identity.file);
+      const length = reviewSession.transcriptBytes as number;
+      if (length > bytes.length ||
+          replaySha256(bytes.subarray(0, length)) !== reviewSession.transcriptDigest)
+        throw Error("Blueprint replay historical review transcript changed.");
+      lastTranscriptBytes = length;
+    }
     preceding = { blueprint: current, verdict };
   }
 

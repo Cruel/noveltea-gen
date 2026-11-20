@@ -5,9 +5,10 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyBlueprintFailure, parseBlueprintReview, parseCausalBlueprint, readApprovedBlueprint,
-  reserveIndependentBlueprintReviewer, type CausalBlueprint, type BlueprintPin } from "../src/architecture-blueprint.js";
+  type CausalBlueprint, type BlueprintPin } from "../src/architecture-blueprint.js";
 import { buildBlueprintObligations } from "../src/architecture-blueprint-obligations.js";
 import { applyBlueprintPatch } from "../src/architecture-blueprint-patch.js";
+import { reviewCycleId, assertReviewCycleSession } from "../src/review-cycle.js";
 import type { JobStartResult } from "../src/job.js";
 import type { Plan } from "../src/architecture.js";
 import type { SkillSnapshot } from "../src/snapshot.js";
@@ -37,20 +38,26 @@ const example: CausalBlueprint = {
 const digest = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-test("blueprint rejects repeated reviewer identity before a second independent model call", () => {
-  const prior = new Set<string>();
-  const planner = { id: "planner", file: "/state/planner.jsonl" };
-  reserveIndependentBlueprintReviewer(planner,
-    { id: "review-0", file: "/state/review-0.jsonl" }, prior);
-  assert.throws(() => reserveIndependentBlueprintReviewer(planner,
-    { id: "review-0", file: "/state/review-0.jsonl" }, prior), /reused a prior Pi session/);
-  assert.throws(() => reserveIndependentBlueprintReviewer(planner,
-    { id: "review-1", file: "/state/review-0.jsonl" }, prior), /reused a prior Pi session/);
-  assert.throws(() => reserveIndependentBlueprintReviewer(planner,
-    { id: "planner", file: "/state/review-new.jsonl" }, prior), /reused a prior Pi session/);
-  reserveIndependentBlueprintReviewer(planner,
-    { id: "review-1", file: "/state/review-1.jsonl" }, prior);
-  assert.equal(prior.size, 4);
+test("review-cycle identity binds Thread, source, assignment and model without granting writer authority", () => {
+  const scope = {
+    jobId: "job", threadId: "thread", baseSha: "a".repeat(40),
+    executionHead: "b".repeat(40), planVersion: 1,
+    contractDigest: "c".repeat(64), snapshotId: "skills", provider: "openai",
+    model: "gpt-6-luna", taskDigest: "d".repeat(64),
+  };
+  const identity = reviewCycleId(scope);
+  assert.equal(identity, reviewCycleId({ ...scope }));
+  for (const change of [{ threadId: "other" }, { contractDigest: "e".repeat(64) },
+    { executionHead: "f".repeat(40) }, { snapshotId: "other" },
+    { provider: "another" }, { model: "another" }, { taskDigest: "f".repeat(64) }])
+    assert.notEqual(identity, reviewCycleId({ ...scope, ...change }));
+  const writer = { id: "writer", file: "/writer.jsonl" };
+  const reviewer = { id: "reviewer", file: "/reviewer.jsonl" };
+  assert.doesNotThrow(() => assertReviewCycleSession(writer, reviewer));
+  assert.doesNotThrow(() => assertReviewCycleSession(writer, reviewer, reviewer));
+  assert.throws(() => assertReviewCycleSession(writer, writer), /wrong or changed/);
+  assert.throws(() => assertReviewCycleSession(writer, reviewer,
+    { ...reviewer, file: "/other.jsonl" }), /wrong or changed/);
 });
 
 test("invalid reviewed patch output is distinguished from interrupted model work", () => {
@@ -405,6 +412,44 @@ test("checkpointed blueprint only restores exact reviewed version, plan, head, s
     await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(finalPin));
     assert.deepEqual((await read())?.blueprint, merged,
       "recovery must apply only the recorded patch against the originally reviewed base");
+
+    // New approvals seal separate historical verdicts against successively longer
+    // prefixes of ONE continuing read-only reviewer conversation.
+    const cycleId = reviewCycleId(admission);
+    const firstTranscript = await readFile(reviewerFile);
+    const nextTranscript = Buffer.concat([firstTranscript, Buffer.from(
+      JSON.stringify({ type: "message", message: { role: "user", content: "Review the corrected draft" } }) + "\n")]);
+    await writeFile(reviewerFile, nextTranscript);
+    const reviewTurn = (blueprint: CausalBlueprint, verdict: unknown, bytes: Buffer) => ({
+      schema: "noveltea-blueprint-review-turn/v1", cycleId,
+      sessionId: "reviewer-id", sessionFile: reviewerFile,
+      blueprintDigest: digest(blueprint), verdictDigest: digest(verdict),
+      transcriptBytes: bytes.length, transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
+    });
+    const firstTurn = reviewTurn(example, revise, firstTranscript);
+    const secondTurn = reviewTurn(merged, review, nextTranscript);
+    await writeFile(join(parent, "plan-2-review-session-0.json"), JSON.stringify(firstTurn));
+    await writeFile(join(parent, "plan-2-review-session-1.json"), JSON.stringify(secondTurn));
+    const continuousPin: BlueprintPin = {
+      ...finalPin, schema: "noveltea-approved-blueprint/v4", reviewCycleId: cycleId,
+      stagesDigest: digest(receipt),
+      reviewerSessionId: "reviewer-id", reviewerSessionFile: reviewerFile,
+    };
+    await writeFile(join(parent, "plan-2-approved.json"), JSON.stringify(continuousPin));
+    assert.deepEqual((await read())?.blueprint, merged);
+    await writeFile(join(parent, "plan-2-review-session-1.json"), JSON.stringify({
+      ...secondTurn, sessionId: "reviewer-id-1",
+    }));
+    await assert.rejects(read, /provenance|wrong or changed/);
+    await writeFile(join(parent, "plan-2-review-session-1.json"), JSON.stringify(secondTurn));
+    await writeFile(reviewerFile, Buffer.from(JSON.stringify({
+      type: "session", id: "reviewer-id",
+    }) + "\nchanged historical text\n"));
+    await assert.rejects(read, /transcript changed/);
+    await writeFile(reviewerFile, nextTranscript);
+    await assert.rejects(() => readApprovedBlueprint(
+      { ...job, threadId: "wrong-thread" }, plan, snapshot, "openai", "gpt-6-luna",
+      "write a mystery", "b".repeat(40)), /stale/);
     await writeFile(join(parent, "plan-2-patch-1.json"), JSON.stringify({
       ...patch, baseDigest: "c".repeat(64),
     }));
