@@ -1440,7 +1440,9 @@ export async function runStoryGeneration(options: GenerationOptions) {
       return { schema: "noveltea-generation/v1", status: current.status ?? state.status,
         reason: current.reason ?? state.reason, checkpointStatus: state.status,
         jobId: job.jobId, threadId: config.configurable.thread_id, checkpointPath: path,
-        nextStage: visible.status === "paused" ? null : visible.ideaTask ? "idea-integration" : visible.active?.stage ??
+        nextStage: visible.causalAmendment &&
+          visible.planVersion === visible.causalAmendment.source.planVersion ? null :
+          visible.ideaTask ? "idea-integration" : visible.active?.stage ??
           (visible.inventory ? nextExecutionItem(visible.inventory,
             visible.pendingOrder ?? visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,

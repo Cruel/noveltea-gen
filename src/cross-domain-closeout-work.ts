@@ -165,9 +165,24 @@ function verifyCommitted(job: JobStartResult, state: Receipt) {
     gitRaw(job, "show", state.proposal.sourceSha + ":" + repoPath(job, state.proposal.allowedPaths[0]!)),
     gitRaw(job, "show", state.commitSha + ":" + repoPath(job, state.proposal.allowedPaths[0]!)));
 }
+/** New receipts include the progress diagnosis that determines retry
+ * authority. Pre-diagnosis receipts retain their original digest unchanged. */
+export function closeoutReviewDigest(input: {
+  reviewerSessionDigest: string; proposal: string; commitSha: string;
+  review: EditorialVerdict;
+}, includeDiagnosis = true) {
+  return hash(JSON.stringify({
+    reviewerSessionDigest: input.reviewerSessionDigest,
+    proposal: input.proposal, commitSha: input.commitSha,
+    verdict: input.review.verdict, findings: input.review.findings,
+    evidence: input.review.evidence,
+    ...(includeDiagnosis && input.review.progressDiagnosis !== undefined ?
+      { progressDiagnosis: input.review.progressDiagnosis } : {}),
+  }));
+}
 /** A failed independent review never becomes a trusted positive checkpoint.
- * It can occur *inside* a later successful dependency repair chain only after
- * each original source, field-only diff and negative reviewer is reauthenticated. */
+ * It can occur inside a later successful dependency repair chain only after
+ * each source, field-only diff and negative reviewer is reauthenticated. */
 async function verifyRejectedChain(job: JobStartResult, state: Receipt) {
   const history = state.history ?? [];
   if (!history.length) return;
@@ -182,11 +197,17 @@ async function verifyRejectedChain(job: JobStartResult, state: Receipt) {
         !git(job, "log", "-1", "--format=%B", entry.commitSha).split("\n")
           .includes("NovelTea-Prerequisite: " + entry.proposal.digest) ||
         entry.review.verdict !== "block" ||
-        entry.reviewDigest !== hash(JSON.stringify({
+        // Historical negative rounds could be sealed before progressDiagnosis
+        // entered the digest. Retain their independent negative verdict and
+        // ledger admission; only NEW reviewed rounds may authorize retries.
+        (entry.reviewDigest !== closeoutReviewDigest({
           reviewerSessionDigest: entry.reviewerSessionDigest,
           proposal: entry.proposal.digest, commitSha: entry.commitSha,
-          verdict: entry.review.verdict, findings: entry.review.findings,
-          evidence: entry.review.evidence })) ||
+          review: entry.review }) &&
+          entry.reviewDigest !== closeoutReviewDigest({
+            reviewerSessionDigest: entry.reviewerSessionDigest,
+            proposal: entry.proposal.digest, commitSha: entry.commitSha,
+            review: entry.review }, false)) ||
         entry.writerSessionDigest !== await checkedSessionDigest(job,
           entry.writerSessionFile, "prerequisite-sessions") ||
         entry.reviewerSessionDigest !== await checkedSessionDigest(job,
@@ -467,11 +488,10 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
           async sessionFile => { state!.reviewerSessionFile = sessionFile; await persist(file, state!); });
         state.reviewerSessionDigest = await checkedSessionDigest(job, state.reviewerSessionFile,
           "review-sessions");
-        state.reviewDigest = hash(JSON.stringify({
+        state.reviewDigest = closeoutReviewDigest({
           reviewerSessionDigest: state.reviewerSessionDigest,
-          proposal: proposal.digest, commitSha: state.commitSha,
-          verdict: state.review.verdict, findings: state.review.findings,
-          evidence: state.review.evidence }));
+          proposal: proposal.digest, commitSha: state.commitSha!,
+          review: state.review });
         state.phase = "reviewed"; await persist(file, state);
       } catch (error) {
         state.failure = String(error); await persist(file, state);
@@ -486,8 +506,12 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
             state.reviewerSessionFile, "review-sessions") ||
           state.writerSessionDigest !== await checkedSessionDigest(job,
             state.sessionFile, "prerequisite-sessions") ||
-          await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path)
-        throw Error("Independent closeout review lacks pinned source or session.");
+          await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path ||
+          state.reviewDigest !== closeoutReviewDigest({
+            reviewerSessionDigest: state.reviewerSessionDigest,
+            proposal: state.proposal.digest, commitSha: state.commitSha,
+            review: state.review }))
+        throw Error("Independent closeout review lacks pinned source or a sealed progress diagnosis.");
       verifyCommitted(job, state);
       const verdict = state.review.verdict === "pass" ? "passed" : "failed";
       await settlePrerequisiteRepair(job, { turnDigest: state.turnDigest, id: state.repairId,
@@ -615,11 +639,10 @@ export async function verifyCrossDomainCloseoutSuccessor(
       state.writerSessionDigest !== await checkedSessionDigest(job,
         state.sessionFile, "prerequisite-sessions") ||
       await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path ||
-      state.reviewDigest !== hash(JSON.stringify({
+      state.reviewDigest !== closeoutReviewDigest({
         reviewerSessionDigest: state.reviewerSessionDigest,
         proposal: state.proposal.digest, commitSha: commit,
-        verdict: state.review.verdict, findings: state.review.findings,
-        evidence: state.review.evidence })) ||
+        review: state.review }) ||
       JSON.stringify(paths) !== JSON.stringify(state.proposal.allowedPaths.map(p =>
         repoPath(job, p))) ||
       !trailers.includes("NovelTea-Job: " + job.jobId) ||

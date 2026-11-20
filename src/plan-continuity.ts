@@ -162,16 +162,16 @@ export function hasPlanContinuity(
           fingerprint !== digest(contractOnly ? step.plan.contract : step.plan))) {
       throw new Error("Historical plan carry-forward does not match its signed proposal or original work.");
     }
-    // Every signed transition must explicitly retain this historical work,
-    // not just the most recent replan. Otherwise a v1 receipt can silently
-    // skip a v2 decision that revoked its continuity.
-    if (!step.carryForward?.includes(stage)) return false;
+    // Authenticate all intervening decisions, but a later independently
+    // signed reauthorization may restore work omitted by an earlier plan.
     if (version < latest.version - 1) {
       const successor = history.find(h => h.plan?.version === version + 1);
       if (!successor || JSON.stringify(step.approvedContract) !== JSON.stringify(successor.plan.contract))
         return false;
     } else {
       if (JSON.stringify(step.approvedContract) !== JSON.stringify(latest.contract)) return false;
+      // Only the current explicit author decision restores or retains work.
+      if (!step.carryForward?.includes(stage)) return false;
     }
   }
   checkHistoricalWork(job, stage, latest.version - 1, git(job, "rev-parse", "HEAD"));
@@ -190,6 +190,30 @@ export function assertFoundationArchitectureContinuity(
   if (foundation.planVersion === architecture.plan?.version) {
     if (foundation.architectureHead !== architecture.expectedHead)
       throw Error("Current Foundations receipt refers to a different Architecture HEAD.");
+    return;
+  }
+  const fork = readRecoveryFork(job);
+  if (fork && digest(architecture.plan) === fork.checkpoint.planDigest) {
+    // Child Architecture intentionally drops parent signing credentials and
+    // history. Its pinned bundle was independently admitted by the parent
+    // against those signed steps before it was copied into this new Thread.
+    const pinned = fork.receipts["character-world.json"];
+    const architecturePin = fork.receipts["architecture.json"];
+    if (!pinned || !architecturePin ||
+        pinned.jobId !== fork.sourceJobId ||
+        pinned.planVersion !== foundation.planVersion ||
+        pinned.architectureHead !== foundation.architectureHead ||
+        architecturePin.jobId !== fork.sourceJobId ||
+        architecturePin.phase !== "committed" ||
+        architecturePin.expectedHead !== architecture.expectedHead ||
+        digest(architecturePin.plan) !== fork.checkpoint.planDigest)
+      throw Error("Carried Foundations do not match their immutable recovery fork source.");
+    try {
+      git(job, "merge-base", "--is-ancestor", foundation.architectureHead,
+        fork.checkpoint.commitSha);
+    } catch {
+      throw Error("Fork Foundations Architecture source is not an ancestor of its verified checkpoint.");
+    }
     return;
   }
   const origin = architecture.history?.find(step => step.plan.version === foundation.planVersion);

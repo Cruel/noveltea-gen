@@ -9,7 +9,7 @@ import { createSkillSnapshot } from "../src/snapshot.js";
 import { removeTestTree } from "./helpers.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair,
   settlePrerequisiteRepair } from "../src/repair-ledger.js";
-import { verifyCrossDomainCloseoutSuccessor } from "../src/cross-domain-closeout-work.js";
+import { verifyCrossDomainCloseoutSuccessor, closeoutReviewDigest } from "../src/cross-domain-closeout-work.js";
 import { validCloseoutProposal, retryCloseoutProposal,
   type CloseoutProposal } from "../src/cross-domain-prerequisite.js";
 import type { JobStartResult } from "../src/job.js";
@@ -180,11 +180,48 @@ NovelTea-Prerequisite: ${next.digest}`);
   const finalMessage = git(f.root, "log", "-1", "--format=%B").split("\n");
   await verifyCrossDomainCloseoutSuccessor(f.job, final, f.after,
     ["story/" + f.path], finalMessage);
+  // An already rejected historical review may have stored an advisory
+  // diagnosis before that field entered the digest. Its original negative
+  // ledger evidence remains valid, but cannot authorize another retry now.
+  const historical = structuredClone(state);
+  historical.history[0].review.progressDiagnosis = {
+    status: "stalled", reason: "Historic diagnosis predates digest inclusion",
+    evidence: null };
+  writeFileSync(f.receiptFile, JSON.stringify(historical));
+  await verifyCrossDomainCloseoutSuccessor(f.job, final, f.after,
+    ["story/" + f.path], finalMessage);
   const corrupted = structuredClone(state);
   corrupted.history[0].reviewDigest = "f".repeat(64);
   writeFileSync(f.receiptFile, JSON.stringify(corrupted));
   await assert.rejects(() => verifyCrossDomainCloseoutSuccessor(f.job, final,
     f.after, ["story/" + f.path], finalMessage), /negative review/);
+});
+
+test("#211: closeout progress diagnosis is sealed; older reviewed receipts retain their original digest", () => {
+  const reviewerSessionDigest = "a".repeat(64);
+  const proposal = "b".repeat(64);
+  const commitSha = "c".repeat(40);
+  const review = { verdict: "block" as const, findings: [{
+    severity: "blocking" as const, dimension: "continuity" as const,
+    source: "milestones/choice-enacted.md:7", repair: "event" as const,
+    message: "The witness has no evidence.",
+  }], evidence: [] };
+  const old = hash(JSON.stringify({ reviewerSessionDigest,
+    proposal, commitSha, verdict: review.verdict,
+    findings: review.findings, evidence: review.evidence }));
+  assert.equal(closeoutReviewDigest({ reviewerSessionDigest, proposal, commitSha, review }), old);
+  const progressDiagnosis = { status: "material" as const,
+    reason: "The new confession is source-grounded.",
+    evidence: { path: "milestones/choice-enacted.md",
+      quote: "New observed contradiction", change: "added" as const } };
+  const sealed = closeoutReviewDigest({ reviewerSessionDigest, proposal, commitSha,
+    review: { ...review, progressDiagnosis } });
+  assert.notEqual(sealed, old);
+  assert.equal(closeoutReviewDigest({ reviewerSessionDigest, proposal, commitSha,
+    review: { ...review, progressDiagnosis } }, false), old,
+    "Historical review proof remains independently recognizable without granting retries.");
+  assert.notEqual(sealed, closeoutReviewDigest({ reviewerSessionDigest, proposal, commitSha,
+    review: { ...review, progressDiagnosis: { ...progressDiagnosis, status: "stalled" } } }));
 });
 test("a forged reviewed phase, record path or original source hash cannot grant downstream admission", async t => {
   const f = await setup(t);

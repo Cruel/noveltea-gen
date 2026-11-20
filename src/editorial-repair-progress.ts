@@ -7,14 +7,16 @@ import type { JobStartResult } from "./job.js";
 export interface EditorialRepairDiagnosis {
   status: "material" | "stalled" | "uncertain";
   reason: string;
-  /** Required only for material progress. An actual added canonical line. */
-  evidence: { path: string; quote: string } | null;
+  /** A literal changed canonical line; removed evidence is from the old
+   * revision, added evidence is from the corrected revision. */
+  evidence: { path: string; quote: string; change?: "added" | "removed" } | null;
 }
 export interface EditorialRepairProgress {
   previousSha: string;
   currentSha: string;
   priorFindings: Array<{ severity: string; source: string; message: string }>;
   added: Array<{ path: string; line: string }>;
+  removed: Array<{ path: string; line: string }>;
 }
 const SHA = /^[a-f0-9]{40}$/;
 function git(job: JobStartResult, ...args: string[]) {
@@ -34,14 +36,17 @@ export function repairProgressScope(job: JobStartResult, previousSha: string,
   git(job, "merge-base", "--is-ancestor", previousSha, currentSha);
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   const added: EditorialRepairProgress["added"] = [];
+  const removed: EditorialRepairProgress["removed"] = [];
   for (const path of paths) {
     const diff = git(job, "diff", "--no-ext-diff", "--no-renames", "--unified=0",
       previousSha, currentSha, "--", prefix + path);
     for (const line of diff.split("\n")) {
-      if (line.startsWith("+") && !line.startsWith("+++") && line.length > 1) {
-        if (line.length > 4_096 || added.length >= 256)
+      if ((line.startsWith("+") && !line.startsWith("+++")) ||
+          (line.startsWith("-") && !line.startsWith("---"))) {
+        if (line.length > 4_096 || added.length + removed.length >= 256)
           throw Error("Editorial convergence source diff exceeds bounded review context.");
-        added.push({ path, line: line.slice(1) });
+        if (line.length < 2) continue;
+        (line.startsWith("+") ? added : removed).push({ path, line: line.slice(1) });
       }
     }
   }
@@ -50,7 +55,7 @@ export function repairProgressScope(job: JobStartResult, previousSha: string,
     throw Error("Editorial convergence has no bounded historical negative review.");
   return { previousSha, currentSha,
     priorFindings: findings.map(f => ({ severity: f.severity, source: f.source, message: f.message })),
-    added };
+    added, removed };
 }
 export function validateEditorialRepairDiagnosis(
   diagnosis: unknown, scope: EditorialRepairProgress): EditorialRepairDiagnosis {
@@ -60,10 +65,12 @@ export function validateEditorialRepairDiagnosis(
       (d.status === "material" && (!d.evidence ||
         typeof d.evidence.path !== "string" || typeof d.evidence.quote !== "string" ||
         d.evidence.quote.trim().length < 8 || d.evidence.quote.length > 500 ||
-        !scope.added.some(line => line.path === d.evidence!.path &&
-          line.line.includes(d.evidence!.quote)))) ||
+        ![undefined, "added", "removed"].includes(d.evidence.change) ||
+        !(d.evidence.change === "removed" ? scope.removed : scope.added)
+          .some(line => line.path === d.evidence!.path &&
+            line.line.includes(d.evidence!.quote)))) ||
       (d.status !== "material" && d.evidence !== null))
-    throw Error("Source-grounded editorial convergence diagnosis lacks a newly added canonical citation.");
+    throw Error("Source-grounded editorial convergence diagnosis lacks a changed canonical citation.");
   return d as EditorialRepairDiagnosis;
 }
 export function productiveEditorialRepair(

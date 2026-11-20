@@ -49,7 +49,7 @@ test("#211: both correction loops require source-grounded review progress, not c
     reason: "A new fragment resolves the inconsistent timeline.",
     evidence: { path, quote: "Unsupported proof from previous canon" } };
   assert.throws(() => validateEditorialRepairDiagnosis(claimed, scope),
-    /newly added canonical citation/);
+    /changed canonical citation/);
   // Independent reviewer may allow additional source-grounded corrections
   // when there is a genuine cited change, without a hard attempt quota.
   const added = { status: "material",
@@ -59,4 +59,40 @@ test("#211: both correction loops require source-grounded review progress, not c
     progressDiagnosis: added }, assignment);
   assert.equal(productiveEditorialRepair(progressing.progressDiagnosis, true), true);
   assert.equal(productiveEditorialRepair(undefined, false), true);
+});
+
+test("#211: removing a false canonical revelation can count as progress without adding prose", t => {
+  const root = mkdtempSync(join(tmpdir(), "nt-editorial-removal-"));
+  t.after(() => removeTestTree(root));
+  const story = join(root, "story"), dir = join(story, "events");
+  mkdirSync(dir, { recursive: true });
+  git(root, "init", "-q"); git(root, "config", "user.name", "Test");
+  git(root, "config", "user.email", "test@example.invalid");
+  const path = "events/ledger.md";
+  const unsupported = "The missing witness saw the sealed confession at midnight.";
+  writeFileSync(join(dir, "ledger.md"),
+    "The witness reads the ledger.\n" + unsupported + "\nThe true timeline remains unclear.\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "Unsubstantiated revelation");
+  const before = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(dir, "ledger.md"),
+    "The witness reads the ledger.\nThe true timeline remains unclear.\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "Remove unsupported reveal");
+  const after = git(root, "rev-parse", "HEAD");
+  const scope = repairProgressScope({ worktreeRoot: root,
+    storyRelativePath: "story" } as JobStartResult, before, after, [path], [
+    { severity: "blocking", source: path + ":2",
+      message: "The scene claims an unsupported reveal." },
+  ]);
+  assert.deepEqual(scope.added, [], "A legitimate deletion has no added lines");
+  assert.ok(scope.removed.some(line => line.line === unsupported));
+  const diagnosis = { status: "material", change: "removed",
+    reason: "The writer removed the unearned confession from the canonical scene.",
+    evidence: { path, quote: unsupported, change: "removed" } };
+  assert.equal(validateEditorialRepairDiagnosis(diagnosis, scope).status, "material");
+  assert.throws(() => validateEditorialRepairDiagnosis({
+    ...diagnosis, evidence: { path, quote: unsupported, change: "added" },
+  }, scope), /changed canonical citation/);
+  assert.throws(() => validateEditorialRepairDiagnosis({
+    ...diagnosis, evidence: { path, quote: "Invented prior scene", change: "removed" },
+  }, scope), /changed canonical citation/);
 });

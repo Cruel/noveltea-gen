@@ -621,19 +621,8 @@ export async function runEventWorkItem(input: EventOptions) {
             !old.conflicts || !old.obligations ||
             arch.history?.at(-1)?.plan.version !== old.planVersion ||
             hash(JSON.stringify(arch.history.at(-1)!.plan)) !== old.planDigest ||
-            prereq.assignmentDigest !== hash(JSON.stringify(old.assignment)) ||
-            prereq.expectedHead !== old.expectedHead ||
-            prereq.snapshotId !== old.snapshot.id || prereq.worker !== old.worker ||
-            prereq.sessionFile !== (old.sessionFile ?? "fixture") ||
-            prereq.reportDigest !== eventPrerequisiteReportDigest({
-              jobId: old.jobId, workItemId: old.workItemId,
-              expectedHead: old.expectedHead, planDigest: old.planDigest,
-              sessionSha256: prereq.sessionSha256, sessionId: prereq.sessionId,
-              assignmentDigest: prereq.assignmentDigest, snapshotId: prereq.snapshotId,
-              sessionFile: prereq.sessionFile, worker: prereq.worker,
-              conflicts: old.conflicts, obligations: old.obligations,
-              causalDiscovery: old.causalDiscovery,
-            })) throw Error("Causal Event replay lacks a sealed, unchanged original no-write discovery.");
+            prereq.reportDigest !== amendment.source.reportDigest)
+          throw Error("Causal Event replay does not match the approved original no-write discovery.");
         await authenticateEventNoWrite(job, old);
         if (dirty(job).length || await trustedHead(job) !== arch.expectedHead)
           throw Error("Causal Event restart requires the exact clean corrected Architecture HEAD.");

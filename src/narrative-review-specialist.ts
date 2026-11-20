@@ -304,10 +304,13 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
         "After judging the full current canonical Story, compare its unresolved findings " +
         "and the authenticated Git additions supplied in ASSIGNMENT.progressScope. " +
         "If this review still BLOCKS, include progressDiagnosis:{status:'material|stalled|uncertain', " +
-        "reason:'source-based explanation (at least 12 chars)',evidence:{path,quote}|null}. " +
+        "reason:'source-based explanation (at least 12 chars)',evidence:{path,quote,change:'added|removed'}|null}. " +
         "Material means an actual meaningful improvement on at least one earlier rejected " +
-        "obligation; quote 8-500 literal characters from a newly ADDED canonical line " +
-        "under an authorized path. A cosmetic rewrite or an unrelated added sentence " +
+        "obligation; quote 8-500 literal characters from a changed canonical line " +
+        "under an authorized path. For deletions/removals that resolve an unsupported " +
+        "claim, cite a line from progressScope.removed with change:'removed'; for new " +
+        "supporting text cite progressScope.added with change:'added'. " +
+        "A cosmetic rewrite or an unrelated added sentence " +
         "is STALLED even when the Git SHA changes. If improvement cannot be determined, " +
         "report UNCERTAIN. In either case KEEP the negative verdict and every actionable " +
         "finding; this assessment is diagnostic advice, not a second PASS. " : "") +
@@ -380,7 +383,8 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
           "never fabricate positive evidence. " : "") +
         (assignment.progressScope ? "For a continuing BLOCK also include the required " +
           "progressDiagnosis status/reason/evidence. Material evidence must quote one of " +
-          "ASSIGNMENT.progressScope.added; stagnant or uncertain requires evidence:null. " : "") +
+          "ASSIGNMENT.progressScope.added or .removed with the matching change type; " +
+          "stagnant or uncertain requires evidence:null. " : "") +
         "Return a fresh complete unfenced JSON object; no write, shell, " +
         "approval or repair tools.");
       const revised = parseSpecialistJson(lastReply(session));
